@@ -26,6 +26,7 @@ sidebar row, the session summary, or a provider request payload.
 import collections
 import json
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -1320,9 +1321,9 @@ def test_batch_tail_read_uses_indexed_reverse_reads_and_only_widens_undecided(
     widen_calls = []
     real_batch = models._state_db_failure_batch_tails
 
-    def recording_batch(cur, cols, active_clause, order_col, chunk, limit):
+    def recording_batch(cur, cols, active_clause, order_col, chunk, limit, **kwargs):
         widen_calls.append((list(chunk), limit))
-        return real_batch(cur, cols, active_clause, order_col, chunk, limit)
+        return real_batch(cur, cols, active_clause, order_col, chunk, limit, **kwargs)
 
     monkeypatch.setattr(models, "_state_db_failure_batch_tails", recording_batch)
 
@@ -1915,3 +1916,492 @@ def test_save_keeps_the_transcript_verdict_while_a_turn_is_in_flight(
     assert session.failure_summary == {
         "kind": "failed_turn", "layer": "billing", "retryable": False,
     }
+
+
+# ── greptile 2026-11-08: removed turns still look failed ────────────────────
+
+def test_save_does_not_restore_a_cleared_sessions_failure(tmp_path, monkeypatch):
+    """Clearing a failed session must not resurrect its marker on save.
+
+    Clearing removes the transcript from the WebUI sidecar and records the
+    0.0 truncate-to-empty sentinel, but the Agent's append-only state.db still
+    holds the failed_turn row. A database verdict read without the truncation
+    window would write the removed failure straight back.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="sess-clear", role="user", content="hi", ts=1.0)
+    _insert_message(
+        conn, sid="sess-clear", role="assistant",
+        content="Your request was not processed.", ts=2.0,
+        display_kind="failed_turn", display_metadata=_failed_turn_metadata(),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+
+    # The counterfactual: without a truncation window the old row still votes.
+    unfiltered, _rev, answered = models._session_failure_state_from_state_db(
+        "sess-clear", db,
+    )
+    assert answered is True
+    assert unfiltered["kind"] == "failed_turn"
+
+    session = models.Session(
+        session_id="sess-clear",
+        messages=[],
+        truncation_watermark=0.0,
+        truncation_boundary=0.0,
+    )
+    session.save()
+    assert session.failure_summary is None
+    on_disk = json.loads(
+        (session_dir / "sess-clear.json").read_text(encoding="utf-8")
+    )
+    assert on_disk.get("failure_summary") is None
+
+
+def test_cold_load_honors_the_sidecars_truncation_window(tmp_path, monkeypatch):
+    """A truncated suffix's failure row cannot speak for the kept transcript.
+
+    ``truncation_watermark`` (== boundary here) is the timestamp of the last
+    kept message; the failed turn beyond it was removed by the truncation.
+    The load must read only the kept part of state.db — otherwise the removed
+    turn's marker comes back.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="sess-tr", role="user", content="hi", ts=1.0)
+    _insert_message(conn, sid="sess-tr", role="assistant", content="all good", ts=2.0)
+    _insert_message(
+        conn, sid="sess-tr", role="assistant",
+        content="Your request was not processed.", ts=50.0,
+        display_kind="failed_turn", display_metadata=_failed_turn_metadata(),
+    )
+    conn.commit()
+    conn.close()
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+    (session_dir / "sess-tr.json").write_text(json.dumps({
+        "session_id": "sess-tr",
+        "title": "Truncated",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "message_count": 2,
+        "messages": [
+            {"role": "user", "content": "hi", "timestamp": 1.0},
+            {"role": "assistant", "content": "all good", "timestamp": 2.0},
+        ],
+        "truncation_watermark": 2.0,
+        "truncation_boundary": 2.0,
+    }), encoding="utf-8")
+
+    # The counterfactual: unfiltered, the removed turn is the newest row.
+    unfiltered, _rev, answered = models._session_failure_state_from_state_db(
+        "sess-tr", db,
+    )
+    assert answered is True
+    assert unfiltered["kind"] == "failed_turn"
+
+    session = models.Session.load("sess-tr")
+    assert session.truncation_watermark == 2.0
+    assert session.failure_summary is None
+
+
+def test_truncation_window_drops_the_deleted_gap_after_an_advanced_watermark(
+    tmp_path, monkeypatch
+):
+    """boundary < watermark: the deleted (boundary, watermark) suffix is dead.
+
+    A new turn may be committed to the sidecar before its state.db rows land,
+    so the newest database row can still be a deleted-suffix failure. The read
+    keeps the legitimate prefix (ts <= boundary) and the post-edit tail
+    (ts >= watermark) only.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="sess-gap", role="user", content="hi", ts=1.0)
+    _insert_message(conn, sid="sess-gap", role="assistant", content="all good", ts=2.0)
+    _insert_message(
+        conn, sid="sess-gap", role="assistant",
+        content="Your request was not processed.", ts=50.0,
+        display_kind="failed_turn", display_metadata=_failed_turn_metadata(),
+    )
+    conn.commit()
+    conn.close()
+    _reset_failure_caches(monkeypatch)
+
+    unfiltered, _rev, answered = models._session_failure_state_from_state_db(
+        "sess-gap", db,
+    )
+    assert answered is True
+    assert unfiltered["kind"] == "failed_turn"
+
+    summary, _revision, answered = models._session_failure_state_from_state_db(
+        "sess-gap", db,
+        truncation_watermark=100.0,
+        truncation_boundary=2.0,
+    )
+    # The kept prefix ends on a settled answer: an answered health clears.
+    assert answered is True
+    assert summary is None
+
+    # And the post-edit tail (ts >= watermark) is legitimate again.
+    conn = sqlite3.connect(str(db))
+    _insert_message(
+        conn, sid="sess-gap", role="assistant",
+        content="Your request was not processed.", ts=100.0,
+        display_kind="failed_turn", display_metadata=_failed_turn_metadata(),
+    )
+    conn.commit()
+    conn.close()
+    models._SESSION_FAILURE_FINGERPRINT_CACHE.clear()
+    summary, _revision, answered = models._session_failure_state_from_state_db(
+        "sess-gap", db,
+        truncation_watermark=100.0,
+        truncation_boundary=2.0,
+    )
+    assert answered is True
+    assert summary["kind"] == "failed_turn"
+
+
+def test_compact_and_sidebar_backfill_use_the_rows_truncation_window(
+    tmp_path, monkeypatch
+):
+    """The index row carries its truncation window; the backfill honors it.
+
+    ``compact()`` must emit the watermark (the index previously carried only
+    the boundary), otherwise the sidebar backfill cannot tell a deleted
+    suffix from a later legitimate turn and restores the removed marker.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="sess-row", role="user", content="hi", ts=1.0)
+    _insert_message(conn, sid="sess-row", role="assistant", content="all good", ts=2.0)
+    _insert_message(
+        conn, sid="sess-row", role="assistant",
+        content="Your request was not processed.", ts=50.0,
+        display_kind="failed_turn", display_metadata=_failed_turn_metadata(),
+    )
+    conn.commit()
+    conn.close()
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+
+    session = models.Session(
+        session_id="sess-row",
+        title="Truncated",
+        messages=[
+            {"role": "user", "content": "hi", "timestamp": 1.0},
+            {"role": "assistant", "content": "all good", "timestamp": 2.0},
+        ],
+        truncation_watermark=2.0,
+        truncation_boundary=2.0,
+    )
+    row = session.compact()
+    assert row["truncation_watermark"] == 2.0
+    assert row["truncation_boundary"] == 2.0
+    row.pop("failure_summary", None)  # a pre-#8447 index row
+
+    models._backfill_sidebar_failure_summaries([row])
+    assert "failure_summary" not in row
+
+    # Counterfactual: the same row WITHOUT its window is marked failed, which
+    # proves the database really is reporting the removed turn.
+    unmarked = models.Session(
+        session_id="sess-row",
+        title="Truncated",
+        messages=[
+            {"role": "user", "content": "hi", "timestamp": 1.0},
+            {"role": "assistant", "content": "all good", "timestamp": 2.0},
+        ],
+    ).compact()
+    unmarked.pop("failure_summary", None)
+    assert "truncation_watermark" not in unmarked
+    models._backfill_sidebar_failure_summaries([unmarked])
+    assert unmarked["failure_summary"]["kind"] == "failed_turn"
+
+
+# ── greptile 2026-11-08: profiles show the wrong failures ───────────────────
+
+def test_sidebar_backfill_reads_each_profiles_own_database(tmp_path, monkeypatch):
+    """All-profiles rows must be answered from their OWN profile's state.db.
+
+    Two profiles can hold the same session id; reading only the active
+    profile's database marks the foreign row with the wrong failure and can
+    overwrite it with the active profile's answer. A profile whose database is
+    absent is unknown — never answered from another profile.
+    """
+    import api.profiles as profiles
+
+    root_home = tmp_path / "root"
+    beta_home = tmp_path / "root" / "profiles" / "beta"
+    root_home.mkdir(parents=True)
+    beta_home.mkdir(parents=True)
+    root_db = root_home / "state.db"
+    beta_db = beta_home / "state.db"
+    _make_production_shaped_state_db(root_db)
+    _make_production_shaped_state_db(beta_db)
+
+    conn = sqlite3.connect(str(root_db))
+    _insert_message(conn, sid="shared", role="user", content="hi", ts=1.0)
+    _insert_message(
+        conn, sid="shared", role="assistant",
+        content="Your request was not processed.", ts=2.0,
+        display_kind="failed_turn",
+        display_metadata=_failed_turn_metadata(
+            layer="billing", code="billing", retryable=False,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(str(beta_db))
+    _insert_message(conn, sid="shared", role="user", content="hi", ts=1.0)
+    _insert_message(conn, sid="shared", role="assistant", content="all good", ts=2.0)
+    _insert_message(conn, sid="beta-only", role="user", content="yo", ts=1.0)
+    _insert_message(
+        conn, sid="beta-only", role="assistant",
+        content="Your request was not processed.", ts=2.0,
+        display_kind="failed_turn",
+        display_metadata=_failed_turn_metadata(
+            layer="upstream", code="rate_limit", retryable=True,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    def fake_home(name):
+        if name == "beta":
+            return beta_home
+        if name in (None, "", "default"):
+            return root_home
+        return tmp_path / "root" / "profiles" / name
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", fake_home)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: root_home)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    _reset_failure_caches(monkeypatch)
+
+    rows = [
+        {"session_id": "shared", "profile": "default"},
+        {"session_id": "shared", "profile": "beta"},
+        {"session_id": "beta-only", "profile": "beta"},
+        {"session_id": "gamma-only", "profile": "gamma"},
+    ]
+    models._backfill_sidebar_failure_summaries(rows)
+
+    # The root row keeps the root database's billing surface.
+    assert rows[0]["failure_summary"] == {
+        "kind": "failed_turn", "layer": "billing", "code": "billing",
+        "retryable": False,
+    }
+    # The beta row with the SAME session id is healthy in its own database: it
+    # must not adopt the root row's marker, and an answered health clears it.
+    assert "failure_summary" not in rows[1]
+    assert rows[1]["_failure_summary_answered"] is True
+    # A beta-only failure is invisible to the active (root) database; only the
+    # beta database can mark it.
+    assert rows[2]["failure_summary"]["layer"] == "upstream"
+    assert rows[2]["failure_summary"]["retryable"] is True
+    # A profile with no database cannot speak: the row is left untouched.
+    assert "failure_summary" not in rows[3]
+    assert "_failure_summary_answered" not in rows[3]
+
+
+# ── greptile 2026-11-04: concurrent index writes / rebuild races ────────────
+
+def test_index_fast_path_holds_the_write_lock(tmp_path, monkeypatch):
+    """The targeted index patch runs under ``_INDEX_WRITE_LOCK``.
+
+    Callers such as the sidebar backfill do not take the lock themselves, so
+    an unlocked read-modify-write let two writers read the same old index and
+    the last write drop the other's update.
+    """
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    session = models.Session(
+        session_id="sess-lock",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    session.save()  # first save rebuilds the index
+
+    observed = []
+    real_patch = models._patch_session_index_in_place
+
+    def spy(updates, session_index_file, _tmp):
+        result = []
+
+        def probe():
+            acquired = models._INDEX_WRITE_LOCK.acquire(timeout=0.3)
+            result.append(acquired)
+            if acquired:
+                models._INDEX_WRITE_LOCK.release()
+
+        worker = threading.Thread(target=probe)
+        worker.start()
+        worker.join()
+        observed.append(result[0])
+        return real_patch(updates, session_index_file, _tmp)
+
+    monkeypatch.setattr(models, "_patch_session_index_in_place", spy)
+    # Direct callers (all_sessions()' backfill, workspace recovery) do not take
+    # the lock themselves; only _write_session_index can serialise them.
+    models._write_session_index(updates=[session])
+    assert observed == [False], (
+        "the index fast path wrote without holding _INDEX_WRITE_LOCK"
+    )
+
+
+def test_rebuild_keeps_a_concurrent_writers_newer_entry(tmp_path, monkeypatch):
+    """A rebuild snapshot must not clobber a row written while it was loading.
+
+    The rebuild reads sidecars outside the index lock. If a writer publishes a
+    newer entry for a row already read by the rebuild, the stale snapshot must
+    not replace it; rows the snapshot alone knows are still added.
+    """
+    db = tmp_path / "no-state.db"
+    _point_models_at(monkeypatch, db)
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _write_legacy_sidecar(session_dir, "sess-a", [
+        {"role": "user", "content": "hi", "timestamp": 1.0},
+    ])
+    _write_legacy_sidecar(session_dir, "sess-b", [
+        {"role": "user", "content": "yo", "timestamp": 1.0},
+    ])
+    # An index that predates the rebuild: sess-a only, with the old snapshot
+    # values the rebuild will read.
+    (session_dir / "_index.json").write_text(json.dumps([{
+        "session_id": "sess-a",
+        "title": "Old",
+        "updated_at": 1.0,
+        "last_message_at": 1.0,
+        "message_count": 1,
+    }]), encoding="utf-8")
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_loader = models._load_session_from_path
+
+    def blocking_loader(path):
+        if path.stem == "sess-b":
+            entered.set()
+            assert release.wait(10), "rebuild was never released"
+        return real_loader(path)
+
+    monkeypatch.setattr(models, "_load_session_from_path", blocking_loader)
+
+    errors = []
+
+    def rebuild():
+        try:
+            models._write_session_index(updates=None)
+        except Exception as exc:  # pragma: no cover - surfaced via errors
+            errors.append(exc)
+
+    worker = threading.Thread(target=rebuild, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(10), "rebuild never reached sess-b"
+        # While sess-b loads, sess-a saves: the index now holds a newer entry
+        # than the snapshot the rebuild already read.
+        models._write_session_index(updates=[{
+            "session_id": "sess-a",
+            "title": "Renamed",
+            "updated_at": 999.0,
+            "last_message_at": 999.0,
+            "message_count": 1,
+        }])
+    finally:
+        release.set()
+        worker.join(timeout=10)
+    assert not errors, errors
+
+    index = json.loads(
+        (session_dir / "_index.json").read_text(encoding="utf-8")
+    )
+    by_id = {entry["session_id"]: entry for entry in index}
+    assert by_id["sess-a"]["title"] == "Renamed", by_id["sess-a"]
+    assert by_id["sess-a"]["updated_at"] == 999.0, by_id["sess-a"]
+    # The snapshot row the concurrent write could not know about is added.
+    assert by_id["sess-b"]["title"] == "Legacy", by_id["sess-b"]
+
+
+# ── greptile 2026-11-04 (P2): warm refreshes reread saved history ───────────
+
+def test_warm_refresh_reads_bounded_tails_after_an_unrelated_append(
+    tmp_path, monkeypatch
+):
+    """An unrelated append must not re-scan every cached session's history.
+
+    The old warm-cache revision probe used ``MAX(id) ... GROUP BY session_id``
+    over the requested sessions — a full-history scan. The per-session tail
+    read now doubles as the revision probe: bounded reverse reads only.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    sids = ["sess-%02d" % index for index in range(24)]
+    for index, sid in enumerate(sids):
+        for message_index in range(120):
+            _insert_message(
+                conn, sid=sid,
+                role="user" if message_index % 2 == 0 else "assistant",
+                content="message %d" % message_index,
+                ts=float(message_index),
+            )
+        if index % 3 == 0:
+            _insert_message(
+                conn, sid=sid, role="assistant",
+                content="Your request was not processed.", ts=200.0,
+                display_kind="failed_turn",
+                display_metadata=_failed_turn_metadata(),
+            )
+    conn.commit()
+    conn.close()
+    _reset_failure_caches(monkeypatch)
+
+    first = models._session_failure_summaries_from_state_db(sids, db)
+    assert first["sess-00"] == {
+        "kind": "failed_turn", "layer": "billing", "code": "billing",
+        "retryable": False,
+    }
+    assert first["sess-01"] is None
+
+    # An unrelated append elsewhere in the database moves the database-wide
+    # fingerprint, so every cached entry is revalidated.
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="sess-unrelated", role="user", content="noise", ts=1.0)
+    conn.commit()
+    conn.close()
+    models._SESSION_FAILURE_FINGERPRINT_CACHE.clear()
+
+    opened = _counting_state_db_connections(monkeypatch)
+    second = models._session_failure_summaries_from_state_db(sids, db)
+
+    assert second == first
+    statements = [sql for proxy in opened for sql, _params in proxy.statements]
+    assert not any("GROUP BY" in sql for sql in statements), statements
+    assert not any("MAX(" in sql for sql in statements), statements
+    tail_statements = [sql for sql in statements if "FROM messages" in sql]
+    assert len(tail_statements) >= len(sids), len(tail_statements)
+    for sql in tail_statements:
+        assert "ORDER BY id DESC" in sql and "LIMIT ?" in sql, sql
+        assert "session_id = ?" in sql, sql
+    steps = sum(proxy.vm_steps for proxy in opened)
+    assert steps < 3000 * len(sids), (steps, len(sids))

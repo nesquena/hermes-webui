@@ -13536,6 +13536,17 @@ def _carry_cli_failure_summary(ui_session: dict, cli_meta: dict) -> None:
     """
     if not isinstance(ui_session, dict) or not isinstance(cli_meta, dict):
         return
+    # #8603 greptile 2026-11-08: a cleared or truncated WebUI row carries its
+    # truncation window, but the Agent's append-only database still holds the
+    # rows the user removed — and the CLI projection that answered cli_meta
+    # does not apply that window. Its verdict cannot override the
+    # truncation-aware value the row already carries.
+    if (
+        ui_session.get("truncation_watermark") is not None
+        or ui_session.get("truncation_boundary") is not None
+    ):
+        cli_meta.pop('_failure_summary_answered', None)
+        return
     if not cli_meta.pop('_failure_summary_answered', False):
         return
     if cli_meta.get('failure_summary'):

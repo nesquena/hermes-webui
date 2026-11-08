@@ -747,6 +747,86 @@ def _patch_session_index_in_place(updates, session_index_file: Path, _tmp: Path)
         return False
 
 
+def _merge_rebuilt_index_entries(entries, session_index_file: Path, _tmp: Path) -> None:
+    """Merge a rebuild snapshot into an index a concurrent writer changed.
+
+    ``_write_session_index`` collects the snapshot OUTSIDE ``_INDEX_WRITE_LOCK``
+    (#8603 r3 finding 1).  If another writer publishes the index while those
+    loads run, each snapshot entry was read from its sidecar BEFORE that write,
+    so blind-patching it in place would replace the concurrent writer's fresher
+    entry with the older snapshot (#8603 greptile 2026-11-04, P1).
+
+    Per row, the logically newer entry wins (``updated_at``, then
+    ``last_message_at``); ties keep the on-disk entry, i.e. the write that
+    actually happened during the rebuild.  Snapshot-only rows are appended only
+    while their backing sidecar (or resident session) still exists — a row the
+    concurrent writer pruned must not come back.  Like
+    ``_patch_session_index_in_place``, the caller holds ``_INDEX_WRITE_LOCK``
+    for the whole read-modify-write.
+    """
+    existing = json.loads(session_index_file.read_bytes())
+    if not isinstance(existing, list):
+        raise ValueError("session index must be a list")
+    with LOCK:
+        in_memory_ids = set(SESSIONS.keys())
+    on_disk_ids = _persisted_session_ids_snapshot()
+    merged: dict = {
+        e.get('session_id'): e for e in existing if e.get('session_id')
+    }
+    for entry in entries:
+        sid = entry.get('session_id')
+        if not sid:
+            continue
+        current = merged.get(sid)
+        if current is None:
+            if (
+                sid in in_memory_ids
+                or on_disk_ids is None
+                or sid in on_disk_ids
+            ):
+                merged[sid] = entry
+            continue
+        if _index_entry_logically_newer(entry, current):
+            # The snapshot is only authoritative while the sidecar it was read
+            # from is still live: the concurrent write may have pruned it.
+            if (
+                sid in in_memory_ids
+                or on_disk_ids is None
+                or sid in on_disk_ids
+            ):
+                merged[sid] = entry
+    payload = json.dumps(
+        sorted(merged.values(), key=lambda s: s.get('updated_at', 0), reverse=True),
+        ensure_ascii=False,
+        indent=2,
+    )
+    try:
+        with open(_tmp, 'w', encoding='utf-8') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        _safe_replace(_tmp, session_index_file)
+    except Exception:
+        try:
+            _tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _index_entry_logically_newer(candidate: dict, current: dict) -> bool:
+    """True when *candidate* carries a strictly later logical write stamp."""
+    for key in ('updated_at', 'last_message_at'):
+        try:
+            candidate_value = float(candidate.get(key) or 0)
+            current_value = float(current.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if candidate_value != current_value:
+            return candidate_value > current_value
+    return False
+
+
 def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
     """Update the session index file.
 
@@ -787,17 +867,24 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
         with _INDEX_WRITE_LOCK:
             if updates is None:
                 # A full rebuild was requested. Another writer may have
-                # published an index while we were loading; patching keeps its
-                # write instead of clobbering it with a snapshot read before
-                # it landed.
+                # published an index while we were loading; merging keeps its
+                # newer entry per row instead of clobbering it with a snapshot
+                # read before that write landed (#8603 greptile 2026-11-04).
                 if (
                     session_index_file.exists()
                     and _session_index_stat_signature(session_index_file) != pre_rebuild_sig
                 ):
-                    _patch_session_index_in_place(
-                        entries, session_index_file, _tmp,
-                    )
-                    return
+                    try:
+                        _merge_rebuilt_index_entries(
+                            entries, session_index_file, _tmp,
+                        )
+                        return
+                    except Exception:
+                        logger.debug(
+                            "Session index merge after a concurrent rebuild "
+                            "write failed; falling back to the collected snapshot",
+                            exc_info=True,
+                        )
             elif session_index_file.exists():
                 # The index appeared while we loaded: honor the targeted
                 # update the caller asked for instead of rebuilding.
@@ -834,7 +921,17 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
 
     # Fast path: patch existing index with updated sessions.
     # This avoids loading every session file on every single save().
-    if not _patch_session_index_in_place(updates, session_index_file, _tmp):
+    # The whole read-modify-write stays under _INDEX_WRITE_LOCK: callers such
+    # as all_sessions()' backfill and workspace recovery do not take the lock
+    # themselves, so an unlocked fast path let two writers read the same old
+    # index and the last write drop the other's update (#8603 greptile
+    # 2026-11-04, P1).  The lock is released before the rebuild fallback so a
+    # corrupt-index recovery can re-enter _write_session_index().
+    with _INDEX_WRITE_LOCK:
+        patched = _patch_session_index_in_place(
+            updates, session_index_file, _tmp,
+        )
+    if not patched:
         # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock).
         # Propagate the resolved target so a rebuild scoped to a specific session dir
         # (the background rebuild thread) falls back to rebuilding THAT dir's index,
@@ -1572,6 +1669,8 @@ def _load_session_from_path(path: Path) -> "Session | None":
             data['failure_summary']
             if 'failure_summary' in data else _MISSING_SUMMARY
         ),
+        truncation_watermark=session.truncation_watermark,
+        truncation_boundary=session.truncation_boundary,
     )
     session.failure_summary = summary
     session.failure_summary_revision = revision
@@ -2356,9 +2455,15 @@ class Session:
         # activity) the transcript-derived value above stands. The read is
         # bounded and revision-gated, so an unchanged database costs one memoized
         # fingerprint probe.
+        # #8603 greptile 2026-11-08: the database is append-only, so a cleared or
+        # truncated session still carries the rows the user removed. The read
+        # applies this session's truncation window first, otherwise a removed
+        # turn's failure would override the kept transcript's own verdict.
         _db_summary, _db_revision, _db_answered = (
             _session_failure_state_from_state_db(
-                self.session_id, _agent_state_db_path(profile=self.profile)
+                self.session_id, _agent_state_db_path(profile=self.profile),
+                truncation_watermark=self.truncation_watermark,
+                truncation_boundary=self.truncation_boundary,
             )
         )
         if _db_answered:
@@ -2694,6 +2799,8 @@ class Session:
                 data['failure_summary']
                 if 'failure_summary' in data else _MISSING_SUMMARY
             ),
+            truncation_watermark=session.truncation_watermark,
+            truncation_boundary=session.truncation_boundary,
         )
         session.failure_summary = summary
         session.failure_summary_revision = revision
@@ -2802,6 +2909,8 @@ class Session:
                     parsed['failure_summary']
                     if 'failure_summary' in parsed else _MISSING_SUMMARY
                 ),
+                truncation_watermark=session.truncation_watermark,
+                truncation_boundary=session.truncation_boundary,
             )
             session.failure_summary = summary
             session.failure_summary_revision = revision
@@ -2987,7 +3096,22 @@ class Session:
             # the overlay needs the sidecar's own shrink authority from the
             # metadata prefix: a truncated sidecar plus append-only state.db
             # rows must not re-credit the removed suffix (#7882 cap follow-up).
-            **({'truncation_boundary': self.truncation_boundary} if self.truncation_boundary else {}),
+            # The failure-state backfill needs the same authority (#8603
+            # greptile 2026-11-08): without the watermark it cannot tell a
+            # deleted suffix from a later legitimate turn, so an index row
+            # would restore the failure the user removed. Emit both fields
+            # whenever one is recorded, including the 0.0 truncate-to-empty
+            # sentinel (never emitted as a bare truthiness test).
+            **(
+                {
+                    key: value
+                    for key, value in (
+                        ('truncation_watermark', self.truncation_watermark),
+                        ('truncation_boundary', self.truncation_boundary),
+                    )
+                    if value is not None
+                }
+            ),
             'pinned': self.pinned,
             'archived': self.archived,
             'project_id': self.project_id,
@@ -9894,14 +10018,79 @@ def _backfill_sidebar_failure_summaries(sessions: list[dict], diag=None) -> None
     revision-gated, one-connection read the Agent-row backfill uses), which
     both marks the pre-PR failures and clears markers the Agent has since
     recovered. Rows the database cannot speak for are left untouched.
+
+    #8603 greptile 2026-11-08: an ``all_sessions()`` page mixes rows owned by
+    different profiles, and each row's failure state lives in ITS profile's
+    ``state.db``.  Grouping by the canonical profile key and reading each
+    group's own database stops a foreign row from borrowing the active
+    profile's answer — and stops two profiles that share a session id from
+    overwriting each other's summary.
+
+    Each row also carries its own truncation window (``compact()`` emits it):
+    a cleared or truncated session's removed turns still sit in the Agent's
+    append-only database, so the per-profile read is bounded by that window
+    and cannot restore the failure the user removed.
     """
     _diag_stage(diag, "all_sessions.failure_summary_backfill")
     try:
-        db_path = _active_state_db_path()
-        if db_path is not None:
-            _backfill_cli_session_failure_summaries(sessions, db_path)
+        from api.profiles import get_active_profile_name
+
+        try:
+            active_group = _sidebar_failure_profile_group(get_active_profile_name())
+        except Exception:
+            active_group = "default"
+        groups: dict[str, list[dict]] = {}
+        for row in sessions:
+            if not isinstance(row, dict) or not row.get("session_id"):
+                continue
+            groups.setdefault(_sidebar_failure_profile_group(row.get("profile")), []).append(row)
+        for profile_key, rows in groups.items():
+            if profile_key == active_group:
+                # Same database the single-profile path has always read (and
+                # the per-request active profile's home).
+                db_path = _active_state_db_path()
+            elif profile_key == "default":
+                # Root rows in an all-profiles view still belong to the root
+                # profile's own home, not to whichever profile is active.
+                db_path = _agent_state_db_path(profile="default")
+            else:
+                # Never answer a named profile from another profile's
+                # database: absence is "unknown", not an invitation to ask the
+                # active profile about a foreign (possibly same-id) row.
+                db_path = _strict_agent_state_db_path(profile=profile_key)
+            if db_path is None:
+                continue
+            truncations = {}
+            for row in rows:
+                sid = str(row.get("session_id") or "").strip()
+                if not sid:
+                    continue
+                watermark = row.get("truncation_watermark")
+                boundary = row.get("truncation_boundary")
+                if watermark is not None or boundary is not None:
+                    truncations[sid] = (watermark, boundary)
+            _backfill_cli_session_failure_summaries(rows, db_path, truncations=truncations)
     except Exception:
         logger.debug("Sidebar failure-summary backfill failed", exc_info=True)
+
+
+def _sidebar_failure_profile_group(profile) -> str:
+    """Canonical profile group for one sidebar row's failure backfill.
+
+    Mirrors ``api.routes._sidebar_profile_group_key``: ``None``/empty and any
+    renamed-root alias collapse onto the root group, so a legacy row tagged
+    ``'default'`` still reads the root profile's database after a rename.
+    """
+    name = str(profile or "default") or "default"
+    if name == "default":
+        return "default"
+    try:
+        from api.profiles import _is_root_profile
+        if _is_root_profile(name):
+            return "default"
+    except Exception:
+        logger.debug("Root-profile check failed for %r", profile, exc_info=True)
+    return name
 
 
 def all_sessions(
@@ -15012,7 +15201,42 @@ def _state_db_failure_tail_decision(rows, cols: set, order_col):
     return None, revision, decisive
 
 
-def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None, bool]:
+def _state_db_failure_truncation_clause(truncation_watermark, truncation_boundary):
+    """WHERE bound that keeps a state.db tail inside the kept transcript.
+
+    Clearing or truncating a failed session removes its rows from the WebUI
+    transcript but leaves them in the Agent's append-only ``state.db``.  A
+    verdict read from those rows would restore the failure the user just
+    removed, so the read applies the same truncation window the display merge
+    applies to state rows:
+
+    * no watermark → no filter (``None``);
+    * ``boundary < watermark`` → a new turn was committed after the edit, so
+      the legitimate prefix (``ts <= boundary``) and the post-edit tail
+      (``ts >= watermark``) survive and the deleted suffix between them is
+      excluded;
+    * otherwise → only rows at or below the watermark survive (the original
+      truncate cutoff, including the ``0.0`` truncate-to-empty sentinel,
+      blocks the whole database).
+
+    Returns ``(sql, params)`` or ``None`` when the session records no
+    truncation.
+    """
+    watermark = _message_timestamp_as_float({"timestamp": truncation_watermark})
+    if watermark is None:
+        return None
+    if watermark <= 0:
+        # Truncate-to-empty (#2914): every state.db row is removed transcript.
+        return "0", ()
+    boundary = _message_timestamp_as_float({"timestamp": truncation_boundary})
+    if boundary is not None and boundary < watermark:
+        return "(timestamp <= ? OR timestamp >= ?)", (boundary, watermark)
+    return "timestamp <= ?", (watermark,)
+
+
+def _read_state_db_failure_tail(
+    db_path, sid, *, truncation_watermark=None, truncation_boundary=None,
+) -> tuple[dict | None, int | None, bool]:
     """Bounded reverse scan of the session's active rows.
 
     Returns ``(summary, revision, decisive)`` where ``revision`` is the largest
@@ -15021,6 +15245,11 @@ def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None, 
     finished turn.  The window is widened once when every row in it is interim
     activity; a still-undecided tail yields ``None`` (never a guessed
     verdict).
+
+    ``truncation_watermark`` / ``truncation_boundary`` apply the session's
+    truncation window in SQL, so the bounded tail is read from the KEPT part
+    of the transcript and removed turns cannot be restored (#8603 greptile
+    2026-11-08: removed turns still look failed).
     """
     try:
         with closing(open_state_db_readonly(db_path)) as conn:
@@ -15040,13 +15269,27 @@ def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None, 
             if 'active' in cols:
                 active_clause = " AND (active IS NULL OR active != 0)"
             order_col = 'id' if 'id' in cols else ('timestamp' if 'timestamp' in cols else None)
+            truncation = _state_db_failure_truncation_clause(
+                truncation_watermark, truncation_boundary,
+            )
+            if truncation is not None and 'timestamp' not in cols:
+                # A truncation window cannot be applied to a schema with no
+                # timestamps: the database cannot speak for this session, and
+                # silence must never override the truncated transcript.
+                return None, None, False
+            truncation_clause = ""
+            truncation_params: tuple = ()
+            if truncation is not None:
+                truncation_clause, truncation_params = truncation
+                truncation_clause = f" AND ({truncation_clause})"
             select = _state_db_failure_tail_select(cols, order_col)
             order_clause = f" ORDER BY {order_col} DESC" if order_col else ""
             for window in (_SESSION_FAILURE_TAIL_WINDOW, _SESSION_FAILURE_TAIL_WINDOW_WIDE):
                 cur.execute(
                     f"SELECT {', '.join(select)} FROM messages "
-                    f"WHERE session_id = ?{active_clause}{order_clause} LIMIT ?",
-                    (sid, window),
+                    f"WHERE session_id = ?{active_clause}{truncation_clause}"
+                    f"{order_clause} LIMIT ?",
+                    (sid, *truncation_params, window),
                 )
                 rows = cur.fetchall()
                 state, revision, decisive = _state_db_failure_tail_verdict(rows, cols, order_col)
@@ -15064,7 +15307,7 @@ def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None, 
 
 
 def _state_db_failure_batch_tails(cur, cols: set, active_clause: str, order_col,
-                                  sids: list, limit: int) -> dict:
+                                  sids: list, limit: int, truncations=None) -> dict:
     """Newest-first tail rows for many sessions, one bounded statement each.
 
     #8603 review round 3, finding 2: the previous single-statement form used
@@ -15078,33 +15321,67 @@ def _state_db_failure_batch_tails(cur, cols: set, active_clause: str, order_col,
     rows it returns; a schema without that index (or with no column to order
     by) runs the same bounded query and stays correct, just slower.
 
+    ``truncations`` maps a session id to its ``(watermark, boundary)`` window.
+    Those tails are bounded to the KEPT transcript in SQL (#8603 greptile
+    2026-11-08), so rows the user cleared or truncated can never vote. A
+    truncated session on a schema without a timestamp column cannot be read
+    within its window; it yields no rows (the database cannot speak), never an
+    unfiltered verdict.
+
     Every statement runs on the caller's ONE connection, so a page of sessions
     still costs a single state.db open.
     """
     tails: dict = {}
     if not sids:
         return tails
+    truncations = truncations or {}
     select = _state_db_failure_tail_select(cols, order_col)
+    if truncations and 'timestamp' in cols and 'timestamp' not in select:
+        # The window predicate needs the row clock even when ordering by id.
+        select.append('timestamp')
     columns = ", ".join(select)
     order_clause = f" ORDER BY {order_col} DESC" if order_col else ""
     for sid in sids:
+        truncation_clause = ""
+        truncation_params: tuple = ()
+        truncation = truncations.get(sid)
+        if truncation is not None:
+            if 'timestamp' not in cols:
+                tails[sid] = []
+                continue
+            window = _state_db_failure_truncation_clause(*truncation)
+            if window is not None:
+                clause, truncation_params = window
+                truncation_clause = f" AND ({clause})"
         cur.execute(
             f"SELECT {columns} FROM messages "
-            f"WHERE session_id = ?{active_clause}{order_clause} LIMIT ?",
-            (sid, limit),
+            f"WHERE session_id = ?{active_clause}{truncation_clause}"
+            f"{order_clause} LIMIT ?",
+            (sid, *truncation_params, limit),
         )
         tails[sid] = cur.fetchall()
     return tails
 
 
-def _session_failure_summaries_from_state_db(sids, db_path) -> dict:
+def _session_failure_summaries_from_state_db(sids, db_path, truncations=None) -> dict:
     """Acquire failure summaries for MANY sessions on one state.db open.
 
     The list-level backfill answers a whole sidebar page at once: one
-    fingerprint probe, one read-only connection, one revision probe and one
-    bounded tail statement per chunk of sessions.  Per-row connections made a
-    poll over N sessions cost N opens — and N × 5s whenever state.db was
-    briefly locked by a writer.
+    fingerprint probe, one read-only connection and one bounded reverse tail
+    read per session.  Per-row connections made a poll over N sessions cost N
+    opens — and N × 5s whenever state.db was briefly locked by a writer.
+
+    The per-session tail read doubles as the revision probe: its newest row id
+    is the session's revision.  A cached entry is reused only when THIS
+    session's tail did not move, so an unrelated append somewhere else in the
+    database no longer re-reads every cached session's full history (#8603
+    greptile 2026-11-04, P2: the old ``MAX(id) ... GROUP BY session_id``
+    revision query scanned all messages of every requested session).
+
+    ``truncations`` maps a session id to its ``(watermark, boundary)`` window
+    (#8603 greptile 2026-11-08).  A truncated session is never answered from
+    the memo and is read through its window, so a cleared or truncated turn
+    cannot restore a failure marker.
 
     Returns ``{sid: summary}`` for the sessions the database could ANSWER,
     where a ``None`` summary means "healthy".  A session the database cannot
@@ -15124,11 +15401,20 @@ def _session_failure_summaries_from_state_db(sids, db_path) -> dict:
 
     db_key = str(db_path)
     wanted = [str(sid) for sid in sids if sid]
+    truncations = {
+        str(sid): window for sid, window in (truncations or {}).items() if sid
+    }
     fingerprint = _state_db_failure_fingerprint(db_path)
-    cached: list = []   # (sid, revision) — needs a revision probe
-    pending: list = []  # no usable stamp — needs the bounded tail read
+    cached: list = []   # (sid, revision)
+    pending: list = []  # needs the bounded tail read
+    cached_map: dict = {}
     with _SESSION_FAILURE_SUMMARY_LOCK:
         for sid in wanted:
+            if sid in truncations:
+                # The memo stamp cannot express a truncation window: read the
+                # kept tail rather than answer from a whole-database verdict.
+                pending.append(sid)
+                continue
             entry = _SESSION_FAILURE_SUMMARY_CACHE.get((db_key, sid))
             if entry is None:
                 pending.append(sid)
@@ -15136,6 +15422,7 @@ def _session_failure_summaries_from_state_db(sids, db_path) -> dict:
                 resolved[sid] = entry[2]
             elif entry[1] is not None:
                 cached.append((sid, entry[1]))
+                cached_map[sid] = entry[2]
             else:
                 pending.append(sid)
     if fingerprint is None:
@@ -15146,7 +15433,7 @@ def _session_failure_summaries_from_state_db(sids, db_path) -> dict:
         pending.extend(sid for sid, _revision in cached)
         cached = []
     if not pending and not cached:
-        # Every session was answered by the fingerprint/revision gate.
+        # Every session was answered by the fingerprint gate.
         return resolved
 
     try:
@@ -15168,77 +15455,60 @@ def _session_failure_summaries_from_state_db(sids, db_path) -> dict:
                 else ('timestamp' if 'timestamp' in cols else None)
             )
 
-            # 1) one revision probe for every session whose cached summary may
-            #    be stale: has THIS session's own tail moved?
-            if cached and order_col == 'id':
-                current: dict = {}
-                for start in range(0, len(cached), _STATE_DB_FAILURE_SID_CHUNK):
-                    chunk = [sid for sid, _rev in cached[start:start + _STATE_DB_FAILURE_SID_CHUNK]]
-                    placeholders = ",".join("?" for _ in chunk)
-                    try:
-                        cur.execute(
-                            f"SELECT session_id, MAX(id) AS max_id FROM messages "
-                            f"WHERE session_id IN ({placeholders}){active_clause} "
-                            f"GROUP BY session_id",
-                            tuple(chunk),
-                        )
-                        for row in cur.fetchall():
-                            current[str(row['session_id'])] = (
-                                int(row['max_id']) if row['max_id'] is not None else None
-                            )
-                    except Exception:
-                        # An unreadable probe is not a verdict: these sessions
-                        # fall back to the bounded tail read, as the
-                        # single-session reader does.
-                        logger.debug(
-                            "state.db failure-summary batch revision probe failed",
-                            exc_info=True,
-                        )
-                        for sid, _revision in cached[start:start + _STATE_DB_FAILURE_SID_CHUNK]:
-                            current.pop(sid, None)
-                for sid, held_revision in cached:
-                    if current.get(sid) != held_revision:
-                        pending.append(sid)
-                        continue
-                    with _SESSION_FAILURE_SUMMARY_LOCK:
-                        entry = _SESSION_FAILURE_SUMMARY_CACHE.get((db_key, sid))
-                        if entry is not None and entry[1] == held_revision:
-                            _SESSION_FAILURE_SUMMARY_CACHE[(db_key, sid)] = (
-                                fingerprint, held_revision, entry[2],
-                            )
-                            _SESSION_FAILURE_SUMMARY_CACHE.move_to_end((db_key, sid))
-                            resolved[sid] = entry[2]
-                            continue
-                    pending.append(sid)
-            elif cached:
-                # No per-session revision to gate on: re-read the tails.
-                pending.extend(sid for sid, _revision in cached)
-
-            # 2) one bounded reverse read per session, widened ONCE and only
-            #    for the tails the narrow window could not decide (#8603 r3
-            #    finding 2: the old widening step re-read already-settled tails
-            #    at the wide window).
+            # 1) one bounded reverse read per session — the read IS the
+            #    revision probe.  A cached session whose newest row id is
+            #    unchanged keeps its cached verdict without a second query;
+            #    every other session is decided from the rows in hand,
+            #    widened ONCE and only when the narrow window was undecided
+            #    (#8603 r3 finding 2; #8603 greptile 2026-11-04 P2).
+            held_revisions = dict(cached)
+            pending.extend(sid for sid, _revision in cached)
             for start in range(0, len(pending), _STATE_DB_FAILURE_SID_CHUNK):
                 chunk = pending[start:start + _STATE_DB_FAILURE_SID_CHUNK]
                 narrow = _state_db_failure_batch_tails(
                     cur, cols, active_clause, order_col, chunk,
                     _SESSION_FAILURE_TAIL_WINDOW,
+                    truncations=truncations,
                 )
-                undecided = [
-                    sid for sid in chunk
-                    if _state_db_failure_tail_verdict(
-                        narrow.get(sid) or [], cols, order_col,
-                    )[0] is _FAILURE_STATE_UNDECIDED
-                    and len(narrow.get(sid) or []) >= _SESSION_FAILURE_TAIL_WINDOW
-                ]
+                decided_from_cache: dict = {}
+                undecided = []
+                for sid in chunk:
+                    rows = narrow.get(sid) or []
+                    state, revision, _decisive = _state_db_failure_tail_verdict(
+                        rows, cols, order_col,
+                    )
+                    held_revision = held_revisions.get(sid)
+                    if held_revision is not None and revision == held_revision:
+                        # This session's own tail did not move: its cached
+                        # verdict still stands (only an unrelated append
+                        # invalidated the database-wide fingerprint).
+                        decided_from_cache[sid] = cached_map[sid]
+                        continue
+                    if (
+                        state is _FAILURE_STATE_UNDECIDED
+                        and len(rows) >= _SESSION_FAILURE_TAIL_WINDOW
+                    ):
+                        undecided.append(sid)
                 wide = (
                     _state_db_failure_batch_tails(
                         cur, cols, active_clause, order_col, undecided,
                         _SESSION_FAILURE_TAIL_WINDOW_WIDE,
+                        truncations=truncations,
                     )
                     if undecided else {}
                 )
+                for sid, summary in decided_from_cache.items():
+                    resolved[sid] = summary
+                    held_revision = held_revisions.get(sid)
+                    if held_revision is not None and fingerprint is not None:
+                        with _SESSION_FAILURE_SUMMARY_LOCK:
+                            _SESSION_FAILURE_SUMMARY_CACHE[(db_key, sid)] = (
+                                fingerprint, held_revision, summary,
+                            )
+                            _SESSION_FAILURE_SUMMARY_CACHE.move_to_end((db_key, sid))
                 for sid in chunk:
+                    if sid in decided_from_cache:
+                        continue
                     rows = wide.get(sid) or narrow.get(sid) or []
                     state, revision, decisive = _state_db_failure_tail_decision(
                         rows, cols, order_col
@@ -15248,7 +15518,11 @@ def _session_failure_summaries_from_state_db(sids, db_path) -> dict:
                         # so the caller keeps the value it already has.
                         continue
                     resolved[sid] = state
-                    if revision is not None and fingerprint is not None:
+                    if (
+                        sid not in truncations
+                        and revision is not None
+                        and fingerprint is not None
+                    ):
                         with _SESSION_FAILURE_SUMMARY_LOCK:
                             _SESSION_FAILURE_SUMMARY_CACHE[(db_key, sid)] = (
                                 fingerprint, revision, state,
@@ -15264,7 +15538,9 @@ def _session_failure_summaries_from_state_db(sids, db_path) -> dict:
     return resolved
 
 
-def _session_failure_state_from_state_db(sid, db_path):
+def _session_failure_state_from_state_db(
+    sid, db_path, *, truncation_watermark=None, truncation_boundary=None,
+):
     """Return ``(summary, revision, answered)`` for ONE session.
 
     ``answered`` is False when the Agent's database cannot speak for this
@@ -15277,6 +15553,12 @@ def _session_failure_state_from_state_db(sid, db_path):
     cold load pays one bounded read on its own 50ms-budget connection rather
     than the list reader's chunk machinery — and both readers reach the same
     verdict because they share the windowing helpers.
+
+    When the session records a truncation window the tail read is bounded by
+    it (#8603 greptile 2026-11-08) and the memo is bypassed in both
+    directions: a verdict computed for a different window must never answer
+    this read, and a truncation-bounded verdict must not answer a caller that
+    can see the whole database.
     """
     if not sid or db_path is None:
         return None, None, False
@@ -15285,20 +15567,27 @@ def _session_failure_state_from_state_db(sid, db_path):
             return None, None, False
     except OSError:
         return None, None, False
+    truncation = _state_db_failure_truncation_clause(
+        truncation_watermark, truncation_boundary,
+    )
     cache_key = (str(db_path), str(sid))
     fingerprint = _state_db_failure_fingerprint(db_path)
-    if fingerprint is not None:
+    if truncation is None and fingerprint is not None:
         with _SESSION_FAILURE_SUMMARY_LOCK:
             entry = _SESSION_FAILURE_SUMMARY_CACHE.get(cache_key)
             if entry is not None and entry[0] == fingerprint:
                 _SESSION_FAILURE_SUMMARY_CACHE.move_to_end(cache_key)
                 return entry[2], entry[1], True
-    summary, revision, decisive = _read_state_db_failure_tail(db_path, sid)
+    summary, revision, decisive = _read_state_db_failure_tail(
+        db_path, sid,
+        truncation_watermark=truncation_watermark,
+        truncation_boundary=truncation_boundary,
+    )
     if not _failure_state_is_answerable(summary, decisive):
         # The database cannot speak for this session: the caller keeps the
         # value it already has rather than reading silence as health.
         return None, None, False
-    if revision is not None and fingerprint is not None:
+    if truncation is None and revision is not None and fingerprint is not None:
         with _SESSION_FAILURE_SUMMARY_LOCK:
             _SESSION_FAILURE_SUMMARY_CACHE[cache_key] = (
                 fingerprint, revision, summary,
@@ -15323,6 +15612,7 @@ def _session_failure_summary_from_state_db(sid, db_path) -> dict | None:
 
 def _acquire_session_failure_state(
     sid, *, profile=None, transcript=None, stored=_MISSING_SUMMARY,
+    truncation_watermark=None, truncation_boundary=None,
 ):
     """Resolve a sidecar's failure state on load (acquire, refresh or keep).
 
@@ -15340,9 +15630,15 @@ def _acquire_session_failure_state(
     answer was read at, or ``None`` when it came from the sidecar/transcript.
     Never saves: an acquisition must not rewrite an unrelated sidecar or
     materialize a metadata-only stub.
+
+    ``truncation_watermark`` / ``truncation_boundary`` bound the database
+    verdict by the session's truncation window (#8603 greptile 2026-11-08):
+    rows the user removed from the transcript must not speak.
     """
     summary, revision, answered = _session_failure_state_from_state_db(
         sid, _agent_state_db_path(profile=profile),
+        truncation_watermark=truncation_watermark,
+        truncation_boundary=truncation_boundary,
     )
     if answered:
         return summary, revision
@@ -15368,7 +15664,7 @@ def _session_failure_summary_backfill(sid, *, profile=None, transcript=None) -> 
     return summary
 
 
-def _backfill_cli_session_failure_summaries(rows, db_path) -> None:
+def _backfill_cli_session_failure_summaries(rows, db_path, *, truncations=None) -> None:
     """Refresh ``failure_summary`` on sidebar rows from the Agent's state.db.
 
     The direct Agent session-list dictionaries carry no summary because they
@@ -15381,6 +15677,10 @@ def _backfill_cli_session_failure_summaries(rows, db_path) -> None:
     summary" rule made that impossible).  A row the database cannot speak for
     is left exactly as it is, so an unreadable database never invents a verdict
     in either direction.
+
+    ``truncations`` maps a session id to its ``(watermark, boundary)`` window
+    (#8603 greptile 2026-11-08): those reads are bounded to the kept
+    transcript, so a cleared or truncated turn's rows cannot speak again.
 
     Answered rows are stamped with the private ``_failure_summary_answered``
     marker so a later merge can tell "healthy" from "unanswered"; the sidebar
@@ -15404,7 +15704,9 @@ def _backfill_cli_session_failure_summaries(rows, db_path) -> None:
         wanted.append(sid)
     if not wanted:
         return
-    summaries = _session_failure_summaries_from_state_db(wanted, db_path)
+    summaries = _session_failure_summaries_from_state_db(
+        wanted, db_path, truncations=truncations,
+    )
     for row in rows:
         if not isinstance(row, dict):
             continue
