@@ -13211,6 +13211,107 @@ _LINEAGE_DISPLAY_CACHE_MAX = 16
 _lineage_display_cache: "OrderedDict[str, dict]" = OrderedDict()
 _lineage_display_cache_lock = threading.Lock()
 
+# perf: memoized GET /api/session payloads. public_session_projection()
+# deep-copies and credential-masks the whole transcript — 0.74 s for a
+# 500-message / 4.6 MB session measured in isolation — and CPython serialises
+# every concurrent repeat on the GIL, so a client that reopens (or retries) the
+# same session turned those repeats into 5-19 s spans in the journal.
+#
+# Validity is fail-closed, like _display_merge_cache:
+#   - only fully-loaded, inactive sessions (no active stream, no pending user
+#     message): an active session's in-memory tail runs ahead of its disk
+#     signature, so it always recomputes;
+#   - the sidecar's exact stat signature, so any write invalidates naturally;
+#   - a state.db signature bracketing the row read: rows are committed before
+#     the debounced sidecar save, so the sidecar alone would re-serve a
+#     transcript missing the newest turns;
+#   - the request shape (message window, model resolution) and the redaction
+#     setting that shapes the masked payload;
+#   - payloads carrying live-journal or gateway-chat keys are never stored:
+#     those derive from files that are not part of the key.
+# memory_status and regeneration_revision derive from live agent state instead
+# of the sidecar and are refreshed from the current request on every hit.
+_SESSION_PROJECTION_CACHE_MAX = 8
+_SESSION_PROJECTION_VOLATILE_KEYS = ("memory_status", "regeneration_revision")
+_SESSION_PROJECTION_UNCACHEABLE_KEYS = (
+    "runtime_journal",
+    "runtime_journal_snapshot",
+    "chat_via_gateway_session",
+    "chat_read_only_reason",
+    "chat_read_only_can_connect",
+)
+_session_projection_cache: "OrderedDict[tuple, dict]" = OrderedDict()
+_session_projection_cache_lock = threading.Lock()
+
+
+def _session_projection_cache_key(
+    sid,
+    *,
+    sidecar_path,
+    state_db_sig,
+    msg_limit,
+    msg_before,
+    expand_renderable,
+    resolve_model,
+    effective_model,
+    effective_provider,
+    active_stream_id,
+    pending_started_at,
+    redact_enabled,
+):
+    """Return the validity key for one projected payload, or None to skip caching.
+
+    None means "do not cache": any component that cannot be resolved exactly
+    (missing sidecar signature, unbracketed state.db read, unreadable settings)
+    disables the cache for this request rather than risking a stale transcript.
+    """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(sid or "")
+    if not sid or state_db_sig is None or redact_enabled is None:
+        return None
+    sidecar_sig = _sidecar_stat_signature(sidecar_path)
+    if sidecar_sig is None:
+        return None
+    # repr() keeps the key hashable regardless of how deep the state.db
+    # signature nests (file fingerprint + DB/WAL/SHM stamps).
+    return (
+        sid,
+        repr(sidecar_sig),
+        repr(state_db_sig),
+        msg_limit,
+        msg_before,
+        bool(expand_renderable),
+        bool(resolve_model),
+        str(effective_model or ""),
+        str(effective_provider or ""),
+        str(active_stream_id or ""),
+        str(pending_started_at or ""),
+        bool(redact_enabled),
+    )
+
+
+def _session_projection_cache_get(key):
+    """Return the cached payload for ``key`` (LRU touch included), or None."""
+    if key is None:
+        return None
+    with _session_projection_cache_lock:
+        payload = _session_projection_cache.get(key)
+        if payload is not None:
+            _session_projection_cache.move_to_end(key, last=True)
+        return payload
+
+
+def _session_projection_cache_put(key, payload) -> None:
+    """Store a payload, evicting the oldest entry past the bound."""
+    if key is None or not isinstance(payload, dict):
+        return
+    with _session_projection_cache_lock:
+        _session_projection_cache[key] = dict(payload)
+        _session_projection_cache.move_to_end(key, last=True)
+        while len(_session_projection_cache) > _SESSION_PROJECTION_CACHE_MAX:
+            _session_projection_cache.popitem(last=False)
+
 
 def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, owner_positions=None) -> list:
     """Return WebUI sidecar messages stitched across compression snapshots.
@@ -17447,6 +17548,16 @@ def _handle_session_get(handler, parsed) -> bool:
         _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
             getattr(s, "messages", None) or [], include_live_partial=True
         ) else None)
+        # perf: bracket the state.db read below so the projected-payload cache
+        # (see _session_projection_cache) keys on a signature that provably
+        # covers every row the payload was built from. Rows commit before the
+        # debounced sidecar save, so the sidecar signature alone does not see
+        # them. Metadata-only and active sessions never populate that cache, so
+        # they skip both probes.
+        _proj_cache_allowed = bool(load_messages) and not _display_merge_session_is_active(s)
+        _proj_db_sig_before = (
+            _state_db_session_signature(sid, _session_profile) if _proj_cache_allowed else None
+        )
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
@@ -17528,6 +17639,11 @@ def _handle_session_get(handler, parsed) -> bool:
             metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
         _t2 = _time.monotonic()
         if _diag: _diag.stage("t2_after_state_db_load")
+        _proj_db_sig = None
+        if _proj_db_sig_before is not None:
+            _proj_db_sig_after = _state_db_session_signature(sid, _session_profile)
+            if _proj_db_sig_before == _proj_db_sig_after:
+                _proj_db_sig = _proj_db_sig_before
         effective_model = (
             _resolve_effective_session_model_for_display(s)
             if resolve_model
@@ -17894,7 +18010,52 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if revision:
                 raw["regeneration_revision"] = revision
-        redact = public_session_projection(raw)
+        # perf: see _session_projection_cache — an unchanged session re-served
+        # after a reopen/retry reuses the projected payload instead of redoing
+        # the full deep-copy + credential-masking pass.
+        try:
+            from api.config import load_settings
+            _proj_redact_enabled = (
+                bool(load_settings().get("api_redact_enabled", True)) if _proj_cache_allowed else None
+            )
+        except Exception:
+            _proj_redact_enabled = None
+        _proj_key = None
+        if _proj_cache_allowed:
+            _proj_key = _session_projection_cache_key(
+                sid,
+                sidecar_path=SESSION_DIR / f"{sid}.json",
+                state_db_sig=_proj_db_sig,
+                msg_limit=msg_limit,
+                msg_before=msg_before,
+                expand_renderable=expand_renderable,
+                resolve_model=resolve_model,
+                effective_model=effective_model,
+                effective_provider=effective_provider,
+                active_stream_id=getattr(s, "active_stream_id", None),
+                pending_started_at=getattr(s, "pending_started_at", None),
+                redact_enabled=_proj_redact_enabled,
+            )
+        _proj_payload = _session_projection_cache_get(_proj_key)
+        if _proj_payload is not None:
+            # Rows are shallow-copied (same contract as _display_merge_cache)
+            # so the response can never mutate the cached entry.
+            redact = dict(_proj_payload)
+            for _list_key in ("messages", "tool_calls", "pending_attachments"):
+                if isinstance(redact.get(_list_key), list):
+                    redact[_list_key] = [
+                        dict(_item) if isinstance(_item, dict) else _item
+                        for _item in redact[_list_key]
+                    ]
+            for _volatile_key in _SESSION_PROJECTION_VOLATILE_KEYS:
+                if _volatile_key in raw:
+                    redact[_volatile_key] = raw[_volatile_key]
+                else:
+                    redact.pop(_volatile_key, None)
+        else:
+            redact = public_session_projection(raw)
+            if not any(_key in redact for _key in _SESSION_PROJECTION_UNCACHEABLE_KEYS):
+                _session_projection_cache_put(_proj_key, redact)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
         resp = j(handler, {"session": redact})
