@@ -252,4 +252,12 @@ def test_load_session_passes_the_proven_turn_owner_to_the_inflight_merge():
     assert calls, "loadSession no longer merges the INFLIGHT tail"
     for extra in calls:
         compact = re.sub(r"\s+", "", extra or "")
-        assert compact == ",_inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId)", calls
+        # #8701 adds the other-stream flag (gated on the entry and stream the load started with, and on the
+        # server's pending prompt) after the owner start.
+        assert compact == (
+            ",_inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId)"
+            ",INFLIGHT[sid]===_inflightAtLoadStart"
+            "&&String(INFLIGHT[sid].streamId||'').trim()===_inflightStreamAtLoadStart"
+            "&&_inflightNamesOtherStream(INFLIGHT[sid],activeStreamId)"
+            "&&!!String((S.session&&S.session.pending_user_message)||'').trim()"
+        ), calls

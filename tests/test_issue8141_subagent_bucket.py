@@ -277,8 +277,12 @@ def test_server_helper_detects_parent_owned_delegated_child():
     child = _row("c", source="subagent", parent="cli_parent",
                  relationship="child_session", raw_source="subagent")
     assert routes._is_delegated_subagent_child(child) is True
-    # Same row without the child_session relationship is not delegated work.
-    assert routes._is_delegated_subagent_child(dict(child, relationship_type=None)) is False
+    # Same row with a declared non-child relationship is not delegated work.
+    assert routes._is_delegated_subagent_child(dict(child, relationship_type="continuation")) is False
+    # #8791: with the relationship not yet known (a persisted sidecar before lineage enrichment), a subagent
+    # row that names a parent is delegated work; with no parent it is not.
+    assert routes._is_delegated_subagent_child(dict(child, relationship_type=None)) is True
+    assert routes._is_delegated_subagent_child(dict(child, relationship_type=None, parent_session_id="")) is False
     # Non-subagent children are not delegated work.
     other = _row("w", source="webui", parent="cli_parent",
                  relationship="child_session", raw_source="webui")
