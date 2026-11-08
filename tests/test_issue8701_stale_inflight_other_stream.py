@@ -14,8 +14,10 @@ and merge helpers from static/sessions.js and the real pending-prompt producer f
 """
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -60,6 +62,16 @@ _SESSIONS_OPTIONAL = (
     "_dropCurrentTurnAssistantMessages",
     "_inflightTurnOwnerStart",
     "_inflightNamesOtherStream",
+    # #7925 defines its prefix-proof helpers ABOVE `_messageComparableText`, so
+    # the helpers slice below cannot reach them. `_ensureMessagesLoaded` calls
+    # all three on every load; without them the run dies on a ReferenceError
+    # *after* the fetch, leaving S.messages half-updated and the INFLIGHT merge
+    # never applied (every assertion in this file then fails on row content).
+    "_markPrefixProvenRows",
+    "_adoptPrefixProof",
+    "_heldRowsArePrefixProven",
+    "_appendAnchorRowFingerprint",
+    "_mergeSessionToolCards",
 )
 
 _STUBS = """
@@ -152,7 +164,33 @@ def _prelude() -> str:
 
 
 def _node(script: str) -> dict:
-    done = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False, cwd=ROOT, timeout=60)
+    # Two host-environment hazards, both fatal to `subprocess.run([NODE, ...])`:
+    #
+    # 1. `-e` carries the whole program on the command line. The prelude inlines
+    #    ~112 KB of helpers straight out of static/sessions.js, and Linux caps a
+    #    *single* argv entry at MAX_ARG_STRLEN (131072 bytes) — execve fails with
+    #    E2BIG long before ARG_MAX is reached. That broke every test here once
+    #    loadSession grew the bounded-tail machinery (#7925). Hand the source
+    #    over a temp file instead; node's positional argument is then a path.
+    #
+    # 2. A launcher may export NODE_CHANNEL_FD (IPC channel to its own parent)
+    #    and/or NODE_OPTIONS. Either one makes a freshly spawned node abort on
+    #    exit with SIGABRT *after* writing correct output — returncode -6 with
+    #    empty stderr, which reads like a script bug but is pure environment
+    #    bleed. Drop both so the child starts as a plain interpreter.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("NODE_CHANNEL_FD", "NODE_OPTIONS")}
+    fd, script_path = tempfile.mkstemp(suffix=".js", prefix="issue8701-", dir=str(ROOT))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        done = subprocess.run([NODE, script_path], capture_output=True, text=True,
+                              check=False, cwd=ROOT, timeout=60, env=env)
+    finally:
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
     assert done.returncode == 0, done.stderr or done.stdout
     return json.loads(done.stdout.strip().splitlines()[-1])
 

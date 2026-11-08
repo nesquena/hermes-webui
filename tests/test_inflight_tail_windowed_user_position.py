@@ -25,8 +25,10 @@ from. The display-only marker is what keeps saved row 0 at absolute 0
 (keep_count 1) when the recovered prompt leads a zero-offset transcript.
 """
 
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,7 +104,26 @@ def _fork_caller() -> str:
 
 def _run(script: str) -> str:
     assert NODE, "node is required for this test"
-    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    # Two host-environment hazards:
+    # 1. `-e` puts the whole program in one argv entry; Linux caps that at
+    #    MAX_ARG_STRLEN (131072 bytes) and execve fails with E2BIG. Write to a
+    #    temp file so node's positional argument is just a path.
+    # 2. A launcher may export NODE_CHANNEL_FD (its IPC channel) and/or
+    #    NODE_OPTIONS; either makes a fresh node abort on exit with SIGABRT
+    #    after writing correct output (returncode -6, empty stderr).
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("NODE_CHANNEL_FD", "NODE_OPTIONS")}
+    fd, script_path = tempfile.mkstemp(suffix=".js", prefix="inflight-tail-", dir=str(ROOT))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        result = subprocess.run([NODE, script_path], capture_output=True, text=True,
+                                check=False, env=env)
+    finally:
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
     assert result.returncode == 0, result.stderr or result.stdout
     return result.stdout
 

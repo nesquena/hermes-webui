@@ -20,13 +20,22 @@ from tests.test_inflight_tail_windowed_user_position import (
 
 
 def _run_file(script: str) -> str:
-    """Execute via a temp file: the composed script exceeds MAX_ARG_STRLEN."""
+    """Execute via a temp file: the composed script exceeds MAX_ARG_STRLEN.
+
+    A launcher may export NODE_CHANNEL_FD (IPC channel to its own parent) and/or
+    NODE_OPTIONS; either makes a freshly spawned node abort on exit with SIGABRT
+    *after* writing correct output (returncode -6, empty stderr). Drop both so the
+    child starts as a plain interpreter.
+    """
     assert NODE, "node is required for this test"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("NODE_CHANNEL_FD", "NODE_OPTIONS")}
     fd, path = tempfile.mkstemp(suffix=".js", dir=os.environ.get("TMPDIR", "/tmp"))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(script)
-        result = subprocess.run([NODE, path], capture_output=True, text=True, check=False)
+        result = subprocess.run([NODE, path], capture_output=True, text=True,
+                                check=False, env=env)
     finally:
         os.unlink(path)
     assert result.returncode == 0, result.stderr or result.stdout
