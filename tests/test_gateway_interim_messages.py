@@ -1,5 +1,6 @@
 """Gateway commentary boundaries, replay, and display-only persistence."""
 
+import io
 import json
 import threading
 import time
@@ -78,6 +79,110 @@ def test_success_writeback_keeps_commentary_outside_model_context(monkeypatch, t
         g.STREAM_PARTIAL_TEXT['stream'] = ''
         assert g._restore_relayed_gateway_state('sid','stream') == 4
         assert g.STREAM_PARTIAL_TEXT['stream'] == 'Final.'
+
+@pytest.mark.parametrize('terminal', ['failed', 'cancelled'])
+@pytest.mark.parametrize('already_streamed', [False, True])
+@pytest.mark.parametrize('trailing', ['', 'Open answer.', 'Checking.'])
+def test_terminal_writeback_retains_sealed_commentary(monkeypatch, tmp_path, terminal, already_streamed, trailing):
+    monkeypatch.setattr(models, 'SESSION_DIR', tmp_path)
+    save = models.Session.save
+    monkeypatch.setattr(models.Session, 'save', lambda self, *a, **k: save(self, *a, skip_index=True, **k))
+    session = models.Session(session_id='sid', workspace=str(ROOT))
+    session.active_stream_id = 'stream'
+    session.pending_user_message = 'question'
+    session.pending_user_source = 'webui'
+    session.pending_started_at = time.time()
+    session.pending_attachments = []
+    # Identical prose in a previous turn must not suppress this turn's row.
+    session.messages = [
+        {'role': 'user', 'content': 'older question', 'timestamp': 1},
+        {'role': 'assistant', 'content': 'Checking.', 'timestamp': 2, '_recovered_display_only': True},
+    ]
+    session.context_messages = []
+    monkeypatch.setitem(g.STREAMS, 'stream', config.create_stream_channel())
+    monkeypatch.setattr(g, 'get_session', lambda *a: session)
+    monkeypatch.setattr('api.gateway_delegation_wakeup.settle_reservation', lambda *a, **k: None)
+    monkeypatch.setattr(g, 'gateway_supports_approval', lambda *a: True)
+    monkeypatch.setattr(g, '_gateway_use_runs_api_enabled', lambda *a: True)
+    monkeypatch.setattr(g, '_gateway_endpoint_for_profile', lambda *a: ('http://unused', ''))
+    monkeypatch.setattr(g, '_gateway_config_for_profile', lambda *a: {'model': {}})
+    monkeypatch.setattr(g, '_gateway_reasoning_effort_for_request', lambda *a, **k: None)
+    from api import streaming
+    monkeypatch.setattr(streaming, '_load_webui_prefill_context', lambda *a: {})
+    monkeypatch.setattr(streaming, '_webui_ephemeral_system_prompt', lambda *a, **k: '')
+
+    frames = []
+    if already_streamed:
+        frames.append(frame('message.delta', len(frames) + 1, delta='Checking.'))
+    frames.append(frame('message.interim', len(frames) + 1, text='Checking.', already_streamed=already_streamed))
+    if trailing:
+        frames.append(frame('message.delta', len(frames) + 1, delta=trailing))
+    frames.append(frame('run.' + terminal, len(frames) + 1, error='terminal failure'))
+    bodies = []
+
+    def urlopen(request, **kwargs):
+        if request.full_url.endswith('/v1/runs'):
+            bodies.append(json.loads(request.data))
+            return io.BytesIO(b'{"run_id":"run"}')
+        if request.full_url.endswith('/events'):
+            return io.BytesIO(b'\n'.join(frames))
+        raise AssertionError('Unexpected Gateway request: ' + request.full_url)
+
+    monkeypatch.setattr(g.urllib.request, 'urlopen', urlopen)
+    # Exercise the actual worker, runs adapter, relay, journal and Session.save.
+    g._run_gateway_chat_streaming('sid', 'question', 'model', str(ROOT), 'stream')
+    expected = ['older question', 'Checking.', 'question', 'Checking.'] + ([trailing] if trailing else [])
+    assert [m['content'] for m in session.messages[:-1]] == expected
+    assert session.messages[3].get('_recovered_display_only') is True
+    assert not session.messages[3].get('_partial')
+    if trailing:
+        assert session.messages[4].get('_partial') is True
+        assert not session.messages[4].get('_recovered_display_only')
+    marker = session.messages[-1]
+    assert marker.get('_error') if terminal == 'failed' else 'cancelled' in marker['content'].lower()
+    assert session.pending_user_message is None
+    rows = run_journal.read_run_events('sid', 'stream')['events']
+    assert len([r for r in rows if r['event'] == 'interim_assistant']) == 1
+    saved = json.loads(session.path.read_text())
+    reloaded = models.Session.load('sid')
+    assert reloaded is not None
+    assert [m['content'] for m in saved['messages']] == expected + [marker['content']]
+    assert [m['content'] for m in reloaded.messages] == expected + [marker['content']]
+    assert saved['messages'] == reloaded.messages == session.messages
+    assert all(not m.get('_recovered_display_only') for m in reloaded.context_messages)
+    expected_checking = int(trailing == 'Checking.')
+    if terminal == 'cancelled':
+        assert [m['content'] for m in reloaded.context_messages].count('Checking.') == expected_checking
+    else:
+        assert all(m['content'] != 'Checking.' for m in reloaded.context_messages)
+    assert reloaded.messages[3].get('_recovered_display_only') is True
+    assert not reloaded.messages[3].get('_partial')
+    if trailing:
+        assert reloaded.messages[4].get('_partial') is True
+        assert not reloaded.messages[4].get('_recovered_display_only')
+
+    # The next real runs-admission body must also exclude sealed commentary.
+    reloaded.active_stream_id = 'next-stream'
+    reloaded.pending_user_message = 'next question'
+    monkeypatch.setitem(g.STREAM_PARTIAL_TEXT, 'next-stream', '')
+    frames[:] = [frame('run.completed', 1, output='Next answer.')]
+    g._run_gateway_runs_api_streaming(
+        'sid', 'next question', 'model', str(ROOT), 'next-stream',
+        'http://unused', '', [], {}, session=reloaded,
+        put_gateway_event=lambda *a: None, cancel_event=threading.Event(),
+    )
+    assert len(bodies) == 2
+    # Error settlement leaves model context to Gateway authority; separately
+    # verify its display-to-context projection retains only the open segment.
+    projected = g._project_transcript_context_rows(reloaded.messages)
+    assert [m['content'] for m in projected].count('Checking.') == expected_checking
+    history = bodies[-1].get('conversation_history', [])
+    assert [m['content'] for m in history].count('Checking.') == (
+        expected_checking if terminal == 'cancelled' else 0
+    )
+    if trailing and terminal == 'cancelled':
+        assert trailing in [m['content'] for m in history]
+
 
 @pytest.mark.parametrize('text', [None, '', '   ', 0, False, [], {}, ['bad']])
 def test_invalid_interim_does_not_reset_answer(text):

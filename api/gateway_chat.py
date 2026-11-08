@@ -2530,6 +2530,19 @@ def _settle_gateway_terminal_error(
             )
         turn_duration = _terminal_turn_duration(session)
         _materialize_pending_user_turn_before_error(session)
+        # Recover sealed commentary before the open suffix and error marker,
+        # while the pending turn still owns the journal output.
+        from api.models import _append_journaled_partial_output
+
+        turn_start = next((
+            i + 1 for i in range(len(session.messages) - 1, -1, -1)
+            if session.messages[i].get("role") == "user"
+        ), len(session.messages))
+        _append_journaled_partial_output(
+            session, stream_id, dedupe_existing=True,
+            dedupe_min_index=turn_start, append_context=False,
+            display_only=True, through_last_interim=True,
+        )
         session.active_stream_id = None
         session.gateway_run = None
         session.pending_user_message = None
@@ -2652,6 +2665,19 @@ def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
             session,
             stream_id,
             partial_ts=partial_msg.get("timestamp") if partial_msg is not None else None,
+        )
+        # Seed/reconcile model context first, then restore display-only sealed
+        # commentary ahead of the open suffix without clearing turn ownership.
+        from api.models import _append_journaled_partial_output
+
+        turn_start = next((
+            i + 1 for i in range(len(session.messages) - 1, -1, -1)
+            if session.messages[i].get("role") == "user"
+        ), len(session.messages))
+        _append_journaled_partial_output(
+            session, stream_id, dedupe_existing=True,
+            dedupe_min_index=turn_start, append_context=False,
+            display_only=True, through_last_interim=True,
         )
         if partial_msg is not None:
             if not isinstance(session.messages, list):
