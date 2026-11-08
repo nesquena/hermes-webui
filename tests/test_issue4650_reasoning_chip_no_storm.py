@@ -51,7 +51,7 @@ const els = {
 };
 
 // Mutable app state the reasoning helpers read from.
-global.S = { session: { model: 'gpt-5', model_provider: 'openai' } };
+global.S = { session: { session_id: 'session-a', model: 'gpt-5', model_provider: 'openai' } };
 global.window = {};
 global.document = { createElement: makeEl, addEventListener(){}, querySelectorAll(){return []}, querySelector(){return null} };
 global.$ = id => els[id] || null;
@@ -125,7 +125,17 @@ _applyReasoningChip('low', { supported_efforts: ['low','high'] });
 for (let i = 0; i < 5; i++) syncReasoningChip();
 result.after_new_model_syncs = CALLS.length;
 
-// 5. OUT-OF-ORDER staleness guard: capture each fetch's success callback and
+// 5. Session switch with the SAME model/provider -> exactly one more fetch.
+// Reasoning effort is session-owned, so model/provider alone is not a complete
+// cache identity.
+global.S.session.session_id = 'session-b';
+syncReasoningChip();
+result.after_same_model_session_switch = CALLS.length;
+_applyReasoningChip('medium', { supported_efforts: ['low','medium','high'] });
+for (let i = 0; i < 5; i++) syncReasoningChip();
+result.after_new_session_syncs = CALLS.length;
+
+// 6. OUT-OF-ORDER staleness guard: capture each fetch's success callback and
 //    fire an OLDER fetch's response AFTER a newer dispatch. The stale response
 //    must be ignored (generation guard), even though both share the same key
 //    after a profile-switch-style cache reset. Swap in a capturing api() mock.
@@ -207,6 +217,17 @@ def test_model_switch_triggers_one_refetch(outcome):
 def test_syncs_after_switch_do_not_refetch(outcome):
     assert outcome["after_new_model_syncs"] == 2, (
         "routine syncs after a model switch must serve the cache again: "
+        f"{outcome['calls']}"
+    )
+
+
+def test_same_model_session_switch_refetches_once(outcome):
+    assert outcome["after_same_model_session_switch"] == 3, (
+        "switching sessions must refresh session-owned reasoning effort even "
+        f"when model/provider are unchanged: {outcome['calls']}"
+    )
+    assert outcome["after_new_session_syncs"] == 3, (
+        "routine syncs after the session refresh must still use the cache: "
         f"{outcome['calls']}"
     )
 
