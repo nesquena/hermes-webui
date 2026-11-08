@@ -29,6 +29,8 @@ class FakeTask:
     priority: int = 0
     body: str | None = None
     claim_lock: str | None = None
+    claim_expires: float | None = None
+    worker_pid: int | None = None
 
 
 @dataclass
@@ -254,7 +256,11 @@ class FakeKanbanDB:
         if force:
             # A dashboard review drop is a human override: the live claim is
             # released as part of the handoff (dashboard plugin parity).
+            # Native clears claim_lock, claim_expires and worker_pid together;
+            # mirror all three so a partial clear would fail the oracles below.
             task.claim_lock = None
+            task.claim_expires = None
+            task.worker_pid = None
         implementer = task.assignee if task.assignee != reviewer else None
         task.status = "review"
         if reviewer is not None:
@@ -1772,7 +1778,7 @@ def test_claimed_running_handoff_to_review_clears_live_claim(monkeypatch):
     fake_kanban = sys.modules["hermes_cli.kanban_db"]
     task = FakeTask(
         "t_claimed_review", "Worker holding the card", "running", "alice",
-        claim_lock="worker-1",
+        claim_lock="worker-1", claim_expires=1793400000.0, worker_pid=12345,
     )
     fake_kanban.tasks.append(task)
 
@@ -1786,6 +1792,12 @@ def test_claimed_running_handoff_to_review_clears_live_claim(monkeypatch):
     assert task.assignee == "bob", "an explicit reviewer must reassign the card"
     assert task.claim_lock is None, (
         "a claimed running handoff to review must clear the live claim"
+    )
+    assert task.claim_expires is None, (
+        "the handoff must clear the claim expiry as well as the lock"
+    )
+    assert task.worker_pid is None, (
+        "the handoff must clear the worker pid as well as the lock"
     )
     event = next(
         e for e in fake_kanban.events
