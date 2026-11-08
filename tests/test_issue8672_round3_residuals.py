@@ -136,12 +136,18 @@ def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages, context_
     return session
 
 
-def _settle_display_and_context(result_rows, prompt):
-    """Run ONE real ``_settle_result_messages()`` call and return its rows."""
+def _settle_display_and_context(monkeypatch, result_rows, prompt):
+    """Run ONE real ``_settle_result_messages()`` call and return its rows.
+
+    The annotation helper is patched with ``monkeypatch`` so the stub cannot
+    leak into later tests (maintainer request, 2026-11-06 review).
+    """
     from api import streaming
     from api.models import Session
 
-    streaming._annotate_media_snapshots_for_settled_messages = lambda _m: None
+    monkeypatch.setattr(
+        streaming, "_annotate_media_snapshots_for_settled_messages", lambda _m: None
+    )
     session = Session(session_id="webui_8672_r3_settle", messages=[], context_messages=[])
     streaming._settle_result_messages(
         session, [], [], copy.deepcopy(result_rows), prompt, "webui", None
@@ -246,6 +252,7 @@ def test_settled_stable_id_does_not_mask_a_durable_row_id_conflict(
     import api.models as models
 
     display_rows, context_rows = _settle_display_and_context(
+        monkeypatch,
         [
             {"role": "assistant", "content": "earlier answer", "timestamp": 500.0},
             {

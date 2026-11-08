@@ -84,12 +84,18 @@ def _install(monkeypatch, tmp_path, sid, sidecar_messages, context_messages=None
     return session
 
 
-def _settle(result_rows, prompt):
-    """One real settle call -> (display rows, context rows) with minted ids."""
+def _settle(monkeypatch, result_rows, prompt):
+    """One real settle call -> (display rows, context rows) with minted ids.
+
+    The annotation helper is patched with ``monkeypatch`` so the stub cannot
+    leak into later tests (maintainer request, 2026-11-06 review).
+    """
     from api import streaming
     from api.models import Session
 
-    streaming._annotate_media_snapshots_for_settled_messages = lambda _m: None
+    monkeypatch.setattr(
+        streaming, "_annotate_media_snapshots_for_settled_messages", lambda _m: None
+    )
     session = Session(session_id="webui_8672_matrix", messages=[], context_messages=[])
     streaming._settle_result_messages(
         session, [], [], copy.deepcopy(result_rows), prompt, "webui", None
@@ -97,12 +103,18 @@ def _settle(result_rows, prompt):
     return list(session.messages), list(session.context_messages)
 
 
-def _settled_transcript(turns=101, sid="webui_8672_matrix"):
-    """Build a settled transcript through REAL settle calls."""
+def _settled_transcript(monkeypatch, turns=101, sid="webui_8672_matrix"):
+    """Build a settled transcript through REAL settle calls.
+
+    The annotation helper is patched with ``monkeypatch`` so the stub cannot
+    leak into later tests (maintainer request, 2026-11-06 review).
+    """
     from api import streaming
     from api.models import Session
 
-    streaming._annotate_media_snapshots_for_settled_messages = lambda _m: None
+    monkeypatch.setattr(
+        streaming, "_annotate_media_snapshots_for_settled_messages", lambda _m: None
+    )
     session = Session(session_id=sid, messages=[], context_messages=[])
     previous_context = []
     previous_display = []
@@ -140,6 +152,7 @@ def test_a01_display_reconciliation_keeps_one_sentinel_and_the_final_answer(
     import api.models as models
 
     display_rows, context_rows = _settle(
+        monkeypatch,
         [
             {"role": "assistant", "content": "earlier answer", "timestamp": 500.0},
             {
@@ -180,6 +193,7 @@ def test_a02_context_reconciliation_keeps_one_sentinel_and_the_final_answer(
     import api.models as models
 
     display_rows, context_rows = _settle(
+        monkeypatch,
         [
             {"role": "assistant", "content": "earlier answer", "timestamp": 500.0},
             {
@@ -253,7 +267,7 @@ def test_a05_bounded_tail_snapshot_reads_the_tail_window(monkeypatch, tmp_path):
     import api.models as models
     from api import session_ops
 
-    session = _settled_transcript(sid="webui_matrix_a05")
+    session = _settled_transcript(monkeypatch, sid="webui_matrix_a05")
     rows = list(session.messages)
     assert len(rows) == 202
     _make_state_db(
@@ -281,7 +295,7 @@ def test_a06_regeneration_does_not_call_the_full_reader(monkeypatch, tmp_path):
     import api.models as models
     from api import session_ops
 
-    session = _settled_transcript(sid="webui_matrix_a06")
+    session = _settled_transcript(monkeypatch, sid="webui_matrix_a06")
     rows = list(session.messages)
     _make_state_db(
         tmp_path / "state.db",
