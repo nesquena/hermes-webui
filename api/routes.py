@@ -9184,6 +9184,191 @@ class _ContextLengthLookupInputs:
         self.api_key = api_key
 
 
+# #8822: hosts the Agent's context-length lookup contacts on its own, by the
+# provider id it is given. Measured on every supported Agent with a no-network
+# request recorder (union over Agent versions: an Agent that skips a host only
+# makes this table conservative). "no_url" hosts are contacted when the lookup
+# passes no base URL; "with_url" hosts even when it passes one, unless the named
+# detector says the installed Agent follows the URL, and only when the Agent's
+# lookup reaches its provider-specific step for that URL. Any id not listed
+# sends its key only to the base URL's own host.
+_CONTEXT_LOOKUP_FIXED_HOSTS = {
+    "anthropic": {"no_url": ("api.anthropic.com",)},
+    "novita": {"no_url": ("api.novita.ai",)},
+    # Older Agents' Copilot live-models step ignores the lookup URL; newer ones dropped it.
+    "copilot": {
+        "no_url": ("api.githubcopilot.com",),
+        "with_url": ("api.githubcopilot.com",),
+        "with_url_unless": "_agent_copilot_lookup_follows_url",
+    },
+    "copilot-acp": {
+        "no_url": ("api.githubcopilot.com",),
+        "with_url": ("api.githubcopilot.com",),
+        "with_url_unless": "_agent_copilot_lookup_follows_url",
+    },
+    # Older Agents' Codex catalog ignores the lookup URL; newer ones follow it.
+    "openai-codex": {
+        "no_url": ("chatgpt.com",),
+        "with_url": ("chatgpt.com",),
+        "with_url_unless": "_agent_codex_catalog_follows_url",
+    },
+}
+
+
+def _context_lookup_origin(url: object) -> str:
+    """Return ``host:port`` for a base URL, or "" when it names no host."""
+    from urllib.parse import urlsplit
+
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text if "://" in text else f"https://{text}")
+        host = (parts.hostname or "").lower()
+        port = parts.port or (80 if parts.scheme == "http" else 443)
+    except ValueError:
+        return ""
+    return f"{host}:{port}" if host else ""
+
+
+def _context_lookup_fixed_origins(provider: str, *, with_url: bool) -> frozenset:
+    entry = _CONTEXT_LOOKUP_FIXED_HOSTS.get(str(provider or "").strip().lower()) or {}
+    hosts = entry.get("with_url" if with_url else "no_url", ())
+    unless = entry.get("with_url_unless")
+    if with_url and hosts and unless and globals()[unless]():
+        # The installed Agent's probe for this provider follows the lookup URL,
+        # so it contacts no fixed host when a URL is set.
+        hosts = ()
+    return frozenset(f"{host}:443" for host in hosts)
+
+
+def _agent_codex_catalog_follows_url() -> bool:
+    """True when the installed Agent's Codex metadata probe follows the base URL.
+
+    Without an importable Agent, or with one that lacks the URL-aware catalog,
+    answer False so the table stays conservative (the key is dropped).
+    """
+    try:
+        from agent import model_metadata as _mm
+    except Exception:
+        return False
+    return callable(getattr(_mm, "_codex_catalog_urls", None))
+
+
+def _agent_copilot_lookup_follows_url() -> bool:
+    """True when the installed Agent's lookup has no Copilot live-models step.
+
+    Older Agents (v0.22.2-v0.22.5, v2026.9.24) have ``hermes_cli.models.get_copilot_model_context``,
+    which their lookup calls with the key alone for a Copilot id (or an id inferred as Copilot)
+    once it reaches the provider-specific step, so it contacts api.githubcopilot.com whatever the
+    lookup URL. Newer Agents dropped that step and follow the URL. Without an importable
+    ``hermes_cli.models``, answer False so the Copilot row applies (the key is dropped).
+
+    The function's absence is read as "follows the URL". An Agent that renamed it but kept the
+    step would be misread; the installed-Agent coverage tests (``test_copilot_live_models_with_a_url
+    _is_in_the_table``, ``test_the_copilot_detector_matches_the_installed_agent``) fail on such an
+    Agent, which is why they run on every supported Agent before a release (#8822 note §5).
+    """
+    try:
+        from hermes_cli import models as _hm
+    except Exception:
+        return False
+    return not callable(getattr(_hm, "get_copilot_model_context", None))
+
+
+# Ids the Agent re-infers from the URL before its provider-specific step.
+_CONTEXT_LOOKUP_URL_INFERRED_IDS = ("", "custom", "openrouter")
+
+
+def _agent_inferred_context_provider(base_url: str) -> str:
+    """The provider id the installed Agent infers from ``base_url``, or "".
+
+    This is the Agent's own inference, so when it's missing the Agent infers nothing either.
+    A renamed one is caught by the coverage test, which probes the inferred ids over every
+    host the Agent knows.
+    """
+    try:
+        from agent import model_metadata as _mm
+    except Exception:
+        return ""
+    infer = getattr(_mm, "_infer_provider_from_url", None)
+    if not callable(infer):
+        return ""
+    try:
+        return str(infer(base_url) or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _agent_reaches_provider_step_with_url(provider: str, base_url: str) -> bool:
+    """Whether the installed Agent's lookup reaches its provider-specific step with this URL.
+
+    Read from the Agent's own early-return check: a truly custom endpoint (``_is_custom_endpoint``
+    and not ``_is_known_provider_base_url``) returns before that step, except for
+    ``openai-codex``. Then no fixed host is contacted, only the URL's own. Fails closed: with no
+    importable Agent, or a predicate missing or raising, answer True so the fixed-host rows apply
+    (the key is dropped rather than risked).
+    """
+    if str(provider or "").strip().lower() == "openai-codex":
+        return True
+    try:
+        from agent import model_metadata as _mm
+    except Exception:
+        return True
+    custom = getattr(_mm, "_is_custom_endpoint", None)
+    known = getattr(_mm, "_is_known_provider_base_url", None)
+    if not (callable(custom) and callable(known)):
+        return True
+    try:
+        return not (custom(base_url) and not known(base_url))
+    except Exception:
+        return True
+
+
+def _context_lookup_contacted_origins(provider: str, base_url: str) -> frozenset:
+    """Every origin the Agent may send the lookup's key to for (provider, base_url)."""
+    if str(base_url or "").strip():
+        # A URL that names no host can't be owned by any key (the empty string
+        # is never in an owned set), so its key is dropped.
+        origins = frozenset({_context_lookup_origin(base_url)})
+        if not _agent_reaches_provider_step_with_url(provider, base_url):
+            return origins
+        origins |= _context_lookup_fixed_origins(provider, with_url=True)
+        if str(provider or "").strip().lower() in _CONTEXT_LOOKUP_URL_INFERRED_IDS:
+            inferred = _agent_inferred_context_provider(base_url)
+            if inferred:
+                origins |= _context_lookup_fixed_origins(inferred, with_url=True)
+        return origins
+    return _context_lookup_fixed_origins(provider, with_url=False)
+
+
+def _context_lookup_record_urls(record: object) -> tuple:
+    """Every URL a config record declares, in each spelling WebUI and the Agent
+    read (``api_config._RAW_PROVIDER_URL_FIELDS``: ``api``, ``url``, ``base_url``)."""
+    if not isinstance(record, dict):
+        return ()
+    return tuple(
+        str(record.get(field)).strip()
+        for field in api_config._RAW_PROVIDER_URL_FIELDS
+        if isinstance(record.get(field), str) and str(record.get(field)).strip()
+    )
+
+
+def _context_lookup_owned_origins(*urls: object, own_provider: str = "") -> frozenset:
+    """Origins a key may go to: its own source's URLs, plus the fixed hosts of the
+    provider it belongs to (``own_provider``: a built-in record, the model block
+    configured for that provider, or a caller that passed no URL)."""
+    owned = set()
+    for url in urls:
+        origin = _context_lookup_origin(url)
+        if origin:
+            owned.add(origin)
+    if own_provider:
+        owned |= _context_lookup_fixed_origins(own_provider, with_url=False)
+        owned |= _context_lookup_fixed_origins(own_provider, with_url=True)
+    return frozenset(owned)
+
+
 def _positive_context_length(value) -> int | None:
     try:
         parsed = int(value)
@@ -9314,6 +9499,19 @@ def _context_length_config_api_key_for_provider(
     cfg: dict | None,
 ) -> str:
     """Return a config/env API key usable for context-window metadata lookup."""
+    return _context_length_config_api_key_and_owner(provider, cfg)[0]
+
+
+def _context_length_config_api_key_and_owner(
+    provider: str | None,
+    cfg: dict | None,
+) -> tuple[str, frozenset]:
+    """Return (config/env API key for the metadata lookup, origins that key owns).
+
+    The key's own origins are its source's base URL, plus the provider's fixed
+    metadata hosts when the source is that provider's own: a built-in
+    ``providers.<id>`` record, or the model block configured for that provider (#8822).
+    """
     cfg = cfg if isinstance(cfg, dict) else {}
     provider = _canonical_context_provider(provider)
 
@@ -9345,7 +9543,11 @@ def _context_length_config_api_key_for_provider(
                 continue
             api_key = _resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env"))
             if api_key:
-                return api_key
+                builtin = not str(provider_key or "").strip().lower().startswith("custom:")
+                return api_key, _context_lookup_owned_origins(
+                    *_context_lookup_record_urls(provider_cfg),
+                    own_provider=provider if builtin else "",
+                )
 
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
@@ -9353,8 +9555,29 @@ def _context_length_config_api_key_for_provider(
         if not provider or _providers_match_for_context(model_provider, provider):
             api_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"))
             if api_key:
-                return api_key
-    return ""
+                return api_key, _context_lookup_owned_origins(
+                    model_cfg.get("base_url"),
+                    own_provider=provider if (provider and model_provider) else "",
+                )
+    return "", frozenset()
+
+
+def _context_lookup_agent_fallback(agent, resolved_api_key=None, resolved_base_url=None, resolved_provider=None) -> dict:
+    """The streaming sites' fallback credential as ONE source: (key, URL, provider) all from the Agent, or, when
+    the Agent has no key, all from the resolved runtime pair. Never the Agent's key with the session's URL: after a
+    fallback the Agent's key, URL and provider move together, away from the session's."""
+    agent_key = getattr(agent, "api_key", "") or ""
+    if agent_key:
+        return dict(
+            fallback_api_key=agent_key,
+            fallback_base_url=str(getattr(agent, "base_url", "") or ""),
+            fallback_provider=str(getattr(agent, "provider", "") or ""),
+        )
+    return dict(
+        fallback_api_key=resolved_api_key or "",
+        fallback_base_url=str(resolved_base_url or ""),
+        fallback_provider=str(resolved_provider or ""),
+    )
 
 
 def _context_length_lookup_inputs_for_model(
@@ -9364,6 +9587,9 @@ def _context_length_lookup_inputs_for_model(
     base_url: str | None = None,
     api_key: str | None = None,
     cfg: dict | None = None,
+    fallback_api_key: object = None,
+    fallback_base_url: str | None = None,
+    fallback_provider: str | None = None,
 ) -> _ContextLengthLookupInputs:
     """Return the effective metadata resolver inputs for a WebUI model.
 
@@ -9388,6 +9614,9 @@ def _context_length_lookup_inputs_for_model(
     bare_model, explicit_provider = _split_provider_qualified_model(model_for_lookup)
     effective_provider = _canonical_context_provider(provider or explicit_provider)
     effective_base_url = str(base_url or "").strip()
+    # #8822: a caller's key owns only the URL the caller passed with it (plus its
+    # provider's fixed metadata hosts). With no caller URL it owns no URL.
+    caller_provider = effective_provider
 
     model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
     if isinstance(model_cfg, dict):
@@ -9449,7 +9678,25 @@ def _context_length_lookup_inputs_for_model(
             break
 
     custom_context_length = None
-    effective_api_key = str(api_key or "").strip()
+    # #8822: a key that isn't a string (a ``key_cmd`` token source the Agent mints
+    # from on use) passes through untouched, as v0.52.544 handed it to the Agent;
+    # stringifying it would send the object's repr as the bearer.
+    effective_api_key = (
+        api_key if (api_key and not isinstance(api_key, str)) else str(api_key or "").strip()
+    )
+    # A caller's key owns the URL it came with. It owns its provider's fixed hosts
+    # only when it came with no URL: a pair with a URL can carry another source's
+    # key under the provider's label (a model alias's own endpoint, or the Agent's
+    # pair after a fallback switched its endpoint and key), so the label alone
+    # doesn't make the key that provider's credential.
+    effective_api_key_owned = (
+        _context_lookup_owned_origins(
+            base_url,
+            own_provider="" if str(base_url or "").strip() else caller_provider,
+        )
+        if effective_api_key
+        else frozenset()
+    )
     if custom_providers:
         target_base = effective_base_url.rstrip("/")
         model_candidates = set(_model_lookup_candidates(bare_model or model_for_lookup))
@@ -9481,6 +9728,7 @@ def _context_length_lookup_inputs_for_model(
                 effective_base_url = entry_base
             if not effective_api_key:
                 effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider or entry_slug)
+                effective_api_key_owned = _context_lookup_owned_origins(*_context_lookup_record_urls(entry))
             custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
             break
 
@@ -9499,7 +9747,39 @@ def _context_length_lookup_inputs_for_model(
             global_context_length = _positive_context_length(raw_cfg_ctx)
 
     if not effective_api_key:
-        effective_api_key = _context_length_config_api_key_for_provider(effective_provider, cfg)
+        effective_api_key, effective_api_key_owned = _context_length_config_api_key_and_owner(effective_provider, cfg)
+
+    # #8822: a key goes only where its own source sends it. The Agent contacts the
+    # base URL's host plus the provider's fixed metadata hosts; if any of those is
+    # not owned by the key's source, the lookup sends no key (it still runs, and
+    # falls back to catalog or default limits). This never changes the URL.
+    if effective_api_key and not (
+        _context_lookup_contacted_origins(effective_provider, effective_base_url) <= effective_api_key_owned
+    ):
+        effective_api_key = ""
+
+    # A fallback key (the Agent's own key at the streaming sites) is used only when
+    # the config selection left none, and only under the caller-key rule: it owns
+    # the URL it came with (the Agent's own, never the session's), or, with no URL,
+    # the fixed hosts of ITS provider (the Agent's, which a fallback may have
+    # switched away from the session's label). The lookup's URL is never changed
+    # for it. This keeps v0.52.544's order (config key first, then the Agent's)
+    # without putting the Agent's key on a host it doesn't own.
+    fallback_key = (
+        fallback_api_key
+        if (fallback_api_key and not isinstance(fallback_api_key, str))
+        else str(fallback_api_key or "").strip()
+    )
+    if not effective_api_key and fallback_key:
+        fallback_owned = _context_lookup_owned_origins(
+            fallback_base_url,
+            own_provider=(
+                "" if str(fallback_base_url or "").strip()
+                else _canonical_context_provider(fallback_provider)
+            ),
+        )
+        if _context_lookup_contacted_origins(effective_provider, effective_base_url) <= fallback_owned:
+            effective_api_key = fallback_key
 
     return _ContextLengthLookupInputs(
         config_context_length=provider_context_length or custom_context_length or global_context_length,
@@ -10610,9 +10890,13 @@ def _session_context_length_lookup_state(
             from api.config import resolve_custom_provider_connection
 
             custom_key, custom_base = resolve_custom_provider_connection(provider_for_lookup)
-            api_key_for_lookup = str(custom_key or "").strip()
+            custom_base = str(custom_base or "").strip()
             if not base_url_for_lookup:
-                base_url_for_lookup = str(custom_base or "").strip()
+                base_url_for_lookup = custom_base
+            # #8822: the record's key owns only the record's own URL. When the model
+            # block overrides the URL, the lookup selects the key for that URL itself.
+            if _context_lookup_origin(base_url_for_lookup) == _context_lookup_origin(custom_base):
+                api_key_for_lookup = str(custom_key or "").strip()
         except Exception:
             logger.debug("custom provider context-length connection resolution failed", exc_info=True)
     return model_for_lookup, provider_for_lookup, base_url_for_lookup, api_key_for_lookup

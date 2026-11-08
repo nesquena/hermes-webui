@@ -468,13 +468,17 @@ def test_an_underscore_spelling_of_the_session_id_still_owns_the_model_url(
 
 
 def test_streaming_context_lookups_pass_no_caller_key():
-    """The two direct streaming calls to the lookup pass the Agent's URL but never its key.
+    """The two direct streaming calls to the lookup pass the Agent's URL but never its key as the caller's.
 
     The runtime connection bundle can already pair one record's URL with another
     record's key (a shared-name credential pool). Passed in as the caller's key, it
     would override the lookup's own, correct choice; .644 kept 8,192 there, and
     passing the key fell back to 256,000 (#8816 round 7). Without a caller key the
     lookup takes the key of whichever config source owns the URL.
+
+    Since #8822 the Agent's key reaches these lookups only as ``fallback_api_key``,
+    which the lookup uses when no config source owns the URL, and only under the
+    same ownership rule (``test_issue8822_context_lookup_key_host``).
 
     Three more streaming sites reach the lookup under an import alias and pass the
     runtime key as ``api_key=``, as v0.52.544 does; that pairing is #8822's, and this
