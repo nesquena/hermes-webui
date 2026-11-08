@@ -18557,7 +18557,12 @@ def _handle_session_get(handler, parsed) -> bool:
             # would both duplicate the work and risk a different result.
             _messages_projected=load_messages,
         )
-        redact = public_session_projection(redact)
+        # #7925 by-construction: `messages` already holds the delivered
+        # projection, so the public form must not project it a second time —
+        # that second pass drops `_active_turn_user` (derived from the
+        # session's active-turn token, never stored on the row) and the
+        # response would then disagree with the `prefix_fp` minted over it.
+        redact = public_session_projection(redact, _messages_projected=load_messages)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
         resp = j(handler, {"session": redact})
