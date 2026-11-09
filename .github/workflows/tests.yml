@@ -202,7 +202,7 @@ jobs:
       # failure picture across the matrix in a single run.
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12', '3.13']
+        python-version: ['3.11', '3.12', '3.13', '3.14']
         # Split the suite across 5 parallel shards per Python version. pytest-shard
         # partitions tests deterministically by test-id hash; the suite was made
         # shard-safe (no cross-test state leakage) so every shard passes

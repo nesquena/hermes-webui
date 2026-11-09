@@ -4,6 +4,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -35,7 +36,7 @@ def test_local_test_runner_uses_supported_venv_before_pytest_collection():
     conftest = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
     resolve_body = runner.split("resolve_venv_python() {", 1)[1].split("\n}\n\nVENV_PY", 1)[0]
 
-    assert "python3.13 python3.12 python3.11 python3" in runner
+    assert "python3.14 python3.13 python3.12 python3.11 python3" in runner
     assert "requirements-dev.txt" in runner
     assert 'HERMES_WEBUI_TEST_PYTHON' in runner
     assert "resolve_venv_python()" in runner
@@ -46,7 +47,7 @@ def test_local_test_runner_uses_supported_venv_before_pytest_collection():
     # Destructive-fs guard: never create/clear a virtualenv through a symlinked .venv
     # (`python -m venv --clear` would empty the symlink's target).
     assert '-L "$VENV_DIR"' in runner
-    assert "Hermes WebUI tests require Python 3.11, 3.12, or 3.13" in conftest
+    assert "Hermes WebUI tests require Python 3.11, 3.12, 3.13, or 3.14" in conftest
     assert "Run ./scripts/test.sh" in conftest
 
 
@@ -209,3 +210,48 @@ def test_live_model_success_log_is_debug_not_default_console_log():
 
     assert "console.debug('[hermes] Live models loaded" in ui
     assert "console.log('[hermes] Live models loaded" not in ui
+
+
+def _run_local_runner_with_python_version(tmp_path, version):
+    """Run scripts/test.sh with a base interpreter that reports *version*.
+
+    The wrapper runs the real interpreter's version checks with a substituted
+    sys.version_info, so test.sh's own range check decides; venv creation is
+    refused, so an accepted version stops at the venv step instead of running.
+    """
+    repo = tmp_path / "repo"
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts" / "test.sh", scripts_dir / "test.sh")
+    _make_executable(scripts_dir / "test.sh")
+    (repo / "requirements-dev.txt").write_text("", encoding="utf-8")
+    fake = repo / "fake-python"
+    fake.write_text(textwrap.dedent(f"""\
+        #!/usr/bin/env bash
+        if [[ "${{1:-}}" == "-" ]]; then
+          exec "{sys.executable}" -c 'import sys; sys.version_info = {version!r} + ("final", 0); exec(sys.stdin.read())'
+        fi
+        exit 99
+        """), encoding="utf-8")
+    _make_executable(fake)
+    env = os.environ.copy()
+    env["HERMES_WEBUI_TEST_PYTHON"] = "./fake-python"
+    return subprocess.run(
+        ["bash", "scripts/test.sh", "tests/example_test.py"],
+        cwd=repo, env=env, text=True, capture_output=True, timeout=20, check=False,
+    )
+
+
+def test_local_test_runner_accepts_python_3_14(tmp_path):
+    result = _run_local_runner_with_python_version(tmp_path, (3, 14, 0))
+
+    assert "Unsupported Python" not in result.stderr, result.stderr
+    assert "Could not create a working .venv with ./fake-python (3.14.0)" in result.stderr, result.stderr
+
+
+def test_local_test_runner_rejects_python_3_15(tmp_path):
+    result = _run_local_runner_with_python_version(tmp_path, (3, 15, 0))
+
+    assert result.returncode == 2, result.stderr
+    assert "Unsupported Python for Hermes WebUI tests: ./fake-python (3.15.0)" in result.stderr
+    assert "Use Python 3.11, 3.12, 3.13, or 3.14." in result.stderr
