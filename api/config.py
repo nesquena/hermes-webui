@@ -5190,6 +5190,7 @@ def resolve_custom_provider_bundle(
     provider_id: str,
     *,
     connection_resolver=None,
+    lookup_only: bool = False,
 ) -> dict | None:
     """Return the COMPLETE connection bundle a named ``custom:*`` record owns.
 
@@ -5238,6 +5239,14 @@ def resolve_custom_provider_bundle(
     the caller's namespace still takes effect. An injected resolver can only
     report a URL/key pair — there is no record behind it — so the bundle it
     yields owns no side fields and the caller keeps the runtime's.
+
+    ``lookup_only`` is for a read path that only asks which endpoint and key the
+    chat would use (GET /api/session's context-length lookup, #8928). Record
+    selection, endpoint ownership and the keyless declaration are unchanged, but
+    the credential comes only from what the record declares in config (literal /
+    ``${ENV}`` / ``key_env`` / ``CUSTOM_<SLUG>_API_KEY``). The credential pool
+    (whose selection can rotate or refresh entries), the host-gated env key and the
+    ``key_cmd`` token provider (which runs a command when used) are skipped.
     """
     pid = str(provider_id or "").strip().lower()
     if not pid.startswith("custom:"):
@@ -5298,7 +5307,7 @@ def resolve_custom_provider_bundle(
     # Pool first, exactly like the runtime's named-custom path: a pooled
     # endpoint's credential AND its pool object come from the same lookup.
     api_key = None
-    pool_runtime = _custom_record_pool_runtime(base_url, record)
+    pool_runtime = None if lookup_only else _custom_record_pool_runtime(base_url, record)
     if pool_runtime:
         api_key = pool_runtime.get("api_key") or None
         if pool_runtime.get("credential_pool") is not None:
@@ -5306,13 +5315,13 @@ def resolve_custom_provider_bundle(
 
     if not api_key:
         api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
-    if not api_key:
+    if not api_key and not lookup_only:
         api_key = _host_gated_env_key(base_url)
 
     # ``key_cmd`` beats a static api_key / key_env (short-lived bearers go stale
     # mid-session), but never displaces a pooled credential, which the pool
     # itself already rotates.
-    if not pool_runtime:
+    if not pool_runtime and not lookup_only:
         token_provider = _custom_record_key_cmd_provider(base_url, record, pid)
         if token_provider is not None:
             api_key = token_provider
@@ -5436,6 +5445,7 @@ def merge_custom_provider_runtime_bundle(
     *,
     lookup_provider: str | None = None,
     connection_resolver=None,
+    lookup_only: bool = False,
 ) -> dict:
     """Return the COMPLETE constructor-routing bundle for one send attempt.
 
@@ -5506,6 +5516,10 @@ def merge_custom_provider_runtime_bundle(
     never be routed through the ambient provider's connection. This holds even
     when the ambient runtime LABELS itself with that same slug — a provider
     string is self-assigned, not proof that the connection belongs to the slug.
+
+    ``lookup_only`` (see :func:`resolve_custom_provider_bundle`) answers the same
+    question for a read path that builds no agent: config-declared credentials
+    only, and a refused route is logged at debug rather than as a warning.
     """
     return _custom_provider_runtime_bundle_with_provenance(
         resolved_provider,
@@ -5514,6 +5528,7 @@ def merge_custom_provider_runtime_bundle(
         runtime_provider,
         lookup_provider=lookup_provider,
         connection_resolver=connection_resolver,
+        lookup_only=lookup_only,
     )[0]
 
 
@@ -5525,6 +5540,7 @@ def _custom_provider_runtime_bundle_with_provenance(
     *,
     lookup_provider: str | None = None,
     connection_resolver=None,
+    lookup_only: bool = False,
 ) -> tuple[dict, dict | None]:
     """:func:`merge_custom_provider_runtime_bundle` plus the record it selected.
 
@@ -5536,6 +5552,8 @@ def _custom_provider_runtime_bundle_with_provenance(
     ``key_cmd`` token provider or select a different pool entry.
     """
     _rt = runtime_provider if isinstance(runtime_provider, dict) else {}
+    # A lookup builds no agent, so a refused route is not news worth a warning.
+    _route_log = logger.debug if lookup_only else logger.warning
     bundle = {
         "provider": resolved_provider,
         "base_url": resolved_base_url,
@@ -5559,7 +5577,9 @@ def _custom_provider_runtime_bundle_with_provenance(
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
         return bundle, None
 
-    custom = resolve_custom_provider_bundle(lookup, connection_resolver=connection_resolver)
+    custom = resolve_custom_provider_bundle(
+        lookup, connection_resolver=connection_resolver, lookup_only=lookup_only
+    )
     if custom is None:
         return bundle, None
 
@@ -5585,7 +5605,7 @@ def _custom_provider_runtime_bundle_with_provenance(
         # unresolvable route as a resolved one; and no KEYLESS_CUSTOM_API_KEY —
         # ``keyless`` is False on an unowned bundle precisely so the placeholder
         # cannot claim that an endpoint we never found is unauthenticated.
-        logger.warning(
+        _route_log(
             "custom provider %s matches no custom_providers[] row, keyed "
             "providers[] record or model: authority, and the resolved connection "
             "belongs to %s; refusing to route it through that provider's "
@@ -5644,7 +5664,7 @@ def _custom_provider_runtime_bundle_with_provenance(
         bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
             CUSTOM_ROUTE_NO_ENDPOINT, custom["provider_id"]
         )
-        logger.warning(
+        _route_log(
             "custom provider %s resolved no endpoint of its own; refusing to pair "
             "its credential with the connection resolved for %s",
             custom["provider_id"],
@@ -5770,7 +5790,7 @@ def _custom_provider_runtime_bundle_with_provenance(
                 # built). Substituting the placeholder would turn that into a
                 # silent 401 against an endpoint that does require auth; leave the
                 # credential unset so the failure names its real cause.
-                logger.warning(
+                _route_log(
                     "custom provider %s declares a credential source that produced "
                     "no key; sending without one rather than the keyless placeholder",
                     custom["provider_id"],
@@ -5787,7 +5807,7 @@ def _custom_provider_runtime_bundle_with_provenance(
             CUSTOM_ROUTE_NO_CREDENTIAL if bundle["base_url"] else CUSTOM_ROUTE_NO_ENDPOINT,
             custom["provider_id"],
         )
-        logger.warning(
+        _route_log(
             "custom provider %s resolved no routable connection (%s); refusing to "
             "build an agent that would re-enter provider routing",
             custom["provider_id"],
