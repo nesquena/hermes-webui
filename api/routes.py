@@ -35288,14 +35288,20 @@ def _run_manual_compression_job(sid, body):
             # get_config_snapshot() and the model/provider resolvers serve, so
             # the job neither reads nor refills the process-wide config cache
             # that other profiles' requests share. Root and profile-less
-            # sessions keep that shared cache, as before.
+            # sessions keep that shared cache, and keep master's env scope
+            # exactly: profile_scope_for_detached_worker binds no env for a
+            # root profile, but a renamed root alias still needs the root .env
+            # and secret scope that profile_env_for_background_worker applies.
             profile = str(getattr(session, "profile", "") or "").strip()
+            named_profile = bool(profile) and not _is_root_profile(profile)
             with profiles_api.profile_scope_for_detached_worker(
                 profile, "manual compression", logger_override=logger
             ), (
                 api_config.thread_private_config()
-                if profile and not _is_root_profile(profile)
-                else nullcontext()
+                if named_profile
+                else profiles_api.profile_env_for_background_worker(
+                    session, "manual compression", logger_override=logger
+                )
             ):
                 _handle_session_compress(memory_handler, body)
         else:
