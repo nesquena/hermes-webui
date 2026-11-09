@@ -65,7 +65,8 @@ def test_a_disabled_record_does_not_fall_through_to_the_model_block_key():
 
 @pytest.mark.parametrize("disabled_first", [True, False])
 def test_a_disabled_record_does_not_fall_through_to_another_record_for_the_provider(disabled_first):
-    # Two spellings of one provider's record; the Agent refuses the provider whichever comes first in the file.
+    # Two spellings of one provider's record. The disabled one is the exact key the Agent checks, so it refuses the
+    # provider whichever comes first in the file.
     off = ("custom:my-proxy", {"base_url": B, "enabled": False})
     on = ("Custom:My-Proxy", {"base_url": B, "api_key": "K2"})
     records = dict([off, on] if disabled_first else [on, off])
@@ -84,6 +85,14 @@ def test_a_disabled_alias_beside_the_enabled_record_keeps_the_records_key(canoni
     assert (got.base_url, got.api_key) == (B, "KR")
 
 
+def test_a_disabled_record_named_for_the_identity_under_another_key_switches_it_off():
+    # WebUI's route finds the record by its name and has no authority left; the chat refuses. Exp-v0.52.659 sent the
+    # model block's KM to A here.
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A, "api_key": "KM"},
+                   "providers": {"one": {"name": "my-proxy", "base_url": B, "api_key": "K1", "enabled": False}}})
+    assert (got.base_url, got.api_key) == (A, "")
+
+
 def test_a_disabled_alias_alone_switches_the_provider_off():
     # No enabled record names the identity, so WebUI's route has no authority and the Agent finds no source.
     got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A, "api_key": "KM"},
@@ -100,21 +109,34 @@ def test_a_disabled_builtin_alias_beside_the_enabled_record_keeps_the_records_ke
     assert got.api_key == "KB"
 
 
+@pytest.mark.parametrize("flag", [False, "off", "no"])
 @pytest.mark.parametrize("canonical_first", [True, False])
-def test_a_disabled_builtin_record_refuses_even_beside_an_enabled_alias(canonical_first):
-    off = ("openai", {"api_key": "KB", "enabled": False})
+def test_a_disabled_builtin_record_refuses_even_beside_an_enabled_alias(canonical_first, flag):
+    off = ("openai", {"api_key": "KB", "enabled": flag})
     on = ("OpenAI", {"api_key": "K2"})
     got = _lookup({"model": {"provider": "openai"}, "providers": dict([off, on] if canonical_first else [on, off])},
                   provider="openai")
     assert got.api_key == ""
 
 
-def test_a_disabled_builtin_alias_alone_is_skipped_like_a_missing_record():
-    # The Agent's exact key misses, so the provider isn't switched off; the alias is invisible, and the selection
-    # reads on as with no record: the model block configured for openai.
+def test_only_disabled_spellings_of_a_builtin_give_no_config_key():
+    # The Agent's exact key misses, so it doesn't refuse; but the switched-off record isn't its source and the chat
+    # doesn't send the model block's key here (openai chats with its own environment key or the placeholder). No
+    # config key lets the streaming sites' Agent fallback supply the chat's own.
     got = _lookup({"model": {"provider": "openai", "api_key": "KM"},
                    "providers": {"OpenAI": {"api_key": "K2", "enabled": False}}}, provider="openai")
-    assert got.api_key == "KM"
+    assert got.api_key == ""
+
+
+def test_a_disabled_builtin_spelling_beside_the_enabled_record_with_a_url_keeps_its_pair():
+    # The chat sends KX to A here (the enabled record's own URL and key). Only this dict order: the lookup's URL comes
+    # from the FIRST matching record, enabled or not, so with the switched-off spelling first it asks the provider's
+    # default host and the key, owned only at A, is dropped there. That URL rule predates this PR (exp-v0.52.659 gives
+    # the same) and this PR changes keys only, never URLs.
+    got = _lookup({"model": {"provider": "openai"},
+                   "providers": {"openai": {"base_url": A, "api_key": "KX"}, "OpenAI": {"enabled": False}}},
+                  provider="openai")
+    assert (got.base_url, got.api_key) == (A, "KX")
 
 
 @pytest.mark.parametrize("flag", [False, "off", "no", 0])

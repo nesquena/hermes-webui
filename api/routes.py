@@ -9594,7 +9594,12 @@ def _context_length_config_api_key_and_owner(
     so the chat sends no key, neither the record's nor the model block's; falling
     through to the model block would send a key the chat never sends. Any other
     switched-off record matching the provider (another spelling of it) is skipped,
-    as the Agent's matcher skips it. A record's key reference may be spelled
+    as the Agent's matcher skips it. When every matching record is switched off, the
+    selection also takes no key. The Agent doesn't refuse a built-in on a disabled
+    spelling, but that record isn't its source and, measured, the chat doesn't send
+    the model block's key there either (openai and anthropic chat with their own
+    environment key or the placeholder), so no config key lets the streaming sites'
+    Agent fallback supply the chat's own. A record's key reference may be spelled
     ``api_key_env`` (:func:`_context_lookup_record_key`).
     """
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -9608,7 +9613,9 @@ def _context_length_config_api_key_and_owner(
             for provider_key, provider_cfg in providers_cfg.items()
             if isinstance(provider_cfg, dict) and _providers_match_for_context(provider_key, provider)
         ]
-        if _context_lookup_provider_disabled(provider, providers_cfg):
+        if _context_lookup_provider_disabled(provider, providers_cfg) or (
+            matching and not any(api_config._raw_provider_record_enabled(c) for _, c in matching)
+        ):
             return "", frozenset()
         for provider_key, provider_cfg in matching:
             if not api_config._raw_provider_record_enabled(provider_cfg):
