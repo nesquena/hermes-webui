@@ -9529,19 +9529,45 @@ def _context_lookup_resolve_key(raw_api_key, raw_key_env=None) -> str:
     return ""
 
 
-def _context_lookup_record_key(record: dict) -> str:
-    """The key a ``providers.<id>`` record declares: ``api_key``, a ``${VAR}``
-    reference, or the variable named by ``key_env`` or, when that is blank, by
-    ``api_key_env`` (#8938).
+def _context_lookup_record_reads_api_key_env(provider_key: object) -> bool:
+    """Whether the chat sends the key a ``providers.<key>`` record names in ``api_key_env`` (#8938).
 
-    That is the record's own credential ladder: WebUI respells ``api_key_env`` to
-    ``key_env`` for a record (``api_config._normalized_raw_provider_record``), and
-    the Agent reads both for one, so the chat sends this key. Only records take the
-    second spelling. The chat reads ``key_env`` alone on a legacy
-    ``custom_providers`` entry and on the model block, so the lookup does too.
+    It does on the records WebUI's own merge serves for a named ``custom:<name>`` route,
+    which respells ``api_key_env`` to ``key_env`` on the record it selects
+    (``api_config._normalized_raw_provider_record``): a ``custom:<name>`` key, the generic
+    ``custom`` record, and a keyed record whose key is no built-in or plugin provider
+    (``api_config._is_native_custom_provider_key``). The Agent's own resolver reads both
+    spellings on such a record too.
+
+    It doesn't on a built-in provider's record (``providers.anthropic``): the Agent reads
+    that record's ``api_key_env`` only for its model listing and URL blocks, never for the
+    chat, which gets an AuthError and sends no key. The merge could select a built-in-keyed
+    record for ``custom:<that id>``; leaving it out sends less than the chat, never more.
+    """
+    raw = str(provider_key or "").strip().lower()
+    if not raw:
+        return False
+    if raw.startswith("custom:") or api_config._canonicalise_provider_id(raw) == "custom":
+        return True
+    return api_config._is_native_custom_provider_key(raw)
+
+
+def _context_lookup_record_key(record: dict, provider_key: object = None) -> str:
+    """The key a ``providers.<provider_key>`` record declares for the chat: ``api_key``, a
+    ``${VAR}`` reference, or the variable named by ``key_env`` or, when that is blank, by
+    ``api_key_env`` on a record whose ``api_key_env`` the chat reads
+    (:func:`_context_lookup_record_reads_api_key_env`, #8938).
+
+    On a legacy ``custom_providers`` entry and on the model block the lookup reads
+    ``key_env`` alone (:func:`_context_lookup_resolve_key`). That is what WebUI's merge reads
+    there for a named ``custom:<name>`` route (#8959). The Agent's own resolver reads
+    ``key_env`` or ``api_key_env`` on any block it resolves itself
+    (``runtime_provider_custom._key_env_secret``), so on a bare ``custom`` or registry
+    route the chat can send an ``api_key_env`` key the lookup doesn't take: the lookup then
+    sends less than the chat, never more.
     """
     key_env = str(record.get("key_env") or "").strip()
-    if not key_env:
+    if not key_env and _context_lookup_record_reads_api_key_env(provider_key):
         api_key_env = record.get("api_key_env")
         key_env = api_key_env.strip() if isinstance(api_key_env, str) else ""
     return _context_lookup_resolve_key(record.get("api_key"), key_env)
@@ -9655,7 +9681,7 @@ def _context_length_config_api_key_and_owner(
         for provider_key, provider_cfg in matching:
             if not api_config._raw_provider_record_enabled(provider_cfg):
                 continue
-            api_key = _context_lookup_record_key(provider_cfg)
+            api_key = _context_lookup_record_key(provider_cfg, provider_key)
             if api_key:
                 builtin = not str(provider_key or "").strip().lower().startswith("custom:")
                 return api_key, _context_lookup_owned_origins(
@@ -9706,8 +9732,8 @@ def _context_lookup_same_value_origins(api_key: object, cfg: dict | None) -> fro
     ``custom_providers`` entry stays a holder when switched off, because the
     Agent's legacy view still routes it and the chat still sends its key (the
     same reason ``api_config``'s identity claims keep counting legacy rows). A
-    record's key reference may be spelled ``api_key_env``
-    (:func:`_context_lookup_record_key`).
+    record's key reference may be spelled ``api_key_env`` where the chat reads that
+    spelling, never on a built-in provider's record (:func:`_context_lookup_record_key`).
     """
     value = _context_lookup_key_value(api_key)
     if not value:
@@ -9719,7 +9745,7 @@ def _context_lookup_same_value_origins(api_key: object, cfg: dict | None) -> fro
         for provider_key, provider_cfg in providers_cfg.items():
             if not api_config._raw_provider_record_enabled(provider_cfg):
                 continue
-            if _context_lookup_record_key(provider_cfg) != value:
+            if _context_lookup_record_key(provider_cfg, provider_key) != value:
                 continue
             builtin = not str(provider_key or "").strip().lower().startswith("custom:")
             owned |= _context_lookup_owned_origins(

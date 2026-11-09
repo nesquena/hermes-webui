@@ -6,9 +6,11 @@ Three follow-ups from the review of #8935, measured against the chat's own route
    for a session on it, custom or built-in. So it is no key source for its own session, and no same-value holder
    for another session (#8918). A legacy ``custom_providers`` entry is different: the Agent's legacy view still
    routes one that's switched off, and the chat still sends its key, so it stays a source and a holder.
-2. **A record's key reference spelled ``api_key_env``** is read, as WebUI's own ladder respells it to ``key_env`` for
-   a record and the Agent reads both. The chat doesn't read ``api_key_env`` on a legacy entry or the model block, so
-   neither does the lookup.
+2. **A record's key reference spelled ``api_key_env``** is read where the chat reads it: on the records WebUI's own
+   merge serves for a named ``custom:<name>`` route, which respells it to ``key_env`` (a ``custom:`` key, the generic
+   ``custom`` record, a keyed record whose key is no built-in provider). Never on a built-in provider's record: the
+   chat gets an AuthError there and sends no key. On a legacy entry or the model block the lookup reads ``key_env``
+   alone, as the merge does (#8959).
 3. **Pins** for three rules that mutants showed no test held: a legacy holder's ``api`` / ``url`` spellings, a
    model-block ``key_env`` holder, and no same-value grant on the Agent-fallback branch.
 """
@@ -311,12 +313,17 @@ def test_a_disabled_builtin_record_gives_no_key(flag):
 
 
 def test_an_ambiguous_identity_is_left_as_before():
-    # Two records name my-proxy. The chat routes this shape through one of them; the selection here reads on as on
-    # exp-v0.52.659 (the model block's key at its own URL). Ambiguity isn't a switch-off.
+    # Two records name my-proxy. The chat refuses this shape: the real resolve_model_provider raises
+    # AmbiguousCustomProviderError. The selection here reads on as on exp-v0.52.659 (the model block's key at its own
+    # URL); ambiguity isn't a switch-off, so behaviour is unchanged.
+    from api import config as api_config
+
     got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A, "api_key": "KM"},
                    "providers": {"one": {"name": "my-proxy", "base_url": B, "api_key": "K1"},
                                  "two": {"name": "my-proxy", "base_url": L, "api_key": "K2"}}})
     assert (got.base_url, got.api_key) == (A, "KM")
+    with pytest.raises(api_config.AmbiguousCustomProviderError):
+        api_config.resolve_model_provider(api_config.model_with_provider_context("m-x", "custom:my-proxy"))
 
 
 def test_an_enabled_builtin_record_keeps_its_key():
@@ -379,10 +386,47 @@ def test_a_record_key_spelled_api_key_env_is_its_own_key(key_in_env):
     assert (got.base_url, got.api_key) == (B, "K1")
 
 
-def test_a_builtin_record_key_spelled_api_key_env_is_its_own_key(key_in_env):
-    # The Agent's own model listing reads ``key_env or api_key_env`` on a provider block (hermes_cli.models).
-    got = _lookup({"model": {"provider": "openai"}, "providers": {"openai": {"api_key_env": VAR}}}, provider="openai")
+@pytest.mark.parametrize("pid", ["openai", "anthropic", "deepseek", "openrouter"])
+@pytest.mark.parametrize("with_url", [False, True], ids=["no-url", "record-url"])
+def test_a_builtin_record_key_spelled_api_key_env_is_not_sent(key_in_env, pid, with_url):
+    # The chat gets an AuthError and sends no key: the Agent reads a built-in record's ``api_key_env`` only for its
+    # model listing and URL blocks, never for the chat. So the lookup sends none either, as on exp-v0.52.659.
+    record = {"api_key_env": VAR, **({"base_url": B} if with_url else {})}
+    got = _lookup({"model": {"provider": pid}, "providers": {pid: record}}, provider=pid)
+    assert got.api_key == ""
+
+
+@pytest.mark.parametrize("pid", ["openai", "anthropic"])
+def test_a_builtin_record_holding_the_value_under_api_key_env_lends_nothing(key_in_env, pid):
+    cfg = {"model": {"provider": "custom:s", "base_url": U},
+           "providers": {"custom:s": {"base_url": U}, pid: {"base_url": U, "api_key_env": VAR}}}
+    assert routes._context_lookup_origin(U) not in routes._context_lookup_same_value_origins("K1", cfg)
+    got = _lookup(cfg, provider="custom:s", api_key="K1")
+    assert (got.base_url, got.api_key) == (U, "")
+
+
+def test_the_generic_custom_record_key_spelled_api_key_env_is_its_own_key(key_in_env):
+    got = _lookup({"model": {"provider": "custom"}, "providers": {"custom": {"base_url": B, "api_key_env": VAR}}},
+                  provider="custom")
     assert got.api_key == "K1"
+
+
+def test_a_keyed_custom_record_holding_the_value_under_api_key_env_lends_its_url(key_in_env):
+    # ``providers.myproxy`` is no built-in: the merge serves it for custom:myproxy and respells its api_key_env.
+    cfg = {"model": {"provider": "custom:s", "base_url": U},
+           "providers": {"custom:s": {"base_url": U}, "myproxy": {"base_url": U, "api_key_env": VAR}}}
+    assert routes._context_lookup_origin(U) in routes._context_lookup_same_value_origins("K1", cfg)
+    got = _lookup(cfg, provider="custom:s", api_key="K1")
+    assert (got.base_url, got.api_key) == (U, "K1")
+
+
+@pytest.mark.parametrize("key,reads", [
+    ("custom:h", True), ("Custom:H", True), ("custom", True), ("myproxy", True), ("my_proxy", True),
+    ("openai", False), ("anthropic", False), ("deepseek", False), ("openrouter", False), ("OpenAI", False), ("", False),
+    (None, False),
+])
+def test_which_records_the_chat_reads_api_key_env_on(key, reads):
+    assert routes._context_lookup_record_reads_api_key_env(key) is reads
 
 
 def test_a_record_holding_the_value_under_api_key_env_lends_its_url(key_in_env):
