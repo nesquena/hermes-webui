@@ -10975,8 +10975,9 @@ def _session_context_length_lookup_state(
         # named custom provider WebUI's own half of the chat's routing chain decides
         # both (the merge api/streaming.py's _resolve_runtime_connection_bundle
         # applies, then raise_for_custom_provider_route). lookup_only keeps it a
-        # read: config-declared credentials only, no credential pool, host-gated env
-        # key or key_cmd, and the Agent's resolve_runtime_provider is never called
+        # read: config-declared credentials only, no credential pool or key_cmd, a
+        # host-gated env key never sent (only read, by the keyless declaration),
+        # and the Agent's resolve_runtime_provider is never called
         # (it can select or refresh pool entries, refresh OAuth credentials and
         # probe a local server). The key is the route's or none: a session that
         # can't chat, or a keyless record (the merge sent the no-auth placeholder),

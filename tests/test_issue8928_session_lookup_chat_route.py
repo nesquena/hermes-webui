@@ -306,6 +306,8 @@ class _SideEffects:
         monkeypatch.setattr(rp, "_try_resolve_from_custom_pool",
                             self._rec("_try_resolve_from_custom_pool",
                                       {"api_key": self.POOL_KEY, "credential_pool": object()}), raising=False)
+        # Not recorded: GET may READ the host-gated env key (a plain env lookup, for the record's keyless
+        # verdict, as the chat does); what's pinned is that it is never SENT (ENV_KEY never reaches a lookup).
         monkeypatch.setattr(rp, "_host_gated_env_key_candidates",
                             lambda base_url, ollama=False: [self.ENV_KEY], raising=False)
         cts = self._module(monkeypatch, "agent.command_token_source", parent="agent")

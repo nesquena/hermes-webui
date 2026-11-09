@@ -5246,8 +5246,11 @@ def resolve_custom_provider_bundle(
     selection, endpoint ownership and the keyless declaration are unchanged, but
     the credential comes only from what the record declares in config (literal /
     ``${ENV}`` / ``key_env`` / ``CUSTOM_<SLUG>_API_KEY``). The credential pool
-    (whose selection can rotate or refresh entries), the host-gated env key and the
-    ``key_cmd`` token provider (which runs a command when used) are skipped.
+    (whose selection can rotate or refresh entries) and the ``key_cmd`` token
+    provider (which runs a command when used) are skipped, and a host-gated env key
+    is never taken as the credential. That env key is still READ, as a plain
+    environment lookup, by the keyless declaration (a record the chat could serve
+    from it is not keyless), so the verdict matches the chat's.
     """
     pid = str(provider_id or "").strip().lower()
     if not pid.startswith("custom:"):
