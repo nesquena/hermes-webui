@@ -145,6 +145,42 @@ def test_a_session_that_cannot_chat_looks_up_without_a_key(monkeypatch):
     assert calls[0]["api_key"] == ""
 
 
+def test_a_session_that_cannot_chat_sends_no_legacy_entry_key(monkeypatch):
+    # The legacy entry holds K1 but no URL, the model block declares L with K1: the chat refuses the route (the
+    # entry has no endpoint of its own). The lookup's legacy-entry scan must not pick K1 up for L.
+    calls = _get_session({"model": {"default": "m-x", "provider": PROVIDER, "base_url": L, "api_key": "K1"},
+                          "providers": {PROVIDER: {"models": {"m-x": {}}}},
+                          "custom_providers": [{"name": "my-proxy", "api_key": "K1", "models": {"m-x": {}}}]},
+                         monkeypatch)
+    assert len(calls) == 1, calls
+    assert calls[0]["api_key"] == ""
+
+
+def test_a_refused_route_never_lends_its_key(monkeypatch):
+    """Whatever a refused route still carries, the lookup treats it as a session that can't chat."""
+    refused = {"provider": PROVIDER, "base_url": None, "api_key": "KREFUSED",
+               config.CUSTOM_ROUTE_ERROR_FIELD: config._custom_route_verdict(config.CUSTOM_ROUTE_NO_ENDPOINT, PROVIDER)}
+    with pytest.raises(config.CustomProviderRouteError):
+        config.raise_for_custom_provider_route(refused)
+    monkeypatch.setattr(config, "merge_custom_provider_runtime_bundle", lambda *a, **k: dict(refused))
+    calls = _get_session(_mixed_listing_cfg("K1", "K1", A, "K1"), monkeypatch)
+    assert len(calls) == 1, calls
+    assert calls[0]["api_key"] == ""
+
+
+def test_a_refused_route_is_not_a_warning_on_get(monkeypatch, caplog):
+    """The chat logs a refused route as a warning before failing the turn; a GET that builds nothing logs at debug."""
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="api.config")
+    calls = _get_session({"model": {"default": "m-x", "provider": PROVIDER, "base_url": A, "api_key": "K1"},
+                          "providers": {PROVIDER: {"api_key": "K1", "models": {"m-x": {}}}}}, monkeypatch)
+    assert len(calls) == 1, calls
+    refused = [r for r in caplog.records if r.name == "api.config" and "custom provider" in r.getMessage()]
+    assert refused, "the refused route should still be logged (at debug)"
+    assert all(r.levelno < logging.WARNING for r in refused), [(r.levelname, r.getMessage()) for r in refused]
+
+
 def test_a_keyless_endpoint_looks_up_without_the_placeholder(monkeypatch):
     calls = _get_session({"model": {"default": "m-x", "provider": PROVIDER},
                           "custom_providers": [{"name": "my-proxy", "base_url": L, "models": {"m-x": {}}}]},
