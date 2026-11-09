@@ -284,40 +284,63 @@ class TestIssue765FollowupHardening:
         with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
         threads would target the same path and the second replace would deterministically
         fail once the first consume/remove happened.
+
+        #7881 contract: saves of ONE session id are serialized by its per-session
+        persistence lock, so the two replaces can no longer overlap (a two-party
+        barrier inside os.replace would deadlock by design). The first replace is
+        held until both workers are alive at once -- so their thread idents, and
+        with them the tmp names, cannot be reused -- and long enough that an
+        unserialized second save would reach os.replace() concurrently.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
+        started = [threading.Event(), threading.Event()]
+        state = {"active": 0, "max_active": 0}
+        state_lock = threading.Lock()
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
-            replace_sources.append(str(src))
-            barrier.wait(timeout=5)
-            return original_replace(src, dst)
+        def _replace_serialized(src, dst):
+            with state_lock:
+                replace_sources.append(str(src))
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            try:
+                for event in started:
+                    assert event.wait(timeout=5), "a save worker never started"
+                time.sleep(0.2)  # window for an unserialized second save
+                return original_replace(src, dst)
+            finally:
+                with state_lock:
+                    state["active"] -= 1
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _replace_serialized)
 
-        def _save_worker():
+        def _save_worker(index):
+            started[index].set()
             try:
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)
 
-        t1 = threading.Thread(target=_save_worker)
-        t2 = threading.Thread(target=_save_worker)
+        t1 = threading.Thread(target=_save_worker, args=(0,))
+        t2 = threading.Thread(target=_save_worker, args=(1,))
         t1.start()
         t2.start()
-        t1.join(timeout=5)
-        t2.join(timeout=5)
+        t1.join(timeout=10)
+        t2.join(timeout=10)
 
+        assert not t1.is_alive() and not t2.is_alive(), "a same-session save deadlocked"
         assert not errors, f"Concurrent same-session saves should not fail: {errors}"
         assert len(replace_sources) >= 2, f"Expected replace calls, got {replace_sources}"
         assert len(set(replace_sources)) == 2, (
             "Concurrent same-session saves must use distinct temp files even if Windows-safe "
             f"replace retries one of them; got {replace_sources}"
+        )
+        assert state["max_active"] == 1, (
+            "same-session saves must be serialized by the per-session persistence lock"
         )
         data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["session_id"] == "same_sid"
