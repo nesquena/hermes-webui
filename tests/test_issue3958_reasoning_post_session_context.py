@@ -56,7 +56,7 @@ def test_ui_posts_reasoning_context_with_effort():
     src = read("static/ui.js")
     assert "function _reasoningEffortContext()" in src
     assert "new URLSearchParams(_reasoningEffortContext())" in src
-    assert "Object.assign({effort:effort},_reasoningEffortContext())" in src
+    assert "Object.assign({effort:effort},context)" in src
 
 
 def test_reasoning_post_route_threads_model_context():
@@ -70,6 +70,7 @@ def test_reasoning_post_route_threads_model_context():
     body = match.group(1)
     assert 'body.get("model")' in body
     assert 'body.get("provider")' in body
-    assert 'set_reasoning_effort(' in body
+    assert 'write_reasoning_effort(' in body
+    assert 'get_reasoning_status(' in body
     assert "model_id=model_id" in body
     assert "provider_id=provider_id" in body

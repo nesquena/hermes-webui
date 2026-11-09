@@ -45,6 +45,7 @@ for (const fn of ['_isSessionLocallyStreaming','_hasPendingUserMessageSignal','_
   '_isChildSession','_isForkWithResolvableParent','_sessionLineageKey','_sidebarLineageKeyForRow',
   '_collapseSessionLineageForSidebar','_attachChildSessionsToSidebarRows','_sessionAttentionState',
   '_sidebarRowHasVisibleMessages','_isDelegatedSubagentRow','_sidebarProjectResolver','_sidebarRowsById','_sidebarHasUnprojectedRows',
+  '_isDelegatedSubagentChild','_sidebarSameProfileForLineage','_sidebarDisplayBucketIsCli',
   '_partitionSidebarSessionRows','_scopedSidebarReferenceRows','_renderSidebarRowsFromRawSessions']) {
   eval.call(global, extractFunc(fn));
 }
