@@ -77,6 +77,7 @@ const required = [
   '_markdownTableCopyHtmlEscape',
   '_markdownTableCopyHtmlAttributeEscape',
   '_markdownTableCopySafeHref',
+  '_markdownTableCopySafeImageSrc',
   '_markdownTableText',
   '_markdownTableCellText',
   '_sanitizeMarkdownTableCellText',
@@ -104,6 +105,10 @@ for (const name of required) {
   } catch (error) {
     throw new Error(name + ' extraction failed: ' + error.message);
   }
+}
+
+function _isSafeDataImageUri(value) {
+  return /^data:image\/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$/i.test(String(value || ''));
 }
 
 function toNodeTypeElement(tagName) {
@@ -343,8 +348,7 @@ console.log(JSON.stringify(payload));
     assert "<thead><tr><th>Product &lt;Name&gt;</th><th>Price &amp; Tax</th></tr></thead>" in out["html"]
     assert "<tbody><tr><td>Widget &gt; Basic</td><td>12 &amp; change</td></tr></tbody>" in out["html"]
     assert "markdown-table-sort" not in out["html"]
-    assert out["plain"].startswith("Product <Name>\tPrice & Tax\n")
-    assert "\nWidget > Basic\t12 & change" in out["plain"]
+    assert out["plain"] == "Product <Name>\tPrice & Tax\nWidget > Basic\t12 & change"
 
 
 def test_copy_payload_preserves_sort_button_text_when_label_is_missing():
@@ -763,9 +767,11 @@ function appendMixedContent(root, suffix) {
     bodyTexts: ['Monthly Subtotal', '$40.00'],
   });
   const strong = makeElement('strong', {attrs: {style: 'color: gold;'}});
-  strong.appendChild(new FakeText('Monthly Subtotal'));
+  strong.appendChild(new FakeText('five'));
   second.body.cells[0].children = [];
   second.body.cells[0].appendChild(strong);
+  second.body.cells[0].appendChild(makeElement('br'));
+  second.body.cells[0].appendChild(new FakeText('six'));
   root.appendChild(second.table);
 
   const trailing = makeElement('p', {
@@ -773,6 +779,21 @@ function appendMixedContent(root, suffix) {
     attrs: {style: 'font-family: sans-serif;', 'data-copy-id': suffix},
   });
   trailing.appendChild(new FakeText('End of report: '));
+  const chart = makeElement('img', {
+    attrs: {
+      src: 'data:image/png;base64,iVBORw0KGgo=',
+      alt: 'Monthly chart',
+      onerror: 'alert(1)',
+    },
+  });
+  trailing.appendChild(chart);
+  trailing.appendChild(new FakeText(' / '));
+  const artifactLink = makeElement('a', {
+    attrs: {href: 'api/media?path=report.pdf&download=1'},
+  });
+  artifactLink.appendChild(new FakeText('download report'));
+  trailing.appendChild(artifactLink);
+  trailing.appendChild(new FakeText(' / '));
   const safeLink = makeElement('a', {
     className: 'themed-link',
     attrs: {
@@ -788,6 +809,15 @@ function appendMixedContent(root, suffix) {
   const trailingEnd = new FakeText('unsafe link');
   unsafeLink.appendChild(trailingEnd);
   trailing.appendChild(unsafeLink);
+  const unsafeDataLink = makeElement('a', {
+    attrs: {href: 'data:text/html;base64,PHNjcmlwdD4='},
+  });
+  unsafeDataLink.appendChild(new FakeText('unsafe data link'));
+  trailing.appendChild(unsafeDataLink);
+  const unsafeImage = makeElement('img', {
+    attrs: {src: 'data:image/svg+xml,<svg onload=alert(1)>', alt: 'unsafe image'},
+  });
+  trailing.appendChild(unsafeImage);
   const hiddenForm = makeElement('form');
   hiddenForm.appendChild(new FakeText('hidden form value'));
   trailing.appendChild(hiddenForm);
@@ -845,10 +875,17 @@ console.log(JSON.stringify({prevented: event.preventDefaultCalled, data: clipboa
     assert "<h2>Monthly Summary</h2>" in html
     assert html.count("<table>") == 2
     assert html.count("<th>Product Name</th><th>Total</th>") == 2
-    assert "<strong>Monthly Subtotal</strong>" in html
+    assert "<strong>five</strong><br>six" in html
+    assert '<img src="data:image/png;base64,iVBORw0KGgo=" alt="Monthly chart">' in html
+    assert '<a href="api/media?path=report.pdf&amp;download=1">download report</a>' in html
     assert '<a href="https://example.com/report?q=monthly&amp;view=full">open report</a>' in html
     assert "<a>unsafe link</a>" in html
+    assert "<a>unsafe data link</a>" in html
     assert "javascript:" not in html
+    assert "data:text/html" not in html
+    assert "image/svg+xml" not in html
+    assert "unsafe image" not in html
+    assert "onerror=" not in html
     assert "onclick=" not in html
     assert "style=" not in html
     assert "class=" not in html
@@ -857,6 +894,6 @@ console.log(JSON.stringify({prevented: event.preventDefaultCalled, data: clipboa
     assert "hidden form value" not in html
     assert "Monthly Summary" in plain
     assert "Product Name\tTotal" in plain
-    assert "Monthly Subtotal\t$40.00" in plain
+    assert "five\nsix\t$40.00" in plain
     assert "End of report" in plain
     assert "hidden form value" not in plain

@@ -569,10 +569,10 @@ function _sanitizeMarkdownTableCellText(cell){
   const sortButton=cell.querySelector?cell.querySelector('.markdown-table-sort'):null;
   if(sortButton){
     const sortLabel=sortButton.querySelector?sortButton.querySelector('.markdown-table-sort-label'):null;
-    if(sortLabel) return _markdownTableCellText(sortLabel);
+    if(sortLabel) return _markdownTableCopyPlainText(sortLabel).replace(/\r/g,'').trim();
     return _markdownTableCellText(sortButton);
   }
-  return _markdownTableCellText(cell);
+  return _markdownTableCopyPlainText(cell).replace(/\r/g,'').trim();
 }
 
 function _markdownTableCopyHtmlEscape(value){
@@ -590,9 +590,20 @@ function _markdownTableCopyHtmlAttributeEscape(value){
 
 function _markdownTableCopySafeHref(value){
   const href=String(value||'').trim();
-  if(!href) return '';
-  if(/^(?:https?:|mailto:|tel:|#|\/(?!\/)|\.\.\/|\.\/)/i.test(href)) return href;
+  if(!href||/[\u0000-\u0020\u007f\\]/.test(href)) return '';
+  if(/^(?:https?:\/\/|mailto:|tel:)/i.test(href)) return href;
+  if(/^[a-z][a-z0-9+.-]*:/i.test(href)||href.startsWith('//')) return '';
+  if(/^(?:#|\/|\.\.\/|\.\/|\?|[a-z0-9_~!$&()*+,;=@%-])/i.test(href)) return href;
   return '';
+}
+
+function _markdownTableCopySafeImageSrc(value){
+  const src=String(value||'').trim();
+  if(/^data:/i.test(src)){
+    return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(src)?src:'';
+  }
+  if(/^(?:mailto:|tel:|#)/i.test(src)) return '';
+  return _markdownTableCopySafeHref(src);
 }
 
 function _markdownTableCopySemanticChildren(node){
@@ -618,7 +629,14 @@ function _markdownTableCopySemanticHtml(node){
   ];
   if(blockedTags.includes(tag)) return '';
 
+  const getAttribute=(name)=>typeof node.getAttribute==='function'?node.getAttribute(name):null;
   const children=_markdownTableCopySemanticChildren(node);
+  if(tag==='img'){
+    const src=_markdownTableCopySafeImageSrc(getAttribute('src'));
+    if(!src) return '';
+    const alt=getAttribute('alt')||'';
+    return `<img src="${_markdownTableCopyHtmlAttributeEscape(src)}" alt="${_markdownTableCopyHtmlAttributeEscape(alt)}">`;
+  }
   const semanticTags=[
     'a','abbr','b','blockquote','br','code','dd','del','details','div','dl','dt',
     'em','h1','h2','h3','h4','h5','h6','hr','i','kbd','li','mark','ol','p',
@@ -627,7 +645,6 @@ function _markdownTableCopySemanticHtml(node){
   ];
   if(!semanticTags.includes(tag)) return children;
 
-  const getAttribute=(name)=>typeof node.getAttribute==='function'?node.getAttribute(name):null;
   const attributes=[];
   if(tag==='a'){
     const href=_markdownTableCopySafeHref(getAttribute('href'));
