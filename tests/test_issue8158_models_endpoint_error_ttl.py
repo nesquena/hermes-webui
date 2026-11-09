@@ -201,3 +201,128 @@ def test_concurrent_reader_gets_preserved_catalog(monkeypatch, tmp_path):
     grupos = _groups_by_provider(data)
     assert "custom:healthy" in grupos
     assert [m["id"] for m in grupos["custom:healthy"]["models"]] == ["healthy/discovered"]
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_partial_rebuild_preserves_healthy_discovered_models(monkeypatch, tmp_path):
+    """#8478 regression: partial rebuild must not drop healthy models from the picker.
+
+    Reviewer scenario:
+    1. via get_available_models(), discover a model from the Healthy endpoint.
+    2. Persist and reload catalog via strict disk loader (_load_models_cache_from_disk).
+    3. Keep config/source equal and age memory catalog by 35 s.
+    4. On retry, let Broken recover fast and delay HTTP response of Healthy,
+       with foreground budget of 0.5 s.
+    5. The partial result must not lose the Healthy model.
+    """
+    import socket
+    import sys
+    from types import SimpleNamespace
+    import urllib.error
+    import urllib.request
+
+    _reset_state(monkeypatch, tmp_path)
+    config._cache_build_in_progress = False
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda _pid: [])
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.models",
+        SimpleNamespace(
+            provider_model_ids=lambda _pid: [],
+            list_available_providers=lambda: [],
+        ),
+    )
+
+    def _unresolvable(*args, **kwargs):
+        raise socket.gaierror("hermetic test resolver")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _unresolvable)
+
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {"provider": "openai", "default": "gpt-5.5"},
+            "providers": {},
+            "fallback_providers": [],
+            "custom_providers": [
+                {"name": "Healthy", "base_url": "http://healthy.local/v1"},
+                {"name": "Broken", "base_url": "http://broken.local/v1"},
+            ],
+        },
+    )
+
+    # 1. First pass: Healthy discovers a model, Broken fails
+    def _urlopen_phase1(req, timeout=None):
+        url = str(getattr(req, "full_url", req))
+        if "healthy.local" in url:
+            return _FakeResponse({"data": [{"id": "healthy/discovered"}]})
+        if "broken.local" in url:
+            raise urllib.error.URLError("unreachable")
+        raise AssertionError(f"Unexpected probe URL: {url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_phase1)
+
+    initial_catalog = config.get_available_models()
+    initial_groups = _groups_by_provider(initial_catalog)
+    assert "custom:healthy" in initial_groups
+    assert [m["id"] for m in initial_groups["custom:healthy"]["models"]] == [
+        "@custom:healthy:healthy/discovered"
+    ]
+    assert "custom:broken" in initial_groups
+    assert initial_groups["custom:broken"].get("models_endpoint_error") is not None
+
+    # 2. Persist and reload the catalog via the strict disk loader
+    loaded = config._load_models_cache_from_disk()
+    assert loaded is not None, "strict disk loader must reload the persisted catalog"
+    loaded_groups = _groups_by_provider(loaded)
+    assert "custom:healthy" in loaded_groups
+    assert [m["id"] for m in loaded_groups["custom:healthy"]["models"]] == [
+        "@custom:healthy:healthy/discovered"
+    ]
+    assert config._has_models_endpoint_error(loaded)
+
+    # 3. Keep config/source identical and age the memory catalog by 35 s
+    _install_memory_catalog(loaded, age_seconds=35.0)
+
+    # 4. On retry: Broken recovers fast, Healthy delays HTTP response past foreground budget (0.5 s)
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.5, raising=False)
+    monkeypatch.setattr(config, "CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS", 5.0, raising=False)
+
+    def _urlopen_phase2(req, timeout=None):
+        url = str(getattr(req, "full_url", req))
+        if "broken.local" in url:
+            return _FakeResponse({"data": [{"id": "broken/discovered"}]})
+        if "healthy.local" in url:
+            time.sleep(0.8)
+            return _FakeResponse({"data": [{"id": "healthy/discovered"}]})
+        raise AssertionError(f"Unexpected probe URL: {url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_phase2)
+
+    retry_data = config.get_available_models()
+    retry_groups = _groups_by_provider(retry_data)
+
+    # 5. The partial result must not lose the Healthy model
+    assert "custom:healthy" in retry_groups, "healthy provider must survive partial rebuild"
+    assert [m["id"] for m in retry_groups["custom:healthy"]["models"]] == [
+        "@custom:healthy:healthy/discovered"
+    ], "healthy model must be preserved in partial return"
+    assert "custom:broken" in retry_groups
+    assert [m["id"] for m in retry_groups["custom:broken"]["models"]] == [
+        "@custom:broken:broken/discovered"
+    ], "recovered provider should be updated from completed partial groups"
+

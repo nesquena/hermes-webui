@@ -13185,6 +13185,43 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         if build_done.is_set() and "error" not in box:
             if "partial" in box:
                 if box["partial"].get("groups"):
+                    if (
+                        preserved_groups is not None
+                        and not _models_rebuild_superseded(rebuild_seq)
+                        and _models_build_identity_current(
+                            rebuild_source_fingerprint, rebuild_profile
+                        )
+                    ):
+                        # Reconcile completed groups from the partial build with
+                        # the healthy catalog already held for the same owner/source (#8478).
+                        partial_catalog = copy.deepcopy(box["partial"])
+                        partial_groups_by_id = {
+                            g.get("provider_id"): g
+                            for g in partial_catalog.get("groups", [])
+                            if g.get("provider_id")
+                        }
+                        reconciled_groups = []
+                        seen_pids = set()
+                        for g in preserved_groups.get("groups", []):
+                            pid = g.get("provider_id")
+                            if not pid:
+                                continue
+                            seen_pids.add(pid)
+                            part_g = partial_groups_by_id.get(pid)
+                            if part_g is not None and (
+                                part_g.get("models")
+                                or part_g.get("models_endpoint_error")
+                            ):
+                                reconciled_groups.append(part_g)
+                            else:
+                                reconciled_groups.append(copy.deepcopy(g))
+                        for g in partial_catalog.get("groups", []):
+                            pid = g.get("provider_id")
+                            if pid and pid not in seen_pids:
+                                seen_pids.add(pid)
+                                reconciled_groups.append(g)
+                        partial_catalog["groups"] = reconciled_groups
+                        return _annotate_fast_tier_model_groups(partial_catalog)
                     return copy.deepcopy(box["partial"])
                 # An all-truncated pass has no picker options. Use the same
                 # stale/static fallback as a still-running first pass below.
