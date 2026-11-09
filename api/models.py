@@ -14292,33 +14292,67 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
             target[key] = copy.deepcopy(value)
 
 
+# Every private alias that names the SAME durable state.db row.  The owning
+# helper accepts all four, so every consumer of the durable provenance must
+# accept all four too -- reading a subset makes an identity invisible to the
+# comparison and lets a distinct row collapse onto the row that owns it
+# (#8672 review, alias completion).
+_STATE_DB_ROW_IDENTITY_FIELDS = (
+    "_row_id",
+    "_state_db_row_id",
+    "_db_row_id",
+    "state_db_row_id",
+)
+
+
+def _canonical_state_db_row_id_value(value) -> str | None:
+    """Return the canonical durable row id for ONE alias value.
+
+    This is the single value rule the durable provenance aliases share:
+    ``_row_id`` / ``_state_db_row_id`` / ``_db_row_id`` / ``state_db_row_id``
+    all name the same durable row, so their values must canonicalise the
+    same way before they are compared.
+
+    A row id is a non-negative integer.  An ``int`` and an integral
+    ``float`` canonicalise to their decimal form, and a decimal string
+    canonicalises to the same digits, so ``7``, ``7.0``, ``"7"`` and ``"007"``
+    all name the SAME row.  Anything else -- a bool, a negative number, a
+    non-integral float, a non-numeric string -- is NOT a row id and returns
+    ``None``.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if value >= 0 else None
+    if isinstance(value, float):
+        if math.isfinite(value) and value >= 0 and value.is_integer():
+            return str(int(value))
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return str(int(text)) if text.isdigit() else None
+    return None
+
+
 def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:
     """Return ``(row_id, valid)`` for private state.db provenance aliases.
 
     A message carrying two different aliases is contradictory provenance.  It
     must not silently fall through to timestamp/sequence matching, because that
     would turn an identity conflict into a guessed provider-side payload.
+
+    Every alias this helper accepts (``_row_id`` / ``_state_db_row_id`` /
+    ``_db_row_id`` / ``state_db_row_id``) names the SAME durable row, so a
+    value is only accepted when it canonicalises to a row id under the shared
+    value rule, and two aliases that disagree are contradictory provenance.
     """
     if not isinstance(message, dict):
         return None, True
     values = set()
-    for key in ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+    for key in _STATE_DB_ROW_IDENTITY_FIELDS:
         if key not in message or message.get(key) in (None, ""):
             continue
-        value = message.get(key)
-        if isinstance(value, bool):
-            return None, False
-        if isinstance(value, int):
-            normalized = str(value) if value >= 0 else None
-        elif isinstance(value, float):
-            normalized = str(int(value)) if math.isfinite(value) and value >= 0 and value.is_integer() else None
-        elif isinstance(value, str):
-            text = value.strip()
-            normalized = text if text.isdigit() else None
-            if normalized is not None:
-                normalized = str(int(normalized))
-        else:
-            normalized = None
+        normalized = _canonical_state_db_row_id_value(message.get(key))
         if normalized is None:
             return None, False
         values.add(normalized)
@@ -14957,7 +14991,23 @@ def _loose_session_message_content(value: str) -> str:
     return " ".join(re.findall(r"\w+", str(value or "").casefold()))
 
 
-_OCCURRENCE_IDENTITY_FIELDS = ("id", "message_id", "_state_db_row_id")
+_OCCURRENCE_STABLE_IDENTITY_FIELDS = ("id", "message_id")
+
+# The canonical field the durable namespace is emitted under.  All four
+# aliases name the SAME durable row, so they must produce the SAME identity
+# string: the comparison looks a namespace up by identity string, and two
+# spellings of one durable row would otherwise read as a conflict.
+_OCCURRENCE_DURABLE_IDENTITY_FIELD = "_state_db_row_id"
+
+# Prefix for the durable identity of a row whose durable provenance is
+# CONTRADICTORY (two aliases disagree) or malformed (a value that is not a row
+# id).  The owning helper reports such a row as invalid, so its durable
+# identity must not name a row -- but it must also not become "no identity":
+# that would let the row collapse onto a DIFFERENT durable row and silently
+# drop a real turn.  A token that can never equal a canonical row id keeps the
+# refusal (it conflicts with every valid durable identity) without guessing
+# which row the row meant.
+_OCCURRENCE_INVALID_DURABLE_PREFIX = "!raw:"
 
 
 def _established_occurrence_identities(msg: dict) -> tuple[str, ...]:
@@ -14977,23 +15027,83 @@ def _established_occurrence_identities(msg: dict) -> tuple[str, ...]:
     ``_stable_message_identity_details`` applies.  Two aliases carrying
     DIFFERENT values are contradictory provenance and both stay, so the row
     remains distinct from either.
+
+    The durable namespace is consumed through the owning helper's rules
+    (``_state_db_row_identity_details`` and the shared value rule), so every
+    durable alias is honoured and every one of them canonicalises the same
+    way:
+
+    * ``7``, ``7.0``, ``"7"`` and ``"007"`` name the SAME durable row, so they
+      must not contradict each other;
+    * a value that is not a row id at all (a bool, a negative number, a
+      non-numeric string) and two durable aliases that disagree are
+      contradictory provenance, so the row names NO durable row -- exactly
+      what the owning helper reports for the same row.  It still refuses to
+      collapse onto one (see below).
     """
     identities: list[str] = []
     seen: set[tuple[str, str]] = set()
-    for field in _OCCURRENCE_IDENTITY_FIELDS:
-        value = msg.get(field)
-        if value in (None, ""):
-            continue
-        identity = f"id:{field}:{value}"
+
+    def _add(identity: str) -> None:
         canonical = (
             _occurrence_identity_namespace(identity),
             _occurrence_identity_value(identity),
         )
         if canonical in seen:
-            continue
+            return
         seen.add(canonical)
         identities.append(identity)
+
+    for field in _OCCURRENCE_STABLE_IDENTITY_FIELDS:
+        value = msg.get(field)
+        if value in (None, ""):
+            continue
+        _add(f"id:{field}:{value}")
+
+    # The durable namespace follows the owning helper: it is established only
+    # when its aliases agree on ONE canonical row id.  The identity is emitted
+    # under the canonical field name so that every alias spelling of that row
+    # produces the same identity string.
+    durable_row_id, durable_valid = _state_db_row_identity_details(msg)
+    if durable_valid:
+        if durable_row_id is not None:
+            _add(f"id:{_OCCURRENCE_DURABLE_IDENTITY_FIELD}:{durable_row_id}")
+        return tuple(identities)
+
+    # Contradictory or malformed durable provenance establishes no durable
+    # identity -- but it must NOT read as "no durable identity at all": that
+    # would let the row collapse onto a DIFFERENT durable row and silently
+    # drop a real turn (#7587 fails closed: keep two rows that are provably
+    # different rather than suppressing one).  The token below names no row
+    # (it can never equal a canonical row id) while still refusing to collapse
+    # onto one, and it is stable, so two rows carrying the SAME broken
+    # provenance still agree with each other.
+    _add(
+        f"id:{_OCCURRENCE_DURABLE_IDENTITY_FIELD}:"
+        f"{_OCCURRENCE_INVALID_DURABLE_PREFIX}"
+        f"{_invalid_durable_provenance_fingerprint(msg)}"
+    )
     return tuple(identities)
+
+
+def _invalid_durable_provenance_fingerprint(msg: dict) -> str:
+    """Return a stable fingerprint of a row's broken durable provenance.
+
+    Two rows carrying the SAME contradictory or malformed durable aliases must
+    agree with each other, so the fingerprint is derived from the raw values
+    actually present.  It is a hex digest, so it can never collide with a
+    canonical row id (which is always decimal digits).
+    """
+    values = set()
+    for key in _STATE_DB_ROW_IDENTITY_FIELDS:
+        if key not in msg:
+            continue
+        value = msg.get(key)
+        if value in (None, ""):
+            continue
+        values.add(repr(value))
+    payload = "\x00".join(sorted(values)).encode("utf-8", "replace")
+    return hashlib.sha1(payload).hexdigest()
 
 
 def _session_message_occurrence_for_key(
