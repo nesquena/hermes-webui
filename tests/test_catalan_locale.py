@@ -180,7 +180,15 @@ def test_catalan_locale_preserves_placeholder_patterns():
     ca_block = extract_locale_block(ca_src, "ca")
 
     value_re = re.compile(r"^\s+([a-zA-Z0-9_]+):\s*(.+?)(?:,\s*$|\s*$)", re.MULTILINE)
-    placeholder_re = re.compile(r"\{[0-9]+\}|\$\{[a-zA-Z_][a-zA-Z0-9_]*\}")
+    # Every placeholder the runtime substitutes: indexed ({0}, {1}), named
+    # ({host}, {days}, {cmd}, …) and JS template interpolations (${n}). The
+    # lookbehind keeps the brace part of `${…}` out of the single-brace set so
+    # an interpolation is counted once, and `${1}` stays unmatched because it is
+    # a literal dollar amount ("{0}% of ${1} budget"), not a placeholder.
+    placeholder_re = re.compile(
+        r"(?<!\$)\{(?:[0-9]+|[A-Za-z_][A-Za-z0-9_]*)\}"
+        r"|\$\{[A-Za-z_][A-Za-z0-9_]*\}"
+    )
 
     def kv(block):
         out = {}
