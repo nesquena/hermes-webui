@@ -35075,6 +35075,10 @@ class _ManualCompressionMemoryHandler:
         self.wfile = io.BytesIO()
         self.status = None
         self.sent_headers = {}
+        # Config of the chat's own profile, for the /compress gateway guard in
+        # _handle_session_compress. The worker thread has no per-request
+        # profile, so an ambient config read there sees the process default.
+        self.session_profile_config = None
 
     def send_response(self, status):
         self.status = status
@@ -35146,6 +35150,11 @@ def _run_manual_compression_job(sid, body):
             from api import profiles as profiles_api
 
             with profiles_api.profile_env_for_background_worker(session, "manual compression", logger_override=logger):
+                # A pure read of the chat's own profile config (no scope change),
+                # so the gateway guard asks the same profile /compress/start did.
+                memory_handler.session_profile_config = get_config_for_profile_home(
+                    profiles_api.get_hermes_home_for_profile(getattr(session, "profile", None))
+                )
                 _handle_session_compress(memory_handler, body)
         else:
             _handle_session_compress(memory_handler, body)
@@ -35374,8 +35383,14 @@ def _handle_session_compress(handler, body):
         return bad(handler, str(e))
 
     # Same in-process/gateway mismatch as /compress/start: refuse before
-    # touching the session.
-    if refuse_on_gateway_backend(handler, "/compress", get_config_snapshot()):
+    # touching the session. On the manual-compression worker, ask the chat's
+    # own profile (set by _run_manual_compression_job), not the process default.
+    guard_config = getattr(handler, "session_profile_config", None)
+    if refuse_on_gateway_backend(
+        handler,
+        "/compress",
+        guard_config if guard_config is not None else get_config_snapshot(),
+    ):
         return
     sid = str(body.get("session_id") or "").strip()
     if not sid:
