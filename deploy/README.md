@@ -28,7 +28,15 @@ level — no `HERMES_WEBUI_PASSWORD` is needed.
 ## Installation
 
 ```bash
-# 1. Install the systemd unit (edit paths for your repo location)
+# 0. Create the backend service account and give it a writable checkout.
+#    hermes-webui.service runs as User=hermeswebui; without the account,
+#    systemd fails before start.sh runs. If you instead run the unit as
+#    your existing installation owner, change User=/Group= in the unit.
+sudo useradd --system --home /opt/hermes-webui --shell /usr/sbin/nologin hermeswebui
+sudo chown -R hermeswebui:hermeswebui /opt/hermes-webui
+
+# 1. Install the systemd unit (edit HERMES_WEBUI_ALLOWED_ORIGINS to your
+#    external origin https://<server_name>:8787 — see Security notes)
 sudo cp hermes-webui.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-webui
@@ -41,11 +49,15 @@ sudo cp nginx-webui.conf /etc/nginx/sites-available/webui
 sudo ln -sf /etc/nginx/sites-available/webui /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 
-# 4. Create system users that PAM will authenticate
+# 4. Create system users that PAM will authenticate.
+#    useradd alone leaves the account locked — set a password too,
+#    otherwise pam_unix cannot log the user in.
 sudo useradd -m -s /bin/bash deployer
+sudo passwd deployer
 
-# 5. Verify
-curl -k https://<your-host>:8787/api/status
+# 5. Verify (the PAM gate prompts for the password; --fail surfaces
+#    HTTP errors instead of printing an error page as success)
+curl --fail --user deployer -k https://<your-host>:8787/api/status
 ```
 
 ## Architecture
@@ -68,6 +80,12 @@ Browser  -->  nginx (port 8787, TLS, PAM auth)  -->  hermes-webui.service (port 
   `127.0.0.1`.
 - `proxy_set_header Host 127.0.0.1;` is the deliberate Host-header rewrite — it
   is not a workaround. It is the correct pattern for loopback-bound backends.
+  Because the Host is rewritten, the backend's CSRF/origin check sees
+  `127.0.0.1` while the browser sends `Origin: https://<server_name>:8787`;
+  the unit therefore sets `HERMES_WEBUI_ALLOWED_ORIGINS` to that external
+  origin. Without it, browser writes fail with 403. (`X-Forwarded-Host`
+  carries `$host` without the `:8787` port, so
+  `HERMES_WEBUI_TRUST_FORWARDED_HOST` alone is not sufficient.)
 - For publicly exposed setups with built-in per-user auth, use the
   `HERMES_WEBUI_PASSWORD` / OIDC approach documented in
   `docs/remote-access.md` instead of this PAM template.

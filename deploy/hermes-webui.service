@@ -4,11 +4,17 @@ After=network.target
 
 [Service]
 Type=simple
+# The unit runs as the `hermeswebui` system account — create it before
+# enabling the unit (see deploy/README.md, Installation step 0).
 User=hermeswebui
 Group=hermeswebui
 WorkingDirectory=/opt/hermes-webui
 Environment=HERMES_WEBUI_HOST=127.0.0.1
 Environment=HERMES_WEBUI_PORT=8788
+# Required behind this proxy: nginx rewrites Host to 127.0.0.1, so the
+# backend's origin check would reject browser writes (403) unless the
+# external origin is allowlisted. Adjust to your server_name + port.
+Environment=HERMES_WEBUI_ALLOWED_ORIGINS=https://ut189103.duckdns.org:8787
 ExecStart=/opt/hermes-webui/start.sh
 Restart=on-failure
 RestartSec=5

@@ -4,7 +4,8 @@
 # Used by nginx's ngx_http_auth_pam_module (auth_pam_service_name webui-auth).
 #
 # Authenticates system user accounts via pam_unix.so against /etc/shadow.
-# Create users with: sudo useradd -m -s /bin/bash deployer
+# Create users with: sudo useradd -m -s /bin/bash deployer && sudo passwd deployer
+# (useradd alone creates a locked account that cannot pass pam_unix.)
 
 #%PAM-1.0
 auth     required   pam_unix.so
