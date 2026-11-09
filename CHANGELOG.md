@@ -117,6 +117,8 @@
 
 ### Fixed
 
+- **Gateway-backed sessions refuse the features that would run the agent inside WebUI.** `/btw`, `/background`, `/compress`, the non-streaming `/api/chat` and the one-shot helper calls (update summaries, commit messages) build an in-process agent. On a gateway-backed deployment they failed with a provider-credential error or quietly ran a turn outside the gateway. They now return 409 with `code: "gateway_mode_unsupported"` and the feature name, before any session, stream or compression job is created. Non-gateway setups are unchanged. Thanks @samikrc. (#8860, fixes #8821)
+
 - **The clarify-timeout tests follow the installed Agent's default.** Agent `177dbc1bcbf1` changed the canonical clarify timeout default from 3600 to 90 seconds, and WebUI uses the Agent's resolver by design, so two tests that hard-coded 3600 failed with current Agents. For absent or invalid values they now expect the installed Agent's own answer, and a new test pins WebUI's inline fallback (3600) when the Agent package can't be imported. Test-only; WebUI clarify prompts follow the Agent's default as before. (#8943, fixes #8942)
 
 - **The docs link check can no longer cancel a release check.** The broken-link step in `docs-ci` was meant to be informational, but it had no time limit of its own: when GitHub throttled its requests, the job's 8-minute limit cancelled the whole job, and a cancelled check stops a release merge. The step now has its own 5-minute limit, so a slow run ends as an informational failure and the job stays green. It also skips `CONTRIBUTORS.md`, whose ~470 GitHub profile links come from GitHub's own merged-PR list. CI-only; no app change. (#8946, fixes #8945)
