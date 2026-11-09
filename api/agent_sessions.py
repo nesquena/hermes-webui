@@ -130,6 +130,7 @@ SOURCE_LABELS = {
     'api_server': 'API',
     'cli': 'CLI',
     'cron': 'Cron',
+    'desktop': 'Desktop',
     'dingtalk': 'DingTalk',
     'discord': 'Discord',
     'email': 'Email',
@@ -160,12 +161,12 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw in {'acp', 'cli', 'tui'}:
-        # 'acp' (Agent Client Protocol adapter — Zed, external device bridges)
-        # is a local interactive agent client like the CLI/TUI: its sessions
-        # live only in state.db, so classifying it 'other' would leave them
-        # invisible in both sidebar buckets (webui skips the state.db
-        # projection; cli keeps only CLI-classified rows).
+    elif raw in {'acp', 'cli', 'desktop', 'tui'}:
+        # ACP adapters and Hermes Desktop are interactive clients like the
+        # CLI/TUI. Their sessions live only in state.db, so classifying them
+        # as 'other' would leave them invisible in both sidebar buckets
+        # (webui skips the state.db projection; cli keeps only interactive
+        # rows).
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -317,10 +318,10 @@ def is_cli_session_row(row: dict) -> bool:
     if source in {"external_agent", "external-agent"}:
         return True
     if (
-        source_tag in {"acp", "cli", "tui"}
-        or raw_source in {"acp", "cli", "tui"}
-        or source_name in {"acp", "cli", "tui"}
-        or source_label in {"acp", "cli", "tui"}
+        source_tag in {"acp", "cli", "desktop", "tui"}
+        or raw_source in {"acp", "cli", "desktop", "tui"}
+        or source_name in {"acp", "cli", "desktop", "tui"}
+        or source_label in {"acp", "cli", "desktop", "tui"}
     ):
         return True
 
@@ -364,11 +365,13 @@ def is_cli_session_row_visible(row: dict) -> bool:
     }
     if "tui" in interactive_sources:
         return True
-    if "acp" in interactive_sources:
-        # Like TUI rows, user-driven ACP sessions stay visible even when
-        # ended/untitled. Unlike TUI, an ACP connection can record only
-        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
-        # require at least one user turn before surfacing the row.
+    if {"acp", "desktop"} & interactive_sources:
+        # Like TUI rows, user-driven ACP/Desktop sessions stay visible even
+        # when ended/untitled. Unlike TUI, these clients can leave connection
+        # records containing only assistant/tool/system rows, so require at
+        # least one user turn when roles are known. The database projection
+        # preserves a positive-message fallback for legacy Desktop history
+        # whose roles are unavailable.
         return _count_user_turns(row) > 0
 
     if _has_cli_lineage(row):
@@ -914,8 +917,18 @@ def read_importable_agent_session_rows(
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
             if 'role' in message_cols:
-                user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+                # NULL-only roles carry no evidence about who spoke. Keep the
+                # legacy message-count fallback for that Desktop session only;
+                # known assistant/tool-only sessions must still stay hidden.
+                user_message_count_expr = (
+                    "CASE WHEN LOWER(COALESCE(s.source, '')) = 'desktop' "
+                    "AND COUNT(m.role) = 0 "
+                    f"THEN COUNT(m.{count_col}) "
+                    "ELSE COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END) END"
+                )
             else:
+                # Legacy schemas cannot prove message roles. Preserve their
+                # positive-message fallback instead of hiding Desktop history.
                 user_message_count_expr = f"COUNT(m.{count_col})"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"

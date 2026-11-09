@@ -105,7 +105,7 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
             return MagicMock(returncode=1, stdout=b'', stderr=b'')
         if git_args == ['fetch', 'origin', '--tags', '--force']:
             return MagicMock(returncode=0, stdout='', stderr='')
-        if git_args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if git_args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return MagicMock(returncode=0, stdout='', stderr='')
         if git_args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return MagicMock(returncode=0, stdout='origin/master\n', stderr='')

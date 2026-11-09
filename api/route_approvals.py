@@ -650,7 +650,7 @@ def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str 
     return None
 
 
-def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dict | None, int]:
+def submit_gateway_pending_mirror(session_key: str, approval: dict, *, cancel_event=None) -> tuple[dict | None, int]:
     """Mirror the live gateway head into WebUI polling state under a typed tag.
 
     Every mirrored entry describes one pending approval to the UI. Run-backed
@@ -676,6 +676,8 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
     the correct producer's own card reappears on the next reconcile.
     """
     with _lock:
+        if cancel_event is not None and cancel_event.is_set():
+            return None, 0
         run_id = str(approval.get("run_id") or "").strip()
         approval_id = str(approval.get("approval_id") or "").strip()
         live_gateway_queue = _gateway_queues.get(session_key) or []
