@@ -8,9 +8,15 @@ On a model switch, the context-length lookup used to pick the key with its own c
 
 For a ``custom:<name>`` session the switch now asks GET's helper (``_session_context_length_lookup_state``, #8928):
 WebUI's own half of the chat's routing chain, read-only (``lookup_only``), with ``caller_key_only`` so the selection
-can't add a key. The same helper sends no key when the chat refuses the provider as switched off (``enabled: false``
-on its authoritative record, the verdict #8938 item 1 gave the config selection). Every expected pair below is the
-chat's own, measured on the real chain with the installed Agent. Other providers keep the previous path.
+can't add a key. The rest of the lookup (a per-model ``context_length`` under the stored spelling) still reads the
+session's stored model and provider. The helper sends no key when the Agent refuses the provider before the chat's
+merge: ``_raise_if_provider_disabled`` reads exactly ``providers.get(<id stripped and lower-cased>)``. Other
+spellings and named records are left to the merge, which is the chat's own route: beside a legacy entry the chat
+still routes through it. Every expected pair below is the chat's own, measured on the real chain with the installed
+Agent. Other providers keep the previous path.
+
+Streaming needs no change: its five lookup sites pass the chat's merged bundle (``resolved_*``, and the Agent built
+from it), and the lookup returns that pair. The stream rows below pin it.
 """
 import copy
 import sys
@@ -41,9 +47,11 @@ def _model_k1():
     return {"provider": "custom:h", "default": "m-x", "base_url": A, "api_key": "K1"}
 
 
-def _fake_metadata(calls):
+def _fake_metadata(calls, seen=None):
     def fake_get_model_context_length(model, base_url="", api_key="", **kwargs):
         calls.append((base_url, api_key))
+        if seen is not None:
+            seen.append(dict(kwargs, model=model))
         return 123_456
 
     mod = types.ModuleType("agent.model_metadata")
@@ -58,13 +66,13 @@ def _use(cfg, monkeypatch):
     return cfg
 
 
-def _switch(cfg, monkeypatch, provider="custom:h"):
+def _switch(cfg, monkeypatch, provider="custom:h", seen=None):
     """Run the real model-switch site and return every (URL, key) the lookup sent."""
     _use(cfg, monkeypatch)
     calls = []
     session = types.SimpleNamespace(model="m-old", model_provider=provider, last_used_model=None, gateway_routing=None,
                                     context_length=0, threshold_tokens=0, last_prompt_tokens=0)
-    with patch.dict(sys.modules, {"agent.model_metadata": _fake_metadata(calls)}):
+    with patch.dict(sys.modules, {"agent.model_metadata": _fake_metadata(calls, seen)}):
         changed = routes._invalidate_session_route_state_if_changed(session, model="m-x", provider=provider)
     assert changed
     assert session.context_length == 123_456
@@ -194,14 +202,38 @@ def test_get_sent_the_legacy_key_for_a_refused_session_before(monkeypatch):
     assert [key for _, key in _get(on, monkeypatch)] != [""]
 
 
-def test_the_disabled_verdict_is_the_config_selections(monkeypatch):
-    """GET and the switch use #8938 item 1's verdict, so the three paths can't disagree on what is switched off."""
+@pytest.mark.parametrize("flag", [False, "off", "no", "0", None])
+def test_the_refusal_is_the_agents_exact_rule(monkeypatch, flag):
+    """``providers.get(<id stripped and lower-cased>)`` and ``is_provider_enabled``, as every supported Agent's
+    ``_raise_if_provider_disabled`` reads them. ``null`` is off there too."""
+    _use(_cfg({"custom:h": {"base_url": A, "enabled": flag}}), monkeypatch)
+    assert routes._context_lookup_agent_refuses_switched_off("custom:h")
+    assert routes._context_lookup_agent_refuses_switched_off(" Custom:H ")
+    _use(_cfg({"custom:h": {"base_url": A, "enabled": True}}), monkeypatch)
+    assert not routes._context_lookup_agent_refuses_switched_off("custom:h")
+
+
+@pytest.mark.parametrize("providers", [
+    {"Custom:H": {"base_url": A, "enabled": False}},
+    {" custom:h ": {"base_url": A, "enabled": False}},
+    {"one": {"name": "h", "base_url": A, "enabled": False}},
+    {"h": {"base_url": A, "enabled": False}},
+    {},
+], ids=["case-variant", "space-variant", "named-record", "raw-named", "none"])
+def test_no_other_spelling_is_the_agents_refusal(monkeypatch, providers):
+    """The Agent's lookup is a plain dict ``get`` with no case-folding of record keys and no alias match."""
+    _use(_cfg(providers), monkeypatch)
+    assert not routes._context_lookup_agent_refuses_switched_off("custom:h")
+
+
+def test_get_takes_the_agents_refusal_not_the_selections_verdict(monkeypatch):
+    """#8938 item 1's ``_context_lookup_provider_disabled`` is the config selection's own (WebUI's native-record
+    verdict). On the chat route the merge refuses what the chat's route refuses; the helper adds only the Agent's
+    exact rule (Codex round 1 on #8963)."""
     seen = []
-    real = routes._context_lookup_provider_disabled
-    monkeypatch.setattr(routes, "_context_lookup_provider_disabled",
-                        lambda *a, **k: seen.append(a[0]) or real(*a, **k))
-    _get(REFUSED_SHAPES[1][1], monkeypatch)
-    assert "custom:h" in seen
+    monkeypatch.setattr(routes, "_context_lookup_provider_disabled", lambda *a, **k: seen.append(a) or False)
+    assert [key for _, key in _get(REFUSED_SHAPES[1][1], monkeypatch)] == [""]
+    assert seen == []
 
 
 # ── The switch takes GET's pair only for a named custom provider ──────────────────────────────────────────────
@@ -301,3 +333,167 @@ def test_a_generic_custom_session_keeps_the_config_selection(monkeypatch):
                          model={"provider": "custom", "default": "m-x", "base_url": A, "api_key": "KM"}),
                     monkeypatch, provider="custom")
     assert calls == [(A, "KM")]
+
+
+# ── Codex round 1 on #8963 ────────────────────────────────────────────────────────────────────────────────────
+# F2: a switched-off alias or named record with no exact record, beside a legacy custom_providers entry. The Agent's
+# exact lookup misses, the merge routes through the legacy entry and the chat sends its key; exp-v0.52.660 and #8956
+# send that pair on the switch and GET. The first build of this fix refused here (WebUI's native verdict).
+
+LEGACY_L = [{"name": "h", "base_url": L, "api_key": "KL"}]
+LEGACY_A = [{"name": "h", "base_url": A, "api_key": "KL"}]
+
+LEGACY_SHAPES = [
+    ("case-variant-off-beside-legacy", _cfg(_alias("K3", False), legacy=LEGACY_L), (L, "KL")),
+    ("space-variant-off-beside-legacy", _cfg(_alias("K3", False, spelling=" custom:h "), legacy=LEGACY_L), (L, "KL")),
+    ("case-variant-off-beside-legacy-and-model-key", _cfg(_alias("K3", False), model=_model_k1(), legacy=LEGACY_L),
+     (L, "KL")),
+    ("case-variant-off-at-another-host-beside-legacy-at-the-model-url",
+     _cfg({"Custom:H": {"base_url": B, "api_key": "K3", "enabled": False}},
+          model={"provider": "custom:h", "default": "m-x", "base_url": A}, legacy=LEGACY_A), (A, "KL")),
+    ("case-variant-off-beside-legacy-same-url", _cfg(_alias("K3", False), legacy=LEGACY_A), (A, "KL")),
+    ("case-variant-off-beside-legacy-same-url-and-model-key", _cfg(_alias("K3", False), model=_model_k1(),
+                                                                    legacy=LEGACY_A), (A, "KL")),
+    ("named-record-off-beside-legacy", _cfg({"one": {"name": "h", "base_url": A, "api_key": "KO", "enabled": False}},
+                                            legacy=LEGACY_A), (A, "KL")),
+    # Senior round 1's variant: the raw-named record switched off.
+    ("raw-named-off-beside-legacy", _cfg({"h": {"base_url": B, "api_key": "K2", "enabled": False}}, legacy=LEGACY_L),
+     (L, "KL")),
+]
+
+
+@pytest.mark.parametrize("cfg,chat_pair", [s[1:] for s in LEGACY_SHAPES], ids=[s[0] for s in LEGACY_SHAPES])
+def test_a_switched_off_spelling_beside_a_legacy_entry_keeps_the_chats_pair(monkeypatch, cfg, chat_pair):
+    assert _switch(cfg, monkeypatch) == _get(cfg, monkeypatch) == [chat_pair]
+
+
+@pytest.mark.parametrize("cfg,chat_pair", [s[1:] for s in LEGACY_SHAPES], ids=[s[0] for s in LEGACY_SHAPES])
+def test_the_legacy_shapes_expected_pair_is_the_merges(monkeypatch, cfg, chat_pair):
+    _use(cfg, monkeypatch)
+    route = config.merge_custom_provider_runtime_bundle(
+        "custom:h", None, None, {}, lookup_provider="custom:h",
+        connection_resolver=config.resolve_custom_provider_connection,
+    )
+    config.raise_for_custom_provider_route(route)
+    assert (route["base_url"], route["api_key"]) == chat_pair
+
+
+def test_a_switched_off_spelling_alone_is_still_refused(monkeypatch):
+    """Without the legacy entry the merge has no source and refuses, and so does the chat (AuthError)."""
+    cfg = _cfg(_alias("K3", False), model={"provider": "custom:h", "default": "m-x", "base_url": A})
+    assert [key for _, key in _switch(cfg, monkeypatch)] == [""]
+    assert [key for _, key in _get(cfg, monkeypatch)] == [""]
+
+
+# F1: a raw-named record's per-model context_length. The switch still reads the stored spelling (providers.mylab),
+# as #8956 did; only the URL and key come from the chat route. (GET and streaming ask under the resolved
+# custom:mylab and miss it, as on exp-v0.52.660: a known residual, not changed here.)
+
+
+@pytest.mark.parametrize("record,chat_pair", [
+    ({"base_url": A, "api_key": "KR"}, (A, "KR")),
+    ({"base_url": A, "api_key_env": VAR}, (A, "KV")),
+], ids=["literal", "api-key-env"])
+def test_a_raw_named_records_model_window_still_reaches_the_switch(monkeypatch, record, chat_pair):
+    monkeypatch.setenv(VAR, "KV")
+    cfg = _cfg({"mylab": {**record, "models": {"m-x": {"context_length": 16384}}}},
+               model={"provider": "mylab", "default": "m-x"})
+    seen = []
+    assert _switch(cfg, monkeypatch, provider="mylab", seen=seen) == [chat_pair]
+    assert [s.get("config_context_length") for s in seen] == [16384]
+    assert [s.get("provider") for s in seen] == ["mylab"]
+
+
+def test_the_switch_passes_the_stored_pair_and_the_requested_id(monkeypatch):
+    seen = {}
+    real = routes._resolve_context_length_for_session_model
+
+    def spy(*a, **k):
+        seen.update(k, args=a)
+        return real(*a, **k)
+
+    monkeypatch.setattr(routes, "_resolve_context_length_for_session_model", spy)
+    monkeypatch.setenv(VAR, "KV")
+    _switch(_cfg({"mylab": {"base_url": A, "api_key_env": VAR}}, model={"provider": "mylab", "default": "m-x"}),
+            monkeypatch, provider="mylab")
+    assert seen["args"] == ("m-x", "mylab")
+    assert seen["requested_provider"] == "custom:mylab"
+    assert (seen["base_url"], seen["api_key"], seen["caller_key_only"]) == (A, "KV", True)
+
+
+# ── Streaming: no change needed. Its lookups pass the chat's merged bundle and send that pair ────────────────
+# api/streaming.py sets resolved_* from the merged bundle (the chat's pair, provider "custom" for a named custom
+# provider) and builds the Agent from it. Two lookup forms read it: the Agent-fallback sites
+# (_context_lookup_agent_fallback) and the three caller sites that pass the Agent's own URL and key.
+
+STREAM_SHAPES = [s for s in CHAT_ROUTE_SHAPES if not s[0].startswith(("r12-enabled", "item2"))] + [
+    ("raw-named-literal", _cfg({"mylab": {"base_url": A, "api_key": "KR"}},
+                               model={"provider": "mylab", "default": "m-x", "base_url": A, "api_key": "KM"}),
+     (A, "KR")),
+]
+
+
+def _bundle(cfg, monkeypatch, provider):
+    _use(cfg, monkeypatch)
+    route = config.merge_custom_provider_runtime_bundle(
+        provider, None, None, {}, lookup_provider=provider,
+        connection_resolver=config.resolve_custom_provider_connection,
+    )
+    config.raise_for_custom_provider_route(route)
+    return route
+
+
+def _stream_lookups(cfg, bundle_provider, url, key, model="m-x"):
+    agent = types.SimpleNamespace(api_key=key, base_url=url, provider=bundle_provider, model=model)
+    fallback = routes._context_length_lookup_inputs_for_model(
+        model, bundle_provider, base_url=getattr(agent, "base_url", "") or url or "", cfg=cfg,
+        **routes._context_lookup_agent_fallback(agent, key, url, bundle_provider))
+    caller = routes._context_length_lookup_inputs_for_model(
+        model, bundle_provider, base_url=getattr(agent, "base_url", "") or url or "",
+        api_key=getattr(agent, "api_key", "") or key or "", cfg=cfg)
+    return [(fallback.base_url, fallback.api_key), (caller.base_url, caller.api_key)]
+
+
+@pytest.mark.parametrize("cfg,chat_pair", [s[1:] for s in STREAM_SHAPES], ids=[s[0] for s in STREAM_SHAPES])
+def test_streaming_sends_the_chats_pair(monkeypatch, cfg, chat_pair):
+    provider = "custom:mylab" if "mylab" in cfg["providers"] else "custom:h"
+    route = _bundle(cfg, monkeypatch, provider)
+    assert route["provider"] == "custom"
+    assert (route["base_url"], route["api_key"]) == chat_pair
+    assert _stream_lookups(cfg, route["provider"], route["base_url"], route["api_key"]) == [chat_pair, chat_pair]
+
+
+def test_streaming_an_ollama_session_sends_the_chats_pair(monkeypatch):
+    """r10 on #8956: the chat's bundle (measured with the Agent) is provider ollama, the model block's KM at A; a
+    generic providers.custom record's api_key_env key never replaces it."""
+    monkeypatch.setenv(VAR, "KV")
+    cfg = _cfg({"custom": {"base_url": B, "api_key_env": VAR}},
+               model={"provider": "ollama", "default": "m-x", "base_url": A, "api_key": "KM"})
+    _use(cfg, monkeypatch)
+    assert _stream_lookups(cfg, "ollama", A, "KM") == [(A, "KM"), (A, "KM")]
+
+
+def test_the_streaming_sites_read_the_merged_bundle():
+    """Source pin: the rows above model the five lookup sites as they are. If a site starts passing something else
+    (the Agent's raw runtime pair, a re-derived record), these tests no longer prove streaming needs no change."""
+    import pathlib
+    import re
+
+    src = (pathlib.Path(routes.__file__).parent / "streaming.py").read_text()
+    assert len(re.findall(r"resolved_api_key = _runtime_bundle\['api_key'\]", src)) == 3
+    assert len(re.findall(r"resolved_base_url = _runtime_bundle\['base_url'\]", src)) == 3
+    assert len(re.findall(r"_context_lookup_agent_fallback\(\s*agent, resolved_api_key, resolved_base_url, "
+                          r"resolved_provider", src)) == 2
+    callers = []
+    for match in re.finditer(r"= _cli_(?:u|cc|sse)\(\n", src):
+        call = src[match.end():src.index("cfg=", match.end())]
+        found = re.search(r"api_key=([^\n]+)\n", call)
+        assert found, call
+        callers.append(found.group(1).strip())
+    assert sorted(callers) == sorted([
+        "_key_u,",
+        "getattr(agent, 'api_key', '') or resolved_api_key or '',",
+        "getattr(agent, 'api_key', '') or resolved_api_key or '',",
+    ])
+    # _cli_u's _key_u is the live Agent's own key (getattr(_agent, 'api_key')), built from the same bundle.
+    assert "_key_u = getattr(_agent, 'api_key', '') or ''" in src
