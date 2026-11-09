@@ -33,6 +33,7 @@ never to run.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shlex
@@ -40,6 +41,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 # Value for ``@pytest.mark.parametrize("host_git", [...], indirect=True)``.
 EMULATED_HOST_WITH_SENTINEL_HELPERS = "emulated-host-with-sentinel-helpers"
@@ -70,11 +73,32 @@ def _write_executable(path: Path, text: str) -> Path:
 
 
 def git_supports_config_redirects(executable: str) -> bool:
+    return _git_version_supports_redirects(executable)
+
+
+@functools.lru_cache(maxsize=None)
+def _git_version_supports_redirects(executable: str) -> bool:
     result = subprocess.run(
         [executable, "--version"], capture_output=True, text=True, timeout=20,
     )
     match = re.search(r"(\d+)\.(\d+)", result.stdout or "")
     return bool(match) and (int(match[1]), int(match[2])) >= _MIN_GIT_FOR_CONFIG_REDIRECTS
+
+
+def require_config_redirects(executable: str) -> None:
+    """Skip, rather than run, when Git can't be kept off the host's config.
+
+    Git older than 2.32 ignores ``GIT_CONFIG_SYSTEM``/``GIT_CONFIG_GLOBAL``, and
+    ``GIT_CONFIG_NOSYSTEM`` does not stop production's explicit
+    ``git config --system`` read. Running the opted-in tests there would hand the
+    host's credential helpers (a keychain, a credential manager) the tests'
+    credentials, which is exactly what this isolation exists to prevent.
+    """
+    if not git_supports_config_redirects(executable):
+        pytest.skip(
+            "Git older than 2.32 ignores GIT_CONFIG_SYSTEM/GIT_CONFIG_GLOBAL, so these "
+            "git-credential tests can't be kept off the host's credential helpers"
+        )
 
 
 def resolve_host_git() -> HostGit | None:

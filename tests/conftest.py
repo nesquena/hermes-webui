@@ -888,6 +888,9 @@ def isolated_host_git_config(host_git, monkeypatch, tmp_path_factory):
     """
     if host_git is None:
         return None
+    # Real host git, even when host_git is the emulated one: its wrapper execs it.
+    real = _host_git_isolation.resolve_host_git()
+    _host_git_isolation.require_config_redirects((real or host_git).executable)
     return _host_git_isolation.isolate_git_from_host_config(
         monkeypatch, tmp_path_factory.mktemp("host-git-isolation"), host_git,
     )

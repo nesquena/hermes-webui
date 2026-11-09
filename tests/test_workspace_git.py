@@ -2745,3 +2745,25 @@ def test_config_names_for_scope_passes_windows_hide_flags(monkeypatch, tmp_path)
     assert captured.get("creationflags") == windows_hide_flags(), (
         "_config_names_for_scope must pass creationflags=windows_hide_flags()"
     )
+
+
+@pytest.mark.parametrize(("version", "skips"), [("2.31.8", True), ("2.32.0", False), ("2.43.0", False)])
+def test_host_git_isolation_skips_instead_of_running_on_git_without_config_redirects(
+    tmp_path, version, skips,
+):
+    """#8931: Git older than 2.32 ignores GIT_CONFIG_SYSTEM/GLOBAL, so the opted-in
+    tests must skip there rather than run with the host's credential helpers."""
+    import os
+
+    if os.name == "nt":
+        pytest.skip("the fake git is a shell script")
+    from tests import _git_host_config_isolation as isolation
+
+    fake = tmp_path / f"git-{version}"
+    fake.write_text(f"#!/bin/sh\necho 'git version {version}'\n", encoding="utf-8")
+    fake.chmod(0o755)
+    if skips:
+        with pytest.raises(pytest.skip.Exception, match="older than 2.32"):
+            isolation.require_config_redirects(str(fake))
+    else:
+        isolation.require_config_redirects(str(fake))
