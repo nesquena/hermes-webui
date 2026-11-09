@@ -9529,6 +9529,24 @@ def _context_lookup_resolve_key(raw_api_key, raw_key_env=None) -> str:
     return ""
 
 
+def _context_lookup_record_key(record: dict) -> str:
+    """The key a ``providers.<id>`` record declares: ``api_key``, a ``${VAR}``
+    reference, or the variable named by ``key_env`` or, when that is blank, by
+    ``api_key_env`` (#8938).
+
+    That is the record's own credential ladder: WebUI respells ``api_key_env`` to
+    ``key_env`` for a record (``api_config._normalized_raw_provider_record``), and
+    the Agent reads both for one, so the chat sends this key. Only records take the
+    second spelling. The chat reads ``key_env`` alone on a legacy
+    ``custom_providers`` entry and on the model block, so the lookup does too.
+    """
+    key_env = str(record.get("key_env") or "").strip()
+    if not key_env:
+        api_key_env = record.get("api_key_env")
+        key_env = api_key_env.strip() if isinstance(api_key_env, str) else ""
+    return _context_lookup_resolve_key(record.get("api_key"), key_env)
+
+
 def _context_length_config_api_key_and_owner(
     provider: str | None,
     cfg: dict | None,
@@ -9538,6 +9556,13 @@ def _context_length_config_api_key_and_owner(
     The key's own origins are its source's base URL, plus the provider's fixed
     metadata hosts when the source is that provider's own: a built-in
     ``providers.<id>`` record, or the model block configured for that provider (#8822).
+
+    When a record for the session's provider is switched off (``enabled: false``),
+    the selection takes no key at all (#8938). The Agent refuses a session on a
+    disabled provider, custom or built-in, so the chat sends no key, neither the
+    record's nor the model block's; falling through to the model block would send a
+    key the chat never sends. A record's key reference may be spelled
+    ``api_key_env`` (:func:`_context_lookup_record_key`).
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     provider = _canonical_context_provider(provider)
@@ -9545,12 +9570,15 @@ def _context_length_config_api_key_and_owner(
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        for provider_key, provider_cfg in providers_cfg.items():
-            if not isinstance(provider_cfg, dict):
-                continue
-            if not _providers_match_for_context(provider_key, provider):
-                continue
-            api_key = _resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env"))
+        matching = [
+            (provider_key, provider_cfg)
+            for provider_key, provider_cfg in providers_cfg.items()
+            if isinstance(provider_cfg, dict) and _providers_match_for_context(provider_key, provider)
+        ]
+        if any(not api_config._raw_provider_record_enabled(provider_cfg) for _, provider_cfg in matching):
+            return "", frozenset()
+        for provider_key, provider_cfg in matching:
+            api_key = _context_lookup_record_key(provider_cfg)
             if api_key:
                 builtin = not str(provider_key or "").strip().lower().startswith("custom:")
                 return api_key, _context_lookup_owned_origins(
@@ -9595,6 +9623,14 @@ def _context_lookup_same_value_origins(api_key: object, cfg: dict | None) -> fro
     model block configured for a built-in provider, also grants that provider's
     own fixed hosts, never another provider's. Blanks, unresolved references and
     token sources grant nothing.
+
+    A record the user switched off (``enabled: false``) is no holder (#8938): the
+    Agent refuses a session on it, so it sends its key nowhere. A legacy
+    ``custom_providers`` entry stays a holder when switched off, because the
+    Agent's legacy view still routes it and the chat still sends its key (the
+    same reason ``api_config``'s identity claims keep counting legacy rows). A
+    record's key reference may be spelled ``api_key_env``
+    (:func:`_context_lookup_record_key`).
     """
     value = _context_lookup_key_value(api_key)
     if not value:
@@ -9604,9 +9640,9 @@ def _context_lookup_same_value_origins(api_key: object, cfg: dict | None) -> fro
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         for provider_key, provider_cfg in providers_cfg.items():
-            if not isinstance(provider_cfg, dict):
+            if not api_config._raw_provider_record_enabled(provider_cfg):
                 continue
-            if _context_lookup_resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env")) != value:
+            if _context_lookup_record_key(provider_cfg) != value:
                 continue
             builtin = not str(provider_key or "").strip().lower().startswith("custom:")
             owned |= _context_lookup_owned_origins(
