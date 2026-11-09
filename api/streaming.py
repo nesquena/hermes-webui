@@ -1338,6 +1338,30 @@ def _is_session_lease_wait_message(kind: str, message: str) -> bool:
     return any(marker in m for marker in _SESSION_LEASE_WAIT_MARKERS)
 
 
+def _is_memory_recall_status(kind: str, message: str, agent) -> bool:
+    """Return True for the Agent's per-turn memory recall indicator.
+
+    Right after an external memory provider injects context, hermes-agent emits
+    ``MemoryManager.describe_recall()`` through ``_emit_status`` (kind
+    ``lifecycle``), e.g. "🧠 Honcho — recalled 3 memories". The line has no
+    marker of its own, so instead of matching its wording this compares it with
+    the value the agent's own memory manager reports for the same turn: user
+    text or any other lifecycle notice can never be promoted, and a provider
+    that words its label differently still matches.
+    """
+    if str(kind or '').strip().lower() != 'lifecycle':
+        return False
+    text = str(message or '').strip()
+    describe = getattr(getattr(agent, '_memory_manager', None), 'describe_recall', None)
+    if not text or not callable(describe):
+        return False
+    try:
+        expected = str(describe() or '').strip()
+    except Exception:
+        return False
+    return bool(expected) and expected == text
+
+
 def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     """Return True only for real Hermes context-compression start notices.
 
@@ -14633,8 +14657,9 @@ def _run_agent_streaming(
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
 
-        Passes compression events as 'compressing' events and rate-limit/fallback
-        events as 'warning' events so the frontend can surface them to the user.
+        Passes compression events as 'compressing' events, rate-limit/fallback
+        events as 'warning' events and the memory recall indicator as a
+        'memory_recall' event so the frontend can surface them to the user.
         Also captures a terminal non-retryable provider error (#5940) so the
         turn-completion classifier can report the real cause instead of the
         generic no_response fallback. All other lifecycle messages are dropped.
@@ -14666,6 +14691,11 @@ def _run_agent_streaming(
         # use the same channel so a delayed turn explains itself.
         if _is_session_lease_wait_message(_kind, _message):
             put('warning', {'type': 'session_lease_wait', 'message': _message})
+            return
+        # Which external memory provider fed this turn ("🧠 <provider> — recalled
+        # N memories"). Other surfaces (CLI, messaging gateway) already show it.
+        if _is_memory_recall_status(_kind, _message, agent):
+            put('memory_recall', {'session_id': session_id, 'message': _message})
             return
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
         if _is_fallback_notice:

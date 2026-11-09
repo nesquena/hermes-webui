@@ -7560,6 +7560,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    source.addEventListener('memory_recall',e=>{
+      // An external memory provider injected context for this turn. Same quiet
+      // composer notice as a fallback warning; nothing is persisted.
+      if(!S.session||S.session.session_id!==activeSid) return;
+      try{
+        const d=JSON.parse(e.data||'{}')||{};
+        if(d.session_id&&d.session_id!==activeSid) return;
+        if(d.message) setComposerStatus(String(d.message),6000);
+      }catch(_){}
+    });
+
     source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       // #8517: memory is off for the agent serving this stream's session. It updates
@@ -7820,7 +7831,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','memory_recall','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

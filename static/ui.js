@@ -11454,17 +11454,21 @@ function setComposerStatus(t,timeoutMs){
   if(statusHidden){
     el.style.display='none';
     el.textContent='';
+    el.removeAttribute('title');
     return;
   }
   if(!t){
     el.style.display='none';
     el.textContent='';
+    el.removeAttribute('title');
     return;
   }
   // Defensive reset: a stale hidden class should never block live status text.
   el.classList.remove('composer-control-hidden');
   el.removeAttribute('aria-hidden');
   el.textContent=t;
+  // The status is ellipsized to a narrow width; keep the full text on hover.
+  el.title=t;
   el.style.display='';
   if(timeoutMs>0){
     const timer=setTimeout(()=>{
