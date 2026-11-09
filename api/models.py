@@ -12773,6 +12773,30 @@ def _decode_state_db_content(value):
     return decoded
 
 
+def _state_db_projection_keeps_row_identity(msg) -> bool:
+    """Whether the default projection keeps a row's private id (provider replay, native image)."""
+    native_image_projection = (
+        msg.get('role') == 'user'
+        and isinstance(msg.get('content'), str)
+        and '[screenshot]' in msg['content']
+    )
+    return native_image_projection or (
+        isinstance(msg.get('api_content'), str) and bool(msg['api_content'])
+    )
+
+
+def without_requested_row_identity(msg):
+    """Return *msg* as the default projection shapes it, from an ``include_row_identity`` read."""
+    if (
+        isinstance(msg, dict)
+        and '_state_db_row_id' in msg
+        and not _state_db_projection_keeps_row_identity(msg)
+    ):
+        msg = dict(msg)
+        del msg['_state_db_row_id']
+    return msg
+
+
 def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
@@ -12796,22 +12820,10 @@ def _project_state_db_message(row, available, id_col, optional, *, include_row_i
         if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
             value = _json_loads_if_string(value)
         msg[col] = value
-    native_image_projection = (
-        msg.get('role') == 'user'
-        and isinstance(msg.get('content'), str)
-        and '[screenshot]' in msg['content']
-    )
     if (
         id_col
         and row['id'] is not None
-        and (
-            include_row_identity
-            or native_image_projection
-            or (
-                isinstance(msg.get('api_content'), str)
-                and msg['api_content']
-            )
-        )
+        and (include_row_identity or _state_db_projection_keeps_row_identity(msg))
     ):
         msg['_state_db_row_id'] = row['id']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
@@ -14311,6 +14323,140 @@ def _adopt_agent_semantic_payload(target: dict | None, source: dict | None) -> N
             target[key] = copy.deepcopy(value)
 
 
+def _cross_store_pairing_key(msg, *, from_sidecar: bool):
+    """Visible identity of one turn's row across the WebUI sidecar and state.db.
+
+    Deliberately narrower than `_session_message_visible_key`: it excludes the
+    `api_content` provider sidecar that key appends via
+    `_session_message_key_with_sidecar`. `api_content` is state.db-only by
+    design, so a gateway turn's Agent copy commonly carries provider bytes its
+    sidecar twin does not have, and keying on it would give the two copies of
+    ONE turn different keys. The shared visible key is left untouched -- other
+    merge paths rely on its stricter identity.
+
+    The Agent copy of a user prompt can carry the workspace prefix the sidecar
+    copy never has; it is stripped from string content only, since structured
+    content keeps its out-of-band tuple identity.
+    """
+    if not isinstance(msg, dict):
+        return ("non_dict", repr(msg))
+    tool_calls = msg.get("tool_calls")
+    tool_calls_key = json.dumps(tool_calls, sort_keys=True, default=str) if tool_calls else ""
+    role = str(msg.get("role") or "")
+    content = _normalized_session_message_content(msg)
+    if role == "user" and not from_sidecar and isinstance(content, str):
+        from api.streaming import _strip_workspace_prefix
+
+        content = " ".join(_strip_workspace_prefix(content, include_legacy=True).split())
+    return (role, content, tool_calls_key)
+
+
+def _state_db_path_for_profile(profile) -> Path:
+    if isinstance(profile, str) and profile:
+        return _get_profile_home(profile) / 'state.db'
+    return _active_state_db_path()
+
+
+def state_db_message_id_floor(sid, *, profile=None) -> int | None:
+    """Return the highest state.db row id *sid* holds, before a Gateway run starts.
+
+    Rows the Agent writes for the run land above it. ``0`` when the store has
+    no rows for the session yet; ``None`` when the store cannot say, which
+    leaves the run's sidecar rows unstamped rather than guessed.
+    """
+    db_path = _state_db_path_for_profile(profile)
+    if not db_path.exists():
+        return 0
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+            if 'id' not in columns:
+                return None
+            floor = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?", (str(sid),)
+            ).fetchone()[0]
+        return int(floor)
+    except Exception:
+        return None
+
+
+def state_db_session_rows_after(sid, floor, *, profile=None) -> list | None:
+    """Return *sid*'s active user/assistant state.db rows above *floor*, with private row ids.
+
+    Only the rows the sidecar turn can mirror are read, so a tool-heavy run
+    does not decode its tool outputs here.
+    """
+    db_path = _state_db_path_for_profile(profile)
+    if not db_path.exists():
+        return []
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            available = {str(row['name']) for row in conn.execute("PRAGMA table_info(messages)")}
+            if not {'id', 'role', 'content', 'timestamp'}.issubset(available):
+                return None
+            optional = [
+                col for col in ('tool_call_id', 'tool_calls', 'tool_name', 'api_content')
+                if col in available
+            ]
+            # The same archived-row filter as the display reader.
+            active_clause = " AND (active IS NULL OR active != 0)" if 'active' in available else ""
+            rows = conn.execute(
+                f"SELECT {', '.join(['id', 'role', 'content', 'timestamp', *optional])} "
+                "FROM messages WHERE session_id = ? AND id > ? AND role IN ('user', 'assistant')"
+                f"{active_clause} ORDER BY id ASC",
+                (str(sid), int(floor)),
+            ).fetchall()
+            return [
+                _project_state_db_message(row, available, True, optional, include_row_identity=True)
+                for row in rows
+            ]
+    except Exception:
+        return None
+
+
+def stamp_gateway_turn_row_ids(run_rows, turn_messages) -> None:
+    """Give a Gateway turn's sidecar rows the row ids of their state.db twins.
+
+    *run_rows* are the state.db rows the Agent wrote for this run (above the
+    pre-run floor). They prove a twin only while they hold exactly one turn:
+    a single user row. A concurrent Telegram turn, a steer, or a transcript
+    rewrite (which reinserts the whole history under new ids) adds prompts,
+    and then nothing is stamped. Within one turn, a sidecar row takes the id
+    of the single row that matches it on the cross-store pairing key; a reply
+    the stream joined across tool calls matches none. The stamp carries the
+    row's own state.db timestamp too (``STATE_DB_ROW_TIMESTAMP_KEY``). Any id
+    the row carried before -- inherited from the run a regeneration
+    superseded -- is dropped either way, so an unproven row is never paired.
+    """
+    rows = [row for row in run_rows or () if isinstance(row, dict)]
+    one_turn = sum(1 for row in rows if row.get('role') == 'user') == 1
+    run_keys = [(_cross_store_pairing_key(row, from_sidecar=False), row) for row in rows] if one_turn else []
+    for msg in turn_messages:
+        if not isinstance(msg, dict):
+            continue
+        for alias in (*STATE_DB_ROW_ID_ALIASES, STATE_DB_ROW_TIMESTAMP_KEY):
+            msg.pop(alias, None)
+        key = _cross_store_pairing_key(msg, from_sidecar=True)
+        matches = [row for row_key, row in run_keys if row_key == key]
+        if (
+            len(matches) == 1
+            and type(matches[0].get('_state_db_row_id')) is int
+            and isinstance(matches[0].get('timestamp'), (int, float))
+        ):
+            msg['_state_db_row_id'] = matches[0]['_state_db_row_id']
+            msg[STATE_DB_ROW_TIMESTAMP_KEY] = matches[0]['timestamp']
+
+
+# Every key a message's private state.db row id has been stored under.
+STATE_DB_ROW_ID_ALIASES = ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id")
+# The stamped row's own state.db timestamp. A row id alone outlives the file
+# that issued it (a state.db restored from a backup or recreated hands the same
+# ids out again); the Agent's own timestamp for that row does not repeat, and a
+# rewrite (/retry, /undo, /compress) gives reinserted rows fresh ones.
+STATE_DB_ROW_TIMESTAMP_KEY = "_state_db_row_timestamp"
+
+
 def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:
     """Return ``(row_id, valid)`` for private state.db provenance aliases.
 
@@ -14321,7 +14467,7 @@ def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bo
     if not isinstance(message, dict):
         return None, True
     values = set()
-    for key in ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+    for key in STATE_DB_ROW_ID_ALIASES:
         if key not in message or message.get(key) in (None, ""):
             continue
         value = message.get(key)
@@ -17090,7 +17236,7 @@ def reconciled_state_db_messages_for_session(
     )
 
 
-def get_cli_session_messages(sid, *, profile=None) -> list:
+def get_cli_session_messages(sid, *, profile=None, include_row_identity: bool = False) -> list:
     """Read messages for a single CLI/external-agent session.
 
     Preserve tool-call/result and reasoning metadata from the agent state.db so
@@ -17101,7 +17247,9 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     """
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
-    return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
+    return get_state_db_session_messages(
+        sid, stitch_continuations=True, profile=profile, include_row_identity=include_row_identity,
+    )
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:

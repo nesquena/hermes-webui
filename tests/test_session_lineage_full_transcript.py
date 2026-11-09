@@ -37,7 +37,7 @@ def test_session_endpoint_merges_sidecar_and_lineage_messages_for_cli_sessions(m
     monkeypatch.setattr(
         routes,
         "get_cli_session_messages",
-        lambda sid: [
+        lambda sid, **_kw: [
             {"role": "user", "content": "root user", "timestamp": 1.0},
             {"role": "assistant", "content": "tip assistant", "timestamp": 2.0},
         ],
@@ -99,7 +99,7 @@ def test_session_endpoint_preserves_distinct_messages_with_different_ids(monkeyp
     monkeypatch.setattr(
         routes,
         "get_cli_session_messages",
-        lambda sid: [
+        lambda sid, **_kw: [
             {"role": "user", "content": "root user", "timestamp": 1.0},
             {
                 "id": "cli-retry",
