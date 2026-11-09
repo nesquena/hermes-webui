@@ -27,6 +27,7 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 
 
 def _slice(start_marker, end_marker, start_from=0):
@@ -72,6 +73,47 @@ def _storage_guard():
     return _slice(
         "function _writeSettingsStorageMirror(",
         "function _syncSpeechPreferenceCache(",
+    )
+
+
+def _boot_voice_mode_consumer():
+    """The real boot consumer from boot.js that reads localStorage directly."""
+    start = BOOT_JS.index("function _voiceModePrefEnabled(){")
+    end = BOOT_JS.index("let _voiceModeState='idle';", start)
+    assert start < end
+    return BOOT_JS[start:end]
+
+
+def _boot_raw_audio_consumer():
+    """The real boot consumer from boot.js that applies raw audio mode in memory."""
+    start = BOOT_JS.index("function _applyRawAudioModePreference(enabled){")
+    assignment = "window._applyRawAudioModePreference=_applyRawAudioModePreference;"
+    end = BOOT_JS.index(assignment, start) + len(assignment)
+    assert start < end
+    return BOOT_JS[start:end]
+
+
+def _boot_speech_mirror():
+    """The real boot mirror that applies server speech values before hydration."""
+    start = BOOT_JS.index("function _mirrorSpeechSettingsFromServer(s){")
+    assignment = (
+        "window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;"
+    )
+    end = BOOT_JS.index(assignment, start) + len(assignment)
+    assert start < end
+    return BOOT_JS[start:end]
+
+
+def _payload_helpers():
+    """Preferences payload builders plus the real autosave POST path.
+
+    The harness composes production functions rather than stubbing them, so the
+    autosave regression exercises the same `_schedulePreferencesAutosave`,
+    `_rememberPreferencesSaved` and `_autosavePreferencesSettings` the panel uses.
+    """
+    return _slice(
+        "function _setOwnedSpeechPayload(",
+        "function _retryPreferencesAutosave(",
     )
 
 
@@ -135,6 +177,7 @@ function $(id){
 }
 const document = {
   createElement(tag){ return new FakeEl(tag); },
+  getElementById(id){ return els[id] || null; },
   documentElement: { classList: { toggle(){} } },
 };
 const window = {
@@ -193,7 +236,18 @@ __MODE_ASSERTS__
 
 _REFUSE_ASSERTS = r"""
 // (a) A refused write must leave hydration finished and every later control
-// both present and wired, showing the server-authoritative value.
+// both present and wired, showing the effective runtime value. With no cache
+// entry, the boot consumers read their fallback, so that is what the control
+// must show (#8749). Raw audio is applied in memory by boot.js, so it keeps the
+// server value.
+const hasNote = (el) => {
+  if(!el) return false;
+  if(el.title && el.title.includes('não aplicado neste navegador')) return true;
+  if(el.dataset && el.dataset.unapplied === 'true') return true;
+  if(el.unappliedNote && (el.unappliedNote.textContent || '').includes('não aplicado neste navegador')) return true;
+  if(el.children && el.children.some(c => c && c.className === 'settings-unapplied-note')) return true;
+  return false;
+};
 let threw = null;
 try {
   __hydrateHead(payload);   // font size runs first in loadSettingsPanel()
@@ -213,24 +267,31 @@ const threwAt = threw
     ')'
   : '';
 const wired = [
-  ['settingsTtsEnabled', 'onchange', 'checked', true],
-  ['settingsTtsAutoRead', 'onchange', 'checked', true],
-  ['settingsVoiceModeEnabled', 'onchange', 'checked', true],
+  ['settingsTtsEnabled', 'onchange', 'checked', false],
+  ['settingsTtsAutoRead', 'onchange', 'checked', false],
+  ['settingsVoiceModeEnabled', 'onchange', 'checked', false],
   ['settingsRawAudio', 'onchange', 'checked', true],
-  ['settingsTtsRate', 'oninput', 'value', '1.4'],
-  ['settingsTtsPitch', 'oninput', 'value', '0.8'],
+  ['settingsTtsRate', 'oninput', 'value', '1'],
+  ['settingsTtsPitch', 'oninput', 'value', '1'],
 ];
 wired.forEach(([id, handler, prop, want]) => {
   const el = els[id];
   assert.ok(el, id + ' was never hydrated' + threwAt);
   assert.strictEqual(typeof el[handler], 'function', id + ' has no ' + handler + ' handler');
-  assert.strictEqual(el[prop], want, id + '.' + prop + ' must show the server value');
+  assert.strictEqual(el[prop], want, id + '.' + prop + ' must show the effective runtime value');
 });
-assert.strictEqual(els.settingsTtsEngine.value, 'edge', 'engine select must show the server value');
+assert.strictEqual(els.settingsTtsEngine.value, 'browser', 'engine select must show the effective runtime value');
 assert.strictEqual(typeof els.settingsTtsEngine.onchange, 'function', 'engine select has no onchange');
 assert.strictEqual(typeof els.settingsTtsVoice.onchange, 'function', 'voice select has no onchange');
 assert.strictEqual(els.settingsFontSize.value, 'large', 'font size select must still hydrate');
 assert.deepStrictEqual(fontSizeApps, ['large'], '_applyFontSize must still run');
+// The divergent speech controls carry the unapplied note; raw audio does not.
+['settingsTtsEnabled', 'settingsTtsAutoRead', 'settingsVoiceModeEnabled',
+ 'settingsTtsEngine', 'settingsTtsRate', 'settingsTtsPitch'].forEach((id) => {
+  assert.ok(hasNote(els[id]), id + ' must show the unapplied note');
+});
+assert.strictEqual(hasNote(els.settingsRawAudio), false,
+  'raw audio is applied in memory, so it must not show the unapplied note');
 
 // (c) the rest of the panel is not blocked by the refusal.
 assert.strictEqual(els.settingsNotificationsEnabled.checked, true, 'hydration stopped before the notification toggle');
@@ -347,7 +408,7 @@ def _run_harness(refuse):
 
 
 def test_refused_storage_write_during_hydration_keeps_speech_controls_wired():
-    """(a)+(c): refusal is non-fatal, controls wired, server value authoritative."""
+    """(a)+(c): refusal is non-fatal, controls wired, effective value shown."""
     _run_harness(refuse=True)
 
 
@@ -425,3 +486,331 @@ def test_speech_handler_writes_go_through_the_guard():
         assert (
             f"localStorage.setItem('{storage_key}'" not in PANELS_JS
         ), f"{storage_key} still has an unguarded localStorage.setItem"
+
+
+_REGRESSION_HARNESS = r"""
+const assert = require('assert');
+
+const REFUSE = true;
+const store = new Map();
+class Storage {
+  getItem(key){ return store.has(key) ? store.get(key) : null; }
+  setItem(key, value){
+    if(REFUSE) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    store.set(key, String(value));
+  }
+  removeItem(key){ store.delete(key); }
+  clear(){ store.clear(); }
+}
+const localStorage = new Storage();
+
+const warnings = [];
+const errors = [];
+console.warn = (...args) => warnings.push(args.map(String).join(' '));
+console.error = (...args) => errors.push(args.map(String).join(' '));
+
+class FakeEl {
+  constructor(tag){
+    this.tagName = tag || 'div';
+    this.id = '';
+    this.value = '';
+    this.checked = false;
+    this.textContent = '';
+    this.innerHTML = '';
+    this.children = [];
+    this.listeners = [];
+    this.hidden = false;
+    this.disabled = false;
+    this.style = {};
+    this.dataset = {};
+    this.classList = { add(){}, remove(){}, toggle(){}, contains(){ return false; } };
+    this.onchange = null;
+    this.oninput = null;
+    this.title = '';
+  }
+  querySelector(sel){
+    if(sel === '.settings-unapplied-note'){
+      return this.children.find(c => c && c.className === 'settings-unapplied-note') || null;
+    }
+    return null;
+  }
+  querySelectorAll(){ return []; }
+  appendChild(node){
+    if(node) node.parentElement = this;
+    this.children.push(node);
+    return node;
+  }
+  addEventListener(type, fn, opts){ this.listeners.push({ type: type, fn: fn }); }
+  closest(sel){
+    if(sel === '.settings-field') return this.parentElement || this;
+    return null;
+  }
+  focus(){}
+  setAttribute(k, v){ this[k] = v; }
+  remove(){
+    if(this.parentElement && Array.isArray(this.parentElement.children)){
+      const idx = this.parentElement.children.indexOf(this);
+      if(idx !== -1) this.parentElement.children.splice(idx, 1);
+    }
+  }
+}
+const els = {};
+function $(id){
+  if(!(id in els)) els[id] = new FakeEl('div');
+  els[id].id = id;
+  return els[id];
+}
+const document = {
+  createElement(tag){ return new FakeEl(tag); },
+  getElementById(id){ return els[id] || null; },
+  querySelector(){ return null; },
+  documentElement: { classList: { toggle(){} }, dataset: {} },
+};
+const window = {
+  speechSynthesis: {
+    getVoices(){ return [{ name: 'Test Voice', lang: 'en-US' }]; },
+    addEventListener(){},
+  },
+};
+const speechSynthesis = window.speechSynthesis;
+const t = (key) => key;
+const esc = (value) => String(value);
+
+const applyTtsCalls = [];
+const toasts = [];
+const fontSizeApps = [];
+function _applyTtsEnabled(value){ applyTtsCalls.push(value); }
+function showToast(message){ toasts.push(String(message)); }
+function _applyFontSize(value){ fontSizeApps.push(value); }
+function _syncFontSizePicker(){}
+
+// Real preferences autosave surface. Capture the debounce timer so the test can
+// flush it deterministically, and record the POST body api() receives.
+const posts = [];
+const pendingTimers = [];
+global.setTimeout = (fn) => { pendingTimers.push(fn); return pendingTimers.length; };
+global.clearTimeout = () => {};
+let _settingsPreferencesAutosaveTimer = null;
+let _settingsPreferencesAutosaveRetryPayload = null;
+let _settingsDirty = false;
+let _settingsHermesDefaultModelOnOpen = '';
+let _settingsHermesDefaultModelProviderOnOpen = null;
+function api(path, options){ posts.push(options); return Promise.resolve(JSON.parse(options.body)); }
+function setScreenReaderMode(){}
+function applyEmptyStateSuggestionPref(){}
+function applyEmptyStatePanelPref(){}
+function applyConversationOutlinePreference(){}
+function _persistDefaultMessageMode(value){ return value || 'steer'; }
+function _applyBusyComposerPlaceholder(){}
+function clearMessageRenderCache(){}
+function renderMessages(){}
+
+// State used by the real boot raw-audio consumer injected below.
+let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
+function _updateMicTooltip(){}
+
+// Setup fake DOM for real boot consumer
+const hasSTT = true;
+const hasTTS = true;
+const modeBtn = $('btnVoiceMode');
+const bar = $('voiceModeBar');
+const indicator = $('voiceModeIndicator');
+const label = $('voiceModeLabel');
+const micBtn = $('btnMic');
+const ta = $('msg');
+function _deactivate(){}
+
+/*__HELPERS__*/
+/*__PAYLOAD_HELPERS__*/
+
+// Inject the REAL boot consumers from boot.js (not stubs)
+/*__BOOT_RAW_AUDIO__*/
+/*__BOOT_SPEECH_MIRROR__*/
+/*__BOOT_VOICE_MODE__*/
+
+function __hydrate(settings){
+/*__HYDRATION__*/
+}
+
+function __hydrateHead(settings){
+/*__HEAD__*/
+}
+
+// 1. Conflicting obsolete cache in store
+store.set('hermes-voice-mode-button', 'false');
+store.set('hermes-raw-audio-mode', 'false');
+store.set('hermes-tts-enabled', 'false');
+store.set('hermes-tts-auto-read', 'false');
+store.set('hermes-tts-engine', 'browser');
+store.set('hermes-tts-rate', '1');
+store.set('hermes-tts-pitch', '1');
+
+// Real boot consumer runs at boot:
+_applyVoiceModePref();
+assert.strictEqual(modeBtn.style.display, 'none', 'boot consumer must hide voice mode button when cached as false');
+assert.strictEqual(_voiceModePrefEnabled(), false, 'boot consumer must evaluate to false');
+
+// Server payload with conflicting authoritative values
+const payload = {
+  tts_enabled: true,
+  tts_auto_read: true,
+  tts_engine: 'edge',
+  tts_voice: 'en-US-AriaNeural',
+  tts_rate: 1.4,
+  tts_pitch: 0.8,
+  voice_mode_button: true,
+  voice_continuous: true,
+  voice_silence_ms: 2400,
+  raw_audio_mode: true,
+  notifications_enabled: true,
+  sidebar_density: 'detailed',
+  font_size: 'large',
+  persisted_speech_keys: [
+    'tts_enabled', 'tts_auto_read', 'tts_engine', 'tts_voice', 'tts_rate',
+    'tts_pitch', 'voice_mode_button', 'voice_continuous', 'voice_silence_ms',
+    'raw_audio_mode',
+  ],
+};
+
+// Real boot sequence: the server mirror applies raw audio in memory, then the
+// voice-mode consumer reads the refused cache.
+_mirrorSpeechSettingsFromServer(payload);
+_applyVoiceModePref();
+assert.strictEqual(modeBtn.style.display, 'none', 'voice mode still reads the refused cache after the mirror');
+
+let threw = null;
+try {
+  __hydrateHead(payload);
+  __hydrate(payload);
+} catch(e) {
+  threw = e;
+}
+assert.strictEqual(threw, null, 'hydration must not throw: ' + (threw && threw.stack));
+
+// 1. Coherence: checkbox reflects runtime value (false), agreeing with _voiceModePrefEnabled() and modeBtn
+assert.strictEqual(els.settingsVoiceModeEnabled.checked, false, 'checkbox must reflect effective runtime value (false), not unapplied server value');
+assert.strictEqual(_voiceModePrefEnabled(), false, 'boot consumer must agree with effective runtime value');
+assert.strictEqual(modeBtn.style.display, 'none', 'button display must agree with runtime value');
+
+// 2. Note communicating unapplied server value must be present
+const hasNote = (el) => {
+  if(!el) return false;
+  if(el.title && el.title.includes('não aplicado neste navegador')) return true;
+  if(el.dataset && el.dataset.unapplied === 'true') return true;
+  if(el.unappliedNote && (el.unappliedNote.textContent || '').includes('não aplicado neste navegador')) return true;
+  if(el.children && el.children.some(c => c && c.className === 'settings-unapplied-note')) return true;
+  return false;
+};
+assert.ok(hasNote(els.settingsVoiceModeEnabled), 'unapplied note ("não aplicado neste navegador") must be present on voiceModeCb');
+
+// 3. Exactly 1 warning logged for refused mirror write
+assert.strictEqual(warnings.length, 1, 'refusal must be reported exactly once: ' + JSON.stringify(warnings));
+assert.ok(/localStorage write refused/.test(warnings[0]), 'warning must name refused write: ' + warnings[0]);
+
+// 3b. The refusal is observable to the caller, not swallowed: hydration uses
+// this return value to choose between the server value and the runtime cache.
+// #8564's mic seed applies the same pattern to `_syncSpeechPreferenceCache`.
+assert.strictEqual(_writeSettingsStorageMirror('hermes-probe-refused', 'x'), false, 'refused mirror write must report failure');
+assert.strictEqual(_syncSpeechPreferenceCache('tts_engine', 'browser'), false, 'refused cache sync must report failure');
+
+// 4. Other speech consumers. Raw audio is applied directly from the server by
+// boot.js (_applyRawAudioModePreference), so its runtime is the server value
+// even though the cache write was refused; no "unapplied" note is needed.
+assert.strictEqual(_rawAudioMode, true, 'raw audio boot consumer must apply the server value in memory');
+assert.strictEqual(els.settingsRawAudio.checked, true, 'raw_audio_mode must agree with its runtime (server value)');
+assert.strictEqual(store.get('hermes-raw-audio-mode'), 'false', 'raw audio cache write must still be refused');
+assert.strictEqual(hasNote(els.settingsRawAudio), false, 'raw_audio_mode is applied, so it must not show the unapplied note');
+
+assert.strictEqual(els.settingsTtsEnabled.checked, false, 'tts_enabled must reflect effective runtime value');
+assert.ok(hasNote(els.settingsTtsEnabled), 'tts_enabled must show unapplied note');
+
+assert.strictEqual(els.settingsTtsAutoRead.checked, false, 'tts_auto_read must reflect effective runtime value');
+assert.ok(hasNote(els.settingsTtsAutoRead), 'tts_auto_read must show unapplied note');
+
+assert.strictEqual(els.settingsTtsEngine.value, 'browser', 'tts_engine must reflect effective runtime value');
+assert.ok(hasNote(els.settingsTtsEngine), 'tts_engine must show unapplied note');
+
+assert.strictEqual(els.settingsTtsRate.value, '1', 'tts_rate must reflect effective runtime value');
+assert.ok(hasNote(els.settingsTtsRate), 'tts_rate must show unapplied note');
+
+assert.strictEqual(els.settingsTtsPitch.value, '1', 'tts_pitch must reflect effective runtime value');
+assert.ok(hasNote(els.settingsTtsPitch), 'tts_pitch must show unapplied note');
+
+// 5. Unrelated saves must omit every speech key whose mirror write was refused,
+// so the durable server value is never replaced by the stale cache. Raw audio
+// was applied in memory by boot.js, so it may still be sent.
+const unappliedKeys = [
+  'voice_mode_button', 'tts_enabled', 'tts_auto_read', 'tts_engine',
+  'tts_voice', 'tts_rate', 'tts_pitch', 'voice_continuous', 'voice_silence_ms',
+];
+const unrelatedSavePayload = _preferencesPayloadFromUi();
+unappliedKeys.forEach((key) => {
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(unrelatedSavePayload, key),
+    'unrelated save must omit unapplied key ' + key + ': ' + JSON.stringify(unrelatedSavePayload)
+  );
+});
+assert.strictEqual(unrelatedSavePayload.raw_audio_mode, true, 'raw_audio_mode is applied, so it may be sent');
+
+// 6. A real unrelated edit still reaches the server: the autosave timer fires,
+// the POST is sent, and its body omits the unapplied speech keys.
+const postsBefore = posts.length;
+els.settingsNotificationsEnabled.checked = true;
+const notifListener = els.settingsNotificationsEnabled.listeners.find((l) => l.type === 'change');
+assert.ok(notifListener, 'notification toggle must be wired to the autosave');
+notifListener.fn();
+assert.strictEqual(posts.length, postsBefore, 'autosave must stay debounced');
+assert.strictEqual(pendingTimers.length, 1, 'autosave timer must be armed');
+assert.strictEqual(warnings.length, 1, 'remembering the saved prefs must not add catch noise');
+
+pendingTimers.shift()().then(() => {
+  assert.strictEqual(posts.length, postsBefore + 1, 'autosave POST must actually be sent');
+  const body = JSON.parse(posts[postsBefore].body);
+  assert.strictEqual(body.notifications_enabled, true, 'POST must carry the unrelated edit');
+  unappliedKeys.forEach((key) => {
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(body, key),
+      'autosave POST must omit unapplied key ' + key + ': ' + JSON.stringify(body)
+    );
+  });
+  assert.strictEqual(body.raw_audio_mode, true, 'autosave POST may carry the applied raw-audio value');
+  assert.deepStrictEqual(errors, []);
+  assert.deepStrictEqual(toasts, []);
+}).catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+
+// 7. Explicit user change clears note and persists the user's choice.
+els.settingsVoiceModeEnabled.checked = true;
+els.settingsVoiceModeEnabled.onchange.call(els.settingsVoiceModeEnabled);
+assert.strictEqual(hasNote(els.settingsVoiceModeEnabled), false, 'user change must clear unapplied note');
+const userSavePayload = _preferencesPayloadFromUi();
+assert.strictEqual(userSavePayload.voice_mode_button, true, 'explicit user change must persist chosen value');
+"""
+
+
+def test_conflicting_cache_refused_write_reflects_runtime_and_shows_unapplied_note():
+    """#8749: Conflicting obsolete cache + refused write must reflect effective runtime
+    value, show the unapplied note, and preserve durable server value on unrelated saves."""
+    script = (
+        _REGRESSION_HARNESS.replace("/*__HELPERS__*/", _speech_helpers())
+        .replace("/*__PAYLOAD_HELPERS__*/", _payload_helpers())
+        .replace("/*__BOOT_RAW_AUDIO__*/", _boot_raw_audio_consumer())
+        .replace("/*__BOOT_SPEECH_MIRROR__*/", _boot_speech_mirror())
+        .replace("/*__BOOT_VOICE_MODE__*/", _boot_voice_mode_consumer())
+        .replace("/*__HYDRATION__*/", _speech_hydration())
+        .replace("/*__HEAD__*/", _font_size_hydration())
+    )
+    result = subprocess.run(
+        ["node", "-"],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "node harness failed\n--- stdout ---\n%s\n--- stderr ---\n%s"
+            % (result.stdout, result.stderr)
+        )
