@@ -9535,9 +9535,10 @@ def _context_lookup_record_reads_api_key_env(provider_key: object) -> bool:
     It does on the records WebUI's own merge serves for a named ``custom:<name>`` route,
     which respells ``api_key_env`` to ``key_env`` on the record it selects
     (``api_config._normalized_raw_provider_record``): a ``custom:<name>`` key, the generic
-    ``custom`` record, and a keyed record whose key is no built-in or plugin provider
-    (``api_config._is_native_custom_provider_key``). The Agent's own resolver reads both
-    spellings on such a record too.
+    ``custom`` record, and a keyed record whose key is no built-in or plugin provider, neither
+    in WebUI's tables (``api_config._is_native_custom_provider_key``) nor in the installed
+    Agent's registry (:func:`_context_lookup_agent_serves_builtin`). The Agent's own resolver
+    reads both spellings on such a record too.
 
     It doesn't on a built-in provider's record (``providers.anthropic``): the Agent reads
     that record's ``api_key_env`` only for its model listing and URL blocks, never for the
@@ -9549,7 +9550,33 @@ def _context_lookup_record_reads_api_key_env(provider_key: object) -> bool:
         return False
     if raw.startswith("custom:") or api_config._canonicalise_provider_id(raw) == "custom":
         return True
-    return api_config._is_native_custom_provider_key(raw)
+    return api_config._is_native_custom_provider_key(raw) and not _context_lookup_agent_serves_builtin(raw)
+
+
+def _context_lookup_agent_serves_builtin(raw: str) -> bool:
+    """Whether the installed Agent serves the name of a ``providers.<raw>`` record as its own
+    built-in provider (#8938).
+
+    The Agent's chat scans ``providers:`` for a raw name only when that name is no canonical
+    built-in (``runtime_provider_custom._shadowed_by_builtin``, after its own name
+    normalisation), so for a built-in it never reads the record's ``api_key_env``. WebUI's
+    provider tables lag the Agent's registry (``tencent-tokenplan`` is in the Agent's, not in
+    WebUI's), so the Agent is asked. With no Agent installed there is no chat and no metadata
+    call, and WebUI's tables decide. An Agent that can't be asked (a renamed function, a
+    missing module, an error) answers True: the lookup reads less, never a key the chat
+    doesn't send.
+    """
+    try:
+        import hermes_cli  # noqa: F401
+    except ImportError:
+        return False
+    try:
+        from hermes_cli import runtime_provider_custom as agent_custom
+
+        name = agent_custom._normalize_custom_provider_name(raw)
+        return bool(agent_custom._shadowed_by_builtin(name))
+    except Exception:
+        return True
 
 
 def _context_lookup_record_key(record: dict, provider_key: object = None) -> str:
