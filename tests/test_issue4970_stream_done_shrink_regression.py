@@ -260,7 +260,7 @@ def test_done_defers_live_dom_removal_but_other_terminal_paths_still_clear():
     """
     clear_live = _extract("clearLiveToolCards")
     done_start = MESSAGES_JS.index("source.addEventListener('done',e=>{")
-    done = MESSAGES_JS[done_start : done_start + 14000]
+    done = MESSAGES_JS[done_start : done_start + 18000]
     harness = textwrap.dedent(f"""
         let removed = 0;
         let timerClears = 0;

@@ -59,6 +59,10 @@ class TestIssue1436BackendFallback:
         # would trigger a spurious Session.load() reload onto a different object.
         s.read_only = False
         s._loaded_metadata_only = False
+        # A real Session's profile is a str or None. A bare MagicMock attribute is
+        # neither; #8834's read-only ownership check (which can see this stub when a
+        # route below leaves it in SESSIONS) fails closed on a non-string profile.
+        s.profile = None
         s.last_prompt_tokens = last_prompt_tokens
         s.input_tokens = input_tokens
         s.output_tokens = 0

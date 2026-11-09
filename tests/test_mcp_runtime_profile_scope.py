@@ -46,6 +46,36 @@ requires_process_home_pin = pytest.mark.skipif(
 
 SCOPE_PROFILE = "profile"
 SCOPE_UNAVAILABLE = "unavailable"
+
+
+def _agent_pins_profile_home_into_stdio_env() -> bool:
+    """Whether the installed agent pins the served profile's HERMES_HOME into every stdio child's env.
+
+    Since hermes-agent 9d8efb35 the stdio spawner adds ``HERMES_HOME`` (the ACTIVE profile's home) to
+    the child env it builds, and that env is part of the connect inputs whose digest decides whether a
+    profile may adopt another profile's connection. Two profiles with an otherwise identical stdio
+    route therefore resolve to different inputs and each opens its own connection; earlier agents
+    share one. Both are valid, so the adoption tests assert the generation they run against.
+    """
+    try:
+        from tools.mcp_tool_config import _build_safe_env
+    except Exception:  # pragma: no cover - depends on the installed agent
+        return False
+    try:
+        return "HERMES_HOME" in _build_safe_env({})
+    except Exception:  # pragma: no cover - depends on the installed agent
+        return False
+
+
+def _assert_adopter_connection(mcp_env, owner_conn) -> None:
+    """profile-write configured the same route profile-read already connected: on an agent that
+    shares identical routes it adopted the owner's connection (owns none); on one that pins
+    HERMES_HOME per profile it opened its own, distinct from the owner's."""
+    adopter_conn = mcp_env.connection("profile-write")
+    if _agent_pins_profile_home_into_stdio_env():
+        assert adopter_conn is not None and adopter_conn is not owner_conn
+    else:
+        assert adopter_conn is None  # adopted, not owned
 READ_TOOLS = {"mcp__atlassian__jira_get_issue", "mcp__atlassian__confluence_search"}
 WRITE_TOOL = "mcp__atlassian__jira_create_issue"
 
@@ -259,12 +289,13 @@ def test_reload_applies_the_requested_profiles_config_only(mcp_env):
 
 @requires_process_home_pin
 def test_reloading_an_adopting_profile_keeps_the_owners_connection(mcp_env):
-    """Identical routes share one connection; the adopter's reload must not stop it."""
+    """Identical routes share one connection (or, on an agent that pins HERMES_HOME per profile,
+    each profile holds its own); the adopter's reload must not stop the owner's."""
     mcp_env.configure("profile-write", atlassian=mcp_env.atlassian("profile-read", read_only=True))
     mcp_env.chat_turn("profile-read")
     mcp_env.chat_turn("profile-write")
     owner_conn = mcp_env.connection("profile-read")
-    assert mcp_env.connection("profile-write") is None  # adopted, not owned
+    _assert_adopter_connection(mcp_env, owner_conn)
     # The adopted connection serves profile-write: status, inventory and the
     # reload summary all count it (it is not "Added" from the user's point of view).
     assert mcp_env.servers("profile-write")["atlassian"]["status"] == "active"
@@ -281,14 +312,15 @@ def test_reloading_an_adopting_profile_keeps_the_owners_connection(mcp_env):
 
 @requires_process_home_pin
 def test_deleting_an_adopting_profiles_last_server_detaches_its_tools_on_reload(mcp_env):
-    """A profile that adopted another profile's identical connection deletes its only
-    server: its reload must drop its tools (they were callable after reload before)
-    while the owner's connection keeps running."""
+    """A profile that adopted another profile's identical connection (or holds its own for the
+    same route, on an agent that pins HERMES_HOME per profile) deletes its only server: its
+    reload must drop its tools (they were callable after reload before) while the owner's
+    connection keeps running."""
     mcp_env.configure("profile-write", atlassian=mcp_env.atlassian("profile-read", read_only=True))
     mcp_env.chat_turn("profile-read")
     mcp_env.chat_turn("profile-write")
     owner_conn = mcp_env.connection("profile-read")
-    assert mcp_env.connection("profile-write") is None  # adopted, not owned
+    _assert_adopter_connection(mcp_env, owner_conn)
     assert READ_TOOLS <= _tool_names(mcp_env.tools("profile-write"))
 
     mcp_env.configure("profile-write")  # no server left
