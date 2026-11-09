@@ -568,12 +568,12 @@ def test_native_context_same_url_preserves_requested_record_authority(monkeypatc
     data = {"model": {"provider": "custom:second", "base_url": URL}, "providers": dict(reversed(records) if reverse else records)}
     bind(monkeypatch, data)
     inputs = routes._context_length_lookup_inputs_for_model(MODEL, "custom:second", api_key=caller_key, cfg=data)
-    # #8822: a caller key that came with no URL owns only its provider's fixed hosts (``custom:second`` has none),
-    # so it isn't sent to the record's URL even though that record holds the same value. That's the GET-session
-    # cost in #8822's design note §4; a follow-up (a caller key also owns the URLs of config sources holding the
-    # identical value) would restore it. Without a caller key, the record's own key keeps its own URL.
+    # #8822: a caller key that came with no URL owns only its provider's fixed hosts (``custom:second`` has none).
+    # #8918: ``custom:second`` holds the identical value and declares this URL, so that record already sends this
+    # exact credential here and the caller's copy may go too. Without a caller key, the record's own key keeps its
+    # own URL.
     assert (inputs.provider, inputs.base_url, inputs.api_key, inputs.config_context_length) == (
-        "custom:second", URL, "synthetic-second-key" if caller_key is None else "", 22222,
+        "custom:second", URL, "synthetic-second-key", 22222,
     )
 
 
