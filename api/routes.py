@@ -9547,6 +9547,36 @@ def _context_lookup_record_key(record: dict) -> str:
     return _context_lookup_resolve_key(record.get("api_key"), key_env)
 
 
+def _context_lookup_provider_disabled(provider: str, providers_cfg: dict) -> bool:
+    """Whether the session's own provider is switched off, by the record the chat obeys (#8938).
+
+    The authoritative record decides, never another spelling of it. For a
+    ``custom:`` id that is WebUI's own verdict,
+    ``api_config._native_custom_provider_record``: an exact ``providers[<id>]``
+    key outranks every alias, including its disabled verdict, and without one a
+    disabled record naming the identity leaves the route with no authority. For
+    any other id it is the exact key the Agent's ``_raise_if_provider_disabled``
+    reads. A disabled alias beside an enabled record switches nothing off: the
+    Agent's matcher skips the alias and the chat keeps the record's key.
+
+    An ambiguous identity (two records claiming it) refuses the chat's route, so
+    it counts as switched off here: the lookup then takes no key.
+    """
+    pid = str(provider or "").strip().lower()
+    if not isinstance(providers_cfg, dict) or not pid:
+        return False
+    if pid.startswith("custom:"):
+        slug = api_config._custom_provider_slug_key(pid)
+        if not slug:
+            return False
+        try:
+            return bool(api_config._native_custom_provider_record(providers_cfg, pid, slug)[1])
+        except api_config.AmbiguousCustomProviderError:
+            return True
+    exact = providers_cfg.get(pid)
+    return isinstance(exact, dict) and not api_config._raw_provider_record_enabled(exact)
+
+
 def _context_length_config_api_key_and_owner(
     provider: str | None,
     cfg: dict | None,
@@ -9557,11 +9587,13 @@ def _context_length_config_api_key_and_owner(
     metadata hosts when the source is that provider's own: a built-in
     ``providers.<id>`` record, or the model block configured for that provider (#8822).
 
-    When a record for the session's provider is switched off (``enabled: false``),
-    the selection takes no key at all (#8938). The Agent refuses a session on a
-    disabled provider, custom or built-in, so the chat sends no key, neither the
-    record's nor the model block's; falling through to the model block would send a
-    key the chat never sends. A record's key reference may be spelled
+    When the session's provider is switched off (``enabled: false`` on its
+    authoritative record, :func:`_context_lookup_provider_disabled`), the selection
+    takes no key at all (#8938). The Agent refuses that session, custom or built-in,
+    so the chat sends no key, neither the record's nor the model block's; falling
+    through to the model block would send a key the chat never sends. Any other
+    switched-off record matching the provider (another spelling of it) is skipped,
+    as the Agent's matcher skips it. A record's key reference may be spelled
     ``api_key_env`` (:func:`_context_lookup_record_key`).
     """
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -9575,9 +9607,11 @@ def _context_length_config_api_key_and_owner(
             for provider_key, provider_cfg in providers_cfg.items()
             if isinstance(provider_cfg, dict) and _providers_match_for_context(provider_key, provider)
         ]
-        if any(not api_config._raw_provider_record_enabled(provider_cfg) for _, provider_cfg in matching):
+        if _context_lookup_provider_disabled(provider, providers_cfg):
             return "", frozenset()
         for provider_key, provider_cfg in matching:
+            if not api_config._raw_provider_record_enabled(provider_cfg):
+                continue
             api_key = _context_lookup_record_key(provider_cfg)
             if api_key:
                 builtin = not str(provider_key or "").strip().lower().startswith("custom:")

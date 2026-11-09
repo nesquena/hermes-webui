@@ -73,6 +73,50 @@ def test_a_disabled_record_does_not_fall_through_to_another_record_for_the_provi
     assert got.api_key == ""
 
 
+@pytest.mark.parametrize("canonical_first", [True, False])
+def test_a_disabled_alias_beside_the_enabled_record_keeps_the_records_key(canonical_first):
+    # The Agent's exact key finds the enabled record and its matcher skips the switched-off spelling, so the chat
+    # keeps KR. Only the authoritative record's verdict switches the provider off.
+    on = ("custom:my-proxy", {"base_url": B, "api_key": "KR"})
+    off = ("Custom:My-Proxy", {"base_url": B, "api_key": "K2", "enabled": False})
+    got = _lookup({"model": {"provider": "custom:my-proxy"},
+                   "providers": dict([on, off] if canonical_first else [off, on])})
+    assert (got.base_url, got.api_key) == (B, "KR")
+
+
+def test_a_disabled_alias_alone_switches_the_provider_off():
+    # No enabled record names the identity, so WebUI's route has no authority and the Agent finds no source.
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A, "api_key": "KM"},
+                   "providers": {"Custom:My-Proxy": {"base_url": B, "api_key": "K2", "enabled": False}}})
+    assert got.api_key == ""
+
+
+@pytest.mark.parametrize("canonical_first", [True, False])
+def test_a_disabled_builtin_alias_beside_the_enabled_record_keeps_the_records_key(canonical_first):
+    on = ("openai", {"api_key": "KB"})
+    off = ("OpenAI", {"api_key": "K2", "enabled": False})
+    got = _lookup({"model": {"provider": "openai"}, "providers": dict([on, off] if canonical_first else [off, on])},
+                  provider="openai")
+    assert got.api_key == "KB"
+
+
+@pytest.mark.parametrize("canonical_first", [True, False])
+def test_a_disabled_builtin_record_refuses_even_beside_an_enabled_alias(canonical_first):
+    off = ("openai", {"api_key": "KB", "enabled": False})
+    on = ("OpenAI", {"api_key": "K2"})
+    got = _lookup({"model": {"provider": "openai"}, "providers": dict([off, on] if canonical_first else [on, off])},
+                  provider="openai")
+    assert got.api_key == ""
+
+
+def test_a_disabled_builtin_alias_alone_is_skipped_like_a_missing_record():
+    # The Agent's exact key misses, so the provider isn't switched off; the alias is invisible, and the selection
+    # reads on as with no record: the model block configured for openai.
+    got = _lookup({"model": {"provider": "openai", "api_key": "KM"},
+                   "providers": {"OpenAI": {"api_key": "K2", "enabled": False}}}, provider="openai")
+    assert got.api_key == "KM"
+
+
 def test_a_disabled_builtin_record_gives_no_key():
     got = _lookup({"model": {"provider": "openai"}, "providers": {"openai": {"api_key": "K1", "enabled": False}}},
                   provider="openai")
