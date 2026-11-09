@@ -147,48 +147,6 @@ def test_field_only_effort_write_is_counted_for_cold_publication(tmp_path, monke
     assert resolved is SESSIONS[sid]
 
 
-def test_draft_lock_held_reload_carries_cli_source_identity(tmp_path, monkeypatch):
-    _isolate_session_store(tmp_path, monkeypatch)
-    sid = "draft-cli-identity"
-    Session(
-        session_id=sid, title="cli title", workspace=str(tmp_path),
-        messages=[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
-    ).save()  # the import save: WebUI-default identity on disk
-    resident = Session.load(sid)
-    identity = {
-        "is_cli_session": True, "source_tag": "hermes-cli", "raw_source": "hermes-cli",
-        "session_source": "cli", "source_label": "Hermes CLI",
-    }
-    for key, value in identity.items():
-        setattr(resident, key, value)  # _get_or_materialize_session's in-memory stamp
-    SESSIONS[sid] = resident
+# A draft save never re-saves a CLI chat as WebUI-native: checked on the draft
+# path, which does not reload the session, in tests/test_composer_draft_cli_identity.py.
 
-    real_lock_factory = routes._get_session_agent_lock
-
-    class _EvictBeforeLock:
-        def __init__(self, inner):
-            self._inner = inner
-
-        def __enter__(self):
-            SESSIONS.pop(sid, None)  # count-cap eviction between resolve and lock
-            self._inner.acquire()
-            return self
-
-        def __exit__(self, *exc):
-            self._inner.release()
-
-    monkeypatch.setattr(
-        routes, "_get_session_agent_lock", lambda value: _EvictBeforeLock(real_lock_factory(value)),
-    )
-    captured = _post(monkeypatch, "/api/session/draft", {"session_id": sid, "text": "new draft"})
-
-    assert captured["status"] == 200, captured
-    reloaded = SESSIONS[sid]
-    assert reloaded is not resident, "the draft must have re-resolved under the lock"
-    for key, value in identity.items():
-        assert getattr(reloaded, key) == value, f"the lock-held reload dropped {key}"
-    # The next whole-session save of the published object keeps the identity.
-    reloaded.save(touch_updated_at=False)
-    on_disk = json.loads((models.SESSION_DIR / f"{sid}.json").read_text())
-    for key, value in identity.items():
-        assert on_disk.get(key) == value, key
