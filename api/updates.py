@@ -1435,8 +1435,14 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
             # Divergent local branch: HEAD is OFF the stable line (it neither
             # contains the tag nor can fast-forward to it) — the opposite of
             # the up-to-date conditions above — so the stable suppression must
-            # not claim "no update" here. Apply the branch ref, matching the
-            # check side's branch comparison. (#8556)
+            # not claim "no update" here (#8556).
+            #
+            # However, for WebUI on stable, falling through to branch comparison
+            # would target the configured upstream (e.g. origin/master or a
+            # feature branch), escaping the stable channel. Return latest_tag so
+            # apply and force recovery remain stable-scoped (#8556, #8655).
+            if suppress_stable_fallthrough:
+                return latest_tag
             pass
         else:
             return latest_tag
@@ -1575,9 +1581,41 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # Unlike conditions 1-2 ("HEAD is on/past the stable line" → up-to-date is
     # truthful), this condition means HEAD is OFF that line — it neither
     # contains the latest tag nor can fast-forward to it — so claiming
-    # "Up to date" would hide every missing commit. Fall through to the branch
-    # comparison for the stable channel too. (#8556)
+    # "Up to date" would hide every missing commit.
+    #
+    # However, for WebUI on stable, falling through to branch comparison targets
+    # the configured upstream (e.g. origin/master or a feature branch), escaping
+    # the stable channel (#8556, #8655). Instead, report a release-based payload
+    # targeting the promoted latest_tag with divergent/repair flags and the real
+    # missing commit count. Experimental and the agent repo keep the branch
+    # fallthrough unchanged.
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
+        if suppress_stable_fallthrough:
+            divergent_behind = behind
+            count_out, count_ok = _run_git(['rev-list', '--count', f'HEAD..{latest_tag}'], path)
+            if count_ok and count_out:
+                try:
+                    divergent_behind = int(count_out.strip())
+                except (ValueError, TypeError):
+                    divergent_behind = behind
+            remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+            remote_url = _normalize_remote_url(remote_url)
+            return {
+                'name': name,
+                'behind': divergent_behind,
+                'current_sha': current_sha_ref,
+                'latest_sha': latest_tag,
+                'branch': latest_tag,
+                'repo_url': remote_url,
+                'compare_url': _build_compare_url(remote_url, current_sha_ref, latest_tag),
+                'release_based': True,
+                'current_version': current_version_display,
+                'latest_version': latest_tag,
+                'latest_tag': latest_tag,
+                'channel': channel,
+                'divergent': True,
+                'repair_required': True,
+            }
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)

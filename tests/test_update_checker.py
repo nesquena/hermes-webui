@@ -8,11 +8,10 @@ Tests cover the four new branches in _apply_update_inner():
   3. pull fails + no upstream tracking  → recovery command with set-upstream-to
   4. pull fails + generic fallback  → raw git output truncated at 300 chars
 """
-from pathlib import Path
-from unittest.mock import patch, call
+from unittest.mock import patch
 import subprocess
 
-import pytest
+from api import updates
 
 
 # ---------------------------------------------------------------------------
@@ -372,20 +371,20 @@ class TestCheckRepoDirtyFlag:
         assert info['stale_check'] is True
 
 
-# Issue #8556: on the `stable` channel a checkout whose local branch DIVERGED
-# from the stable line — HEAD neither contains the latest stable tag nor can
-# fast-forward to it — used to be reported as "Up to date" (behind == 0), hiding
-# the hundreds of commits it is missing. Conditions 1-2 (HEAD at/past the tag)
-# are the up-to-date states; a divergence is their opposite.
+# Issue #8556 / #8655: on the `stable` channel a checkout whose local branch
+# DIVERGED from the stable line — HEAD neither contains the latest stable tag
+# nor can fast-forward to it — must retain stable-scoped targets (latest_tag),
+# rather than falling through to configured upstream branches (origin/master or
+# origin/feature).
 class TestStableDivergedBranchIsNotUpToDate:
     CURRENT_TAG = 'v0.52.492'
     LATEST_TAG = 'v0.52.544'
 
-    def _diverged_stable_repo(self, tmp_path):
-        """Linear stable line .492→.544 plus a local branch off .492 with a
-        local-only commit that exists on no stable tag."""
+    def _diverged_stable_repo(self, tmp_path, upstream_kind='master'):
+        """Linear stable line .492→.544, plus 3 unpromoted commits on master,
+        plus local branch off .492 with local-only commit L, tracking master or feature."""
         upstream = tmp_path / 'upstream'
-        upstream.mkdir()
+        upstream.mkdir(parents=True, exist_ok=True)
         _git(upstream, 'init', '-q', '-b', 'master')
         _git(upstream, 'config', 'user.email', 't@t.co')
         _git(upstream, 'config', 'user.name', 'Test')
@@ -394,10 +393,15 @@ class TestStableDivergedBranchIsNotUpToDate:
         _git(upstream, 'add', 'APP')
         _git(upstream, 'commit', '-q', '-m', self.CURRENT_TAG)
         _git(upstream, 'tag', self.CURRENT_TAG)
-        for patch in range(493, 545):
-            tracked.write_text(f'release {patch}\n', encoding='utf-8')
-            _git(upstream, 'commit', '-q', '-am', f'v0.52.{patch}')
-            _git(upstream, 'tag', f'v0.52.{patch}')
+        for patch_num in range(493, 545):
+            tracked.write_text(f'release {patch_num}\n', encoding='utf-8')
+            _git(upstream, 'commit', '-q', '-am', f'v0.52.{patch_num}')
+            _git(upstream, 'tag', f'v0.52.{patch_num}')
+
+        # Three unpromoted commits on master after .544 (U)
+        for unpromoted in range(1, 4):
+            tracked.write_text(f'unpromoted master commit {unpromoted}\n', encoding='utf-8')
+            _git(upstream, 'commit', '-q', '-am', f'unpromoted experimental work {unpromoted}')
 
         origin = tmp_path / 'origin.git'
         subprocess.run(
@@ -412,33 +416,127 @@ class TestStableDivergedBranchIsNotUpToDate:
         _git(repo, 'config', 'user.email', 't@t.co')
         _git(repo, 'config', 'user.name', 'Test')
         _git(repo, 'checkout', '-q', '-b', 'stable-local', self.CURRENT_TAG)
-        (repo / 'APP').write_text('local hotfix\n', encoding='utf-8')
-        _git(repo, 'commit', '-q', '-am', 'local hotfix not on the stable line')
-        _git(repo, 'branch', '--set-upstream-to=origin/master', 'stable-local')
+        (repo / 'APP').write_text('local hotfix L\n', encoding='utf-8')
+        _git(repo, 'commit', '-q', '-am', 'local commit L not on stable line')
+
+        if upstream_kind == 'master':
+            _git(repo, 'branch', '--set-upstream-to=origin/master', 'stable-local')
+        elif upstream_kind == 'feature':
+            _git(repo, 'checkout', '-q', '-b', 'feature')
+            (repo / 'APP').write_text('feature commit F\n', encoding='utf-8')
+            _git(repo, 'commit', '-q', '-am', 'feature commit F')
+            _git(repo, 'push', '-q', 'origin', 'feature')
+            _git(repo, 'checkout', '-q', 'stable-local')
+            _git(repo, 'branch', '-D', '-q', 'feature')
+            _git(repo, 'branch', '--set-upstream-to=origin/feature', 'stable-local')
+        else:
+            raise ValueError(f"Unknown upstream_kind: {upstream_kind}")
+
         return repo
 
-    def test_check_reports_the_divergence_not_up_to_date(self, tmp_path):
-        from api import updates
-
-        repo = self._diverged_stable_repo(tmp_path)
+    def test_check_reports_stable_scoped_target_with_unpromoted_master(self, tmp_path):
+        repo = self._diverged_stable_repo(tmp_path, upstream_kind='master')
         info = updates._check_repo(repo, 'webui', 'stable')
 
         assert info is not None
-        assert info['behind'] == 52, (
-            'a divergent stable checkout must report the real gap, not 0'
-        )
-        # The truthful comparison target is the configured branch, not the
-        # stable tag HEAD can neither contain nor fast-forward to.
-        assert info['branch'] == 'origin/master'
-        assert info['current_tag'] == self.CURRENT_TAG
+        assert info['behind'] == 52
+        assert info['branch'] == self.LATEST_TAG
         assert info['latest_tag'] == self.LATEST_TAG
-        assert info['current_sha'] != info['latest_sha']
-        assert info.get('release_based') is None  # branch payload, not tag payload
+        assert info['latest_sha'] == self.LATEST_TAG
+        assert info['release_based'] is True
+        assert info['divergent'] is True
+        assert info['repair_required'] is True
+        assert info['current_sha'] == self.CURRENT_TAG
+        assert info['current_version'] == self.CURRENT_TAG
+        assert info['latest_version'] == self.LATEST_TAG
+        assert info['channel'] == 'stable'
+        assert info['name'] == 'webui'
+        assert 'origin/master' not in info['branch']
 
-    def test_apply_mirror_selects_the_branch_not_no_update(self, tmp_path):
-        from api import updates
+    def test_check_reports_stable_scoped_target_with_feature_upstream(self, tmp_path):
+        repo = self._diverged_stable_repo(tmp_path, upstream_kind='feature')
+        info = updates._check_repo(repo, 'webui', 'stable')
 
-        repo = self._diverged_stable_repo(tmp_path)
-        # The apply side must mirror the check side: no suppression of the
-        # branch comparison when HEAD is OFF the stable line (#2653/#2846).
-        assert updates._select_apply_compare_ref(repo, 'stable', 'webui') == 'origin/master'
+        assert info is not None
+        assert info['branch'] == self.LATEST_TAG
+        assert info['latest_tag'] == self.LATEST_TAG
+        assert info['release_based'] is True
+        assert info['divergent'] is True
+        assert 'origin/feature' not in info['branch']
+
+    def test_select_apply_ref_is_stable_tag_not_configured_upstream(self, tmp_path):
+        repo_master = self._diverged_stable_repo(tmp_path / 'm', upstream_kind='master')
+        assert updates._select_apply_compare_ref(repo_master, 'stable', 'webui') == self.LATEST_TAG
+
+        repo_feature = self._diverged_stable_repo(tmp_path / 'f', upstream_kind='feature')
+        assert updates._select_apply_compare_ref(repo_feature, 'stable', 'webui') == self.LATEST_TAG
+
+    def test_force_recovery_lands_on_promoted_tag(self, tmp_path, monkeypatch):
+        repo = self._diverged_stable_repo(tmp_path, upstream_kind='master')
+        monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+        monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+        res = updates._apply_force_update_inner('webui', 'stable')
+        assert res['ok'] is True
+
+        head_sha = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=str(repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        tag_sha = subprocess.run(
+            ['git', 'rev-parse', f'{self.LATEST_TAG}^{{commit}}'],
+            cwd=str(repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        master_sha = subprocess.run(
+            ['git', 'rev-parse', 'origin/master^{commit}'],
+            cwd=str(repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        assert head_sha == tag_sha
+        assert head_sha != master_sha
+
+    def test_normal_apply_refuses_ff_to_unpromoted_master(self, tmp_path, monkeypatch):
+        repo = self._diverged_stable_repo(tmp_path, upstream_kind='master')
+        monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+        monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+
+        sha_before = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=str(repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        res = updates._apply_update_inner('webui', 'stable')
+        assert res['ok'] is False
+        assert 'fast-forward' in res.get('message', '').lower()
+
+        sha_after = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=str(repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert sha_after == sha_before
+
+    def test_up_to_date_still_reported_at_and_past_latest_tag(self, tmp_path):
+        repo = self._diverged_stable_repo(tmp_path, upstream_kind='master')
+
+        # HEAD exactly at latest_tag (.544)
+        _git(repo, 'checkout', '-q', self.LATEST_TAG)
+        info_at = updates._check_repo(repo, 'webui', 'stable')
+        assert info_at is not None
+        assert info_at['behind'] == 0
+
+        # HEAD past latest_tag (ahead on the line)
+        _git(repo, 'checkout', '-q', '-b', 'ahead-branch', self.LATEST_TAG)
+        (repo / 'APP').write_text('ahead commit\n', encoding='utf-8')
+        _git(repo, 'commit', '-q', '-am', 'ahead commit past latest tag')
+        info_past = updates._check_repo(repo, 'webui', 'stable')
+        assert info_past is not None
+        assert info_past['behind'] == 0
+
+    def test_experimental_channel_still_branch_compares(self, tmp_path):
+        repo = self._diverged_stable_repo(tmp_path, upstream_kind='master')
+        info = updates._check_repo(repo, 'webui', 'experimental')
+        assert info is not None
+        assert info.get('release_based') is None
+        assert info['branch'] == 'origin/master'
+        assert updates._select_apply_compare_ref(repo, 'experimental', 'webui') == 'origin/master'
+        assert updates._select_apply_compare_ref(repo, 'stable', 'agent') == 'origin/master'
