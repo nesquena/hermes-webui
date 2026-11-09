@@ -9556,9 +9556,13 @@ def _context_lookup_requested_provider(model: str | None, provider: str | None) 
     ``providers.<that id>.enabled`` before anything else. The id is the session's
     own spelling, not its alias resolution (``ollama`` stays ``ollama``), except
     where the chat rewrites it (a legacy configured ``local`` becomes ``custom``).
-    Asking the same resolver keeps the two in step; it returns an already-resolved
-    id unchanged. Without a model, or if resolution fails, this is the session's
-    cleaned provider id.
+
+    Call it with the session's STORED model and provider, as the chat resolves
+    them, exactly once. It is not idempotent: resolution can strip a provider
+    prefix from the model (``openai/m-x`` -> ``m-x``), and resolving that bare id
+    again may match another provider's model list. Callers that already hold the
+    resolved provider (GET, the streaming sites) pass it to the lookup as is.
+    Without a model, or if resolution fails, this is the cleaned provider id.
     """
     model_text = str(model or "").strip()
     if model_text:
@@ -9768,9 +9772,16 @@ def _context_length_lookup_inputs_for_model(
     fallback_api_key: object = None,
     fallback_base_url: str | None = None,
     fallback_provider: str | None = None,
+    requested_provider: str | None = None,
     caller_key_only: bool = False,
 ) -> _ContextLengthLookupInputs:
     """Return the effective metadata resolver inputs for a WebUI model.
+
+    ``requested_provider`` (#8938) is the id the chat asks the Agent for, which
+    decides whether the session's provider is switched off. Callers passing an
+    already-resolved ``provider`` (GET, the streaming sites) leave it unset: that
+    provider is the chat's id. A caller holding only the stored provider (model
+    switch) passes :func:`_context_lookup_requested_provider` of the stored values.
 
     ``agent.model_metadata.get_model_context_length`` understands global
     ``config_context_length`` and custom-provider overrides, but only when the
@@ -9797,7 +9808,9 @@ def _context_length_lookup_inputs_for_model(
     bare_model, explicit_provider = _split_provider_qualified_model(model_for_lookup)
     effective_provider = _canonical_context_provider(provider or explicit_provider)
     # #8938: the id the chat asks the Agent for, the key it checks for enabled: false.
-    requested_provider = _context_lookup_requested_provider(model_for_lookup, provider)
+    requested_provider = str(requested_provider or "").strip().lower() or (
+        _clean_session_model_provider(provider or explicit_provider) or ""
+    )
     effective_base_url = str(base_url or "").strip()
     # #8822: a caller's key owns only the URL the caller passed with it (plus its
     # provider's fixed metadata hosts). With no caller URL it owns no URL.
@@ -9807,6 +9820,7 @@ def _context_length_lookup_inputs_for_model(
     if isinstance(model_cfg, dict):
         if not effective_provider:
             effective_provider = _canonical_context_provider(model_cfg.get("provider"))
+            requested_provider = requested_provider or _clean_session_model_provider(model_cfg.get("provider")) or ""
         if not effective_base_url:
             # #7535: the global model.base_url may only fill an empty slot when
             # the session provider IS the configured model.provider owner
@@ -11014,6 +11028,7 @@ def _resolve_context_length_for_session_model(
     *,
     base_url: str | None = None,
     api_key: str | None = None,
+    requested_provider: str | None = None,
     caller_key_only: bool = False,
 ) -> int:
     """Best-effort current context window for a session model.
@@ -11036,6 +11051,7 @@ def _resolve_context_length_for_session_model(
             base_url=base_url,
             api_key=api_key,
             cfg=_cfg_for_cl if isinstance(_cfg_for_cl, dict) else {},
+            requested_provider=requested_provider,
             caller_key_only=caller_key_only,
         )
         try:
@@ -11310,6 +11326,8 @@ def _invalidate_session_route_state_if_changed(
         session.context_length = _resolve_context_length_for_session_model(
             session.model,
             session.model_provider,
+            # #8938: the stored provider is raw; the chat asks the Agent for its resolution.
+            requested_provider=_context_lookup_requested_provider(session.model, session.model_provider),
         )
         session.threshold_tokens = 0
         session.last_prompt_tokens = 0

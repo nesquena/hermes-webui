@@ -207,23 +207,77 @@ def test_the_requested_id_comes_from_the_model_block_when_the_session_names_none
 # Codex round 4: the chat rewrites a legacy configured ``local`` to ``custom`` before asking the Agent, so for a model
 # change on a ``local`` session (the stored provider is passed raw) the Agent checks providers.custom, not
 # providers.local. Measured: providers.local off -> the chat sends K@U; providers.custom off -> it refuses.
-def test_a_legacy_local_session_is_checked_under_custom():
+@pytest.mark.parametrize("off,want", [("local", "KM"), ("custom", "")])
+def test_a_legacy_local_session_is_checked_under_custom(off, want):
     model = {"provider": "local", "base_url": A, "api_key": "KM"}
-    got = _lookup({"model": dict(model), "providers": {"local": {"enabled": False}}}, provider="local")
-    assert routes._context_lookup_requested_provider("m-x", "local") == "custom"
-    assert (got.base_url, got.api_key) == (A, "KM")
-    got = _lookup({"model": dict(model), "providers": {"custom": {"enabled": False}}}, provider="local")
-    assert (got.base_url, got.api_key) == (A, "")
+    cfg = {"model": dict(model), "providers": {off: {"enabled": False}}}
+    # Model switch: the stored provider is raw, so the switch passes the chat's resolution of it.
+    LIVE.clear()
+    LIVE.update(cfg)
+    requested = routes._context_lookup_requested_provider("m-x", "local")
+    assert requested == "custom"
+    got = _lookup(cfg, provider="local", requested_provider=requested)
+    assert (got.base_url, got.api_key) == (A, want)
+    # GET and the streaming sites pass the resolved provider, which is the chat's id as is.
+    got = _lookup({"model": dict(model), "providers": {off: {"enabled": False}}}, provider="custom")
+    assert (got.base_url, got.api_key) == (A, want)
 
 
-def test_the_requested_id_is_the_chats_and_idempotent():
+@pytest.mark.parametrize("off,want", [("local", "KM"), ("custom", "")])
+def test_the_model_switch_passes_the_chats_requested_id(monkeypatch, off, want):
+    from types import SimpleNamespace
+
+    LIVE.update({"model": {"provider": "local", "base_url": A, "api_key": "KM"}, "providers": {off: {"enabled": False}},
+                 "custom_providers": []})
+    seen = {}
+
+    def fake(model, provider=None, **kw):
+        seen.update(kw, model=model, provider=provider)
+        return routes._context_length_lookup_inputs_for_model(model, provider, cfg=LIVE, **kw).api_key == "KM" and 1 or 0
+
+    monkeypatch.setattr(routes, "_resolve_context_length_for_session_model", fake)
+    session = SimpleNamespace(model="old-m", model_provider="local", last_used_model=None, gateway_routing=None,
+                              context_length=0, threshold_tokens=0, last_prompt_tokens=0)
+    assert routes._invalidate_session_route_state_if_changed(session, model="m-x", provider="local", already_resolved=True)
+    assert seen["requested_provider"] == "custom"
+    assert session.context_length == (1 if want == "KM" else 0)
+
+
+def test_the_session_resolver_forwards_the_requested_id(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    meta = ModuleType("agent.model_metadata")
+    meta.get_model_context_length = lambda *a, **k: 4242
+    monkeypatch.setitem(sys.modules, "agent.model_metadata", meta)
+    seen = {}
+    real = routes._context_length_lookup_inputs_for_model
+
+    def spy(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(routes, "_context_length_lookup_inputs_for_model", spy)
+    assert routes._resolve_context_length_for_session_model("m-x", "local", requested_provider="custom") == 4242
+    assert seen["requested_provider"] == "custom"
+
+
+# Codex round 5: resolution is not idempotent, so a caller that already resolved the session must not be resolved again.
+# GET resolves model.default "openai/m-x" to ("m-x", "openai"); resolving the bare "m-x" again would match the disabled
+# anthropic record's model list and drop OpenAI's working key (authenticated /api/session: 65,536 -> 256,000).
+def test_a_resolved_caller_is_not_resolved_again(key_in_env):
+    cfg = {"model": {"provider": "openai", "default": "openai/m-x", "base_url": A, "key_env": VAR},
+           "providers": {"anthropic": {"models": ["m-x"], "enabled": False}}}
+    got = _lookup(cfg, provider="openai")
+    assert (got.base_url, got.api_key) == (A, "K1")
+
+
+def test_the_requested_id_is_the_chats():
     LIVE.update({"model": {"provider": "openrouter"}, "providers": {}, "custom_providers": []})
     for raw, want in (("ollama", "ollama"), ("claude", "claude"), ("custom", "custom"), ("custom:my-proxy", "custom:my-proxy"),
-                      ("OpenAI", "openai"), ("@ollama:m-x", "ollama")):
-        got = routes._context_lookup_requested_provider("m-x", raw) if not raw.startswith("@") else \
-            routes._context_lookup_requested_provider(raw, None)
-        assert got == want, raw
-        assert routes._context_lookup_requested_provider("m-x", got) == got
+                      ("OpenAI", "openai")):
+        assert routes._context_lookup_requested_provider("m-x", raw) == want, raw
+    assert routes._context_lookup_requested_provider("@ollama:m-x", None) == "ollama"
     # A configured provider keeps its spelling through the chat's resolver; the Agent lowercases it.
     LIVE["model"] = {"provider": "OpenAI"}
     assert routes._context_lookup_requested_provider("m-x", "OpenAI") == "openai"
