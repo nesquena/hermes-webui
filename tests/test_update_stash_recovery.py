@@ -1,12 +1,21 @@
 """Tests for graceful stash-apply recovery in _apply_update_inner."""
 from unittest.mock import patch
 
+import pytest
+
 import api.updates as updates
+
+
+@pytest.fixture(autouse=True)
+def _own_repo_root(tmp_path, monkeypatch):
+    """Each test runs the updater against its own fake checkout, never the repository the tests sit in
+    (which may be an export without .git) (#8784)."""
+    (tmp_path / ".git").mkdir(exist_ok=True)
+    monkeypatch.setattr(updates, "REPO_ROOT", tmp_path)
 
 
 def test_pull_failure_untracked_overwrite_flags_conflict(tmp_path):
     """Untracked overwrite pull failures must surface the existing force-update path."""
-    (tmp_path / '.git').mkdir()
     call_log = []
 
     def fake_git(args, path, timeout=10):
@@ -28,7 +37,6 @@ def test_pull_failure_untracked_overwrite_flags_conflict(tmp_path):
     restart_calls = []
 
     with (
-        patch.object(updates, 'REPO_ROOT', tmp_path),
         patch.object(updates, '_run_git', side_effect=fake_git),
         patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
         patch.object(updates, '_schedule_restart', side_effect=lambda: restart_calls.append(1)),
@@ -45,7 +53,6 @@ def test_pull_failure_untracked_overwrite_flags_conflict(tmp_path):
 
 def test_apply_force_update_removes_untracked_files_before_reset(tmp_path):
     """Force update must clear untracked colliders before reset --hard (#4310)."""
-    (tmp_path / '.git').mkdir()
     call_log = []
 
     def fake_git(args, path, timeout=10):
@@ -67,7 +74,6 @@ def test_apply_force_update_removes_untracked_files_before_reset(tmp_path):
     restart_calls = []
 
     with (
-        patch.object(updates, 'REPO_ROOT', tmp_path),
         patch.object(updates, '_run_git', side_effect=fake_git),
         patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
         patch.object(updates, '_schedule_restart', side_effect=lambda: restart_calls.append(1)),
@@ -88,7 +94,6 @@ def test_apply_force_update_proceeds_when_clean_fails(tmp_path):
     update (#4914). On Windows a reserved-device-name file (nul/con/prn/…) can
     land in the tree and git can't delete it, so `clean` exits non-zero — but
     that residue is harmless and must not block the force update."""
-    (tmp_path / '.git').mkdir()
     call_log = []
 
     def fake_git(args, path, timeout=10):
@@ -110,7 +115,6 @@ def test_apply_force_update_proceeds_when_clean_fails(tmp_path):
     restart_calls = []
 
     with (
-        patch.object(updates, 'REPO_ROOT', tmp_path),
         patch.object(updates, '_run_git', side_effect=fake_git),
         patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
         patch.object(updates, '_schedule_restart', side_effect=lambda: restart_calls.append(1)),
