@@ -7627,6 +7627,29 @@ let _composerFitMutationObserver=null;
 let _composerFitObservedFooter=null;
 let _composerFitResizeListenerBound=false;
 
+function _fitComposerTooltipDirections(left){
+  // Reorder and visibility settings can put any direct tooltip button at a
+  // different edge. Flip only when its right-facing box would actually clip
+  // and the left-facing alternative fits; hidden siblings and DOM order alone
+  // cannot make that decision (a sole visible Attach sits at the LEFT edge).
+  const clip=left.getBoundingClientRect();
+  left.querySelectorAll(':scope > button.has-tooltip').forEach(function(button){
+    const rect=button.getBoundingClientRect();
+    const tooltip=getComputedStyle(button,'::after');
+    const width=parseFloat(tooltip.width)||0;
+    const hidden=getComputedStyle(button).display==='none'||!rect.width;
+    const rightClips=rect.right+8+width>clip.right+1;
+    const leftFits=rect.left-8-width>=clip.left-1;
+    button.classList.toggle('has-tooltip--left',!hidden&&rightClips&&leftFits);
+  });
+}
+
+function _fitComposerTooltipDirectionFromEvent(event){
+  const button=event.target&&event.target.closest&&event.target.closest('button.has-tooltip');
+  if(!button||button.parentElement!==event.currentTarget) return;
+  _fitComposerTooltipDirections(event.currentTarget);
+}
+
 function _fitComposerFooter(){
   const footer=document.querySelector('.composer-footer');
   if(!footer) return;
@@ -7699,6 +7722,7 @@ function _fitComposerFooter(){
     void footer.offsetWidth;
     footer.classList.remove('cf-measuring');
   }
+  if(typeof _fitComposerTooltipDirections==='function') _fitComposerTooltipDirections(left);
   // Post-restore transition check: fire the same composer menu cleanup used
   // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
   // above). Both burger transitions (entering and leaving) close — the same
@@ -7731,6 +7755,10 @@ function _initComposerFooterFit(){
   _composerFitResizeObserver=null;
   _composerFitMutationObserver=null;
   _composerFitObservedFooter=footer;
+  // Re-read localized tooltip width at the interaction point too, without
+  // waiting for a resize/refit after a visibility or data-tooltip change.
+  left.addEventListener('pointerover',_fitComposerTooltipDirectionFromEvent);
+  left.addEventListener('focusin',_fitComposerTooltipDirectionFromEvent);
   if(window.ResizeObserver){
     try{
       _composerFitResizeObserver=new ResizeObserver(_scheduleComposerFit);

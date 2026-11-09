@@ -13,7 +13,9 @@ Binds the four regressions reproduced on PR #8766 (2026-11-05/07):
   demoting to icons when needed rather than squeezing its click target;
 * with the supported control-order setting moved to Attach-last, the full-stage
   candidates at 1252px (ordinary labels) and 1464px (long labels) must preserve
-  both Attach and Dictate at 34px, then recover at wide and phone widths.
+  both Attach and Dictate at 34px, then recover at wide and phone widths;
+* in those same supported Attach-last scenes, Attach's live hovered tooltip
+  must not be clipped by the .composer-left scroll container (C60-F1).
 
 The server and state are disposable and agent-free. No production app, browser,
 credentials, or service is touched.
@@ -85,6 +87,61 @@ def _ax_button_name(cdp, selector: str) -> str:
     if len(buttons) != 1:
         raise AssertionError(f"expected one accessible button for {selector}: {tree['nodes']!r}")
     return str(buttons[0].get("name", {}).get("value", ""))
+
+
+def _attach_tooltip_geometry(cdp, page) -> dict:
+    """Measure the live ::after border box against its native clip container."""
+    document = cdp.send("DOM.getDocument", {"depth": 0})
+    found = cdp.send(
+        "DOM.querySelector",
+        {"nodeId": document["root"]["nodeId"], "selector": "#btnAttach"},
+    )
+    if not found.get("nodeId"):
+        raise AssertionError("missing #btnAttach while measuring its tooltip")
+    described = cdp.send(
+        "DOM.describeNode",
+        {"nodeId": found["nodeId"], "depth": 1, "pierce": True},
+    )
+    pseudos = [
+        node for node in described["node"].get("pseudoElements", [])
+        if node.get("pseudoType") == "after"
+    ]
+    if len(pseudos) != 1:
+        raise AssertionError(f"expected one Attach ::after pseudo-element: {described!r}")
+    box = cdp.send("DOM.getBoxModel", {"backendNodeId": pseudos[0]["backendNodeId"]})
+    border = box["model"]["border"]
+    xs = border[0::2]
+    ys = border[1::2]
+    geometry = page.evaluate(
+        """() => {
+          const attach = document.querySelector('#btnAttach');
+          const left = document.querySelector('.composer-left');
+          const tooltip = getComputedStyle(attach, '::after');
+          const clip = getComputedStyle(left);
+          const rect = left.getBoundingClientRect();
+          return {
+            hovered: attach.matches(':hover'),
+            opacity: Number(tooltip.opacity),
+            tooltipPosition: tooltip.position,
+            tooltipLeft: tooltip.left,
+            tooltipRight: tooltip.right,
+            clipLeft: rect.left,
+            clipRight: rect.right,
+            overflowX: clip.overflowX,
+          };
+        }"""
+    )
+    geometry.update(
+        {
+            "borderLeft": min(xs),
+            "borderRight": max(xs),
+            "borderTop": min(ys),
+            "borderBottom": max(ys),
+        }
+    )
+    geometry["clippedLeftPx"] = max(0.0, geometry["clipLeft"] - geometry["borderLeft"])
+    geometry["clippedRightPx"] = max(0.0, geometry["borderRight"] - geometry["clipRight"])
+    return geometry
 
 
 def _start_opacity_recording(page) -> None:
@@ -310,6 +367,21 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
         ):
             failures.append("Attach tooltip never became fully visible before resize")
             return failures, evidence
+        evidence["defaultOrderTooltip"] = page.evaluate(
+            """() => {
+              const left = document.querySelector('.composer-left');
+              const style = getComputedStyle(document.querySelector('#btnAttach'), '::after');
+              return {
+                firstControl: Array.from(left.children).find((element) => !['fileInput', 'cameraFileInput'].includes(element.id) && !element.classList.contains('composer-divider')).id,
+                tooltipLeft: style.left,
+                tooltipRight: style.right,
+              };
+            }"""
+        )
+        if evidence["defaultOrderTooltip"]["firstControl"] != "btnAttach":
+            failures.append(f"default control order changed before the resize check: {evidence['defaultOrderTooltip']}")
+        if evidence["defaultOrderTooltip"]["tooltipLeft"] == "auto":
+            failures.append(f"default-order Attach tooltip unexpectedly flipped left: {evidence['defaultOrderTooltip']}")
         evidence["resize"] = {}
         for width in (1921, 1920):
             if width == 1921:
@@ -427,10 +499,10 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
                 "an-extremely-long-language-model-display-name-for-the-footer",
             ),
         )
-        # Keep two neighboring natural-full boundary cases. The measured
-        # transition sits near the existing 1600px composer breakpoint; keeping
-        # both avoids pretending one pixel is a universal boundary across hosts.
-        for boundary_width in (1600, 1610):
+        # Keep neighboring natural-full boundary cases. The measured transition
+        # sits near the existing 1600px composer breakpoint; keeping several
+        # avoids pretending one pixel is a universal boundary across hosts.
+        for boundary_width in (1600, 1610, 1620, 1630, 1680):
             scenarios += ((
                 f"fullSqueeze{boundary_width}",
                 boundary_width,
@@ -461,6 +533,86 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
                         f"{name}: {control} measured {measured}px rather than its declared 34px "
                         f"at natural {geometry['stage']} stage: {geometry}"
                     )
+            # C60-F1: hover the reordered right-edge control and compare the
+            # browser's actual pseudo-element border box with the native clip.
+            # This catches paint clipping even when opacity is 1 and every
+            # control-width / fit-stage assertion above is green.
+            page.hover("#btnAttach")
+            if not _wait_until(
+                page,
+                "Number(getComputedStyle(document.querySelector('#btnAttach'), '::after').opacity) >= 0.999",
+                3000,
+            ):
+                failures.append(f"{name}: Attach tooltip never became visible for the clipping check")
+                continue
+            tooltip = _attach_tooltip_geometry(cdp, page)
+            geometry["tooltip"] = tooltip
+            if not tooltip["hovered"]:
+                failures.append(f"{name}: Attach did not remain hovered for the clipping check")
+            clipped = tooltip["overflowX"] in {"auto", "hidden", "scroll", "clip"} and (
+                tooltip["clippedLeftPx"] > 0.5 or tooltip["clippedRightPx"] > 0.5
+            )
+            if clipped:
+                failures.append(
+                    f"{name}: native {tooltip['overflowX']} clip cut Attach's live tooltip "
+                    f"left={tooltip['clippedLeftPx']:.4f}px right={tooltip['clippedRightPx']:.4f}px: {tooltip}"
+                )
+            screenshot_dir = os.environ.get("COMPOSER_TOOLTIP_SCREENSHOT_DIR")
+            if screenshot_dir:
+                os.makedirs(screenshot_dir, exist_ok=True)
+                page.screenshot(path=os.path.join(screenshot_dir, f"{name}-attach-hover.png"))
+        # Adversarial visibility control: DOM order alone must not flip a sole
+        # visible Attach at the LEFT edge into an empty left-facing tooltip.
+        # Hide every other left control through the supported settings owner.
+        page.evaluate(
+            """() => {
+              const defs = window._COMPOSER_CONTROL_TOGGLE_DEFS.concat(
+                window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS,
+              );
+              const hidden = {};
+              for (const def of defs) {
+                if (def.orderGroup === 'left' && def.key !== 'hide_composer_attach') hidden[def.key] = true;
+              }
+              window._composerControlVisibility = hidden;
+              window._applyComposerFooterVisibilitySettings();
+            }"""
+        )
+        page.set_viewport_size({"width": 1920, "height": 900})
+        page.wait_for_timeout(400)
+        sole = _composer_geometry(page)
+        evidence["attachLast"]["soleVisible1920"] = sole
+        visible_controls = [
+            child for child in sole["children"]
+            if child["id"] not in {"fileInput", "cameraFileInput"}
+            and "composer-divider" not in child["className"]
+            and child["display"] != "none"
+            and child["width"] > 0
+        ]
+        if [child["id"] for child in visible_controls] != ["btnAttach"]:
+            failures.append(f"soleVisible1920: supported visibility did not leave only Attach: {visible_controls}")
+        page.hover("#btnAttach")
+        if not _wait_until(
+            page,
+            "Number(getComputedStyle(document.querySelector('#btnAttach'), '::after').opacity) >= 0.999",
+            3000,
+        ):
+            failures.append("soleVisible1920: Attach tooltip never became visible")
+        else:
+            tooltip = _attach_tooltip_geometry(cdp, page)
+            sole["tooltip"] = tooltip
+            if tooltip["clippedLeftPx"] > 0.5 or tooltip["clippedRightPx"] > 0.5:
+                failures.append(f"soleVisible1920: Attach's sole visible tooltip was clipped: {tooltip}")
+            screenshot_dir = os.environ.get("COMPOSER_TOOLTIP_SCREENSHOT_DIR")
+            if screenshot_dir:
+                os.makedirs(screenshot_dir, exist_ok=True)
+                page.screenshot(path=os.path.join(screenshot_dir, "soleVisible1920-attach-hover.png"))
+        page.evaluate(
+            """() => {
+              window._composerControlVisibility = {};
+              window._applyComposerFooterVisibilitySettings();
+            }"""
+        )
+
         evidence["attachLast"]["recovery"] = {}
         for name, width in (("wide1920", 1920), ("phone390", 390)):
             _set_populated_scene(page, LONG_WORKSPACE_LABEL, LONG_MODEL_LABEL)
@@ -566,7 +718,7 @@ def main() -> int:
                         print(" - " + failure, file=sys.stderr)
                     print(json.dumps(evidence, indent=2), file=sys.stderr)
                     return 1
-                print("COMPOSER TOOLTIP GEOMETRY PASSED: idle AX + 2x24 resize frames + 1120px shrink target + Attach-last full-stage targets + wide/phone recovery")
+                print("COMPOSER TOOLTIP GEOMETRY PASSED: idle AX + 2x24 resize frames + 1120px shrink target + Attach-last targets/tooltips + wide/phone recovery")
                 return 0
             finally:
                 proc.terminate()
