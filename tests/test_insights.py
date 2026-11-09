@@ -2840,7 +2840,7 @@ def test_insights_range_fallback_note_is_localized_at_runtime():
             f"{loc} must carry exactly one {{days}} placeholder: {rec['val']!r}"
 
 
-def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch):
+def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch, tmp_path):
     """New /api/insights/traffic endpoint returns top 10 inbound IPs and outbound domains."""
     import api.routes as routes
     from unittest.mock import MagicMock
@@ -2852,6 +2852,28 @@ def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch):
         "10.0.0.5 - - [28/Oct/2026:12:00:00 +0700] \"POST /api/test HTTP/1.1\" 201 89 \"-\" \"python-requests/2.28\"\n"
         "10.0.0.5 - - [28/Oct/2026:13:00:00 +0700] \"GET /api/test HTTP/1.1\" 200 45 \"-\" \"python-requests/2.28\"\n"
         "172.16.0.1 - - [01/Oct/2026:08:00:00 +0700] \"GET /api/foo HTTP/1.1\" 200 12 \"-\" \"Mozilla/5.0\"\n"
+    )
+
+    # Hermetic log source: write the fake logs to a tmp file and point the
+    # endpoint at it, so the result cannot depend on a real nginx log on
+    # the host (readable or not) or on the sudo fallback path.
+    log_file = tmp_path / "access.log"
+    log_file.write_text(fake_nginx_logs)
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+
+    # Pin the local timezone to the fake clock's zone (+07): the log
+    # entries carry a fixed +0700 offset, and in hosts east of UTC+11 the
+    # converted instants would land after the fake clock. Stub reverse
+    # DNS so no real resolver is consulted.
+    import os as _os
+    import socket as _socket
+    import time as _time_mod
+
+    monkeypatch.setenv("TZ", "Asia/Bangkok")
+    if hasattr(_time_mod, "tzset"):
+        _time_mod.tzset()
+    monkeypatch.setattr(
+        _socket, "gethostbyaddr", lambda ip: (_socket.gethostname(), [], [ip])
     )
 
     class FakeRow:
@@ -2925,6 +2947,12 @@ def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch):
     day_nous = next(r for r in data["outbound_domains_day"] if r["domain"] == "inference-api.nousresearch.com")
     assert day_nous["calls"] == 100
 
+    # Restore the host timezone (tzset is process-global; monkeypatch
+    # only restores the env var).
+    _os.environ.pop("TZ", None)
+    if hasattr(_time_mod, "tzset"):
+        _time_mod.tzset()
+
 
 def test_insights_traffic_rejects_malformed_days():
     """?days=, ?days=abc and out-of-range days return 400, never raise."""
@@ -2943,7 +2971,7 @@ def test_insights_traffic_rejects_malformed_days():
 def test_parse_nginx_date_honours_logged_offset():
     """A logged +0700 instant must compare correctly against local windows."""
     import api.routes as routes
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     dt = routes._parse_nginx_date("28/Oct/2026:15:09:36 +0000")
     assert dt is not None and dt.tzinfo is None

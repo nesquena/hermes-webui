@@ -16627,6 +16627,12 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     if start_meta is not None or end_meta is not None:
         start_ts = start_meta[1] if start_meta else None
         end_ts = end_meta[1] if end_meta else None
+        # A calendar-DATE end selects the WHOLE end day (next local
+        # midnight, capped at now below) — matching /api/insights.
+        # Without this, selecting today for both dates excludes today's
+        # traffic.
+        if end_meta is not None and end_meta[0] == "date":
+            end_ts = end_ts + 86400 - 0.001
         if end_meta is None:
             end_ts = now
         if end_ts > now:
@@ -16655,7 +16661,9 @@ def _handle_insights_traffic(handler, parsed) -> bool:
         if not 1 <= days <= 365:
             return j(handler, {"error": "days must be an integer between 1 and 365"}, status=400)
         end_ts = now
-        start_ts = end_ts - (days - 1) * 86400
+        # Full `days` of history (not days-1): days=30 covers 30 days and
+        # days=1 covers the last 24h instead of collapsing to one instant.
+        start_ts = end_ts - days * 86400
 
     # Derive every window from `now` (time.time()), not _datetime.now(), so
     # an injected clock (tests) drives the day/month windows consistently.
@@ -16683,7 +16691,15 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     # only when the log is present but unreadable. Rotated .gz files are
     # decompressed instead of being silently skipped.
     log_base = os.getenv("HERMES_WEBUI_ACCESS_LOG", "/var/log/nginx/access.log")
-    log_files = [log_base] + sorted(str(p) for p in Path(os.path.dirname(log_base) or ".").glob("access.log.*"))
+    log_dir = os.path.dirname(log_base) or "."
+    stem = os.path.basename(log_base)
+    # Rotated siblings derive from the CONFIGURED filename (hermes.log.1,
+    # hermes.log.2.gz), so a custom log path keeps its history and never
+    # sweeps up an unrelated site's access.log.* files.
+    rotated_logs = sorted(
+        str(p) for p in Path(log_dir).glob(stem + ".*") if str(p) != log_base
+    )
+    log_files = [log_base] + rotated_logs
     readable = [f for f in log_files if Path(f).exists()]
     # Attempt the default path even when nothing registered as readable
     # (e.g. present but permission-denied to exists()): the direct read
@@ -16691,26 +16707,32 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     # yields no lines.
     candidates = readable or [log_base]
 
-    def _read_log_lines(filepath):
+    def _iter_log_lines(filepath):
+        # Stream line-by-line: full-file reads (+ gzip expansion) would
+        # spike memory on busy nginx hosts and repeat on every refresh.
         if filepath.endswith(".gz"):
             with gzip.open(filepath, "rt", errors="ignore") as fh:
-                return fh.read().splitlines()
+                yield from fh
+            return
         try:
-            return Path(filepath).read_text(errors="ignore").splitlines()
+            with Path(filepath).open(errors="ignore") as fh:
+                yield from fh
+            return
         except OSError:
-            result = subprocess.run(
-                ["sudo", "cat", filepath],
-                capture_output=True, text=True, timeout=60,
-            )
-            if result.returncode != 0:
-                return None
-            return result.stdout.splitlines()
+            pass
+        result = subprocess.run(
+            ["sudo", "cat", filepath],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return
+        yield from result.stdout.splitlines()
 
     nginx_date_re = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
 
     # Sort files: current first (most recent), then rotated by number descending
     def sort_key(p):
-        m = re.search(r'\.log\.(\d+)', p)
+        m = re.search(r'\.(\d+)(?:\.gz)?$', p)
         if m:
             return (-int(m.group(1)), p)
         return (0, p)
@@ -16718,11 +16740,7 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     inbound_source = "ok" if readable else "missing"
     for filepath in sorted(candidates, key=sort_key):
         try:
-            lines = _read_log_lines(filepath)
-            if lines is None:
-                inbound_source = "unreadable"
-                continue
-            for line in lines:
+            for line in _iter_log_lines(filepath):
                 m = nginx_date_re.match(line)
                 if m:
                     ip = m.group(1)
