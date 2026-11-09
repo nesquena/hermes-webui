@@ -99,12 +99,18 @@ populate the attachment tray as uploadable Files.
 
 An ordinary `draft_authority_unconfirmed` 409 or transient network/server failure
 schedules a 1/2/4/8/16/30-second capped exponential backoff. Each dispatch (also
-queued dispatches), retry and acknowledgement checks the captured profile and
-latest intent; a durable token prevents an old realm's retry or acknowledgement
-from replaying/removing a replacement intent. Clear supersedes the old edit and
-keeps its own pending empty record until acknowledged. Authorization refusals and
-failed moved-session replays are not automatically retried in-page; pending
-content remains recoverable. Existing moved-session target guards still apply.
+queued dispatches) and retry checks the captured profile and latest intent; a
+durable token prevents an old realm from replaying/removing a replacement intent.
+An acknowledgement removes its matching token from the captured profile even
+if another profile is now active, without updating that profile's composer.
+Clear supersedes the old edit and keeps its own pending empty record until
+acknowledged. Authorization refusals and failed moved-session replays are not
+automatically retried in-page; pending content remains recoverable. Existing
+moved-session target guards still apply.
+
+A delivered Steer's compare-and-clear retires only the captured local intent at
+or before its draft revision. Its pending record and retry are removed even when
+a mismatch keeps a newer server draft; a replacement local intent is left alone.
 
 Successful acknowledgement removes only its matching pending record. Storage
 unavailability/quota failures retain in-page recovery and guarded retry, but

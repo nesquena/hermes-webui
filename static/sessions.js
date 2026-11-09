@@ -70,8 +70,8 @@ function _composerDraftProfile() { return S.activeProfile || 'default'; }
 function _composerDraftPendingKey(sid, profile=_composerDraftProfile()) {
   return _COMPOSER_DRAFT_PENDING_PREFIX + JSON.stringify([profile, sid]);
 }
-function _readComposerDraftPending(sid) {
-  try { return JSON.parse(localStorage.getItem(_composerDraftPendingKey(sid)) || 'null'); }
+function _readComposerDraftPending(sid, profile=_composerDraftProfile()) {
+  try { return JSON.parse(localStorage.getItem(_composerDraftPendingKey(sid, profile)) || 'null'); }
   catch (_) { return null; }
 }
 function _composerDraftIntentIsCurrent(sid, intent) {
@@ -82,10 +82,10 @@ function _composerDraftIntentIsCurrent(sid, intent) {
   return !intent.durable || !!(stored && stored.token === intent.token);
 }
 function _removeComposerDraftPending(sid, intent) {
-  if (!intent || intent.profile !== _composerDraftProfile()) return;
-  const stored = _readComposerDraftPending(sid);
+  if (!intent) return;
+  const stored = _readComposerDraftPending(sid, intent.profile);
   if (stored && stored.token === intent.token) {
-    try { localStorage.removeItem(_composerDraftPendingKey(sid)); } catch (_) {}
+    try { localStorage.removeItem(_composerDraftPendingKey(sid, intent.profile)); } catch (_) {}
   }
 }
 function _retryComposerDraft(sid, intent, attempt=0) {
@@ -492,17 +492,21 @@ function _postComposerDraftPayload(sid, draft, intent=null, goalContinuationId='
     });
   });
   return request.then((response) => {
-    if (intent && _composerDraftLocalFallbackBySid.get(requestSid) !== intent) return response;
-    if (intent && typeof _composerDraftIntentIsCurrent === 'function'
-        && !_composerDraftIntentIsCurrent(requestSid, intent)) return response;
-    if (!response) throw new Error('Composer draft was not acknowledged');
+    const isCurrentIntent = !intent || (_composerDraftLocalFallbackBySid.get(requestSid) === intent
+      && (typeof _composerDraftIntentIsCurrent !== 'function' || _composerDraftIntentIsCurrent(requestSid, intent)));
+    if (!response) {
+      if (!isCurrentIntent) return response;
+      throw new Error('Composer draft was not acknowledged');
+    }
     const responseSid = _composerDraftResponseSessionId(response, postedSid);
+    // Acknowledgement owns the captured profile's token, not the active composer.
+    if (intent && typeof _removeComposerDraftPending === 'function') _removeComposerDraftPending(requestSid, intent);
+    if (!isCurrentIntent) return response;
     if (intent && responseSid !== requestSid
         && (_composerDraftLatestIntentSequenceBySid.get(responseSid) || 0) > intent.sequence) {
       return response;
     }
     if (intent) {
-      if (typeof _removeComposerDraftPending === 'function') _removeComposerDraftPending(requestSid, intent);
       if (typeof _composerDraftRetryTimers !== 'undefined') clearTimeout(_composerDraftRetryTimers.get(requestSid));
       _composerDraftLocalFallbackBySid.delete(requestSid);
     }
@@ -704,6 +708,7 @@ function _clearComposerDraftIfUnchanged(sid, text, files, maxRev) {
       && _draftSaveTimerPayload === _composerDraftPayloadSignature(text, files)) clearTimeout(_draftSaveTimer);
   const ifFiles = _composerDraftFilesForPersist(files);
   const ifSig = _composerDraftPayloadSignature(String(text || ''), ifFiles);
+  const fallback = _composerDraftLocalFallbackBySid.get(sid);
   // Join the per-session draft write chain so an earlier queued save cannot
   // land after this compare-and-clear and resurrect the retired draft.
   const previous = _composerDraftPostPromisesBySid.get(sid);
@@ -717,12 +722,13 @@ function _clearComposerDraftIfUnchanged(sid, text, files, maxRev) {
   });
   _composerDraftPostPromisesBySid.set(sid, pending);
   return pending.then((r) => {
-    if (r && r.mismatch) return false;
-    // A failed-save local fallback holding exactly the retired payload is now stale.
-    const fallback = _composerDraftLocalFallbackBySid.get(sid);
-    if (fallback && _composerDraftPayloadSignature(fallback.text, _composerDraftFilesForPersist(fallback.files)) === ifSig) {
+    // A mismatch preserves the remote draft, not a retry of the retired edit.
+    if (fallback && _composerDraftLocalFallbackBySid.get(sid) === fallback
+        && _composerDraftRevision(sid) <= Number(maxRev)
+        && _composerDraftPayloadSignature(fallback.text, _composerDraftFilesForPersist(fallback.files)) === ifSig) {
       _forgetComposerDraftLocalFallback(sid);
     }
+    if (r && r.mismatch) return false;
     _rememberComposerDraftPayloadState(sid, '', []);
     return true;
   }).catch(() => false);

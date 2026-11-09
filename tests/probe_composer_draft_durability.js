@@ -97,5 +97,78 @@ async function flush(){for(let i=0;i<40;i++) await Promise.resolve();}
   const denied=page('default',403);
   denied.run("_saveComposerDraftNow('denied-sid','denied',[]).catch(()=>{})");await flush();
   assert.equal(denied.timers.size,0,'authorization refusals do not retry');
-  process.stdout.write('durability recovery, supersession, clear, profile isolation: PASS\n');
+  for (const editOtherProfile of [false, true]) {
+    storage.clear();
+    const saving=page(), ack=saving.hold();
+    saving.run("_saveComposerDraftNow('probe-owner','already saved',[]).catch(()=>{})");
+    saving.run("S.activeProfile='bravo'; S.session.composer_draft={text:'bravo draft',files:[]}");
+    saving.ta.value='bravo composer';
+    if (editOtherProfile) saving.run("_saveComposerDraft('probe-owner','bravo pending',[])");
+    ack.resolve({session_id:'probe-owner'}); await flush();
+    const key=profile=>'hermes-composer-pending:v1:'+JSON.stringify([profile,'probe-owner']);
+    assert.equal(storage.has(key('default')),false,'ack clears its captured profile after a switch');
+    assert.equal(saving.ta.value,'bravo composer','old ack leaves active composer alone');
+    assert.equal(saving.run('S.session.composer_draft.text'),'bravo draft');
+    assert.equal(storage.has(key('bravo')),editOtherProfile,'other profile pending intent survives');
+    const original=page(); original.succeed();
+    original.run("_restoreComposerDraft({text:'newer remote draft'},'probe-owner')");
+    assert.equal(original.ta.value,'newer remote draft','saved text is not restored after a switch');
+    await original.tick(); assert.equal(original.requests.length,0,'saved text is not replayed');
+  }
+  storage.clear();
+  const retiring=page();
+  retiring.run("_saveComposerDraftNow('probe-owner','delivered steer',[]).catch(()=>{})"); await flush();
+  let remote={text:'newer remote draft',files:[]}, releaseCompare;
+  const compareGate=new Promise(resolve=>{releaseCompare=resolve;});
+  retiring.c.api=async (_,opts)=>{
+    const body=JSON.parse(opts.body); retiring.requests.push(body);
+    if (Object.hasOwn(body,'if_text')) {
+      await compareGate;
+      return {session_id:body.session_id,mismatch:true,draft:remote};
+    }
+    remote={text:body.text,files:body.files}; return {session_id:body.session_id,draft:remote};
+  };
+  const retirement=retiring.run("_clearComposerDraftIfUnchanged('probe-owner','delivered steer',[],_composerDraftRevision('probe-owner'))");
+  await retiring.tick(); // A retry queued behind the in-flight comparison must also be cancelled.
+  releaseCompare();
+  assert.equal(await retirement,false,'compare mismatch preserves the remote draft');
+  await retiring.tick();
+  assert.equal(remote.text,'newer remote draft','retry cannot overwrite a mismatching draft after retirement');
+  assert.equal(storage.size,0,'retired edit is not restored after reload');
+  assert.equal(retiring.timers.size,0,'retirement cancels its retry');
+  for (const mismatch of [false, true]) {
+    for (const replacement of ['text','files','retype','profile']) {
+      storage.clear();
+      const editing=page();
+      editing.run("_saveComposerDraftNow('probe-owner','delivered steer',[]).catch(()=>{})"); await flush();
+      const comparison=editing.hold();
+      const clearing=editing.run("_clearComposerDraftIfUnchanged('probe-owner','delivered steer',[],_composerDraftRevision('probe-owner'))");
+      await flush();
+      if (replacement==='profile') editing.run("S.activeProfile='bravo'");
+      if (replacement==='retype') editing.run("_noteComposerDraftPayload('probe-owner','',[])");
+      const nextText=replacement==='text'?'new local edit':'delivered steer';
+      const nextFiles=replacement==='files'?[{name:'new.txt',size:3}]:[];
+      editing.run(`_saveComposerDraft('probe-owner',${JSON.stringify(nextText)},${JSON.stringify(nextFiles)})`);
+      const pendingKey='hermes-composer-pending:v1:'+JSON.stringify([replacement==='profile'?'bravo':'default','probe-owner']);
+      const pendingValue=storage.get(pendingKey);
+      comparison.resolve({session_id:'probe-owner',mismatch}); await clearing;
+      assert.equal(storage.get(pendingKey),pendingValue,'retirement leaves replacement intent intact');
+      const restored=page(replacement==='profile'?'bravo':'default'); restored.succeed();
+      restored.run("_restoreComposerDraft({text:'remote'},'probe-owner')");
+      assert.equal(restored.ta.value,nextText,'replacement survives reload');
+      await restored.tick();
+      assert.equal(restored.requests.at(-1).text,nextText,'replacement still persists');
+      assert.equal(restored.requests.at(-1).files.length,nextFiles.length);
+    }
+  }
+  storage.clear();
+  const retyped=page();
+  retyped.run("_saveComposerDraft('probe-owner','delivered steer',[]); globalThis.retiredRev=_composerDraftRevision('probe-owner'); _noteComposerDraftPayload('probe-owner','',[]); _saveComposerDraft('probe-owner','delivered steer',[])");
+  retyped.succeed();
+  const retypedRecord=[...storage.values()][0];
+  await retyped.run("_clearComposerDraftIfUnchanged('probe-owner','delivered steer',[],retiredRev)");
+  assert.equal([...storage.values()][0],retypedRecord,'newer revision survives retirement of identical text');
+  await retyped.tick();
+  assert.equal(retyped.requests.at(-1).text,'delivered steer','newer identical text still autosaves');
+  process.stdout.write('durability recovery, supersession, clear, profile isolation, retirement: PASS\n');
 })().catch(e=>{console.error(e);process.exitCode=1;});
