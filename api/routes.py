@@ -9618,6 +9618,19 @@ def _context_lookup_provider_disabled(provider: str, providers_cfg: dict, reques
     return isinstance(exact, dict) and not api_config._raw_provider_record_enabled(exact)
 
 
+def _context_lookup_providers_cfg() -> dict:
+    """The active profile's ``providers:`` mapping, from the config the lookup reads (#8963)."""
+    try:
+        from api.config import get_config as _get_config_for_cl
+
+        cfg = _get_config_for_cl()
+    except Exception:
+        logger.debug("context lookup: config unavailable", exc_info=True)
+        return {}
+    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else None
+    return providers_cfg if isinstance(providers_cfg, dict) else {}
+
+
 def _context_length_config_api_key_and_owner(
     provider: str | None,
     cfg: dict | None,
@@ -11086,7 +11099,9 @@ def _session_context_length_lookup_state(
     the base URL / custom-provider key shape used by streaming saves. (#4248)
     For a named custom provider the URL and key are the chat route's (#8928), and
     the key is final: pass ``caller_key_only`` for that provider (see
-    :func:`_session_context_lookup_uses_chat_route`).
+    :func:`_session_context_lookup_uses_chat_route`). The model switch takes the
+    same pair for such a provider (#8963). A provider the chat refuses as switched
+    off (``enabled: false`` on its authoritative record) looks up without a key.
     """
     model_for_lookup = str(model or "").strip()
     provider_for_lookup = str(provider or "").strip()
@@ -11140,6 +11155,11 @@ def _session_context_length_lookup_state(
             route_url = str(route.get("base_url") or "").strip()
             if route_url:
                 base_url_for_lookup = route_url
+            # #8963: a switched-off provider is refused before the chat reaches this
+            # merge (the Agent's _raise_if_provider_disabled), so it sends no key; the
+            # verdict is the one the config selection uses (#8938 item 1).
+            if _context_lookup_provider_disabled(provider_for_lookup, _context_lookup_providers_cfg()):
+                return model_for_lookup, provider_for_lookup, base_url_for_lookup, ""
             route_key = route.get("api_key")
             keyless = bool(isinstance(custom, dict) and custom.get("keyless"))
             if isinstance(route_key, str) and not keyless:
@@ -11152,7 +11172,7 @@ def _session_context_length_lookup_state(
 
 
 def _session_context_lookup_uses_chat_route(provider: str | None) -> bool:
-    """True when GET /api/session's lookup takes its URL and key from the chat route (#8928)."""
+    """True when the context lookup takes its URL and key from the chat route: GET /api/session (#8928) and the model switch (#8963)."""
     return str(provider or "").strip().startswith("custom:")
 
 
@@ -11328,12 +11348,28 @@ def _invalidate_session_route_state_if_changed(
     if changed:
         session.last_used_model = None
         session.gateway_routing = None
-        session.context_length = _resolve_context_length_for_session_model(
-            session.model,
-            session.model_provider,
-            # #8938: the stored provider is raw; the chat asks the Agent for its resolution.
-            requested_provider=_context_lookup_requested_provider(session.model, session.model_provider),
-        )
+        # #8938: the stored provider is raw; the chat asks the Agent for its resolution.
+        requested_provider = _context_lookup_requested_provider(session.model, session.model_provider)
+        if _session_context_lookup_uses_chat_route(requested_provider):
+            # #8963: a named custom provider's URL and key are the chat route's, as on
+            # GET (#8928), not a config selection that predicts the chat's record.
+            lookup_model, lookup_provider, lookup_url, lookup_key = _session_context_length_lookup_state(
+                session.model,
+                session.model_provider,
+            )
+            session.context_length = _resolve_context_length_for_session_model(
+                lookup_model,
+                lookup_provider,
+                base_url=lookup_url,
+                api_key=lookup_key,
+                caller_key_only=_session_context_lookup_uses_chat_route(lookup_provider),
+            )
+        else:
+            session.context_length = _resolve_context_length_for_session_model(
+                session.model,
+                session.model_provider,
+                requested_provider=requested_provider,
+            )
         session.threshold_tokens = 0
         session.last_prompt_tokens = 0
 
