@@ -5243,14 +5243,17 @@ def resolve_custom_provider_bundle(
 
     ``lookup_only`` is for a read path that only asks which endpoint and key the
     chat would use (GET /api/session's context-length lookup, #8928). Record
-    selection, endpoint ownership and the keyless declaration are unchanged, but
-    the credential comes only from what the record declares in config (literal /
-    ``${ENV}`` / ``key_env`` / ``CUSTOM_<SLUG>_API_KEY``). The credential pool
-    (whose selection can rotate or refresh entries) and the ``key_cmd`` token
-    provider (which runs a command when used) are skipped, and a host-gated env key
-    is never taken as the credential. That env key is still READ, as a plain
-    environment lookup, by the keyless declaration (a record the chat could serve
-    from it is not keyless), so the verdict matches the chat's.
+    selection and endpoint ownership are unchanged, but the credential comes only
+    from what the record declares in config (literal / ``${ENV}`` / ``key_env`` /
+    ``CUSTOM_<SLUG>_API_KEY``). The credential pool (whose selection can rotate or
+    refresh entries) and the ``key_cmd`` token provider (which runs a command when
+    used) are skipped, and a host-gated env key is never taken as the credential.
+    The keyless declaration still READS that env key, as a plain environment
+    lookup (a record the chat could serve from it is not keyless). It differs from
+    the chat's in one case: a pool the record doesn't declare in config (an
+    auth.json ``custom:<name>`` pool) is never consulted, so a record whose only
+    credential is such a pool reads as keyless here and the read path looks up
+    without a key, where the chat would use the pool's.
     """
     pid = str(provider_id or "").strip().lower()
     if not pid.startswith("custom:"):
