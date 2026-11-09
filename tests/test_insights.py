@@ -2861,20 +2861,15 @@ def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch, tmp
     log_file.write_text(fake_nginx_logs)
     monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
 
-    # Pin the local timezone to the fake clock's zone (+07): the log
-    # entries carry a fixed +0700 offset, and in hosts east of UTC+11 the
-    # converted instants would land after the fake clock. Stub reverse
-    # DNS so no real resolver is consulted.
-    import os as _os
+    # Fixed fake clock as a UTC epoch (2026-10-28 07:00 UTC = 14:00 at
+    # +07, matching the log offsets). Using an absolute instant instead
+    # of mktime() on local clock fields makes the test independent of
+    # the host timezone: both the clock and the parsed log instants are
+    # absolute, so they shift together under any local zone. No TZ
+    # mutation needed. Stub reverse DNS so no real resolver is used.
     import socket as _socket
-    import time as _time_mod
 
-    monkeypatch.setenv("TZ", "Asia/Bangkok")
-    if hasattr(_time_mod, "tzset"):
-        _time_mod.tzset()
-    monkeypatch.setattr(
-        _socket, "gethostbyaddr", lambda ip: (_socket.gethostname(), [], [ip])
-    )
+    monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
 
     class FakeRow:
         def __init__(self, data):
@@ -2915,9 +2910,9 @@ def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch, tmp
 
     monkeypatch.setattr(routes.subprocess, "run", mock_subprocess_run)
 
-    import time as _time
+    import calendar as _calendar
     import types
-    now_ts = _time.mktime((2026, 10, 28, 14, 0, 0, 0, 0, -1))
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
     monkeypatch.setattr(routes.time, "time", lambda: now_ts)
 
     handler = _FakeHandler()
@@ -2946,12 +2941,6 @@ def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch, tmp
 
     day_nous = next(r for r in data["outbound_domains_day"] if r["domain"] == "inference-api.nousresearch.com")
     assert day_nous["calls"] == 100
-
-    # Restore the host timezone (tzset is process-global; monkeypatch
-    # only restores the env var).
-    _os.environ.pop("TZ", None)
-    if hasattr(_time_mod, "tzset"):
-        _time_mod.tzset()
 
 
 def test_insights_traffic_rejects_malformed_days():
