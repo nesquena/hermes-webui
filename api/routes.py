@@ -9618,37 +9618,6 @@ def _context_lookup_provider_disabled(provider: str, providers_cfg: dict, reques
     return isinstance(exact, dict) and not api_config._raw_provider_record_enabled(exact)
 
 
-def _context_lookup_providers_cfg() -> dict:
-    """The active profile's ``providers:`` mapping, from the config the lookup reads (#8963)."""
-    try:
-        from api.config import get_config as _get_config_for_cl
-
-        cfg = _get_config_for_cl()
-    except Exception:
-        logger.debug("context lookup: config unavailable", exc_info=True)
-        return {}
-    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else None
-    return providers_cfg if isinstance(providers_cfg, dict) else {}
-
-
-def _context_lookup_agent_refuses_switched_off(provider: str | None) -> bool:
-    """Whether the Agent refuses ``provider`` as switched off before the chat's merge (#8963).
-
-    The Agent's ``_raise_if_provider_disabled`` reads exactly one record:
-    ``providers.get(<requested id, stripped and lower-cased>)``, a plain dict lookup
-    with no case-folding of the record keys and no alias match, and refuses when
-    ``is_provider_enabled`` says it is off (``api_config._raw_provider_record_enabled``
-    mirrors it: ``false`` / ``"off"`` / ``"no"`` / ``"0"`` / ``null``). The same on
-    every supported Agent. Other spellings and named records are the merge's to
-    refuse: beside a legacy ``custom_providers`` entry the chat still routes.
-    """
-    key = str(provider or "").strip().lower()
-    if not key:
-        return False
-    exact = _context_lookup_providers_cfg().get(key)
-    return isinstance(exact, dict) and not api_config._raw_provider_record_enabled(exact)
-
-
 def _context_length_config_api_key_and_owner(
     provider: str | None,
     cfg: dict | None,
@@ -11118,8 +11087,8 @@ def _session_context_length_lookup_state(
     For a named custom provider the URL and key are the chat route's (#8928), and
     the key is final: pass ``caller_key_only`` for that provider (see
     :func:`_session_context_lookup_uses_chat_route`). The model switch takes the
-    same pair for such a provider (#8963). A provider the chat refuses as switched
-    off (``enabled: false`` on its authoritative record) looks up without a key.
+    same pair for such a provider (#8963). A route the merge refuses (the chat's
+    own verdict, switched-off records included) looks up without a key.
     """
     model_for_lookup = str(model or "").strip()
     provider_for_lookup = str(provider or "").strip()
@@ -11173,11 +11142,10 @@ def _session_context_length_lookup_state(
             route_url = str(route.get("base_url") or "").strip()
             if route_url:
                 base_url_for_lookup = route_url
-            # #8963: the Agent refuses a provider whose exact record is switched off
-            # before the chat reaches this merge, so the lookup sends no key. Only that
-            # exact rule: the merge above already refused what the chat's route refuses.
-            if _context_lookup_agent_refuses_switched_off(provider_for_lookup):
-                return model_for_lookup, provider_for_lookup, base_url_for_lookup, ""
+            # #8963: no switched-off verdict of the lookup's own here. The chat
+            # obeys this merge: api/streaming.py prints and drops the Agent's
+            # resolve_runtime_provider error (its switched-off ValueError too) and
+            # routes through the same merge, so a route it builds is the chat's.
             route_key = route.get("api_key")
             keyless = bool(isinstance(custom, dict) and custom.get("keyless"))
             if isinstance(route_key, str) and not keyless:

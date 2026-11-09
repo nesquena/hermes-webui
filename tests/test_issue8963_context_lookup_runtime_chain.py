@@ -9,11 +9,10 @@ On a model switch, the context-length lookup used to pick the key with its own c
 For a ``custom:<name>`` session the switch now asks GET's helper (``_session_context_length_lookup_state``, #8928):
 WebUI's own half of the chat's routing chain, read-only (``lookup_only``), with ``caller_key_only`` so the selection
 can't add a key. The rest of the lookup (a per-model ``context_length`` under the stored spelling) still reads the
-session's stored model and provider. The helper sends no key when the Agent refuses the provider before the chat's
-merge: ``_raise_if_provider_disabled`` reads exactly ``providers.get(<id stripped and lower-cased>)``. Other
-spellings and named records are left to the merge, which is the chat's own route: beside a legacy entry the chat
-still routes through it. Every expected pair below is the chat's own, measured on the real chain with the installed
-Agent. Other providers keep the previous path.
+session's stored model and provider. The lookup adds no switched-off verdict of its own on this route: the chat
+routes through the same merge even when the Agent's resolver raises (api/streaming.py prints and drops that error,
+the switched-off ValueError included), so the merge's verdict is the chat's. Every expected pair below is the chat's
+own, measured on the real streaming chain with the installed Agent. Other providers keep the previous path.
 
 Streaming needs no change: its five lookup sites pass the chat's merged bundle (``resolved_*``, and the Agent built
 from it), and the lookup returns that pair. The stream rows below pin it.
@@ -171,69 +170,86 @@ def test_the_model_block_key_no_longer_stands_in_for_the_record(monkeypatch):
     assert all(key != "K1" for _, key in calls)
 
 
-# ── Switched off: the chat refuses, the lookup sends no key ───────────────────────────────────────────────────
+# ── Switched off: the merge (the chat's own route) decides ───────────────────────────────────────────────────
+# api/streaming.py prints and drops the Agent's resolve_runtime_provider error, its switched-off ValueError included,
+# and routes the turn through WebUI's merge with an empty runtime (no key, the configured URL). So the chat refuses
+# exactly when the merge does, and the lookup adds no verdict of its own (Codex round 2 on #8963).
 
 
 REFUSED_SHAPES = [
     ("exact-record-disabled-beside-raw-h", _cfg({**_alias("K3", False, spelling="custom:h"), **RAW_H},
                                                  model=_model_k1())),
-    ("exact-record-disabled-beside-legacy-entry",
-     _cfg({"custom:h": {"base_url": A, "api_key": "KX", "enabled": False}},
-          legacy=[{"name": "h", "base_url": L, "api_key": "KL"}])),
     ("exact-record-disabled-alone", _cfg({"custom:h": {"base_url": A, "api_key": "KX", "enabled": False}},
                                          model=_model_k1())),
+    ("case-variant-disabled-alone", _cfg(_alias("K3", False), model={"provider": "custom:h", "default": "m-x",
+                                                                       "base_url": A})),
 ]
 
 
 @pytest.mark.parametrize("cfg", [s[1] for s in REFUSED_SHAPES], ids=[s[0] for s in REFUSED_SHAPES])
-def test_a_switched_off_provider_looks_up_without_a_key_on_switch_and_get(monkeypatch, cfg):
+def test_a_route_the_merge_refuses_looks_up_without_a_key(monkeypatch, cfg):
+    _use(cfg, monkeypatch)
+    with pytest.raises(config.CustomProviderRouteError):
+        _streaming_bundle(cfg, monkeypatch, "custom:h")
     switch, get = _switch(cfg, monkeypatch), _get(cfg, monkeypatch)
     assert [key for _, key in switch] == [""], switch
     assert [key for _, key in get] == [""], get
 
 
-def test_get_sent_the_legacy_key_for_a_refused_session_before(monkeypatch):
-    """Senior round 9 on #8956: GET sent the legacy entry's key though the chat refuses custom:h. Its enabled twin
-    still sends it, so the verdict is the switch, not the legacy entry."""
-    legacy = [{"name": "h", "base_url": L, "api_key": "KL"}]
-    on = _cfg({"custom:h": {"base_url": A, "api_key": "KX", "enabled": True}}, legacy=legacy)
-    off = _cfg({"custom:h": {"base_url": A, "api_key": "KX", "enabled": False}}, legacy=legacy)
-    assert [key for _, key in _get(off, monkeypatch)] == [""]
-    assert [key for _, key in _get(on, monkeypatch)] != [""]
+EXACT_OFF_BESIDE_LEGACY = [
+    ("legacy-entry", [{"name": "h", "base_url": L, "api_key": "KL"}]),
+    ("legacy-entry-itself-switched-off", [{"name": "h", "base_url": L, "api_key": "KL", "enabled": False}]),
+]
 
 
-@pytest.mark.parametrize("flag", [False, "off", "no", "0", None])
-def test_the_refusal_is_the_agents_exact_rule(monkeypatch, flag):
-    """``providers.get(<id stripped and lower-cased>)`` and ``is_provider_enabled``, as every supported Agent's
-    ``_raise_if_provider_disabled`` reads them. ``null`` is off there too."""
-    _use(_cfg({"custom:h": {"base_url": A, "enabled": flag}}), monkeypatch)
-    assert routes._context_lookup_agent_refuses_switched_off("custom:h")
-    assert routes._context_lookup_agent_refuses_switched_off(" Custom:H ")
-    _use(_cfg({"custom:h": {"base_url": A, "enabled": True}}), monkeypatch)
-    assert not routes._context_lookup_agent_refuses_switched_off("custom:h")
+@pytest.mark.parametrize("legacy", [s[1] for s in EXACT_OFF_BESIDE_LEGACY], ids=[s[0] for s in EXACT_OFF_BESIDE_LEGACY])
+def test_an_exact_switched_off_record_beside_a_legacy_entry_keeps_the_chats_legacy_pair(monkeypatch, legacy):
+    """The Agent raises (``providers.custom:h`` is off), streaming drops the error, and the merge routes through the
+    legacy entry: the chat sends KL to L. exp-v0.52.660 and #8956 send that pair on GET; senior round 9's "refused"
+    reading of this shape on #8956 came from a probe that counted the Agent's raise as the chat's refusal."""
+    cfg = _cfg({"custom:h": {"base_url": A, "api_key": "KX", "enabled": False}}, legacy=legacy)
+    route = _streaming_bundle(cfg, monkeypatch, "custom:h")
+    assert (route["base_url"], route["api_key"]) == (L, "KL")
+    assert _switch(cfg, monkeypatch) == _get(cfg, monkeypatch) == [(L, "KL")]
 
 
-@pytest.mark.parametrize("providers", [
-    {"Custom:H": {"base_url": A, "enabled": False}},
-    {" custom:h ": {"base_url": A, "enabled": False}},
-    {"one": {"name": "h", "base_url": A, "enabled": False}},
-    {"h": {"base_url": A, "enabled": False}},
-    {},
-], ids=["case-variant", "space-variant", "named-record", "raw-named", "none"])
-def test_no_other_spelling_is_the_agents_refusal(monkeypatch, providers):
-    """The Agent's lookup is a plain dict ``get`` with no case-folding of record keys and no alias match."""
-    _use(_cfg(providers), monkeypatch)
-    assert not routes._context_lookup_agent_refuses_switched_off("custom:h")
-
-
-def test_get_takes_the_agents_refusal_not_the_selections_verdict(monkeypatch):
-    """#8938 item 1's ``_context_lookup_provider_disabled`` is the config selection's own (WebUI's native-record
-    verdict). On the chat route the merge refuses what the chat's route refuses; the helper adds only the Agent's
-    exact rule (Codex round 1 on #8963)."""
+def test_the_lookup_adds_no_switched_off_verdict_on_the_chat_route(monkeypatch):
+    """#8938 item 1's ``_context_lookup_provider_disabled`` is the config selection's own. The chat-route helper
+    consults no switched-off verdict at all: the merge it runs is the chat's."""
     seen = []
-    monkeypatch.setattr(routes, "_context_lookup_provider_disabled", lambda *a, **k: seen.append(a) or False)
-    assert [key for _, key in _get(REFUSED_SHAPES[1][1], monkeypatch)] == [""]
+    monkeypatch.setattr(routes, "_context_lookup_provider_disabled", lambda *a, **k: seen.append(a) or True)
+    cfg = _cfg({"custom:h": {"base_url": A, "api_key": "KX", "enabled": False}}, legacy=EXACT_OFF_BESIDE_LEGACY[0][1])
+    assert _get(cfg, monkeypatch) == [(L, "KL")]
     assert seen == []
+
+
+def test_streaming_drops_the_agents_resolution_error_and_routes_through_the_merge():
+    """Source pin for the premise above. If api/streaming.py starts stopping the turn when the Agent's
+    resolve_runtime_provider raises, the chat refuses these shapes and this file's expectations must change."""
+    import pathlib
+
+    src = (pathlib.Path(routes.__file__).parent / "streaming.py").read_text()
+    # The turn's own resolution (the other call is the credential self-heal, which re-resolves on a 401).
+    warn = src.index('print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)')
+    head = src.rindex("_rt = resolve_runtime_provider_with_anthropic_env_lock(", 0, warn)
+    assert "_rt = {}" in src[head - 1500:head]
+    assert "except Exception as _e:" in src[head:warn]
+    tail = src[warn:warn + 4000]
+    assert "_runtime_bundle = _resolve_runtime_connection_bundle(" in tail
+    assert "raise_for_custom_provider_route(_runtime_bundle)" in tail
+    assert "raise" not in src[warn:warn + 200].split("\n", 1)[1].split("\n", 1)[0]
+
+
+def _streaming_bundle(cfg, monkeypatch, provider):
+    """What api/streaming.py builds when the Agent's resolution raised: the merge with an empty runtime, no key and
+    the configured URL, then the route verdict."""
+    _use(cfg, monkeypatch)
+    _m, pid, configured = config.resolve_model_provider(config.model_with_provider_context("m-x", provider))
+    from api import streaming
+
+    route = streaming._resolve_runtime_connection_bundle(pid, None, configured, {}, custom_provider_lookup=pid)
+    config.raise_for_custom_provider_route(route)
+    return route
 
 
 # ── The switch takes GET's pair only for a named custom provider ──────────────────────────────────────────────
@@ -336,9 +352,9 @@ def test_a_generic_custom_session_keeps_the_config_selection(monkeypatch):
 
 
 # ── Codex round 1 on #8963 ────────────────────────────────────────────────────────────────────────────────────
-# F2: a switched-off alias or named record with no exact record, beside a legacy custom_providers entry. The Agent's
-# exact lookup misses, the merge routes through the legacy entry and the chat sends its key; exp-v0.52.660 and #8956
-# send that pair on the switch and GET. The first build of this fix refused here (WebUI's native verdict).
+# F2: a switched-off alias or named record with no exact record, beside a legacy custom_providers entry. The merge
+# routes through the legacy entry and the chat sends its key; exp-v0.52.660 and #8956 send that pair on GET (and on
+# the switch for the entries at A). The first build of this fix refused here (WebUI's native verdict).
 
 LEGACY_L = [{"name": "h", "base_url": L, "api_key": "KL"}]
 LEGACY_A = [{"name": "h", "base_url": A, "api_key": "KL"}]
