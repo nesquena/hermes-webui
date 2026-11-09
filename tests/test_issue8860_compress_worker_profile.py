@@ -1,16 +1,22 @@
-"""Manual compression asks the chat's own profile whether it is gateway-backed (#8860 fold).
+"""Manual compression trusts the gateway check made by ``/compress/start`` (#8860 fold).
 
 ``/compress/start`` checks the gateway backend on the request thread, where the
-profile cookie selects the chat's profile. The job then runs on a worker thread
-that carries the profile env but not the per-request profile, so the second
-``/compress`` guard inside ``_handle_session_compress`` read the process-default
-profile's config. With a gateway default profile and a local chat profile the
-start call answered 200 and the job then failed with the gateway refusal.
+profile cookie selects the chat's profile, and only then starts the worker. The
+PR's second ``/compress`` guard inside ``_handle_session_compress`` also ran on
+that worker thread, which carries the profile env but not the per-request
+profile, so it re-read the process-default profile's config: with a gateway
+default profile and a local chat profile the start call answered 200 and the job
+then failed with the gateway refusal.
 
-These tests use two real profile homes with different ``webui_chat_backend``
-values and drive the real start route, worker and handler.
+The worker now marks its in-memory handler as admitted and the handler skips the
+guard for that marker only; the synchronous ``/api/session/compress`` route keeps
+the guard exactly. These tests use two real profile homes and drive the real
+start route, worker and handler.
 """
+import ast
 import threading
+import types
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +24,8 @@ from api import config, oauth, profiles, routes
 from tests.test_sprint46 import _FakeAgent, _FakeHandler, _make_session
 
 _REFUSAL = "/compress is unavailable on gateway-backed sessions"
+_MARKER = "gateway_admission_checked"
+_REPO = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -62,6 +70,21 @@ def profile_pair(tmp_path, monkeypatch, cleanup_test_sessions):
     profiles.clear_request_profile()
 
 
+@pytest.fixture
+def workers(monkeypatch):
+    """Record every thread the start route launches."""
+    started = []
+    real_thread = threading.Thread
+
+    def record_thread(*args, **kwargs):
+        worker = real_thread(*args, **kwargs)
+        started.append(worker)
+        return worker
+
+    monkeypatch.setattr(routes.threading, "Thread", record_thread)
+    return started
+
+
 def _work_session():
     sid = _make_session()
     session = routes.get_session(sid)
@@ -86,18 +109,7 @@ def _job(sid):
         return dict(routes._MANUAL_COMPRESSION_JOBS.get(sid) or {})
 
 
-def test_local_chat_profile_compresses_when_default_profile_is_gateway(profile_pair, monkeypatch):
-    profile_pair("gateway", "webui")
-    sid, session = _work_session()
-    workers = []
-    real_thread = threading.Thread
-
-    def record_thread(*args, **kwargs):
-        worker = real_thread(*args, **kwargs)
-        workers.append(worker)
-        return worker
-
-    monkeypatch.setattr(routes.threading, "Thread", record_thread)
+def _start_and_finish(sid, workers):
     handler = _FakeHandler()
     _as_work_request(routes._handle_session_compress_start, handler, {"session_id": sid})
     assert handler.status == 200, handler.payload()
@@ -105,14 +117,19 @@ def test_local_chat_profile_compresses_when_default_profile_is_gateway(profile_p
     for worker in workers:
         worker.join(15)
         assert not worker.is_alive()
+    return _job(sid)
 
-    job = _job(sid)
+
+def test_local_chat_profile_compresses_when_default_profile_is_gateway(profile_pair, workers):
+    profile_pair("gateway", "webui")
+    sid, _session = _work_session()
+    job = _start_and_finish(sid, workers)
     assert job.get("status") == "done", job
     assert job.get("error_status") is None, job
     assert len(routes.get_session(sid).context_messages or []) > 0
 
 
-def test_gateway_chat_profile_is_refused_at_start_when_default_profile_is_local(profile_pair):
+def test_gateway_chat_profile_is_refused_at_start_when_default_profile_is_local(profile_pair, workers):
     profile_pair("webui", "gateway")
     sid, _session = _work_session()
     handler = _FakeHandler()
@@ -122,6 +139,7 @@ def test_gateway_chat_profile_is_refused_at_start_when_default_profile_is_local(
     assert payload["code"] == "gateway_mode_unsupported"
     assert payload["error"] == _REFUSAL
     assert _job(sid) == {}, "a refused start must not create a compression job"
+    assert workers == [], "a refused start must not launch a worker"
 
 
 def test_sync_compress_route_still_refuses_a_gateway_backed_chat(profile_pair):
@@ -133,46 +151,87 @@ def test_sync_compress_route_still_refuses_a_gateway_backed_chat(profile_pair):
     assert handler.payload()["code"] == "gateway_mode_unsupported"
 
 
-def test_worker_guard_still_refuses_when_the_chat_profile_is_gateway(profile_pair):
-    """The worker's own guard asks the chat's profile, not the default (which is local here)."""
-    profile_pair("webui", "gateway")
-    sid, _session = _work_session()
-    with routes._MANUAL_COMPRESSION_JOBS_LOCK:
-        routes._MANUAL_COMPRESSION_JOBS[sid] = {
-            "session_id": sid,
-            "focus_topic": None,
-            "status": "running",
-            "started_at": 0.0,
-            "updated_at": 0.0,
-        }
-    routes._run_manual_compression_job(sid, {"session_id": sid})
-    job = _job(sid)
-    assert job.get("status") == "error", job
-    assert job.get("error_status") == 409, job
-    assert job.get("error") == _REFUSAL, job
-
-
-def test_external_config_override_is_honoured_like_the_start_route(profile_pair, tmp_path, monkeypatch):
-    """``HERMES_CONFIG_PATH`` is what ``/compress/start`` reads for every profile; the worker must agree."""
+def test_external_config_override_job_completes_when_admitted(profile_pair, tmp_path, monkeypatch, workers):
+    """``HERMES_CONFIG_PATH`` selects local mode at admission; the job follows that verdict."""
     profile_pair("gateway", "gateway")
     override = tmp_path / "external-config.yaml"
     override.write_text("webui_chat_backend: webui\n")
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(override))
     sid, _session = _work_session()
-    workers = []
-    real_thread = threading.Thread
-
-    def record_thread(*args, **kwargs):
-        worker = real_thread(*args, **kwargs)
-        workers.append(worker)
-        return worker
-
-    monkeypatch.setattr(routes.threading, "Thread", record_thread)
-    handler = _FakeHandler()
-    _as_work_request(routes._handle_session_compress_start, handler, {"session_id": sid})
-    assert handler.status == 200, handler.payload()
-    for worker in workers:
-        worker.join(15)
-        assert not worker.is_alive()
-    job = _job(sid)
+    job = _start_and_finish(sid, workers)
     assert job.get("status") == "done", job
+
+
+def _functions_by_line(tree):
+    spans = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            spans.append((node.lineno, node.end_lineno, node.name))
+    return spans
+
+
+def _enclosing(spans, lineno):
+    inside = [s for s in spans if s[0] <= lineno <= s[1]]
+    return min(inside, key=lambda s: s[1] - s[0])[2] if inside else "<module>"
+
+
+def _source_trees():
+    paths = sorted((_REPO / "api").glob("*.py")) + [_REPO / "server.py"]
+    for path in paths:
+        if path.exists():
+            yield path, ast.parse(path.read_text(encoding="utf-8"))
+
+
+def test_worker_is_reached_only_through_a_passing_compress_start():
+    """The worker trusts admission, so its only entry must sit behind the start route's guard."""
+    references = []
+    for path, tree in _source_trees():
+        spans = _functions_by_line(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "_run_manual_compression_job":
+                references.append((path.name, _enclosing(spans, node.lineno), node.lineno))
+    assert references, "no reference to _run_manual_compression_job found"
+    assert {(f, fn) for f, fn, _ in references} == {("routes.py", "_handle_session_compress_start")}, references
+
+    tree = ast.parse((_REPO / "api" / "routes.py").read_text(encoding="utf-8"))
+    start = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_handle_session_compress_start"
+    )
+    guard_lines = [
+        n.lineno for n in ast.walk(start)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "refuse_on_gateway_backend"
+    ]
+    worker_lines = [line for _f, _fn, line in references]
+    assert guard_lines and max(guard_lines) < min(worker_lines), (guard_lines, worker_lines)
+
+
+def test_guard_is_skipped_only_for_the_worker_marker(profile_pair):
+    profile_pair("webui", "gateway")
+
+    def run(handler):
+        _as_work_request(routes._handle_session_compress, handler, {"session_id": "no-such-session"})
+        return handler.status
+
+    assert run(_FakeHandler()) == 409
+    truthy = _FakeHandler()
+    setattr(truthy, _MARKER, "yes")
+    assert run(truthy) == 409, "only the exact True set by the worker skips the guard"
+    marked = _FakeHandler()
+    setattr(marked, _MARKER, True)
+    assert run(marked) != 409
+
+    assert not hasattr(routes._ManualCompressionMemoryHandler(), _MARKER)
+    assert not hasattr(types.SimpleNamespace(), _MARKER)
+    uses = []
+    for path, tree in _source_trees():
+        spans = _functions_by_line(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == _MARKER:
+                uses.append((path.name, _enclosing(spans, node.lineno), type(node.ctx).__name__))
+            elif isinstance(node, ast.Constant) and node.value == _MARKER:
+                uses.append((path.name, _enclosing(spans, node.lineno), "Str"))
+    assert sorted(uses) == [
+        ("routes.py", "_handle_session_compress", "Str"),
+        ("routes.py", "_run_manual_compression_job", "Store"),
+    ], uses
