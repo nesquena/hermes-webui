@@ -230,6 +230,8 @@ def test_entry_profile_is_used_by_initial_guard_even_if_body_read_switches_globa
 
 @pytest.mark.parametrize('older_skip_index,newer_skip_index', [(True, True), (True, False), (False, True), (False, False)])
 def test_owner_saves_prepare_independent_temp_files(env, monkeypatch, older_skip_index, newer_skip_index):
+    # Same-session saves take turns (#7881): the newer save waits for the paused older
+    # one, then publishes last, and neither leaves a temp file behind.
     e = env
     older = e.owner(composer_draft={'text': 'older'})
     newer = e.m.Session(session_id=older.session_id, title='newer', composer_draft={'text': 'newer'})
@@ -245,22 +247,28 @@ def test_owner_saves_prepare_independent_temp_files(env, monkeypatch, older_skip
 
     monkeypatch.setattr(e.m.os, 'fsync', pause_older)
 
-    def save_older():
+    def run(fn):
         try:
-            older.save(touch_updated_at=False, skip_index=older_skip_index)
+            fn()
         except BaseException as exc:
             errors.append(exc)
 
-    thread = threading.Thread(target=save_older, name='older-owner')
+    thread = threading.Thread(target=run, name='older-owner',
+                              args=(lambda: older.save(touch_updated_at=False, skip_index=older_skip_index),))
     thread.start()
+    later = None
     try:
         assert prepared.wait(5)
-        newer.save(touch_updated_at=False, skip_index=newer_skip_index)
-        assert json.loads(newer.path.read_text())['title'] == 'newer'
+        later = threading.Thread(target=run, name='newer-owner',
+                                 args=(lambda: newer.save(touch_updated_at=False, skip_index=newer_skip_index),))
+        later.start()
     finally:
         resume.set()
         thread.join(6)
-    assert not thread.is_alive() and not errors
+        if later is not None:
+            later.join(6)
+    assert not thread.is_alive() and later is not None and not later.is_alive() and not errors
+    assert json.loads(newer.path.read_text())['title'] == 'newer'
     assert not list(e.folder.glob('*.tmp.*'))
 
 

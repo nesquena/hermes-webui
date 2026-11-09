@@ -75,11 +75,13 @@ def test_non_array_transcript_requires_complete_document(tmp_path, monkeypatch, 
 
 @pytest.mark.parametrize('older_skip_index,newer_skip_index', [(True, True), (True, False), (False, True)])
 def test_overlapping_skip_index_saves_keep_fallback_in_publication_order(tmp_path, monkeypatch, older_skip_index, newer_skip_index):
+    # Same-session saves take turns (#7881): the draft post and the newer save may wait
+    # for the paused older save; publication order is still older -> draft -> newer.
     models, routes, _, _, owner = seed(tmp_path, monkeypatch)
     published, resume = threading.Event(), threading.Event()
     real_replace = models._replace_session_sidecar if hasattr(models, '_replace_session_sidecar') else models._safe_replace
     seam = '_replace_session_sidecar' if hasattr(models, '_replace_session_sidecar') else '_safe_replace'
-    errors = []
+    errors, statuses = [], []
     def replace(*args, **kwargs):
         result = real_replace(*args, **kwargs)
         if threading.current_thread().name == 'older-owner-save':
@@ -95,15 +97,25 @@ def test_overlapping_skip_index_saves_keep_fallback_in_publication_order(tmp_pat
     worker = threading.Thread(target=save, name='older-owner-save')
     worker.start()
     latest = {'text': 'new durable publication', 'files': []}
+    def publish_then_save():
+        try:
+            statuses.append(_post_json(monkeypatch, routes, '/api/session/draft', {'session_id': owner.session_id, **latest})[0])
+            owner.save(skip_index=newer_skip_index)
+        except BaseException as exc:
+            errors.append(exc)
+    later = None
     try:
         assert published.wait(5)
-        assert _post_json(monkeypatch, routes, '/api/session/draft', {'session_id': owner.session_id, **latest})[0] == 200
-        owner.save(skip_index=newer_skip_index)
-        assert json.loads(owner.path.read_text())['composer_draft'] == latest
+        later = threading.Thread(target=publish_then_save, name='newer-owner-save')
+        later.start()
     finally:
         resume.set()
         worker.join(5)
-    assert not worker.is_alive() and not errors
+        if later is not None:
+            later.join(10)
+    assert not worker.is_alive() and later is not None and not later.is_alive() and not errors
+    assert statuses == [200]
+    assert json.loads(owner.path.read_text())['composer_draft'] == latest
     models._session_draft_path(owner.session_id).write_text('{damaged')
     cold = models.Session.load(owner.session_id).composer_draft
     warm = owner.composer_draft
