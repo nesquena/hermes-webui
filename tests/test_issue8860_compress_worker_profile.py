@@ -150,3 +150,29 @@ def test_worker_guard_still_refuses_when_the_chat_profile_is_gateway(profile_pai
     assert job.get("status") == "error", job
     assert job.get("error_status") == 409, job
     assert job.get("error") == _REFUSAL, job
+
+
+def test_external_config_override_is_honoured_like_the_start_route(profile_pair, tmp_path, monkeypatch):
+    """``HERMES_CONFIG_PATH`` is what ``/compress/start`` reads for every profile; the worker must agree."""
+    profile_pair("gateway", "gateway")
+    override = tmp_path / "external-config.yaml"
+    override.write_text("webui_chat_backend: webui\n")
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(override))
+    sid, _session = _work_session()
+    workers = []
+    real_thread = threading.Thread
+
+    def record_thread(*args, **kwargs):
+        worker = real_thread(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr(routes.threading, "Thread", record_thread)
+    handler = _FakeHandler()
+    _as_work_request(routes._handle_session_compress_start, handler, {"session_id": sid})
+    assert handler.status == 200, handler.payload()
+    for worker in workers:
+        worker.join(15)
+        assert not worker.is_alive()
+    job = _job(sid)
+    assert job.get("status") == "done", job

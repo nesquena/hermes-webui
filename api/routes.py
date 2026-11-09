@@ -35150,11 +35150,16 @@ def _run_manual_compression_job(sid, body):
             from api import profiles as profiles_api
 
             with profiles_api.profile_env_for_background_worker(session, "manual compression", logger_override=logger):
-                # A pure read of the chat's own profile config (no scope change),
-                # so the gateway guard asks the same profile /compress/start did.
-                memory_handler.session_profile_config = get_config_for_profile_home(
-                    profiles_api.get_hermes_home_for_profile(getattr(session, "profile", None))
-                )
+                # Give the gateway guard the config /compress/start read for this
+                # chat, without changing the worker's scope: an external
+                # HERMES_CONFIG_PATH is authoritative for every profile there
+                # (_get_config_path), otherwise it is the chat profile's own file.
+                if os.getenv("HERMES_CONFIG_PATH"):
+                    memory_handler.session_profile_config = get_config_snapshot()
+                else:
+                    memory_handler.session_profile_config = get_config_for_profile_home(
+                        profiles_api.get_hermes_home_for_profile(getattr(session, "profile", None))
+                    )
                 _handle_session_compress(memory_handler, body)
         else:
             _handle_session_compress(memory_handler, body)
