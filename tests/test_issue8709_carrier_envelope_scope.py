@@ -15,8 +15,6 @@ from urllib.parse import urlparse
 import api.models as models
 import api.routes as routes
 from api.compression_anchor import (
-    COMPACTION_HANDOFF_DELIMITER_PREFIX,
-    COMPACTION_HANDOFF_HEADER_PREFIX,
     project_compaction_carrier_for_display,
     project_compaction_carriers_for_display,
 )
