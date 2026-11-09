@@ -109,9 +109,18 @@ jobs:
 
       # Broken-link check. Handed a FIXED glob (not the attacker-controlled list) so
       # no untrusted filename ever reaches lychee's `eval`. Over-checking docs is
-      # harmless. Informational only: continue-on-error keeps it from blocking.
+      # harmless. Informational only, in two ways: continue-on-error keeps a failed
+      # check from blocking, and the step's own timeout (below the job's 8 minutes)
+      # keeps a SLOW check from blocking. A job-level timeout cancels the whole job,
+      # whatever continue-on-error says, and a cancelled check stops a release merge.
+      #
+      # CONTRIBUTORS.md is skipped: its ~470 github.com profile links (about 60% of
+      # all unique URLs) are generated from GitHub's own merged-PR list, so they exist
+      # by construction, and they are most of the requests a throttled run must get
+      # through.
       - name: Broken-link check (lychee)
         uses: lycheeverse/lychee-action@v2
+        timeout-minutes: 5
         with:
           args: >-
             --no-progress
@@ -119,6 +128,7 @@ jobs:
             --accept 200,206,301,302,303,307,308,401,403,429
             --timeout 20
             --max-retries 2
+            --exclude-path 'CONTRIBUTORS\.md'
             "**/*.md"
             "**/*.markdown"
             "**/*.rst"
