@@ -28205,6 +28205,8 @@ const LOCALES = {
     pb_update_failed: 'Không thể lưu cài đặt dự án: ',
   },
   ca: {
+    composer_placeholder_read_only: 'Només de lectura a la WebUI',
+    composer_read_only_connection: 'Com connectar',
     offline_title: 'Connexió perduda',
     offline_browser_detail: 'El navegador indica que el dispositiu està fora de línia.',
     offline_network_detail: 'Ara mateix no es pot connectar amb Hermes des d\'aquest navegador.',
@@ -28877,7 +28879,7 @@ const LOCALES = {
     update_no_target: 'No s\'ha seleccionat cap component per actualitzar. Actualitza l\'estat de les actualitzacions i torna-ho a provar.',
     update_failed_network: 'Ha fallat l\'actualització: no s\'ha pogut contactar amb el servidor de la WebUI. Potser s\'ha reiniciat o s\'ha interromput la connexió. Espera uns segons, recarrega la pàgina i, si encara no respon, comprova el servidor.',
     update_failed_prefix: 'Ha fallat l\'actualització: ',
-    settings_updates_available: 'Actualitzacions disponibles: {count}',
+    settings_updates_available_targets: 'Actualitzacions disponibles: {0}',
     settings_latest_tag_suffix: '·\u00a0Etiqueta\u00a0més\u00a0recent:\u00a0{0}',
     settings_updates_disabled: 'Les comprovacions d\'actualitzacions estan desactivades',
     settings_update_check_failed: 'Ha fallat la comprovació d\'actualitzacions',
