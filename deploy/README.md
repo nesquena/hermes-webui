@@ -49,6 +49,16 @@ sudo cp nginx-webui.conf /etc/nginx/sites-available/webui
 sudo ln -sf /etc/nginx/sites-available/webui /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 
+# 3b. REQUIRED for PAM logins: nginx workers must run as root.
+#     pam_unix verifies passwords against /etc/shadow, which only root
+#     can read — and its setgid helper unix_chkpwd can only verify the
+#     *caller's own* password, so a www-data worker rejects every
+#     correct password for other users (e.g. deployer). Set the `user`
+#     directive in /etc/nginx/nginx.conf to `user root;` and restart
+#     nginx. See Security notes for the tradeoff.
+sudo sed -i -E 's/^\s*user\s+\w+;/user root;/' /etc/nginx/nginx.conf
+sudo systemctl restart nginx
+
 # 4. Create system users that PAM will authenticate.
 #    useradd alone leaves the account locked — set a password too,
 #    otherwise pam_unix cannot log the user in.
@@ -76,6 +86,13 @@ Browser  -->  nginx (port 8787, TLS, PAM auth)  -->  hermes-webui.service (port 
 - The backend **must** stay on `127.0.0.1` (`HERMES_WEBUI_HOST=127.0.0.1`) — never
   bind to `0.0.0.0` unless you also set `HERMES_WEBUI_PASSWORD` for built-in auth.
 - Do **not** set `HERMES_WEBUI_PASSWORD` — PAM auth at the proxy replaces it.
+- PAM requires nginx workers to run as root (`user root;` in `nginx.conf`,
+  Installation step 3b): `pam_unix` checks passwords against `/etc/shadow`,
+  which only root can read, and its `unix_chkpwd` helper verifies only the
+  caller's own password. That widens the blast radius of a worker compromise,
+  so prefer running this stack on a dedicated host/VM rather than a shared
+  box. Granting the worker read access to `/etc/shadow` instead is **not**
+  an acceptable alternative.
 - TLS termination happens at nginx. The backend receives plain HTTP from
   `127.0.0.1`.
 - `proxy_set_header Host 127.0.0.1;` is the deliberate Host-header rewrite — it
