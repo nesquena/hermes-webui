@@ -9547,7 +9547,7 @@ def _context_lookup_record_key(record: dict) -> str:
     return _context_lookup_resolve_key(record.get("api_key"), key_env)
 
 
-def _context_lookup_provider_disabled(provider: str, providers_cfg: dict) -> bool:
+def _context_lookup_provider_disabled(provider: str, providers_cfg: dict, requested: str = "") -> bool:
     """Whether the session's own provider is switched off, by the record the chat obeys (#8938).
 
     The authoritative record decides, never another spelling of it. For a
@@ -9556,8 +9556,13 @@ def _context_lookup_provider_disabled(provider: str, providers_cfg: dict) -> boo
     key outranks every alias, including its disabled verdict, and without one a
     disabled record naming the identity leaves the route with no authority. For
     any other id it is the exact key the Agent's ``_raise_if_provider_disabled``
-    reads. A disabled alias beside an enabled record switches nothing off: the
-    Agent's matcher skips the alias and the chat keeps the record's key.
+    reads: ``requested``, the session's provider id BEFORE alias resolution (the
+    chat asks the Agent for ``ollama``, not ``custom``; for ``claude``, not
+    ``anthropic``), falling back to ``provider``. A disabled record under the
+    resolved id (``providers.custom`` for an ``ollama`` session) switches nothing
+    off, as the chat still routes and sends the model block's key. A disabled
+    alias beside an enabled record switches nothing off either: the Agent's
+    matcher skips the alias and the chat keeps the record's key.
 
     When two records claim a ``custom:`` identity (WebUI's helper raises
     ``AmbiguousCustomProviderError``), the verdict falls back to that exact key. The
@@ -9574,13 +9579,15 @@ def _context_lookup_provider_disabled(provider: str, providers_cfg: dict) -> boo
                 return bool(api_config._native_custom_provider_record(providers_cfg, pid, slug)[1])
             except api_config.AmbiguousCustomProviderError:
                 pass
-    exact = providers_cfg.get(pid)
+    exact = providers_cfg.get(str(requested or "").strip().lower() or pid)
     return isinstance(exact, dict) and not api_config._raw_provider_record_enabled(exact)
 
 
 def _context_length_config_api_key_and_owner(
     provider: str | None,
     cfg: dict | None,
+    *,
+    requested_provider: str | None = None,
 ) -> tuple[str, frozenset]:
     """Return (config/env API key for the metadata lookup, origins that key owns).
 
@@ -9594,15 +9601,15 @@ def _context_length_config_api_key_and_owner(
     so the chat sends no key, neither the record's nor the model block's; falling
     through to the model block would send a key the chat never sends. Any other
     switched-off record matching the provider (another spelling of it) is skipped,
-    as the Agent's matcher skips it. When every matching record is switched off, the
-    selection also takes no key. The Agent doesn't refuse a built-in on a disabled
-    spelling, but that record isn't its source and, measured, the chat doesn't send
-    the model block's key there either (openai and anthropic chat with their own
-    environment key or the placeholder), so no config key lets the streaming sites'
-    Agent fallback supply the chat's own. A record's key reference may be spelled
-    ``api_key_env`` (:func:`_context_lookup_record_key`).
+    as the Agent's matcher skips it, and the selection reads on exactly as if that
+    record weren't there: the chat routes the same with or without it.
+
+    ``requested_provider`` is the session's provider id before alias resolution, the
+    key the Agent checks; callers that pass an already-resolved ``provider`` pass it.
+    Without it, ``provider`` is taken as the requested id.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
+    requested = str(requested_provider or _clean_session_model_provider(provider) or "").strip().lower()
     provider = _canonical_context_provider(provider)
     _resolve_key = _context_lookup_resolve_key
 
@@ -9613,9 +9620,7 @@ def _context_length_config_api_key_and_owner(
             for provider_key, provider_cfg in providers_cfg.items()
             if isinstance(provider_cfg, dict) and _providers_match_for_context(provider_key, provider)
         ]
-        if _context_lookup_provider_disabled(provider, providers_cfg) or (
-            matching and not any(api_config._raw_provider_record_enabled(c) for _, c in matching)
-        ):
+        if _context_lookup_provider_disabled(provider, providers_cfg, requested):
             return "", frozenset()
         for provider_key, provider_cfg in matching:
             if not api_config._raw_provider_record_enabled(provider_cfg):
@@ -9765,6 +9770,8 @@ def _context_length_lookup_inputs_for_model(
 
     bare_model, explicit_provider = _split_provider_qualified_model(model_for_lookup)
     effective_provider = _canonical_context_provider(provider or explicit_provider)
+    # #8938: the id before alias resolution, the key the Agent checks for enabled: false.
+    requested_provider = _clean_session_model_provider(provider or explicit_provider) or ""
     effective_base_url = str(base_url or "").strip()
     # #8822: a caller's key owns only the URL the caller passed with it (plus its
     # provider's fixed metadata hosts). With no caller URL it owns no URL.
@@ -9774,6 +9781,7 @@ def _context_length_lookup_inputs_for_model(
     if isinstance(model_cfg, dict):
         if not effective_provider:
             effective_provider = _canonical_context_provider(model_cfg.get("provider"))
+            requested_provider = _clean_session_model_provider(model_cfg.get("provider")) or ""
         if not effective_base_url:
             # #7535: the global model.base_url may only fill an empty slot when
             # the session provider IS the configured model.provider owner
@@ -9899,7 +9907,9 @@ def _context_length_lookup_inputs_for_model(
             global_context_length = _positive_context_length(raw_cfg_ctx)
 
     if not effective_api_key and not caller_key_only:
-        effective_api_key, effective_api_key_owned = _context_length_config_api_key_and_owner(effective_provider, cfg)
+        effective_api_key, effective_api_key_owned = _context_length_config_api_key_and_owner(
+            effective_provider, cfg, requested_provider=requested_provider
+        )
 
     # #8822: a key goes only where its own source sends it. The Agent contacts the
     # base URL's host plus the provider's fixed metadata hosts; if any of those is

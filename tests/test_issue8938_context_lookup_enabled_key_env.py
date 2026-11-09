@@ -36,6 +36,27 @@ def key_in_env(monkeypatch):
     monkeypatch.delenv(UNSET, raising=False)
 
 
+# The installed Agent's provider aliases, pinned: an agent-free run (CI) resolves none, so ``ollama`` would stay
+# ``ollama`` and the requested-vs-resolved cases below would test nothing.
+ALIASES = {"ollama": "custom", "vllm": "custom", "claude": "anthropic", "grok": "xai", "glm": "zai",
+           "moonshot": "kimi-coding"}
+
+
+@pytest.fixture
+def aliases(monkeypatch):
+    from api import config as api_config
+
+    real = getattr(api_config, "_resolve_provider_alias", None)
+
+    def resolve(value):
+        key = str(value or "").strip().lower()
+        if key in ALIASES:
+            return ALIASES[key]
+        return real(value) if real else value
+
+    monkeypatch.setattr(api_config, "_resolve_provider_alias", resolve)
+
+
 # ── 1. A record the user switched off is no key source for its own session ────
 
 
@@ -119,13 +140,60 @@ def test_a_disabled_builtin_record_refuses_even_beside_an_enabled_alias(canonica
     assert got.api_key == ""
 
 
-def test_only_disabled_spellings_of_a_builtin_give_no_config_key():
-    # The Agent's exact key misses, so it doesn't refuse; but the switched-off record isn't its source and the chat
-    # doesn't send the model block's key here (openai chats with its own environment key or the placeholder). No
-    # config key lets the streaming sites' Agent fallback supply the chat's own.
+def test_a_disabled_builtin_alias_alone_is_skipped_like_a_missing_record():
+    # The Agent's exact key misses, so the provider isn't switched off; the alias is invisible, and the selection
+    # reads on as with no record: the model block configured for openai.
     got = _lookup({"model": {"provider": "openai", "api_key": "KM"},
                    "providers": {"OpenAI": {"api_key": "K2", "enabled": False}}}, provider="openai")
+    assert got.api_key == "KM"
+
+
+# Codex round 3: a disabled spelling that isn't the exact key never drops the model block's working pair. The chat
+# sends it (measured over authenticated HTTP), with or without the switched-off record.
+@pytest.mark.parametrize("provider,spelling", [("custom", "Custom"), ("openai", "OpenAI"), ("ollama", "Ollama"),
+                                               ("openrouter", "OpenRouter")])
+@pytest.mark.parametrize("key_field", ["api_key", "key_env"])
+def test_a_disabled_spelling_never_drops_the_model_blocks_pair(provider, spelling, key_field, key_in_env):
+    model = {"provider": provider, "base_url": A, key_field: "KM" if key_field == "api_key" else VAR}
+    want = "KM" if key_field == "api_key" else "K1"
+    alone = _lookup({"model": dict(model)}, provider=provider)
+    beside = _lookup({"model": dict(model), "providers": {spelling: {"base_url": B, "api_key": "K2", "enabled": False}}},
+                     provider=provider)
+    assert (alone.base_url, alone.api_key) == (A, want)
+    assert (beside.base_url, beside.api_key) == (A, want)
+
+
+# The Agent checks providers.<the id it was asked for>, before alias resolution: an ollama session is refused by
+# providers.ollama, not providers.custom; a claude session by providers.claude, not providers.anthropic.
+@pytest.mark.parametrize("provider", ["ollama", "vllm", "claude", "grok", "glm", "moonshot"])
+def test_the_requested_ids_disabled_record_switches_an_aliased_provider_off(provider, aliases):
+    assert routes._canonical_context_provider(provider) == ALIASES[provider]
+    got = _lookup({"model": {"provider": provider, "base_url": A, "api_key": "KM"},
+                   "providers": {provider: {"enabled": False}}}, provider=provider)
+    assert (got.base_url, got.api_key) == (A, "")
+
+
+@pytest.mark.parametrize("provider", ["ollama", "vllm"])
+def test_a_disabled_record_under_the_resolved_id_leaves_an_aliased_provider_on(provider, aliases):
+    # providers.custom switched off doesn't refuse an ollama session; the chat sends the model block's KM to A.
+    assert routes._canonical_context_provider(provider) == "custom"
+    got = _lookup({"model": {"provider": provider, "base_url": A, "api_key": "KM"},
+                   "providers": {"custom": {"enabled": False}}}, provider=provider)
+    assert (got.base_url, got.api_key) == (A, "KM")
+
+
+def test_the_requested_id_comes_from_the_model_block_when_the_session_names_none(aliases):
+    got = _lookup({"model": {"provider": "ollama", "base_url": A, "api_key": "KM"},
+                   "providers": {"ollama": {"enabled": False}}}, provider=None)
     assert got.api_key == ""
+
+
+def test_the_config_selection_alone_reads_the_requested_id(aliases):
+    cfg = {"model": {"provider": "ollama", "base_url": A, "api_key": "KM"}, "providers": {"ollama": {"enabled": False}}}
+    assert routes._context_length_config_api_key_and_owner("ollama", cfg)[0] == ""
+    assert routes._context_length_config_api_key_and_owner("custom", cfg, requested_provider="ollama")[0] == ""
+    cfg["providers"] = {"custom": {"enabled": False}}
+    assert routes._context_length_config_api_key_and_owner("custom", cfg, requested_provider="ollama")[0] == "KM"
 
 
 def test_a_disabled_builtin_spelling_beside_the_enabled_record_with_a_url_keeps_its_pair():
