@@ -79,6 +79,70 @@ def test_a_same_value_holder_with_another_scheme_lends_nothing():
     assert (got.base_url, got.api_key) == (B, "")
 
 
+# ── Host spelling: an IPv6 zone ID is case-sensitive, a DNS name is not ────────
+# A zone ID names a network interface (``%ethA`` and ``%etha`` are different links on Linux), and the HTTP client
+# connects to the zone exactly as written. ``urlsplit().hostname`` already lowercases DNS names and IPv6 hex digits
+# and keeps the zone ID as written, so the origin helper must not fold its case on top.
+ZONE_UPPER = "https://[fe80::1%ethA]/v1"
+ZONE_LOWER = "https://[fe80::1%etha]/v1"
+
+
+def _same_value_cfg(held, target):
+    """A caller key with no URL; another provider's record holds the same value at ``held``."""
+    return {"model": {"provider": "custom:session", "base_url": target},
+            "providers": {"custom:holder": {"base_url": held, "api_key": "K1"}}}
+
+
+def _own_source_cfg(held, target):
+    """The session's own record holds the key at ``held``; the model block names ``target``."""
+    return {"model": {"provider": "custom:holder", "base_url": target},
+            "providers": {"custom:holder": {"base_url": held, "api_key": "K1"}}}
+
+
+def test_the_origin_keeps_an_ipv6_zone_ids_case_and_folds_dns_and_hex_case():
+    assert routes._context_lookup_origin("https://[FE80::1%ethA]/v1") == "fe80::1%ethA:443"
+    assert routes._context_lookup_origin("https://Owner.TEST/v1") == "owner.test:443"
+
+
+def test_a_same_value_holder_on_an_ipv6_zone_differing_only_in_case_lends_nothing():
+    got = _lookup(_same_value_cfg(ZONE_UPPER, ZONE_LOWER), provider="custom:session", api_key="K1")
+    assert got.api_key == ""
+
+
+def test_a_records_own_key_does_not_reach_an_ipv6_zone_differing_only_in_case():
+    """Also closes a send ``.655`` already made: #8917's origin helper folded the zone ID's case."""
+    got = _lookup(_own_source_cfg(ZONE_UPPER, ZONE_LOWER), provider="custom:holder", base_url=ZONE_LOWER)
+    assert got.api_key == ""
+
+
+@pytest.mark.parametrize("cfg_for,kw", [
+    (_same_value_cfg, {"provider": "custom:session", "api_key": "K1"}),
+    (_own_source_cfg, {"provider": "custom:holder", "base_url": ZONE_UPPER}),
+])
+def test_the_same_ipv6_zone_still_matches(cfg_for, kw):
+    got = _lookup(cfg_for(ZONE_UPPER, ZONE_UPPER), **kw)
+    assert got.api_key == "K1"
+
+
+@pytest.mark.parametrize("cfg_for,kw", [
+    (_same_value_cfg, {"provider": "custom:session", "api_key": "K1"}),
+    (_own_source_cfg, {"provider": "custom:holder", "base_url": B}),
+])
+def test_a_host_differing_only_in_dns_case_is_the_same_origin(cfg_for, kw):
+    got = _lookup(cfg_for("https://B.Record-URL.TEST/v1", B), **kw)
+    assert got.api_key == "K1"
+
+
+def test_an_rfc6874_encoded_zone_does_not_match_a_raw_zone():
+    """``[fe80::1%25ethA]`` (RFC 6874's percent-encoded zone) against a holder written ``%ethA``.
+
+    They are different strings, so no key goes. Canonicalising host spellings is #8922's territory; until then a
+    spelling mismatch only costs the lookup a pair, it never sends a key anywhere new.
+    """
+    got = _lookup(_same_value_cfg(ZONE_UPPER, "https://[fe80::1%25ethA]/v1"), provider="custom:session", api_key="K1")
+    assert got.api_key == ""
+
+
 def test_a_holder_that_declares_no_url_lends_nothing():
     # #8822's class stays closed: the record holds K1 but declares no URL, and A is the model block's.
     got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A},
