@@ -9559,20 +9559,21 @@ def _context_lookup_provider_disabled(provider: str, providers_cfg: dict) -> boo
     reads. A disabled alias beside an enabled record switches nothing off: the
     Agent's matcher skips the alias and the chat keeps the record's key.
 
-    An ambiguous identity (two records claiming it) refuses the chat's route, so
-    it counts as switched off here: the lookup then takes no key.
+    When two records claim a ``custom:`` identity (WebUI's helper raises
+    ``AmbiguousCustomProviderError``), the verdict falls back to that exact key. The
+    chat refuses some of these shapes and routes others through one record, so
+    ambiguity itself decides nothing here and the selection reads on as before.
     """
     pid = str(provider or "").strip().lower()
     if not isinstance(providers_cfg, dict) or not pid:
         return False
     if pid.startswith("custom:"):
         slug = api_config._custom_provider_slug_key(pid)
-        if not slug:
-            return False
-        try:
-            return bool(api_config._native_custom_provider_record(providers_cfg, pid, slug)[1])
-        except api_config.AmbiguousCustomProviderError:
-            return True
+        if slug:
+            try:
+                return bool(api_config._native_custom_provider_record(providers_cfg, pid, slug)[1])
+            except api_config.AmbiguousCustomProviderError:
+                pass
     exact = providers_cfg.get(pid)
     return isinstance(exact, dict) and not api_config._raw_provider_record_enabled(exact)
 

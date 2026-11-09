@@ -117,10 +117,21 @@ def test_a_disabled_builtin_alias_alone_is_skipped_like_a_missing_record():
     assert got.api_key == "KM"
 
 
-def test_a_disabled_builtin_record_gives_no_key():
-    got = _lookup({"model": {"provider": "openai"}, "providers": {"openai": {"api_key": "K1", "enabled": False}}},
-                  provider="openai")
+@pytest.mark.parametrize("flag", [False, "off", "no", 0])
+def test_a_disabled_builtin_record_gives_no_key(flag):
+    # The Agent refuses the provider, so not even the model block's key goes.
+    got = _lookup({"model": {"provider": "openai", "api_key": "KM"},
+                   "providers": {"openai": {"api_key": "K1", "enabled": flag}}}, provider="openai")
     assert got.api_key == ""
+
+
+def test_an_ambiguous_identity_is_left_as_before():
+    # Two records name my-proxy. The chat routes this shape through one of them; the selection here reads on as on
+    # exp-v0.52.659 (the model block's key at its own URL). Ambiguity isn't a switch-off.
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A, "api_key": "KM"},
+                   "providers": {"one": {"name": "my-proxy", "base_url": B, "api_key": "K1"},
+                                 "two": {"name": "my-proxy", "base_url": L, "api_key": "K2"}}})
+    assert (got.base_url, got.api_key) == (A, "KM")
 
 
 def test_an_enabled_builtin_record_keeps_its_key():
