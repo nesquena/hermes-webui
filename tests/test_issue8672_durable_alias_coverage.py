@@ -263,8 +263,9 @@ def test_durable_alias_conflict_keeps_the_distinct_sqlite_row(
 
 
 @pytest.mark.parametrize("alias", DURABLE_ALIASES)
+@pytest.mark.parametrize("durable_value", [7, "7", "007", 7.0])
 def test_durable_alias_agreement_collapses_the_same_sqlite_row(
-    monkeypatch, tmp_path, alias
+    monkeypatch, tmp_path, alias, durable_value
 ):
     """The SAME durable row under a different alias spelling must collapse.
 
@@ -274,13 +275,15 @@ def test_durable_alias_agreement_collapses_the_same_sqlite_row(
     conflict) or split one namespace into two spellings that read as a
     conflict -- the row would be duplicated in the transcript.
     """
-    display, context = _reconcile(monkeypatch, tmp_path, alias, 7, 7)
+    display, context = _reconcile(
+        monkeypatch, tmp_path, alias, durable_value, 7
+    )
 
     for label, rows in (("display", display), ("context", context)):
         contents = [row.get("content") for row in rows]
         assert _sentinel_count(rows) == 1, (
-            f"{label} reconciliation duplicated one durable row under {alias}: "
-            f"{contents}"
+            f"{label} reconciliation duplicated one durable row under {alias} "
+            f"with durable value {durable_value!r}: {contents}"
         )
         assert "final answer" in contents, (
             f"{label} reconciliation dropped the final answer: {contents}"
@@ -432,6 +435,42 @@ def test_durable_alias_spelling_of_one_row_still_collapses_onto_its_twin(alias):
 
 
 # ── the owning helper's canonical value rule applies to every alias ────────
+
+
+@pytest.mark.parametrize(
+    "left_value, right_value",
+    [("007", 7), (7, "7"), (7.0, 7), ("7", 7)],
+)
+def test_durable_alias_two_spellings_of_one_row_do_not_conflict(
+    left_value, right_value
+):
+    """Two spellings of ONE durable row must not read as a conflict.
+
+    The owning helper canonicalises the value, so ``"007"``, ``"7"``, ``7.0``
+    and ``7`` all name the same durable row.  Comparing the raw values
+    instead makes the two rows contradict each other, which splits one row
+    into two in the transcript.
+    """
+    import api.models as models
+
+    left = {
+        "role": "user",
+        "content": SENTINEL,
+        "_state_db_row_id": left_value,
+    }
+    right = {
+        "role": "user",
+        "content": SENTINEL,
+        "_state_db_row_id": right_value,
+    }
+    left_occurrence = models._session_message_visible_key(left)[3]
+    right_occurrence = models._session_message_visible_key(right)[3]
+    assert models._visible_keys_share_occurrence(
+        left_occurrence, right_occurrence
+    ), (
+        f"{left_value!r} and {right_value!r} name the same durable row, so "
+        "they must not conflict"
+    )
 
 
 @pytest.mark.parametrize("alias", DURABLE_ALIASES)
