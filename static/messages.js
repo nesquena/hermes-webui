@@ -593,7 +593,11 @@ function _markdownTableCopySafeHref(value){
   if(!href||/[\u0000-\u0020\u007f\\]/.test(href)) return '';
   if(/^(?:https?:\/\/|mailto:|tel:)/i.test(href)) return href;
   if(/^[a-z][a-z0-9+.-]*:/i.test(href)||href.startsWith('//')) return '';
-  if(/^(?:#|\/|\.\.\/|\.\/|\?|[a-z0-9_~!$&()*+,;=@%-])/i.test(href)) return href;
+  if(/^(?:#|\/|\.\.\/|\.\/|\?|[a-z0-9_~!$&()*+,;=@%-])/i.test(href)){
+    const base=typeof window!=='undefined'&&window.location?window.location.href:'';
+    if(!base||typeof URL!=='function') return '';
+    try{return new URL(href,base).href;}catch(_){return '';}
+  }
   return '';
 }
 
@@ -654,6 +658,10 @@ function _markdownTableCopySemanticHtml(node){
     const start=getAttribute('start');
     if(start!==null&&/^-?\d+$/.test(String(start))) attributes.push(`start="${String(start)}"`);
   }
+  if(tag==='li'){
+    const value=getAttribute('value');
+    if(value!==null&&/^-?\d+$/.test(String(value))) attributes.push(`value="${String(value)}"`);
+  }
   if(tag==='td'||tag==='th'){
     for(const name of ['colspan','rowspan']){
       const value=getAttribute(name);
@@ -677,7 +685,7 @@ function _markdownTableCopyCellHtml(cell){
 
 function _markdownTableCopyPayloadForTable(table){
   if(!table||!table.rows) return null;
-  const rows=Array.from(table.rows||[]);
+  const rows=Array.from(table.rows||[]).filter((row)=>row&&!row.hidden);
   if(!rows.length) return null;
   let headerRowCount=0;
   while(headerRowCount<rows.length){
@@ -832,10 +840,33 @@ function _markdownTableCopyPlainText(node){
   if(blockedTags.includes(tag)) return '';
   if(tag==='br') return '\n';
   if(tag==='hr') return '\n---\n';
+  if(tag==='tr'){
+    const cells=_markdownTableNodeChildren(node)
+      .filter((child)=>child&&/^(?:td|th)$/i.test(String(child.tagName||'')))
+      .map((cell)=>_markdownTableCopyPlainText(cell).trim());
+    if(cells.length) return `${cells.join('\t')}\n`;
+  }
   const children=_markdownTableNodeChildren(node)
     .map(_markdownTableCopyPlainText)
     .join('');
-  if(tag==='li') return `\n- ${children.trim()}\n`;
+  if(tag==='li'){
+    const parent=node.parentElement||node.parentNode;
+    const parentTag=parent&&parent.tagName?String(parent.tagName).toLowerCase():'';
+    if(parentTag==='ol'){
+      let ordinal=1;
+      const start=typeof parent.getAttribute==='function'?parent.getAttribute('start'):null;
+      if(start!==null&&/^-?\d+$/.test(String(start))) ordinal=Number(start);
+      for(const sibling of _markdownTableNodeChildren(parent)){
+        if(!sibling||String(sibling.tagName||'').toLowerCase()!=='li') continue;
+        const value=typeof sibling.getAttribute==='function'?sibling.getAttribute('value'):null;
+        if(value!==null&&/^-?\d+$/.test(String(value))) ordinal=Number(value);
+        if(sibling===node) break;
+        ordinal++;
+      }
+      return `\n${ordinal}. ${children.trim()}\n`;
+    }
+    return `\n- ${children.trim()}\n`;
+  }
   const blockTags=[
     'blockquote','dd','details','div','dl','dt','h1','h2','h3','h4','h5','h6',
     'ol','p','pre','summary','table','ul',

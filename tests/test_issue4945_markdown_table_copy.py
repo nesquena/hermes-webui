@@ -304,6 +304,7 @@ function buildEnhancedTableFixture(includeFilter, options = {}) {
 }
 
 global.window = {
+  location: {href: 'https://hermes.example/chat'},
   getSelection() {
     return null;
   }
@@ -341,12 +342,16 @@ const {table} = buildEnhancedTableFixture(false, {
   headerTexts: ['Product <Name>', 'Price & Tax'],
   bodyTexts: ['Widget > Basic', '12 & change'],
 });
+const hidden = makeRow([makeCell('td', 'Hidden product'), makeCell('td', '99')]);
+hidden.hidden = true;
+table.rows.splice(1, 0, hidden);
 const payload = _markdownTableCopyPayloadForTable(table);
 console.log(JSON.stringify(payload));
 """
     )
     assert "<thead><tr><th>Product &lt;Name&gt;</th><th>Price &amp; Tax</th></tr></thead>" in out["html"]
     assert "<tbody><tr><td>Widget &gt; Basic</td><td>12 &amp; change</td></tr></tbody>" in out["html"]
+    assert "Hidden product" not in out["html"]
     assert "markdown-table-sort" not in out["html"]
     assert out["plain"] == "Product <Name>\tPrice & Tax\nWidget > Basic\t12 & change"
 
@@ -752,11 +757,25 @@ function appendMixedContent(root, suffix) {
   heading.appendChild(new FakeText('Monthly Summary'));
   root.appendChild(heading);
 
+  const ordered = makeElement('ol', {attrs: {start: '5'}});
+  const fifth = makeElement('li', {attrs: {value: '5'}});
+  fifth.appendChild(new FakeText('Fifth item'));
+  const eighth = makeElement('li', {attrs: {value: '8'}});
+  eighth.appendChild(new FakeText('Eighth item'));
+  ordered.appendChild(fifth);
+  ordered.appendChild(eighth);
+  root.appendChild(ordered);
+
   const first = buildEnhancedTableFixture(true, {
     headerTexts: ['Product Name', 'Total'],
     bodyTexts: ['Example Service A', '$10.00'],
   });
   root.appendChild(first.table);
+
+  const genericTable = makeElement('table');
+  genericTable.appendChild(makeRow([makeCell('td', 'A1'), makeCell('td', 'B1')]));
+  genericTable.appendChild(makeRow([makeCell('td', 'A2'), makeCell('td', 'B2')]));
+  root.appendChild(genericTable);
 
   const subheading = makeElement('h3', {className: 'muted'});
   subheading.appendChild(new FakeText('Example Site B'));
@@ -787,6 +806,11 @@ function appendMixedContent(root, suffix) {
     },
   });
   trailing.appendChild(chart);
+  trailing.appendChild(new FakeText(' / '));
+  const localChart = makeElement('img', {
+    attrs: {src: 'api/media?path=chart.png', alt: 'Local chart'},
+  });
+  trailing.appendChild(localChart);
   trailing.appendChild(new FakeText(' / '));
   const artifactLink = makeElement('a', {
     attrs: {href: 'api/media?path=report.pdf&download=1'},
@@ -873,11 +897,13 @@ console.log(JSON.stringify({prevented: event.preventDefaultCalled, data: clipboa
     html = out["data"]["text/html"]
     plain = out["data"]["text/plain"]
     assert "<h2>Monthly Summary</h2>" in html
-    assert html.count("<table>") == 2
+    assert '<ol start="5"><li value="5">Fifth item</li><li value="8">Eighth item</li></ol>' in html
+    assert html.count("<table>") == 3
     assert html.count("<th>Product Name</th><th>Total</th>") == 2
     assert "<strong>five</strong><br>six" in html
     assert '<img src="data:image/png;base64,iVBORw0KGgo=" alt="Monthly chart">' in html
-    assert '<a href="api/media?path=report.pdf&amp;download=1">download report</a>' in html
+    assert '<img src="https://hermes.example/api/media?path=chart.png" alt="Local chart">' in html
+    assert '<a href="https://hermes.example/api/media?path=report.pdf&amp;download=1">download report</a>' in html
     assert '<a href="https://example.com/report?q=monthly&amp;view=full">open report</a>' in html
     assert "<a>unsafe link</a>" in html
     assert "<a>unsafe data link</a>" in html
@@ -893,7 +919,10 @@ console.log(JSON.stringify({prevented: event.preventDefaultCalled, data: clipboa
     assert "markdown-table-sort" not in html
     assert "hidden form value" not in html
     assert "Monthly Summary" in plain
+    assert "5. Fifth item" in plain
+    assert "8. Eighth item" in plain
     assert "Product Name\tTotal" in plain
+    assert "A1\tB1\nA2\tB2" in plain
     assert "five\nsix\t$40.00" in plain
     assert "End of report" in plain
     assert "hidden form value" not in plain
