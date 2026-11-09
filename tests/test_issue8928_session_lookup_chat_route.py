@@ -13,7 +13,9 @@ builds a ``key_cmd`` token provider, never sends a host-gated env key, and never
 ``resolve_runtime_provider``. The key is the route's or none (a session that can't chat, or a keyless endpoint's
 placeholder, looks up without one); config selection can't add one. Other providers keep the previous path.
 """
+import os
 import socket
+import subprocess
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -181,6 +183,59 @@ def test_a_refused_route_is_not_a_warning_on_get(monkeypatch, caplog):
     assert all(r.levelno < logging.WARNING for r in refused), [(r.levelname, r.getMessage()) for r in refused]
 
 
+UNOWNED = ("custom:ghost", {"model": {"default": "m-x", "provider": "custom:ghost"}})
+AMBIGUOUS = ("custom:openai", {"model": {"default": "m-x", "provider": "custom:openai"},
+                               "providers": {"openai": {"base_url": "https://api.openai.com/v1", "api_key": "KB"},
+                                             "custom:openai": {"base_url": L, "api_key": "KN", "models": {"m-x": {}}}}})
+
+
+@pytest.mark.parametrize("provider,cfg", [UNOWNED, AMBIGUOUS], ids=["unowned-slug", "ambiguous-name"])
+def test_get_logs_no_warning_for_a_route_the_chat_refuses(monkeypatch, caplog, provider, cfg):
+    import copy
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    calls = _get_session(copy.deepcopy(cfg), monkeypatch, provider=provider)
+    assert len(calls) == 1, calls
+    assert calls[0]["api_key"] == ""
+    loud = [(r.name, r.getMessage()) for r in caplog.records if r.levelno >= logging.WARNING]
+    assert loud == []
+    assert any(r.name == "api.config" and "provider" in r.getMessage() for r in caplog.records), \
+        "the refusal should still be logged at debug"
+
+
+@pytest.mark.parametrize("provider,cfg", [UNOWNED, AMBIGUOUS], ids=["unowned-slug", "ambiguous-name"])
+def test_the_chat_route_still_warns_when_it_refuses(monkeypatch, caplog, provider, cfg):
+    """The flag is the only thing that quiets a refusal: the chat's own merge (no flag) still warns."""
+    import copy
+    import logging
+
+    cfg = copy.deepcopy(cfg)
+    cfg.setdefault("providers", {})
+    cfg.setdefault("custom_providers", [])
+    monkeypatch.setattr(config, "cfg", cfg)
+    monkeypatch.setattr(config, "get_config", lambda *a, **k: cfg)
+    caplog.set_level(logging.DEBUG)
+    route = config.merge_custom_provider_runtime_bundle(provider, None, None, {}, lookup_provider=provider)
+    with pytest.raises(config.CustomProviderRouteError):
+        config.raise_for_custom_provider_route(route)
+    assert any(r.levelno == logging.WARNING and r.name == "api.config" for r in caplog.records)
+
+
+def test_the_ambiguous_name_refusal_still_warns_for_its_other_callers(monkeypatch, caplog):
+    """``log`` is only passed by the merge; the refusal's other callers keep the warning."""
+    import copy
+    import logging
+
+    cfg = copy.deepcopy(AMBIGUOUS[1])
+    cfg.setdefault("custom_providers", [])
+    monkeypatch.setattr(config, "cfg", cfg)
+    monkeypatch.setattr(config, "get_config", lambda *a, **k: cfg)
+    caplog.set_level(logging.DEBUG)
+    assert config._refuse_ambiguous_provider_name({}, AMBIGUOUS[0]) is not None
+    assert [r.levelno for r in caplog.records if "refusing provider route" in r.getMessage()] == [logging.WARNING]
+
+
 def test_a_keyless_endpoint_looks_up_without_the_placeholder(monkeypatch):
     calls = _get_session({"model": {"default": "m-x", "provider": PROVIDER},
                           "custom_providers": [{"name": "my-proxy", "base_url": L, "models": {"m-x": {}}}]},
@@ -236,6 +291,10 @@ class _SideEffects:
             CredentialPool = None
         if CredentialPool is not None:
             monkeypatch.setattr(CredentialPool, "select", self._rec("CredentialPool.select"))
+        for name in ("Popen", "run", "call", "check_call", "check_output"):
+            monkeypatch.setattr(subprocess, name, self._rec(f"subprocess.{name}", raises=True))
+        monkeypatch.setattr(os, "system", self._rec("os.system", raises=True))
+        monkeypatch.setattr(os, "popen", self._rec("os.popen", raises=True))
         for name in ("connect", "connect_ex"):
             monkeypatch.setattr(socket.socket, name, self._rec(f"socket.{name}", raises=True))
         monkeypatch.setattr(socket, "create_connection", self._rec("socket.create_connection", raises=True))
@@ -329,6 +388,7 @@ def test_lookup_only_skips_exactly_the_pool_the_env_key_and_the_token_command(mo
     assert view["api_key"] == "KSTATIC"
     for field in ("provider_id", "slug", "source", "status", "is_exact", "base_url", "endpoint_owned"):
         assert view[field] == chat[field], field
+    assert view["record"] == chat["record"]
     del cfg["providers"][PROVIDER]["api_key"]
     fx.calls.clear()
     view = config.resolve_custom_provider_bundle(PROVIDER, lookup_only=True)

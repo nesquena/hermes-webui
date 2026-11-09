@@ -4600,12 +4600,13 @@ def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit
     }
 
 
-def _refuse_ambiguous_provider_name(bundle: dict, *providers: object) -> dict | None:
+def _refuse_ambiguous_provider_name(bundle: dict, *providers: object, log=None) -> dict | None:
     """Make ``bundle`` terminal when any of ``providers`` is ambiguous (#8690).
 
     The verdict is what stops the turn (:data:`CUSTOM_ROUTE_ERROR_FIELD`); the
     connection and every side field are cleared too, so a consumer that reads
-    the fields without checking it still has nothing to send.
+    the fields without checking it still has nothing to send. ``log`` replaces
+    the warning for a read path that builds no agent (``lookup_only``).
     """
     for provider in dict.fromkeys(providers):
         verdict = provider_name_ambiguity_verdict(provider)
@@ -4615,7 +4616,7 @@ def _refuse_ambiguous_provider_name(bundle: dict, *providers: object) -> dict | 
             for field in CUSTOM_CONNECTION_SIDE_FIELDS:
                 bundle[field] = None
             bundle[CUSTOM_ROUTE_ERROR_FIELD] = verdict
-            logger.warning("refusing provider route: %s", verdict["message"])
+            (log or logger.warning)("refusing provider route: %s", verdict["message"])
             return verdict
     return None
 
@@ -5572,7 +5573,7 @@ def _custom_provider_runtime_bundle_with_provenance(
     lookup = lookup_provider or resolved_provider
     # A name two records claim (#8690) is refused before any record is chosen:
     # the runtime dict may already pair one record's endpoint with another's key.
-    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider) is not None:
+    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider, log=_route_log) is not None:
         return bundle, None
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
         return bundle, None
