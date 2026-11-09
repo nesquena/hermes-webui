@@ -20,6 +20,8 @@ import os
 import re
 import subprocess
 import sys
+
+from tests._updates_module_isolation import updates_module_unloaded
 from pathlib import Path
 from unittest.mock import patch
 
@@ -98,41 +100,40 @@ def test_current_sha_is_merge_base_not_local_HEAD(tmp_path, monkeypatch):
     expected_base = _short_sha(repo, 'HEAD~2')  # merge-base in this scenario
 
     # Import updates with a stable CWD
-    if 'api.updates' in sys.modules:
-        del sys.modules['api.updates']
-    from api import updates as upd
+    with updates_module_unloaded():  # a fresh import for this test; the original is restored after (#8784)
+        from api import updates as upd
 
-    result = upd._check_repo(repo, 'webui')
+        result = upd._check_repo(repo, 'webui')
 
-    assert result is not None, "non-bare repo with origin should return a result"
-    assert result['behind'] == 3, f"expected 3 commits behind, got {result['behind']}"
+        assert result is not None, "non-bare repo with origin should return a result"
+        assert result['behind'] == 3, f"expected 3 commits behind, got {result['behind']}"
 
-    # The core fix: current_sha must be the merge-base, not local HEAD.
-    # merge-base = HEAD~2 in this scenario (local has 2 unpushed commits,
-    # so the most recent shared point with upstream is 2 commits before HEAD).
-    assert result['current_sha'] == expected_base, (
-        f"current_sha should be merge-base ({expected_base}), got {result['current_sha']} "
-        f"(local HEAD is {head_sha}). Old #1579 bug regressed."
-    )
-    assert result['current_sha'] != head_sha, (
-        f"current_sha must NOT be local HEAD ({head_sha}) — that's the #1579 bug."
-    )
-    # latest_sha is what _check_repo's own fetch+rev-parse returns
-    assert result['latest_sha'], "latest_sha must be populated"
-    # Critical compare-URL property: current_sha and latest_sha both correspond
-    # to commits the upstream knows about (one by being upstream tip, the other
-    # by being a shared ancestor). The merge-base is verifiable via the local
-    # clone's remote-tracking branch:
-    upstream_history = subprocess.run(
-        ['git', '-C', str(repo), 'log', '--format=%h', 'origin/master'],
-        capture_output=True, text=True, check=True,
-    ).stdout.split()
-    assert result['current_sha'] in upstream_history or any(
-        h.startswith(result['current_sha']) for h in upstream_history
-    ), (
-        f"current_sha ({result['current_sha']}) must be present in upstream history "
-        f"— that's what guarantees the GitHub /compare/ URL won't 404."
-    )
+        # The core fix: current_sha must be the merge-base, not local HEAD.
+        # merge-base = HEAD~2 in this scenario (local has 2 unpushed commits,
+        # so the most recent shared point with upstream is 2 commits before HEAD).
+        assert result['current_sha'] == expected_base, (
+            f"current_sha should be merge-base ({expected_base}), got {result['current_sha']} "
+            f"(local HEAD is {head_sha}). Old #1579 bug regressed."
+        )
+        assert result['current_sha'] != head_sha, (
+            f"current_sha must NOT be local HEAD ({head_sha}) — that's the #1579 bug."
+        )
+        # latest_sha is what _check_repo's own fetch+rev-parse returns
+        assert result['latest_sha'], "latest_sha must be populated"
+        # Critical compare-URL property: current_sha and latest_sha both correspond
+        # to commits the upstream knows about (one by being upstream tip, the other
+        # by being a shared ancestor). The merge-base is verifiable via the local
+        # clone's remote-tracking branch:
+        upstream_history = subprocess.run(
+            ['git', '-C', str(repo), 'log', '--format=%h', 'origin/master'],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        assert result['current_sha'] in upstream_history or any(
+            h.startswith(result['current_sha']) for h in upstream_history
+        ), (
+            f"current_sha ({result['current_sha']}) must be present in upstream history "
+            f"— that's what guarantees the GitHub /compare/ URL won't 404."
+        )
 
 
 def test_current_sha_equals_HEAD_when_no_local_commits(tmp_path):
@@ -142,17 +143,16 @@ def test_current_sha_equals_HEAD_when_no_local_commits(tmp_path):
     we shipped before #1579.
     """
     repo = _make_throwaway_repo(tmp_path, local_only_commits=0, upstream_advanced=4)
-    if 'api.updates' in sys.modules:
-        del sys.modules['api.updates']
-    from api import updates as upd
-    result = upd._check_repo(repo, 'webui')
+    with updates_module_unloaded():  # a fresh import for this test; the original is restored after (#8784)
+        from api import updates as upd
+        result = upd._check_repo(repo, 'webui')
 
-    head_sha = _short_sha(repo, 'HEAD')
-    assert result['current_sha'] == head_sha, (
-        "Pure-behind clone: merge-base equals HEAD; URL should be unchanged "
-        "from pre-#1579 behavior."
-    )
-    assert result['behind'] == 4
+        head_sha = _short_sha(repo, 'HEAD')
+        assert result['current_sha'] == head_sha, (
+            "Pure-behind clone: merge-base equals HEAD; URL should be unchanged "
+            "from pre-#1579 behavior."
+        )
+        assert result['behind'] == 4
 
 
 def test_current_sha_falls_back_to_None_when_merge_base_fails(tmp_path):
@@ -161,28 +161,27 @@ def test_current_sha_falls_back_to_None_when_merge_base_fails(tmp_path):
     rather than emitting one that 404s.
     """
     repo = _make_throwaway_repo(tmp_path, local_only_commits=0, upstream_advanced=1)
-    if 'api.updates' in sys.modules:
-        del sys.modules['api.updates']
-    from api import updates as upd
+    with updates_module_unloaded():  # a fresh import for this test; the original is restored after (#8784)
+        from api import updates as upd
 
-    # Patch _run_git so any 'merge-base' call returns failure
-    real_run = upd._run_git
+        # Patch _run_git so any 'merge-base' call returns failure
+        real_run = upd._run_git
 
-    def fake_run(args, *a, **kw):
-        if args and args[0] == 'merge-base':
-            return ('', False)
-        return real_run(args, *a, **kw)
+        def fake_run(args, *a, **kw):
+            if args and args[0] == 'merge-base':
+                return ('', False)
+            return real_run(args, *a, **kw)
 
-    with patch.object(upd, '_run_git', side_effect=fake_run):
-        result = upd._check_repo(repo, 'webui')
+        with patch.object(upd, '_run_git', side_effect=fake_run):
+            result = upd._check_repo(repo, 'webui')
 
-    assert result is not None
-    assert result['current_sha'] is None, (
-        "merge-base failure must fall back to None so JS suppresses the link "
-        "(emitting a known-broken URL is worse than no link)."
-    )
-    # latest_sha should still be populated — that path doesn't depend on merge-base
-    assert result['latest_sha']
+        assert result is not None
+        assert result['current_sha'] is None, (
+            "merge-base failure must fall back to None so JS suppresses the link "
+            "(emitting a known-broken URL is worse than no link)."
+        )
+        # latest_sha should still be populated — that path doesn't depend on merge-base
+        assert result['latest_sha']
 
 
 # ── 2. Client-side: ui.js link guard suppresses URL on null current_sha ──
@@ -230,22 +229,21 @@ def test_reporter_url_shape_no_longer_produces_invalid_compare_url(tmp_path):
     a SHA that exists upstream.
     """
     repo = _make_throwaway_repo(tmp_path, local_only_commits=2, upstream_advanced=5)
-    if 'api.updates' in sys.modules:
-        del sys.modules['api.updates']
-    from api import updates as upd
-    result = upd._check_repo(repo, 'webui')
+    with updates_module_unloaded():  # a fresh import for this test; the original is restored after (#8784)
+        from api import updates as upd
+        result = upd._check_repo(repo, 'webui')
 
-    head_sha = _short_sha(repo, 'HEAD')
-    base_sha = _short_sha(repo, 'HEAD~2')  # the merge-base
+        head_sha = _short_sha(repo, 'HEAD')
+        base_sha = _short_sha(repo, 'HEAD~2')  # the merge-base
 
-    # The compare URL the JS would build
-    cur, latest = result['current_sha'], result['latest_sha']
-    # In a real run repo_url is converted from origin's URL; in this test the
-    # value will be a file:// path, but that's fine — what we care about is
-    # the cur and latest shas.
-    assert cur == base_sha
-    assert cur != head_sha, "Must not use local HEAD (the #1579 reporter URL bug)"
+        # The compare URL the JS would build
+        cur, latest = result['current_sha'], result['latest_sha']  # noqa: F841  pre-existing; only cur is asserted
+        # In a real run repo_url is converted from origin's URL; in this test the
+        # value will be a file:// path, but that's fine — what we care about is
+        # the cur and latest shas.
+        assert cur == base_sha
+        assert cur != head_sha, "Must not use local HEAD (the #1579 reporter URL bug)"
 
-    # The "merge-base...upstream-tip" URL is by construction valid because
-    # both endpoints exist on the upstream (one by being the upstream tip,
-    # the other by being a shared ancestor of upstream and local).
+        # The "merge-base...upstream-tip" URL is by construction valid because
+        # both endpoints exist on the upstream (one by being the upstream tip,
+        # the other by being a shared ancestor of upstream and local).
