@@ -13,6 +13,15 @@ from io import BytesIO
 import pytest
 
 from tests._pytest_port import BASE
+from tests._git_host_config_isolation import (
+    EMULATED_HOST_WITH_SENTINEL_HELPERS,
+    credential_helpers_seen,
+)
+
+# Git children here must never read the host's system/global git config: on a
+# Mac that runs osxkeychain against the test servers (#8931). See
+# tests/_git_host_config_isolation.py.
+pytestmark = pytest.mark.usefixtures("isolated_host_git_config")
 
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -1366,6 +1375,57 @@ def test_git_fetch_blocks_repo_local_credential_helper_execution(tmp_path):
 
     assert exc.value.code == "auth_failed"
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("host_git", [EMULATED_HOST_WITH_SENTINEL_HELPERS], indirect=True)
+def test_git_fetch_never_runs_host_credential_helpers(tmp_path, host_git):
+    """#8931 guard: the host's system/global credential helpers never run here.
+
+    ``host_git`` emulates a developer machine whose system and global git config
+    name a sentinel helper, the role Homebrew's osxkeychain plays on a Mac. This
+    fetch keeps the host's HOME, so without this module's
+    ``isolated_host_git_config`` both sentinels answer the 401.
+    """
+    import os
+
+    if os.name == "nt":
+        pytest.skip("executable credential helper setup is POSIX-only")
+
+    from api.subprocess_utils import clean_git_env
+    from api.workspace_git import GitWorkspaceError, git_fetch
+
+    # The emulation is live: a scrubbed git child of the bare host sees both helpers.
+    assert credential_helpers_seen(host_git.executable, tmp_path, clean_git_env()) == [
+        f"system\t{host_git.sentinel_helpers[0]}",
+        f"global\t{host_git.sentinel_helpers[1]}",
+    ]
+
+    class AuthRequiredHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="hermes-test"')
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            del format, args
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), AuthRequiredHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _git(repo, "remote", "add", "origin", f"http://127.0.0.1:{server.server_port}/repo.git")
+        with pytest.raises(GitWorkspaceError) as exc:
+            git_fetch(repo)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert exc.value.code == "auth_failed"
+    assert host_git.sentinel_calls() == []
 
 
 def test_git_fetch_blocks_repo_local_askpass_execution(tmp_path):
