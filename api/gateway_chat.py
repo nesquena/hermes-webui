@@ -1011,8 +1011,8 @@ def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1, read
 _GATEWAY_FAILED_CAUSE_FIELDS = ("turn_exit_reason", "terminal_reason")
 
 
-def _gateway_run_failed_message(payload: dict) -> str:
-    """Name the terminal cause a failed run reported, after its ``error`` text (#8675).
+def _gateway_run_failed_message(payload: dict, default_state: str = "failed") -> str:
+    """Name the terminal cause a failed run reported, after its ``error`` text (#8675, #8742).
 
     ``run.failed`` carries ``turn_exit_reason`` (and, on some gateways,
     ``terminal_reason``) in the SAME payload as ``error``. The relay used to
@@ -1020,13 +1020,15 @@ def _gateway_run_failed_message(payload: dict) -> str:
     "Gateway run failed" with no way to tell it apart from a transport hiccup
     — while the direct (non-gateway) path already names it. Compose the cause
     onto the original text instead of replacing it: ``error`` stays the
-    message prefix because ``_classify_provider_error`` matches that text, and
-    dropping it would make every provider failure fall back to "generic error".
+    message prefix.
 
     With no cause in the payload the message is byte-identical to before, so
     gateways that do not publish the field keep today's behaviour.
     """
-    base = str(payload.get("error") or "").strip() or "Gateway run failed"
+    if not isinstance(payload, dict):
+        payload = {}
+    fallback = f"Gateway run {default_state}"
+    base = str(payload.get("error") or "").strip() or fallback
     causes = []
     for field in _GATEWAY_FAILED_CAUSE_FIELDS:
         value = str(payload.get(field) or "").strip()
@@ -1049,6 +1051,59 @@ def _gateway_run_failed_message(payload: dict) -> str:
             "follow-up or increase `agent.max_turns`."
         )
     return f"{base} ({'; '.join(f'{field}: {value}' for field, value in causes)})"
+
+
+def _gateway_run_failed_classify_target(payload: dict, default_state: str = "failed") -> str:
+    """Extract authoritative error text to classify, separate from display composition (#8742).
+
+    Uses explicit payload error when provided. When missing or generic fallback,
+    falls back to a structured kind of the terminal reason (stripping dynamic parameterization
+    such as iteration counters) — never the composed display message.
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    fallback = f"Gateway run {default_state}"
+    raw_error = str(payload.get("error") or "").strip()
+    if raw_error and raw_error.lower() not in {fallback.lower(), "gateway run failed", "gateway run error"}:
+        return raw_error
+    from api.streaming import _agent_result_tool_limit_reached
+    if _agent_result_tool_limit_reached(payload):
+        return "max_iterations_reached"
+    for field in _GATEWAY_FAILED_CAUSE_FIELDS:
+        val = str(payload.get(field) or "").strip()
+        if val:
+            kind = val.split("(", 1)[0].strip()
+            if kind:
+                return kind
+    return raw_error or fallback
+
+
+class GatewayRunFailed(RuntimeError):
+    """Raised when a gateway run reaches a terminal failure status (#8742).
+
+    Carries both the user-facing formatted message and the authoritative
+    classification target so that classification does not inspect dynamic
+    cause strings (such as iteration budgets containing 401/404/429).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        classify_target: str = "",
+        payload: dict | None = None,
+    ):
+        super().__init__(message)
+        self.message = message
+        self.classify_target = classify_target or message
+        self.payload = payload or {}
+
+
+def _gateway_run_failed_error(payload: dict, default_state: str = "failed") -> GatewayRunFailed:
+    """Build a GatewayRunFailed exception carrying display message and classify target (#8742)."""
+    message = _gateway_run_failed_message(payload, default_state=default_state)
+    target = _gateway_run_failed_classify_target(payload, default_state=default_state)
+    return GatewayRunFailed(message, classify_target=target, payload=payload)
 
 
 def _relay_gateway_run_events(
@@ -1246,7 +1301,7 @@ def _relay_gateway_run_events(
                 run_id,
                 reason="Gateway run failed before approval resolution",
             )
-            raise RuntimeError(_gateway_run_failed_message(payload))
+            raise _gateway_run_failed_error(payload)
         if payload_event == "run.cancelled":
             _relay_gateway_pending_steer(session_id, payload, put_gateway_event)
             from api.route_approvals import settle_gateway_pending_run
@@ -1533,7 +1588,7 @@ def _run_gateway_runs_api_streaming(
         if state in ("cancelled", "interrupted"):
             return "cancel", None
         if state != "completed":
-            return "raise", RuntimeError(str(status.get("error") or f"Gateway run {state}"))
+            return "raise", _gateway_run_failed_error(status, default_state=state)
         output = str(status.get("output") or "")
         if not output:
             # Round-4 review (Greptile item 1): the settle path is
@@ -2120,7 +2175,7 @@ def _await_gateway_run_result(
                 put_gateway_event("cancel", {"message": "Cancelled by gateway"})
                 return None, {}
             if state != "completed":
-                raise RuntimeError(str(status.get("error") or f"Gateway run {state}"))
+                raise _gateway_run_failed_error(status, default_state=state)
             output = str(status.get("output") or "")
             if output and stream_id in STREAM_PARTIAL_TEXT:
                 STREAM_PARTIAL_TEXT[stream_id] = output
@@ -2531,6 +2586,7 @@ def _settle_gateway_terminal_error(
     *,
     persisted_model=None,
     persisted_model_provider=None,
+    classify_target=None,
 ):
     from api.streaming import (
         _classify_provider_error,
@@ -2549,9 +2605,14 @@ def _settle_gateway_terminal_error(
             error_payload = dict(terminal_error)
             error_classification = {"label": error_payload.get("label") or "Gateway request failed"}
         else:
-            error_classification = _classify_provider_error(terminal_error)
+            target_to_classify = classify_target
+            if target_to_classify is None:
+                target_to_classify = getattr(terminal_error, "classify_target", None)
+            if target_to_classify is None:
+                target_to_classify = str(terminal_error)
+            error_classification = _classify_provider_error(target_to_classify)
             error_payload = _provider_error_payload(
-                terminal_error,
+                str(terminal_error),
                 error_classification["type"],
                 error_classification.get("hint", ""),
             )
@@ -3430,6 +3491,7 @@ def _run_gateway_chat_streaming(
                     "hint": "Reopen the conversation to recover the existing turn. Do not resend it."})
                 return
             except Exception as exc:
+                classify_target = getattr(exc, "classify_target", None)
                 terminal_error = (
                     _gateway_http_error_event(exc, api_key_configured=bool(api_key))
                     if isinstance(exc, urllib.error.HTTPError) else str(exc)
@@ -3443,6 +3505,7 @@ def _run_gateway_chat_streaming(
                     terminal_error,
                     persisted_model=persisted_model,
                     persisted_model_provider=persisted_model_provider,
+                    classify_target=classify_target,
                 )
                 if error_payload is None:
                     return

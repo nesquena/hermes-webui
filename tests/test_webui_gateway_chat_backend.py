@@ -2681,3 +2681,229 @@ def test_shared_url_key_a_profile_config_naming_the_shared_url_still_sends_the_s
     url, key = gateway_chat._gateway_endpoint_for_profile("beta")
     assert url.rstrip("/") == "http://gw.local:8642" and key == "shared-root-key", (url, key)
 
+
+# ==============================================================================
+# #8742: Provider error classification separated from display message
+# ==============================================================================
+
+
+@pytest.mark.parametrize(
+    ("exit_reason", "expected_type"),
+    [
+        ("max_iterations_reached(401/401)", "error"),
+        ("max_iterations_reached(404/404)", "error"),
+        ("max_iterations_reached(429/429)", "error"),
+    ],
+)
+def test_gateway_runs_api_run_failed_iteration_budget_classifies_as_error(
+    tmp_path, monkeypatch, exit_reason, expected_type,
+):
+    """#8742: Iteration exit reasons with 401/404/429 numbers must classify as 'error', not auth/not_found/rate_limit."""
+    events, s = _gateway_run_failed_events(
+        tmp_path,
+        monkeypatch,
+        {"error": "Gateway run failed", "turn_exit_reason": exit_reason},
+    )
+    apperrors = [item[1] for item in events if item[0] == "apperror"]
+    assert apperrors, "a failed run must settle into an apperror"
+    assert apperrors[-1]["type"] == expected_type
+    message = apperrors[-1]["message"]
+    assert exit_reason in message
+    assert "agent.max_turns" in message
+    assert message.startswith("Gateway run failed")
+    saved = models.get_session(s.session_id)
+    assert saved.messages[-1]["_error"] is True
+    assert exit_reason in saved.messages[-1]["content"]
+
+
+def test_gateway_runs_api_run_failed_explicit_401_with_429_iteration_budget(tmp_path, monkeypatch):
+    """#8742: Explicit HTTP 401 error combined with 429 iteration budget stays auth_mismatch."""
+    events, s = _gateway_run_failed_events(
+        tmp_path,
+        monkeypatch,
+        {
+            "error": "HTTP 401: Invalid API key",
+            "turn_exit_reason": "max_iterations_reached(429/429)",
+        },
+    )
+    apperrors = [item[1] for item in events if item[0] == "apperror"]
+    assert apperrors, "a failed run must settle into an apperror"
+    assert apperrors[-1]["type"] == "auth_mismatch"
+    message = apperrors[-1]["message"]
+    assert message.startswith("HTTP 401: Invalid API key")
+    assert "max_iterations_reached(429/429)" in message
+    assert "agent.max_turns" in message
+
+
+def test_gateway_runs_api_run_failed_without_error_field_uses_structured_kind(tmp_path, monkeypatch):
+    """#8742: When error field is omitted, structured kind is classified instead of composite text."""
+    events, s = _gateway_run_failed_events(
+        tmp_path,
+        monkeypatch,
+        {"turn_exit_reason": "max_iterations_reached(401/401)"},
+    )
+    apperrors = [item[1] for item in events if item[0] == "apperror"]
+    assert apperrors, "a failed run must settle into an apperror"
+    assert apperrors[-1]["type"] == "error"
+    message = apperrors[-1]["message"]
+    assert "max_iterations_reached(401/401)" in message
+    assert message.startswith("Gateway run failed")
+
+
+def test_gateway_runs_api_status_settle_recovery_names_cause_and_classifies_safely(tmp_path, monkeypatch):
+    """#8742: Status recovery (_settle_by_status) uses safe display message and authoritative classification."""
+    import queue
+    import uuid
+    from unittest.mock import MagicMock, patch
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.models import new_session
+
+    events = []
+    q = queue.Queue()
+    q.put_nowait = lambda item: events.append(item)
+    q.put = lambda item, *a, **k: events.append(item)
+    stream_id = f"sid-status-settle-{uuid.uuid4().hex[:8]}"
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    call_count = [0]
+
+    def fake_urlopen(req, *, timeout=None):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            resp = MagicMock()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = lambda s, *a: None
+            resp.read = lambda sz=65536: b'{"run_id":"run_status_failed"}'
+            return resp
+        # Fail the events stream to force durable status polling (_settle_by_status)
+        import urllib.error
+        raise urllib.error.URLError("events connection refused")
+
+    status_payload = {
+        "run_id": "run_status_failed",
+        "status": "failed",
+        "error": "Gateway run failed",
+        "turn_exit_reason": "max_iterations_reached(401/401)",
+    }
+
+    try:
+        s = new_session()
+        s.active_stream_id = stream_id
+        s.pending_user_message = "hi"
+        s.pending_attachments = []
+        s.save()
+        with patch.dict("os.environ", {
+            "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
+        }, clear=True), \
+             patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+             patch("api.gateway_chat._get_gateway_run_status", return_value=status_payload), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_chat_streaming(
+                session_id=s.session_id,
+                msg_text="hi",
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+    apperrors = [item[1] for item in events if item[0] == "apperror"]
+    assert apperrors, "status settle must emit an apperror"
+    assert apperrors[-1]["type"] == "error"
+    assert "max_iterations_reached(401/401)" in apperrors[-1]["message"]
+    assert "agent.max_turns" in apperrors[-1]["message"]
+
+
+def test_gateway_runs_api_restart_recovery_names_cause_and_classifies_safely(tmp_path, monkeypatch):
+    """#8742: Restart recovery (_await_gateway_run_result) uses safe display message and authoritative classification."""
+    import queue
+    import uuid
+    from unittest.mock import patch
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.models import new_session
+
+    events = []
+    q = queue.Queue()
+    q.put_nowait = lambda item: events.append(item)
+    q.put = lambda item, *a, **k: events.append(item)
+    stream_id = f"sid-restart-settle-{uuid.uuid4().hex[:8]}"
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    status_payload = {
+        "run_id": "run_restart_failed",
+        "status": "failed",
+        "error": "Gateway run failed",
+        "turn_exit_reason": "max_iterations_reached(401/401)",
+    }
+
+    try:
+        s = new_session()
+        s.active_stream_id = stream_id
+        s.pending_user_message = "hi"
+        s.pending_attachments = []
+        s.save()
+        with patch.dict("os.environ", {
+            "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
+        }, clear=True), \
+             patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+             patch("api.gateway_chat._get_gateway_run_status", return_value=status_payload):
+            _run_gateway_chat_streaming(
+                session_id=s.session_id,
+                msg_text="hi",
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+                reattach_run={"run_id": "run_restart_failed", "stream_id": stream_id},
+            )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+    apperrors = [item[1] for item in events if item[0] == "apperror"]
+    assert apperrors, "restart recovery must emit an apperror"
+    assert apperrors[-1]["type"] == "error"
+    assert "max_iterations_reached(401/401)" in apperrors[-1]["message"]
+    assert "agent.max_turns" in apperrors[-1]["message"]
+
+
+def test_gateway_run_failed_classify_target_extracts_authoritative_error():
+    """#8742: Authoritative classification target extraction logic."""
+    from api.gateway_chat import _gateway_run_failed_classify_target
+
+    # Explicit provider error preserved
+    assert _gateway_run_failed_classify_target({
+        "error": "HTTP 401: Invalid API key",
+        "turn_exit_reason": "max_iterations_reached(429/429)",
+    }) == "HTTP 401: Invalid API key"
+
+    # Iteration budget stripped of dynamic counter
+    assert _gateway_run_failed_classify_target({
+        "error": "Gateway run failed",
+        "turn_exit_reason": "max_iterations_reached(401/401)",
+    }) == "max_iterations_reached"
+
+    # Missing error uses structured kind
+    assert _gateway_run_failed_classify_target({
+        "turn_exit_reason": "max_iterations_reached(404/404)",
+    }) == "max_iterations_reached"
+
+    # Terminal reason structured kind
+    assert _gateway_run_failed_classify_target({
+        "terminal_reason": "provider_error",
+    }) == "provider_error"
+
+    # Fallback when no causes
+    assert _gateway_run_failed_classify_target({}) == "Gateway run failed"
+
+
+
