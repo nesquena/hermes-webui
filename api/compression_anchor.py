@@ -167,6 +167,52 @@ def compaction_handoff_remainder(message):
     return head.strip()
 
 
+_CARRIER_NOT_A_CARRIER = "not_carrier"
+_CARRIER_PROVEN_SYNTHETIC = "proven_synthetic"
+_CARRIER_AUTHENTIC_REMAINDER = "authentic_remainder"
+
+
+def _compaction_carrier_envelope_decision(content_text: str) -> tuple[str, str]:
+    """Three-outcome decision on compaction carrier envelope evidence.
+
+    Outcomes:
+    - (_CARRIER_NOT_A_CARRIER, ""): not a carrier or missing/truncated envelope.
+    - (_CARRIER_PROVEN_SYNTHETIC, ""): proven pure synthetic carrier only.
+    - (_CARRIER_AUTHENTIC_REMAINDER, authentic_head): merged carrier with authentic text.
+    """
+    if not isinstance(content_text, str):
+        return _CARRIER_NOT_A_CARRIER, ""
+
+    text = content_text.strip()
+    low = text.lower()
+    if not low.startswith(COMPACTION_HANDOFF_HEADER_PREFIX):
+        return _CARRIER_NOT_A_CARRIER, ""
+
+    close = text.find("]")
+    if close < 0:
+        return _CARRIER_NOT_A_CARRIER, ""
+
+    after_close = text[close + 1:]
+    rest = after_close.strip()
+    low_after = after_close.lower()
+
+    delimiter_idx = low_after.find(COMPACTION_HANDOFF_DELIMITER_PREFIX)
+    if delimiter_idx >= 0:
+        head = after_close[:delimiter_idx].strip()
+        if not head:
+            return _CARRIER_PROVEN_SYNTHETIC, ""
+        low_head = head.lower()
+        if low_head.startswith(COMPACTION_PROMPT_CARD_PREFIX) or low_head.startswith("context compaction"):
+            return _CARRIER_PROVEN_SYNTHETIC, ""
+        return _CARRIER_AUTHENTIC_REMAINDER, head
+
+    low_rest = rest.lower()
+    if low_rest.startswith(COMPACTION_PROMPT_CARD_PREFIX) or low_rest.startswith("context compaction"):
+        return _CARRIER_PROVEN_SYNTHETIC, ""
+
+    return _CARRIER_NOT_A_CARRIER, ""
+
+
 def project_compaction_carrier_for_display(message):
     """Display-only projection: drop the handoff, keep the authentic row.
 
@@ -174,31 +220,67 @@ def project_compaction_carrier_for_display(message):
     summary for replay), so this never mutates the input and belongs only at
     the WebUI display boundary.
 
-    Only MERGED carriers are rewritten: they still hold the authentic retained
-    row text and a real tool-call step that must keep rendering. Standalone
-    summary cards (``[context compaction ...]``) are returned untouched - the
-    transcript renderer already treats them as a compaction card and needs the
-    summary text for that card.
+    Only MERGED carriers and proven synthetic carriers are rewritten.
+    Standalone summary cards (``[context compaction ...]``) are returned
+    untouched - the transcript renderer already treats them as a compaction
+    card and needs the summary text for that card.
     """
     if not isinstance(message, dict):
         return message
+    role = message.get("role")
+    if role not in ("user", "assistant"):
+        return message
+
     content = message.get("content")
-    if not isinstance(content, str):
-        return message
-    text = content.strip()
-    low = text.lower()
-    merged_carrier = low.startswith(COMPACTION_HANDOFF_HEADER_PREFIX) or (
-        bool(message.get("_compressed_summary"))
-        and COMPACTION_HANDOFF_DELIMITER_PREFIX in low
-    )
-    if not merged_carrier:
-        return message
-    projected = dict(message)
-    projected["content"] = compaction_handoff_remainder(message)
-    # The flag describes the handoff we just removed; keeping it would let a
-    # downstream mirror treat the authentic remainder as a synthetic card.
-    projected.pop("_compressed_summary", None)
-    return projected
+    if isinstance(content, str):
+        decision, remainder = _compaction_carrier_envelope_decision(content)
+        if decision == _CARRIER_NOT_A_CARRIER:
+            return message
+        projected = dict(message)
+        projected["content"] = remainder
+        # The flag describes the handoff we just removed; keeping it would let a
+        # downstream mirror treat the authentic remainder as a synthetic card.
+        projected.pop("_compressed_summary", None)
+        return projected
+
+    if isinstance(content, list):
+        has_carrier_block = False
+        new_content = []
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type in {"text", "input_text", "output_text"} or (
+                    part_type is None and ("text" in part or "content" in part)
+                ):
+                    text_key = "text" if "text" in part else ("content" if "content" in part else None)
+                    if text_key and isinstance(part[text_key], str):
+                        raw_text = part[text_key]
+                        decision, remainder = _compaction_carrier_envelope_decision(raw_text)
+                        if decision in (
+                            _CARRIER_PROVEN_SYNTHETIC,
+                            _CARRIER_AUTHENTIC_REMAINDER,
+                        ):
+                            has_carrier_block = True
+                            new_part = dict(part)
+                            new_part[text_key] = remainder
+                            new_content.append(new_part)
+                            continue
+            elif isinstance(part, str):
+                decision, remainder = _compaction_carrier_envelope_decision(part)
+                if decision in (_CARRIER_PROVEN_SYNTHETIC, _CARRIER_AUTHENTIC_REMAINDER):
+                    has_carrier_block = True
+                    new_content.append(remainder)
+                    continue
+            new_content.append(part)
+
+        if not has_carrier_block:
+            return message
+        projected = dict(message)
+        projected["content"] = new_content
+        projected.pop("_compressed_summary", None)
+        return projected
+
+    return message
 
 
 def project_compaction_carriers_for_display(messages):
