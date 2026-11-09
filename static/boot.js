@@ -718,6 +718,12 @@ function _openMobileSidebarFromGesture(){
   _setPanelInert(sidebar, true);
 }
 
+function _swipeHitsRect(point,id){
+  const el=document.getElementById(id);
+  if(!el||!point) return false;
+  const r=el.getBoundingClientRect();
+  return point.clientX>=r.left&&point.clientX<=r.right&&point.clientY>=r.top&&point.clientY<=r.bottom;
+}
 function _onPwaSidebarSwipeStart(e){
   if(_isDesktopWidth())return;
   if(_isTouchPointerEvent(e))return;
@@ -727,6 +733,9 @@ function _onPwaSidebarSwipeStart(e){
   if(!point)return;
   if(point.clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
   if(_isInteractiveSwipeTarget(e.target))return;
+  // hwc: sidebar-typing-lock — composer and the message field. A real keyboard
+  // inset grows .composer-wrap padding, so this rect already covers that band.
+  if(_swipeHitsRect(point,'composerWrap')||_swipeHitsRect(point,'msg'))return;
   _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
 }
 
@@ -3171,7 +3180,10 @@ document.addEventListener('keydown',async e=>{
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
   if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')){
     const t=e.target;
-    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    const active=document.activeElement;
+    const _isTextEl=el=>!!(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable));
+    // hwc: sidebar-typing-lock — also the focused element, not only the event target.
+    const isText=_isTextEl(t)||_isTextEl(active);
     if(!isText&&typeof toggleSidebar==='function'&&_isDesktopWidth()){
       e.preventDefault();
       toggleSidebar();
