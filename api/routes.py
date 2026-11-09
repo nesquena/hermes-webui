@@ -16521,67 +16521,24 @@ def _handle_insights(handler, parsed) -> bool:
 
 
 def _parse_nginx_date(dt_str):
-    """Parse nginx log date string like '28/Oct/2026:15:09:36 +0700'."""
-    try:
-        import datetime as _dt_mod
-        # Strip timezone for parsing
-        dt_clean = dt_str.split()[0]
-        dt = _dt_mod.datetime.strptime(dt_clean, "%d/%b/%Y:%H:%M:%S")
-        return dt
-    except Exception:
-        return None
+    """Parse nginx log date string like '28/Oct/2026:15:09:36 +0700'.
 
-
-def _parse_nginx_logs(start_dt, end_dt):
-    """Parse nginx access logs and return top 10 inbound IPs for the given window.
-    
-    Uses subprocess + sudo tail to read /var/log/nginx/access.log safely.
+    Returns a naive datetime in server-local time. The logged offset is
+    honoured (nginx may log in a different timezone than the server):
+    the parsed instant is converted to local time before comparison, so
+    window checks are timezone-safe. Falls back to the naive form when
+    the string carries no offset.
     """
-    # Build a combined access log view: current + rotated logs
-    # We use `cat` on all files to get the full history
-    log_files = ["/var/log/nginx/access.log"] + sorted(
-        Path("/var/log/nginx").glob("access.log.*")
-    )
-    
-    # Filter to files that exist and are readable (we'll use sudo)
-    readable = []
-    for f in log_files:
-        if f.exists():
-            readable.append(str(f))
-    
-    if not readable:
-        return []
-    
-    # Use `sudo tail -n +1` to read all lines from all files
-    # We cat all files in order (oldest first) to maintain date ordering
-    ip_counts = collections.Counter()
-    
-    nginx_date_re = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
-    
-    # Process files - oldest first
-    for filepath in sorted(readable, key=lambda p: (
-        int(re.search(r'\.log\.(\d+)', p).group(1)) if re.search(r'\.log\.(\d+)', p) else 999
-    )):
-        try:
-            result = subprocess.run(
-                ["sudo", "cat", filepath],
-                capture_output=True, text=True, timeout=30
-            )
-            if result.returncode != 0:
-                continue
-            
-            for line in result.stdout.splitlines():
-                m = nginx_date_re.match(line)
-                if m:
-                    ip = m.group(1)
-                    dt_str = m.group(2)
-                    dt = _parse_nginx_date(dt_str)
-                    if dt and start_dt <= dt <= end_dt:
-                        ip_counts[ip] += 1
-        except Exception:
-            continue
-    
-    return ip_counts.most_common(10)
+    import datetime as _dt_mod
+    try:
+        dt = _dt_mod.datetime.strptime(dt_str, "%d/%b/%Y:%H:%M:%S %z")
+        return dt.astimezone().replace(tzinfo=None)
+    except (ValueError, OverflowError):
+        pass
+    try:
+        return _dt_mod.datetime.strptime(dt_str.split()[0], "%d/%b/%Y:%H:%M:%S")
+    except (ValueError, OverflowError):
+        return None
 
 
 def _get_outbound_domains(start_dt, end_dt):
@@ -16599,32 +16556,28 @@ def _get_outbound_domains(start_dt, end_dt):
                 SELECT RTRIM(smu.billing_base_url, '/') as billing_base_url, SUM(smu.api_call_count) as calls
                 FROM session_model_usage smu
                 JOIN sessions s ON s.id = smu.session_id
-                WHERE smu.billing_base_url IS NOT NULL 
+                WHERE smu.billing_base_url IS NOT NULL
                   AND smu.billing_base_url != ''
                   AND s.started_at >= ?
                   AND s.started_at <= ?
                 GROUP BY RTRIM(smu.billing_base_url, '/')
-                ORDER BY calls DESC
-                LIMIT 10
             """, (start_dt.timestamp(), end_dt.timestamp()))
             rows = cur.fetchall()
-            
-            result = []
+
+            # Aggregate by domain before limiting: several full URLs can
+            # share one provider domain (…/v1, …/v2), and grouping/limiting
+            # in SQL by full URL would split their counts across rows.
+            from urllib.parse import urlparse as _urlparse
+            by_domain = {}
             for r in rows:
                 url = r["billing_base_url"]
-                # Extract domain from URL
                 try:
-                    from urllib.parse import urlparse
-                    parsed = urlparse(url)
-                    domain = parsed.netloc or url
+                    domain = _urlparse(url).netloc or url
                 except Exception:
                     domain = url
-                result.append({
-                    "domain": domain,
-                    "url": url,
-                    "calls": r["calls"],
-                })
-            return result
+                entry = by_domain.setdefault(domain, {"domain": domain, "url": url, "calls": 0})
+                entry["calls"] += r["calls"] or 0
+            return sorted(by_domain.values(), key=lambda e: e["calls"], reverse=True)[:10]
     except Exception:
         return []
 
@@ -16632,8 +16585,7 @@ def _get_outbound_domains(start_dt, end_dt):
 def _handle_insights_traffic(handler, parsed) -> bool:
     """Return top 10 inbound IPs and outbound domains for a given time window."""
     import collections as _collections
-    import re as _re
-    from urllib.parse import urlparse as _urlparse
+    import math as _math
     from datetime import datetime as _datetime, timedelta as _timedelta
     
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -16661,7 +16613,7 @@ def _handle_insights_traffic(handler, parsed) -> bool:
             f = float(v)
         except (TypeError, ValueError):
             return None
-        if not math.isfinite(f):
+        if not _math.isfinite(f):
             return None
         return ("num", f)
     
@@ -16671,106 +16623,143 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     now = time.time()
     start_ts = None
     end_ts = None
-    end_exclusive = True
-    
+
     if start_meta is not None or end_meta is not None:
         start_ts = start_meta[1] if start_meta else None
         end_ts = end_meta[1] if end_meta else None
         if end_meta is None:
             end_ts = now
-            end_exclusive = False
         if end_ts > now:
             end_ts = now
         if start_ts is None:
             start_ts = end_ts - 30 * 86400
-        # Ensure valid
-        if start_ts is None or end_ts is None or start_ts > end_ts:
+        # Unsupported or inverted numeric ranges fail closed to the
+        # default trailing window instead of raising in fromtimestamp().
+        try:
+            _datetime.fromtimestamp(start_ts)
+            _datetime.fromtimestamp(end_ts)
+        except (OverflowError, ValueError, OSError):
+            start_ts = None
+            end_ts = None
+        if start_ts is not None and start_ts > end_ts:
             start_ts = None
             end_ts = None
     else:
-        # Trailing mode: last 30 days
-        days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
+        # Trailing mode: last N days. Empty/non-integer `days`
+        # (?days=, ?days=abc) is a controlled 400, never an exception.
+        raw_days = query.get("days", ["30"])[0]
+        try:
+            days = int(str(raw_days).strip())
+        except (TypeError, ValueError):
+            return j(handler, {"error": "days must be an integer between 1 and 365"}, status=400)
+        if not 1 <= days <= 365:
+            return j(handler, {"error": "days must be an integer between 1 and 365"}, status=400)
         end_ts = now
         start_ts = end_ts - (days - 1) * 86400
-        end_exclusive = False
-    
+
     # Derive every window from `now` (time.time()), not _datetime.now(), so
     # an injected clock (tests) drives the day/month windows consistently.
     now_dt = _datetime.fromtimestamp(now)
     if start_ts is None:
-        start_dt = now_dt - _timedelta(days=30)
-        end_dt = now_dt
+        req_start_dt = now_dt - _timedelta(days=30)
+        req_end_dt = now_dt
     else:
-        start_dt = _datetime.fromtimestamp(start_ts)
-        end_dt = _datetime.fromtimestamp(end_ts)
+        req_start_dt = _datetime.fromtimestamp(start_ts)
+        req_end_dt = _datetime.fromtimestamp(end_ts)
 
-    # Inbound IPs from nginx logs
-    # For day and month windows
-    one_day_ago = now_dt - _timedelta(days=1)
-    day_start = _datetime(one_day_ago.year, one_day_ago.month, one_day_ago.day)
-    month_start = now_dt - _timedelta(days=30)
+    # Rolling windows (Past Day = last 24h, Past Month = last 30d),
+    # intersected with the requested interval when one was supplied, so
+    # a custom range bounds what the traffic cards count.
+    day_start = max(now_dt - _timedelta(days=1), req_start_dt)
+    day_end = min(now_dt, req_end_dt)
+    month_start = max(now_dt - _timedelta(days=30), req_start_dt)
+    month_end = min(now_dt, req_end_dt)
     
     ip_counts_day = _collections.Counter()
     ip_counts_month = _collections.Counter()
     
-    log_files = ["/var/log/nginx/access.log"] + sorted(
-        Path("/var/log/nginx").glob("access.log.*")
-    )
-    readable = [str(f) for f in log_files if Path(f).exists()]
-    if not readable:
-        readable = ["/var/log/nginx/access.log"]
-    
+    # Inbound IPs from nginx logs. Read with the server's own permissions
+    # first (the production image has no sudo); fall back to `sudo cat`
+    # only when the log is present but unreadable. Rotated .gz files are
+    # decompressed instead of being silently skipped.
+    log_base = os.getenv("HERMES_WEBUI_ACCESS_LOG", "/var/log/nginx/access.log")
+    log_files = [log_base] + sorted(str(p) for p in Path(os.path.dirname(log_base) or ".").glob("access.log.*"))
+    readable = [f for f in log_files if Path(f).exists()]
+    # Attempt the default path even when nothing registered as readable
+    # (e.g. present but permission-denied to exists()): the direct read
+    # then the sudo fallback decide, and a genuinely absent log simply
+    # yields no lines.
+    candidates = readable or [log_base]
+
+    def _read_log_lines(filepath):
+        if filepath.endswith(".gz"):
+            with gzip.open(filepath, "rt", errors="ignore") as fh:
+                return fh.read().splitlines()
+        try:
+            return Path(filepath).read_text(errors="ignore").splitlines()
+        except OSError:
+            result = subprocess.run(
+                ["sudo", "cat", filepath],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                return None
+            return result.stdout.splitlines()
+
     nginx_date_re = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
-    
+
     # Sort files: current first (most recent), then rotated by number descending
     def sort_key(p):
         m = re.search(r'\.log\.(\d+)', p)
         if m:
             return (-int(m.group(1)), p)
         return (0, p)
-    
-    for filepath in sorted(readable, key=sort_key):
+
+    inbound_source = "ok" if readable else "missing"
+    for filepath in sorted(candidates, key=sort_key):
         try:
-            result = subprocess.run(
-                ["sudo", "cat", filepath],
-                capture_output=True, text=True, timeout=60
-            )
-            if result.returncode != 0:
+            lines = _read_log_lines(filepath)
+            if lines is None:
+                inbound_source = "unreadable"
                 continue
-            for line in result.stdout.splitlines():
+            for line in lines:
                 m = nginx_date_re.match(line)
                 if m:
                     ip = m.group(1)
                     dt = _parse_nginx_date(m.group(2))
                     if dt:
-                        if day_start <= dt <= now_dt:
+                        if day_start <= dt <= day_end:
                             ip_counts_day[ip] += 1
-                        if month_start <= dt <= now_dt:
+                        if month_start <= dt <= month_end:
                             ip_counts_month[ip] += 1
         except Exception:
             continue
-    
+
     # Outbound domains from Hermes state.db
-    out_day = _get_outbound_domains(day_start, now_dt)
-    out_month = _get_outbound_domains(month_start, now_dt)
-    
+    out_day = _get_outbound_domains(day_start, day_end)
+    out_month = _get_outbound_domains(month_start, month_end)
+
     def _ip_to_domain(ip):
+        # Bounded reverse-DNS: a slow resolver must not stall the panel.
         try:
+            import concurrent.futures as _futures
             import socket as _socket
-            hostname, _, _ = _socket.gethostbyaddr(ip)
-            return hostname
+            with _futures.ThreadPoolExecutor(max_workers=1) as pool:
+                hostname = pool.submit(_socket.gethostbyaddr, ip).result(timeout=1)
+            return hostname[0]
         except Exception:
             return ip
-    
+
     def _format_ips(counter):
-        return [{"ip": ip, "count": count, "domain": _ip_to_domain(ip)} 
+        return [{"ip": ip, "count": count, "domain": _ip_to_domain(ip)}
                 for ip, count in counter.most_common(10)]
-    
+
     return j(handler, {
         "inbound_ips_day": _format_ips(ip_counts_day),
         "inbound_ips_month": _format_ips(ip_counts_month),
         "outbound_domains_day": out_day,
         "outbound_domains_month": out_month,
+        "inbound_source": inbound_source,
     })
 
 

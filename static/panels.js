@@ -4939,15 +4939,22 @@ async function loadInsights(animate) {
   // earlier response must never overwrite a newer range.  Each call takes
   // its own token; only the newest token may render.
   const reqToken = ++_insightsReqToken;
+  // Traffic loads separately: the existing Insights cards render as soon as
+  // their data is ready and never wait on nginx log scans / reverse-DNS.
+  const trafficPromise = api(`/api/insights/traffic?${qs.toString()}`).catch(() => null);
   try {
-    const [data, wikiStatus, skillUsage, traffic] = await Promise.all([
+    const [data, wikiStatus, skillUsage] = await Promise.all([
       api(`/api/insights?${qs.toString()}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
-      api(`/api/insights/traffic?${qs.toString()}`).catch(() => null),
     ]);
     if (reqToken !== _insightsReqToken) return;
-    _renderInsights(data, box, wikiStatus, skillUsage, traffic);
+    _renderInsights(data, box, wikiStatus, skillUsage);
+    trafficPromise.then(traffic => {
+      if (reqToken !== _insightsReqToken) return; // superseded by a newer load
+      const mount = typeof box.querySelector === 'function' ? box.querySelector('#insightsTrafficMount') : null;
+      if (mount) mount.innerHTML = _renderTrafficPanel(traffic);
+    });
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
@@ -5277,13 +5284,14 @@ function _renderSkillUsage(d) {
 }
 
 function _renderTrafficPanel(traffic) {
+  if (traffic === undefined) return ''; // not loaded yet — mounted separately
   if (!traffic) {
     return `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_traffic_title'))}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
   }
 
   function _renderIpTable(items, periodLabel) {
     if (!items || !items.length) {
-      return `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_traffic_inbound'))} · ${esc(periodLabel)}</div><div class="insights-empty">No data</div></div>`;
+      return `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_traffic_inbound'))} · ${esc(periodLabel)}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
     }
     const rows = items.map((item, idx) => {
       const display = item.domain && item.domain !== item.ip ? `${esc(item.ip)} (${esc(item.domain)})` : esc(item.ip);
@@ -5294,7 +5302,7 @@ function _renderTrafficPanel(traffic) {
 
   function _renderDomainTable(items, periodLabel) {
     if (!items || !items.length) {
-      return `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_traffic_outbound'))} · ${esc(periodLabel)}</div><div class="insights-empty">No data</div></div>`;
+      return `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_traffic_outbound'))} · ${esc(periodLabel)}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
     }
     const rows = items.map((item, idx) => {
       return `<div class="insights-table-row"><span>${idx + 1}</span><span class="insights-address-cell" title="${esc(item.domain)}">${esc(item.domain)}</span><span>${item.calls.toLocaleString()}</span></div>`;
@@ -5478,7 +5486,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage, traffic) {
       </div>
       ${dowHtml}
       ${hodHtml}
-      ${_renderTrafficPanel(traffic)}
+      <div id="insightsTrafficMount"></div>
       <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(rangeLabel)}</div>
     `;
 }

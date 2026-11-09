@@ -2843,7 +2843,7 @@ def test_insights_range_fallback_note_is_localized_at_runtime():
 def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch):
     """New /api/insights/traffic endpoint returns top 10 inbound IPs and outbound domains."""
     import api.routes as routes
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock
     import pathlib
 
     fake_nginx_logs = (
@@ -2924,3 +2924,72 @@ def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch):
 
     day_nous = next(r for r in data["outbound_domains_day"] if r["domain"] == "inference-api.nousresearch.com")
     assert day_nous["calls"] == 100
+
+
+def test_insights_traffic_rejects_malformed_days():
+    """?days=, ?days=abc and out-of-range days return 400, never raise."""
+    import types
+
+    import api.routes as routes
+
+    for query in ("days=", "days=abc", "days=0", "days=9999"):
+        handler = _FakeHandler()
+        parsed = types.SimpleNamespace(query=query)
+        routes._handle_insights_traffic(handler, parsed)
+        assert handler.status == 400, query
+        assert "error" in handler.json_body(), query
+
+
+def test_parse_nginx_date_honours_logged_offset():
+    """A logged +0700 instant must compare correctly against local windows."""
+    import api.routes as routes
+    from datetime import datetime, timedelta
+
+    dt = routes._parse_nginx_date("28/Oct/2026:15:09:36 +0000")
+    assert dt is not None and dt.tzinfo is None
+    # Same instant written in +0700 is 7h earlier on the clock face.
+    dt2 = routes._parse_nginx_date("28/Oct/2026:22:09:36 +0700")
+    assert dt2 == dt
+    # One hour after the +0000 instant exceeds a 30-minute window check.
+    assert dt + timedelta(minutes=30) < dt2 + timedelta(hours=1)
+
+
+def test_get_outbound_domains_aggregates_by_domain_on_real_sqlite(tmp_path, monkeypatch):
+    """Real SQLite: counts combine by domain before the top-10 limit."""
+    import sqlite3
+    from datetime import datetime, timedelta
+
+    import api.models as models
+    import api.routes as routes
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL)")
+    conn.execute(
+        "CREATE TABLE session_model_usage "
+        "(session_id TEXT, billing_base_url TEXT, api_call_count INTEGER)"
+    )
+    now = datetime.now()
+    in_window = now.timestamp()
+    out_window = (now - timedelta(days=90)).timestamp()
+    rows = [
+        ("s1", in_window, "https://api.example.com/v1", 30),
+        ("s2", in_window, "https://api.example.com/v2", 25),
+        ("s3", in_window, "https://other.test/v1", 10),
+        ("s4", out_window, "https://api.example.com/v1", 999),
+    ]
+    for sid, started, url, calls in rows:
+        conn.execute("INSERT INTO sessions VALUES (?, ?)", (sid, started))
+        conn.execute(
+            "INSERT INTO session_model_usage VALUES (?, ?, ?)", (sid, url, calls)
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    result = routes._get_outbound_domains(
+        now - timedelta(days=1), now + timedelta(days=1)
+    )
+    domains = {r["domain"]: r["calls"] for r in result}
+    # /v1 + /v2 combine under one domain; the out-of-window 999 is excluded.
+    assert domains == {"api.example.com": 55, "other.test": 10}
