@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 import weakref
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -604,6 +605,58 @@ def _apply_config_defaults(config_data: dict) -> None:
     for key, value in _DEFAULT_EXPERIMENTAL_CONFIG.items():
         experimental.setdefault(key, value)
 
+
+def _thread_private_config() -> dict | None:
+    """Return this thread's private config (#8970) while it names the active file.
+
+    Set only by :func:`thread_private_config`. ``None`` on every other thread,
+    and on this one once ``_get_config_path()`` resolves a different file (a
+    nested scope for another profile), so callers fall back to the shared cache.
+    """
+    pinned = getattr(_thread_ctx, "private_config", None)
+    if pinned is None:
+        return None
+    config_path, config_data = pinned
+    try:
+        return config_data if _get_config_path() == config_path else None
+    except Exception:
+        return None
+
+
+def _config_view() -> dict:
+    """Config read by the model/provider resolvers: this thread's private config
+    (#8970) when one is bound, else the shared ``cfg`` alias as before."""
+    private = _thread_private_config()
+    return private if private is not None else cfg
+
+
+@contextmanager
+def thread_private_config():
+    """Serve THIS thread's config reads from a private read of its config.yaml (#8970).
+
+    ``get_config()`` / ``get_config_snapshot()`` refill the process-wide
+    ``_cfg_cache`` (the bare ``cfg`` alias) in place for whatever file the
+    calling thread resolves, and the model/provider resolvers read that alias
+    directly, so it holds whichever profile refilled it last. A detached worker
+    that runs one session's job enters this scope INSIDE its profile scope
+    (``profile_scope_for_detached_worker``): the file ``_get_config_path()`` now
+    names is read once, directly, the way ``get_config_for_profile_home`` reads a
+    diverging profile (``${VAR}`` expanded under the scope's thread env). While
+    the path still matches, ``get_config()``, ``get_config_snapshot()`` and the
+    resolvers on this thread serve that dict; the shared cache is neither read
+    nor refilled, so other profiles' requests are unaffected. The previous state
+    is restored on exit, including on exceptions.
+    """
+    config_path = _get_config_path()
+    private = _load_yaml_config_file(config_path)
+    _apply_config_defaults(private)
+    previous = getattr(_thread_ctx, "private_config", None)
+    _thread_ctx.private_config = (config_path, private)
+    try:
+        yield private
+    finally:
+        _thread_ctx.private_config = previous
+
  
 def reload_config_if_stale() -> None:
     """Refresh config.yaml once for concurrent stale read paths."""
@@ -624,6 +677,9 @@ def reload_config_if_stale() -> None:
 
 def get_config() -> dict:
     """Return the cached config dict, loading from disk if needed."""
+    private = _thread_private_config()
+    if private is not None:
+        return private
     config_path = _get_config_path()
     try:
         current_mtime = config_path.stat().st_mtime
@@ -648,6 +704,9 @@ def get_config() -> dict:
 
 def get_config_snapshot() -> dict:
     """Return a request-owned config snapshot captured under the cache lock."""
+    private = _thread_private_config()
+    if private is not None:
+        return copy.deepcopy(private)
     with _cfg_lock:
         config_path = _get_config_path()
         try:
@@ -3168,7 +3227,8 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     model = str(model_id or "").strip()
     if not model:
         return False
-    model_cfg = cfg.get("model", {})
+    config_view = _config_view()  # #8970: see resolve_model_provider()
+    model_cfg = config_view.get("model", {})
     if isinstance(model_cfg, dict):
         if str(model_cfg.get("default") or "").strip() == model:
             return True
@@ -3179,7 +3239,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     prov = str(config_provider or "").strip().lower()
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
-        for entry in _custom_provider_entries():
+        for entry in _custom_provider_entries(config_view):
             slug = _custom_provider_slug_from_name(entry.get("name"))
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
@@ -3340,7 +3400,7 @@ def _get_provider_base_url(provider_id):
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    model_cfg = cfg.get("model", {}) or {}
+    model_cfg = _config_view().get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
@@ -3351,7 +3411,7 @@ def _get_provider_base_url(provider_id):
 
 
 def _get_providers_cfg() -> dict:
-    providers_cfg = cfg.get("providers")
+    providers_cfg = _config_view().get("providers")
     return providers_cfg if isinstance(providers_cfg, dict) else {}
 
 
@@ -3546,6 +3606,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
     """
+    # #8970: a worker in a private config scope resolves against ITS profile's
+    # config, not whichever profile last refilled the shared alias.
+    cfg = _config_view()
     config_provider = None
     config_base_url = None
     model_cfg = cfg.get("model", {})
@@ -5873,6 +5936,7 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     internal disambiguation form, so use it only when the provider context is
     needed to route away from the current default provider.
     """
+    cfg = _config_view()  # #8970: see resolve_model_provider()
     model = str(model_id or "").strip()
     provider = str(model_provider or "").strip().lower()
     if not model or not provider or provider == "default" or model.startswith("@"):
