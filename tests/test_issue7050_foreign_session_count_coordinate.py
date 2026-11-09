@@ -272,3 +272,56 @@ def test_webui_native_metadata_poll_keeps_the_cheap_growth_path(monkeypatch, tmp
     assert metadata["message_count"] == 6
     full = _load(sid, "&messages=1&resolve_model=0")
     assert full["message_count"] == 4
+
+
+def test_foreign_cli_warm_resident_reflects_separately_saved_sidecar(monkeypatch, tmp_path):
+    """A warm resident in memory must not hide a newer sidecar saved separately."""
+    import api.models as models
+
+    sid = "cli7050_warm_resident"
+    sidecar_messages = [
+        {"role": "user", "content": "q0", "timestamp": 1000.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1001.0},
+    ]
+    _install_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, sidecar_messages)
+
+    resident = models.get_session(sid)
+    assert resident is not None
+    assert len(resident.messages) == 2
+
+    separate = models.Session.load(sid)
+    separate.messages.extend([
+        {"role": "user", "content": "q1", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a1", "timestamp": 1003.0},
+    ])
+    separate.save(touch_updated_at=False)
+
+    metadata, limited, full = _solution(sid)
+
+    assert metadata["message_count"] == full["message_count"] == limited["message_count"] == 4
+    assert metadata["last_message_at"] == full["last_message_at"] == limited["last_message_at"]
+    assert metadata["messages"] == []
+
+
+def test_foreign_cli_persisted_sidecar_metadata_miss_stays_in_display_coordinates(monkeypatch, tmp_path):
+    """Foreign session with CLI metadata lookup miss ({}) must stay in display coordinates."""
+    import api.routes as routes
+
+    sid = "cli7050_meta_miss"
+    rows, _ = _foreign_state_rows(archived_pairs=2, active_turns=1, duplicate_active=False)
+    sidecar_rows = [row for row in rows if row.get("active", 1) == 1]
+    assert len(rows) == 7
+    assert len(sidecar_rows) == 3
+
+    _install_session(monkeypatch, tmp_path, sid, sidecar_rows)
+    _make_state_db(tmp_path / "state.db", sid, rows)
+
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda session_id: {})
+
+    metadata = _load(sid, "&messages=0&resolve_model=0")
+    full = _load(sid, "&messages=1&resolve_model=0")
+
+    assert metadata["message_count"] == full["message_count"] == 3
+    assert metadata["last_message_at"] == full["last_message_at"]
+    assert metadata["message_count"] != 7

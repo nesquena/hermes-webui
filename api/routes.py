@@ -13292,6 +13292,7 @@ def _merged_sidecar_state_messages_for_display(
     state_db_messages,
     *,
     owner_positions=None,
+    cancelled_journal_owner_messages=None,
 ) -> list:
     """Merge one session's sidecar lineage with its state.db rows for display.
 
@@ -13331,7 +13332,11 @@ def _merged_sidecar_state_messages_for_display(
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
-        cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
+        cancelled_journal_owner_messages=(
+            getattr(session, "messages", None) or []
+            if cancelled_journal_owner_messages is None
+            else cancelled_journal_owner_messages
+        ),
     )
     merged = _merged_webui_lineage_messages_for_display(
         session,
@@ -13373,18 +13378,34 @@ def _foreign_session_display_message_summary(
     transcript: only the cheap coordinate leaves the server.
     """
     source_session = session
-    if not (getattr(session, "messages", None) or []):
-        # A metadata-only stub never carries the transcript, so load the sidecar
-        # to feed the merge the same sidecar rows a message load would use.
+    if not (
+        getattr(session, "active_stream_id", None)
+        or getattr(session, "pending_user_message", None)
+    ):
+        from api.models import (
+            _cached_session_lags_disk,
+            get_sidecar_session_profile_readonly,
+        )
+
         try:
-            loaded = Session.load(sid)
+            if _cached_session_lags_disk(session):
+                disk_profile = get_sidecar_session_profile_readonly(sid)
+                if disk_profile == getattr(session, "profile", None):
+                    loaded = Session.load(sid)
+                    if loaded is not None:
+                        source_session = loaded
+        except (KeyError, ValueError):
+            pass
         except Exception:
-            loaded = None
-        if loaded is not None and (getattr(loaded, "messages", None) or []):
-            source_session = loaded
+            pass
     reader_kwargs = {"profile": profile}
+    cancelled_owner_messages = getattr(session, "messages", None) or []
+    if not cancelled_owner_messages:
+        # A metadata-only stub never carries the transcript: the journal-owner
+        # argument then has to come from the snapshot that did.
+        cancelled_owner_messages = getattr(source_session, "messages", None) or []
     if _cancelled_journal_turn_owner(
-        getattr(source_session, "messages", None) or [], include_live_partial=True
+        cancelled_owner_messages, include_live_partial=True,
     ):
         # Same reader shape the message-load branch uses for a cancelled-journal
         # turn: the private row identities are what let the merge dedupe
@@ -13401,8 +13422,27 @@ def _foreign_session_display_message_summary(
     merged = _merged_sidecar_state_messages_for_display(
         source_session,
         get_state_db_session_messages(sid, **reader_kwargs),
+        cancelled_journal_owner_messages=cancelled_owner_messages,
     )
     return _message_summary(merged)
+
+
+def _session_display_count_is_foreign(session, cli_meta: dict | None, sid: str) -> bool:
+    """Return True when ``session`` should compute message summary in foreign display coordinates.
+
+    When CLI metadata lookup succeeds, its source marker decides. When the lookup
+    misses ({}), fall back to state.db's authoritative source for this session row.
+    If state.db has no row or errors, consult the session's persisted CLI/read-only markers.
+    WebUI-native sessions take the cheap raw growth path.
+    """
+    if cli_meta:
+        return not _session_source_is_webui(cli_meta)
+    if not _session_requires_cli_metadata_lookup(session):
+        return False
+    source = _state_db_session_source(sid)
+    if source:
+        return source != "webui"
+    return bool(getattr(session, "is_cli_session", False) or getattr(session, "read_only", False))
 
 
 def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
@@ -17460,7 +17500,7 @@ def _handle_session_get(handler, parsed) -> bool:
             # the same session, always saw a change, and force-reloaded the
             # entire transcript forever. WebUI-native sessions keep the cheap
             # growth-signal path (their sidecar count is the display count).
-            if cli_meta and not _session_source_is_webui(cli_meta):
+            if _session_display_count_is_foreign(s, cli_meta, sid):
                 metadata_summary = _foreign_session_display_message_summary(
                     s, sid, _session_profile,
                 )
