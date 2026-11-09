@@ -1091,6 +1091,90 @@ def build_share_snapshot(session) -> dict:
     }
 
 
+class ShareTokenOwnershipError(Exception):
+    """A share token names a public snapshot owned by a different session.
+
+    Domain error, not a generic failure: the ``/api/share/*`` handlers map it to
+    an explicit 409 naming both sessions, so a cross-session token can never be
+    answered with a silent 200 or fall through to a 500. See #8734.
+    """
+
+    def __init__(self, token: str, owner_session_id: str, acting_session_id: str):
+        self.token = str(token or "")
+        self.owner_session_id = str(owner_session_id or "")
+        self.acting_session_id = str(acting_session_id or "")
+        super().__init__(
+            f"Share token '{self.token}' belongs to session '{self.owner_session_id}', "
+            f"not '{self.acting_session_id}'"
+        )
+
+
+def _snapshot_owner(payload: dict | None) -> str:
+    """The session that published ``payload``, or empty for legacy snapshots."""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("source_session_id") or "").strip()
+
+
+def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
+    """True if *child_sid* is the compression continuation of *parent_sid*."""
+    if not child_sid or not parent_sid or child_sid == parent_sid:
+        return False
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(child_sid) or not models.is_safe_session_id(parent_sid):
+            return False
+        child_path = models.SESSION_DIR / f"{child_sid}.json"
+        if not child_path.is_file():
+            return False
+        prefix = models._persisted_session_meta_prefix(child_sid)
+        if isinstance(prefix, dict):
+            parent_id = str(prefix.get("parent_session_id") or "").strip()
+            if parent_id == parent_sid:
+                parent_prefix = models._persisted_session_meta_prefix(parent_sid)
+                if isinstance(parent_prefix, dict) and parent_prefix.get("pre_compression_snapshot"):
+                    continuation_id = str(parent_prefix.get("pre_compression_continuation_session_id") or "").strip()
+                    if continuation_id == child_sid:
+                        return True
+    except Exception:
+        pass
+    return False
+
+
+def _read_share_snapshot(token: str, *, expected_session_id: str | None = None) -> dict | None:
+    """Read a snapshot from disk, enforcing ownership when *expected_session_id* is given.
+
+    Returns the raw snapshot payload dict, or ``None`` when the file is missing
+    or unparseable. Raises :class:`ShareTokenOwnershipError` when the snapshot
+    exists, carries a non-empty ``source_session_id``, and does not match
+    *expected_session_id*. Legacy snapshots without ``source_session_id`` are
+    accepted for any session (migration compatibility).
+    """
+    token = str(token or "").strip()
+    if not token:
+        return None
+    try:
+        path = _share_path(token)
+    except ValueError:
+        return None
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Failed to read share snapshot %s", path, exc_info=True)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if expected_session_id is not None:
+        expected = str(expected_session_id or "").strip()
+        owner = _snapshot_owner(payload)
+        if owner and expected and owner != expected:
+            raise ShareTokenOwnershipError(token, owner, expected)
+    return payload
+
+
 def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: str = "") -> dict:
     """Persist a prebuilt share snapshot under ``token`` (or a fresh one).
 
@@ -1099,6 +1183,8 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
     large session) and take the lock only around token resolution, this write and
     the token persist (#8255 review).
     """
+    acting_sid = str(source_session_id or "").strip()
+    reassigned_from = ""
     with _SHARE_LOCK:
         _ensure_share_dir()
         token = str(token or "").strip()
@@ -1118,13 +1204,34 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
                 token = ""
                 path = None
                 existing = None
+            elif isinstance(existing, dict):
+                # #8734: the token in this session's sidecar is a claim, not proof.
+                # Never rewrite a snapshot another session owns — mint this session its
+                # own token instead, so the other session's public URL keeps serving
+                # its own conversation.
+                existing_owner = _snapshot_owner(existing)
+                if (
+                    existing_owner
+                    and acting_sid
+                    and existing_owner != acting_sid
+                    and not _is_compression_continuation(acting_sid, existing_owner)
+                ):
+                    reassigned_from = token
+                    token = ""
+                    path = None
+                    existing = None
+                    logger.warning(
+                        "Share token %s in session %s belongs to session %s; minted a "
+                        "new token instead of overwriting that snapshot (#8734)",
+                        reassigned_from, acting_sid, existing_owner,
+                    )
         if path is None:
             token = secrets.token_urlsafe(18)
             path = _share_path(token)
         now = time.time()
         payload = {
             "token": token,
-            "source_session_id": str(source_session_id or ""),
+            "source_session_id": acting_sid,
             "title": snapshot["title"],
             "messages": snapshot["messages"],
             "message_count": snapshot["message_count"],
@@ -1141,6 +1248,8 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
         "share_message_count": payload["message_count"],
         "share_created_at": payload["created_at"],
         "share_updated_at": payload["updated_at"],
+        "token_reassigned": bool(reassigned_from),
+        "replaced_token": reassigned_from,
     }
 
 
@@ -1165,6 +1274,8 @@ def _share_owner_exists(payload: dict) -> bool:
     is gone (the conversation was deleted, including by a delete from before
     this check existed), is not served.
     """
+    if "source_session_id" not in payload:
+        return True  # legacy snapshot from before source_session_id existed
     sid = payload.get("source_session_id")
     if not isinstance(sid, str) or not sid:
         return False
@@ -1179,23 +1290,13 @@ def _share_owner_exists(payload: dict) -> bool:
         return False
 
 
-def load_share(token: str) -> dict | None:
+def load_share(token: str, *, expected_session_id: str | None = None) -> dict | None:
     """The public view of a share, or ``None`` (the caller answers 404).
 
     A refused snapshot (revoked, or its conversation no longer exists) gives the
     same ``None`` as an unknown token (#8837).
     """
-    try:
-        path = _share_path(token)
-    except ValueError:
-        return None
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("Failed to read share snapshot %s", path, exc_info=True)
-        return None
+    payload = _read_share_snapshot(token, expected_session_id=expected_session_id)
     if not isinstance(payload, dict):
         return None
     if payload.get("revoked_at"):
@@ -1257,18 +1358,18 @@ def revoke_share(session) -> bool:
     token = str(getattr(session, "share_token", "") or "").strip()
     if not token:
         return False
+    session_id = str(getattr(session, "session_id", "") or "")
     with _SHARE_LOCK:
+        # #8734: revoke must prove the token is this session's. Otherwise the
+        # request would take down another session's link while its owner still
+        # shows it as shared. Raises ShareTokenOwnershipError (named refusal).
+        payload = _read_share_snapshot(token, expected_session_id=session_id)
+        if not isinstance(payload, dict):
+            return True
         try:
             path = _share_path(token)
         except ValueError:
             return False
-        if path.exists():
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-            payload["revoked_at"] = time.time()
-            _write_json_atomic(path, payload)
+        payload["revoked_at"] = time.time()
+        _write_json_atomic(path, payload)
     return True
