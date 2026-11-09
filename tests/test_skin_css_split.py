@@ -93,7 +93,7 @@ def test_every_stylesheet_belongs_to_a_registered_skin():
 def test_registered_keys_use_the_browser_fallback():
     """An explicit `value` wins; a bare `name` is lowercased, not slugified."""
     entries = dict(_registered_skin_entries())
-    assert entries["Codex"] == "codex"
+    assert entries["Paper Graphite"] == "paper-graphite"
     assert entries["Ares"] == "ares"
     assert entries["Neon Soft"] == "neon-soft"
     # Guard the exact fallback expression boot.js uses.

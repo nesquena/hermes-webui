@@ -27,6 +27,7 @@ const SHELL_ASSETS = [
   './static/skins/catppuccin.css' + VQ,
   './static/skins/charizard.css' + VQ,
   './static/skins/codex.css' + VQ,
+  './static/skins/paper-graphite.css' + VQ,
   './static/skins/geist-contrast.css' + VQ,
   './static/skins/github.css' + VQ,
   './static/skins/graphite.css' + VQ,

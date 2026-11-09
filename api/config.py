@@ -14695,6 +14695,7 @@ _SETTINGS_SKIN_VALUES = {
     "charizard",
     "sienna",
     "catppuccin",
+    "paper-graphite",
     "nous",
     "geist-contrast",
     "zeus",
