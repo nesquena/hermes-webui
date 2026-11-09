@@ -24,9 +24,25 @@ VAR = "WEBUI_TEST_8938_KEY"
 UNSET = "WEBUI_TEST_8938_UNSET"
 
 
+# The chat resolves the session's provider against the live config (api.config.cfg), so the lookup's requested id
+# does too: each test's config is installed as the live one.
+LIVE = {}
+
+
+@pytest.fixture(autouse=True)
+def live_config(monkeypatch):
+    from api import config as api_config
+
+    LIVE.clear()
+    monkeypatch.setattr(api_config, "cfg", LIVE)
+    monkeypatch.setattr(api_config, "get_config", lambda *a, **k: LIVE)
+
+
 def _lookup(cfg, provider="custom:my-proxy", **kw):
     cfg.setdefault("providers", {})
     cfg.setdefault("custom_providers", [])
+    LIVE.clear()
+    LIVE.update(cfg)
     return routes._context_length_lookup_inputs_for_model("m-x", provider, cfg=cfg, **kw)
 
 
@@ -186,6 +202,31 @@ def test_the_requested_id_comes_from_the_model_block_when_the_session_names_none
     got = _lookup({"model": {"provider": "ollama", "base_url": A, "api_key": "KM"},
                    "providers": {"ollama": {"enabled": False}}}, provider=None)
     assert got.api_key == ""
+
+
+# Codex round 4: the chat rewrites a legacy configured ``local`` to ``custom`` before asking the Agent, so for a model
+# change on a ``local`` session (the stored provider is passed raw) the Agent checks providers.custom, not
+# providers.local. Measured: providers.local off -> the chat sends K@U; providers.custom off -> it refuses.
+def test_a_legacy_local_session_is_checked_under_custom():
+    model = {"provider": "local", "base_url": A, "api_key": "KM"}
+    got = _lookup({"model": dict(model), "providers": {"local": {"enabled": False}}}, provider="local")
+    assert routes._context_lookup_requested_provider("m-x", "local") == "custom"
+    assert (got.base_url, got.api_key) == (A, "KM")
+    got = _lookup({"model": dict(model), "providers": {"custom": {"enabled": False}}}, provider="local")
+    assert (got.base_url, got.api_key) == (A, "")
+
+
+def test_the_requested_id_is_the_chats_and_idempotent():
+    LIVE.update({"model": {"provider": "openrouter"}, "providers": {}, "custom_providers": []})
+    for raw, want in (("ollama", "ollama"), ("claude", "claude"), ("custom", "custom"), ("custom:my-proxy", "custom:my-proxy"),
+                      ("OpenAI", "openai"), ("@ollama:m-x", "ollama")):
+        got = routes._context_lookup_requested_provider("m-x", raw) if not raw.startswith("@") else \
+            routes._context_lookup_requested_provider(raw, None)
+        assert got == want, raw
+        assert routes._context_lookup_requested_provider("m-x", got) == got
+    # A configured provider keeps its spelling through the chat's resolver; the Agent lowercases it.
+    LIVE["model"] = {"provider": "OpenAI"}
+    assert routes._context_lookup_requested_provider("m-x", "OpenAI") == "openai"
 
 
 def test_the_config_selection_alone_reads_the_requested_id(aliases):

@@ -9547,6 +9547,32 @@ def _context_lookup_record_key(record: dict) -> str:
     return _context_lookup_resolve_key(record.get("api_key"), key_env)
 
 
+def _context_lookup_requested_provider(model: str | None, provider: str | None) -> str:
+    """The provider id the chat asks the Agent for, as the Agent reads it (#8938).
+
+    WebUI's chat resolves the session's model and provider with
+    ``api.config.resolve_model_provider`` and passes that provider to the Agent,
+    which lowercases it (``resolve_requested_provider``) and then checks
+    ``providers.<that id>.enabled`` before anything else. The id is the session's
+    own spelling, not its alias resolution (``ollama`` stays ``ollama``), except
+    where the chat rewrites it (a legacy configured ``local`` becomes ``custom``).
+    Asking the same resolver keeps the two in step; it returns an already-resolved
+    id unchanged. Without a model, or if resolution fails, this is the session's
+    cleaned provider id.
+    """
+    model_text = str(model or "").strip()
+    if model_text:
+        try:
+            from api.config import resolve_model_provider
+
+            resolved = resolve_model_provider(model_with_provider_context(model_text, provider or None))[1]
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip().lower()
+        except Exception:
+            logger.debug("context lookup: requested provider resolution failed", exc_info=True)
+    return str(_clean_session_model_provider(provider) or "").strip().lower()
+
+
 def _context_lookup_provider_disabled(provider: str, providers_cfg: dict, requested: str = "") -> bool:
     """Whether the session's own provider is switched off, by the record the chat obeys (#8938).
 
@@ -9556,9 +9582,9 @@ def _context_lookup_provider_disabled(provider: str, providers_cfg: dict, reques
     key outranks every alias, including its disabled verdict, and without one a
     disabled record naming the identity leaves the route with no authority. For
     any other id it is the exact key the Agent's ``_raise_if_provider_disabled``
-    reads: ``requested``, the session's provider id BEFORE alias resolution (the
-    chat asks the Agent for ``ollama``, not ``custom``; for ``claude``, not
-    ``anthropic``), falling back to ``provider``. A disabled record under the
+    reads: ``requested``, the id the chat asks the Agent for
+    (:func:`_context_lookup_requested_provider`; ``ollama``, not ``custom``;
+    ``claude``, not ``anthropic``), falling back to ``provider``. A disabled record under the
     resolved id (``providers.custom`` for an ``ollama`` session) switches nothing
     off, as the chat still routes and sends the model block's key. A disabled
     alias beside an enabled record switches nothing off either: the Agent's
@@ -9604,9 +9630,9 @@ def _context_length_config_api_key_and_owner(
     as the Agent's matcher skips it, and the selection reads on exactly as if that
     record weren't there: the chat routes the same with or without it.
 
-    ``requested_provider`` is the session's provider id before alias resolution, the
-    key the Agent checks; callers that pass an already-resolved ``provider`` pass it.
-    Without it, ``provider`` is taken as the requested id.
+    ``requested_provider`` is the id the chat asks the Agent for, the key the Agent
+    checks (:func:`_context_lookup_requested_provider`). Without it, ``provider`` is
+    taken as the requested id.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     requested = str(requested_provider or _clean_session_model_provider(provider) or "").strip().lower()
@@ -9770,8 +9796,8 @@ def _context_length_lookup_inputs_for_model(
 
     bare_model, explicit_provider = _split_provider_qualified_model(model_for_lookup)
     effective_provider = _canonical_context_provider(provider or explicit_provider)
-    # #8938: the id before alias resolution, the key the Agent checks for enabled: false.
-    requested_provider = _clean_session_model_provider(provider or explicit_provider) or ""
+    # #8938: the id the chat asks the Agent for, the key it checks for enabled: false.
+    requested_provider = _context_lookup_requested_provider(model_for_lookup, provider)
     effective_base_url = str(base_url or "").strip()
     # #8822: a caller's key owns only the URL the caller passed with it (plus its
     # provider's fixed metadata hosts). With no caller URL it owns no URL.
@@ -9781,7 +9807,6 @@ def _context_length_lookup_inputs_for_model(
     if isinstance(model_cfg, dict):
         if not effective_provider:
             effective_provider = _canonical_context_provider(model_cfg.get("provider"))
-            requested_provider = _clean_session_model_provider(model_cfg.get("provider")) or ""
         if not effective_base_url:
             # #7535: the global model.base_url may only fill an empty slot when
             # the session provider IS the configured model.provider owner
