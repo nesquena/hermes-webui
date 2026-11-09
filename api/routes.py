@@ -9532,27 +9532,28 @@ def _context_lookup_resolve_key(raw_api_key, raw_key_env=None) -> str:
 def _context_lookup_record_reads_api_key_env(provider_key: object) -> bool:
     """Whether the lookup reads the key a ``providers.<key>`` record names in ``api_key_env`` (#8938).
 
-    Only on the two record kinds WebUI's own merge serves for the chat and respells
+    Only on a ``custom:<name>`` record: WebUI's own merge serves it for that named route and
+    respells ``api_key_env`` to ``key_env`` for the chat
     (``_custom_provider_runtime_bundle_with_provenance`` ->
-    ``api_config._normalized_raw_provider_record``, ``api_key_env`` -> ``key_env``): a
-    ``custom:<name>`` key, and the generic ``custom`` record. On those the chat sends that
-    key, so the lookup sends it too.
+    ``api_config._normalized_raw_provider_record``), so the chat sends that key and the lookup
+    sends it too.
 
     Every other record is left at exp-v0.52.660's behaviour, its ``api_key_env`` unread:
-    a built-in provider's record (``providers.anthropic``: the chat gets an AuthError and
-    sends no key) and a raw-named record (``providers.mylab`` for a ``mylab`` session,
-    ``providers.tencent-tokenplan``, an alias such as ``providers.grok``, ``providers.auto``).
-    Whether the chat reads a raw-named record depends on the Agent's own selection
-    (its built-in registry, alias table, per-home plugins and ``auto`` rule), which WebUI
-    would have to predict, and every prediction drifted from the Agent. Leaving them
-    unread sends less than the chat on some (a context window from the default), never a
-    key the chat doesn't send. Taking the pair from the chat's own runtime chain instead,
-    as GET does since #8951, is tracked in #8963.
+    - a built-in provider's record (``providers.anthropic``): the chat gets an AuthError and
+      sends no key;
+    - the generic ``providers.custom`` record: the lookup also selects that shared placeholder
+      record for ``ollama`` / ``local`` sessions, where the chat uses the model block's key;
+      reading its ``api_key_env`` there would outrank the model block's key and then fail the
+      origin check, so the lookup would send nothing;
+    - a raw-named record (``providers.mylab``, ``providers.tencent-tokenplan``, an alias such
+      as ``providers.grok``, ``providers.auto``): whether the chat reads one depends on the
+      Agent's own selection (its registry, aliases, per-home plugins, ``auto`` rule), which
+      WebUI would have to predict.
+    Leaving them unread sends less than the chat on some (a context window from the default),
+    never a key the chat doesn't send and never less than exp-v0.52.660. Taking the pair from
+    the chat's own runtime chain, as GET does since #8951, is tracked in #8963.
     """
-    raw = str(provider_key or "").strip().lower()
-    if not raw:
-        return False
-    return raw.startswith("custom:") or api_config._canonicalise_provider_id(raw) == "custom"
+    return str(provider_key or "").strip().lower().startswith("custom:")
 
 
 def _context_lookup_record_key(record: dict, provider_key: object = None) -> str:

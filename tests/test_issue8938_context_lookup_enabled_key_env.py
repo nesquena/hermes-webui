@@ -6,12 +6,14 @@ Three follow-ups from the review of #8935, measured against the chat's own route
    for a session on it, custom or built-in. So it is no key source for its own session, and no same-value holder
    for another session (#8918). A legacy ``custom_providers`` entry is different: the Agent's legacy view still
    routes one that's switched off, and the chat still sends its key, so it stays a source and a holder.
-2. **A record's key reference spelled ``api_key_env``** is read on the two record kinds WebUI's own merge serves and
-   respells to ``key_env`` for the chat: a ``custom:<name>`` key and the generic ``custom`` record. Every other record
-   keeps exp-v0.52.660's behaviour (unread): a built-in provider's record (the chat gets an AuthError and sends no key)
-   and a raw-named record (``mylab``, ``tencent-tokenplan``, an alias such as ``grok``, ``auto``), whose use by the
-   chat depends on the Agent's own selection. That sends less than the chat on some, never more (#8963). On a
-   legacy entry or the model block the lookup reads ``key_env`` alone, as the merge does (#8959).
+2. **A record's key reference spelled ``api_key_env``** is read on a ``custom:<name>`` record, which WebUI's own merge
+   serves for that named route and respells to ``key_env`` for the chat. Every other record keeps exp-v0.52.660's
+   behaviour (unread): a built-in provider's record (the chat gets an AuthError and sends no key); the generic
+   ``custom`` record, which the lookup also selects for ``ollama`` / ``local`` sessions, where reading it would cost
+   the model block's key (Codex round 10); and a raw-named record (``mylab``, ``tencent-tokenplan``, an alias such as
+   ``grok``, ``auto``), whose use by the chat depends on the Agent's own selection. That sends less than the chat on
+   some, never more and never less than .660 (#8963). On a legacy entry or the model block the lookup reads
+   ``key_env`` alone, as the merge does (#8959).
 3. **Pins** for three rules that mutants showed no test held: a legacy holder's ``api`` / ``url`` spellings, a
    model-block ``key_env`` holder, and no same-value grant on the Agent-fallback branch.
 """
@@ -406,10 +408,23 @@ def test_a_builtin_record_holding_the_value_under_api_key_env_lends_nothing(key_
     assert (got.base_url, got.api_key) == (U, "")
 
 
-def test_the_generic_custom_record_key_spelled_api_key_env_is_its_own_key(key_in_env):
+def test_the_generic_custom_record_key_spelled_api_key_env_is_not_read(key_in_env):
+    # Left at exp-v0.52.660's behaviour (#8963): the shared placeholder record is selected for ollama / local sessions
+    # too, where reading it would cost the model block's key (next test).
     got = _lookup({"model": {"provider": "custom"}, "providers": {"custom": {"base_url": B, "api_key_env": VAR}}},
                   provider="custom")
-    assert got.api_key == "K1"
+    assert got.api_key == ""
+
+
+@pytest.mark.parametrize("provider", ["ollama", "local", "custom"])
+def test_the_generic_custom_record_api_key_env_never_costs_the_model_block_key(key_in_env, provider):
+    """Codex round 10: the chat sends the model block's KM to A; the generic ``custom`` record names another key for
+    B. Reading that record's ``api_key_env`` made it outrank KM and then fail the origin check, so the lookup sent
+    nothing to A (a real endpoint's 65,536-token window became the 256,000 default). As on exp-v0.52.660, KM goes to
+    A."""
+    got = _lookup({"model": {"provider": provider, "base_url": A, "api_key": "KM"},
+                   "providers": {"custom": {"base_url": B, "api_key_env": VAR}}}, provider=provider)
+    assert (got.base_url, got.api_key) == (A, "KM")
 
 
 def test_a_raw_named_record_holding_the_value_under_api_key_env_lends_nothing(key_in_env):
@@ -422,7 +437,7 @@ def test_a_raw_named_record_holding_the_value_under_api_key_env_lends_nothing(ke
 
 
 @pytest.mark.parametrize("key,reads", [
-    ("custom:h", True), ("Custom:H", True), (" custom:h ", True), ("custom", True), ("Custom", True),
+    ("custom:h", True), ("Custom:H", True), (" custom:h ", True), ("custom", False), ("Custom", False),
     ("myproxy", False), ("my_proxy", False), ("My Proxy", False), ("tencent-tokenplan", False), ("tokenplan", False),
     ("auto", False), ("grok", False), ("ollama", False), ("local", False), ("vllm", False),
     ("openai", False), ("anthropic", False), ("deepseek", False), ("openrouter", False), ("OpenAI", False), ("", False),
@@ -540,7 +555,7 @@ def test_the_rule_never_asks_the_agent(monkeypatch):
     pkg.runtime_provider_custom = mod
     monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider_custom", mod)
-    for key, reads in (("custom:h", True), ("custom", True), ("mylab", False), ("tencent-tokenplan", False),
+    for key, reads in (("custom:h", True), ("custom", False), ("mylab", False), ("tencent-tokenplan", False),
                        ("auto", False)):
         assert routes._context_lookup_record_reads_api_key_env(key) is reads
     assert calls == []
