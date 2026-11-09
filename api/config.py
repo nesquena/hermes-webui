@@ -7570,6 +7570,9 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
           one raw row (_expand_env_vars + _same_json_value).
        c. Unique shape: dict against dict with identical key sets and all non-reference
           leaves equal, matching exactly one raw row.
+       d. Edited row: dict against dict with identical key sets differing at exactly one
+          leaf, matching exactly one raw row, so a row made only of references still
+          keeps the siblings the edit did not touch.
     3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
     4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
        rows disputing the same raw row, or non-unique match in a list with references) raises
@@ -7638,6 +7641,24 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                     return False
         return has_non_ref_leaf
 
+    def _edited_row_candidates(new_item) -> list[int]:
+        """Raw rows identical to *new_item* except at exactly one leaf (#8740 CR)."""
+        if not isinstance(new_item, dict):
+            return []
+        out = []
+        for raw_idx, raw_item in enumerate(raw_list):
+            if not isinstance(raw_item, dict) or set(raw_item.keys()) != set(new_item.keys()):
+                continue
+            differing = 0
+            for key in raw_item:
+                if not _same_json_value(new_item[key], _expand_env_vars(raw_item[key])):
+                    differing += 1
+                    if differing > 1:
+                        break
+            if differing == 1:
+                out.append(raw_idx)
+        return out
+
     matches: dict[int, int | None] = {}
     for new_idx, new_item in enumerate(new_list):
         # 2.b: Expanded value
@@ -7662,6 +7683,15 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             raise ValueError(ambiguous_err)
         if len(cands_2c) == 1:
             matches[new_idx] = cands_2c[0]
+            continue
+
+        # 2.d: a row edited at exactly one leaf, so a row made only of
+        # references still keeps the siblings the edit did not touch.
+        cands_2d = _edited_row_candidates(new_item)
+        if len(cands_2d) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2d) == 1:
+            matches[new_idx] = cands_2d[0]
             continue
 
         matches[new_idx] = None

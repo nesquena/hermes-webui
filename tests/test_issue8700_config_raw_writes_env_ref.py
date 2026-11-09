@@ -580,6 +580,36 @@ def test_extra_body_list_references_survive_environment_divergence(cfg_path, mon
     _assert_no_secret(cfg_path, "POST /api/model/set divergence extra_body list")
 
 
+def test_extra_body_row_with_only_references_keeps_siblings_when_one_leaf_is_edited(
+    cfg_path, monkeypatch
+):
+    """A row edited in one leaf still keeps its other references (#8740 CR)."""
+    monkeypatch.setenv("HERMES_TEST_A", "val-alpha-123")
+    monkeypatch.setenv("HERMES_TEST_B", "val-beta-456")
+
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", {
+        "rows": [{"a": "${HERMES_TEST_A}", "b": "${HERMES_TEST_B}"}]
+    }))
+
+    edited = {"rows": [{"a": "typed-by-the-user", "b": "val-beta-456"}]}
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": edited},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["rows"]
+    assert written == [{"a": "typed-by-the-user", "b": "${HERMES_TEST_B}"}], (
+        f"editing one leaf of a reference-only row baked its siblings: {written!r}"
+    )
+    _assert_no_secret(cfg_path, "POST /api/model/set edited reference-only row")
+
+
 def test_extra_body_list_without_references_is_written_as_given(cfg_path):
     raw_eb = {
         "items": [
