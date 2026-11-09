@@ -1,4 +1,4 @@
-"""#8938: the context-length lookup applies the ``enabled`` rule and reads a record's ``api_key_env``, as the chat does.
+"""#8938: the context-length lookup applies the ``enabled`` rule as the chat does; ``api_key_env`` stays at .660 (#8963).
 
 Three follow-ups from the review of #8935, measured against the chat's own route on every supported Agent:
 
@@ -6,13 +6,10 @@ Three follow-ups from the review of #8935, measured against the chat's own route
    for a session on it, custom or built-in. So it is no key source for its own session, and no same-value holder
    for another session (#8918). A legacy ``custom_providers`` entry is different: the Agent's legacy view still
    routes one that's switched off, and the chat still sends its key, so it stays a source and a holder.
-2. **A record's key reference spelled ``api_key_env``** is read on a ``custom:<name>`` record, which WebUI's own merge
-   serves for that named route and respells to ``key_env`` for the chat. Every other record keeps exp-v0.52.660's
-   behaviour (unread): a built-in provider's record (the chat gets an AuthError and sends no key); the generic
-   ``custom`` record, which the lookup also selects for ``ollama`` / ``local`` sessions, where reading it would cost
-   the model block's key (Codex round 10); and a raw-named record (``mylab``, ``tencent-tokenplan``, an alias such as
-   ``grok``, ``auto``), whose use by the chat depends on the Agent's own selection. That sends less than the chat on
-   some, never more and never less than .660 (#8963). On a legacy entry or the model block the lookup reads
+2. **A record's key reference spelled ``api_key_env``** is deferred to #8963 and stays at exp-v0.52.660's behaviour on
+   every record (unread). Each WebUI-side prediction of which record's ``api_key_env`` the chat reads drifted from the
+   chat's own selection in review (rounds 5-11 of #8956); the fix belongs in the chat's runtime chain, as #8951 did for
+   GET. The pins below hold every reviewed shape at .660's pairs. On a legacy entry or the model block the lookup reads
    ``key_env`` alone, as the merge does (#8959).
 3. **Pins** for three rules that mutants showed no test held: a legacy holder's ``api`` / ``url`` spellings, a
    model-block ``key_env`` holder, and no same-value grant on the Agent-fallback branch.
@@ -380,23 +377,77 @@ def test_a_disabled_legacy_entry_holding_the_value_still_lends_its_url(flag):
     assert (got.base_url, got.api_key) == (L, "K1")
 
 
-# ── 2. A record's key reference spelled ``api_key_env`` ──────────────────────
+# ── 2. ``api_key_env``: deferred to #8963, exp-v0.52.660's behaviour everywhere ──────────────────────────────
+# Rounds r5-r11 of #8956's review each found that a WebUI-side prediction of which record's ``api_key_env`` the chat
+# reads drifted from the chat's own selection. These pins hold every such shape at .660's pairs; they pass on .660.
 
 
-def test_a_record_key_spelled_api_key_env_is_its_own_key(key_in_env):
-    got = _lookup({"model": {"provider": "custom:h"},
-                   "providers": {"custom:h": {"base_url": B, "api_key_env": VAR}}}, provider="custom:h")
-    assert (got.base_url, got.api_key) == (B, "K1")
+ALL_KEYS = ["custom:h", "Custom:H", " custom:h ", "custom", "Custom", "mylab", "My Lab", "tencent-tokenplan",
+            "tokenplan", "tokenhub", "auto", "grok", "fw", "ollama", "local", "openai", "anthropic", "deepseek"]
 
 
-@pytest.mark.parametrize("pid", ["openai", "anthropic", "deepseek", "openrouter"])
+@pytest.mark.parametrize("key", ALL_KEYS)
+@pytest.mark.parametrize("session", ["own", "custom"])
 @pytest.mark.parametrize("with_url", [False, True], ids=["no-url", "record-url"])
-def test_a_builtin_record_key_spelled_api_key_env_is_not_sent(key_in_env, pid, with_url):
-    # The chat gets an AuthError and sends no key: the Agent reads a built-in record's ``api_key_env`` only for its
-    # model listing and URL blocks, never for the chat. So the lookup sends none either, as on exp-v0.52.659.
+def test_no_record_api_key_env_is_its_own_key(key_in_env, key, session, with_url):
+    slug = key.strip().lower().replace(" ", "-")
+    provider = slug if session == "own" or slug.startswith("custom") else f"custom:{slug}"
     record = {"api_key_env": VAR, **({"base_url": B} if with_url else {})}
-    got = _lookup({"model": {"provider": pid}, "providers": {pid: record}}, provider=pid)
+    got = _lookup({"model": {"provider": provider}, "providers": {key: record}}, provider=provider)
     assert got.api_key == ""
+
+
+@pytest.mark.parametrize("key", ["custom:h", "Custom:H", "custom", "myproxy", "openai", "anthropic", "auto"])
+def test_no_record_holding_the_value_under_api_key_env_lends_its_url(key_in_env, key):
+    cfg = {"model": {"provider": "custom:s", "base_url": U},
+           "providers": {"custom:s": {"base_url": U}, key: {"base_url": U, "api_key_env": VAR}}}
+    assert routes._context_lookup_origin(U) not in routes._context_lookup_same_value_origins("K1", cfg)
+    got = _lookup(cfg, provider="custom:s", api_key="K1")
+    assert (got.base_url, got.api_key) == (U, "")
+
+
+def test_key_env_is_still_read_and_api_key_env_is_no_fallback(key_in_env):
+    on = _lookup({"model": {"provider": "custom:h"}, "providers": {"custom:h": {"base_url": B, "key_env": VAR}}},
+                 provider="custom:h")
+    blank = _lookup({"model": {"provider": "custom:h"},
+                     "providers": {"custom:h": {"base_url": B, "key_env": " ", "api_key_env": VAR}}}, provider="custom:h")
+    literal = _lookup({"model": {"provider": "custom:h"},
+                       "providers": {"custom:h": {"base_url": B, "api_key": "KL", "api_key_env": VAR}}},
+                      provider="custom:h")
+    assert (on.api_key, blank.api_key, literal.api_key) == ("K1", "", "KL")
+
+
+@pytest.mark.parametrize("spelling", ["Custom:H", " custom:h "])
+def test_a_variant_custom_key_never_costs_the_exact_records_key(key_in_env, spelling):
+    """Codex round 11 (S1): a case or whitespace variant of the session's own ``custom:`` key beside the exact record.
+    The chat sends the exact record's KR to A; reading the variant's ``api_key_env`` made it outrank KR and then fail
+    the origin check. As on .660, KR goes to A."""
+    got = _lookup({"model": {"provider": "custom:h", "base_url": A},
+                   "providers": {spelling: {"base_url": B, "api_key_env": VAR},
+                                 "custom:h": {"base_url": A, "api_key": "KR"}}}, provider="custom:h")
+    assert (got.base_url, got.api_key) == (A, "KR")
+
+
+def test_a_variant_custom_key_lends_no_url_to_another_records_key(monkeypatch):
+    """Codex round 11 (S2): an ``ollama`` session (the chat sends the model block's KM to A) with the generic record's
+    KALIAS, and a ``Custom:H`` record at A whose ``api_key_env`` names KALIAS's value. Counting that as a holder
+    granted KALIAS origin A, and the lookup sent it instead of KM. As on .660, A is granted to no such holder."""
+    monkeypatch.setenv(VAR, "KALIAS")
+    cfg = {"model": {"provider": "ollama", "base_url": A, "api_key": "KM"},
+           "providers": {"custom": {"api_key": "KALIAS"}, "Custom:H": {"base_url": A, "api_key_env": VAR},
+                         "custom:h": {"base_url": B, "api_key": "KO"}}}
+    assert routes._context_lookup_origin(A) not in routes._context_lookup_same_value_origins("KALIAS", cfg)
+    assert _lookup(cfg, provider="ollama").api_key != "KALIAS"
+
+
+@pytest.mark.parametrize("provider", ["ollama", "local", "custom"])
+def test_the_generic_custom_record_api_key_env_never_costs_the_model_block_key(key_in_env, provider):
+    """Codex round 10: the chat sends the model block's KM to A; the generic ``custom`` record names another key for
+    B. Reading that record's ``api_key_env`` made it outrank KM and then fail the origin check. As on .660, KM goes
+    to A."""
+    got = _lookup({"model": {"provider": provider, "base_url": A, "api_key": "KM"},
+                   "providers": {"custom": {"base_url": B, "api_key_env": VAR}}}, provider=provider)
+    assert (got.base_url, got.api_key) == (A, "KM")
 
 
 @pytest.mark.parametrize("pid", ["openai", "anthropic"])
@@ -406,73 +457,6 @@ def test_a_builtin_record_holding_the_value_under_api_key_env_lends_nothing(key_
     assert routes._context_lookup_origin(U) not in routes._context_lookup_same_value_origins("K1", cfg)
     got = _lookup(cfg, provider="custom:s", api_key="K1")
     assert (got.base_url, got.api_key) == (U, "")
-
-
-def test_the_generic_custom_record_key_spelled_api_key_env_is_not_read(key_in_env):
-    # Left at exp-v0.52.660's behaviour (#8963): the shared placeholder record is selected for ollama / local sessions
-    # too, where reading it would cost the model block's key (next test).
-    got = _lookup({"model": {"provider": "custom"}, "providers": {"custom": {"base_url": B, "api_key_env": VAR}}},
-                  provider="custom")
-    assert got.api_key == ""
-
-
-@pytest.mark.parametrize("provider", ["ollama", "local", "custom"])
-def test_the_generic_custom_record_api_key_env_never_costs_the_model_block_key(key_in_env, provider):
-    """Codex round 10: the chat sends the model block's KM to A; the generic ``custom`` record names another key for
-    B. Reading that record's ``api_key_env`` made it outrank KM and then fail the origin check, so the lookup sent
-    nothing to A (a real endpoint's 65,536-token window became the 256,000 default). As on exp-v0.52.660, KM goes to
-    A."""
-    got = _lookup({"model": {"provider": provider, "base_url": A, "api_key": "KM"},
-                   "providers": {"custom": {"base_url": B, "api_key_env": VAR}}}, provider=provider)
-    assert (got.base_url, got.api_key) == (A, "KM")
-
-
-def test_a_raw_named_record_holding_the_value_under_api_key_env_lends_nothing(key_in_env):
-    # ``providers.myproxy`` is raw-named: its api_key_env stays unread, as on exp-v0.52.660 (#8963).
-    cfg = {"model": {"provider": "custom:s", "base_url": U},
-           "providers": {"custom:s": {"base_url": U}, "myproxy": {"base_url": U, "api_key_env": VAR}}}
-    assert routes._context_lookup_origin(U) not in routes._context_lookup_same_value_origins("K1", cfg)
-    got = _lookup(cfg, provider="custom:s", api_key="K1")
-    assert (got.base_url, got.api_key) == (U, "")
-
-
-@pytest.mark.parametrize("key,reads", [
-    ("custom:h", True), ("Custom:H", True), (" custom:h ", True), ("custom", False), ("Custom", False),
-    ("myproxy", False), ("my_proxy", False), ("My Proxy", False), ("tencent-tokenplan", False), ("tokenplan", False),
-    ("auto", False), ("grok", False), ("ollama", False), ("local", False), ("vllm", False),
-    ("openai", False), ("anthropic", False), ("deepseek", False), ("openrouter", False), ("OpenAI", False), ("", False),
-    (None, False),
-])
-def test_which_records_the_chat_reads_api_key_env_on(key, reads):
-    assert routes._context_lookup_record_reads_api_key_env(key) is reads
-
-
-def test_a_record_holding_the_value_under_api_key_env_lends_its_url(key_in_env):
-    # The issue's repro: a caller K1 with no URL, the lookup URL U, and a record at U whose api_key_env names K1.
-    cfg = {"model": {"provider": "custom:s", "base_url": U},
-           "providers": {"custom:s": {"base_url": U}, "custom:h": {"base_url": U, "api_key_env": VAR}}}
-    assert routes._context_lookup_origin(U) in routes._context_lookup_same_value_origins("K1", cfg)
-    got = _lookup(cfg, provider="custom:s", api_key="K1")
-    assert (got.base_url, got.api_key) == (U, "K1")
-
-
-def test_a_blank_key_env_falls_back_to_api_key_env(key_in_env):
-    got = _lookup({"model": {"provider": "custom:h"},
-                   "providers": {"custom:h": {"base_url": B, "key_env": "  ", "api_key_env": VAR}}}, provider="custom:h")
-    assert got.api_key == "K1"
-
-
-def test_key_env_outranks_api_key_env(key_in_env):
-    # WebUI's ladder keeps a non-blank key_env; one naming an unset variable gives no key.
-    got = _lookup({"model": {"provider": "custom:h"},
-                   "providers": {"custom:h": {"base_url": B, "key_env": UNSET, "api_key_env": VAR}}}, provider="custom:h")
-    assert got.api_key == ""
-
-
-def test_a_literal_api_key_outranks_api_key_env(key_in_env):
-    got = _lookup({"model": {"provider": "custom:h"},
-                   "providers": {"custom:h": {"base_url": B, "api_key": "KLIT", "api_key_env": VAR}}}, provider="custom:h")
-    assert got.api_key == "KLIT"
 
 
 def test_a_legacy_entry_api_key_env_is_not_read(key_in_env):
@@ -514,48 +498,3 @@ def test_the_same_value_grant_does_not_extend_the_fallback_key():
                    "providers": {"custom:h": {"base_url": B, "api_key": "AGENT-KEY"}}},
                   provider="custom:s", fallback_api_key="AGENT-KEY", fallback_base_url=C)
     assert (got.base_url, got.api_key) == (B, "")
-
-
-# ── raw-named records: exp-v0.52.660's behaviour, and no Agent call (auditor STB8956D) ──────────
-
-
-@pytest.mark.parametrize("key", ["mylab", "My Lab", "tencent-tokenplan", "Tencent-TokenPlan", "tokenhub", "auto",
-                                 "Auto", "grok", "fw", "ollama", "local"])
-@pytest.mark.parametrize("session", ["own", "custom"])
-def test_a_raw_named_record_key_spelled_api_key_env_is_not_sent(key_in_env, key, session):
-    """Senior rounds 5 and 6: whether the chat reads such a record is the Agent's call (its built-in registry,
-    aliases, per-home plugins, ``auto``). The lookup reads none of them, as on exp-v0.52.660."""
-    slug = key.strip().lower().replace(" ", "-")
-    provider = slug if session == "own" else f"custom:{slug}"
-    got = _lookup({"model": {"provider": provider}, "providers": {key: {"base_url": B, "api_key_env": VAR}}},
-                  provider=provider)
-    assert got.api_key == ""
-
-
-def test_a_raw_named_record_literal_key_is_unchanged(key_in_env):
-    """Only the ``api_key_env`` spelling is narrowed: a literal key on a raw-named record for its own session is read,
-    as on exp-v0.52.660."""
-    got = _lookup({"model": {"provider": "mylab"}, "providers": {"mylab": {"base_url": B, "api_key": "KL"}}},
-                  provider="mylab")
-    assert (got.base_url, got.api_key) == (B, "KL")
-
-
-def test_the_rule_never_asks_the_agent(monkeypatch):
-    """No Agent predicate on this path (senior round 6: each call re-parsed the Agent's config, and ``auto`` ran its
-    provider auto-detection). A stand-in Agent records any call; none may happen."""
-    import sys
-    import types
-
-    calls = []
-    pkg = types.ModuleType("hermes_cli")
-    pkg.__path__ = []
-    mod = types.ModuleType("hermes_cli.runtime_provider_custom")
-    mod._shadowed_by_builtin = lambda name: calls.append(("_shadowed_by_builtin", name)) or False
-    mod._normalize_custom_provider_name = lambda value: calls.append(("_normalize", value)) or value
-    pkg.runtime_provider_custom = mod
-    monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
-    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider_custom", mod)
-    for key, reads in (("custom:h", True), ("custom", False), ("mylab", False), ("tencent-tokenplan", False),
-                       ("auto", False)):
-        assert routes._context_lookup_record_reads_api_key_env(key) is reads
-    assert calls == []
