@@ -846,6 +846,27 @@ function _markdownTableCopyPlainText(node){
       .map((cell)=>_markdownTableCopyPlainText(cell).trim());
     if(cells.length) return `${cells.join('\t')}\n`;
   }
+  if(tag==='ol'){
+    let ordinal=1;
+    const start=typeof node.getAttribute==='function'?node.getAttribute('start'):null;
+    if(start!==null&&/^-?\d+$/.test(String(start))) ordinal=Number(start);
+    const lines=[];
+    for(const child of _markdownTableNodeChildren(node)){
+      if(!child||String(child.tagName||'').toLowerCase()!=='li'){
+        lines.push(_markdownTableCopyPlainText(child));
+        continue;
+      }
+      const value=typeof child.getAttribute==='function'?child.getAttribute('value'):null;
+      if(value!==null&&/^-?\d+$/.test(String(value))) ordinal=Number(value);
+      const content=_markdownTableNodeChildren(child)
+        .map(_markdownTableCopyPlainText)
+        .join('')
+        .trim();
+      lines.push(`\n${ordinal}. ${content}\n`);
+      ordinal++;
+    }
+    return `\n${lines.join('')}\n`;
+  }
   const children=_markdownTableNodeChildren(node)
     .map(_markdownTableCopyPlainText)
     .join('');
@@ -853,16 +874,8 @@ function _markdownTableCopyPlainText(node){
     const parent=node.parentElement||node.parentNode;
     const parentTag=parent&&parent.tagName?String(parent.tagName).toLowerCase():'';
     if(parentTag==='ol'){
-      let ordinal=1;
-      const start=typeof parent.getAttribute==='function'?parent.getAttribute('start'):null;
-      if(start!==null&&/^-?\d+$/.test(String(start))) ordinal=Number(start);
-      for(const sibling of _markdownTableNodeChildren(parent)){
-        if(!sibling||String(sibling.tagName||'').toLowerCase()!=='li') continue;
-        const value=typeof sibling.getAttribute==='function'?sibling.getAttribute('value'):null;
-        if(value!==null&&/^-?\d+$/.test(String(value))) ordinal=Number(value);
-        if(sibling===node) break;
-        ordinal++;
-      }
+      const value=typeof node.getAttribute==='function'?node.getAttribute('value'):null;
+      const ordinal=value!==null&&/^-?\d+$/.test(String(value))?Number(value):1;
       return `\n${ordinal}. ${children.trim()}\n`;
     }
     return `\n- ${children.trim()}\n`;

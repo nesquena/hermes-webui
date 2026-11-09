@@ -762,8 +762,11 @@ function appendMixedContent(root, suffix) {
   fifth.appendChild(new FakeText('Fifth item'));
   const eighth = makeElement('li', {attrs: {value: '8'}});
   eighth.appendChild(new FakeText('Eighth item'));
+  const ninth = makeElement('li');
+  ninth.appendChild(new FakeText('Ninth item'));
   ordered.appendChild(fifth);
   ordered.appendChild(eighth);
+  ordered.appendChild(ninth);
   root.appendChild(ordered);
 
   const first = buildEnhancedTableFixture(true, {
@@ -897,7 +900,7 @@ console.log(JSON.stringify({prevented: event.preventDefaultCalled, data: clipboa
     html = out["data"]["text/html"]
     plain = out["data"]["text/plain"]
     assert "<h2>Monthly Summary</h2>" in html
-    assert '<ol start="5"><li value="5">Fifth item</li><li value="8">Eighth item</li></ol>' in html
+    assert '<ol start="5"><li value="5">Fifth item</li><li value="8">Eighth item</li><li>Ninth item</li></ol>' in html
     assert html.count("<table>") == 3
     assert html.count("<th>Product Name</th><th>Total</th>") == 2
     assert "<strong>five</strong><br>six" in html
@@ -921,6 +924,7 @@ console.log(JSON.stringify({prevented: event.preventDefaultCalled, data: clipboa
     assert "Monthly Summary" in plain
     assert "5. Fifth item" in plain
     assert "8. Eighth item" in plain
+    assert "9. Ninth item" in plain
     assert "Product Name\tTotal" in plain
     assert "A1\tB1\nA2\tB2" in plain
     assert "five\nsix\t$40.00" in plain
