@@ -9228,7 +9228,12 @@ def _context_lookup_origin(url: object) -> str:
         return ""
     try:
         parts = urlsplit(text if "://" in text else f"https://{text}")
-        host = (parts.hostname or "").lower()
+        # ``hostname`` lowercases only up to the first "%". A DNS name is case-insensitive throughout (percent-encoded
+        # letters included), so lowercase it in full. An IPv6 literal (the only host with ":") keeps its zone ID as
+        # written: a zone ID names an interface (case-sensitive), and the client connects to it as written.
+        host = parts.hostname or ""
+        if ":" not in host:
+            host = host.lower()
         port = parts.port or (80 if parts.scheme == "http" else 443)
     except ValueError:
         return ""
@@ -9506,6 +9511,28 @@ def _context_length_config_api_key_for_provider(
     return _context_length_config_api_key_and_owner(provider, cfg)[0]
 
 
+def _context_lookup_resolve_key(raw_api_key, raw_key_env=None) -> str:
+    """Resolve a config source's declared key: a literal, a ``${VAR}`` reference or
+    ``key_env``, stripped. Unresolved references and blanks resolve to ``""``."""
+    api_key_text = str(raw_api_key or "").strip()
+    if (
+        api_key_text.startswith("${")
+        and api_key_text.endswith("}")
+        and len(api_key_text) > 3
+    ):
+        resolved = api_config._thread_local_env_value(api_key_text[2:-1]).strip()
+        if resolved:
+            return resolved
+    elif api_key_text:
+        return api_key_text
+    key_env = str(raw_key_env or "").strip()
+    if key_env:
+        resolved = api_config._thread_local_env_value(key_env).strip()
+        if resolved:
+            return resolved
+    return ""
+
+
 def _context_length_config_api_key_and_owner(
     provider: str | None,
     cfg: dict | None,
@@ -9518,25 +9545,7 @@ def _context_length_config_api_key_and_owner(
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     provider = _canonical_context_provider(provider)
-
-    def _resolve_key(raw_api_key, raw_key_env=None) -> str:
-        api_key_text = str(raw_api_key or "").strip()
-        if (
-            api_key_text.startswith("${")
-            and api_key_text.endswith("}")
-            and len(api_key_text) > 3
-        ):
-            resolved = api_config._thread_local_env_value(api_key_text[2:-1]).strip()
-            if resolved:
-                return resolved
-        elif api_key_text:
-            return api_key_text
-        key_env = str(raw_key_env or "").strip()
-        if key_env:
-            resolved = api_config._thread_local_env_value(key_env).strip()
-            if resolved:
-                return resolved
-        return ""
+    _resolve_key = _context_lookup_resolve_key
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
@@ -9564,6 +9573,66 @@ def _context_length_config_api_key_and_owner(
                     own_provider=provider if (provider and model_provider) else "",
                 )
     return "", frozenset()
+
+
+def _context_lookup_key_value(api_key: object) -> str:
+    """The comparable value of a selected key for #8918's same-value rule: the
+    stripped string, or ``""`` for a non-string (token source), a blank, or an
+    unresolved ``${VAR}`` reference. Declared keys go through
+    ``_context_lookup_resolve_key``, which strips the same way."""
+    if not isinstance(api_key, str):
+        return ""
+    value = api_key.strip()
+    if value.startswith("${") and value.endswith("}"):
+        return ""
+    return value
+
+
+def _context_lookup_same_value_origins(api_key: object, cfg: dict | None) -> frozenset:
+    """Origins owned by every config source that declares exactly this key value (#8918).
+
+    A key may go to a URL that a source holding the same value declares: that
+    source already sends this exact credential there, so the lookup exposes
+    nothing new. A holder is a source that declares the key itself (``api_key``
+    or ``key_env``): a ``providers.<id>`` record, a ``custom_providers`` entry, or
+    the model block. Each grants the URLs it declares; a built-in record, or the
+    model block configured for a built-in provider, also grants that provider's
+    own fixed hosts, never another provider's. Blanks, unresolved references and
+    token sources grant nothing.
+    """
+    value = _context_lookup_key_value(api_key)
+    if not value:
+        return frozenset()
+    cfg = cfg if isinstance(cfg, dict) else {}
+    owned = set()
+    providers_cfg = cfg.get("providers") or {}
+    if isinstance(providers_cfg, dict):
+        for provider_key, provider_cfg in providers_cfg.items():
+            if not isinstance(provider_cfg, dict):
+                continue
+            if _context_lookup_resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env")) != value:
+                continue
+            builtin = not str(provider_key or "").strip().lower().startswith("custom:")
+            owned |= _context_lookup_owned_origins(
+                *_context_lookup_record_urls(provider_cfg),
+                own_provider=_canonical_context_provider(provider_key) if builtin else "",
+            )
+    custom_providers = cfg.get("custom_providers")
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            if _context_lookup_resolve_key(entry.get("api_key"), entry.get("key_env")) != value:
+                continue
+            owned |= _context_lookup_owned_origins(*_context_lookup_record_urls(entry))
+    model_cfg = cfg.get("model")
+    if isinstance(model_cfg, dict):
+        if _context_lookup_resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env")) == value:
+            owned |= _context_lookup_owned_origins(
+                model_cfg.get("base_url"),
+                own_provider=_canonical_context_provider(model_cfg.get("provider")),
+            )
+    return frozenset(owned)
 
 
 def _context_lookup_agent_fallback(agent, resolved_api_key=None, resolved_base_url=None, resolved_provider=None) -> dict:
@@ -9757,10 +9826,16 @@ def _context_length_lookup_inputs_for_model(
     # base URL's host plus the provider's fixed metadata hosts; if any of those is
     # not owned by the key's source, the lookup sends no key (it still runs, and
     # falls back to catalog or default limits). This never changes the URL.
-    if effective_api_key and not (
-        _context_lookup_contacted_origins(effective_provider, effective_base_url) <= effective_api_key_owned
-    ):
-        effective_api_key = ""
+    # A host is also owned when a config source holding the same key value owns
+    # it (#8918): a caller key that arrived without a URL, or a key the config
+    # selection took from a source without one, can still go where another
+    # holder of that exact credential already sends it.
+    if effective_api_key:
+        contacted = _context_lookup_contacted_origins(effective_provider, effective_base_url)
+        if not contacted <= effective_api_key_owned and not (
+            contacted <= effective_api_key_owned | _context_lookup_same_value_origins(effective_api_key, cfg)
+        ):
+            effective_api_key = ""
 
     # A fallback key (the Agent's own key at the streaming sites) is used only when
     # the config selection left none, and only under the caller-key rule: it owns
