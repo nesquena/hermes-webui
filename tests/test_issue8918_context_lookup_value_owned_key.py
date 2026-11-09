@@ -81,8 +81,8 @@ def test_a_same_value_holder_with_another_scheme_lends_nothing():
 
 # ── Host spelling: an IPv6 zone ID is case-sensitive, a DNS name is not ────────
 # A zone ID names a network interface (``%ethA`` and ``%etha`` are different links on Linux), and the HTTP client
-# connects to the zone exactly as written. ``urlsplit().hostname`` already lowercases DNS names and IPv6 hex digits
-# and keeps the zone ID as written, so the origin helper must not fold its case on top.
+# connects to the zone exactly as written. ``urlsplit().hostname`` lowercases only up to the first "%", so the origin
+# helper folds a DNS name in full and leaves an IPv6 literal's zone ID as written.
 ZONE_UPPER = "https://[fe80::1%ethA]/v1"
 ZONE_LOWER = "https://[fe80::1%etha]/v1"
 
@@ -102,6 +102,18 @@ def _own_source_cfg(held, target):
 def test_the_origin_keeps_an_ipv6_zone_ids_case_and_folds_dns_and_hex_case():
     assert routes._context_lookup_origin("https://[FE80::1%ethA]/v1") == "fe80::1%ethA:443"
     assert routes._context_lookup_origin("https://Owner.TEST/v1") == "owner.test:443"
+    # ``urlsplit().hostname`` stops lowercasing at the first "%"; a DNS name is still folded in full.
+    assert routes._context_lookup_origin("https://LOCAL%68OST:8443/v1") == "local%68ost:8443"
+
+
+@pytest.mark.parametrize("cfg_for,kw", [
+    (_same_value_cfg, {"provider": "custom:session", "api_key": "K1"}),
+    (_own_source_cfg, {"provider": "custom:holder", "base_url": "https://LOCAL%68OST:8443/v1"}),
+])
+def test_a_percent_encoded_dns_host_differing_only_in_case_is_the_same_origin(cfg_for, kw):
+    """``local%68ost`` and ``LOCAL%68OST`` are the same host (the client decodes both to ``localhost``)."""
+    got = _lookup(cfg_for("https://local%68ost:8443/v1", "https://LOCAL%68OST:8443/v1"), **kw)
+    assert got.api_key == "K1"
 
 
 def test_a_same_value_holder_on_an_ipv6_zone_differing_only_in_case_lends_nothing():

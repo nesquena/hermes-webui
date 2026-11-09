@@ -9224,9 +9224,12 @@ def _context_lookup_origin(url: object) -> str:
         return ""
     try:
         parts = urlsplit(text if "://" in text else f"https://{text}")
-        # ``hostname`` already lowercases DNS names and IPv6 hex digits. It keeps an IPv6 zone ID as written, and that
-        # must stay so: a zone ID names an interface (case-sensitive), and the client connects to it as written.
+        # ``hostname`` lowercases only up to the first "%". A DNS name is case-insensitive throughout (percent-encoded
+        # letters included), so lowercase it in full. An IPv6 literal (the only host with ":") keeps its zone ID as
+        # written: a zone ID names an interface (case-sensitive), and the client connects to it as written.
         host = parts.hostname or ""
+        if ":" not in host:
+            host = host.lower()
         port = parts.port or (80 if parts.scheme == "http" else 443)
     except ValueError:
         return ""
