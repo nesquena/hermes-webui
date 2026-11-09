@@ -128,10 +128,31 @@ import tempfile as _tempfile
 _TEST_STATE_ROOT = pathlib.Path(
     os.getenv('HERMES_WEBUI_TEST_STATE_ROOT', _tempfile.gettempdir())
 ) / 'hermes-webui-tests'
-TEST_STATE_DIR = pathlib.Path(os.getenv(
-    'HERMES_WEBUI_TEST_STATE_DIR',
-    str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT, TEST_PORT))
-)).resolve()
+# ``os.getenv(name, default)`` returns "" (not the default) when the variable is
+# exported but empty, and ``Path("").resolve()`` is the CURRENT DIRECTORY — so a
+# bare ``HERMES_WEBUI_TEST_STATE_DIR=`` pointed the test state dir at the checkout
+# and teardown rmtree'd the repo. Treat an empty (or whitespace-only) value as
+# unset; a non-blank value is used exactly as given (a directory name may end in
+# a space, and stripping it would select, then clean, the parent directory).
+_TEST_STATE_DIR_RAW = os.getenv('HERMES_WEBUI_TEST_STATE_DIR') or ''
+TEST_STATE_DIR = pathlib.Path(
+    _TEST_STATE_DIR_RAW if _TEST_STATE_DIR_RAW.strip()
+    else str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT, TEST_PORT))
+).resolve()
+
+# Belt and braces for an explicit value: never let the session fixture (which
+# rmtrees the state dir at setup and teardown) delete the checkout, anything
+# above it, or anything inside it (``tests``, ``static``, a relative path).
+if (TEST_STATE_DIR == REPO_ROOT
+        or TEST_STATE_DIR in REPO_ROOT.parents
+        or REPO_ROOT in TEST_STATE_DIR.parents):
+    raise RuntimeError(
+        f"REFUSING TO RUN: test state dir {TEST_STATE_DIR} is the repo checkout "
+        f"({REPO_ROOT}), one of its parents, or a directory inside it, so the "
+        f"state-dir cleanup would delete repository files. Unset "
+        f"HERMES_WEBUI_TEST_STATE_DIR (defaults to a temp dir) or point it "
+        f"outside the checkout."
+    )
 
 # Production-proximity guard: refuse to run if the resolved test state dir lands
 # inside the REAL Hermes home tree — a misconfigured HERMES_WEBUI_TEST_STATE_DIR
@@ -564,6 +585,7 @@ requires_agent_modules = pytest.mark.skipif(
 )
 
 def pytest_configure(config):
+    _repo_git_guard.pytest_configure(config)  # records --basetemp for the guard (see tests/_real_repo_git_guard.py)
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
     config.addinivalue_line("markers", "requires_fcntl: skip when fcntl-backed file-descriptor operations are unavailable")
@@ -812,6 +834,22 @@ def allow_outbound_network(monkeypatch):
     yield
 
 
+# ── Real-checkout git guard ─────────────────────────────────────────────────
+# Installed once here, like the network guard above: see tests/_real_repo_git_guard.py.
+from tests import _real_repo_git_guard as _repo_git_guard  # noqa: E402
+
+from api.config import _AGENT_DIR as _PRODUCTION_AGENT_DIR  # noqa: E402  (the runtime's own discovery)
+
+_repo_git_guard.install(REPO_ROOT, HERMES_AGENT, _PRODUCTION_AGENT_DIR)
+pytest_runtest_logstart = _repo_git_guard.pytest_runtest_logstart
+pytest_runtest_makereport = _repo_git_guard.pytest_runtest_makereport
+
+
+@pytest.fixture
+def allow_real_repo_git(monkeypatch):
+    """Opt in to real mutating git against the checkout for one test."""
+    monkeypatch.setattr(subprocess, 'Popen', _repo_git_guard.REAL_POPEN)
+    yield
 
 
 # ── Environment isolation for tests ────────────────────────────────────────

@@ -8,6 +8,7 @@ Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
 cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
+import copy
 import json
 import logging
 import os
@@ -44,6 +45,33 @@ _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
 # runs after this import). A root-profile read layers the root .env over this
 # instead of the live os.environ, which holds the switched-to profile's .env.
 _INITIAL_PROCESS_ENV = dict(os.environ)
+
+
+def _read_dotenv_values(env_path) -> dict[str, str]:
+    """KEY=VALUE pairs of a .env file as the launchers read it (``export`` prefix and quotes stripped); {} on error."""
+    values: dict[str, str] = {}
+    try:
+        text = Path(env_path).expanduser().read_text(encoding="utf-8")
+    except Exception:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        if key.startswith('export '):
+            key = key[len('export '):].strip()
+        value = value.strip().strip('"').strip("'")
+        if key and value:
+            values[key] = value
+    return values
+
+
+# The launch home's .env as it was at startup. Shell launchers (ctl.sh) source $HERMES_HOME/.env before Python
+# starts, so for a NAMED profile home those values sit in os.environ looking like launcher exports; this snapshot
+# is the provenance record that tells them apart (#8432).
+_INITIAL_HERMES_HOME_DOTENV = _read_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {}
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
@@ -209,6 +237,11 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # escape isolation (#4589).
 _PROTECTED_ENV_KEYS = frozenset({
     'HERMES_WEBUI_ISOLATED_PROFILE',
+    # Where the Agent reads the executing tree's install stamp (its pm/paths.py
+    # install_root()). docker_init decides at boot whether a mounted Agent would
+    # relaunch from that stamp (#8593); a profile .env moving it would change the
+    # answer for the next in-app update restart, which skips docker_init (#8594).
+    'HERMES_INSTALL_ROOT',
     # Server-wide sidebar window; a profile .env must not widen the per-request query.
     'HERMES_WEBUI_VISIBLE_SESSION_LIMIT',
     # #7656 round-3: HERMES_WEBUI_MAX_SESSION_RESOLVE is a process-wide resource
@@ -838,6 +871,95 @@ class cron_profile_context:
         return False
 
 
+# ── Lock-free per-thread cron store scope (#7295, #6753) ─────────────────────
+# A long in-process cron job (the scheduled fire wrapped by
+# install_cron_scheduler_profile_isolation(), or the in-chat cronjob
+# action=run) holds _cron_env_lock and points os.environ['HERMES_HOME'] and the
+# cron module path globals at its own profile for the whole run. Request
+# handlers that only touch the cron store must not wait for that, and must not
+# read those globals either. Newer Agents expose context-local overrides that
+# take priority over the globals:
+#   * cron.jobs.use_cron_store(home)            -> jobs.json / output / locks
+#   * hermes_constants.set_hermes_home_override  -> get_hermes_home() readers
+#     (executions/notepad DBs, config.yaml timezone and model-pin reads)
+# cron_store_scope*() binds both for the current thread only and never takes
+# _cron_env_lock. If either helper is missing (older Agent, test stub) it falls
+# back to the lock-based contexts above, unchanged. Callers whose code path
+# reads process-global state (os.environ, cron.scheduler._hermes_home, gateway
+# status via get_process_hermes_home) must keep using the lock-based contexts.
+
+
+_RLOCK_TYPES = tuple(
+    t for t in (type(threading.RLock()), getattr(threading, '_PyRLock', None)) if isinstance(t, type)
+)
+
+
+def _agent_jobs_lock_is_reentrant(cron_jobs_mod) -> bool:
+    """True when the thread holding the Agent's ``_jobs_lock()`` may re-enter it.
+
+    The lock-free paths hold ``_jobs_lock()`` around Agent calls that take it
+    again internally (Create's two writes, Resume, List/Run reads). Agents that
+    ship ``use_cron_store`` nest it through a thread-local depth counter over an
+    ``RLock`` (``_jobs_lock_state`` / ``_jobs_file_lock``). Older Agents (e.g.
+    e5b4cf7bea2) use a plain ``threading.Lock``, where that outer hold
+    deadlocks the inner acquire. Anything else is treated as non-reentrant,
+    which keeps the locked fallback (slower, never a hang).
+    """
+    return isinstance(getattr(cron_jobs_mod, '_jobs_file_lock', None), _RLOCK_TYPES) and isinstance(
+        getattr(cron_jobs_mod, '_jobs_lock_state', None), threading.local
+    )
+
+
+def _cron_store_scope_helpers():
+    """Return ``(use_cron_store, hermes_constants)`` when the Agent supports it."""
+    try:
+        import cron.jobs as _cj
+    except Exception:
+        return None
+    use_cron_store = getattr(_cj, 'use_cron_store', None)
+    if not callable(use_cron_store) or not callable(getattr(_cj, 'get_cron_output_dir', None)):
+        return None
+    # Lock-free writers rely on the Agent's jobs.json lock to serialize against
+    # each other and against a running job's bookkeeping (Resume holds it across
+    # its read/compute/write), and hold it around Agent calls that take it
+    # again, so it must be re-entrant. Otherwise keep the locked fallback.
+    if not callable(getattr(_cj, '_jobs_lock', None)) or not _agent_jobs_lock_is_reentrant(_cj):
+        return None
+    home_mod = _resolve_hermes_home_override()
+    if home_mod is None:
+        return None
+    return use_cron_store, home_mod
+
+
+@contextmanager
+def cron_store_scope_for_home(home: Path):
+    """Route cron store access in this thread to *home* without the env lock."""
+    home = Path(home)
+    helpers = _cron_store_scope_helpers()
+    if helpers is None:
+        with cron_profile_context_for_home(home):
+            yield home
+        return
+    use_cron_store, home_mod = helpers
+    token = home_mod.set_hermes_home_override(str(home))
+    try:
+        with use_cron_store(home):
+            yield home
+    finally:
+        home_mod.reset_hermes_home_override(token)
+
+
+@contextmanager
+def cron_store_scope():
+    """TLS-active-profile variant of :func:`cron_store_scope_for_home`."""
+    if _cron_store_scope_helpers() is None:
+        with cron_profile_context():
+            yield
+        return
+    with cron_store_scope_for_home(get_active_hermes_home()):
+        yield
+
+
 def get_hermes_home_for_profile(name: str) -> Path:
     """Return the HERMES_HOME Path for *name* without mutating any process state.
 
@@ -900,25 +1022,34 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     of that run.
     """
     home = Path(home).expanduser()
+    dotenv = _read_profile_dotenv(home)
     env: dict[str, str] = {}
 
-    try:
-        from api import yaml_compat as _yaml
+    # config.yaml keeps raw ``${VAR}`` references (#8032): resolve terminal
+    # values under the profile's own env binding before projecting them. A
+    # scalar that stays unresolved is left unset rather than handed to the
+    # Agent as a literal placeholder (host, image, cwd...).
+    from api.config import _has_env_ref
 
-        cfg_path = home / 'config.yaml'
-        cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
-        if not isinstance(cfg, dict):
-            cfg = {}
+    try:
+        cfg = load_profile_config(home, env=_profile_env_binding(home, dotenv))
     except Exception:
         cfg = {}
-
-    terminal_cfg = cfg.get('terminal', {}) if isinstance(cfg, dict) else {}
+    terminal_cfg = cfg.get('terminal', {})
     if isinstance(terminal_cfg, dict):
         for key, env_key in _TERMINAL_ENV_MAPPINGS.items():
-            if key in terminal_cfg and terminal_cfg[key] is not None:
-                env[env_key] = _stringify_env_value(terminal_cfg[key])
+            value = terminal_cfg.get(key)
+            if value is not None and not _has_env_ref(value):
+                env[env_key] = _stringify_env_value(value)
 
-    env_path = home / '.env'
+    env.update(dotenv)
+    return env
+
+
+def _read_profile_dotenv(home: Path) -> dict[str, str]:
+    """Return a profile's ``.env`` assignments (operator-protected keys skipped)."""
+    env: dict[str, str] = {}
+    env_path = Path(home) / '.env'
     if env_path.exists():
         try:
             for line in env_path.read_text(encoding='utf-8').splitlines():
@@ -937,8 +1068,126 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
                         env[k] = v
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
-
     return env
+
+
+# ── Reading config VALUES from a profile's raw config.yaml (#8032) ───────────
+# Writers keep ``${VAR}`` references on disk, so any reader of a raw document
+# must expand it under the env of the profile that OWNS the document — never
+# the live process env, which streaming turns and background workers overwrite
+# with their own profile's values while they run. Route value reads through
+# load_profile_config() / expand_profile_config();
+# tests/test_issue8032_profile_env_binding.py fails on any new raw load in api/.
+
+def _is_root_profile_home(home) -> bool:
+    try:
+        return Path(home).expanduser().resolve() == Path(_DEFAULT_HERMES_HOME).expanduser().resolve()
+    except Exception:
+        return False
+
+
+def _profile_env_binding(home, dotenv: dict[str, str]) -> dict[str, str]:
+    from api import paths as _paths
+
+    env: dict[str, str] = {}
+    if _is_root_profile_home(home):
+        # Explicit ROOT binding from the launch-time snapshot, taken at import:
+        # it predates every _reload_dotenv() and every worker that mirrors a
+        # named profile into os.environ, so a key the loader mirrored later is
+        # still the LAUNCHER's value here and root keeps it. The only
+        # profile-owned values the snapshot can hold are those a shell launcher
+        # (ctl.sh) sourced from a NAMED launch home's .env before Python
+        # started. #8435's provenance record (_INITIAL_HERMES_HOME_DOTENV)
+        # identifies them by value, the same rule as
+        # api.gateway_chat._env_value_is_profile_sourced(): a non-empty value
+        # equal to the named launch home's .env value is that profile's and is
+        # dropped (fail closed, even when the launcher exported it too). Root's
+        # own .env below restores the keys it defines.
+        launch_dotenv: dict[str, str] = {}
+        if _INITIAL_HERMES_HOME and not _is_root_profile_home(_INITIAL_HERMES_HOME):
+            launch_dotenv = _INITIAL_HERMES_HOME_DOTENV
+
+        def _from_named_launch_home(key, value) -> bool:
+            value = str(value or "").strip()
+            return bool(value) and key in launch_dotenv and str(launch_dotenv[key] or "").strip() == value
+
+        env.update((k, v) for k, v in _paths.STARTUP_ENV.items() if not _from_named_launch_home(k, v))
+    env.update(filter_runtime_env_for_gateway_parity(dotenv))
+    env['HERMES_HOME'] = str(Path(home).expanduser())
+    return env
+
+
+def profile_env_binding(home) -> dict[str, str]:
+    """The env a profile's config.yaml ``${VAR}`` references resolve against.
+
+    * named profile: its own ``.env`` only, never the server process env
+      (fail-closed profile isolation, #3961);
+    * root profile: the launch-time env snapshot (``api.paths.STARTUP_ENV``,
+      taken before any worker mirrors a named profile into ``os.environ``)
+      without the values a shell launcher sourced from a NAMED launch home's
+      ``.env`` (``_INITIAL_HERMES_HOME_DOTENV``, #8435), under root's own
+      ``.env``. It is bound
+      explicitly instead of falling back to live ``os.environ``: a
+      process-wide switch loads a named profile's ``.env`` into it and every
+      streaming turn / background worker mirrors its named profile's env into
+      it while it runs.
+
+    ``HERMES_HOME`` is the profile's home in both cases.
+    """
+    return _profile_env_binding(home, _read_profile_dotenv(Path(home).expanduser()))
+
+
+def expand_profile_config(home, raw, *, env: Optional[dict] = None):
+    """Expand ``${VAR}`` in a RAW config document (or any subtree of it) that
+    belongs to the profile at *home*, under ``profile_env_binding(home)``.
+
+    Returns a fresh structure; *raw* is never mutated. A reference the binding
+    cannot resolve stays the literal ``${VAR}`` (``api.config._has_env_ref``
+    is true for it), and a caller that forwards a value treats that as absent.
+    Pass *env* to reuse a binding computed earlier (e.g. before taking a lock).
+    The binding is applied to the calling thread only, for the expansion.
+    """
+    from api.config import _expand_env_vars, _thread_ctx
+
+    if env is None:
+        env = profile_env_binding(home)
+    previous_env = getattr(_thread_ctx, 'env', None)
+    previous_block = getattr(_thread_ctx, 'block_process_env_fallback', False)
+    _thread_ctx.env = dict(env)
+    _thread_ctx.block_process_env_fallback = True
+    try:
+        try:
+            return _expand_env_vars(raw)
+        except RecursionError:
+            # A recursive YAML alias elsewhere in the document must not hide
+            # the profile's ordinary settings: keep the raw tree (its ${VAR}
+            # literals read as absent via _has_env_ref) instead of {}.
+            logger.debug("profile config at %s has a recursive alias; served unexpanded", home)
+            return copy.deepcopy(raw)
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_env is None:
+            del _thread_ctx.env
+        else:
+            _thread_ctx.env = previous_env
+
+
+def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
+    """Return the profile's config.yaml with every ``${VAR}`` expanded under that
+    profile's env binding (see ``expand_profile_config``); ``{}`` when the file
+    is missing or unparsable. Parsed fresh on every call, like the readers it
+    replaced, so an out-of-band edit is never served stale.
+    """
+    config_path = Path(home).expanduser() / 'config.yaml'
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+    except Exception:
+        logger.debug("Failed to load profile config from %s", config_path, exc_info=True)
+        return {}
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    expanded = expand_profile_config(home, raw, env=env)
+    return expanded if isinstance(expanded, dict) else {}
 
 
 # Match Hermes Agent gateway behavior: profile-scoped WebUI runs should
@@ -1103,14 +1352,19 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
         return names
 
     custom_providers = payload.get("custom_providers") if isinstance(payload, dict) else None
-    if not isinstance(custom_providers, list):
-        return names
-    for custom_provider in custom_providers:
+    entries = list(custom_providers) if isinstance(custom_providers, list) else []
+    # Scrubbing is intentionally independent of catalog visibility/precedence:
+    # even disabled or shadowed native records declare profile-owned secrets.
+    native_providers = payload.get("providers") if isinstance(payload, dict) else None
+    if isinstance(native_providers, dict):
+        entries.extend(native_providers.values())
+    for custom_provider in entries:
         if not isinstance(custom_provider, dict):
             continue
-        key_env = str(custom_provider.get("key_env") or "").strip()
-        if key_env:
-            names.add(key_env)
+        for field in ("key_env", "api_key_env"):
+            key_env = str(custom_provider.get(field) or "").strip()
+            if key_env:
+                names.add(key_env)
         api_key = str(custom_provider.get("api_key") or "").strip()
         match = re.fullmatch(r"\$\{([^}]+)\}", api_key)
         if match:
@@ -1858,13 +2112,13 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         from api.config import get_config
         cfg = get_config()
     else:
-        # Direct disk read — does not touch _cfg_cache
+        # Direct disk read — does not touch _cfg_cache. config.yaml keeps raw
+        # ``${VAR}`` references (#8032), so expand them under the TARGET
+        # profile's env binding (root included: a worker's mirrored env must
+        # not resolve root's references) before handing defaults to the
+        # frontend; otherwise New Chat would send the literal placeholders.
         try:
-            from api import yaml_compat as _yaml
-            cfg_path = home / 'config.yaml'
-            cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
-            if not isinstance(cfg, dict):
-                cfg = {}
+            cfg = load_profile_config(home)
         except Exception:
             cfg = {}
     model_cfg = cfg.get('model', {})
@@ -1875,6 +2129,12 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     elif isinstance(model_cfg, dict):
         default_model = model_cfg.get('default')
         default_model_provider = model_cfg.get('provider')
+    # A reference the target profile can't resolve stays a literal ``${VAR}``
+    # after expansion; never hand that placeholder to New Chat (#8032).
+    if isinstance(default_model, str) and '${' in default_model:
+        default_model = None
+    if isinstance(default_model_provider, str) and '${' in default_model_provider:
+        default_model_provider = None
 
     # Read the target profile's workspace directly from *home* rather than via
     # get_last_workspace() which routes through the thread-local/process-global active
@@ -1936,8 +2196,43 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
-_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float, str | None]] = {}
-_SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
+# Cache entry: (enabled, compat, mtime_ns, hard_expiry, org, validated_at).
+# mtime_ns/org are the change-detection snapshot taken before the compute;
+# validated_at is when the entry was last confirmed (or written).
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float, str | None, float]] = {}
+_SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because invalidate_profile_skills_stats() handles programmatic changes
+
+# Stale-while-revalidate window (#7940). The stat-only probe still walks the
+# whole skill tree (thousands of stat() calls on a large library), so running
+# it on EVERY call made the probe itself the dominant /api/profiles cost —
+# that was the remaining half of #7940 after the cache-survives-switch and
+# no-list_profiles_api pieces landed. Inside the window a hit serves purely
+# from memory (zero I/O); past it a hit returns the stale counts immediately
+# and revalidates on a background thread. Bound on out-of-band (CLI/git)
+# staleness: REVALIDATE_AFTER + one probe/compute (~seconds), versus the old
+# per-call guarantee. Programmatic changes stay immediate via
+# invalidate_profile_skills_stats(). Sized >> _LIST_PROFILES_CACHE_TTL (4s) so a
+# steady poll costs ~1 probe per 30s per profile instead of one per rebuild,
+# and << TTL (300s) so the hard safety net is unaffected.
+_SKILLS_STATS_REVALIDATE_AFTER = 30.0
+_SKILLS_STATS_REVALIDATE_INFLIGHT: set[Path] = set()
+_SKILLS_STATS_REVALIDATE_GUARD = threading.Lock()
+_SKILLS_STATS_GENERATION = 0
+
+
+def invalidate_profile_skills_stats() -> None:
+    """Drop all cached skill stats and fence off computes that started earlier."""
+    global _SKILLS_STATS_GENERATION
+    with _SKILLS_STATS_REVALIDATE_GUARD:
+        _SKILLS_STATS_GENERATION += 1
+        _SKILLS_STATS_CACHE.clear()
+
+
+def _publish_skills_stats(profile_dir: Path, generation: int, entry: tuple) -> None:
+    """Publish unless an invalidation landed after ``generation`` was captured."""
+    with _SKILLS_STATS_REVALIDATE_GUARD:
+        if generation == _SKILLS_STATS_GENERATION:
+            _SKILLS_STATS_CACHE[profile_dir] = entry
 
 # Per-profile compute locks (#5364). Without these, concurrent cold-startup
 # requests (ThreadingHTTPServer runs one OS thread per request) all miss the
@@ -2037,29 +2332,6 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     if not skills_dir.is_dir():
         return (0, 0)
 
-    disabled = set()
-    config_path = profile_dir / "config.yaml"
-    if config_path.exists():
-        try:
-            from api import yaml_compat as _yaml
-            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if isinstance(cfg, dict):
-                skills_cfg = cfg.get("skills")
-                if isinstance(skills_cfg, dict):
-                    # Align with get_disabled_skill_names(platform="webui") behavior:
-                    platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
-                    if platform_disabled is not None:
-                        disabled_val = platform_disabled
-                    else:
-                        disabled_val = skills_cfg.get("disabled")
-
-                    if disabled_val is not None:
-                        if isinstance(disabled_val, str):
-                            disabled_val = [disabled_val]
-                        disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
-        except Exception:
-            pass
-
     try:
         from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
     except ImportError as exc:
@@ -2073,6 +2345,30 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # count it produced would be inaccurate. The UI omits the skills line
         # when the total is 0, so the profile picker stays fully usable.
         return (0, 0)
+
+    disabled = set()
+    try:
+        # Expanded under the profile's own env (#8032: ``disabled: ${VAR}``
+        # stays a reference on disk), then decoded like the Skills reader does
+        # (a serialized ``'["a","b"]'`` string is a list, #7120).
+        skills_cfg = load_profile_config(profile_dir).get("skills")
+        if isinstance(skills_cfg, dict):
+            # Align with get_disabled_skill_names(platform="webui") behavior:
+            platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
+            if platform_disabled is not None:
+                disabled_val = platform_disabled
+            else:
+                disabled_val = skills_cfg.get("disabled")
+
+            if disabled_val is not None:
+                parse_list = getattr(sys.modules.get("agent.skill_utils"), "parse_config_string_list", None)
+                if parse_list is not None:
+                    disabled_val = parse_list(disabled_val)
+                elif isinstance(disabled_val, str):
+                    disabled_val = [disabled_val]
+                disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
+    except Exception:
+        pass
 
     seen_names = set()
     enabled_count = 0
@@ -2098,14 +2394,83 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     return (enabled_count, compatible_count)
 
 
-def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
-    """Calculate (enabled_count, compatible_count) with two-tier mtime cache.
+def _maybe_trigger_skills_stats_revalidate(profile_dir: Path) -> None:
+    """Start a single-flight background revalidate for a stale cache entry."""
+    with _SKILLS_STATS_REVALIDATE_GUARD:
+        if profile_dir in _SKILLS_STATS_REVALIDATE_INFLIGHT:
+            return
+        _SKILLS_STATS_REVALIDATE_INFLIGHT.add(profile_dir)
+    try:
+        _start_skills_stats_revalidate_thread(profile_dir)
+    except Exception:
+        logger.debug("skills-stats revalidate spawn failed for %s", profile_dir, exc_info=True)
+        with _SKILLS_STATS_REVALIDATE_GUARD:
+            _SKILLS_STATS_REVALIDATE_INFLIGHT.discard(profile_dir)
 
-    A cheap stat-only mtime probe runs on EVERY call so out-of-band (CLI/git)
-    skill changes are reflected promptly — the expensive part (reading + parsing
-    every SKILL.md) is what the cache avoids, not the change detection. The TTL
-    is only a safety-net upper bound that forces an occasional full recompute
-    even when the mtime probe sees no change.
+
+def _start_skills_stats_revalidate_thread(profile_dir: Path) -> None:
+    """Spawn the daemon worker (seam for tests: patch to run synchronously)."""
+    threading.Thread(
+        target=_revalidate_skills_stats_worker, args=(profile_dir,), daemon=True
+    ).start()
+
+
+def _revalidate_skills_stats_worker(profile_dir: Path) -> None:
+    """Re-probe one stale entry off the request thread and republish it.
+
+    Runs under the per-profile compute lock so it can never duplicate a
+    concurrent synchronous miss; skips silently when one is already in flight
+    (the sync path will publish fresh data anyway). Never extends the hard
+    expiry on a no-change probe — the TTL safety net must still fire.
+    """
+    import time
+    try:
+        lock = _skills_stats_lock_for(profile_dir)
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            generation = _SKILLS_STATS_GENERATION
+            cached = _SKILLS_STATS_CACHE.get(profile_dir)
+            if cached is None:
+                return  # .clear()ed since the trigger — next request sync-misses
+            enabled, compat, old_mtime_ns, expiry, old_org, _ = cached
+            skills_dir = profile_dir / "skills"
+            config_path = profile_dir / "config.yaml"
+            # Snapshot BEFORE compute (same TOCTOU rule as the sync path).
+            new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+            new_org = _active_org_marker(skills_dir)
+            now = time.time()
+            if new_mtime_ns == old_mtime_ns and new_org == old_org and now < expiry:
+                # No change: refresh only validated_at; keep the original hard
+                # expiry so the TTL safety net still fires on schedule.
+                _publish_skills_stats(profile_dir, generation, (
+                    enabled, compat, old_mtime_ns, expiry, old_org, now
+                ))
+            else:
+                res = _compute_profile_skills_stats(profile_dir)
+                _publish_skills_stats(profile_dir, generation, (
+                    res[0], res[1], new_mtime_ns,
+                    time.time() + _SKILLS_STATS_CACHE_TTL, new_org, time.time(),
+                ))
+        finally:
+            lock.release()
+    except Exception:
+        logger.debug("skills-stats background revalidate failed for %s", profile_dir, exc_info=True)
+    finally:
+        with _SKILLS_STATS_REVALIDATE_GUARD:
+            _SKILLS_STATS_REVALIDATE_INFLIGHT.discard(profile_dir)
+
+
+def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Calculate (enabled_count, compatible_count) with a revalidating mtime cache.
+
+    Stale-while-revalidate (#7940): a fresh-window hit serves with zero I/O; a
+    stale hit returns immediately and re-probes on a background thread. The
+    probe + full compute still run — just off the request path — so out-of-band
+    (CLI/git) changes surface within ~REVALIDATE_AFTER + one probe, while
+    programmatic changes stay immediate via invalidate_profile_skills_stats(). The
+    TTL remains the hard upper bound that forces a synchronous recompute even
+    when the probe can't see a change (mtime-preserving git checkout).
     """
     import time
     profile_dir = Path(profile_dir).resolve()
@@ -2113,33 +2478,30 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     skills_dir = profile_dir / "skills"
     config_path = profile_dir / "config.yaml"
 
-    # Always run the cheap stat-only probe first — this is what catches an
-    # out-of-band create/edit/delete within the same request (not after the TTL).
-    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
-    current_org = _active_org_marker(skills_dir)
-
     # Read via .get() (not membership-check + index) so a concurrent
     # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
     # between the `in` test and the lookup.
     cached = _SKILLS_STATS_CACHE.get(profile_dir)
     if cached is not None:
-        enabled, compat, cached_mtime_ns, expiry, cached_org = cached
-        # Fast path: files unchanged (by the cheap probe above) AND still within
-        # the TTL → serve cached without re-reading any SKILL.md. The mtime probe
-        # already ran, so an out-of-band change is caught immediately regardless
-        # of the TTL. On TTL expiry we deliberately fall through to a full
-        # recompute (the TTL is a safety net for mtime-preserving changes that
-        # the probe can't see — e.g. a git checkout that restores the old mtime).
-        # The active-org marker is carried IN the same tuple, so a reader never
-        # sees a new org beside stale counts (single atomic publish below).
-        if (
-            current_mtime_ns == cached_mtime_ns
-            and now < expiry
-            and cached_org == current_org
-        ):
+        enabled, compat, _, expiry, cached_org, validated_at = cached
+        # SWR fast path: entry inside its hard TTL serves straight from memory.
+        # Within the revalidate window it is still fresh → zero I/O. Past it the
+        # stale counts still answer now while a background worker re-probes —
+        # the whole point is that the tree walk never runs on the request path.
+        # The org marker is one small read, so an org pull stays next-call (#7972).
+        if now < expiry and cached_org == _active_org_marker(skills_dir):
+            if now - validated_at < _SKILLS_STATS_REVALIDATE_AFTER:
+                return enabled, compat
+            _maybe_trigger_skills_stats_revalidate(profile_dir)
             return enabled, compat
 
-    # Cache miss, mtime changed, active org changed, or TTL expired — serialize per-profile so a
+    # Cache miss or hard-TTL expiry — the probe runs here (and only here) so the
+    # synchronous path keeps its immediate out-of-band detection on a cold or
+    # expired entry. Falls through to the serialized compute below.
+    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    current_org = _active_org_marker(skills_dir)
+
+    # Cache miss or hard-TTL expiry — serialize per-profile so a
     # burst of concurrent misses (cold startup) collapses to ONE compute instead
     # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
     lock = _skills_stats_lock_for(profile_dir)
@@ -2149,7 +2511,7 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # still matches and the entry is within its TTL — no second compute.
         cached = _SKILLS_STATS_CACHE.get(profile_dir)
         if cached is not None:
-            enabled, compat, cached_mtime_ns, expiry, cached_org = cached
+            enabled, compat, cached_mtime_ns, expiry, cached_org, _ = cached
             if (
                 current_mtime_ns == cached_mtime_ns
                 and time.time() < expiry
@@ -2160,15 +2522,17 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # Snapshot mtime BEFORE compute so any concurrent SKILL.md write during
         # the compute window causes a mismatch on the next probe instead of
         # silently serving stale data (TOCTOU).
+        generation = _SKILLS_STATS_GENERATION
         new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
         new_org = _active_org_marker(skills_dir)
         res = _compute_profile_skills_stats(profile_dir)
-        # Publish counts + mtime + org in ONE tuple assignment: a lock-free
-        # fast-path reader sees either the whole old entry or the whole new one,
-        # never a new org tag beside pre-rewrite counts.
-        _SKILLS_STATS_CACHE[profile_dir] = (
-            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL, new_org
-        )
+        # Publish counts + mtime + org + validation time in ONE tuple assignment:
+        # a lock-free fast-path reader sees either the whole old entry or the
+        # whole new one, never a new org tag beside pre-rewrite counts. A compute
+        # overtaken by an invalidation returns its result without caching it.
+        _publish_skills_stats(profile_dir, generation, (
+            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL, new_org, time.time()
+        ))
         return res
 
 
@@ -2847,7 +3211,7 @@ def create_profile_api(name: str, clone_from: str = None,
     _drop_profile_models_cache(name)
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
 
@@ -2918,7 +3282,7 @@ def delete_profile_api(name: str) -> dict:
 
     _drop_profile_models_cache(name)
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
     return {'ok': True, 'name': name}

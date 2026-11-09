@@ -350,12 +350,12 @@ def _env_mb_bytes(name: str, default_mb: int) -> int:
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
 def _discovery_result():
-    return _startup._discover_agent_identity(
+    # Same helper managed_agent_startup uses to pick the Agent it activates, so
+    # startup activation and the runtime Agent cannot diverge (#8529).
+    return _startup.discover_runtime_agent_identity(
         repo_root=REPO_ROOT,
-        hermes_home=Path(os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))),
         default_hermes_home=_DEFAULT_HERMES_HOME,
         user_home=HOME,
-        python_exe=os.getenv("HERMES_WEBUI_PYTHON") or sys.executable,
     )
 
 
@@ -798,6 +798,31 @@ _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
 
+def _detached_copy(value, _active=None):
+    """Deep-copy a parsed YAML tree so every mapping/list OCCURRENCE is its own
+    object. ``copy.deepcopy`` keeps YAML anchor/alias identity (its memo maps a
+    shared node to one copy), so a writer that mutates one aliased slot in a
+    raw write snapshot would silently change every other slot sharing the
+    anchor. The env-expanding reader always produced detached copies; raw
+    write transactions (#8032) must too. A genuinely self-referential node
+    (a recursive alias) keeps deepcopy semantics instead of recursing forever.
+    """
+    if not isinstance(value, (dict, list)):
+        return value
+    if _active is None:
+        _active = set()
+    key = id(value)
+    if key in _active:
+        return copy.deepcopy(value)
+    _active.add(key)
+    try:
+        if isinstance(value, dict):
+            return {k: _detached_copy(v, _active) for k, v in value.items()}
+        return [_detached_copy(v, _active) for v in value]
+    finally:
+        _active.discard(key)
+
+
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
     """Return the RAW (un-env-expanded) parsed config dict, memoized on
     (resolved path, st_mtime_ns, st_size). Shared parse core for
@@ -833,7 +858,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
             raw = cached[1]
             if not isinstance(raw, dict):
                 return {}
-            return copy.deepcopy(raw) if _copy else raw
+            return _detached_copy(raw) if _copy else raw
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
     # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
@@ -846,7 +871,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
-    return copy.deepcopy(raw) if _copy else raw
+    return _detached_copy(raw) if _copy else raw
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
@@ -860,7 +885,87 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
-def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
+_AMBIENT_CONFIG = object()
+
+
+def _profile_home_config_source(
+    profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+):
+    """Pick the config file :func:`get_config_for_profile_home` reads.
+
+    Returns ``_AMBIENT_CONFIG`` for the ambient ``get_config()`` (whose file is
+    ``_get_config_path()``), ``None`` for a missing profile home, or the
+    profile's own ``config.yaml``.
+    """
+    if not profile_home:
+        return _AMBIENT_CONFIG
+    try:
+        target = Path(profile_home).expanduser()
+    except Exception:
+        return _AMBIENT_CONFIG
+
+    from api.workspace import _safe_resolve as _cfg_safe_resolve
+
+    # Canonicalize BOTH sides before every identity comparison (#7168 re-gate
+    # round 5): when HERMES_HOME (or the config parent) is a symlink alias,
+    # lexical equality fails and an authoritative HERMES_CONFIG_PATH inside
+    # the aliased home would be bypassed in favor of a direct — wrong — read.
+    target = _cfg_safe_resolve(target)
+    try:
+        from api.profiles import get_active_hermes_home, get_hermes_home_for_profile
+
+        root_home = _cfg_safe_resolve(get_hermes_home_for_profile("default"))
+        override = os.getenv("HERMES_CONFIG_PATH")
+        # Resolve the folder, not the file: a symlinked config.yaml belongs to the
+        # profile home it sits in, not to wherever its target lives.
+        override_path = None
+        if override:
+            _override_raw = Path(override).expanduser()
+            override_path = _cfg_safe_resolve(_override_raw.parent) / _override_raw.name
+        # An external override is the root profile's config whichever named
+        # profile is process-active, unless it lives under a named profile home.
+        if (
+            isolate_config_override and override_path is not None
+            and target == root_home
+            and not override_path.is_relative_to(_cfg_safe_resolve(root_home / "profiles"))
+        ):
+            return _AMBIENT_CONFIG
+        # Root is handled above; an override under <root>/profiles belongs to
+        # that named profile, never to root, so root must not match it here.
+        override_matches = (
+            not isolate_config_override
+            or override_path is None
+            or (target != root_home and override_path.is_relative_to(target))
+        )
+        active_home = _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser())
+        if override_matches and active_home == target:
+            return _AMBIENT_CONFIG
+    except Exception:
+        pass
+    # If the ambient resolver already points at this profile home, defer to
+    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
+    # MUST run before the nonexistent-home guard below: a matching ambient home
+    # whose directory doesn't physically exist yet (fresh install, monkeypatched
+    # cfg) must still resolve through get_config(), not return {} (#4516 gate).
+    try:
+        # Resolve the parent directory, not the file, so a symlinked config.yaml
+        # still matches its own home (master's comparison).
+        config_parent = _cfg_safe_resolve(_get_config_path().parent)
+        if config_parent == target or (
+            isolate_config_override and target != root_home
+            and config_parent.is_relative_to(target)
+        ):
+            return _AMBIENT_CONFIG
+    except Exception:
+        pass
+    if not target.exists():
+        return None
+    return target / "config.yaml"
+
+
+def get_config_for_profile_home(
+    profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+) -> dict:
     """Return the config dict for an explicit profile home directory.
 
     The streaming agent runs on a detached worker thread that does NOT inherit
@@ -877,53 +982,44 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     the path the ambient resolver would pick (the common single-profile case),
     we return the cached ``get_config()`` to preserve in-memory overrides used
     by tests and runtime callers, and to honour an authoritative
-    ``HERMES_CONFIG_PATH`` override. Only when the session's profile home
-    diverges from the ambient path do we read the session profile's file
+    ``HERMES_CONFIG_PATH`` override. Session defaults and Gateway workers pass
+    ``isolate_config_override=True`` so a named profile never uses an override
+    outside its own home, even when request-local context selects that profile;
+    in that mode the root profile always uses an override that is not under
+    ``<root>/profiles``, whichever named profile is process-active.
+    Settings/workspace callers retain their ambient read/write authority.
+    When the session's profile home diverges from the ambient path or its
+    isolated override check rejects the ambient file, we read the profile file
     directly — a pure read with no global cache mutation, so it is race-free
     across concurrent sessions on different profiles. Divergent profiles stay
     isolated: a nonexistent home returns ``{}`` and an existing home without a
     ``config.yaml`` yields defaults — neither ever falls back to the ambient
     config (profiles-are-islands).
     """
-    if not profile_home:
+    source = _profile_home_config_source(
+        profile_home, isolate_config_override=isolate_config_override
+    )
+    if source is _AMBIENT_CONFIG:
         return get_config()
-    try:
-        target = Path(profile_home).expanduser()
-    except Exception:
-        return get_config()
-
-    from api.workspace import _safe_resolve as _cfg_safe_resolve
-
-    # Canonicalize BOTH sides before every identity comparison (#7168 re-gate
-    # round 5): when HERMES_HOME (or the config parent) is a symlink alias,
-    # lexical equality fails and an authoritative HERMES_CONFIG_PATH inside
-    # the aliased home would be bypassed in favor of a direct — wrong — read.
-    target = _cfg_safe_resolve(target)
-    try:
-        from api.profiles import get_active_hermes_home
-
-        if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
-            return get_config()
-    except Exception:
-        pass
-    # If the ambient resolver already points at this profile home, defer to
-    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
-    # MUST run before the nonexistent-home guard below: a matching ambient home
-    # whose directory doesn't physically exist yet (fresh install, monkeypatched
-    # cfg) must still resolve through get_config(), not return {} (#4516 gate).
-    try:
-        if _cfg_safe_resolve(_get_config_path().parent) == target:
-            return get_config()
-    except Exception:
-        pass
-    if not target.exists():
+    if source is None:
         return {}
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
-    profile_cfg = _load_yaml_config_file(target / "config.yaml")
+    profile_cfg = _load_yaml_config_file(source)
     _apply_config_defaults(profile_cfg)
     return profile_cfg
+
+
+def isolated_profile_config_path(profile_home: "Path | str | None") -> "Path | None":
+    """Return the file ``get_config_for_profile_home(..., isolate_config_override=True)``
+    reads for ``profile_home`` (``None`` when that home does not exist).
+
+    Lets the reasoning-effort chip and its writer use the same file as the
+    isolated readers (session defaults, local and Gateway workers).
+    """
+    source = _profile_home_config_source(profile_home, isolate_config_override=True)
+    return _get_config_path() if source is _AMBIENT_CONFIG else source
 
 
 def _config_for_yaml_save(config_data: dict) -> dict:
@@ -947,6 +1043,54 @@ def _config_for_yaml_save(config_data: dict) -> dict:
         if not agent_cfg:
             data.pop("agent", None)
     return data
+
+
+# ── Config WRITE rule (#8032 / #5619) ─────────────────────────────────────────
+# A config write transaction must read config.yaml with
+# _load_yaml_config_file_raw(), mutate that RAW document and save it. Env
+# expansion (_load_yaml_config_file / get_config) is for READS only: saving an
+# expanded dict writes the resolved secret in place of its ``${VAR}``
+# reference. ``${env:VAR}`` and every other reference form must likewise be
+# saved verbatim. A writer that must COMPARE a stored value against a
+# resolved one expands a copy for the comparison and keeps the raw value; a
+# writer that re-saves a field the UI displayed resolved goes through
+# _preserve_env_ref().
+_ENV_REF_PATTERN = re.compile(r"\$\{[^}]+\}")
+
+
+def _has_env_ref(value) -> bool:
+    """True when *value* is a string holding at least one ``${...}`` reference."""
+    return isinstance(value, str) and _ENV_REF_PATTERN.search(value) is not None
+
+
+def _preserve_env_ref(raw_value, new_value, normalize=None):
+    """Return *raw_value* when it is a ``${VAR}`` reference that currently
+    resolves to *new_value* (after the optional ``normalize``), else *new_value*.
+
+    Lets a writer re-save a value the UI displayed from an env-backed field
+    without baking the resolved value into config.yaml, while a value the user
+    really changed is still written exactly as given (#8032).
+
+    This includes an EMPTY submission: a reference whose variable is set to ""
+    is displayed as "" and re-submitted as "", which is an unchanged field, so
+    the reference is kept rather than dropped.
+    """
+    if not _has_env_ref(raw_value) or not isinstance(new_value, str) or new_value == raw_value:
+        return new_value
+    try:
+        expanded = _expand_env_vars(raw_value)
+        if normalize is not None:
+            same = normalize(expanded) == normalize(new_value)
+        else:
+            same = expanded == new_value
+    except Exception:
+        return new_value
+    return raw_value if same else new_value
+
+
+def _normalize_base_url_for_compare(value) -> str:
+    """Comparison form of a base URL (writers persist it stripped, no trailing /)."""
+    return str(value or "").strip().rstrip("/")
 
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
@@ -1550,12 +1694,133 @@ def _custom_provider_slug_from_name(name: object) -> str:
     return "custom:" + slug
 
 
-def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
+def _is_native_custom_provider_key(key: object) -> bool:
+    """Separate custom mapping keys from built-in/plugin provider settings."""
+    if not isinstance(key, str) or not key.strip():
+        return False
+    raw = key.strip().lower()
+    # Registered names preserve underscores; runtime alias folding does not.
+    # Explicit custom:<slug> keys still declare independent named providers.
+    if not raw.startswith("custom:") and _is_plugin_model_provider(raw):
+        return False
+    canonical = _canonicalise_provider_id(key)
+    if canonical == "custom":
+        return False  # generic default-endpoint settings, not a named identity
+    return raw.startswith("custom:") or not (
+        canonical in _PROVIDER_DISPLAY or canonical in _PROVIDER_MODELS
+        or _is_plugin_model_provider(canonical)
+    )
+
+
+def _native_identity_index(native: dict) -> tuple[list, dict, dict, dict]:
+    """One pass over ``providers:`` for :func:`_custom_provider_entries`.
+
+    Maps every alias and slug a record can be named by (the two vocabularies of
+    :func:`_custom_record_names_identity`, from the same ``name or key``
+    expression the selectors use) to the record's position. Built once per view,
+    so resolving N identities costs O(N) instead of rescanning every key per
+    identity, which made the view quadratic in the number of native providers.
+    """
+    items = list(native.items())
+    by_alias: dict[str, set[int]] = {}
+    by_slug: dict[str, set[int]] = {}
+    by_key: dict = {}
+    for pos, (key, record) in enumerate(items):
+        by_key[key] = pos
+        display = (record.get("name") if isinstance(record, dict) else None) or key
+        for alias in _custom_provider_alias_set(display, key):
+            by_alias.setdefault(alias, set()).add(pos)
+        for value in (display, key):
+            if str(value or "").strip():
+                by_slug.setdefault(_custom_provider_slug_key(value), set()).add(pos)
+    return items, by_alias, by_slug, by_key
+
+
+def _native_identity_scope(native: dict, index: tuple, pid: str, slug: str) -> dict:
+    """The ``providers:`` entries that can name ``pid``, in their original order.
+
+    A superset of every key :func:`_native_custom_provider_record` can accept for
+    ``pid`` (its exact key, any record whose name or key carries ``pid`` as an
+    Agent alias, any whose name or key normalizes to ``slug``), so selecting from
+    it gives the same record, the same disabled verdict and the same collision
+    error as selecting from the whole mapping.
+    """
+    items, by_alias, by_slug, by_key = index
+    positions = set(by_alias.get(pid, ())) | set(by_slug.get(slug, ()))
+    if pid in by_key:
+        positions.add(by_key[pid])
+    return dict(items[pos] for pos in sorted(positions))
+
+
+def _custom_provider_entries(
+    config_obj: dict | None = None, *, for_catalog: bool = False,
+) -> list[dict]:
+    """Read-only legacy-shaped view of configured custom providers.
+
+    A missing, empty or malformed legacy store has no legacy winners; native
+    providers are still read, as v0.52.544's catalog and routing did (#8685).
+    In a mixed store legacy identities win. Native mapping keys are
+    identities; their editable names are labels only. Never insert this view
+    into config or use it in place of the complete record during connection
+    selection (``_select_custom_provider_record``). Catalogs retain the older
+    inactive bare models-only exclusion; other metadata readers remain complete.
+    """
     source = config_obj if isinstance(config_obj, dict) else cfg
-    entries = source.get("custom_providers", [])
-    if not isinstance(entries, list):
-        return []
-    return [entry for entry in entries if isinstance(entry, dict)]
+    raw_entries = source.get("custom_providers", [])
+    entries = (
+        [entry for entry in raw_entries if isinstance(entry, dict)]
+        if isinstance(raw_entries, list) else []
+    )
+    native = source.get("providers")
+    if not isinstance(native, dict):
+        return entries
+    seen = {_custom_provider_slug_from_name(entry.get("name")) for entry in entries}
+    index = _native_identity_index(native)
+    for key in native:
+        if not _is_native_custom_provider_key(key):
+            continue
+        identity = _custom_provider_slug_from_name(key)
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        # Use the same exact-key precedence and collision check as runtime;
+        # insertion order must never choose a different native authority.
+        slug = _custom_provider_slug_key(identity)
+        try:
+            record, _disabled = _native_custom_provider_record(
+                _native_identity_scope(native, index, identity, slug), identity, slug,
+            )
+        except AmbiguousCustomProviderError:
+            # Omit only this unusable identity. Explicit routing still validates
+            # its raw authority at the point of return, not during enumeration.
+            continue
+        if record is None:
+            continue
+        model_cfg = source.get("model")
+        active = model_cfg.get("provider") if isinstance(model_cfg, dict) else None
+        explicit_native = key.strip().lower().startswith("custom:") or identity in native
+        if (for_catalog and not explicit_native
+                and _custom_provider_slug_from_name(active) != identity
+                and not _custom_record_owns_connection(record, identity)):
+            # A bare models-only settings block is not a new picker route
+            # (#1970/#5301). Explicit custom: keys still declare native catalogs.
+            continue
+        entry = copy.deepcopy(record)
+        entry["name"] = identity if identity in native else key
+        fallback_label = key if explicit_native else key.replace("-", " ").title()
+        entry["display_name"] = str(record.get("name") or fallback_label).strip()
+        # Native records are hand-edited config; only a string names a default
+        # model in the legacy-shaped view. A non-string ``model`` / ``default_model``
+        # (``model: 42``) must not reach consumers that call ``.strip()`` on it:
+        # it crashed resolution for UNRELATED providers (@openai:...), which
+        # v0.52.544 resolved (#8685 gate).
+        model = entry.get("model")
+        if not isinstance(model, str) or not model.strip():
+            default_model = record.get("default_model")
+            model = default_model if isinstance(default_model, str) else ""
+        entry["model"] = model
+        entries.append(entry)
+    return entries
 
 
 def _configured_model_ids(raw_models: object) -> list[str]:
@@ -1629,6 +1894,17 @@ def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
     ]
 
 
+def _configured_model_explicit_labels(raw_models: object) -> dict[str, str]:
+    """Read explicit labels without changing custom catalogs' fallback labels."""
+    if not isinstance(raw_models, list):
+        return {}
+    labelled = [
+        row for row in raw_models
+        if isinstance(row, dict) and str(row.get("label") or "").strip()
+    ]
+    return {row["id"]: row["label"] for row in _configured_model_options(labelled)}
+
+
 def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
     """Merge picker option rows from multiple sources, first-seen order, deduped by id.
 
@@ -1671,14 +1947,150 @@ def _named_custom_provider_slug_for_provider(
     if not raw:
         return ""
     raw_suffix = raw.removeprefix("custom:")
+    # A bare built-in or plugin id (``openai``) is claimed only by a legacy
+    # ``custom_providers`` entry of that name, as on v0.52.544. A native
+    # ``providers['custom:openai']`` record needs the explicit ``custom:openai``
+    # selector; WebUI selector resolution never hands it the bare built-in
+    # route (#8685). The Agent's own runtime resolution is order-dependent
+    # downstream of this (#8690).
+    legacy_only = _is_bare_builtin_provider_id(raw)
+    legacy_names = _legacy_custom_provider_names(config_obj) if legacy_only else set()
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
         slug = _custom_provider_slug_from_name(entry_name)
         if not entry_name or not slug:
             continue
+        if legacy_only and entry_name not in legacy_names:
+            continue
         if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
             return slug
     return ""
+
+
+def _legacy_custom_provider_names(config_obj: dict | None = None) -> set[str]:
+    """Lower-cased names of the legacy ``custom_providers`` list entries."""
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    raw_entries = source.get("custom_providers", [])
+    if not isinstance(raw_entries, list):
+        return set()
+    return {
+        str(entry.get("name") or "").strip().lower()
+        for entry in raw_entries
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+    }
+
+
+def _is_bare_builtin_provider_id(provider: object) -> bool:
+    """Whether a bare (non-``custom:``) id names a built-in or plugin provider.
+
+    Such an id is claimed only by a legacy ``custom_providers`` entry of that
+    name, never by a native ``providers['custom:<id>']`` record (#8685, #8816).
+
+    ``_is_native_custom_provider_key`` alone decides plugin-backed built-ins from
+    the plugin registry, so with plugin discovery unavailable the Agent's
+    canonical ``xai`` (WebUI's tables say ``x-ai``) read as a native custom key,
+    and a bare xAI session took the ``custom:xai`` record's endpoint and key
+    (#8816). A static-table built-in is therefore also matched through the
+    provider alias table, independent of plugin discovery.
+    """
+    raw = str(provider or "").strip().lower()
+    if not raw or raw.startswith("custom:"):
+        return False
+    if not _is_native_custom_provider_key(raw):
+        return True
+
+    targets = _provider_id_forms(raw)
+    # A registered plugin reached through an alias (``fw`` -> ``fireworks``).
+    if any(_is_plugin_model_provider(t) for t in targets):
+        return True
+    # A built-in from WebUI's tables or the Agent's own provider catalog, so the
+    # answer doesn't depend on WebUI's plugin discovery (``fireworks`` is in the
+    # Agent catalog but not in WebUI's tables).
+    return bool(targets & _known_builtin_provider_forms())
+
+
+def _provider_id_forms(value: object) -> set[str]:
+    """A provider id's spellings: itself, ``_`` as ``-``, and each one's alias target."""
+    value = str(value or "").strip().lower()
+    forms = {value, value.replace("_", "-")}
+    forms |= {str(_resolve_provider_alias(f) or f).strip().lower() for f in tuple(forms)}
+    # The generic ``custom`` target (Agent aliases ollama/local/vllm -> custom;
+    # catalog slug ``custom``) is a placeholder, not a provider identity: a
+    # bare ``vllm`` with its own ``custom:vllm`` record keeps that route, as on
+    # .630. A raw ``custom`` id never reaches here (the caller returns first).
+    return {f for f in forms if f and f != "custom"}
+
+
+# (key, forms) for _known_builtin_provider_forms; replaced whole, never mutated.
+_KNOWN_BUILTIN_FORMS_CACHE: tuple[tuple, frozenset[str]] | None = None
+
+
+def _known_builtin_provider_forms() -> frozenset[str]:
+    """Every spelling of every built-in id WebUI knows: its tables plus the Agent catalog.
+
+    Rebuilding this for each unknown bare custom name made ``resolve_model_provider``
+    up to ~6x slower (#8816, round 7). The cache key is everything the result
+    depends on: the Agent's and WebUI's alias tables (by content), WebUI's provider
+    tables (by key) and the Agent catalog's entries. Any change rebuilds it, so a
+    stale answer is never served.
+    """
+    global _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+
+        agent_aliases = tuple(_agent_aliases.items()) if isinstance(_agent_aliases, dict) else ()
+    except Exception:
+        agent_aliases = ()
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS as _catalog
+
+        # The entries (NamedTuples in every Agent so far) themselves, not their slugs:
+        # plugin admission inserts entries at runtime, which changes this tuple, and
+        # comparing it short-circuits on identity, so the slug walk below runs only
+        # when the catalog changed.
+        catalog_key = tuple(_catalog or ())
+    except Exception:
+        catalog_key = ()
+    key = (
+        agent_aliases,
+        tuple(_PROVIDER_ALIASES.items()),
+        tuple(_PROVIDER_DISPLAY),
+        tuple(_PROVIDER_MODELS),
+        catalog_key,
+    )
+    cached = _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        if cached is not None and cached[0] == key:
+            return cached[1]
+    except Exception:
+        pass  # an entry type whose comparison raises: rebuild
+    known = [k for k in (*_PROVIDER_DISPLAY, *_PROVIDER_MODELS) if isinstance(k, str)]
+    known.extend(_agent_builtin_provider_ids())
+    forms = frozenset(form for k in known for form in _provider_id_forms(k))
+    _KNOWN_BUILTIN_FORMS_CACHE = (key, forms)
+    return forms
+
+
+def _agent_builtin_provider_ids() -> tuple[str, ...]:
+    """Provider slugs in the Agent's canonical catalog, or ``()`` when the Agent
+    (or an older Agent without the catalog) isn't importable, or the catalog has
+    a shape this WebUI doesn't know. Never raises into routing."""
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS
+
+        slugs = []
+        for entry in CANONICAL_PROVIDERS or ():
+            if isinstance(entry, str):
+                slug = entry
+            else:
+                slug = getattr(entry, "slug", None)
+                if slug is None and isinstance(entry, (tuple, list)) and entry:
+                    slug = entry[0]
+            if isinstance(slug, str) and slug.strip():
+                slugs.append(slug.strip().lower())
+        return tuple(slugs)
+    except Exception:
+        return ()
 
 
 def _resolve_configured_provider_id(
@@ -1687,6 +2099,7 @@ def _resolve_configured_provider_id(
     *,
     base_url: object = None,
     resolve_alias: bool = True,
+    model_id: str | None = None,
 ) -> str:
     """Normalize a configured provider id.
 
@@ -1709,7 +2122,9 @@ def _resolve_configured_provider_id(
     if not resolve_alias:
         raw = str(provider or "").strip().lower()
         if base_url and raw == "custom":
-            by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+            by_base_url = _named_custom_provider_slug_for_base_url(
+                base_url, config_obj, model_id=model_id
+            )
             if by_base_url:
                 return by_base_url
         return str(provider or "")
@@ -1719,7 +2134,9 @@ def _resolve_configured_provider_id(
         base_url
         and str(resolved or "").strip().lower() == "custom"
     ):
-        by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+        by_base_url = _named_custom_provider_slug_for_base_url(
+            base_url, config_obj, model_id=model_id
+        )
         if by_base_url:
             return by_base_url
 
@@ -1751,7 +2168,12 @@ def _canonicalise_provider_id(name: object) -> str:
     """
     if not name:
         return ""
-    raw = str(name).strip().lower().replace("_", "-")
+    raw = str(name).strip().lower()
+    if raw.startswith("custom:"):
+        # This namespace is already minted by _custom_provider_slug_from_name;
+        # folding underscores would disconnect catalog IDs from raw selection.
+        return raw
+    raw = raw.replace("_", "-")
     if not raw:
         return ""
     # Already a canonical id known to _PROVIDER_DISPLAY/_PROVIDER_MODELS:
@@ -1851,19 +2273,54 @@ def _lookup_custom_api_key_env(provider_id: object) -> str | None:
     return None
 
 
+def _custom_provider_entry_owns_model(entry: dict, model_id: str) -> bool:
+    """True when a ``custom_providers[]`` entry declares ``model_id`` itself.
+
+    Ownership is by declaration, not substring: an exact ``model:`` match or a
+    listed id in a pinned ``models:`` allowlist (all shapes via
+    ``_configured_model_ids``). A live discovered catalog is metadata, not a
+    declaration. Used to disambiguate several entries sharing one ``base_url``
+    (#7176): the declaring owner outranks declaration order, and among several
+    declaring owners the first-declared one wins.
+    """
+    model = str(model_id or "").strip()
+    if not model or not isinstance(entry, dict):
+        return False
+    if str(entry.get("model") or "").strip() == model:
+        return True
+    if _provider_models_are_discovered_catalog(entry):
+        return False
+    return model in _configured_model_ids(entry.get("models"))
+
+
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
+    model_id: str | None = None,
 ) -> str:
+    """Slug of the custom_providers[] entry for ``base_url``.
+
+    Several entries may share one ``base_url`` (a gateway fronting several
+    APIs on one host, one entry per ``api_mode`` — #7176). A plain first-match
+    then routes every model through the FIRST-declared entry, producing an
+    opaque 401 for models owned by later entries. When ``model_id`` is given,
+    the entry that declares the model outranks declaration order; otherwise
+    (or when no entry declares it) the historical first-match stands.
+    """
     target = _normalize_base_url_for_match(base_url)
     if not target:
         return ""
+    fallback = ""
     for entry in _custom_provider_entries(config_obj):
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
-    return ""
+        slug = _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        if not fallback:
+            fallback = slug
+        if model_id and _custom_provider_entry_owns_model(entry, model_id):
+            return slug
+    return fallback
 
 
 def _provider_is_known_or_configured(
@@ -2948,6 +3405,82 @@ def _custom_provider_slug_key(value: object) -> str:
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
+# Fields _custom_provider_entries() writes on its copy of a native record; every
+# other field of the entry is the normalized record's own.
+_CUSTOM_PROVIDER_ENTRY_VIEW_FIELDS = frozenset({"name", "display_name", "model"})
+
+
+def _raw_custom_provider_url(raw_cfg: dict, exp_cfg: dict, match: dict, url: str) -> str:
+    """Return the raw config text behind the selected custom provider's URL (#8032).
+
+    ``match`` was selected from ``_custom_provider_entries(exp_cfg)``, the
+    env-expanded view, and ``url`` is its resolved base URL. Recover the field of
+    THAT record, never a value search across records:
+
+    * a legacy winner is the very dict from ``exp_cfg["custom_providers"]``;
+      expansion keeps list positions, so its raw twin is at the same index;
+    * a native winner is a normalized copy. Its source record is the one whose
+      ``_normalized_raw_provider_record(record, key)`` equals the entry on every
+      field the entries view copies (the normalizer stamps the record's own
+      config key as ``provider_key``), and the URL field is the one the
+      normalizer read: the first non-empty ``api``/``url``/``base_url`` of the
+      expanded record.
+
+    The raw text is used only when it expands to ``url``. Otherwise, or when the
+    source is not exactly one raw text, return ``url`` itself, which is what
+    master writes. Pure and lock-safe.
+    """
+    want = _normalize_base_url_for_compare(url)
+
+    def _same(raw):
+        if isinstance(raw, str) and raw.strip():
+            if _normalize_base_url_for_compare(_expand_env_vars(raw)) == want:
+                return raw.strip()
+        return None
+
+    if not (isinstance(raw_cfg, dict) and isinstance(exp_cfg, dict)):
+        return url
+    exp_list = exp_cfg.get("custom_providers")
+    raw_list = raw_cfg.get("custom_providers")
+    if isinstance(exp_list, list):
+        for index, entry in enumerate(exp_list):
+            if entry is not match:
+                continue
+            twin = raw_list[index] if (
+                isinstance(raw_list, list) and len(raw_list) == len(exp_list)
+            ) else None
+            return (_same(twin.get("base_url")) if isinstance(twin, dict) else None) or url
+    exp_native = exp_cfg.get("providers")
+    raw_native = raw_cfg.get("providers")
+    if not (isinstance(exp_native, dict) and isinstance(raw_native, dict)):
+        return url
+    found = set()
+    for key, record in exp_native.items():
+        if not isinstance(record, dict) or not record:
+            continue
+        normalized = _normalized_raw_provider_record(record, key)
+        if any(
+            match.get(field) != value
+            for field, value in normalized.items()
+            if field not in _CUSTOM_PROVIDER_ENTRY_VIEW_FIELDS
+        ):
+            continue
+        url_field = next(
+            (
+                field for field in _RAW_PROVIDER_URL_FIELDS
+                if isinstance(record.get(field), str) and record.get(field).strip()
+            ),
+            None,
+        )
+        raw_record = raw_native.get(key)
+        if url_field is None or not isinstance(raw_record, dict):
+            continue
+        raw = _same(raw_record.get(url_field))
+        if raw is not None:
+            found.add(raw)
+    return found.pop() if len(found) == 1 else url
+
+
 def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
     """Return the single named ``custom_providers`` entry matching ``slug_key``.
 
@@ -3023,6 +3556,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             cfg,
             base_url=config_base_url,
             resolve_alias=False,
+            model_id=model_id,
         )
 
     # Heal legacy ``provider: local`` entries (written by WebUI < v0.50.252)
@@ -3043,17 +3577,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         request that resolves to a DIFFERENT provider (an unrelated
         ``@openrouter:...`` / ``@custom:safe-provider:...`` lane, or the bare
         ``custom`` proxy), so the ambiguity check runs only on the slug actually
-        being returned. ``_unique_custom_provider_entry`` raises
-        AmbiguousCustomProviderError when >=2 config entries share the slug, so a
-        downstream credential lookup can never first-match a different entry than
-        the one whose endpoint we resolved. No-op for bare ``custom`` and every
-        non-custom provider.
+        being returned. ``_select_custom_provider_record`` validates the raw
+        legacy/native authority for that target, including identities omitted by
+        the read view, so downstream credential lookup cannot first-match a
+        different record. No-op for bare ``custom`` and non-custom providers.
         """
         if isinstance(provider, str) and provider.startswith("custom:"):
-            _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
-                _custom_provider_slug_key(provider),
-            )
+            _select_custom_provider_record(provider, _custom_provider_slug_key(provider), cfg)
         return model, provider, base_url
 
     # Read before the strip below, which returns a plain str.
@@ -3127,7 +3657,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             or model_id in _provider_models_set
         )
     )
-    custom_providers = cfg.get('custom_providers', [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         # Disambiguation guard: when two custom_providers[] entries both list the
         # same bare model id (e.g. dogapi and packyapi both advertise
@@ -3214,6 +3744,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
                 continue
+            if target not in _configured_model_ids(pdef.get('models')):
+                continue
+            if _is_native_custom_provider_key(slug) and not _is_bare_builtin_provider_id(slug):
+                # Handled by the read view, including enabled/legacy precedence.
+                # A built-in's own record (``providers.fireworks`` when plugin
+                # discovery is unavailable) stays its URL override, as on .630
+                # and v0.52.544 (#8816 senior round 4).
+                continue
             # Copilot is the documented exception: `providers.copilot.models` is
             # a per-model SETTINGS map (reasoning_effort, limits, etc.), NOT a
             # routable allowlist (see the exception at the catalog-build site).
@@ -3290,7 +3828,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # to _get_provider_base_url() when no exact custom_providers[] row exists.
         if provider_hint.startswith("custom:"):
             entry = _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
+                _custom_provider_entries(cfg),
                 _custom_provider_slug_key(provider_hint),
             )
             if entry is not None:
@@ -3341,7 +3879,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default config provider. MUST come BEFORE
         # the config_base_url branch because many providers have a base_url set.
         if prefix and config_provider and prefix != config_provider:
-            _custom_cfg = cfg.get("custom_providers", [])
+            _custom_cfg = _custom_provider_entries(cfg)
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
@@ -3578,6 +4116,8 @@ CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
 # Kept beside the custom-provider reasons because it travels the same terminal
 # verdict path: an unresolvable route must stop before any provider routing.
 MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
+# A built-in provider name that another provider record also claims (#8690).
+PROVIDER_NAME_AMBIGUOUS = "provider_name_ambiguous"
 
 # Key the verdict travels under on a merged bundle. ``None`` == routable.
 CUSTOM_ROUTE_ERROR_FIELD = "route_error"
@@ -3812,6 +4352,274 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
     )
 
 
+# ``hermes_cli.config._ENV_REF_RE``: the references the Agent expands in string values.
+_AGENT_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _agent_expands_env_ref(value: object) -> bool:
+    """True when the Agent expands a ``${VAR}`` / ``${env:VAR}`` in string ``value``.
+
+    Mirror of ``hermes_cli.config._env_ref_var_name``; ``${env:}``, other sources
+    (``${file:...}``) and an incomplete ``${`` stay verbatim, as do mapping keys.
+    """
+    if not isinstance(value, str):
+        return False
+    for inner in _AGENT_ENV_REF_RE.findall(value):
+        ref = inner.strip()
+        if ref.startswith("env:"):
+            if ref[len("env:"):].strip():
+                return True
+        elif not re.match(r"^[a-z][a-z0-9_-]*:", ref):
+            return True
+    return False
+
+
+def _agent_expanded_text(value: object) -> str | None:
+    """String ``value`` as the installed Agent's ``load_config()`` expands it here, else None.
+
+    Calls the Agent's own expander (``hermes_cli.config._expand_env_vars``: an env
+    ``${VAR}`` / ``${env:VAR}`` is read through ``agent.secret_scope.get_secret`` under the
+    bound scope; an unset or non-env reference stays verbatim), and only while
+    ``agent.secret_scope.current_secret_scope()`` is not None. When it is None this returns
+    None, so a templated name claims every name and a templated ``enabled`` flag keeps its
+    record claiming: fail closed, even where the Agent's own resolver would expand the value
+    from the process env. The rule is that condition, not a list of routes.
+
+    A known request path where it is None: the chat route's
+    ``streaming._resolve_runtime_connection_bundle`` (and the model-alias variant) for the
+    root profile (``default`` or a renamed root alias) or with no profile name, when no
+    outer scope is bound. ``profiles.profile_scope_for_detached_worker`` binds no scope for
+    those and leaves any outer one in place; for a named profile it binds one through
+    ``profiles.profile_env_for_background_worker``. Other paths may bind one, the root
+    profile included: read-only request scopes
+    (``profiles.profile_env_for_active_request_readonly``, the root profile too with
+    ``include_root=True``) and background workers such as title generation
+    (``profile_env_for_background_worker`` binds one for a non-empty profile name other
+    than ``default``, a renamed root alias included). None as well when the expander is unavailable or
+    fails: callers keep their fail-closed reading.
+    """
+    try:
+        from agent.secret_scope import current_secret_scope
+        from hermes_cli.config import _expand_env_vars as agent_expand_env_vars
+    except ImportError:
+        return None
+    try:
+        # Without a bound profile secret scope the expander reads the shared process env,
+        # which a concurrent worker for another profile can hold: keep the reading closed.
+        # Known case: the chat route's bundle resolution for the root profile or with no
+        # profile name, when no outer scope is bound (see the docstring).
+        # Re-reading that env after the resolver could see another value than the resolver
+        # read (test_a_concurrent_profile_env_between_the_resolver_and_the_guard_...).
+        # Follow-up: judge against the exact value the Agent resolver read for this request.
+        if current_secret_scope() is None:
+            return None
+        expanded = agent_expand_env_vars(value)
+    except Exception:
+        logger.debug("provider name check: Agent env expansion failed", exc_info=True)
+        return None
+    return expanded if isinstance(expanded, str) else None
+
+
+def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
+    """The first identity in ``keys`` / ``values`` whose spellings include one of ``names``.
+
+    Spellings: the Agent's alias vocabulary (:func:`_custom_provider_alias_set`)
+    plus underscore folding. The claiming identity is returned for the message in
+    its raw spelling (never a URL, credential or expanded value). A value the Agent
+    env-expands is judged by the Agent's own expansion (:func:`_agent_expanded_text`,
+    an unset reference stays verbatim) only while an Agent profile secret scope is bound
+    (``agent.secret_scope.current_secret_scope()`` is not None); otherwise (no scope bound,
+    for example the chat route's bundle resolution for the root profile with no outer
+    scope; or no expander) it claims every name, since WebUI cannot then reproduce the
+    value the Agent's resolver reads with certainty.
+    """
+    for value, expandable in (*((key, False) for key in keys), *((val, True) for val in values)):
+        text = spelled = str(value or "").strip()
+        if expandable and _agent_expands_env_ref(value):
+            expanded = _agent_expanded_text(value)
+            if expanded is None:
+                return text
+            spelled = expanded.strip()
+        aliases = _custom_provider_alias_set(spelled, "") if spelled else frozenset()
+        if names & (aliases | {alias.replace("_", "-") for alias in aliases}):
+            return text
+    return None
+
+
+def _provider_identity_sources(config: object) -> tuple:
+    """The config views :func:`provider_name_ambiguity_verdict` reads identities from.
+
+    An explicit ``config`` is the only view. Otherwise the active profile's
+    config.yaml as parsed but NOT env-expanded (the file :func:`get_config`
+    serves, via :func:`_get_config_path`) comes first, then the cached view.
+    The Agent re-expands ``${VAR}`` references from the profile's current
+    secret scope on every load, while the cache keeps the expansion it saw when
+    it last reloaded (an edited .env does not change config.yaml's mtime), so
+    only the raw spelling tells reliably that a name is a reference (Codex r3).
+    The cached view still counts, so an in-memory config is never ignored.
+    Every view carries the Agent's managed scope (:func:`_with_managed_scope`).
+    """
+    if config is not None:
+        return (_with_managed_scope(config),)
+    try:
+        raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+    except Exception:
+        logger.debug("provider name check: raw config unreadable", exc_info=True)
+        raw = None
+    # A detached snapshot, not get_config()'s live cache dict: another profile's request can
+    # refill that dict in place while this check runs, and a retained reference then judged
+    # this profile's name against the other profile's records (release-lane tag-delta audit).
+    return (_with_managed_scope(raw), _with_managed_scope(get_config_snapshot()))
+
+
+def _with_managed_scope(view: object) -> object:
+    """``view`` with the Agent's managed-scope config.yaml merged on top (Codex r5).
+
+    The Agent resolves providers from ``load_config()``, which deep-merges the
+    IT-pushed managed config over the profile's, managed winning per leaf
+    (``hermes_cli.config._merge_managed_overlay``). Same reader and merge as
+    ``managed_scope.apply_managed_overlay``, minus its ``${VAR}`` expansion, so
+    a managed reference is judged like any other (:func:`_claiming_value`: by the
+    Agent's expander under a bound profile secret scope, else a wildcard). ``view``
+    is never mutated; an Agent
+    without managed scope, or no managed config, leaves it unchanged.
+    """
+    try:
+        from hermes_cli.config import _deep_merge
+        from hermes_cli.managed_scope import load_managed_config
+    except ImportError:
+        return view
+    try:
+        managed = load_managed_config() if isinstance(view, dict) else None
+        return _deep_merge(copy.deepcopy(view), managed) if isinstance(managed, dict) and managed else view
+    except Exception:
+        # The Agent fails open the same way (``apply_managed_overlay``).
+        logger.debug("provider name check: managed scope unreadable", exc_info=True)
+        return view
+
+
+def provider_name_ambiguity_verdict(provider: object, config: object = None) -> dict | None:
+    """Terminal verdict when one built-in provider name has two claimants (#8690).
+
+    Identities are read from every view :func:`_provider_identity_sources`
+    returns; the first view with an ambiguity decides (fail closed).
+
+    The Agent answers a name with the first record whose alias set contains it
+    and shares one credential pool between such records, so the endpoint and key
+    it returns can belong to different records depending on config order. The
+    route fails closed instead. Purely name-based (no URL is read); a record
+    claims in any spelling the Agent accepts. A keyed record the Agent treats as
+    disabled claims nothing; a templated ``enabled`` flag is judged after the Agent's
+    env expansion only while an Agent profile secret scope is bound
+    (``current_secret_scope()`` is not None), and with none bound the record keeps
+    claiming (fail closed). A templated ``name`` follows the same rule
+    (:func:`_agent_expanded_text`, which names a known request path with no scope). A legacy row counts enabled or not (the Agent's
+    legacy view still selects disabled rows).
+
+    * Bare built-in ``X``: ambiguous when any record other than ``providers.X``
+      claims ``X``, or two keys are ``X``. Without ``providers.X`` the built-in
+      identity (default endpoint, ambient key) is still the second claimant:
+      WebUI routes bare ``X`` as the built-in (#8685), the Agent as the sibling.
+    * Explicit ``custom:X`` (``X`` built-in): ambiguous when ``providers.X``
+      exists and another record also claims ``custom:X`` (the Agent's alias set
+      for ``providers.X`` contains it). Otherwise untouched.
+    """
+    route = str(provider or "").strip().lower().replace(" ", "-")
+    explicit = route.startswith("custom:")
+    builtin = _canonicalise_provider_id(route.split(":", 1)[1].strip() if explicit else route)
+    if (
+        not builtin
+        or builtin in {"custom", "auto"}
+        or builtin.startswith("custom:")
+        or _is_native_custom_provider_key(builtin)
+    ):
+        return None
+    names = {route, route.replace("_", "-"), f"custom:{builtin}" if explicit else builtin}
+    for source in _provider_identity_sources(config):
+        if isinstance(source, dict):
+            verdict = _provider_name_ambiguity_in(source, route, builtin, explicit, names)
+            if verdict is not None:
+                return verdict
+    return None
+
+
+def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit: bool, names: set) -> dict | None:
+    """:func:`provider_name_ambiguity_verdict` for one config view."""
+    own: list[str] = []
+    others: list[str] = []
+    providers = source.get("providers")
+    for key, record in (providers.items() if isinstance(providers, dict) else ()):
+        key_text = str(key or "").strip()
+        if not key_text or not isinstance(record, dict):
+            continue
+        # The Agent skips a keyed record whose ``enabled`` is false in both of its views
+        # (``_match_new_style_provider`` and ``providers_dict_to_custom_providers``), so a
+        # disabled one claims nothing. Legacy ``custom_providers`` rows stay counted below:
+        # the Agent's legacy view still selects a row the user switched off. A templated
+        # flag is judged as the Agent expands it only while a profile secret scope is bound
+        # (``current_secret_scope()`` is not None, :func:`_agent_expanded_text`); with none
+        # bound or no expander it is unknown and keeps the record claiming (fail closed).
+        flag = record.get("enabled", True)
+        if _agent_expands_env_ref(flag):
+            expanded = _agent_expanded_text(flag)
+            flag = flag if expanded is None else expanded
+        if not _raw_provider_record_enabled({"enabled": flag}):
+            continue
+        # The Agent's identities for a keyed record: its ``name`` (or key) and its key.
+        claimed_by = _claiming_value((key_text,), (record.get("name"),), names)
+        if claimed_by is None:
+            continue
+        if not key_text.lower().startswith("custom:") and _canonicalise_provider_id(key_text) == builtin:
+            own.append(key_text)
+        else:
+            others.append(f"'{key_text}'" + (f" (named '{claimed_by}')" if claimed_by != key_text else ""))
+    legacy = source.get("custom_providers")
+    # A legacy row's only identity is its ``name``; the Agent ignores a
+    # non-list section and a row's raw ``provider_key``.
+    for row in legacy if isinstance(legacy, list) else ():
+        claimed_by = _claiming_value((), (row.get("name"),), names) if isinstance(row, dict) else None
+        if claimed_by is not None:
+            others.append(f"custom_providers entry '{claimed_by}'")
+    if explicit:
+        ambiguous = bool(own) and len(own) + len(others) >= 2
+    else:
+        ambiguous = bool(others) or len(own) >= 2
+    if not ambiguous:
+        return None
+    claimants = [f"the built-in '{builtin}'"] + [f"'{key}'" for key in own[1:]] + others
+    count = {2: "Two", 3: "Three"}.get(len(claimants), str(len(claimants)))
+    listed = ", ".join(claimants[:-1]) + " and " + claimants[-1]
+    return {
+        "reason": PROVIDER_NAME_AMBIGUOUS,
+        "provider": route,
+        "message": (
+            f"{count} providers claim '{builtin}': {listed}. Rename the custom one "
+            "(for example custom:my-proxy) or remove one, then retry."
+        ),
+        "hint": "Edit the provider under Settings -> Providers or in config.yaml.",
+    }
+
+
+def _refuse_ambiguous_provider_name(bundle: dict, *providers: object) -> dict | None:
+    """Make ``bundle`` terminal when any of ``providers`` is ambiguous (#8690).
+
+    The verdict is what stops the turn (:data:`CUSTOM_ROUTE_ERROR_FIELD`); the
+    connection and every side field are cleared too, so a consumer that reads
+    the fields without checking it still has nothing to send.
+    """
+    for provider in dict.fromkeys(providers):
+        verdict = provider_name_ambiguity_verdict(provider)
+        if verdict is not None:
+            bundle["base_url"] = None
+            bundle["api_key"] = None
+            for field in CUSTOM_CONNECTION_SIDE_FIELDS:
+                bundle[field] = None
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = verdict
+            logger.warning("refusing provider route: %s", verdict["message"])
+            return verdict
+    return None
+
+
 # ``enabled:`` words YAML may hand us as strings, matching
 # hermes_cli.config_providers._FALSE_WORDS.
 _PROVIDER_DISABLED_WORDS = frozenset({"false", "0", "no", "off"})
@@ -3920,6 +4728,64 @@ def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> d
     return owning[0][1] if owning else None
 
 
+def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -> tuple[dict | None, bool]:
+    """Return the native authority and whether its explicit disable is terminal.
+
+    Exact canonical keys outrank aliases, including their disabled verdict.
+    Without one, reuse the raw selector's collision check rather than silently
+    choosing the first key that normalizes to the same identity.
+    """
+    if not isinstance(providers_cfg, dict):
+        return None, False
+    exact = providers_cfg.get(pid)
+    normalized = None
+    if isinstance(exact, dict) and exact:
+        if not _raw_provider_record_enabled(exact):
+            return None, True
+        normalized = _normalized_raw_provider_record(exact, pid)
+        if _custom_record_owns_connection(normalized, pid):
+            return normalized, False
+    record = _unique_raw_provider_record(providers_cfg, pid, slug)
+    if record is not None:
+        return record, False
+    disabled = any(
+        _is_native_custom_provider_key(key)
+        and isinstance(candidate, dict) and bool(candidate)
+        and not _raw_provider_record_enabled(candidate)
+        and _custom_record_names_identity(candidate.get("name") or key, key, pid, slug)
+        for key, candidate in providers_cfg.items()
+    )
+    if disabled:
+        return None, True
+    # Metadata-only rows remain readable, but the runtime candidate loop still
+    # requires a declared connection. They cannot displace an owning alias above.
+    if normalized is not None:
+        return normalized, False
+    metadata = [
+        _normalized_raw_provider_record(candidate, key)
+        for key, candidate in providers_cfg.items()
+        if _is_native_custom_provider_key(key) and isinstance(candidate, dict) and candidate
+        and _raw_provider_record_enabled(candidate) and _custom_provider_slug_key(key) == slug
+    ]
+    return (metadata[0] if len(metadata) == 1 else None), False
+
+
+def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool:
+    """Whether an owned native identity forbids even a persisted-pool probe.
+
+    A legacy winner retains its established precedence. Missing configuration
+    is not disabled: explicitly persisted pool-only browsing remains valid.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid.startswith("custom:"):
+        return False
+    slug = _custom_provider_slug_key(pid)
+    if not slug or _unique_custom_provider_entry(cfg_data.get("custom_providers"), slug) is not None:
+        return False
+    _record, disabled = _native_custom_provider_record(cfg_data.get("providers"), pid, slug)
+    return disabled
+
+
 def _select_custom_provider_record(
     pid: str,
     slug: str,
@@ -3984,21 +4850,11 @@ def _select_custom_provider_record(
     # Fallbacks for setups that don't use custom_providers names directly. Every
     # one of them is keyed on this provider's OWN identity.
     providers_cfg = cfg_data.get("providers", {})
-    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
     provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
-
-    if (
-        isinstance(provider_specific, dict)
-        and provider_specific
-        and not _raw_provider_record_enabled(provider_specific)
-    ):
-        # ``providers['custom:<slug>']`` names THIS slug by its own exact key, so
-        # switching it off is a statement about this route and not merely about
-        # one candidate among several. Falling through to the generic ``custom``
-        # record or the ``model:`` block would honour the disable by routing the
-        # turn somewhere ELSE — the ambient provider's endpoint and credential
-        # under the name the user just took offline. The slug's own authority
-        # said no, so the route is terminal here.
+    native_record, disabled = _native_custom_provider_record(providers_cfg, pid, slug)
+    if disabled:
+        # The identity's authority said no; generic model/pool fallbacks cannot
+        # resurrect it under the name the user explicitly took offline.
         return None, "", False, CUSTOM_SELECTION_MISSING
 
     model_cfg = cfg_data.get("model", {})
@@ -4028,26 +4884,13 @@ def _select_custom_provider_record(
     )
 
     def _candidates():
-        """Identity-owned candidates, most specific first — evaluated LAZILY.
+        """Identity-owned candidates, most specific first.
 
-        Laziness is load-bearing for the raw-``providers:`` scan alone: that one
-        RAISES on an alias collision, and a config whose route is already decided
-        by the exact ``providers['custom:<slug>']`` key must not be failed closed
-        by a collision further down a list it never reaches.
+        Native exact-key precedence and lazy alias-collision checks are shared
+        with the read view in _native_custom_provider_record().
         """
-        if isinstance(provider_specific, dict) and provider_specific:
-            # Keyed by this provider's own id: ``providers['custom:<slug>']``.
-            yield provider_specific, "providers"
-        # The standard v12 shape: a raw ``providers:<key>`` record that names
-        # this identity by its own config key or display name (``providers:
-        # {omni: ...}`` for ``custom:omni``), matched with the installed Agent's
-        # alias rules. This is identity ownership, not an ambient-field escape —
-        # a record that names some OTHER provider never appears here, and an
-        # unknown slug still matches nothing and falls through to the terminal
-        # verdict below.
-        raw_record = _unique_raw_provider_record(providers_cfg, pid, slug)
-        if raw_record is not None:
-            yield raw_record, "providers"
+        if native_record is not None:
+            yield native_record, "providers"
         if generic_claims_slug:
             yield provider_custom, "providers"
         if isinstance(model_cfg, dict) and model_cfg and _raw_provider_record_enabled(model_cfg) and (
@@ -4701,14 +5544,18 @@ def _custom_provider_runtime_bundle_with_provenance(
         "acp_command": _rt.get("acp_command", _rt.get("command")),
         "acp_args": _rt.get("acp_args", _rt.get("args")),
         "credential_pool": _rt.get("credential_pool"),
-        # Routable until a named custom route proves otherwise. Non-custom
-        # routes legitimately leave the endpoint and/or credential to the
-        # runtime provider, so only the named-``custom:`` branches below can
-        # record a verdict here.
+        # Routable until a route proves otherwise. Non-custom routes
+        # legitimately leave the endpoint and/or credential to the runtime
+        # provider; they record a verdict only when two records claim their
+        # name (#8690). Named ``custom:`` routes are judged below.
         CUSTOM_ROUTE_ERROR_FIELD: None,
     }
 
     lookup = lookup_provider or resolved_provider
+    # A name two records claim (#8690) is refused before any record is chosen:
+    # the runtime dict may already pair one record's endpoint with another's key.
+    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider) is not None:
+        return bundle, None
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
         return bundle, None
 
@@ -5092,7 +5939,7 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
         # for collisions, matching the point-of-return guard used by
         # resolve_model_provider. (#7356 maintainer review)
         if provider.startswith("custom:"):
-            custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else []
+            custom_providers = _custom_provider_entries(cfg) if isinstance(cfg, dict) else []
             if (
                 _unique_custom_provider_entry(
                     custom_providers, _custom_provider_slug_key(provider)
@@ -6116,14 +6963,69 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def _config_reasoning_effort(config_data) -> str:
+    """Return a config dict's ``agent.reasoning_effort`` ("" when unset)."""
+    agent_cfg = config_data.get("agent") if isinstance(config_data, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return ""
+    return str(agent_cfg.get("reasoning_effort") or "").strip().lower()
+
+
+def resolve_session_reasoning_effort(
+    config_data,
+    *,
+    session_effort=None,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Resolve the effort used by one WebUI session for its next turn.
+
+    ``Session.reasoning_effort`` is authoritative when present, including the
+    empty string (provider default). Legacy sessions store ``None`` and inherit
+    the active profile's CLI-compatible ``agent.reasoning_effort`` value.
+    """
+    effort_raw = session_effort
+    if effort_raw is None:
+        effort_raw = _config_reasoning_effort(config_data)
+    return coerce_reasoning_effort_for_model(
+        effort_raw,
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
+def effective_session_reasoning_effort(session_effort, profile_home) -> str:
+    """Return the stored effort a session's next turn starts from.
+
+    ``session_effort`` wins when present (``""`` = provider default). Legacy
+    sessions (``None``) inherit ``agent.reasoning_effort`` from their own
+    profile's isolated config: the single source shared by the composer chip,
+    new-session defaults, and the local and Gateway workers.
+    """
+    if session_effort is not None:
+        return str(session_effort)
+    return _config_reasoning_effort(
+        get_config_for_profile_home(profile_home, isolate_config_override=True)
+    )
+
+
+_REASONING_EFFORT_UNSET = object()
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    effort_override=_REASONING_EFFORT_UNSET,
 ) -> dict:
-    """Return current reasoning configuration from the active profile's
-    config.yaml — the same source of truth the CLI reads from.
+    """Return current reasoning configuration for a model.
+
+    The active profile's config.yaml is the default (and remains the CLI source
+    of truth). ``effort_override`` lets a WebUI session supply its durable
+    per-session selection without changing capability resolution.
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
@@ -6131,9 +7033,17 @@ def get_reasoning_status(
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
-    agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    if effort_override is not _REASONING_EFFORT_UNSET:
+        effort_raw = effort_override
+    else:
+        # The profile default comes from the same isolated file the session
+        # readers and write_reasoning_effort() use, not the ambient override.
+        default_path = _active_isolated_config_path()
+        effort_raw = (
+            _config_reasoning_effort(_load_yaml_config_file(default_path))
+            if default_path is not None else ""
+        )
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -6269,7 +7179,8 @@ def set_reasoning_display(show: bool) -> dict:
     """
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load: a write must never save env-expanded values (#8032 write rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         display_cfg = config_data.get("display")
         if not isinstance(display_cfg, dict):
             display_cfg = {}
@@ -6278,6 +7189,20 @@ def set_reasoning_display(show: bool) -> dict:
         _save_yaml_config_file(config_path, config_data)
     reload_config()
     return get_reasoning_status()
+
+
+def normalize_reasoning_effort(effort) -> str:
+    """Return the canonical stored form of a ``/reasoning`` level.
+
+    ``""`` means provider default. Raises ``ValueError`` for unknown levels.
+    """
+    raw = str(effort or "").strip().lower()
+    if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:
+        raise ValueError(
+            f"Unknown reasoning effort '{effort}'. "
+            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
+        )
+    return raw
 
 
 def set_reasoning_effort(
@@ -6301,15 +7226,50 @@ def set_reasoning_effort(
 
     Raises ``ValueError`` on any other unrecognised level so callers can 400.
     """
-    raw = str(effort or "").strip().lower()
-    if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:
-        raise ValueError(
-            f"Unknown reasoning effort '{effort}'. "
-            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
-        )
-    config_path = _get_config_path()
+    write_reasoning_effort(effort)
+    return get_reasoning_status(
+        model_id=model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
+def _active_isolated_config_path() -> "Path | None":
+    from api.profiles import get_active_hermes_home
+
+    return isolated_profile_config_path(get_active_hermes_home())
+
+
+def write_reasoning_effort(effort: str, profile_home: "Path | str | None" = None) -> str:
+    """Write ``agent.reasoning_effort`` to a profile's config.yaml.
+
+    The local file write half of :func:`set_reasoning_effort`, without the
+    capability lookup (which may do network I/O), so callers can hold a
+    session lock across it. ``profile_home`` (default: the active profile)
+    selects the file through :func:`isolated_profile_config_path`, the same
+    file every reader of the profile default uses. A missing profile home is
+    never redirected to another profile's file: for a session's profile the
+    write is skipped (the session keeps its own value, and the profile's
+    readers see ``""``); for the active profile, where the profile default is
+    the only thing saved, it raises ``ValueError``. Returns the normalized
+    stored value.
+    """
+    raw = normalize_reasoning_effort(effort)
+    if profile_home is None:
+        config_path = _active_isolated_config_path()
+        if config_path is None:
+            raise ValueError("The active profile no longer exists.")
+    else:
+        config_path = isolated_profile_config_path(profile_home)
+        if config_path is None:
+            logger.warning(
+                "reasoning effort: profile home %s is missing; profile default not written",
+                profile_home,
+            )
+            return raw
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
@@ -6324,11 +7284,7 @@ def set_reasoning_effort(
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()
-    return get_reasoning_status(
-        model_id=model_id,
-        provider_id=provider_id,
-        base_url=base_url,
-    )
+    return raw
 
 
 def _public_advanced_model_options(model_cfg: dict) -> dict:
@@ -6520,6 +7476,23 @@ def _main_model_request_overrides(
     return overrides
 
 
+def _same_json_value(a, b) -> bool:
+    """Equal as JSON, so type edits count: Python treats 1 == True == 1.0 (#8129 r7).
+
+    One JSON round-trip first: JSON object keys are strings, so a YAML mapping
+    with mixed int/str keys (``logit_bias: {100: 1, '101': 2}``) can be sorted,
+    while values keep their JSON types. A value JSON cannot encode at all
+    (non-scalar mapping keys) falls back to plain equality.
+    """
+    def _canonical(value):
+        return json.dumps(json.loads(json.dumps(value, default=str)), sort_keys=True)
+
+    try:
+        return _canonical(a) == _canonical(b)
+    except (TypeError, ValueError):
+        return a == b
+
+
 def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
     """Apply supported advanced model options to a config block in-place."""
     if advanced is None:
@@ -6528,8 +7501,15 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         raise ValueError("advanced model options must be an object")
     if "base_url" in advanced:
         base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
-        if base_url:
-            model_cfg["base_url"] = base_url
+        # model_cfg is the RAW block: re-submitting the displayed (resolved)
+        # URL keeps a ${VAR} reference instead of baking it (#8032). That
+        # includes "" for a reference whose variable is empty: the field is
+        # unchanged, so the reference survives instead of being removed.
+        stored_base_url = _preserve_env_ref(
+            model_cfg.get("base_url"), base_url, normalize=_normalize_base_url_for_compare
+        )
+        if stored_base_url:
+            model_cfg["base_url"] = stored_base_url
         else:
             model_cfg.pop("base_url", None)
     for field in ("timeout", "download_timeout", "max_concurrency"):
@@ -6550,10 +7530,13 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         if extra_body in (None, ""):
             model_cfg.pop("extra_body", None)
         elif isinstance(extra_body, dict):
-            if extra_body:
-                model_cfg["extra_body"] = extra_body
-            else:
+            if not extra_body:
                 model_cfg.pop("extra_body", None)
+            elif not _same_json_value(_expand_env_vars(model_cfg.get("extra_body")), extra_body):
+                # Only a changed object is written: re-submitting the displayed
+                # (resolved) one unchanged keeps the raw block and its ${VAR}
+                # references (#8032).
+                model_cfg["extra_body"] = extra_body
         else:
             raise ValueError("extra_body must be a JSON object")
     if "service_tier" in advanced:
@@ -6582,12 +7565,20 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): model_cfg stays raw so ${VAR} references
+        # in fields this save doesn't change are written back verbatim.
+        config_data = _load_yaml_config_file_raw(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
+        raw_model_cfg = dict(model_cfg)
 
-        previous_provider = str(model_cfg.get("provider") or "").strip()
+        # Compare the RESOLVED provider: ``provider: ${MODEL_PROVIDER}`` must not
+        # look like a provider switch (which would drop a valid base_url) just
+        # because the raw placeholder differs from the caller's resolved value.
+        previous_provider = str(
+            _expand_env_vars(str(model_cfg.get("provider") or "").strip()) or ""
+        ).strip()
         requested_provider = str(provider or "").strip()
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
@@ -6612,12 +7603,25 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if persisted_provider.lower() == "local":
             persisted_provider = "custom"
 
-        model_cfg["default"] = persisted_model
+        # Keep an env reference when it already resolves to the value being
+        # saved (the user re-saved what the UI displayed); a changed value is
+        # written as given.
+        model_cfg["default"] = _preserve_env_ref(
+            raw_model_cfg.get("default"), persisted_model, normalize=str.strip
+        )
         if persisted_provider:
-            model_cfg["provider"] = persisted_provider
+            model_cfg["provider"] = _preserve_env_ref(
+                raw_model_cfg.get("provider"), persisted_provider, normalize=str.strip
+            )
 
         if resolved_base_url and not provider_override_won:
-            model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+            # Same value as master writes; only a ${VAR} already in model.base_url
+            # that resolves to it is kept instead of its expansion (#8032).
+            model_cfg["base_url"] = _preserve_env_ref(
+                raw_model_cfg.get("base_url"),
+                str(resolved_base_url).strip().rstrip("/"),
+                normalize=_normalize_base_url_for_compare,
+            )
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
@@ -6794,7 +7798,9 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     model = str(model or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): untouched slots/fields keep their
+        # ${VAR} references.
+        config_data = _load_yaml_config_file_raw(config_path)
         if task != "__reset__" and task not in AUX_TASK_SLOTS:
             raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
         if task == "__reset__":
@@ -6821,8 +7827,10 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             slot_cfg = aux_cfg.get(task, {})
             if not isinstance(slot_cfg, dict):
                 slot_cfg = {}
-            slot_cfg["provider"] = provider
-            slot_cfg["model"] = model
+            # Keep a ${VAR} that already resolves to the submitted value: the
+            # advanced dialog re-posts the provider/model it displayed (#8032).
+            slot_cfg["provider"] = _preserve_env_ref(slot_cfg.get("provider"), provider, normalize=str.strip)
+            slot_cfg["model"] = _preserve_env_ref(slot_cfg.get("model"), model, normalize=str.strip)
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 # Resolve the auxiliary slot's base_url against the SELECTED
                 # provider, not the active main provider. A bare
@@ -6858,12 +7866,23 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     # closed on a collision (raises AmbiguousCustomProviderError)
                     # exactly like every other path — otherwise the ambiguity
                     # would be swallowed and the wrong endpoint persisted.
+                    # config_data is RAW (#8032). Select on an env-EXPANDED
+                    # snapshot, exactly as master selected on its expanded read:
+                    # legacy-over-native precedence (#8448), enabled state,
+                    # uniqueness and the native api/url/base_url alias order all
+                    # depend on resolved values. Then write the raw text behind
+                    # the winning URL, so a ${VAR} endpoint stays a reference.
+                    _exp_cfg = _expand_env_vars(config_data)
                     _cp_match = _unique_custom_provider_entry(
-                        config_data.get("custom_providers", []),
+                        _custom_provider_entries(_exp_cfg),
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
-                        resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
+                        _url = str(_cp_match.get("base_url") or "").strip()
+                        if _url:
+                            resolved_base_url = _raw_custom_provider_url(
+                                config_data, _exp_cfg, _cp_match, _url,
+                            )
                 if not resolved_base_url:
                     # Best-effort fallback for the unnamed `custom` case (no own
                     # entry). Keep it non-fatal for unexpected errors, but let a
@@ -6875,7 +7894,13 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     except Exception:
                         resolved_base_url = None
                 if resolved_base_url:
-                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+                    # A ${VAR} already in the slot's base_url that resolves to
+                    # the new URL is kept instead of its expansion (#8032).
+                    slot_cfg["base_url"] = _preserve_env_ref(
+                        slot_cfg.get("base_url"),
+                        str(resolved_base_url).strip().rstrip("/"),
+                        normalize=_normalize_base_url_for_compare,
+                    )
             if advanced is not None:
                 try:
                     _apply_advanced_model_options(slot_cfg, advanced)
@@ -7449,10 +8474,13 @@ def _minimal_static_models_catalog() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        # Resolved before provider detection so the shared-base_url
+        # disambiguation (#7176) can prefer the entry that owns this model.
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
-                    active_provider, cfg, base_url=cfg_base_url
+                    active_provider, cfg, base_url=cfg_base_url, model_id=default_model
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -7463,13 +8491,13 @@ def _minimal_static_models_catalog() -> dict:
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
                         _resolve_configured_provider_id(
-                            _store.get("active_provider"), cfg, base_url=cfg_base_url
+                            _store.get("active_provider"), cfg,
+                            base_url=cfg_base_url, model_id=default_model,
                         )
                         or None
                     )
             except Exception:
                 pass
-        default_model = get_effective_default_model(cfg)
         groups: list[dict] = []
         if default_model:
             try:
@@ -7512,12 +8540,16 @@ def _static_models_catalog_without_live_probes() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        # Resolved before provider detection so the shared-base_url
+        # disambiguation (#7176) can prefer the entry that owns this model.
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
                     active_provider,
                     cfg,
                     base_url=cfg_base_url,
+                    model_id=default_model,
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -7533,13 +8565,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                             auth_store.get("active_provider"),
                             cfg,
                             base_url=cfg_base_url,
+                            model_id=default_model,
                         )
                         or None
                     )
         except Exception:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
-        default_model = get_effective_default_model(cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
@@ -7581,6 +8613,8 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if isinstance(providers_cfg, dict):
             for provider_key, provider_cfg in providers_cfg.items():
+                if _is_native_custom_provider_key(provider_key):
+                    continue  # named groups are populated from the read view below
                 canonical = _canonicalise_provider_id(provider_key)
                 if not canonical:
                     continue
@@ -7637,13 +8671,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
 
-        for entry in _custom_provider_entries(cfg):
+        for entry in _custom_provider_entries(cfg, for_catalog=True):
             provider_name = str(entry.get("name") or "").strip()
             provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
-                    {"name": provider_name, "models": []},
+                    {"name": entry.get("display_name") or provider_name, "models": []},
                 )
             detected_providers.add(provider_slug)
 
@@ -7655,8 +8689,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                 if configured_id not in configured_ids:
                     configured_ids.append(configured_id)
 
+            configured_labels = _configured_model_explicit_labels(entry.get("models"))
             for configured_id in configured_ids:
-                label = _get_label_for_model(configured_id, [])
+                label = configured_labels.get(configured_id) or _get_label_for_model(configured_id, [])
                 if provider_slug == "custom":
                     custom_group_models.append({"id": configured_id, "label": label})
                 else:
@@ -7667,7 +8702,9 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if cfg_base_url:
             detected_providers.add(
-                _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                _named_custom_provider_slug_for_base_url(
+                    cfg_base_url, cfg, model_id=default_model
+                )
                 or active_provider
                 or "custom"
             )
@@ -8546,6 +9583,178 @@ def _is_loadable_disk_cache(cache: object) -> bool:
     return True
 
 
+# --- Durable-cache read memo (#7723 follow-up) ---------------------------
+# Since #7932 the models-cache freshness clock lives INSIDE the payload
+# (``_built_at``), so reading it costs a full parse of the whole catalog file.
+# A session visit needs that stamp AND the catalog groups, which meant parsing
+# the same file twice per visit — ~10 ms of redundant JSON parsing on a
+# 675 KB / 5000-model catalog, doubling session-open disk I/O.
+#
+# This one-slot memo lets the first reader parse the file once and hand the
+# result to the readers that immediately follow on the same visit. It changes
+# NO public or private signatures and no call sites, so every existing stub of
+# these loaders keeps working.
+#
+# Correctness: the entry is keyed on the IDENTITY OF THE BYTES ACTUALLY PARSED
+# — (path, st_mtime_ns, st_size, st_ino, st_dev) read from the open file
+# descriptor — and re-validated by a fresh stat() before use, so a cache
+# rewritten between the two reads is never served from a stale memo.
+#
+# The descriptor stat matters on its own: the writer replaces the file with a
+# temp file plus os.replace(), which mints a NEW inode but can land inside the
+# same coarse-clock mtime tick at an identical size. A precheck-then-open
+# window measured on Linux showed a same-size rewrite served the old generation
+# in 1,461 of 2,000 trials. Keying on the inode of the bytes we parsed makes
+# that window unobservable, because the key and the payload are taken from the
+# same open file.
+#
+# Slot access is guarded by a lock held across the producer's write and across
+# the consumer's whole read-validate-clear path. Without it two threads that
+# interleave inside that path both pass validation and both receive the SAME
+# payload object, which is exactly the shared-mutable-catalog aliasing the
+# consume step exists to prevent.
+#
+# The entry ALSO carries the catalog generation (``_models_rebuild_seq``) that
+# was current when the payload was parsed. A catalog invalidation advances
+# that generation, so an entry parsed before one describes the PRE-invalidation
+# catalog. The file's stat identity cannot detect that on its own — a rebuild
+# is not guaranteed to change ANY part of that key (same coarse-clock mtime
+# tick, same size, and a filesystem that reissues the freed inode) — so the
+# generation travels with the entry and fences it. The producer refuses to
+# publish an entry whose generation is no longer current, and the consumer
+# rejects one whose generation no longer matches. BOTH are required:
+# ``invalidate_models_cache()`` clears the slot BEFORE it advances the
+# generation, so a producer can publish into that gap and only the consumer's
+# check can catch it.
+#
+# ``None`` in the payload slot means "the file parsed, but not to a dict" — a
+# real answer, distinct from "no memo entry". An unreadable/unparseable file
+# takes a different route: the read raises, the memo slot is CLEARED, and the
+# next reader retries from scratch.
+_MODELS_DISK_PAYLOAD_UNSET = object()
+# (path, st_mtime_ns, st_size, st_ino, st_dev, catalog generation, payload)
+_models_disk_payload_memo: tuple[str, int, int, int, int, int, dict | None] | None = None
+_models_disk_payload_memo_lock = threading.Lock()
+
+
+def _clear_models_disk_payload_memo() -> None:
+    """Drop the one-slot parse memo (a no-op when the slot is already empty).
+
+    Callers that abandon a parse without consuming it MUST go through here, so
+    the memo cannot keep a whole parsed catalog resident past the visit that
+    produced it. The memo lock is a leaf — nothing is acquired while it is
+    held — so this is safe to call while holding the catalog lock.
+    """
+    global _models_disk_payload_memo
+    with _models_disk_payload_memo_lock:
+        _models_disk_payload_memo = None
+
+
+def _read_models_cache_disk_payload(cache_path: Path) -> dict | None:
+    """Read + parse the durable models cache, memoising it for immediate reuse.
+
+    Returns the raw on-disk payload, or None when the file is missing or
+    unreadable/unparseable (which also clears the memo).
+    """
+    global _models_disk_payload_memo
+    # Capture the catalog generation BEFORE the parse. An invalidation that
+    # lands while this read is in flight advances the generation, and the
+    # bytes parsed here then describe the PRE-invalidation catalog.
+    generation = _models_rebuild_seq
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            # fstat describes the bytes json.load is about to parse, so the
+            # memo key and the payload cannot disagree.
+            st = os.fstat(f.fileno())
+            payload = json.load(f)
+    except Exception:
+        _clear_models_disk_payload_memo()
+        return None
+    if not isinstance(payload, dict):
+        payload = None
+    entry = (
+        str(cache_path),
+        st.st_mtime_ns,
+        st.st_size,
+        st.st_ino,
+        st.st_dev,
+        generation,
+        payload,
+    )
+    with _models_disk_payload_memo_lock:
+        # Publish only while the generation this parse belongs to is still
+        # current. A catalog invalidation that landed during the parse
+        # supersedes these bytes, and a reader must never be handed them.
+        if generation == _models_rebuild_seq:
+            _models_disk_payload_memo = entry
+    return payload
+
+
+def _memoized_models_cache_disk_payload(cache_path: Path):
+    """Consume the memoised payload if it still matches the file on disk.
+
+    Returns ``_MODELS_DISK_PAYLOAD_UNSET`` when there is no usable entry, in
+    which case the caller must read the file itself.
+
+    The entry is CONSUMED on a hit (the memo slot is cleared before the
+    payload is returned). The memo exists to collapse the precheck+loader
+    double-parse inside a single session visit — never to serve one parse to
+    readers spread across time. A pre-#7932-era read always produced a fresh
+    ``json.load``, so each caller owned its catalog exclusively and could
+    mutate it freely; handing the SAME objects to a second reader would let
+    one caller's in-place edits (e.g. ``_annotate_fast_tier_model_groups``
+    writing ``supports_fast_tier`` into the model dicts, or
+    ``warm_models_catalog_provenance_if_cold`` publishing it into the
+    process-wide ``_available_models_cache`` without a deepcopy) corrupt a
+    later read that would then hand the edited catalog back as if it had just
+    been parsed from disk.
+
+    Consuming the slot restores the pre-existing ownership invariant: the memo
+    hands its payload to exactly one reader, and every later read re-parses.
+    That keeps the single-parse win for the one sequence that matters (the
+    freshness precheck immediately followed by the loader in the same visit)
+    while making aliasing impossible.
+
+    The lock is held across the whole read-validate-clear path, not just the
+    clear. Reading the slot and then calling ``stat()`` releases the GIL, so
+    without the lock two threads can both be inside this function at once, both
+    pass validation, and both return the same object. The consume step would
+    then be a no-op in exactly the case it exists for.
+    """
+    global _models_disk_payload_memo
+    with _models_disk_payload_memo_lock:
+        memo = _models_disk_payload_memo
+        if memo is None:
+            return _MODELS_DISK_PAYLOAD_UNSET
+        path_str, mtime_ns, size, ino, dev, generation, payload = memo
+        if path_str != str(cache_path):
+            return _MODELS_DISK_PAYLOAD_UNSET
+        try:
+            st = cache_path.stat()
+        except OSError:
+            return _MODELS_DISK_PAYLOAD_UNSET
+        if (st.st_mtime_ns, st.st_size, st.st_ino, st.st_dev) != (mtime_ns, size, ino, dev):
+            return _MODELS_DISK_PAYLOAD_UNSET
+        # Generation fence, checked AFTER the stat so that an invalidation
+        # landing during the stat() is still caught. The stat identity alone
+        # cannot tell a pre-invalidation catalog from the rebuilt one: a
+        # rebuild is not guaranteed to change any part of that key. The
+        # generation can, because an invalidation always advances it.
+        #
+        # The producer refuses to publish a stale generation, but it cannot
+        # cover this window: ``invalidate_models_cache()`` clears the slot
+        # BEFORE it advances the generation, so a producer can publish into
+        # that gap. This check is what catches it.
+        if generation != _models_rebuild_seq:
+            # The entry belongs to a superseded catalog generation. It can
+            # never be served, so drop it rather than keep a parsed catalog
+            # resident.
+            _models_disk_payload_memo = None
+            return _MODELS_DISK_PAYLOAD_UNSET
+        _models_disk_payload_memo = None
+        return payload
+
+
 def _load_models_cache_from_disk() -> dict | None:
     """Load /api/models cache from disk if it exists and has current metadata.
 
@@ -8560,10 +9769,16 @@ def _load_models_cache_from_disk() -> dict | None:
         import json as _j
 
         cache_path = _get_models_cache_path()
-        if not cache_path.exists():
+        cache = _memoized_models_cache_disk_payload(cache_path)
+        if cache is _MODELS_DISK_PAYLOAD_UNSET:
+            if not cache_path.exists():
+                return None
+            with open(cache_path, encoding="utf-8") as f:
+                cache = _j.load(f)
+        elif cache is None:
+            # The memo recorded that this exact file parsed to a non-dict, so
+            # there is no usable catalog in it.
             return None
-        with open(cache_path, encoding="utf-8") as f:
-            cache = _j.load(f)
         if not _is_loadable_disk_cache(cache):
             return None
         # Strip the disk-only metadata before returning, so the in-memory
@@ -8902,6 +10117,12 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+        elif not explicit_credential:
+            # The credential came from the provider's runtime, host-gated against the
+            # alias URL. For a name two records claim that is the shared pool's key,
+            # which can be the other record's (#8690): the alias takes the provider's
+            # verdict. An alias with its own key owns both halves and is untouched.
+            _refuse_ambiguous_provider_name(bundle, logical_provider)
         return bundle
 
     resolved_provider = provider
@@ -8943,6 +10164,9 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+    # Last, so an alias credential can neither complete nor relabel a pair the
+    # provider's runtime resolved under a name two records claim (#8690).
+    _refuse_ambiguous_provider_name(bundle, provider, route.get("provider"))
     return bundle
 
 
@@ -8961,10 +10185,15 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         import json as _j
 
         cache_path = _get_models_cache_path()
-        if not cache_path.exists():
+        cache = _memoized_models_cache_disk_payload(cache_path)
+        if cache is _MODELS_DISK_PAYLOAD_UNSET:
+            if not cache_path.exists():
+                return None
+            with open(cache_path, encoding="utf-8") as f:
+                cache = _j.load(f)
+        elif cache is None:
+            # The memo recorded that this exact file parsed to a non-dict.
             return None
-        with open(cache_path, encoding="utf-8") as f:
-            cache = _j.load(f)
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
@@ -9225,6 +10454,18 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
     global _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
     global _cache_build_in_progress
+    # Drop the one-slot parse memo BEFORE the disk unlink below. The memo is
+    # keyed on (path, mtime_ns, size, st_ino, st_dev), so a payload parsed
+    # before this call keeps a key that still matches the freshly rebuilt file:
+    # the writer creates a new inode, but the rebuild can land inside the same
+    # coarse-clock mtime tick at an identical size, and on any filesystem that
+    # reuses inodes the st_ino/st_dev pair can match too. A reader that then
+    # consumed the memo would be handed the PRE-invalidation catalog -- and
+    # because the consume step hands out that object without a copy, the
+    # caller's in-place edits would corrupt it for every reader after it.
+    # Invalidating the memory cache while leaving the parse memo populated is
+    # therefore not a no-op: the memo is the one cache that survives here.
+    _clear_models_disk_payload_memo()
     with _models_cache_disk_commit_lock:
         with _cache_build_cv:
             _allocate_models_rebuild_seq()
@@ -9815,6 +11056,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 active_provider,
                 cfg,
                 base_url=cfg_base_url,
+                model_id=default_model,
             )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
@@ -9830,6 +11072,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         auth_store.get("active_provider"),
                         cfg,
                         base_url=cfg_base_url,
+                        model_id=default_model,
                     )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
@@ -10049,6 +11292,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _canonical_to_raw_provider_key: dict[str, str] = {}
         if isinstance(_cfg_providers, dict):
             for _pid_key, _provider_cfg in _cfg_providers.items():
+                if _is_native_custom_provider_key(_pid_key):
+                    continue  # named groups are populated from the read view below
                 _canonical = _canonicalise_provider_id(_pid_key)
                 if not _canonical:
                     continue
@@ -10125,6 +11370,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         model_cfg.get("provider"),
                         cfg,
                         base_url=base_url,
+                        model_id=default_model,
                     )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
@@ -10134,6 +11380,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for provider_key, provider_cfg in providers_cfg.items():
                     if not isinstance(provider_cfg, dict):
                         continue
+                    if _is_native_custom_provider_key(provider_key):
+                        continue  # normalized native URLs/identities come from the view
                     provider_base_url = _normalize_base_url_for_match(
                         provider_cfg.get("base_url")
                     )
@@ -10142,20 +11390,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         if provider_hint:
                             return str(provider_hint).strip().lower()
 
-            custom_providers_cfg = cfg.get("custom_providers", [])
-            if isinstance(custom_providers_cfg, list):
-                for entry in custom_providers_cfg:
-                    if not isinstance(entry, dict):
-                        continue
-                    entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
-                    if entry_base_url != target:
-                        continue
-                    entry_name = str(entry.get("name") or "").strip()
-                    if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
-                    return "custom"
-
-            return ""
+            return _named_custom_provider_slug_for_base_url(
+                base_url, cfg, model_id=default_model
+            )
 
         def _models_endpoint_for_base_url(base_url: str) -> str:
             base = str(base_url or "").strip().rstrip("/")
@@ -10371,7 +11608,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             little smaller, whereas under-counting would over-spend the budget.
             """
             count = 1 if cfg_base_url else 0
-            custom_providers_cfg = cfg.get("custom_providers", [])
+            custom_providers_cfg = _custom_provider_entries(cfg, for_catalog=True)
             if isinstance(custom_providers_cfg, list):
                 for entry in custom_providers_cfg:
                     if not isinstance(entry, dict):
@@ -10379,7 +11616,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not (entry.get("name") or "").strip():
                         continue
                     configured_models = entry.get("models")
-                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                    if (isinstance(configured_models, (dict, list)) and len(configured_models) > 0
+                            and not _provider_models_are_discovered_catalog(entry)):
                         continue
                     count += 1
             # The LM Studio provider-group branch re-probes the same
@@ -10413,6 +11651,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
         auto_detected_models_by_provider: dict[str, list[dict]] = {}
+        _active_probe_owner = None
         if cfg_base_url:
             base_url = cfg_base_url.strip()
             configured_provider = _configured_provider_for_base_url(base_url)
@@ -10472,7 +11711,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         break
 
             _trusted_custom_bases: list[object] = [cfg_base_url]
-            _custom_providers_for_trust = cfg.get("custom_providers", [])
+            _custom_providers_for_trust = _custom_provider_entries(cfg)
             if isinstance(_custom_providers_for_trust, list):
                 _trusted_custom_bases.extend(
                     _cp.get("base_url")
@@ -10491,8 +11730,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider_key = provider.lower()
                 auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
                 detected_providers.add(provider_key)
+            _active_probe_owner = (provider.lower(), str(api_key or "").strip())
 
-        _custom_providers_cfg = cfg.get("custom_providers", [])
+        _custom_providers_cfg = _custom_provider_entries(cfg, for_catalog=True)
         _named_custom_groups: dict = {}
         _named_custom_errors: dict[str, dict] = {}
         if isinstance(_custom_providers_cfg, list):
@@ -10503,14 +11743,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _cp_name = (_cp.get("name") or "").strip()
                 _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
-                    _named_custom_groups[_slug] = (_cp_name, [])
+                    _named_custom_groups[_slug] = (_cp.get("display_name") or _cp_name, [])
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
-                _cp_api_key = str(_cp.get("api_key") or "").strip()
-                if not _cp_api_key:
-                    _cp_key_env = str(_cp.get("key_env") or "").strip()
-                    if _cp_key_env:
-                        _cp_api_key = _thread_local_env_value(_cp_key_env).strip()
+                _cp_api_key = _resolve_custom_record_key(
+                    _cp.get("api_key"), _cp.get("key_env"), _slug,
+                ) or ""
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
                     try:
@@ -10540,7 +11778,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cp_has_configured_models = (
                         isinstance(_cp_configured_models, (dict, list))
                         and len(_cp_configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(_cp)
                     )
+                    if (
+                        _active_probe_owner
+                        and _active_probe_owner[0] == _slug
+                        and str(_cp_api_key or "").strip() != _active_probe_owner[1]
+                    ):
+                        # #7176: a shared-URL entry whose credential (even none)
+                        # differs must not inherit the active probe's catalog.
+                        auto_detected_models_by_provider.pop(_slug, None)
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
                     if _cp_has_configured_models:
@@ -10580,6 +11827,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
 
                 # Collect configured model IDs as a fallback/sticky entry after live discovery.
+                _cp_labels = _configured_model_explicit_labels(_cp.get("models"))
                 _cp_model_ids: list[str] = []
                 _cp_model = _cp.get("model", "")
                 if _cp_model:
@@ -10591,7 +11839,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
                     if _cp_model and _dedup_key not in _seen_custom_ids:
-                        _cp_label = _get_label_for_model(_cp_model, [])
+                        _cp_label = _cp_labels.get(_cp_model) or _get_label_for_model(_cp_model, [])
                         _seen_custom_ids.add(_dedup_key)
                         if _slug:
                             detected_providers.add(_slug)
@@ -10620,7 +11868,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
-        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(
+            cfg_base_url, cfg, model_id=default_model
+        )
         if _base_matched_named_slug and _named_custom_slugs:
             for _pid in list(detected_providers):
                 _pid_norm = str(_pid or "").strip().lower()
@@ -10636,13 +11886,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 configured_providers.add(active_provider)
             cfg_providers = cfg.get("providers", {})
             if isinstance(cfg_providers, dict):
-                # Canonicalise here too — same rationale as #1568 detection
-                # path. Without this, only_show_configured mode could
-                # exclude detected ``opencode-go`` because configured_providers
-                # only has the underscore-variant key from config.yaml.
-                configured_providers.update(
-                    _canonicalise_provider_id(k) or k for k in cfg_providers.keys()
-                )
+                # Native keys use the same stable identity as the read view;
+                # built-in/plugin aliases retain their existing canonical ids.
+                # Scalar siblings such as only_configured are settings, not ids.
+                for key, value in cfg_providers.items():
+                    if _is_native_custom_provider_key(key):
+                        if isinstance(value, dict):
+                            configured_providers.add(_custom_provider_slug_from_name(key))
+                    else:
+                        configured_providers.add(_canonicalise_provider_id(key) or key)
             # Only show providers that are both detected and configured
             detected_providers = detected_providers.intersection(configured_providers)
 
@@ -11920,10 +13172,15 @@ def _models_disk_cache_built_at(cache_path: Path) -> float | None:
     Returns None for caches written before the stamp existed (their freshness
     falls back to file mtime), future-stamped caches, and any unreadable/unparseable
     payload, so the freshness decision never hard-fails on a malformed cache.
+
+    Goes through ``_read_models_cache_disk_payload`` so the parse is memoised:
+    this is the first reader on the session-visit path, and the loaders that
+    follow it in the same call reuse the parse rather than re-reading the file.
     """
     try:
-        with open(cache_path, encoding="utf-8") as f:
-            payload = json.load(f)
+        payload = _read_models_cache_disk_payload(cache_path)
+        if not isinstance(payload, dict):
+            return None
         built_at = payload.get("_built_at")
         if isinstance(built_at, (int, float)) and math.isfinite(built_at) and 0 < built_at <= time.time():
             return float(built_at)
@@ -12066,6 +13323,17 @@ def get_available_models_for_session_visit() -> dict:
             cached = _get_fresh_memory_models_cache(now_mono)
             if cached is not None:
                 _mark("memory_cache_hit")
+                # The freshness precheck above parsed the durable cache into
+                # the one-slot parse memo, but this visit is served from
+                # memory and never reaches the loader that would consume it.
+                # Drop the entry so the memo cannot keep a whole parsed
+                # catalog resident (2.2 MB at 5000 models) past the visit
+                # that produced it, and so an unrelated later read cannot
+                # consume a parse this visit abandoned.
+                #
+                # The memo lock is a leaf, so taking it under the catalog lock
+                # cannot invert the commit -> catalog order.
+                _clear_models_disk_payload_memo()
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
         _mark("memory_cache_miss_loading_disk")
@@ -13207,6 +14475,19 @@ def _clear_thread_env():
 SESSION_AGENT_LOCKS = weakref.WeakValueDictionary()
 SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
+# Per-session lock for share create/revoke only (#8255 review). Kept separate from
+# the agent-turn lock on purpose: the agent lock is held across a turn's retry and
+# credential refresh, so coordinating shares on it would make a revoke wait for a
+# whole agent operation, and a create would block the streaming worker while it
+# redacts and embeds a large snapshot. This lock covers token resolution, the
+# snapshot write/mark and the token persist, nothing else.
+SHARE_SESSION_LOCKS = weakref.WeakValueDictionary()
+SHARE_SESSION_LOCKS_LOCK = threading.Lock()
+
+# A share call waits at most this long for another share call on the same session
+# (the repo's other handlers use the same bound and answer 503 instead of hanging).
+SHARE_SESSION_LOCK_TIMEOUT_SECONDS = 5.0
+
 
 def _get_session_agent_lock(session_id: str) -> threading.Lock:
     """Return the per-session Lock used to serialize all Session mutations.
@@ -13230,6 +14511,23 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             SESSION_AGENT_LOCKS[session_id] = lock
+        return lock
+
+
+def _get_session_share_lock(session_id: str) -> threading.Lock:
+    """Return the per-session Lock that serializes share create/revoke (#8255).
+
+    Deliberately separate from ``_get_session_agent_lock``: the agent lock is held
+    across an agent turn (including its credential-refresh retry), so coordinating
+    shares on it would make a revoke wait for a whole agent operation and a create
+    would lock the streaming worker out while it redacts a large snapshot. Weak
+    registry, same lifecycle as the agent locks.
+    """
+    with SHARE_SESSION_LOCKS_LOCK:
+        lock = SHARE_SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            SHARE_SESSION_LOCKS[session_id] = lock
         return lock
 
 
@@ -13297,6 +14595,14 @@ _SETTINGS_DEFAULTS = {
     "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
+    # Run-journal retention caps (#7613). 0 disables an individual cap. The sweep
+    # ARCHIVES eligible runs (compresses + moves them to _run_journal_archive/)
+    # rather than deleting, so these caps only decide when a run leaves the live
+    # directory; reads fall back to the archive. Defaults mirror api.run_journal.
+    "run_journal_retention_ttl_days": 14,  # archived once the run file is N days old
+    "run_journal_retention_max_runs_per_session": 40,  # keep at most N newest runs live per session
+    "run_journal_retention_max_bytes_per_session": 256 * 1024 * 1024,  # per-session live byte budget
+    "run_journal_archive_ttl_days": 0,  # delete ARCHIVES older than N days; 0 = never (keep forever)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
     "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
@@ -13342,6 +14648,7 @@ _SETTINGS_DEFAULTS = {
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # legacy compatibility; Worklog renderer remains enabled
+    "screen_reader_mode": False,  # opt-in screen reader optimizations (currently: xterm.js screenReaderMode)
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
     "workspace_todos_tab": False,  # show a Todos tab in the workspace panel (right side)
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
@@ -13619,10 +14926,14 @@ _SETTINGS_INT_RANGES = {
     "inflight_state_max_json_chars": (100000, 4000000),
     "structured_code_auto_tree_lines": (1, 1000),
     "voice_silence_ms": (200, 60000),
+    "run_journal_retention_max_runs_per_session": (0, 100_000),
+    "run_journal_retention_max_bytes_per_session": (0, 100 * 1024 * 1024 * 1024),
 }
 _SETTINGS_FLOAT_RANGES = {
     "tts_rate": (0.5, 2.0),
     "tts_pitch": (0.0, 2.0),
+    "run_journal_retention_ttl_days": (0.0, 3650.0),
+    "run_journal_archive_ttl_days": (0.0, 3650.0),
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
@@ -13656,6 +14967,7 @@ _SETTINGS_BOOL_KEYS = {
     "rtl",
     "notifications_enabled",
     "show_thinking",
+    "screen_reader_mode",
     "terminal_auto_expand_on_output",
     "workspace_todos_tab",
     "api_redact_enabled",

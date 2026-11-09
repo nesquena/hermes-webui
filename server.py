@@ -108,6 +108,7 @@ activate_managed_agent()
 logger = logging.getLogger(__name__)
 
 from api.request_logging import emit_request_log
+from api.routes import request_log_forwarded_fields  # #7863
 from api.auth import check_auth_or_close, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
@@ -119,6 +120,7 @@ from api.helpers import (
 )
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers, fold_api_path
+from api.run_drain import RunAdmissionClosed, ShutdownDrain, send_admission_closed
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
@@ -362,11 +364,6 @@ class Handler(BaseHTTPRequestHandler):
                 remote = str(self.client_address[0])
         except Exception:
             remote = '-'
-        forwarded_for = None
-        try:
-            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
-        except Exception:
-            forwarded_for = None
         record_data = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,
@@ -375,8 +372,12 @@ class Handler(BaseHTTPRequestHandler):
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         }
-        if forwarded_for:
-            record_data['forwarded_for'] = forwarded_for
+        try:
+            # #7863/#7864: trusted-proxy resolution + a per-record flag when a
+            # forwarded header was dropped, so the loss is visible per request.
+            record_data.update(request_log_forwarded_fields(self))
+        except Exception:
+            pass
         record = _json.dumps(record_data)
         self._safe_webui_print(f'[webui] {record}')
 
@@ -395,6 +396,8 @@ class Handler(BaseHTTPRequestHandler):
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
+        except RunAdmissionClosed as exc:  # #7293: a restart/drain closed run admission
+            send_admission_closed(self, exc)
         except Exception:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
@@ -421,6 +424,8 @@ class Handler(BaseHTTPRequestHandler):
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
+        except RunAdmissionClosed as exc:  # #7293: a restart/drain closed run admission
+            send_admission_closed(self, exc)
         except Exception:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
@@ -602,7 +607,7 @@ def main() -> None:
         print('[ok] Running within container.', flush=True)
 
     # Security: warn if binding non-loopback without authentication
-    from api.auth import get_oidc_startup_warning, is_auth_enabled
+    from api.auth import get_oidc_startup_warning, is_auth_enabled, print_startup_warnings
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
         print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
@@ -615,9 +620,9 @@ def main() -> None:
         print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
         print(f'        enable authentication.', flush=True)
 
-    oidc_startup_warning = get_oidc_startup_warning()
-    if oidc_startup_warning:
-        print(f'[!!] WARNING: {oidc_startup_warning}', flush=True)
+    if (w := get_oidc_startup_warning()):
+        print(f'[!!] WARNING: {w}', flush=True)
+    print_startup_warnings()  # #7864 r2: no-op TRUST_FORWARDED_FOR etc.
 
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:
@@ -660,6 +665,7 @@ def main() -> None:
         from api.background_process import start_drain_thread
         if start_drain_thread():
             print('[ok] bg_task_complete drain thread started', flush=True)
+        from api.gateway_delegation_wakeup import start_gateway_delegation_poller; start_gateway_delegation_poller()
     except Exception as e:
         print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
 
@@ -700,34 +706,18 @@ def main() -> None:
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
 
-    # ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
-    # terminates the process WITHOUT unwinding the try/finally around
-    # serve_forever(), so drain_all_on_shutdown() (which flushes in-flight
-    # fire-and-forget memory commits) would never run on the normal managed
-    # stop. Install a handler that requests an orderly shutdown so
-    # serve_forever() returns and the existing `finally` block drains cleanly.
-    #
-    # httpd.shutdown() blocks until serve_forever() has exited and MUST NOT be
-    # called from the thread running serve_forever() (it would deadlock), so we
-    # dispatch it from a short-lived helper thread. The handler is idempotent
-    # and guards against double-shutdown (e.g. repeated SIGTERM/SIGINT).
-    _shutdown_requested = threading.Event()
-
-    def _request_shutdown(signum, _frame):
-        if _shutdown_requested.is_set():
-            return
-        _shutdown_requested.set()
-        threading.Thread(
-            target=httpd.shutdown,
-            name="webui-sigterm-shutdown",
-            daemon=True,
-        ).start()
+    # Stop signals (#7293): the first SIGTERM/SIGINT starts ONE bounded run drain
+    # (see api/run_drain.ShutdownDrain), then httpd.shutdown() lets serve_forever()
+    # return so the `finally` below runs drain_all_on_shutdown(); a second signal
+    # escalates. httpd.shutdown() must not run on the serve_forever() thread.
+    shutdown_drain = ShutdownDrain(httpd.shutdown)
 
     try:
-        signal.signal(signal.SIGTERM, _request_shutdown)
-        signal.signal(signal.SIGINT, _request_shutdown)  # Ctrl-C / ctl.sh daemons (#7078)
+        signal.signal(signal.SIGTERM, shutdown_drain.handle_signal)
+        signal.signal(signal.SIGINT, shutdown_drain.handle_signal)  # Ctrl-C / ctl.sh daemons (#7078)
     except (ValueError, OSError):
         logger.debug("Could not install shutdown signal handlers", exc_info=True)
+    print(f'  Stop drain budget: {shutdown_drain.budget_seconds:g}s (HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS)', flush=True)
 
     try:
         httpd.serve_forever()
@@ -745,8 +735,8 @@ def main() -> None:
         except Exception:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
         try:
-            from api.background_process import stop_drain_thread
-            stop_drain_thread()
+            from api.gateway_delegation_wakeup import stop_gateway_delegation_poller; stop_gateway_delegation_poller()
+            from api.background_process import stop_drain_thread; stop_drain_thread()
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
         try:
