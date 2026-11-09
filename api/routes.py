@@ -9663,6 +9663,7 @@ def _context_length_lookup_inputs_for_model(
     fallback_api_key: object = None,
     fallback_base_url: str | None = None,
     fallback_provider: str | None = None,
+    caller_key_only: bool = False,
 ) -> _ContextLengthLookupInputs:
     """Return the effective metadata resolver inputs for a WebUI model.
 
@@ -9670,6 +9671,10 @@ def _context_length_lookup_inputs_for_model(
     ``config_context_length`` and custom-provider overrides, but only when the
     matching base URL is supplied. WebUI also owns ``providers.<provider>.models``
     overrides, so normalize those here and keep route/session-save/SSE aligned.
+
+    ``caller_key_only``: the caller already decided the key (GET /api/session's
+    chat-route lookup, #8928): use ``api_key`` or no key, and never select one
+    from config. Every other output (URL fill, context overrides) is unchanged.
     """
     model_for_lookup = str(model or "").strip()
     if not model_for_lookup:
@@ -9799,7 +9804,7 @@ def _context_length_lookup_inputs_for_model(
                 effective_provider = entry_slug
             if not effective_base_url and entry_base:
                 effective_base_url = entry_base
-            if not effective_api_key:
+            if not effective_api_key and not caller_key_only:
                 effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider or entry_slug)
                 effective_api_key_owned = _context_lookup_owned_origins(*_context_lookup_record_urls(entry))
             custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
@@ -9819,7 +9824,7 @@ def _context_length_lookup_inputs_for_model(
         ):
             global_context_length = _positive_context_length(raw_cfg_ctx)
 
-    if not effective_api_key:
+    if not effective_api_key and not caller_key_only:
         effective_api_key, effective_api_key_owned = _context_length_config_api_key_and_owner(effective_provider, cfg)
 
     # #8822: a key goes only where its own source sends it. The Agent contacts the
@@ -10900,6 +10905,7 @@ def _resolve_context_length_for_session_model(
     *,
     base_url: str | None = None,
     api_key: str | None = None,
+    caller_key_only: bool = False,
 ) -> int:
     """Best-effort current context window for a session model.
 
@@ -10921,6 +10927,7 @@ def _resolve_context_length_for_session_model(
             base_url=base_url,
             api_key=api_key,
             cfg=_cfg_for_cl if isinstance(_cfg_for_cl, dict) else {},
+            caller_key_only=caller_key_only,
         )
         try:
             return _get_cl(
@@ -10947,6 +10954,9 @@ def _session_context_length_lookup_state(
     This stays config-based and side-effect-free for GET /api/session. It avoids
     a live provider catalog rebuild while still aligning the reload path with
     the base URL / custom-provider key shape used by streaming saves. (#4248)
+    For a named custom provider the URL and key are the chat route's (#8928), and
+    the key is final: pass ``caller_key_only`` for that provider (see
+    :func:`_session_context_lookup_uses_chat_route`).
     """
     model_for_lookup = str(model or "").strip()
     provider_for_lookup = str(provider or "").strip()
@@ -10964,21 +10974,56 @@ def _session_context_length_lookup_state(
         base_url_for_lookup = str(resolved_base_url or "").strip()
     except Exception:
         logger.debug("session context-length lookup state resolution failed", exc_info=True)
-    if provider_for_lookup.startswith("custom:"):
+    if _session_context_lookup_uses_chat_route(provider_for_lookup):
+        # #8928: ask the host the session chats with, with the chat's key. For a
+        # named custom provider WebUI's own half of the chat's routing chain decides
+        # both (the merge api/streaming.py's _resolve_runtime_connection_bundle
+        # applies, then raise_for_custom_provider_route). lookup_only keeps it a
+        # read: config-declared credentials only, no credential pool or key_cmd, a
+        # host-gated env key never sent (only read, by the keyless declaration),
+        # and the Agent's resolve_runtime_provider is never called
+        # (it can select or refresh pool entries, refresh OAuth credentials and
+        # probe a local server). The key is the route's or none: a session that
+        # can't chat, or a keyless record (the merge sent the no-auth placeholder),
+        # looks up without one, and the caller passes caller_key_only so config
+        # selection can't add one. Keylessness is the selected record's own verdict
+        # (the merge's only gate on the placeholder), never a string comparison: a
+        # key the user configured as "dummy-key" is still the chat's key.
+        api_key_for_lookup = ""
         try:
-            from api.config import resolve_custom_provider_connection
+            from api.config import (
+                _custom_provider_runtime_bundle_with_provenance,
+                raise_for_custom_provider_route,
+                resolve_custom_provider_connection,
+            )
 
-            custom_key, custom_base = resolve_custom_provider_connection(provider_for_lookup)
-            custom_base = str(custom_base or "").strip()
-            if not base_url_for_lookup:
-                base_url_for_lookup = custom_base
-            # #8822: the record's key owns only the record's own URL. When the model
-            # block overrides the URL, the lookup selects the key for that URL itself.
-            if _context_lookup_origin(base_url_for_lookup) == _context_lookup_origin(custom_base):
-                api_key_for_lookup = str(custom_key or "").strip()
+            route, custom = _custom_provider_runtime_bundle_with_provenance(
+                provider_for_lookup,
+                None,
+                base_url_for_lookup or None,
+                {},
+                lookup_provider=provider_for_lookup,
+                connection_resolver=resolve_custom_provider_connection,
+                lookup_only=True,
+            )
+            raise_for_custom_provider_route(route)
+            route_url = str(route.get("base_url") or "").strip()
+            if route_url:
+                base_url_for_lookup = route_url
+            route_key = route.get("api_key")
+            keyless = bool(isinstance(custom, dict) and custom.get("keyless"))
+            if isinstance(route_key, str) and not keyless:
+                route_key = route_key.strip()
+                if route_key:
+                    api_key_for_lookup = route_key
         except Exception:
-            logger.debug("custom provider context-length connection resolution failed", exc_info=True)
+            logger.debug("session context-length lookup: the session's chat route is unavailable", exc_info=True)
     return model_for_lookup, provider_for_lookup, base_url_for_lookup, api_key_for_lookup
+
+
+def _session_context_lookup_uses_chat_route(provider: str | None) -> bool:
+    """True when GET /api/session's lookup takes its URL and key from the chat route (#8928)."""
+    return str(provider or "").strip().startswith("custom:")
 
 
 def _session_model_identity_matches(
@@ -17474,6 +17519,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 _provider_for_lookup,
                 base_url=_base_url_for_lookup,
                 api_key=_api_key_for_lookup,
+                caller_key_only=_session_context_lookup_uses_chat_route(_provider_for_lookup),
             )
             _model_changed_for_context = not _session_model_identity_matches(
                 _stored_model_for_lookup,

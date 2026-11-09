@@ -219,15 +219,20 @@ def _session_state(cfg, provider, monkeypatch):
     return base_url, api_key
 
 
-@pytest.mark.parametrize("cfg", [
-    {"model": {"provider": "custom:my-proxy", "base_url": A}, "providers": {"custom:my-proxy": {"api_key": "KB"}}},
-    {"model": {"provider": "custom:my-proxy", "base_url": A},
-     "providers": {"custom:my-proxy": {"base_url": B, "api_key": "KB"}}},
-    {"model": {"provider": "custom:my-proxy", "base_url": A},
-     "custom_providers": [{"name": "my-proxy", "base_url": L, "api_key": "KL"}]},
+@pytest.mark.parametrize("cfg,expected", [
+    # The session can't chat (the record declares no endpoint): no key anywhere.
+    ({"model": {"provider": "custom:my-proxy", "base_url": A}, "providers": {"custom:my-proxy": {"api_key": "KB"}}},
+     (A, "")),
+    # #8928: the lookup asks the host the session chats with (the record's own URL), with the record's key.
+    ({"model": {"provider": "custom:my-proxy", "base_url": A},
+      "providers": {"custom:my-proxy": {"base_url": B, "api_key": "KB"}}}, (B, "KB")),
+    ({"model": {"provider": "custom:my-proxy", "base_url": A},
+      "custom_providers": [{"name": "my-proxy", "base_url": L, "api_key": "KL"}]}, (L, "KL")),
 ], ids=["record-key-only", "record-url", "legacy-entry"])
-def test_a_session_reload_never_pairs_a_records_key_with_the_model_url(cfg, monkeypatch):
-    assert _session_state(cfg, "custom:my-proxy", monkeypatch) == (A, "")
+def test_a_session_reload_never_pairs_a_records_key_with_the_model_url(cfg, expected, monkeypatch):
+    got = _session_state(cfg, "custom:my-proxy", monkeypatch)
+    assert got == expected
+    assert got[0] != A or got[1] == "", "a record's key never goes to the model block's URL"
 
 
 def test_a_session_reload_keeps_a_records_key_on_its_own_url(monkeypatch):
