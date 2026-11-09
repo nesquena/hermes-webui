@@ -6,11 +6,12 @@ Three follow-ups from the review of #8935, measured against the chat's own route
    for a session on it, custom or built-in. So it is no key source for its own session, and no same-value holder
    for another session (#8918). A legacy ``custom_providers`` entry is different: the Agent's legacy view still
    routes one that's switched off, and the chat still sends its key, so it stays a source and a holder.
-2. **A record's key reference spelled ``api_key_env``** is read where the chat reads it: on the records WebUI's own
-   merge serves for a named ``custom:<name>`` route, which respells it to ``key_env`` (a ``custom:`` key, the generic
-   ``custom`` record, a keyed record whose key is no built-in provider). Never on a built-in provider's record: the
-   chat gets an AuthError there and sends no key. On a legacy entry or the model block the lookup reads ``key_env``
-   alone, as the merge does (#8959).
+2. **A record's key reference spelled ``api_key_env``** is read on the two record kinds WebUI's own merge serves and
+   respells to ``key_env`` for the chat: a ``custom:<name>`` key and the generic ``custom`` record. Every other record
+   keeps exp-v0.52.660's behaviour (unread): a built-in provider's record (the chat gets an AuthError and sends no key)
+   and a raw-named record (``mylab``, ``tencent-tokenplan``, an alias such as ``grok``, ``auto``), whose use by the
+   chat depends on the Agent's own selection. That sends less than the chat on some, never more (#8963). On a
+   legacy entry or the model block the lookup reads ``key_env`` alone, as the merge does (#8959).
 3. **Pins** for three rules that mutants showed no test held: a legacy holder's ``api`` / ``url`` spellings, a
    model-block ``key_env`` holder, and no same-value grant on the Agent-fallback branch.
 """
@@ -411,17 +412,19 @@ def test_the_generic_custom_record_key_spelled_api_key_env_is_its_own_key(key_in
     assert got.api_key == "K1"
 
 
-def test_a_keyed_custom_record_holding_the_value_under_api_key_env_lends_its_url(key_in_env):
-    # ``providers.myproxy`` is no built-in: the merge serves it for custom:myproxy and respells its api_key_env.
+def test_a_raw_named_record_holding_the_value_under_api_key_env_lends_nothing(key_in_env):
+    # ``providers.myproxy`` is raw-named: its api_key_env stays unread, as on exp-v0.52.660 (#8963).
     cfg = {"model": {"provider": "custom:s", "base_url": U},
            "providers": {"custom:s": {"base_url": U}, "myproxy": {"base_url": U, "api_key_env": VAR}}}
-    assert routes._context_lookup_origin(U) in routes._context_lookup_same_value_origins("K1", cfg)
+    assert routes._context_lookup_origin(U) not in routes._context_lookup_same_value_origins("K1", cfg)
     got = _lookup(cfg, provider="custom:s", api_key="K1")
-    assert (got.base_url, got.api_key) == (U, "K1")
+    assert (got.base_url, got.api_key) == (U, "")
 
 
 @pytest.mark.parametrize("key,reads", [
-    ("custom:h", True), ("Custom:H", True), ("custom", True), ("myproxy", True), ("my_proxy", True),
+    ("custom:h", True), ("Custom:H", True), (" custom:h ", True), ("custom", True), ("Custom", True),
+    ("myproxy", False), ("my_proxy", False), ("My Proxy", False), ("tencent-tokenplan", False), ("tokenplan", False),
+    ("auto", False), ("grok", False), ("ollama", False), ("local", False), ("vllm", False),
     ("openai", False), ("anthropic", False), ("deepseek", False), ("openrouter", False), ("OpenAI", False), ("", False),
     (None, False),
 ])
@@ -498,99 +501,46 @@ def test_the_same_value_grant_does_not_extend_the_fallback_key():
     assert (got.base_url, got.api_key) == (B, "")
 
 
-# ── a built-in the Agent knows and WebUI's tables don't (senior round 5) ─────
+# ── raw-named records: exp-v0.52.660's behaviour, and no Agent call (auditor STB8956D) ──────────
 
 
-def _stand_in_agent(monkeypatch, *, shadowed=None, missing=False, raises=False, no_submodule=False):
-    """A stand-in ``hermes_cli.runtime_provider_custom`` honouring the Agent's contract: the Agent's normaliser
-    (``strip().lower()``, spaces to dashes), then ``_shadowed_by_builtin`` on the normalised name."""
+@pytest.mark.parametrize("key", ["mylab", "My Lab", "tencent-tokenplan", "Tencent-TokenPlan", "tokenhub", "auto",
+                                 "Auto", "grok", "fw", "ollama", "local"])
+@pytest.mark.parametrize("session", ["own", "custom"])
+def test_a_raw_named_record_key_spelled_api_key_env_is_not_sent(key_in_env, key, session):
+    """Senior rounds 5 and 6: whether the chat reads such a record is the Agent's call (its built-in registry,
+    aliases, per-home plugins, ``auto``). The lookup reads none of them, as on exp-v0.52.660."""
+    slug = key.strip().lower().replace(" ", "-")
+    provider = slug if session == "own" else f"custom:{slug}"
+    got = _lookup({"model": {"provider": provider}, "providers": {key: {"base_url": B, "api_key_env": VAR}}},
+                  provider=provider)
+    assert got.api_key == ""
+
+
+def test_a_raw_named_record_literal_key_is_unchanged(key_in_env):
+    """Only the ``api_key_env`` spelling is narrowed: a literal key on a raw-named record for its own session is read,
+    as on exp-v0.52.660."""
+    got = _lookup({"model": {"provider": "mylab"}, "providers": {"mylab": {"base_url": B, "api_key": "KL"}}},
+                  provider="mylab")
+    assert (got.base_url, got.api_key) == (B, "KL")
+
+
+def test_the_rule_never_asks_the_agent(monkeypatch):
+    """No Agent predicate on this path (senior round 6: each call re-parsed the Agent's config, and ``auto`` ran its
+    provider auto-detection). A stand-in Agent records any call; none may happen."""
     import sys
     import types
 
+    calls = []
     pkg = types.ModuleType("hermes_cli")
+    pkg.__path__ = []
     mod = types.ModuleType("hermes_cli.runtime_provider_custom")
-    mod._normalize_custom_provider_name = lambda value: value.strip().lower().replace(" ", "-")
-    seen = []
-    if not missing:
-        def shadowed_by_builtin(name):
-            seen.append(name)
-            if raises:
-                raise RuntimeError("registry unavailable")
-            return name in (shadowed or ())
-        mod._shadowed_by_builtin = shadowed_by_builtin
-    pkg.__path__ = []  # a package: a submodule it lacks is searched for, not found, and raises ImportError
-    monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
-    if no_submodule:  # an Agent without the module (older, or a rename)
-        name = "hermes_cli.runtime_provider_custom"
-
-        class _NoSuchModule:  # ahead of any finder that would locate the installed Agent's copy by name
-            @staticmethod
-            def find_spec(fullname, path=None, target=None):
-                if fullname == name:
-                    raise ModuleNotFoundError(f"No module named {name!r}", name=name)
-                return None
-
-        monkeypatch.delitem(sys.modules, name, raising=False)
-        monkeypatch.setattr(sys, "meta_path", [_NoSuchModule(), *sys.meta_path])
-        return seen
+    mod._shadowed_by_builtin = lambda name: calls.append(("_shadowed_by_builtin", name)) or False
+    mod._normalize_custom_provider_name = lambda value: calls.append(("_normalize", value)) or value
     pkg.runtime_provider_custom = mod
+    monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider_custom", mod)
-    return seen
-
-
-@pytest.mark.parametrize("key", ["zz-agent-builtin", "ZZ-Agent-Builtin", "zz agent builtin"])
-def test_a_record_named_for_a_builtin_only_the_agent_knows_is_not_read(monkeypatch, key):
-    seen = _stand_in_agent(monkeypatch, shadowed={"zz-agent-builtin"})
-    from api import config as api_config
-
-    assert api_config._is_native_custom_provider_key(key)  # WebUI's tables don't know it
-    assert routes._context_lookup_record_reads_api_key_env(key) is False
-    assert seen == ["zz-agent-builtin"]
-
-
-def test_a_record_the_agent_scans_is_still_read(monkeypatch):
-    _stand_in_agent(monkeypatch, shadowed={"zz-agent-builtin"})
-    assert routes._context_lookup_record_reads_api_key_env("myproxy") is True
-    assert routes._context_lookup_record_reads_api_key_env("custom:zz-agent-builtin") is True
-
-
-@pytest.mark.parametrize("how", ["no-submodule", "missing", "raises"])
-def test_an_agent_that_cannot_be_asked_reads_less(monkeypatch, how):
-    _stand_in_agent(monkeypatch, missing=how == "missing", raises=how == "raises", no_submodule=how == "no-submodule")
-    assert routes._context_lookup_record_reads_api_key_env("myproxy") is False
-    assert routes._context_lookup_record_reads_api_key_env("custom:myproxy") is True
-
-
-def test_with_no_agent_webuis_tables_decide(monkeypatch):
-    import sys
-
-    monkeypatch.setitem(sys.modules, "hermes_cli", None)
-    assert routes._context_lookup_record_reads_api_key_env("myproxy") is True
-    assert routes._context_lookup_record_reads_api_key_env("anthropic") is False
-
-
-def test_a_builtin_only_the_agent_knows_sends_no_record_key(monkeypatch, key_in_env):
-    _stand_in_agent(monkeypatch, shadowed={"zz-agent-builtin"})
-    cfg = {"model": {"provider": "zz-agent-builtin"},
-           "providers": {"zz-agent-builtin": {"base_url": B, "api_key_env": VAR}}}
-    assert _lookup(cfg, provider="zz-agent-builtin").api_key == ""
-
-
-@pytest.mark.parametrize("key", ["tencent-tokenplan", "Tencent-TokenPlan"])
-def test_the_installed_agents_tencent_tokenplan_record_key_is_not_sent(key, key_in_env):
-    """Senior round 5, on the installed Agent: the chat for ``tencent-tokenplan`` takes the Agent's built-in route
-    and never reads this record's ``api_key_env``; WebUI's tables don't list the id. The ``tokenplan`` alias record
-    is the user's target, which the chat reads, so it stays read."""
-    agent_custom = pytest.importorskip("hermes_cli.runtime_provider_custom")
-    if not agent_custom._shadowed_by_builtin("tencent-tokenplan"):
-        pytest.skip("this Agent has no tencent-tokenplan built-in")
-    cfg = {"model": {"provider": "tencent-tokenplan"}, "providers": {key: {"base_url": B, "api_key_env": VAR}}}
-    assert _lookup(cfg, provider="tencent-tokenplan").api_key == ""
-    assert routes._context_lookup_record_reads_api_key_env("tokenplan") is True
-
-
-def test_the_agent_contract_this_lookup_asks():
-    agent_custom = pytest.importorskip("hermes_cli.runtime_provider_custom")
-    assert agent_custom._normalize_custom_provider_name(" My Proxy ") == "my-proxy"
-    assert agent_custom._shadowed_by_builtin("custom") is False
-    assert agent_custom._shadowed_by_builtin("anthropic") is True
+    for key, reads in (("custom:h", True), ("custom", True), ("mylab", False), ("tencent-tokenplan", False),
+                       ("auto", False)):
+        assert routes._context_lookup_record_reads_api_key_env(key) is reads
+    assert calls == []
