@@ -7547,6 +7547,140 @@ def _same_json_value(a, b) -> bool:
         return a == b
 
 
+def _object_has_env_ref(obj) -> bool:
+    """True when *obj* contains at least one ``${...}`` reference anywhere in its structure."""
+    if isinstance(obj, str):
+        return _ENV_REF_PATTERN.search(obj) is not None
+    if isinstance(obj, dict):
+        return any(_object_has_env_ref(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_object_has_env_ref(item) for item in obj)
+    return False
+
+
+def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
+    """Match rows between *raw_list* and *new_list* using the correspondence ladder (#8740 CR).
+
+    Ladder order:
+    1. Scan: if *raw_list* contains no ``${...}`` references anywhere, return *new_list* as given.
+    2. Ladder for lists with references (each submitted row matches at most one raw row):
+       a. Identity: unique scalar key present across all rows on both sides, checked
+          in fixed order ('id', 'name', 'key').
+       b. Unique expanded value: submitted row is JSON-equal to the expansion of exactly
+          one raw row (_expand_env_vars + _same_json_value).
+       c. Unique shape: dict against dict with identical key sets and all non-reference
+          leaves equal, matching exactly one raw row.
+    3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
+    4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
+       rows disputing the same raw row, or non-unique match in a list with references) raises
+       ValueError before writing so the on-disk config remains intact.
+    5. Leaves within a matched row are resolved via _preserve_env_refs_in_object.
+    """
+    if not _object_has_env_ref(raw_list):
+        return new_list
+
+    if not isinstance(new_list, list) or not raw_list:
+        return new_list
+    if not new_list:
+        return []
+
+    ambiguous_err = (
+        "advanced model options: extra_body list rows could not be matched unambiguously; "
+        "structural edit rejected to avoid assigning an environment reference to the wrong row"
+    )
+
+    # Ladder step 2.a: Identity
+    chosen_key = None
+    for cand in ("id", "name", "key"):
+        raw_ok = all(
+            isinstance(r, dict) and cand in r and type(r[cand]) in (str, int, bool)
+            for r in raw_list
+        )
+        new_ok = all(
+            isinstance(n, dict) and cand in n and type(n[cand]) in (str, int, bool)
+            for n in new_list
+        )
+        if raw_ok and new_ok:
+            raw_vals = [r[cand] for r in raw_list]
+            new_vals = [n[cand] for n in new_list]
+            raw_unique = len(raw_vals) == len({json.dumps(v, sort_keys=True) for v in raw_vals})
+            new_unique = len(new_vals) == len({json.dumps(v, sort_keys=True) for v in new_vals})
+            if raw_unique and new_unique:
+                chosen_key = cand
+                break
+
+    if chosen_key is not None:
+        raw_by_key = {}
+        for idx, r in enumerate(raw_list):
+            raw_by_key[json.dumps(r[chosen_key], sort_keys=True)] = idx
+
+        result = []
+        for new_item in new_list:
+            k_json = json.dumps(new_item[chosen_key], sort_keys=True)
+            if k_json in raw_by_key:
+                raw_idx = raw_by_key[k_json]
+                result.append(_preserve_env_refs_in_object(raw_list[raw_idx], new_item))
+            else:
+                result.append(new_item)
+        return result
+
+    # Ladder step 2.b & 2.c: Row-level matching
+    def _matches_shape(raw_item, new_item) -> bool:
+        if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
+            return False
+        if set(raw_item.keys()) != set(new_item.keys()):
+            return False
+        has_non_ref_leaf = False
+        for k in raw_item:
+            if not _object_has_env_ref(raw_item[k]):
+                has_non_ref_leaf = True
+                if not _same_json_value(raw_item[k], new_item[k]):
+                    return False
+        return has_non_ref_leaf
+
+    matches: dict[int, int | None] = {}
+    for new_idx, new_item in enumerate(new_list):
+        # 2.b: Expanded value
+        cands_2b = [
+            raw_idx
+            for raw_idx, raw_item in enumerate(raw_list)
+            if _same_json_value(new_item, _expand_env_vars(raw_item))
+        ]
+        if len(cands_2b) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2b) == 1:
+            matches[new_idx] = cands_2b[0]
+            continue
+
+        # 2.c: Shape
+        cands_2c = [
+            raw_idx
+            for raw_idx, raw_item in enumerate(raw_list)
+            if _matches_shape(raw_item, new_item)
+        ]
+        if len(cands_2c) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2c) == 1:
+            matches[new_idx] = cands_2c[0]
+            continue
+
+        matches[new_idx] = None
+
+    # Check for two submitted rows disputing the same raw row
+    claimed_raw = [r for r in matches.values() if r is not None]
+    if len(claimed_raw) != len(set(claimed_raw)):
+        raise ValueError(ambiguous_err)
+
+    result = []
+    for new_idx, new_item in enumerate(new_list):
+        raw_idx = matches[new_idx]
+        if raw_idx is not None:
+            result.append(_preserve_env_refs_in_object(raw_list[raw_idx], new_item))
+        else:
+            result.append(new_item)
+    return result
+
+
 def _preserve_env_refs_in_object(raw_value, new_value):
     """Return *new_value* with every ``${VAR}`` leaf the edit left unchanged restored (#8700).
 
@@ -7557,9 +7691,9 @@ def _preserve_env_refs_in_object(raw_value, new_value):
     original, so an unrelated edit no longer bakes the referenced values in.
 
     Structure follows *new_value* — a key the edit removed stays removed, a list
-    the edit resized is written as given (positional refs can't be trusted) —
-    and a leaf is kept only through ``_preserve_env_ref``, i.e. when its
-    reference still expands to the submitted value.
+    the edit resized is matched via the ladder in ``_preserve_env_refs_in_list``
+    (#8740 CR) — and a leaf is kept only through ``_preserve_env_ref``, i.e. when
+    its reference still expands to the submitted value.
     """
     if isinstance(raw_value, dict) and isinstance(new_value, dict):
         return {
@@ -7570,15 +7704,8 @@ def _preserve_env_refs_in_object(raw_value, new_value):
             )
             for key, value in new_value.items()
         }
-    if (
-        isinstance(raw_value, list)
-        and isinstance(new_value, list)
-        and len(raw_value) == len(new_value)
-    ):
-        return [
-            _preserve_env_refs_in_object(raw_item, item)
-            for raw_item, item in zip(raw_value, new_value)
-        ]
+    if isinstance(raw_value, list) and isinstance(new_value, list):
+        return _preserve_env_refs_in_list(raw_value, new_value)
     if isinstance(raw_value, str) and isinstance(new_value, str):
         return _preserve_env_ref(raw_value, new_value)
     return new_value

@@ -349,6 +349,268 @@ def test_extra_body_without_references_is_written_unchanged(cfg_path):
     assert _raw(cfg_path)["model"]["extra_body"] == {"temperature": 2, "top_p": 0.9}
 
 
+# ── Extra body list row matching (#8740 CR) ──────────────────────────────────
+
+
+def test_extra_body_reordered_rows_follow_their_identity(cfg_path, monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_A", "val-alpha-123")
+    monkeypatch.setenv("HERMES_TEST_B", "val-beta-456")
+
+    raw_eb = {
+        "items": [
+            {"name": "alpha", "token": "${HERMES_TEST_A}"},
+            {"name": "beta", "token": "${HERMES_TEST_B}"},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    reordered = {
+        "items": [
+            {"name": "beta", "token": "val-beta-456"},
+            {"name": "alpha", "token": "val-alpha-123"},
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": reordered},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["items"]
+    assert written[0] == {"name": "beta", "token": "${HERMES_TEST_B}"}
+    assert written[1] == {"name": "alpha", "token": "${HERMES_TEST_A}"}
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "val-alpha-123" not in text
+    assert "val-beta-456" not in text
+    _assert_no_secret(cfg_path, "POST /api/model/set reordered extra_body list")
+
+
+def test_auxiliary_extra_body_reordered_rows_follow_their_identity(cfg_path, monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_A", "val-alpha-123")
+    monkeypatch.setenv("HERMES_TEST_B", "val-beta-456")
+
+    raw_eb = {
+        "items": [
+            {"name": "alpha", "token": "${HERMES_TEST_A}"},
+            {"name": "beta", "token": "${HERMES_TEST_B}"},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    reordered = {
+        "items": [
+            {"name": "beta", "token": "val-beta-456"},
+            {"name": "alpha", "token": "val-alpha-123"},
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": reordered},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["items"]
+    assert written[0] == {"name": "beta", "token": "${HERMES_TEST_B}"}
+    assert written[1] == {"name": "alpha", "token": "${HERMES_TEST_A}"}
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "val-alpha-123" not in text
+    assert "val-beta-456" not in text
+    _assert_no_secret(cfg_path, "POST /api/model/set auxiliary reordered extra_body list")
+
+
+def test_extra_body_reordered_anonymous_rows_reject_without_writing(cfg_path, monkeypatch):
+    synth_common = "synth-common-val-999"
+    monkeypatch.setenv("HERMES_TEST_A", synth_common)
+    monkeypatch.setenv("HERMES_TEST_B", synth_common)
+
+    raw_eb = {
+        "temperature": 1,
+        "items": [
+            {"token": "${HERMES_TEST_A}"},
+            {"token": "${HERMES_TEST_B}"},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
+
+    reordered = {
+        "temperature": 2,
+        "items": [
+            {"token": synth_common},
+            {"token": synth_common},
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": reordered},
+        },
+    )
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced model options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
+
+
+def test_extra_body_appended_row_keeps_surviving_references(cfg_path, monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_A", "val-alpha-123")
+    monkeypatch.setenv("HERMES_TEST_B", "val-beta-456")
+
+    raw_eb = {
+        "items": [
+            {"name": "alpha", "token": "${HERMES_TEST_A}"},
+            {"name": "beta", "token": "${HERMES_TEST_B}"},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    appended = {
+        "items": [
+            {"name": "alpha", "token": "val-alpha-123"},
+            {"name": "beta", "token": "val-beta-456"},
+            {"name": "gamma", "token": "literal-xyz"},
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": appended},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["items"]
+    assert len(written) == 3
+    assert written[0] == {"name": "alpha", "token": "${HERMES_TEST_A}"}
+    assert written[1] == {"name": "beta", "token": "${HERMES_TEST_B}"}
+    assert written[2] == {"name": "gamma", "token": "literal-xyz"}
+    _assert_no_secret(cfg_path, "POST /api/model/set append extra_body list")
+
+
+def test_extra_body_removed_row_keeps_surviving_references(cfg_path, monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_A", "val-alpha-123")
+    monkeypatch.setenv("HERMES_TEST_B", "val-beta-456")
+
+    raw_eb = {
+        "items": [
+            {"name": "alpha", "token": "${HERMES_TEST_A}"},
+            {"name": "beta", "token": "${HERMES_TEST_B}"},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    removed = {
+        "items": [
+            {"name": "alpha", "token": "val-alpha-123"},
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": removed},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["items"]
+    assert len(written) == 1
+    assert written[0] == {"name": "alpha", "token": "${HERMES_TEST_A}"}
+    _assert_no_secret(cfg_path, "POST /api/model/set remove extra_body list")
+
+
+def test_extra_body_list_references_survive_environment_divergence(cfg_path, monkeypatch):
+    from api import config
+
+    raw_eb = {
+        "items": [
+            {"name": "alpha", "token": "${HERMES_TEST_A}"},
+            {"name": "beta", "token": "${HERMES_TEST_B}"},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    monkeypatch.setenv("HERMES_TEST_A", "diverged-alpha-789")
+    monkeypatch.setenv("HERMES_TEST_B", "diverged-beta-012")
+
+    shown = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]
+    assert shown == {
+        "items": [
+            {"name": "alpha", "token": "diverged-alpha-789"},
+            {"name": "beta", "token": "diverged-beta-012"},
+        ]
+    }
+
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": shown},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["items"]
+    assert written[0] == {"name": "alpha", "token": "${HERMES_TEST_A}"}
+    assert written[1] == {"name": "beta", "token": "${HERMES_TEST_B}"}
+    _assert_no_secret(cfg_path, "POST /api/model/set divergence extra_body list")
+
+
+def test_extra_body_list_without_references_is_written_as_given(cfg_path):
+    raw_eb = {
+        "items": [
+            {"name": "alpha", "token": "plain-alpha"},
+            {"name": "beta", "token": "plain-beta"},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    reordered = {
+        "items": [
+            {"name": "beta", "token": "plain-beta"},
+            {"name": "alpha", "token": "plain-alpha"},
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": reordered},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["items"]
+    assert written[0] == {"name": "beta", "token": "plain-beta"}
+    assert written[1] == {"name": "alpha", "token": "plain-alpha"}
+
+
 # ── 1. Derived endpoint in set_hermes_default_model (api/config.py) ───────────
 # Choosing a named custom provider as the default model writes the endpoint that
 # the provider RECORD resolves to. When that record holds ``base_url: ${URL}``
