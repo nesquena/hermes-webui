@@ -1,6 +1,6 @@
-"""Regression tests for issue #6460.
+"""Regression tests for issue #6460 and PR #8646.
 
-Image-annotated user turn merged into a later user turn WITHOUT a restart.
+Image-annotated user turn reconciliation with image attachment provenance.
 
 The hermes-agent persists a user turn that carried a native image part by
 flattening it to text and writing the ``[screenshot]`` annotation as a LINE OF
@@ -9,28 +9,17 @@ ITS OWN (``agent/session_persistence.py``::
     return "\\n".join(txt) if txt else None
 
 with ``_image_marker`` returning ``[screenshot]`` / ``[screenshot detail=low]``
-for each image part). The WebUI sidecar keeps the bare display text, which has
-no annotation at all.
+for each image part). The WebUI sidecar keeps the bare display text with no
+generated annotation, but with attachment provenance: either in the WebUI
+composer text suffix (``[Attached files: ...]``) or structured in the
+``attachments`` list.
 
-``_normalized_session_message_content`` collapsed ALL whitespace of the blob
-BEFORE anything looked at the workspace prefix, so the line boundary that makes
-that annotation a marker was gone:
-
-* sidecar row  -> ``"Here are my app settings [Attached files: .../shot.jpg]"``
-* state.db row -> ``".../shot.jpg] [screenshot]"``
-
-The reconciliation key therefore differed, ``state_db_delta_after_context``
-treated the state.db copy as a NEW row, and the agent merged the two adjacent
-user rows into a permanent composite. The same collapse also made GENERATED
-markers indistinguishable from literal user prose: a message whose text is
-``"type"\\n"[screenshot]"\\n"literally"`` keyed exactly like the prose
-``"type [screenshot] literally"``, so two genuinely different turns could fold
-into one.
-
-The fix normalizes PER LINE: a line that consists solely of the marker shape is
-the agent's annotation and is dropped from the identity; a marker embedded in a
-line of prose is literal text and stays. The visible bytes are never changed --
-only the identity functions that drive reconciliation.
+Universal scalar identity remains strictly literal: it collapses whitespace
+without deleting marker-shaped lines. Reconciling agent-generated marker lines
+with sidecar display text requires verified image provenance linking the turns
+(matching timestamps, private identity compatibility, matching tools, and
+two-way bucket uniqueness). Without provenance, ordinary scalar prose and
+assistant code blocks are preserved literally.
 """
 import json
 import sqlite3
@@ -205,6 +194,7 @@ def test_merge_keeps_the_image_turn_once_with_its_display_form():
         "id": "webui-6460",
         "role": "user",
         "content": DISPLAY_TEXT,
+        "attachments": ["/tmp/shot.jpg"],
         "timestamp": 1000.0,
     }
     state = {"role": "user", "content": CONTEXT_TEXT, "timestamp": 1000.0}
@@ -220,21 +210,23 @@ def test_merge_keeps_the_image_turn_once_with_its_display_form():
 # ---------------------------------------------------------------------------
 
 
-def test_literal_inline_marker_never_keys_like_a_generated_marker_line():
-    """Prose with ``[screenshot]`` mid-sentence is a different message.
+def test_literal_inline_and_multiline_markers_share_scalar_content_key_without_provenance():
+    """Without image provenance, literal inline and multiline markers share scalar identity.
 
-    Before the fix both forms collapsed to the same key, so a user who typed
-    the annotation as prose collided with the agent's generated marker.
+    Master semantics: universal scalar identity collapses whitespace with split(),
+    so inline and multiline marker text key identically. Collision protection
+    comes from image provenance linkage, not from unconditionally deleting
+    marker shapes.
     """
     from api.models import _session_message_content_key
 
-    prose = {"role": "user", "content": "type [screenshot] literally to annotate"}
-    generated = {
+    inline = {"role": "user", "content": "type [screenshot] literally to annotate"}
+    multiline = {
         "role": "user",
         "content": "type\n[screenshot]\nliterally to annotate",
     }
 
-    assert _session_message_content_key(prose) != _session_message_content_key(generated)
+    assert _session_message_content_key(inline) == _session_message_content_key(multiline)
 
 
 def test_literal_inline_marker_is_preserved_in_identity():
@@ -249,6 +241,60 @@ def test_literal_inline_marker_is_preserved_in_identity():
     )
 
 
+def test_literal_standalone_marker_without_provenance_is_never_collapsed():
+    """Literal standalone marker without attachment provenance keeps both lines in delta."""
+    from api.models import state_db_delta_after_context
+
+    sidecar = [
+        {"role": "user", "content": "alpha omega", "timestamp": 1000.0},
+        {"role": "assistant", "content": "ok", "timestamp": 1001.0},
+    ]
+    state = [
+        {"role": "user", "content": "alpha\n[screenshot]\nomega", "timestamp": 2000.0},
+        {"role": "assistant", "content": "ok", "timestamp": 2001.0},
+    ]
+    assert len(state_db_delta_after_context(sidecar, state)) == 2
+
+
+@pytest.mark.parametrize(
+    "marker_body",
+    [
+        "alpha\n[screenshot detail=low]\nomega",
+        "alpha\n[screenshot]\n[screenshot]\nomega",
+    ],
+)
+def test_literal_detail_and_repeated_markers_without_provenance_are_never_collapsed(
+    marker_body,
+):
+    """Literal detail or repeated markers without provenance are never collapsed."""
+    from api.models import state_db_delta_after_context
+
+    sidecar = [
+        {"role": "user", "content": "alpha omega", "timestamp": 1000.0},
+        {"role": "assistant", "content": "ok", "timestamp": 1001.0},
+    ]
+    state = [
+        {"role": "user", "content": marker_body, "timestamp": 2000.0},
+        {"role": "assistant", "content": "ok", "timestamp": 2001.0},
+    ]
+    assert len(state_db_delta_after_context(sidecar, state)) == 2
+
+
+def test_assistant_code_block_with_screenshot_line_preserved_without_provenance():
+    """Assistant code block with a [screenshot] line does not collapse with code lacking it."""
+    from api.models import state_db_delta_after_context
+
+    sidecar = [
+        {"role": "user", "content": "show code", "timestamp": 1000.0},
+        {"role": "assistant", "content": "```\ncode\n```", "timestamp": 1001.0},
+    ]
+    state = [
+        {"role": "user", "content": WORKSPACE_PREFIX + "show code", "timestamp": 2000.0},
+        {"role": "assistant", "content": "```\ncode\n[screenshot]\n```", "timestamp": 2001.0},
+    ]
+    assert len(state_db_delta_after_context(sidecar, state)) == 2
+
+
 def test_merge_does_not_fold_literal_prose_into_a_marker_turn():
     """Two genuinely different user turns stay two rows."""
     from api.models import merge_session_messages_append_only
@@ -256,12 +302,12 @@ def test_merge_does_not_fold_literal_prose_into_a_marker_turn():
     sidecar = {
         "id": "webui-literal",
         "role": "user",
-        "content": "type [screenshot] literally to annotate",
+        "content": "alpha omega",
         "timestamp": 1000.0,
     }
     state = {
         "role": "user",
-        "content": WORKSPACE_PREFIX + "type\n[screenshot]\nliterally to annotate",
+        "content": WORKSPACE_PREFIX + "alpha\n[screenshot]\nomega",
         "timestamp": 1000.0,
     }
 
@@ -272,17 +318,57 @@ def test_merge_does_not_fold_literal_prose_into_a_marker_turn():
     "marker",
     ["[screenshot]", "[screenshot detail=low]", "[screenshot detail=high]", "  [screenshot]  "],
 )
-def test_annotation_line_reconciles_whatever_its_detail_form(marker):
-    """Every annotation form the agent can write is recognized as the marker."""
-    from api.models import _session_message_content_key
+def test_genuine_producer_composed_image_positive_control_reconciles(marker):
+    """Genuine producer-composed image turn reconciles across all marker forms.
 
-    displayed = {"role": "user", "content": "what is wrong here?"}
-    annotated = {
-        "role": "user",
-        "content": WORKSPACE_PREFIX + "what is wrong here?\n" + marker,
-    }
+    Tests both WebUI composer representations:
+    (a) Suffix format: '[Attached files: ...]'
+    (b) Structured metadata: 'attachments: [...]'
+    """
+    from api.models import state_db_delta_after_context
 
-    assert _session_message_content_key(annotated) == _session_message_content_key(displayed)
+    # Variant (a): WebUI composer suffix
+    sidecar_suffix = [
+        {
+            "role": "user",
+            "content": "what is wrong here?\n\n[Attached files: /tmp/shot.jpg]",
+            "timestamp": 1000.0,
+        },
+        {"role": "assistant", "content": "Analyzing...", "timestamp": 1001.0},
+    ]
+    state_suffix = [
+        {
+            "role": "user",
+            "content": (
+                WORKSPACE_PREFIX
+                + "what is wrong here?\n\n[Attached files: /tmp/shot.jpg]\n"
+                + marker
+            ),
+            "timestamp": 1000.0,
+        },
+        {"role": "assistant", "content": "Analyzing...", "timestamp": 1001.0},
+    ]
+    assert state_db_delta_after_context(sidecar_suffix, state_suffix) == []
+
+    # Variant (b): attachments list metadata
+    sidecar_meta = [
+        {
+            "role": "user",
+            "content": "what is wrong here?",
+            "attachments": ["/tmp/shot.jpg"],
+            "timestamp": 1000.0,
+        },
+        {"role": "assistant", "content": "Analyzing...", "timestamp": 1001.0},
+    ]
+    state_meta = [
+        {
+            "role": "user",
+            "content": WORKSPACE_PREFIX + "what is wrong here?\n" + marker,
+            "timestamp": 1000.0,
+        },
+        {"role": "assistant", "content": "Analyzing...", "timestamp": 1001.0},
+    ]
+    assert state_db_delta_after_context(sidecar_meta, state_meta) == []
 
 
 @pytest.mark.parametrize(
