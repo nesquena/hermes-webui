@@ -6,12 +6,12 @@ entry declares URL L with its key, and the model block points elsewhere (A or B)
 entry's key; the lookup asked the model block's URL and, after #8917, sent no key there. The window then came from the
 wrong endpoint or the default.
 
-The lookup now takes both halves from WebUI's own half of the chat's routing chain
-(``merge_custom_provider_runtime_bundle`` + ``raise_for_custom_provider_route``) for a named custom provider. That
-chain runs with ``lookup_only``: GET is a read path, so it never selects or refreshes a credential pool entry, never
-builds a ``key_cmd`` token provider, never sends a host-gated env key, and never calls the Agent's
-``resolve_runtime_provider``. The key is the route's or none (a session that can't chat, or a keyless endpoint's
-placeholder, looks up without one); config selection can't add one. Other providers keep the previous path.
+The lookup now takes both halves from WebUI's own half of the chat's routing chain (the merge,
+``_custom_provider_runtime_bundle_with_provenance``, + ``raise_for_custom_provider_route``) for a named custom
+provider. That chain runs with ``lookup_only``: GET is a read path, so it never selects or refreshes a credential pool
+entry, never builds a ``key_cmd`` token provider, never sends a host-gated env key, and never calls the Agent's
+``resolve_runtime_provider``. The key is the route's or none (a session that can't chat, or a record the merge judged
+keyless, looks up without one); config selection can't add one. Other providers keep the previous path.
 """
 import os
 import socket
@@ -164,7 +164,8 @@ def test_a_refused_route_never_lends_its_key(monkeypatch):
                config.CUSTOM_ROUTE_ERROR_FIELD: config._custom_route_verdict(config.CUSTOM_ROUTE_NO_ENDPOINT, PROVIDER)}
     with pytest.raises(config.CustomProviderRouteError):
         config.raise_for_custom_provider_route(refused)
-    monkeypatch.setattr(config, "merge_custom_provider_runtime_bundle", lambda *a, **k: dict(refused))
+    monkeypatch.setattr(config, "_custom_provider_runtime_bundle_with_provenance",
+                        lambda *a, **k: (dict(refused), {"keyless": False}))
     calls = _get_session(_mixed_listing_cfg("K1", "K1", A, "K1"), monkeypatch)
     assert len(calls) == 1, calls
     assert calls[0]["api_key"] == ""
@@ -243,6 +244,31 @@ def test_a_keyless_endpoint_looks_up_without_the_placeholder(monkeypatch):
     assert len(calls) == 1, calls
     assert (calls[0]["base_url"], calls[0]["api_key"]) == (L, "")
     assert calls[0]["api_key"] != config.KEYLESS_CUSTOM_API_KEY
+
+
+@pytest.mark.parametrize("cfg,url", [
+    ({"model": {"default": "m-x", "provider": PROVIDER},
+      "custom_providers": [{"name": "my-proxy", "base_url": L, "api_key": "dummy-key", "models": {"m-x": {}}}]}, L),
+    ({"model": {"default": "m-x", "provider": PROVIDER},
+      "providers": {PROVIDER: {"base_url": B, "api_key": "dummy-key", "models": {"m-x": {}}}}}, B),
+], ids=["legacy-entry", "record"])
+def test_a_key_configured_as_the_placeholder_string_is_still_the_chats_key(cfg, url, monkeypatch):
+    """Keylessness is the record's verdict, not a string: a configured "dummy-key" is a real key the chat sends."""
+    import copy
+
+    cfg = copy.deepcopy(cfg)
+    cfg.setdefault("providers", {})
+    cfg.setdefault("custom_providers", [])
+    monkeypatch.setattr(config, "cfg", cfg)
+    monkeypatch.setattr(config, "get_config", lambda *a, **k: cfg)
+    route, custom = config._custom_provider_runtime_bundle_with_provenance(
+        PROVIDER, None, None, {}, lookup_provider=PROVIDER,
+        connection_resolver=config.resolve_custom_provider_connection,
+    )
+    assert (route["base_url"], route["api_key"], custom["keyless"]) == (url, "dummy-key", False)
+    calls = _get_session(cfg, monkeypatch)
+    assert len(calls) == 1, calls
+    assert (calls[0]["base_url"], calls[0]["api_key"]) == (url, "dummy-key")
 
 
 def test_only_named_custom_providers_take_the_chat_route():

@@ -10979,18 +10979,20 @@ def _session_context_length_lookup_state(
         # key or key_cmd, and the Agent's resolve_runtime_provider is never called
         # (it can select or refresh pool entries, refresh OAuth credentials and
         # probe a local server). The key is the route's or none: a session that
-        # can't chat, or a keyless endpoint (the placeholder), looks up without one,
-        # and the caller passes caller_key_only so config selection can't add one.
+        # can't chat, or a keyless record (the merge sent the no-auth placeholder),
+        # looks up without one, and the caller passes caller_key_only so config
+        # selection can't add one. Keylessness is the selected record's own verdict
+        # (the merge's only gate on the placeholder), never a string comparison: a
+        # key the user configured as "dummy-key" is still the chat's key.
         api_key_for_lookup = ""
         try:
             from api.config import (
-                KEYLESS_CUSTOM_API_KEY,
-                merge_custom_provider_runtime_bundle,
+                _custom_provider_runtime_bundle_with_provenance,
                 raise_for_custom_provider_route,
                 resolve_custom_provider_connection,
             )
 
-            route = merge_custom_provider_runtime_bundle(
+            route, custom = _custom_provider_runtime_bundle_with_provenance(
                 provider_for_lookup,
                 None,
                 base_url_for_lookup or None,
@@ -11004,9 +11006,10 @@ def _session_context_length_lookup_state(
             if route_url:
                 base_url_for_lookup = route_url
             route_key = route.get("api_key")
-            if isinstance(route_key, str):
+            keyless = bool(isinstance(custom, dict) and custom.get("keyless"))
+            if isinstance(route_key, str) and not keyless:
                 route_key = route_key.strip()
-                if route_key and route_key != KEYLESS_CUSTOM_API_KEY:
+                if route_key:
                     api_key_for_lookup = route_key
         except Exception:
             logger.debug("session context-length lookup: the session's chat route is unavailable", exc_info=True)

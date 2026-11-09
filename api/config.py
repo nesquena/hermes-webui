@@ -5446,7 +5446,6 @@ def merge_custom_provider_runtime_bundle(
     *,
     lookup_provider: str | None = None,
     connection_resolver=None,
-    lookup_only: bool = False,
 ) -> dict:
     """Return the COMPLETE constructor-routing bundle for one send attempt.
 
@@ -5517,10 +5516,6 @@ def merge_custom_provider_runtime_bundle(
     never be routed through the ambient provider's connection. This holds even
     when the ambient runtime LABELS itself with that same slug — a provider
     string is self-assigned, not proof that the connection belongs to the slug.
-
-    ``lookup_only`` (see :func:`resolve_custom_provider_bundle`) answers the same
-    question for a read path that builds no agent: config-declared credentials
-    only, and a refused route is logged at debug rather than as a warning.
     """
     return _custom_provider_runtime_bundle_with_provenance(
         resolved_provider,
@@ -5529,7 +5524,6 @@ def merge_custom_provider_runtime_bundle(
         runtime_provider,
         lookup_provider=lookup_provider,
         connection_resolver=connection_resolver,
-        lookup_only=lookup_only,
     )[0]
 
 
@@ -5551,6 +5545,11 @@ def _custom_provider_runtime_bundle_with_provenance(
     Callers that also need the provenance take it from here rather than
     re-resolving: a second resolution re-reads the config and can mint a second
     ``key_cmd`` token provider or select a different pool entry.
+
+    ``lookup_only`` (see :func:`resolve_custom_provider_bundle`) answers the same
+    question for a read path that builds no agent (GET /api/session's
+    context-length lookup, #8928): config-declared credentials only, and a
+    refused route is logged at debug rather than as a warning.
     """
     _rt = runtime_provider if isinstance(runtime_provider, dict) else {}
     # A lookup builds no agent, so a refused route is not news worth a warning.
