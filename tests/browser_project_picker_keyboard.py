@@ -180,6 +180,15 @@ LONG_PROJECTS = [
 LONG_PROJECTS_LAST = "読書メモ"
 
 
+def _project_id(seed, name):
+    """The id of a seeded project, looked up by name.
+
+    ``seed["projects"]`` follows ``PROJECTS`` (creation order); the picker lists
+    them in ``PROJECTS_ORDER``, so row position and creation position differ.
+    """
+    return seed["projects"][PROJECTS.index(name)]
+
+
 def _wait_for_health(timeout=30):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -460,9 +469,12 @@ def _check_single(page, seed):
     problem = _open_single_picker(page, alpha)
     if problem:
         return failures + [f"  [single] reopen: {problem}"]
+    # The first project row in presentation order, reached from either end so
+    # the assertion does not depend on where focus happened to open.
+    page.keyboard.press("Home")
     page.keyboard.press("ArrowDown")
     page.keyboard.press("Enter")
-    target = {"session_id": alpha, "project_id": seed["projects"][1]}
+    target = {"session_id": alpha, "project_id": _project_id(seed, PROJECTS_ORDER[0])}
     if not _wait_until(page, f"!document.querySelector('{SINGLE}')"):
         fail("Enter on a project did not close the picker")
     page.wait_for_timeout(300)
@@ -491,7 +503,7 @@ def _check_single(page, seed):
     if not _wait_until(page, f"!document.querySelector('{SINGLE}')"):
         fail("a click on a project did not close the picker")
     page.wait_for_timeout(300)
-    if moves != [{"session_id": alpha, "project_id": seed["projects"][0]}]:
+    if moves != [{"session_id": alpha, "project_id": _project_id(seed, PROJECTS_ORDER[0])}]:
         fail(f"a click on a project sent {moves}")
 
     # The two labels follow the interface language.
