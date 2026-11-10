@@ -1036,6 +1036,32 @@ def goal_continuation_attempt_owns_admission(
                     attempt,
                 )
                 return False
+            if token.get("_handoff_adopted_into_record"):
+                # #7862 re-gate round 20 (CORE finding 1, post-bind pause): an
+                # ADOPTION CONVERSION ANCHOR is not custody. The adoption that
+                # converted this attempt's handoff into a claimable record
+                # deliberately keeps the in-memory token (the receipt's
+                # liveness anchor needs it) and the reconciliation below
+                # deliberately preserves it — but it also keeps the token's
+                # ``_handoff_stream_id``, because the conversion copies the
+                # durable entry verbatim and only strips that field from the
+                # RESTORED RECORD. The stream-identity comparison below
+                # therefore answered "still ours" for an admission a restore
+                # had already spent, so a route parked between its binding and
+                # its worker release walked straight through the fence the
+                # moment the takeover happened inside ITS OWN process (the
+                # deferred handoff recovery, or any second restore there).
+                # Every other ownership consumer already treats a marked token
+                # as "not custody" — the rollback restore's own guard skips it
+                # for exactly this reason — so this one has to agree.
+                logger.error(
+                    "Goal continuation admission for session %s (attempt %s) "
+                    "was converted into a claimable record by a restore; its "
+                    "worker must not run",
+                    sid,
+                    attempt,
+                )
+                return False
             bound_stream = str(token.get("_handoff_stream_id") or "")
             if stream_id and bound_stream and bound_stream != str(stream_id):
                 # The durable admission was re-bound to a different stream:
@@ -1254,6 +1280,42 @@ def _drop_continuation_handoffs_unlocked(sid: str) -> int:
     # spent"; with no token left there is nothing to withhold from disk.
     _ADOPTED_HANDOFF_SESSIONS.discard(sid)
     return len(keys)
+
+
+def _drop_continuation_handoff_unlocked(sid: str, attempt: str) -> int:
+    """Remove ONE start attempt's durable handoff; callers hold ``_LOCK``.
+
+    #7862 re-gate round 20 (CORE finding 2): the rejected-start rollback
+    spends "the admission the losing attempt consumed", and that admission is
+    keyed by (session, attempt) — so the mutation has to be keyed the same
+    way. It used to call the session-wide drop above, which is correct for a
+    retirement (the intent is over for the whole session) but wrong for a
+    compensation: the restore's own admission guard already proves no OTHER
+    attempt owns this session's admission before it lands, and the only
+    remaining tokens are the losing attempt's own custody plus any conversion
+    anchors a restore left behind. Deleting the session's whole handoff table
+    there would spend custody the losing attempt never held — the successor's
+    admission, if a later schedule ever reaches this line with one still
+    present. Scoping the drop to the losing attempt makes the guard and the
+    mutation agree instead of relying on the guard alone.
+
+    With no attempt identity there is nothing to scope to, so the caller keeps
+    the session-wide shape (the legacy single-attempt record carries none).
+
+    Returns 1 when a token was removed. The caller is responsible for the
+    snapshot write, so this and the state it accompanies always land in one
+    ``os.replace``.
+    """
+    key = (sid, str(attempt or "").strip())
+    if not key[1] or key not in _CONTINUATION_HANDOFF_TOKENS:
+        return 0
+    _CONTINUATION_HANDOFF_TOKENS.pop(key, None)
+    if not any(k[0] == sid for k in _CONTINUATION_HANDOFF_TOKENS):
+        # No token is left for this session, so nothing is withheld from disk
+        # on its behalf any more — the same condition the session-wide drop
+        # ends in, reached only once the last token is really gone.
+        _ADOPTED_HANDOFF_SESSIONS.discard(sid)
+    return 1
 
 
 def _prune_spent_generations_unlocked() -> None:
@@ -2375,8 +2437,22 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
             # adoption re-armed the record from the stale handoff even though the
             # retry had already consumed it. Cleared in the same snapshot as the
             # restore, so the durable state never shows both.
-
-            _drop_continuation_handoffs_unlocked(sid)
+            #
+            # #7862 re-gate round 20 (CORE finding 2): the spend is scoped to the
+            # LOSING attempt's own custody, keyed by the attempt identity the
+            # receipt carries. The session-wide drop that used to sit here is a
+            # retirement's mutation, not a compensation's: this rollback lost one
+            # admission, so it may only spend that one — and the admission guard
+            # above has already proved no other attempt owns this session's
+            # admission, so scoping changes nothing observable while removing the
+            # last way a successor's custody could be deleted from under it.
+            if losing_attempt:
+                _drop_continuation_handoff_unlocked(sid, losing_attempt)
+            else:
+                # No attempt identity to scope to (a legacy record): keep the
+                # session-wide shape rather than leaving the spent handoff
+                # claimable for the next cold restore.
+                _drop_continuation_handoffs_unlocked(sid)
             _restore_committed = _write_registry_unlocked(
                 PENDING_GOAL_CONTINUATION_RECORDS,
                 context=f"rollback-restore sid={sid}",
