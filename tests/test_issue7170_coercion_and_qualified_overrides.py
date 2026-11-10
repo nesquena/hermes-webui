@@ -532,3 +532,267 @@ def test_fallback_matches_core_differentially(no_core):
                         f"model={model} key={key} value={value!r}: "
                         f"core={expected!r} fallback={resolved!r}"
                     )
+
+
+# ──────────── Fix C: colon-scoped override keys (``provider:model``) ────────────
+#
+# CharlesMcquade (2026-11-09): executing ``6556b155`` directly showed one
+# remaining scoped-selection gap. ``configured_reasoning_effort_for_model``
+# calls the shared ``resolve_per_model_reasoning_effort(model, overrides)``
+# WITHOUT a provider, and core's variant generator emits slash and dot/dash
+# forms only — so a colon-scoped key (``prov:m1``) can never participate.
+# With global ``low``, ``prov:m1: medium`` and bare ``m1: high`` the resolver
+# returned ``high`` (expected ``medium``); with only ``prov:m1`` present it fell
+# back to global ``low`` (expected ``medium``). The bare-only control worked.
+
+
+def test_scoped_key_wins_over_bare_model_key():
+    """``prov:m1: medium`` must beat bare ``m1: high`` for (prov, m1).
+
+    A scoped key names the provider too, so it is strictly more specific than
+    the bare model spelling. Returning ``high`` meant the scoped selection was
+    silently ignored whenever a bare key also existed.
+    """
+    data = _write_overrides({"prov:m1": "medium", "m1": "high"}, global_effort="low")
+
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="m1", provider_id="prov"
+        )
+        == "medium"
+    )
+    # Same decision through the Gateway bridge path.
+    assert (
+        gateway_chat._gateway_reasoning_effort_for_request(
+            data, model="m1", model_provider="prov"
+        )
+        == "medium"
+    )
+
+
+def test_scoped_key_participates_without_bare_key():
+    """``prov:m1: medium`` alone must resolve ``medium``, not the global ``low``.
+
+    Core never sees the provider, so the scoped key was invisible and the
+    global effort won — the override looked configured but did nothing.
+    """
+    data = _write_overrides({"prov:m1": "medium"}, global_effort="low")
+
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="m1", provider_id="prov"
+        )
+        == "medium"
+    )
+    assert (
+        gateway_chat._gateway_reasoning_effort_for_request(
+            data, model="m1", model_provider="prov"
+        )
+        == "medium"
+    )
+
+
+def test_scoped_key_control_bare_and_global_still_work():
+    """The two control shapes the reviewer confirmed working must stay working."""
+    bare_only = _write_overrides({"m1": "high"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            bare_only, model_id="m1", provider_id="prov"
+        )
+        == "high"
+    )
+    global_only = _write_overrides({}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            global_only, model_id="m1", provider_id="prov"
+        )
+        == "low"
+    )
+
+
+def test_scoped_key_ignores_other_providers():
+    """A scoped key must only match the model's OWN provider.
+
+    Otherwise one provider's override would leak into a same-named model on
+    another provider — the exact cross-path inconsistency this PR exists to
+    remove.
+    """
+    data = _write_overrides({"other-provider:m1": "medium"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="m1", provider_id="prov"
+        )
+        == "low"
+    )
+
+
+def test_scoped_key_needs_a_provider_to_apply():
+    """Without a provider there is no scope: the bare key keeps winning."""
+    data = _write_overrides({"prov:m1": "medium", "m1": "high"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(data, model_id="m1") == "high"
+    )
+
+
+def test_scoped_key_does_not_capture_a_colon_in_the_model_name():
+    """A colon inside a model id is not a provider scope.
+
+    ``qwen3.5:397b`` is a legitimate model spelling (Ollama-style tags), so it
+    must stay a plain key rather than being read as ``provider=qwen3.5``.
+    """
+    data = _write_overrides({"qwen3.5:397b": "high"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="qwen3.5", provider_id="prov"
+        )
+        == "low"
+    )
+    # …and the tagged model still resolves its own key when it is the model.
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="qwen3.5:397b", provider_id="prov"
+        )
+        == "high"
+    )
+
+
+def test_at_qualified_spelling_still_outranks_scoped_key():
+    """The caller's own ``@provider:model`` spelling stays most specific.
+
+    It names the exact routing lane, so adding scoped keys must not demote it.
+    """
+    data = _write_overrides(
+        {"@prov:m1": "minimal", "prov:m1": "medium"}, global_effort="low"
+    )
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="@prov:m1", provider_id="prov"
+        )
+        == "minimal"
+    )
+
+
+def test_scoped_key_honors_disable_and_dot_dash_tolerance():
+    """Scoped keys must parse like every other override key."""
+    disabled = _write_overrides({"prov:m1": False}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            disabled, model_id="m1", provider_id="prov"
+        )
+        == "none"
+    )
+    dotted = _write_overrides({"prov:gpt-5-4": "medium"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            dotted, model_id="gpt-5.4", provider_id="prov"
+        )
+        == "medium"
+    )
+
+
+def test_scoped_key_custom_provider_slug():
+    """A ``custom:<slug>:<model>`` provider id must scope its own keys.
+
+    The provider segment itself contains a colon, so the key has two — the
+    split must take the LAST colon as the model boundary.
+    """
+    data = _write_overrides(
+        {"custom:newapi:ve-gpt": "medium"}, global_effort="low"
+    )
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="ve-gpt", provider_id="custom:newapi"
+        )
+        == "medium"
+    )
+
+
+def test_scoped_key_retains_global_when_value_unrepresentable():
+    """An unrepresentable scoped value must retain the global, not blank it."""
+    data = _write_overrides({"prov:m1": "ultra"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="m1", provider_id="prov"
+        )
+        == "low"
+    )
+
+
+def test_scoped_key_works_without_hermes_core(no_core):
+    """The scoped lookup is WebUI-side, so it must work with no core tree.
+
+    Both of the reviewer's reproductions are re-checked on the no-core
+    fallback path: the scoped key must still participate and still outrank the
+    bare spelling.
+    """
+    both = _write_overrides({"prov:m1": "medium", "m1": "high"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            both, model_id="m1", provider_id="prov"
+        )
+        == "medium"
+    )
+    scoped_only = _write_overrides({"prov:m1": "medium"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            scoped_only, model_id="m1", provider_id="prov"
+        )
+        == "medium"
+    )
+    # Boolean-false disable must survive the scoped path too.
+    disabled = _write_overrides({"prov:m1": False}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            disabled, model_id="m1", provider_id="prov"
+        )
+        == "none"
+    )
+
+
+def test_reasoning_override_keys_enumerates_scoped_spelling():
+    """The setter must enumerate the scoped spelling the reader now matches.
+
+    A level write / ``Default`` for ``(prov, m1)`` has to supersede and clear
+    ``prov:m1``, otherwise the stale scoped entry survives and keeps answering
+    on read — the chip snaps back to the old level, which is precisely the
+    write/read identity split this enumeration exists to prevent.
+    """
+    overrides = {"prov:m1": "medium", "m1": "high", "other:m1": "max"}
+    keys = cfg._reasoning_override_keys_for_model(
+        "m1", overrides, provider_id="prov"
+    )
+    assert "prov:m1" in keys
+    assert "m1" in keys
+    # Another provider's same-named model must never be cleared.
+    assert "other:m1" not in keys
+    # Without a provider there is no scope, so only the bare spelling matches.
+    assert cfg._reasoning_override_keys_for_model(
+        "m1", overrides, provider_id=None
+    ) == ["m1"]
+
+
+def test_scoped_key_beats_bare_for_at_qualified_model():
+    """For an ``@provider:model`` model, the scoped key must beat the bare one.
+
+    A bare-key hit also populates ``per_model``, so gating the scoped lookup on
+    "did anything match" let the bare spelling outrank the scoped one for an
+    @-qualified model. Only a literal ``@provider:model`` KEY may outrank the
+    scoped key, because it names the exact routing lane.
+    """
+    data = _write_overrides({"prov:m1": "medium", "m1": "high"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="@prov:m1", provider_id="prov"
+        )
+        == "medium"
+    ), "scoped key must outrank the bare spelling for an @-qualified model"
+    # …but a literal @ key still wins outright.
+    exact = _write_overrides(
+        {"@prov:m1": "minimal", "prov:m1": "medium"}, global_effort="low"
+    )
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            exact, model_id="@prov:m1", provider_id="prov"
+        )
+        == "minimal"
+    ), "the caller's own @ spelling stays most specific"

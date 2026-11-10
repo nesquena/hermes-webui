@@ -7300,7 +7300,111 @@ def _reasoning_override_keys_for_model(
                 for tv in _reasoning_override_variants_for_model(t)
             ):
                 matched.append(key)
+    # Colon-scoped keys (``<provider>:<model>``) are matched by the reader
+    # (``_scoped_reasoning_override_keys_for_model``), so the writer must
+    # supersede and clear them too. Without this a stale ``prov:m1`` entry
+    # survived a new level write / ``Default`` and kept answering on read,
+    # making the chip snap back — the same write/read identity split this
+    # enumeration exists to prevent.
+    for scoped in _scoped_reasoning_override_keys_for_model(
+        model, overrides, provider_id, orig_model=orig_model
+    ):
+        if scoped not in matched:
+            matched.append(scoped)
     return matched
+
+
+def _scoped_reasoning_override_keys_for_model(
+    model_id: str,
+    overrides: dict,
+    provider_id: str | None = None,
+    *,
+    orig_model: str | None = None,
+) -> list[str]:
+    """Override keys written as ``<provider>:<model>`` for this model+provider.
+
+    ``agent.reasoning_overrides`` keys are usually a bare model id or a
+    slash-qualified one. Hermes core's ``resolve_per_model_reasoning_effort``
+    is provider-blind by design — it only receives ``(model, overrides)`` — so a
+    colon-scoped key (``prov:m1``) can never participate in that resolution.
+    The WebUI *does* know the provider (every call site threads
+    ``provider_id``), so scoped keys are matched here instead, as an extra
+    step the core resolver cannot cover.
+
+    The colon is overloaded in this codebase: it separates the WebUI
+    ``@provider:model`` routing lane and it also appears inside ordinary model
+    names (``qwen3.5:397b``). A key is treated as scoped only when its prefix
+    names the model's OWN provider, so ``prov:m1`` matches ``(prov, m1)`` and
+    ``qwen3.5:397b`` stays a plain model spelling for model ``qwen3.5:397b``.
+    Returns the matching keys in the caller's original spelling, most specific
+    first, so the reader can pick the first one and the setter can clear them.
+    """
+    model = str(model_id or "").strip()
+    if not model or not isinstance(overrides, dict) or not overrides:
+        return []
+    provider = str(provider_id or "").strip()
+    if not provider:
+        return []
+    # Provider spellings: its own forms plus the ``@``-stripped variant, so a
+    # caller passing ``custom:newapi`` and a key written ``newapi`` (or vice
+    # versa) still line up. ``_provider_id_forms`` already folds ``_``→``-``
+    # and resolves aliases.
+    provider_forms = {provider.lower()}
+    provider_forms |= {form for form in _provider_id_forms(provider) if form}
+    if provider.lower().startswith("@"):
+        provider_forms.add(provider.lower()[1:])
+
+    # Candidate model spellings: the bare id, its dot/dash derivatives, the
+    # caller's original ``@provider:model`` tail, and every slash-qualified
+    # form — the same equivalence class the unscoped path matches.
+    model_variants = _reasoning_override_variants_for_model(
+        model, orig_model=orig_model or model_id
+    )
+    wanted = {v.lower() for v in model_variants}
+    wanted |= {v.lower().replace(".", "-") for v in model_variants}
+    wanted |= {v.lower().replace("-", ".") for v in model_variants}
+
+    matched: list[str] = []
+    for key in overrides:
+        if not isinstance(key, str):
+            continue
+        k = key.strip()
+        if not k or ":" not in k:
+            continue
+        prefix, _, tail = k.rpartition(":")
+        if not prefix or not tail:
+            continue
+        if prefix.strip().lower() not in provider_forms:
+            continue
+        tail_lower = tail.strip().lower()
+        if (
+            tail_lower in wanted
+            or tail_lower.replace(".", "-") in wanted
+            or tail_lower.replace("-", ".") in wanted
+        ):
+            matched.append(key)
+    return matched
+
+
+def _parse_reasoning_override_value(raw):
+    """Parse an override value with CORE semantics.
+
+    ``parse_reasoning_effort()`` in this module returns ``None`` for a YAML
+    boolean ``False`` and for the ``"false"``/``"disabled"`` spellings, but
+    Hermes core treats all of them as *reasoning disabled*. Leaving them
+    unparsed made the no-core fallback silently ignore an explicit disable and
+    keep the global effort.
+
+    Module-level (not nested in the fallback block) because the colon-scoped
+    lookup runs outside that block and must parse values identically.
+    """
+    if raw is False:
+        return {"enabled": False}
+    if raw is None or raw is True:
+        return None
+    if str(raw).strip().lower() in {"none", "false", "disabled"}:
+        return {"enabled": False}
+    return parse_reasoning_effort(raw)
 
 
 def _config_reasoning_effort(config_data) -> str:
@@ -7437,19 +7541,10 @@ def configured_reasoning_effort_for_model(
             def _fallback_parse(raw):
                 """Parse an override value with CORE semantics.
 
-                ``parse_reasoning_effort()`` in this module returns ``None`` for
-                a YAML boolean ``False`` and for the ``"false"``/``"disabled"``
-                spellings, but Hermes core treats all of them as *reasoning
-                disabled*.  Leaving them unparsed made the fallback silently
-                ignore an explicit disable and keep the global effort.
+                Delegates to the module-level helper so the colon-scoped lookup
+                (which runs outside this block) parses values identically.
                 """
-                if raw is False:
-                    return {"enabled": False}
-                if raw is None or raw is True:
-                    return None
-                if str(raw).strip().lower() in {"none", "false", "disabled"}:
-                    return {"enabled": False}
-                return parse_reasoning_effort(raw)
+                return _parse_reasoning_override_value(raw)
 
             normalized_overrides = {
                 str(key).strip().lower(): value
@@ -7477,6 +7572,46 @@ def configured_reasoning_effort_for_model(
                         )
                         if per_model is not None:
                             break
+
+    # Colon-scoped keys (``<provider>:<model>``) are the one shape Hermes core
+    # cannot resolve: ``resolve_per_model_reasoning_effort`` is provider-blind
+    # and its variant generator emits slash and dot/dash forms only, so a
+    # ``prov:m1`` key never matched and the bare/global value won. The WebUI
+    # knows the provider at every call site, so resolve them here. A scoped key
+    # is MORE specific than the bare model spelling (it names the provider too),
+    # so it supersedes the bare match above — that is the whole point of
+    # writing one.
+    #
+    # The ONE form that outranks it is the caller's own ``@provider:model``
+    # spelling: it names the exact routing lane, so when such a key literally
+    # exists it stays authoritative. That is checked against the override KEYS,
+    # not against ``per_model`` — a bare-key hit also leaves ``per_model`` set,
+    # and treating that as "an @ key won" would let the bare spelling beat the
+    # scoped one for an @-qualified model.
+    if isinstance(overrides, dict) and model and provider_id:
+        _orig_at_forms = set()
+        if orig_model.startswith("@") and ":" in orig_model:
+            _orig_at_forms = {orig_model.lower(), orig_model.strip().lower()}
+        _at_key_present = bool(
+            _orig_at_forms
+            and any(
+                isinstance(k, str) and k.strip().lower() in _orig_at_forms
+                for k in overrides
+            )
+        )
+        if not _at_key_present:
+            _scoped_keys = _scoped_reasoning_override_keys_for_model(
+                model,
+                overrides,
+                provider_id,
+                orig_model=orig_model,
+            )
+            if _scoped_keys:
+                _scoped_parsed = _parse_reasoning_override_value(
+                    overrides[_scoped_keys[0]]
+                )
+                if _scoped_parsed is not None:
+                    per_model = _scoped_parsed
 
     if per_model is not None:
         if per_model.get("enabled") is False:
