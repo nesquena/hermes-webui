@@ -724,11 +724,13 @@ def test_the_closed_expansion_still_reads_the_agents_process_global_variables(
     process-global variables from the process env, and nothing else from it.
     A name padded with spaces is read the way WebUI's own lookup reads it (stripped),
     as master's shared-cache expansion did (Codex r4)."""
+    # The helper skips this test without an Agent (CI installs none); call it before
+    # importing Agent modules (Opus r2).
+    agents = _real_agent_runtime(monkeypatch)
     import hermes_constants
     from agent import secret_scope
     from api import config, profiles
 
-    agents = _real_agent_runtime(monkeypatch)
     if case == "server_own_profile":
         monkeypatch.setattr(hermes_constants, "_PINNED_PROCESS_HERMES_HOME", str(homes.work))
     elif case == "no_home_override":
