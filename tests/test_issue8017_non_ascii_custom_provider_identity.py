@@ -1372,6 +1372,82 @@ def test_set_default_model_drops_the_previous_routes_key_when_the_endpoint_is_re
     )
 
 
+def test_an_env_backed_entry_name_is_matched_by_its_expanded_identity(monkeypatch, tmp_path):
+    """A ``${VAR}`` name must reach the entry the picker named (r39).
+
+    The picker mints ``custom:<expanded>``, but ``_selected_fallback_entry``
+    compared the raw reference. The entry was therefore unmatched, so the Save
+    copied the new endpoint onto the block and left the previous route's
+    synthetic key there, which the connection resolver then served to the new
+    host. Both spellings must reach the same route, and the reference itself
+    must survive on disk.
+    """
+    OLD_URL = "https://old.invalid/v1"
+    NEW_URL = "https://new.invalid/v1"
+    monkeypatch.setenv("PROVIDER_NAME", "晨光")
+    for index, spelling in enumerate(("${PROVIDER_NAME}", "晨光")):
+        _case_dir = tmp_path / f"spelling-{index}"
+        _case_dir.mkdir()
+        cfg_path = _write_cfg(
+            _case_dir,
+            "model:\n"
+            "  provider: custom\n"
+            "  default: old-model\n"
+            f"  base_url: {OLD_URL}\n"
+            "  api_key: synthetic-old-key\n"
+            "custom_providers:\n"
+            f"  - name: {spelling}\n"
+            f"    base_url: {NEW_URL}\n"
+            "    model: new-model\n",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda p=cfg_path: p)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+        _load(cfg_path)
+        assert config.set_hermes_default_model("new-model", provider="custom:晨光")["ok"] is True
+
+        config._cfg_path = cfg_path
+        config._cfg_mtime = config.Path(cfg_path).stat().st_mtime
+        _load(cfg_path)
+        on_disk = config._load_yaml_config_file(cfg_path)
+        raw_disk = config._load_yaml_config_file_raw(cfg_path)
+        assert raw_disk["custom_providers"][0]["name"] == spelling, (
+            "the document must keep the name exactly as the user wrote it"
+        )
+        assert not on_disk["model"].get("api_key"), (
+            "the previous route's key must not follow the pick, whichever way the name is spelled"
+        )
+        assert config.resolve_custom_provider_connection("custom:晨光") == (None, NEW_URL), (
+            "an expanded and a literal name must resolve to the same keyless entry"
+        )
+
+
+def test_a_keyless_custom_record_returns_no_key_instead_of_raising(monkeypatch):
+    """A record with no credential source yields no key, not an AttributeError (r39).
+
+    ``_resolve_custom_record_key`` answers ``None`` when the record declares no
+    ``api_key``/``key_env`` and the convention variable is unset. The caller
+    then called ``.startswith`` on that ``None``, so a keyless entry which does
+    match the requested provider crashed instead of falling through to the
+    credential pool the way a keyed-but-empty one does.
+    """
+    from api import providers
+
+    shape = {
+        "model": {"provider": "custom", "default": "chat-model"},
+        "custom_providers": [
+            {
+                "name": "openrouter",
+                "base_url": "https://keyless.invalid/v1",
+                "model": "chat-model",
+            },
+        ],
+    }
+    monkeypatch.setattr(providers, "get_config", lambda: shape)
+    assert providers._get_provider_api_key("openrouter") is None
+
+
 def test_an_entry_whose_only_credential_is_a_key_cmd_serves_instead_of_the_block(monkeypatch):
     """A declared ``key_cmd`` is a credential: the block must not take the route over.
 

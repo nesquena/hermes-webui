@@ -28213,8 +28213,8 @@ def _handle_live_models(handler, parsed):
                 if not (provider == "custom" or provider.startswith("custom:")):
                     return []
                 try:
-                    from api.config import _custom_provider_entry_identity
-                    _cp_entries = cfg.get("custom_providers", [])
+                    from api.config import _custom_provider_entries, _custom_provider_entry_identity
+                    _cp_entries = _custom_provider_entries(cfg)
                     if not isinstance(_cp_entries, list):
                         return []
                     _cp_providers_cfg = cfg.get("providers")

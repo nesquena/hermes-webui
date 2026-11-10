@@ -1552,7 +1552,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                 provider_id, cp, custom_providers, providers_cfg, cfg.get("model")
             ):
                 cp_key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
-                if cp_key.startswith("${") and cp_key.endswith("}"):
+                if cp_key and cp_key.startswith("${") and cp_key.endswith("}"):
                     return _thread_local_env_value(cp_key[2:-1]).strip() or None
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key

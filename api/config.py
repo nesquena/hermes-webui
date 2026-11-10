@@ -8474,7 +8474,14 @@ def _selected_fallback_entry(provider: object, config_data: object) -> dict | No
         return None
     for entry in _custom_provider_entries(config_data):
         name = entry.get("name")
-        if not _custom_provider_slug_is_fallback(name) or _custom_provider_slug_key(name) != slug:
+        # A ``${VAR}`` name is a reference on disk but a literal identity once
+        # resolved: the picker mints its slug from the EXPANDED value. Judging
+        # ownership against the raw text therefore matched nothing, so the
+        # Save fell through to the connection copy and kept the previous
+        # route's key (#8164 r39). Expand for this decision only; the document
+        # keeps the reference and is written back unchanged.
+        identity_name = _expand_env_vars(name) if isinstance(name, str) else name
+        if not _custom_provider_slug_is_fallback(identity_name) or _custom_provider_slug_key(identity_name) != slug:
             continue
         return entry
     return None
