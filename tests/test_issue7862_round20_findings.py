@@ -66,12 +66,11 @@ from api.goal_continuation_store import _ROLLBACK_RECEIPT_TTL_SECONDS as _TTL  #
 
 # The round-16 separate-process harness and the round-17 command extensions
 # (``consume_restored`` / ``rollback`` / ``route_launch_regen``) are reused
-# verbatim: the maintainer asked to KEEP that design.
-from tests.test_issue7862_round17_findings import (  # noqa: E402
-    _Worker as _Round17Worker,
-    _wait_for_parked,
-    _wait_for_stream_release,
-)
+# verbatim: the maintainer asked to KEEP that design. Only the worker base
+# class is bound at module level, because that is all the module body needs.
+# The two parking / release helpers are imported by the single test that calls
+# them, so this list cannot drift out of sync with their call sites.
+from tests.test_issue7862_round17_findings import _Worker as _Round17Worker  # noqa: E402
 
 
 class _Worker(_Round17Worker):
@@ -331,6 +330,19 @@ class TestAPostBindPauseWithASuccessorThatAlreadySpentTheIntent:
     """
 
     def test_a_takeover_after_the_bind_refuses_and_rolls_back_cleanly(self, workers):
+        # Resolve the two parking/release helpers from the module that owns
+        # them, at call time, instead of leaning only on the module-level
+        # ``from ... import`` above. That import binds them at collection time,
+        # so a partial edit of its name list (dropping one helper) still
+        # collects cleanly and then dies HERE with a NameError — the one
+        # failure shape collection cannot catch, which is how this suite looked
+        # flaky for a round. Binding at the call site keeps the reference and
+        # its use together.
+        from tests.test_issue7862_round17_findings import (  # noqa: E402
+            _wait_for_parked,
+            _wait_for_stream_release,
+        )
+
         sid = "sess-r20-post-bind-pause"
         late = _TTL + 120
         owner = workers("owner")
