@@ -19,7 +19,6 @@ import multiprocessing
 import os
 import pathlib
 import shutil
-import stat
 import subprocess
 import sys
 import time
@@ -585,6 +584,7 @@ requires_agent_modules = pytest.mark.skipif(
 )
 
 def pytest_configure(config):
+    _repo_git_guard.pytest_configure(config)  # records --basetemp for the guard (see tests/_real_repo_git_guard.py)
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
     config.addinivalue_line("markers", "requires_fcntl: skip when fcntl-backed file-descriptor operations are unavailable")
@@ -833,6 +833,22 @@ def allow_outbound_network(monkeypatch):
     yield
 
 
+# ── Real-checkout git guard ─────────────────────────────────────────────────
+# Installed once here, like the network guard above: see tests/_real_repo_git_guard.py.
+from tests import _real_repo_git_guard as _repo_git_guard  # noqa: E402
+
+from api.config import _AGENT_DIR as _PRODUCTION_AGENT_DIR  # noqa: E402  (the runtime's own discovery)
+
+_repo_git_guard.install(REPO_ROOT, HERMES_AGENT, _PRODUCTION_AGENT_DIR)
+pytest_runtest_logstart = _repo_git_guard.pytest_runtest_logstart
+pytest_runtest_makereport = _repo_git_guard.pytest_runtest_makereport
+
+
+@pytest.fixture
+def allow_real_repo_git(monkeypatch):
+    """Opt in to real mutating git against the checkout for one test."""
+    monkeypatch.setattr(subprocess, 'Popen', _repo_git_guard.REAL_POPEN)
+    yield
 
 
 # ── Environment isolation for tests ────────────────────────────────────────
@@ -1131,24 +1147,6 @@ def _rmtree_retry(path):
     )
 
 
-def _seed_test_skills(real_skills: pathlib.Path, test_skills: pathlib.Path) -> None:
-    if not real_skills.exists() or test_skills.exists():
-        return
-    try:
-        test_skills.symlink_to(real_skills)
-    except OSError as exc:
-        if not WINDOWS or getattr(exc, "winerror", None) != 1314:
-            raise
-        shutil.copytree(real_skills, test_skills, copy_function=_copy2_readonly)
-
-
-def _copy2_readonly(source: str, destination: str) -> str:
-    copied = shutil.copy2(source, destination)
-    path = pathlib.Path(copied)
-    path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-    return copied
-
-
 # ── Session-scoped test server ────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1175,11 +1173,8 @@ def test_server():
     TEST_STATE_DIR.mkdir(parents=True)
     TEST_WORKSPACE.mkdir(parents=True)
 
-    # Symlink real skills into test home so skill-related tests work,
-    # but all write-heavy state stays isolated.
-    real_skills  = HERMES_HOME / 'skills'
-    test_skills  = TEST_STATE_DIR / 'skills'
-    _seed_test_skills(real_skills, test_skills)
+    # The test home starts with no skills: nothing from the real Hermes home is
+    # linked or copied in, so the test server's skill writes stay in test state.
 
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)

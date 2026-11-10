@@ -469,8 +469,11 @@ def test_nested_root_ancestor_swap_after_resolution_never_embeds_outside_bytes(
     # Dry run: unswapped, the nested-root image embeds (non-vacuous) and we
     # learn every filesystem step.  Root resolution (realpath's lstat calls)
     # happens before the first os.open; a swap BEFORE resolution redirects
-    # the trusted configuration itself (pre-existing policy, out of scope), so
-    # the swap is applied at every step from the first open onwards.
+    # roots handed in as allowed_roots, which are resolved per call.  Shares
+    # pass the attachment root as a startup-trusted root instead; that case,
+    # swapped at every step including resolution, is covered by
+    # tests/test_issue8590_share_root_trust.py.  Here the swap is applied at
+    # every step from the first open onwards.
     dry_tree = _nested_root_tree(tmp_path / "dry")
     dry = _FsEvents()
     with dry.installed(monkeypatch):

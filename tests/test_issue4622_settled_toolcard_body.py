@@ -87,6 +87,7 @@ for (const n of messagesFns) code += extractFunc(mSrc, n) + '\n';
 for (const n of uiFns) code += extractFunc(uSrc, n) + '\n';
 code += `
 var buf='';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data',c=>buf+=c);
 process.stdin.on('end',()=>{
   var p=JSON.parse(buf||'{}');
