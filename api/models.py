@@ -13776,6 +13776,36 @@ def _normalized_message_timestamp_for_key(value):
     return str(int(timestamp))
 
 
+# The clock fields a transcript row can carry, in authority order.  ``timestamp``
+# is the ordinary representation; ``_ts`` is the legacy one the real
+# missing-timestamp stamper (``streaming._stamp_missing_message_timestamps``)
+# preserves INSTEAD of adding a ``timestamp``.  ``_message_exact_timestamp_details``
+# already treats both as supported, so the occurrence discriminator has to read
+# them the same way or a saved ``_ts`` row reads as clock-less and stops
+# distinguishing two occurrences of the same prompt (#8672 gate C67-F1).
+_MESSAGE_CLOCK_FIELDS = ("timestamp", "_ts")
+
+
+def _message_occurrence_clock_value(msg):
+    """Return the raw clock value the occurrence discriminator normalises.
+
+    ``timestamp`` wins when the row carries one; otherwise the legacy ``_ts``
+    clock is the same row's time and is honoured.  A row with neither keeps
+    answering ``None`` so the discriminator's clock-less fallback (private
+    identity, then the wildcard) still applies.
+    """
+    if not isinstance(msg, dict):
+        return None
+    for field in _MESSAGE_CLOCK_FIELDS:
+        if field not in msg:
+            continue
+        value = msg.get(field)
+        if value in (None, ""):
+            continue
+        return value
+    return None
+
+
 def _message_timestamp_as_float(msg):
     if not isinstance(msg, dict):
         return None
@@ -15124,9 +15154,14 @@ def _session_message_occurrence_for_key(
     JSON write and the state.db created_at write for the SAME logical row, so
     a replayed durable record still collapses.
 
-    A missing/empty timestamp yields ``""`` and an unparseable one yields its
+    A missing/empty clock yields ``""`` and an unparseable one yields its
     own string, so rows without usable clock data still key stably against
     each other (they never become permanently unmatchable) and never raise.
+    The clock is read through the shared representation helper, so a legacy
+    ``_ts`` row is the SAME clock a ``timestamp`` row would carry: the real
+    missing-timestamp stamper keeps such a row without adding a ``timestamp``,
+    and reading only one field made every saved ``_ts`` occurrence read as
+    clock-less (#8672 gate C67-F1).
 
     When the clock is missing entirely the discriminator falls back to the
     private identities the row carries (``id`` / ``message_id`` /
@@ -15157,7 +15192,9 @@ def _session_message_occurrence_for_key(
     """
     if not isinstance(msg, dict):
         return ""
-    stamp = _normalized_message_timestamp_for_key(msg.get("timestamp"))
+    stamp = _normalized_message_timestamp_for_key(
+        _message_occurrence_clock_value(msg)
+    )
     identity = ""
     if include_private_identity or not stamp:
         identity = ",".join(_established_occurrence_identities(msg))
@@ -15293,6 +15330,12 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
             _visible_key_without_occurrence(key),
             {
                 "any": key,
+                # Every member of the group in build order.  The O(1) probes
+                # below answer the common shapes; this list is the bounded
+                # fallback that lets an EXHAUSTED representative hand the
+                # replay to another compatible occurrence instead of
+                # appending it as a second row (#8672 gate C67-F1).
+                "members": [],
                 # Exact occurrence string -> key (never the "" sentinel).
                 "by_occurrence": {},
                 # Rows that ESTABLISH a clock, bucketed per clock.  Inside one
@@ -15363,6 +15406,7 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
             group["by_namespace"].setdefault(
                 _occurrence_identity_namespace(identity), {}
             ).setdefault(identity, key)
+        group["members"].append(key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
@@ -15627,8 +15671,21 @@ def _occurrence_identity_conflict(left_identity, right_identity) -> bool:
     carrying the same value are still one identity rather than a
     contradiction.
     """
-    left = _occurrence_identities(left_identity)
-    right = _occurrence_identities(right_identity)
+    return _occurrence_identity_lists_conflict(
+        _occurrence_identities(left_identity),
+        _occurrence_identities(right_identity),
+    )
+
+
+def _occurrence_identity_lists_conflict(
+    left: tuple[str, ...], right: tuple[str, ...]
+) -> bool:
+    """True when two lists of private identities contradict each other.
+
+    The pair-wise core of :func:`_occurrence_identity_conflict`, kept separate
+    so a caller that already holds the split identities does not have to
+    re-join and re-split them for every candidate it inspects.
+    """
     for left_part in left:
         for right_part in right:
             if not left_part or not right_part or left_part == right_part:
@@ -15674,14 +15731,50 @@ def _visible_keys_share_occurrence(left, right) -> bool:
     return True
 
 
-def _clockless_duplicate_candidate(group: dict, identities):
+def _visible_key_capacity_remaining(key, remaining) -> bool:
+    """True when a saved occurrence can still absorb one more replay.
+
+    ``remaining`` maps a visible key to the number of replays it may still
+    consume (``sidecar_visible_counts`` minus what the merge already skipped).
+    ``None`` means the caller does not track capacity, so every candidate
+    stays available and the historical behaviour is preserved exactly.
+    """
+    if remaining is None:
+        return True
+    return remaining.get(key, 1) > 0
+
+
+def _visible_key_occurrence_compatible(key, identities) -> bool:
+    """True when a candidate key's private identities do not contradict ours.
+
+    The check is applied to the CANDIDATE, not to the whole group (#8672 gate
+    C67-F2): one occurrence's durable id must not veto a compatible sibling
+    that establishes no such id, so the sibling can consume its own replay.
+    A candidate that carries no private identity at all contradicts nothing.
+    """
+    if not identities:
+        return True
+    occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+    _clock, identity_text = _occurrence_parts(occurrence)
+    candidate_identities = _occurrence_identities(identity_text)
+    if not candidate_identities:
+        return True
+    # Routed through the shared comparison (not its list core) so every
+    # identity comparison in this module stays observable in one place.
+    return not _occurrence_identity_conflict(
+        ",".join(candidate_identities), ",".join(identities)
+    )
+
+
+def _clockless_duplicate_candidate(group: dict, identities, remaining=None):
     """Return a clock-unestablished representative compatible with ``identities``.
 
     A row without a usable clock cannot prove it is a DIFFERENT occurrence,
     so it stays a wildcard for an incoming clock the group's buckets do not
-    carry.  The caller applies the group-level namespace check first, so no
-    clock-unestablished identity can contradict the incoming ones here and
-    the first representative is compatible by construction.
+    carry.  Compatibility is checked against the candidate's OWN identities,
+    because the group-level namespace veto no longer runs before this probe
+    (#8672 gate C67-F2): an exhausted or contradictory representative must not
+    hide another compatible saved occurrence.
     """
     clockless = group.get("clockless") or {}
     if clockless.get("representative") is None:
@@ -15691,10 +15784,18 @@ def _clockless_duplicate_candidate(group: dict, identities):
         match = by_identity.get(identity)
         if match is not None:
             return match
-    return clockless.get("anonymous") or clockless.get("representative")
+    for candidate in (clockless.get("anonymous"), clockless.get("representative")):
+        if candidate is None:
+            continue
+        if not _visible_key_occurrence_compatible(candidate, identities):
+            continue
+        if not _visible_key_capacity_remaining(candidate, remaining):
+            continue
+        return candidate
+    return None
 
 
-def _clockfree_duplicate_candidate(group: dict, occurrence):
+def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
     """Pick a clock-free duplicate representative consistent with ``occurrence``.
 
     Exact occurrence equality is authoritative.  Beyond that, a one-sided
@@ -15711,31 +15812,34 @@ def _clockfree_duplicate_candidate(group: dict, occurrence):
     SEVERAL namespaces is compared in ALL of them, so a stable id cannot mask
     a comparable durable conflict on the same row (round 3).
 
-    Every step below is a dict lookup keyed by clock and canonical identity
-    namespace -- never a scan over the group's members (#8672 review P2,
-    round 3): the prebuilt index is the bounded-work contract, and a bucket
-    holding a thousand same-clock occurrences of one repeated prompt must
-    not be rescanned per incoming row.
+    The durable conflict is a property of the CANDIDATE, never a group-wide
+    veto (#8672 gate C67-F2): the earlier saved occurrence of a repeated
+    prompt owns durable row 7 while the later one is unbound, and an incoming
+    durable row 8 conflicts with the first but not with the second, so the
+    unbound sibling still has to absorb its own replay.
+
+    Every preferred step below is a dict lookup keyed by clock and canonical
+    identity namespace -- never a scan over the group's members (#8672 review
+    P2, round 3): the prebuilt index is the bounded-work contract, and a
+    bucket holding a thousand same-clock occurrences of one repeated prompt
+    must not be rescanned per incoming row.  The ordered member list is only
+    walked once the preferred candidate is EXHAUSTED, so replay capacity is
+    consumed one occurrence at a time (C67-F1).
     """
     exact = group.get("by_occurrence", {}).get(occurrence)
-    if exact is not None:
+    if exact is not None and _visible_key_capacity_remaining(exact, remaining):
         return exact
     clock, identity_text = _occurrence_parts(occurrence)
     identities = _occurrence_identities(identity_text)
-    by_namespace = group.get("by_namespace") or {}
-    for identity in identities:
-        namespace_values = by_namespace.get(_occurrence_identity_namespace(identity))
-        if namespace_values and identity not in namespace_values:
-            # A conflicting private id in the SAME namespace is contradictory
-            # identity, not a missing clock: keep the rows distinct.
-            return None
     if clock:
         bucket = (group.get("by_clock") or {}).get(clock)
         if bucket is not None:
             bucket_by_identity = bucket.get("by_identity") or {}
             for identity in identities:
                 match = bucket_by_identity.get(identity)
-                if match is not None:
+                if match is not None and _visible_key_capacity_remaining(
+                    match, remaining
+                ):
                     return match
             bucket_by_namespace = bucket.get("by_namespace") or {}
             for identity in identities:
@@ -15747,39 +15851,108 @@ def _clockfree_duplicate_candidate(group: dict, occurrence):
                     # merely one-sided and collapses onto the bucket's
                     # compatible representative.
                     return None
-            return bucket.get("representative")
+            representative = bucket.get("representative")
+            if representative is not None and _visible_key_capacity_remaining(
+                representative, remaining
+            ):
+                return representative
+            # The bucket's representative already absorbed its replay.  Another
+            # occurrence at the SAME clock is still a compatible saved row, so
+            # the replay must land on it instead of being appended (C67-F1).
+            for candidate in bucket_by_identity.values():
+                if not _visible_key_capacity_remaining(candidate, remaining):
+                    continue
+                if not _visible_key_occurrence_compatible(candidate, identities):
+                    continue
+                return candidate
+            return None
         # No row establishes this clock.  A different ESTABLISHED clock stays
         # distinct, but a clock-unestablished copy of the same turn is still
         # compatible and must be checked BEFORE the incoming clock is
         # rejected: two identical image turns, one at a known clock and one
         # without any timestamp, replayed the second one from state.db at a
         # new clock and the merge appended the image again (Greptile P1).
-        clockless = _clockless_duplicate_candidate(group, identities)
+        clockless = _clockless_duplicate_candidate(group, identities, remaining)
         if clockless is not None:
             return clockless
         if group.get("by_clock"):
             return None
-        return group.get("any")
+        return _first_compatible_member(group, identities, remaining)
     if identities:
         by_identity = group.get("by_identity") or {}
         for identity in identities:
             match = by_identity.get(identity)
-            if match is not None:
+            if match is not None and _visible_key_capacity_remaining(
+                match, remaining
+            ):
                 return match
+        # A row with no clock cannot prove it is a different occurrence, so a
+        # same-namespace conflict anywhere in the group stays a refusal HERE:
+        # the row has no clock to narrow the candidate set, and refusing keeps
+        # two provably different turns apart (fail closed, #7587).
+        by_namespace = group.get("by_namespace") or {}
+        for identity in identities:
+            namespace_values = by_namespace.get(
+                _occurrence_identity_namespace(identity)
+            )
+            if namespace_values and identity not in namespace_values:
+                return None
         # The namespace check above proved no group identity contradicts
         # ours, so the first identity-bearing row is a compatible
         # representative -- resolved without scanning the bucket.
         for candidate in by_identity.values():
+            if not _visible_key_capacity_remaining(candidate, remaining):
+                continue
+            if not _visible_key_occurrence_compatible(candidate, identities):
+                continue
             return candidate
-        return group.get("any")
-    return (
-        (group.get("clockless") or {}).get("anonymous")
-        or (group.get("clockless") or {}).get("representative")
-        or group.get("any")
-    )
+        return _first_compatible_member(group, identities, remaining)
+    # Neither a clock nor a private identity: a pure wildcard, so the first
+    # member that can still absorb a replay wins.
+    return _first_compatible_member(group, (), remaining)
 
 
-def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
+def _first_compatible_member(group: dict, identities, remaining=None):
+    """Return the first group member that is compatible and unconsumed.
+
+    The fallback of last resort for the shapes the O(1) probes cannot answer
+    (an exhausted representative, or a group whose only members are
+    clock-less).  It walks the ordered member list once and stops at the
+    first compatible row with replay capacity left, so consumption stays
+    one-to-one without rescanning a whole same-clock bucket (C67-F1).
+    """
+    clockless = group.get("clockless") or {}
+    for candidate in (
+        clockless.get("anonymous"),
+        clockless.get("representative"),
+        *(group.get("members") or []),
+    ):
+        if candidate is None:
+            continue
+        if not _visible_key_occurrence_compatible(candidate, identities):
+            continue
+        if not _visible_key_capacity_remaining(candidate, remaining):
+            continue
+        return candidate
+    return None
+
+
+def _matching_visible_duplicate(
+    visible_key: tuple,
+    visible_keys: set[tuple],
+    lookup: dict | None = None,
+    *,
+    remaining: dict | None = None,
+):
+    """Return the saved visible key a replay collapses onto, or ``None``.
+
+    ``remaining`` is the caller's live replay-capacity map (visible key ->
+    replays it may still absorb).  When supplied, an EXHAUSTED representative
+    no longer wins: the probes below hand the replay to another compatible
+    saved occurrence instead, so capacity is consumed one occurrence at a time
+    (#8672 gate C67-F1).  ``None`` keeps the historical capacity-blind
+    behaviour for every caller that does not track it.
+    """
     if visible_key in visible_keys:
         return visible_key
     role = visible_key[0]
@@ -15819,7 +15992,9 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
                 # occurrences, so a repeated prompt with thousands of
                 # occurrences never rescans the whole list (Greptile: "Repeated
                 # prompts slow loading").  A clock-less row is a wildcard.
-                candidate = _clockfree_duplicate_candidate(group, occurrence)
+                candidate = _clockfree_duplicate_candidate(
+                    group, occurrence, remaining
+                )
                 if candidate is not None:
                     return candidate
         elif lookup is None and len(visible_keys) <= _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS:
@@ -15881,6 +16056,16 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
             occurrence,
             _visible_key_field(existing_key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""),
         ):
+            continue
+        # This saved occurrence already absorbed its own replay.  The #7587
+        # occurrence discriminator gives every occurrence of a repeated prompt
+        # its own visible identity, so a second replay of the same repeated
+        # turn must land on the NEXT compatible occurrence rather than on an
+        # exhausted representative -- otherwise the merge refuses the skip and
+        # appends the turn a second time (#8672 gate C67-F1).  Callers that do
+        # not track capacity (``remaining is None``) keep the historical
+        # first-match behaviour byte for byte.
+        if not _visible_key_capacity_remaining(existing_key, remaining):
             continue
         # Exact visible-key equality was checked above. For very large payloads
         # (tool logs / request dumps), Python-in substring and fuzzy-token
@@ -17183,6 +17368,12 @@ def _merge_session_messages_append_only_impl(
         merged_messages.append(msg)
         _remember_merged_message(msg, source="sidecar")
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
+    # Live replay capacity per saved occurrence (#8672 gate C67-F1).  Every
+    # occurrence of a repeated prompt owns its own visible identity, so each
+    # one may absorb exactly one replay; the merge decrements this map wherever
+    # it records a skip, and the duplicate probes below prefer a candidate that
+    # still has capacity instead of an exhausted representative.
+    sidecar_visible_remaining = dict(sidecar_visible_counts)
     state_multimodal_mirror_keys = {}
     ambiguous_state_multimodal_mirrors = set()
     if sidecar_multimodal_mirrors:
@@ -17577,10 +17768,14 @@ def _merge_session_messages_append_only_impl(
                 visible_key,
                 sidecar_visible_keys,
                 sidecar_visible_lookup,
+                remaining=sidecar_visible_remaining,
             )
             if matched_visible_key is not None:
                 skipped_state_visible_counts[matched_visible_key] = (
                     skipped_state_visible_counts.get(matched_visible_key, 0) + 1
+                )
+                sidecar_visible_remaining[matched_visible_key] = (
+                    sidecar_visible_remaining.get(matched_visible_key, 1) - 1
                 )
             # Record dedup key so later duplicates of this replayed message
             # are caught by the dedup guard (#3346).
@@ -17649,12 +17844,16 @@ def _merge_session_messages_append_only_impl(
             visible_key,
             sidecar_visible_keys,
             sidecar_visible_lookup,
+            remaining=sidecar_visible_remaining,
         )
         if matched_visible_key is not None and not post_cancel_state:
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
             if skipped_count < sidecar_count:
                 skipped_state_visible_counts[matched_visible_key] = skipped_count + 1
+                sidecar_visible_remaining[matched_visible_key] = (
+                    sidecar_visible_remaining.get(matched_visible_key, 1) - 1
+                )
                 _merge_session_display_metadata(merged_by_visible_key.get(matched_visible_key), msg)
                 continue
         # State rows at or before the newest sidecar timestamp are normally
