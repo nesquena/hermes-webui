@@ -11454,21 +11454,17 @@ function setComposerStatus(t,timeoutMs){
   if(statusHidden){
     el.style.display='none';
     el.textContent='';
-    el.removeAttribute('title');
     return;
   }
   if(!t){
     el.style.display='none';
     el.textContent='';
-    el.removeAttribute('title');
     return;
   }
   // Defensive reset: a stale hidden class should never block live status text.
   el.classList.remove('composer-control-hidden');
   el.removeAttribute('aria-hidden');
   el.textContent=t;
-  // The status is ellipsized to a narrow width; keep the full text on hover.
-  el.title=t;
   el.style.display='';
   if(timeoutMs>0){
     const timer=setTimeout(()=>{
@@ -15841,6 +15837,44 @@ function _setAssistantTurnTps(turn, tpsText=''){
 function _setLiveAssistantTps(value){
   _setAssistantTurnTps($('liveAssistantTurn'), isTpsDisplayEnabled()?_formatTurnTps(value):'');
 }
+// Which external memory provider fed the turn ("🧠 Honcho — recalled 3 memories"),
+// on its own line under the assistant name and above the turn body, where the CLI
+// prints it above the reply. It sits outside .assistant-turn-blocks, so rebuilding
+// the blocks during a live turn leaves it in place. While streaming, the value is keyed by session and stream so it only lands
+// on that stream's live turn; settled turns read the persisted _memoryRecall.
+const _liveMemoryRecall=new Map();
+function _noteLiveMemoryRecall(sessionId, streamId, text){
+  const value=String(text||'').trim();
+  if(!sessionId||!value) return;
+  _liveMemoryRecall.set(String(sessionId),{streamId:String(streamId||''),text:value});
+}
+function _liveMemoryRecallText(sessionId, streamId){
+  const entry=sessionId?_liveMemoryRecall.get(String(sessionId)):null;
+  return entry&&entry.streamId===String(streamId||'')?entry.text:'';
+}
+function _setAssistantTurnMemoryRecall(turn, text){
+  if(!turn) return;
+  let line=Array.from(turn.children||[]).find(el=>String(el.className||'').split(/\s+/).includes('msg-memory-recall'));
+  const value=String(text||'').trim();
+  if(!value){if(line) line.remove();return;}
+  if(!line){
+    const role=turn.querySelector('.msg-role.assistant');
+    if(!role) return;
+    line=document.createElement('div');
+    line.className='msg-memory-recall';
+    role.after(line);
+  }
+  if(line.textContent!==value) line.textContent=value;
+  if(line.title!==value) line.title=value;
+}
+function _syncLiveAssistantMemoryRecall(){
+  if(!S.session) return;
+  const turn=$('liveAssistantTurn');
+  if(!turn) return;
+  if(turn.dataset.sessionId&&turn.dataset.sessionId!==S.session.session_id) return;
+  const text=_liveMemoryRecallText(S.session.session_id, S.activeStreamId);
+  if(text) _setAssistantTurnMemoryRecall(turn, text);
+}
 function _createAssistantTurn(tsTitle='', tpsText=''){
   const row=document.createElement('div');
   row.className='msg-row assistant-turn';
@@ -19880,6 +19914,7 @@ function _formatRunElapsed(seconds){
 function _moveLiveRunStatusToTurnEnd(el){
   el=el||$('liveRunStatus');
   if(!el) return null;
+  if(typeof _syncLiveAssistantMemoryRecall==='function') _syncLiveAssistantMemoryRecall();
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
   if(blocks&&el.parentElement===blocks&&blocks.lastElementChild!==el) blocks.appendChild(el);
@@ -19902,6 +19937,7 @@ function placeLiveRunStatusHost(){
   }
   const blocks=_assistantTurnBlocks(turn);
   if(blocks&&el.parentElement!==blocks) blocks.appendChild(el);
+  if(typeof _syncLiveAssistantMemoryRecall==='function') _syncLiveAssistantMemoryRecall();
   el.className='live-run-status live-footer';
   return _moveLiveRunStatusToTurnEnd(el);
 }
@@ -22963,6 +22999,7 @@ function renderMessages(options){
         for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);
         const role=recycled.querySelector('.msg-role.assistant');
         if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        if(typeof _setAssistantTurnMemoryRecall==='function') _setAssistantTurnMemoryRecall(recycled, '');
         currentAssistantTurn=recycled;
       }else{
         currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
@@ -22973,6 +23010,7 @@ function renderMessages(options){
       inner.appendChild(currentAssistantTurn);
     }
     _setLatestAssistantTurnLandmark(currentAssistantTurn, !m._live&&rawIdx===latestRenderedAssistantRawIdx);
+    if(m._memoryRecall&&typeof _setAssistantTurnMemoryRecall==='function') _setAssistantTurnMemoryRecall(currentAssistantTurn, m._memoryRecall);
     const seg=document.createElement('div');
     if(Array.isArray(orderedTransparentParts)&&orderedTransparentParts.length){
       const blocks=_assistantTurnBlocks(currentAssistantTurn);
@@ -23057,6 +23095,7 @@ function renderMessages(options){
       // right session's DOM (the user may have switched tabs/sessions
       // while this stream is still streaming). See #1366.
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
+      if(typeof _syncLiveAssistantMemoryRecall==='function') _syncLiveAssistantMemoryRecall();
       seg.setAttribute('data-live-assistant','1');
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';

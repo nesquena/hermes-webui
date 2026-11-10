@@ -7093,6 +7093,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           // Stamp _ts on the last assistant message if it has no timestamp
           if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
+          if(lastAsst&&!lastAsst._memoryRecall&&typeof _liveMemoryRecallText==='function'){
+            const _recall=_liveMemoryRecallText(activeSid,streamId);
+            if(_recall) lastAsst._memoryRecall=_recall;
+          }
           if(d.usage){
             const _doneUsageFallback={...(S.lastUsage||{})};
             if(S.session){
@@ -7561,13 +7565,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('memory_recall',e=>{
-      // An external memory provider injected context for this turn. Same quiet
-      // composer notice as a fallback warning; nothing is persisted.
-      if(!S.session||S.session.session_id!==activeSid) return;
+      // An external memory provider injected context for this turn. Shown in the
+      // turn header, as the CLI prints it above the reply; the server persists it
+      // on the settled turn as _memoryRecall.
       try{
         const d=JSON.parse(e.data||'{}')||{};
         if(d.session_id&&d.session_id!==activeSid) return;
-        if(d.message) setComposerStatus(String(d.message),6000);
+        if(!d.message) return;
+        if(typeof _noteLiveMemoryRecall==='function') _noteLiveMemoryRecall(activeSid,streamId,String(d.message));
+        if(!S.session||S.session.session_id!==activeSid) return;
+        if(typeof _syncLiveAssistantMemoryRecall==='function') _syncLiveAssistantMemoryRecall();
       }catch(_){}
     });
 
@@ -7854,7 +7861,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_memoryRecall','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
     const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;

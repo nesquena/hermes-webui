@@ -88,6 +88,7 @@ def _build_status_callback(agent=None):
         "put": lambda event, data: events.append((event, data)),
         "session_id": "sid-1",
         "_captured_terminal_error": [None],
+        "_turn_memory_recall": [None],
         "_is_agent_compression_start_status": streaming._is_agent_compression_start_status,
         "_is_fallback_lifecycle_message": streaming._is_fallback_lifecycle_message,
         "_is_session_lease_wait_message": streaming._is_session_lease_wait_message,
