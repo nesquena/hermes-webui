@@ -155,6 +155,12 @@ SETTLE_MS = 600
 LONG_PRESS_MS = 700
 MIN_TOUCH_ROW_PX = 44
 PROJECTS = ["Research", "Client work", "Reading list"]
+# The picker presents its project rows alphabetically (#6393): a base-sensitivity
+# collation with a project_id tie-break (static/sessions.js, _projectsSortedByName).
+# The seeds above are creation order; the expectations below are presentation order,
+# measured with that shipped comparator (V8/ICU) so a reordering regression reddens
+# this gate instead of hiding behind creation order.
+PROJECTS_ORDER = ["Client work", "Reading list", "Research"]
 LONG_PROJECTS = [
     "Quartalsbericht und Budgetplanung für das kommende Geschäftsjahr",
     "Kundengespräche",
@@ -169,6 +175,9 @@ LONG_PROJECTS = [
     "Release notes",
     "Experiments",
 ]
+# Presentation order of LONG_PROJECTS: the shipped comparator puts the CJK name
+# last and the German/Latin ones first, so the End/ArrowUp row is 読書メモ.
+LONG_PROJECTS_LAST = "読書メモ"
 
 
 def _wait_for_health(timeout=30):
@@ -342,7 +351,7 @@ def _check_single(page, seed):
         return [f"  [single] {problem}"]
     picker = page.evaluate(PICKER_JS, SINGLE)
     texts = [row["text"] for row in picker["rows"]]
-    expected = ["No project", *PROJECTS, "+ New project"]
+    expected = ["No project", *PROJECTS_ORDER, "+ New project"]
     if texts != expected:
         fail(f"rows are {texts}, expected {expected}")
     if picker["role"] != "menu":
@@ -364,10 +373,11 @@ def _check_single(page, seed):
     if failures:
         return failures
 
-    # Arrows wrap, Home and End jump.
+    # Arrows wrap, Home and End jump. Focus opens on the session's current
+    # project (Research), which the alphabetical order now places last.
     steps = [
-        ("ArrowDown", PROJECTS[1]),
-        ("ArrowUp", PROJECTS[0]),
+        ("ArrowDown", "+ New project"),
+        ("ArrowUp", PROJECTS_ORDER[-1]),
         ("Home", "No project"),
         ("ArrowUp", "+ New project"),
         ("ArrowDown", "No project"),
@@ -557,12 +567,12 @@ def _check_batch(page, seed):
     if [row["role"] for row in picker["rows"]] != ["menuitem"] * len(picker["rows"]):
         fail(f"row roles are {[row['role'] for row in picker['rows']]}")
     texts = [row["text"] for row in picker["rows"]]
-    if texts != ["Kein Projekt", *PROJECTS]:
+    if texts != ["Kein Projekt", *PROJECTS_ORDER]:
         fail(f"rows are {texts}")
     if [row["text"] for row in picker["rows"] if row["focused"]] != ["Kein Projekt"]:
         fail("focus did not open on the first row")
     page.keyboard.press("End")
-    if _focused_text(page) != PROJECTS[-1]:
+    if _focused_text(page) != PROJECTS_ORDER[-1]:
         fail(f"End moved focus to {_focused_text(page)!r}")
     on_move_button = (
         "(() => { const a = document.activeElement; return !!a && a.isConnected"
@@ -2126,7 +2136,7 @@ def _check_batch_long_list(page, seed):
         return [f"  [batch long list] {first['problem']}"]
     if not first["taller"]:
         failures.append("  [batch long list] the batch picker fits the window: the long list was not seeded")
-    for key, want in (("End", LONG_PROJECTS[-1]), ("Home", "No project"), ("ArrowUp", LONG_PROJECTS[-1])):
+    for key, want in (("End", LONG_PROJECTS_LAST), ("Home", "No project"), ("ArrowUp", LONG_PROJECTS_LAST)):
         page.keyboard.press(key)
         page.wait_for_timeout(150)
         state = page.evaluate(FOCUSED_ROW_ON_SCREEN_JS)

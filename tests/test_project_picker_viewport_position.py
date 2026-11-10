@@ -28,7 +28,15 @@ def _show_project_picker_source() -> str:
     assert start >= 0, "_showProjectPicker not found in static/sessions.js"
     end = SESSIONS_JS.find("function _resizeProjectInput(", start)
     assert end > start, "_resizeProjectInput sentinel not found after picker"
-    return SESSIONS_JS[start:end]
+    # The picker section sorts its rows through _projectsSortedByName, declared
+    # far above it at module scope. This harness executes the real picker body,
+    # so it carries the real helper rather than a test-local rewrite of it.
+    helper_start = SESSIONS_JS.find("function _projectsSortedByName(")
+    assert helper_start >= 0, "_projectsSortedByName not found in static/sessions.js"
+    helper_end = SESSIONS_JS.find("\n}", helper_start)
+    assert helper_end > helper_start, "_projectsSortedByName has no closing brace"
+    helper = SESSIONS_JS[helper_start:helper_end + 2]
+    return helper + SESSIONS_JS[start:end]
 
 
 _DRIVER_PREFIX = r"""
