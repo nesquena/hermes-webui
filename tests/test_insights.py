@@ -3216,3 +3216,48 @@ def test_insights_traffic_slow_resolver_does_not_stall_request(monkeypatch, tmp_
     # Unanswered lookup keeps the raw IP as the displayed domain.
     assert data["inbound_ips_day"][0]["domain"] == "192.168.1.1"
 
+
+def test_insights_traffic_returns_raw_ips_when_dns_pool_is_busy(monkeypatch, tmp_path):
+    """At the outstanding-lookup cap the handler keeps raw IPs immediately.
+
+    The pool is shared and bounded, so a busy resolver must degrade to the
+    raw-IP fallback instead of queueing more work.
+    """
+    import calendar as _calendar
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.models as models
+    import api.routes as routes
+
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] "
+        "\"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+    monkeypatch.setattr(
+        routes, "_REVERSE_DNS_OUTSTANDING", routes._REVERSE_DNS_MAX_OUTSTANDING
+    )
+
+    def _boom(ip):
+        raise AssertionError("resolver must not run when the pool is busy")
+
+    monkeypatch.setattr(_socket, "gethostbyaddr", _boom)
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: pathlib.Path("/nonexistent/state.db")
+    )
+
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    routes._handle_insights_traffic(handler, parsed)
+
+    assert handler.status == 200
+    data = handler.json_body()
+    assert data["inbound_ips_day"][0]["ip"] == "192.168.1.1"
+    assert data["inbound_ips_day"][0]["domain"] == "192.168.1.1"
+
