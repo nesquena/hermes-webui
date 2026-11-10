@@ -9658,9 +9658,13 @@ def _context_length_config_api_key_and_owner(
 
     When the session's provider is switched off (``enabled: false`` on its
     authoritative record, :func:`_context_lookup_provider_disabled`), the selection
-    takes no key at all (#8938). The Agent refuses that session, custom or built-in,
-    so the chat sends no key, neither the record's nor the model block's; falling
-    through to the model block would send a key the chat never sends. Any other
+    takes no key at all (#8938). The Agent's resolver refuses that session, custom or
+    built-in, but api/streaming.py drops that refusal (#8974) and the chat may still
+    route: through WebUI's merge for a custom session, or through ``AIAgent``'s own
+    resolution for a built-in one, which can pick an enabled twin (``OpenAI`` beside a
+    switched-off ``openai``). The selection doesn't predict that route. It takes no
+    key, neither the switched-off record's nor the model block's; where the chat does
+    route, the lookup gets the default window (cost-only, #8974). Any other
     switched-off record matching the provider (another spelling of it) is skipped,
     as the Agent's matcher skips it, and the selection reads on exactly as if that
     record weren't there: the chat routes the same with or without it.
@@ -11112,7 +11116,9 @@ def _session_context_length_lookup_state(
     the base URL / custom-provider key shape used by streaming saves. (#4248)
     For a named custom provider the URL and key are the chat route's (#8928), and
     the key is final: pass ``caller_key_only`` for that provider (see
-    :func:`_session_context_lookup_uses_chat_route`).
+    :func:`_session_context_lookup_uses_chat_route`). The model switch takes the
+    same pair for such a provider (#8963). A route the merge refuses (the chat's
+    own verdict, switched-off records included) looks up without a key.
     """
     model_for_lookup = str(model or "").strip()
     provider_for_lookup = str(provider or "").strip()
@@ -11166,6 +11172,10 @@ def _session_context_length_lookup_state(
             route_url = str(route.get("base_url") or "").strip()
             if route_url:
                 base_url_for_lookup = route_url
+            # #8963: no switched-off verdict of the lookup's own here. The chat
+            # obeys this merge: api/streaming.py prints and drops the Agent's
+            # resolve_runtime_provider error (its switched-off ValueError too) and
+            # routes through the same merge, so a route it builds is the chat's.
             route_key = route.get("api_key")
             keyless = bool(isinstance(custom, dict) and custom.get("keyless"))
             if isinstance(route_key, str) and not keyless:
@@ -11178,7 +11188,7 @@ def _session_context_length_lookup_state(
 
 
 def _session_context_lookup_uses_chat_route(provider: str | None) -> bool:
-    """True when GET /api/session's lookup takes its URL and key from the chat route (#8928)."""
+    """True when the context lookup takes its URL and key from the chat route: GET /api/session (#8928) and the model switch (#8963)."""
     return str(provider or "").strip().startswith("custom:")
 
 
@@ -11354,12 +11364,31 @@ def _invalidate_session_route_state_if_changed(
     if changed:
         session.last_used_model = None
         session.gateway_routing = None
-        session.context_length = _resolve_context_length_for_session_model(
-            session.model,
-            session.model_provider,
-            # #8938: the stored provider is raw; the chat asks the Agent for its resolution.
-            requested_provider=_context_lookup_requested_provider(session.model, session.model_provider),
-        )
+        # #8938: the stored provider is raw; the chat asks the Agent for its resolution.
+        requested_provider = _context_lookup_requested_provider(session.model, session.model_provider)
+        if _session_context_lookup_uses_chat_route(requested_provider):
+            # #8963: a named custom provider's URL and key are the chat route's, as on
+            # GET (#8928), not a config selection that predicts the chat's record. The
+            # rest of the lookup (a per-model context_length under the stored spelling,
+            # e.g. providers.mylab for a raw-named session) still reads the stored pair.
+            _lookup_model, lookup_provider, lookup_url, lookup_key = _session_context_length_lookup_state(
+                session.model,
+                session.model_provider,
+            )
+            session.context_length = _resolve_context_length_for_session_model(
+                session.model,
+                session.model_provider,
+                base_url=lookup_url,
+                api_key=lookup_key,
+                requested_provider=requested_provider,
+                caller_key_only=_session_context_lookup_uses_chat_route(lookup_provider),
+            )
+        else:
+            session.context_length = _resolve_context_length_for_session_model(
+                session.model,
+                session.model_provider,
+                requested_provider=requested_provider,
+            )
         session.threshold_tokens = 0
         session.last_prompt_tokens = 0
 

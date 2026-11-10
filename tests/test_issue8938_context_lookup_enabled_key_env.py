@@ -113,12 +113,14 @@ def test_a_disabled_record_does_not_fall_through_to_another_record_for_the_provi
     assert got.api_key == ""
 
 
+@pytest.mark.parametrize("flag", [False, "off", "no"])
 @pytest.mark.parametrize("canonical_first", [True, False])
-def test_a_disabled_alias_beside_the_enabled_record_keeps_the_records_key(canonical_first):
+def test_a_disabled_alias_beside_the_enabled_record_keeps_the_records_key(canonical_first, flag):
     # The Agent's exact key finds the enabled record and its matcher skips the switched-off spelling, so the chat
-    # keeps KR. Only the authoritative record's verdict switches the provider off.
+    # keeps KR. Only the authoritative record's verdict switches the provider off. Every spelling the Agent's
+    # is_provider_enabled reads as off counts, not only ``False`` (m5air M14).
     on = ("custom:my-proxy", {"base_url": B, "api_key": "KR"})
-    off = ("Custom:My-Proxy", {"base_url": B, "api_key": "K2", "enabled": False})
+    off = ("Custom:My-Proxy", {"base_url": B, "api_key": "K2", "enabled": flag})
     got = _lookup({"model": {"provider": "custom:my-proxy"},
                    "providers": dict([on, off] if canonical_first else [off, on])})
     assert (got.base_url, got.api_key) == (B, "KR")
@@ -139,10 +141,12 @@ def test_a_disabled_alias_alone_switches_the_provider_off():
     assert got.api_key == ""
 
 
+@pytest.mark.parametrize("flag", [False, "off", "no"])
 @pytest.mark.parametrize("canonical_first", [True, False])
-def test_a_disabled_builtin_alias_beside_the_enabled_record_keeps_the_records_key(canonical_first):
+def test_a_disabled_builtin_alias_beside_the_enabled_record_keeps_the_records_key(canonical_first, flag):
+    # exp-v0.52.660 sent the switched-off spelling's K2 here; the chat sends KB (m5air M14).
     on = ("openai", {"api_key": "KB"})
-    off = ("OpenAI", {"api_key": "K2", "enabled": False})
+    off = ("OpenAI", {"api_key": "K2", "enabled": flag})
     got = _lookup({"model": {"provider": "openai"}, "providers": dict([on, off] if canonical_first else [off, on])},
                   provider="openai")
     assert got.api_key == "KB"
@@ -274,6 +278,22 @@ def test_a_resolved_caller_is_not_resolved_again(key_in_env):
     assert (got.base_url, got.api_key) == (A, "K1")
 
 
+def test_a_resolved_caller_is_not_resolved_again_through_the_session_resolver(key_in_env, monkeypatch):
+    # The same rule one level up (m5air M21): GET and the model switch call _resolve_context_length_for_session_model
+    # with an already-resolved provider and no requested id, and it must not resolve one itself.
+    import sys
+    from types import ModuleType
+
+    sent = []
+    meta = ModuleType("agent.model_metadata")
+    meta.get_model_context_length = lambda model, base_url="", api_key="", **kw: sent.append((base_url, api_key)) or 4242
+    monkeypatch.setitem(sys.modules, "agent.model_metadata", meta)
+    LIVE.update({"model": {"provider": "openai", "default": "openai/m-x", "base_url": A, "key_env": VAR},
+                 "providers": {"anthropic": {"models": ["m-x"], "enabled": False}}, "custom_providers": []})
+    assert routes._resolve_context_length_for_session_model("m-x", "openai") == 4242
+    assert sent == [(A, "K1")]
+
+
 def test_the_requested_id_is_the_chats():
     LIVE.update({"model": {"provider": "openrouter"}, "providers": {}, "custom_providers": []})
     for raw, want in (("ollama", "ollama"), ("claude", "claude"), ("custom", "custom"), ("custom:my-proxy", "custom:my-proxy"),
@@ -314,7 +334,7 @@ def test_a_disabled_builtin_record_gives_no_key(flag):
 
 def test_an_ambiguous_identity_is_left_as_before():
     # Two records name my-proxy. The chat refuses this shape: the real resolve_model_provider raises
-    # AmbiguousCustomProviderError. The selection here reads on as on exp-v0.52.659 (the model block's key at its own
+    # AmbiguousCustomProviderError. The selection here reads on as on exp-v0.52.660 (the model block's key at its own
     # URL); ambiguity isn't a switch-off, so behaviour is unchanged.
     from api import config as api_config
 
