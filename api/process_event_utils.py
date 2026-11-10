@@ -9,7 +9,14 @@ import math
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Any
+
+from api.delegation_ledger_owner import (
+    authorized_ledger_homes,
+    ledger_home_scope,
+    resolve_ledger_owner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +33,11 @@ _ASYNC_DELIVERY_RETRY_TIMER: threading.Timer | None = None
 _ASYNC_DELIVERY_RETRY_DEADLINE = 0.0
 _ASYNC_DELIVERY_RETRY_QUEUE: Any = None
 _ASYNC_DELIVERY_RETRY_GENERATION = 0
+# Owner ledgers (None = ambient, for legacy no-row events) and unknown-owner
+# events that the next shared sweep restores or requeues.
+_ASYNC_DELIVERY_RETRY_HOMES: set[Path | None] = set()
+_ASYNC_DELIVERY_RETRY_EVENTS: dict[str, dict] = {}
+_NON_LAUNCH_REPLAY_DONE = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +47,8 @@ class AsyncDelegationDeliveryClaim:
     delegation_id: str
     claim_id: str
     durable: bool
+    # Owner resolved at claim time; ACK, release and retry reuse it.
+    ledger_home: Path | None = None
 
 
 def completion_delivery_id(evt: Any) -> str:
@@ -214,6 +228,8 @@ def restore_durable_process_completions(process_registry: Any) -> None:
     Agent method is once-per-process and replays in the launch profile scope;
     older builds without it keep their import-time restore.
     """
+    global _NON_LAUNCH_REPLAY_DONE
+
     restore = getattr(process_registry, "restore_completions", None)
     if not callable(restore):
         return
@@ -221,15 +237,38 @@ def restore_durable_process_completions(process_registry: Any) -> None:
         restore()
     except Exception:
         logger.warning("Failed to restore durable process completions", exc_info=True)
+    # The Agent replays only the launch profile. Replay every authorized ledger
+    # once (claims are atomic, so the launch ledger repeating is harmless).
+    if _NON_LAUNCH_REPLAY_DONE:
+        return
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    if completion_queue is None:
+        return
+    try:
+        homes = authorized_ledger_homes()
+    except Exception:
+        logger.warning("Unable to enumerate delegation ledgers; replay stays pending")
+        return
+    _NON_LAUNCH_REPLAY_DONE = True
+    for home in homes:
+        _arm_async_delegation_restore_sweep(completion_queue, 0.0, ledger_home=home)
 
 
-def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> bool:
+def _arm_async_delegation_restore_sweep(
+    completion_queue: Any,
+    delay: float,
+    *,
+    ledger_home: Path | None = None,
+    deferred_event: dict | None = None,
+) -> bool:
     """Arm one process-wide durable restore sweep at the earliest deadline.
 
     The durable database is the backlog. Keeping one shared timer avoids both
     one-thread-per-event growth and lossy eviction of individual retry entries.
-    The sweep restores every still-pending record; atomic claims suppress races
-    and delivered rows are excluded by the core query.
+    The sweep restores every still-pending record of each owner ledger queued
+    for it, and requeues unknown-owner events so they are resolved again;
+    atomic claims suppress races and delivered rows are excluded by the core
+    query.
     """
     global _ASYNC_DELIVERY_RETRY_TIMER
     global _ASYNC_DELIVERY_RETRY_DEADLINE
@@ -242,6 +281,10 @@ def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> 
     deadline = time.monotonic() + retry_delay
 
     with _ASYNC_DELIVERY_RETRY_LOCK:
+        if deferred_event is not None:
+            _ASYNC_DELIVERY_RETRY_EVENTS[completion_delivery_id(deferred_event)] = dict(deferred_event)
+        else:
+            _ASYNC_DELIVERY_RETRY_HOMES.add(ledger_home)
         if (
             _ASYNC_DELIVERY_RETRY_TIMER is not None
             and deadline >= _ASYNC_DELIVERY_RETRY_DEADLINE
@@ -267,19 +310,36 @@ def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> 
                 _ASYNC_DELIVERY_RETRY_TIMER = None
                 _ASYNC_DELIVERY_RETRY_DEADLINE = 0.0
                 _ASYNC_DELIVERY_RETRY_QUEUE = None
-            try:
-                from tools.async_delegation import restore_undelivered_completions
+                homes = list(_ASYNC_DELIVERY_RETRY_HOMES)
+                events = list(_ASYNC_DELIVERY_RETRY_EVENTS.values())
+                _ASYNC_DELIVERY_RETRY_HOMES.clear()
+                _ASYNC_DELIVERY_RETRY_EVENTS.clear()
+            for home in homes:
+                try:
+                    from tools.async_delegation import restore_undelivered_completions
 
-                restore_undelivered_completions(target_queue)
-            except Exception:
-                logger.warning(
-                    "Failed to restore pending async delegations; retrying sweep",
-                    exc_info=True,
-                )
-                _arm_async_delegation_restore_sweep(
-                    target_queue,
-                    ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
-                )
+                    with ledger_home_scope(home):
+                        restore_undelivered_completions(target_queue)
+                except Exception:
+                    logger.warning(
+                        "Failed to restore pending async delegations; retrying sweep",
+                        exc_info=True,
+                    )
+                    _arm_async_delegation_restore_sweep(
+                        target_queue,
+                        ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+                        ledger_home=home,
+                    )
+            for event in events:
+                try:
+                    target_queue.put(event)
+                except Exception:
+                    logger.warning("Failed to requeue async delegation event", exc_info=True)
+                    _arm_async_delegation_restore_sweep(
+                        target_queue,
+                        ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+                        deferred_event=event,
+                    )
 
         timer = threading.Timer(retry_delay, _restore)
         timer.daemon = True
@@ -293,17 +353,32 @@ def schedule_async_delegation_claim_retry(
     completion_queue: Any,
     *,
     delay: float | None = None,
+    claim: AsyncDelegationDeliveryClaim | None = None,
 ) -> bool:
-    """Schedule a durable restore sweep after a claim or routing lease delay."""
+    """Schedule a durable restore sweep of the owner ledger after a claim or routing lease delay."""
     if not isinstance(evt, dict) or evt.get("type") != "async_delegation":
         return False
     delegation_id = str(evt.get("delegation_id") or "").strip()
     if not delegation_id or completion_queue is None:
         return False
+    retry_delay = (
+        ASYNC_DELIVERY_CLAIM_RETRY_SECONDS if delay is None else max(0.0, float(delay))
+    )
+    if claim is not None:
+        ledger_home = claim.ledger_home
+    else:
+        owner = resolve_ledger_owner(evt)
+        if owner.status == "unknown":
+            # Neither success nor rejection: resolve the event again later.
+            return _arm_async_delegation_restore_sweep(
+                completion_queue, retry_delay, deferred_event=evt
+            )
+        ledger_home = owner.home
     try:
         from tools.async_delegation import get_durable_delegation
 
-        durable = get_durable_delegation(delegation_id)
+        with ledger_home_scope(ledger_home):
+            durable = get_durable_delegation(delegation_id)
     except (ImportError, AttributeError):
         return False
     except Exception:
@@ -328,10 +403,9 @@ def schedule_async_delegation_claim_retry(
         except Exception:
             logger.debug("Failed to return async delegation offer %s", delegation_id, exc_info=True)
 
-    retry_delay = (
-        ASYNC_DELIVERY_CLAIM_RETRY_SECONDS if delay is None else max(0.0, float(delay))
+    return _arm_async_delegation_restore_sweep(
+        completion_queue, retry_delay, ledger_home=ledger_home
     )
-    return _arm_async_delegation_restore_sweep(completion_queue, retry_delay)
 
 
 def requeue_async_delegation_event(
@@ -341,6 +415,7 @@ def requeue_async_delegation_event(
     delay: float = 0.0,
     stop_event: threading.Event | None = None,
     durable: bool | None = None,
+    claim: AsyncDelegationDeliveryClaim | None = None,
 ) -> bool:
     """Requeue an async event, falling back to the durable restore sweep.
 
@@ -369,11 +444,13 @@ def requeue_async_delegation_event(
             return _arm_async_delegation_restore_sweep(
                 completion_queue,
                 ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+                ledger_home=getattr(claim, "ledger_home", None),
             )
         return schedule_async_delegation_claim_retry(
             evt,
             completion_queue,
             delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+            claim=claim,
         )
 
 
@@ -404,6 +481,11 @@ def claim_async_delegation_delivery(
     delegation_id = completion_delivery_id(evt)
     if not delegation_id or not _claim_bounded_local(delegation_id):
         return None
+    owner = resolve_ledger_owner(evt)
+    if owner.status == "unknown":
+        # The caller's claim-None path schedules the deferred retry.
+        _release_bounded_local(delegation_id)
+        return None
 
     try:
         from tools.async_delegation import (
@@ -416,10 +498,12 @@ def claim_async_delegation_delivery(
             delegation_id=delegation_id,
             claim_id="",
             durable=False,
+            ledger_home=owner.home,
         )
 
     try:
-        claim_id = claim_event_delivery(evt, str(consumer or "webui"))
+        with ledger_home_scope(owner.home):
+            claim_id = claim_event_delivery(evt, str(consumer or "webui"))
     except Exception:
         _release_bounded_local(delegation_id)
         logger.warning(
@@ -435,6 +519,7 @@ def claim_async_delegation_delivery(
         delegation_id=delegation_id,
         claim_id=str(claim_id or ""),
         durable=True,
+        ledger_home=owner.home,
     )
 
 
@@ -476,25 +561,26 @@ def complete_async_delegation_delivery(
     claim: AsyncDelegationDeliveryClaim,
 ) -> None:
     """Complete a claim after WebUI has accepted the event for delivery."""
-    if claim.durable:
-        from tools.async_delegation import complete_event_delivery
+    with ledger_home_scope(claim.ledger_home):
+        if claim.durable:
+            from tools.async_delegation import complete_event_delivery
 
-        try:
-            complete_event_delivery(evt, claim.claim_id)
-            _cancel_async_delegation_claim_retry(claim.delegation_id)
-            return
-        except Exception:
-            logger.warning(
-                "Durable async delegation completion ACK failed for %s; "
-                "trying compatibility marker",
-                claim.delegation_id,
-                exc_info=True,
-            )
-            if _mark_legacy_async_delivery_complete(claim.delegation_id):
+            try:
+                complete_event_delivery(evt, claim.claim_id)
                 _cancel_async_delegation_claim_retry(claim.delegation_id)
                 return
-            raise
-    _mark_legacy_async_delivery_complete(claim.delegation_id)
+            except Exception:
+                logger.warning(
+                    "Durable async delegation completion ACK failed for %s; "
+                    "trying compatibility marker",
+                    claim.delegation_id,
+                    exc_info=True,
+                )
+                if _mark_legacy_async_delivery_complete(claim.delegation_id):
+                    _cancel_async_delegation_claim_retry(claim.delegation_id)
+                    return
+                raise
+        _mark_legacy_async_delivery_complete(claim.delegation_id)
 
 
 def _release_accepts_retryable(release_fn: Any) -> bool:
@@ -533,10 +619,11 @@ def release_async_delegation_delivery(
         if claim.durable:
             from tools.async_delegation import release_event_delivery
 
-            if retryable and _release_accepts_retryable(release_event_delivery):
-                release_event_delivery(evt, claim.claim_id, retryable=True)
-            else:
-                release_event_delivery(evt, claim.claim_id)
+            with ledger_home_scope(claim.ledger_home):
+                if retryable and _release_accepts_retryable(release_event_delivery):
+                    release_event_delivery(evt, claim.claim_id, retryable=True)
+                else:
+                    release_event_delivery(evt, claim.claim_id)
     except Exception:
         logger.warning(
             "Failed to release durable async delegation delivery for %s",
@@ -558,7 +645,9 @@ def _reset_legacy_async_delivery_dedupe_for_tests() -> None:
     global _ASYNC_DELIVERY_RETRY_DEADLINE
     global _ASYNC_DELIVERY_RETRY_QUEUE
     global _ASYNC_DELIVERY_RETRY_GENERATION
+    global _NON_LAUNCH_REPLAY_DONE
 
+    _NON_LAUNCH_REPLAY_DONE = False
     with _LEGACY_ASYNC_DELIVERY_LOCK:
         _LEGACY_ASYNC_DELIVERY_IDS.clear()
     with _ASYNC_DELIVERY_RETRY_LOCK:
@@ -566,6 +655,8 @@ def _reset_legacy_async_delivery_dedupe_for_tests() -> None:
         _ASYNC_DELIVERY_RETRY_TIMER = None
         _ASYNC_DELIVERY_RETRY_DEADLINE = 0.0
         _ASYNC_DELIVERY_RETRY_QUEUE = None
+        _ASYNC_DELIVERY_RETRY_HOMES.clear()
+        _ASYNC_DELIVERY_RETRY_EVENTS.clear()
         _ASYNC_DELIVERY_RETRY_GENERATION += 1
     if timer is not None:
         timer.cancel()

@@ -484,7 +484,7 @@ def test_formatting_failure_stays_bounded_not_keep_legacy_retrying(monkeypatch):
     _install_fake_legacy_delivery_api(monkeypatch)
     calls = {"n": 0}
 
-    def _spy(process_registry, evt, *, keep_legacy_retrying=False):
+    def _spy(process_registry, evt, *, keep_legacy_retrying=False, claim=None):
         calls["n"] += 1
         calls["keep_legacy_retrying"] = keep_legacy_retrying
 
