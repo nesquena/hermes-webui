@@ -245,7 +245,12 @@ def test_etag_limits_types_and_no_normalizer(http, png, monkeypatch):
     assert save(http, {"instance_name": "hostile\nname"})[0] == 400
     assert http("/api/instance-branding", "POST", b"{}", headers={"If-Match": etag, "Content-Type": "image/png"})[0] == 415
     assert http("/api/instance-branding", "POST", b"x" * 4097, headers={"If-Match": etag})[0] == 413
-    assert http("/api/instance-branding/image", "POST", b"x" * (branding.MAX_UPLOAD + 1), headers={"If-Match": etag})[0] == 413
+    # Oversized input is rejected from its headers, before reading the body.
+    # Sending 2 MiB after that rejection races the intentional connection close.
+    status, headers, _ = http("/api/instance-branding/image", "POST", b"",
+                              headers={"If-Match": etag, "Content-Length": str(branding.MAX_UPLOAD + 1)})
+    assert status == 413
+    assert headers["Connection"].lower() == "close"
     activate(http, png)
     monkeypatch.setattr(branding, "_image_module", lambda: None)
     assert not get_state(http)[0]["can_upload"]
@@ -405,6 +410,112 @@ def test_last_two_image_references_survive_name_edits(http, png):
     assert save(http, {"instance_name": "Label only"})[0] == 200
     retained = {entry.name for entry in (Path(config.STATE_DIR) / "branding").iterdir()}
     assert retained == set(revisions[-2:])
+
+
+def test_unchanged_identity_reads_reuse_validated_images(http, png, monkeypatch):
+    active = activate(http, png)
+    reads = []
+    original = branding._read_asset
+
+    def tracked(revision, filename):
+        reads.append(filename)
+        return original(revision, filename)
+
+    monkeypatch.setattr(branding, "_read_asset", tracked)
+    for _ in range(3):
+        assert get_state(http)[0]["effective"] == active["effective"]
+        assert http("/")[0] == 200
+        assert http("/manifest.json")[0] == 200
+        assert http("/api/settings")[0] == 200
+    assert reads == [], "unchanged images must not be reopened under the settings lock"
+
+
+@pytest.mark.parametrize("change", ["missing", "corrupt", "symlink", "directory_symlink", "state_root"])
+def test_checked_image_cache_detects_filesystem_changes(http, state, png, monkeypatch, change):
+    active = activate(http, png)
+    root, _ = state
+    revision = active["config"]["image_revision"]
+    directory = root / "branding" / revision
+    path = directory / "icon-192.png"
+    original = path.read_bytes()
+    if change == "state_root":
+        other = root / "other-state"
+        other.mkdir()
+        monkeypatch.setattr(config, "STATE_DIR", other)
+        assert not branding._complete_image(revision)
+        return
+    if change == "missing":
+        path.unlink()
+    elif change == "corrupt":
+        # Same size, changed CRC: size-only or revision-only caches are unsafe.
+        path.write_bytes(original[:-1] + bytes([original[-1] ^ 255]))
+    elif change == "symlink":
+        path.unlink()
+        path.symlink_to(directory / "icon-512.png")
+    else:
+        moved = directory.with_name("moved")
+        directory.rename(moved)
+        directory.symlink_to(moved, target_is_directory=True)
+    assert not get_state(http)[0]["effective"]["active"]
+    assert json.loads(http("/manifest.json")[2])["name"] == "Hermes"
+    if change == "directory_symlink":
+        directory.unlink()
+        moved.rename(directory)
+    else:
+        path.unlink(missing_ok=True)
+        path.write_bytes(original)
+    assert get_state(http)[0]["effective"] == active["effective"]
+
+
+def test_transient_image_read_failure_is_not_cached(http, state, png, monkeypatch):
+    active = activate(http, png)
+    directory = state[0] / "branding" / active["config"]["image_revision"]
+    (directory / "icon-192.png").touch()
+    original = branding._read_asset
+    failed = False
+
+    def transient(revision, filename):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("transient read failure")
+        return original(revision, filename)
+
+    monkeypatch.setattr(branding, "_read_asset", transient)
+    assert not get_state(http)[0]["effective"]["active"]
+    assert get_state(http)[0]["effective"] == active["effective"]
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_real_cron_editor_survives_branding_change(http, png, width):
+    playwright = pytest.importorskip("playwright.sync_api")
+    config.save_settings({"onboarding_completed": True, "language": "en", "check_for_updates": False})
+    activate(http, png)
+    with playwright.sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            context = browser.new_context(viewport={"width": width, "height": 900},
+                                          is_mobile=width == 390, has_touch=width == 390,
+                                          service_workers="block")
+            context.add_cookies([{"name": auth.COOKIE_NAME, "value": http.owner, "url": http.origin}])
+            page = context.new_page()
+            # Exercise the real local shell/cron form; CDN integrations are unrelated.
+            page.route("**/*", lambda route: route.continue_()
+                       if route.request.url.startswith(http.origin + "/") else route.abort())
+            page.goto(http.origin + "/", wait_until="load")
+            page.wait_for_function("typeof openCronCreate==='function' && typeof showConfirmDialog==='function'")
+            page.evaluate("openCronCreate()")
+            prompt = page.locator("#cronFormPrompt")
+            prompt.fill("Unsaved scheduled-job instructions")
+            assert save(http, {"instance_name": "Changed in another tab"})[0] == 200
+            page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+            page.locator("#appDialogOverlay").wait_for(state="visible")
+            page.wait_for_function("document.activeElement.id==='appDialogCancel'")
+            assert prompt.input_value() == "Unsaved scheduled-job instructions"
+            page.locator("#appDialogCancel").click()
+            assert prompt.input_value() == "Unsaved scheduled-job instructions"
+        finally:
+            browser.close()
 
 
 def test_notification_uses_shared_icon_but_native_badge(state):

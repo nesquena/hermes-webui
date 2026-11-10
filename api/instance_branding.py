@@ -1,5 +1,6 @@
 """Installation identity v1. Settings own configuration; only derivatives are public."""
 
+from functools import lru_cache
 import hashlib
 import html
 import io
@@ -105,13 +106,39 @@ def _read_asset(revision, filename):
     return data
 
 
+def _image_fingerprint(root, revision):
+    """Detect replacement, edits, missing files and symlinks without image reads."""
+    directory = root / "branding" / revision
+    fingerprint = []
+    for path in (root / "branding", directory, *(directory / name for name in ASSETS)):
+        info = path.lstat()
+        is_directory = path in (root / "branding", directory)
+        if not (stat.S_ISDIR(info.st_mode) if is_directory else stat.S_ISREG(info.st_mode)):
+            raise FileNotFoundError
+        fingerprint.append((info.st_dev, info.st_ino, info.st_size,
+                            info.st_mtime_ns, info.st_ctime_ns))
+    return tuple(fingerprint)
+
+
+@lru_cache(maxsize=16)
+def _checked_image(root, revision, fingerprint):
+    """Bounded process-local cache; public reads still validate anchored bytes."""
+    for filename in ASSETS:
+        _read_asset(revision, filename)
+    # Never cache transient errors or success if files changed during validation.
+    if _image_fingerprint(root, revision) != fingerprint:
+        raise FileNotFoundError
+    return True
+
+
 def _complete_image(revision):
     if not revision:
         return True
+    if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
+        return False
     try:
-        for filename in ASSETS:
-            _read_asset(revision, filename)
-        return True
+        root = Path(config.STATE_DIR).resolve()
+        return _checked_image(root, revision, _image_fingerprint(root, revision))
     except (OSError, ValueError):
         return False
 
