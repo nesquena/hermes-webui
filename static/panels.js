@@ -7897,6 +7897,16 @@ async function switchToProfile(name) {
     if (typeof _invalidateModelDropdownRequests === 'function') _invalidateModelDropdownRequests();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
+    // #8576 (greptile P1, 2026-11-08): an explicit-picker marker is session-
+    // scoped evidence authored under the profile that owned the pick. This
+    // writer has NOT replaced S.session yet, and newSession() below reads that
+    // still-loaded session's marker — so drop it at the profile boundary,
+    // exactly like the persisted pair above. Without this, a pick made on the
+    // old conversation would pass the armed reset gate and send its model +
+    // provider in the destination profile's automatic New Chat.
+    if (S.session && S.session.session_id && typeof _clearExplicitPickerPick === 'function') {
+      _clearExplicitPickerPick(S.session.session_id);
+    }
     _skillsData = null;
     _workspaceList = null;
     // The destination profile's defaults are a PAIR: adopting its default model

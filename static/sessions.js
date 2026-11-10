@@ -2454,9 +2454,11 @@ async function newSession(flash, options={}){
       catch(_){ freshExplicitPick=null; }
     }
     const freshExplicitPickValue=String((freshExplicitPick&&freshExplicitPick.value)||'').trim();
-    // The marker authorizes ONLY the exact value it recorded. A picker or
-    // persisted entry holding anything else is leftover catalogue state from
-    // the previous profile and stays quarantined while the reset is armed.
+    // The marker authorizes ONLY the exact value it recorded. A picker entry
+    // holding anything else is leftover catalogue state from the previous
+    // profile and stays quarantined while the reset is armed. (The picker
+    // itself is per-tab DOM: whatever option it names carries its own
+    // provider, so a value match there is a pair match by construction.)
     const freshExplicitPickOwns=(value)=>!!(freshExplicitPickValue
       &&freshExplicitPickValue===String(value||'').trim());
     let newModelState=null;
@@ -2484,13 +2486,23 @@ async function newSession(flash, options={}){
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
     }else if((!S._profileSwitchModelReset||freshExplicitPickValue)
         &&typeof _readPersistedModelState==='function'){
-      // The persisted pair is not session-scoped, so under the armed gate only
-      // the value the fresh pick itself wrote may pass; any other value is the
-      // previous profile's quarantined state.
       const _persistedModelState=_readPersistedModelState();
-      if(!S._profileSwitchModelReset
-         ||freshExplicitPickOwns(_persistedModelState&&_persistedModelState.model)){
+      if(!S._profileSwitchModelReset){
+        // No pending profile switch: the persisted pair is this profile's own
+        // preference and may pass as-is.
         newModelState=_persistedModelState;
+      }else if(freshExplicitPickOwns(_persistedModelState&&_persistedModelState.model)){
+        // Under the armed gate the persisted pair is SHARED localStorage:
+        // another tab can rewrite it between this tab's pick and this New
+        // Chat. Matching the model alone admitted that tab's
+        // same-model/different-provider pair and supplied the wrong
+        // model_provider (#8576, greptile P1 2026-11-08). Keep the stored
+        // pair's model (the pick wrote its normalised id there), but take the
+        // provider from the marker itself — never from the shared store.
+        newModelState={
+          model:_persistedModelState.model,
+          model_provider:(freshExplicitPick&&freshExplicitPick.model_provider)||null,
+        };
       }
     }
     if(newModelState&&newModelState.model){
@@ -2761,6 +2773,16 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _invalidateModelDropdownRequests==='function') _invalidateModelDropdownRequests();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
+    // #8576 (greptile P1, 2026-11-08): an explicit-picker marker is session-
+    // scoped evidence authored under the profile that owned the pick. This
+    // writer still holds the PREVIOUS profile's session in S.session, and
+    // newSession() reads that session's marker — so drop it at the profile
+    // boundary, exactly like the persisted pair above. Without this, a pick
+    // made on the old conversation would pass the armed reset gate and send
+    // its model + provider under the destination profile's name.
+    if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function'){
+      _clearExplicitPickerPick(S.session.session_id);
+    }
     // The destination profile's defaults are a PAIR: adopting its default model
     // also (re)binds the provider from the SAME switch response — replace or
     // clear, never keep the previous profile's pair when the destination has
