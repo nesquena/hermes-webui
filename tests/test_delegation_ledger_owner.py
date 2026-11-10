@@ -125,15 +125,25 @@ def test_failed_home_binding_never_runs_against_the_ambient_ledger(world, monkey
     assert peu.legacy_async_delivery_dedupe_size() == 0
 
 
-def test_startup_replays_each_ledger_once_and_retries_after_enumeration_failure(world, monkeypatch):
+def test_startup_replay_retries_by_itself_after_enumeration_failure(world, monkeypatch):
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.05)
     registry = types.SimpleNamespace(restore_completions=lambda: None, completion_queue=queue.Queue())
-    with monkeypatch.context() as broken:
-        broken.setattr(world["profiles"], "list_profiles_api", lambda: 1 / 0)
-        peu.restore_durable_process_completions(registry)
-    assert not peu._NON_LAUNCH_REPLAY_DONE
-    peu.restore_durable_process_completions(registry)
+    listed = world["profiles"].list_profiles_api
+    failures = iter([True])
+
+    def flaky():
+        if next(failures, False):
+            raise RuntimeError("enumeration failed")
+        return listed()
+
+    monkeypatch.setattr(world["profiles"], "list_profiles_api", flaky)
+    # The background drain calls this once; no later turn may be needed to recover.
     peu.restore_durable_process_completions(registry)
     deadline = time.monotonic() + 2
     while len(world["calls"]) < 2 and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert sorted(world["calls"]) == sorted([("restore", str(world["root"])), ("restore", str(world["named"]))])
+    replayed = sorted([("restore", str(world["root"])), ("restore", str(world["named"]))])
+    assert sorted(world["calls"]) == replayed
+    peu.restore_durable_process_completions(registry)
+    time.sleep(0.2)
+    assert sorted(world["calls"]) == replayed  # once only

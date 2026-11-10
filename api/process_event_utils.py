@@ -38,6 +38,7 @@ _ASYNC_DELIVERY_RETRY_GENERATION = 0
 _ASYNC_DELIVERY_RETRY_HOMES: set[Path | None] = set()
 _ASYNC_DELIVERY_RETRY_EVENTS: dict[str, dict] = {}
 _NON_LAUNCH_REPLAY_DONE = False
+_NON_LAUNCH_REPLAY_TIMER: threading.Timer | None = None
 
 
 @dataclass(frozen=True)
@@ -228,8 +229,6 @@ def restore_durable_process_completions(process_registry: Any) -> None:
     Agent method is once-per-process and replays in the launch profile scope;
     older builds without it keep their import-time restore.
     """
-    global _NON_LAUNCH_REPLAY_DONE
-
     restore = getattr(process_registry, "restore_completions", None)
     if not callable(restore):
         return
@@ -237,17 +236,39 @@ def restore_durable_process_completions(process_registry: Any) -> None:
         restore()
     except Exception:
         logger.warning("Failed to restore durable process completions", exc_info=True)
-    # The Agent replays only the launch profile. Replay every authorized ledger
-    # once (claims are atomic, so the launch ledger repeating is harmless).
-    if _NON_LAUNCH_REPLAY_DONE:
-        return
     completion_queue = getattr(process_registry, "completion_queue", None)
-    if completion_queue is None:
+    if completion_queue is not None:
+        _replay_all_ledgers(completion_queue)
+
+
+def _replay_all_ledgers(completion_queue: Any) -> None:
+    """Queue one restore of every authorized ledger, retrying until enumeration works.
+
+    The Agent replays only the launch profile. Claims are atomic, so restoring
+    the launch ledger again is harmless. The background drain calls this once
+    at startup, so a failed enumeration must retry on its own timer.
+    """
+    global _NON_LAUNCH_REPLAY_DONE
+    global _NON_LAUNCH_REPLAY_TIMER
+
+    if _NON_LAUNCH_REPLAY_DONE:
         return
     try:
         homes = authorized_ledger_homes()
     except Exception:
-        logger.warning("Unable to enumerate delegation ledgers; replay stays pending")
+        logger.warning("Unable to enumerate delegation ledgers; retrying replay later")
+        with _ASYNC_DELIVERY_RETRY_LOCK:
+            if _NON_LAUNCH_REPLAY_TIMER is None:
+
+                def _retry() -> None:
+                    global _NON_LAUNCH_REPLAY_TIMER
+                    with _ASYNC_DELIVERY_RETRY_LOCK:
+                        _NON_LAUNCH_REPLAY_TIMER = None
+                    _replay_all_ledgers(completion_queue)
+
+                _NON_LAUNCH_REPLAY_TIMER = threading.Timer(ASYNC_DELIVERY_ROUTING_RETRY_SECONDS, _retry)
+                _NON_LAUNCH_REPLAY_TIMER.daemon = True
+                _NON_LAUNCH_REPLAY_TIMER.start()
         return
     _NON_LAUNCH_REPLAY_DONE = True
     for home in homes:
@@ -646,6 +667,7 @@ def _reset_legacy_async_delivery_dedupe_for_tests() -> None:
     global _ASYNC_DELIVERY_RETRY_QUEUE
     global _ASYNC_DELIVERY_RETRY_GENERATION
     global _NON_LAUNCH_REPLAY_DONE
+    global _NON_LAUNCH_REPLAY_TIMER
 
     _NON_LAUNCH_REPLAY_DONE = False
     with _LEGACY_ASYNC_DELIVERY_LOCK:
@@ -658,5 +680,9 @@ def _reset_legacy_async_delivery_dedupe_for_tests() -> None:
         _ASYNC_DELIVERY_RETRY_HOMES.clear()
         _ASYNC_DELIVERY_RETRY_EVENTS.clear()
         _ASYNC_DELIVERY_RETRY_GENERATION += 1
+        replay_timer = _NON_LAUNCH_REPLAY_TIMER
+        _NON_LAUNCH_REPLAY_TIMER = None
     if timer is not None:
         timer.cancel()
+    if replay_timer is not None:
+        replay_timer.cancel()

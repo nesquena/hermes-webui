@@ -32,8 +32,9 @@ restores nothing (#7214).
   deferred unknown-owner events. It is not a recurring scan of every ledger.
 - **Startup replay.** The Agent replays only its launch profile. On the first
   `restore_durable_process_completions` call, WebUI queues one restore of every
-  authorized ledger. If enumeration is incomplete, replay stays pending for the
-  next call. Atomic claims make a repeated launch-ledger restore harmless.
+  authorized ledger. If enumeration is incomplete, a single delayed timer
+  retries the replay, because the background drain calls the restore only once
+  at startup. Atomic claims make a repeated launch-ledger restore harmless.
 
 ## Out of scope
 
