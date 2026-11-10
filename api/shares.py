@@ -1153,7 +1153,38 @@ def create_or_refresh_share(session) -> dict:
     )
 
 
+def _share_owner_exists(payload: dict) -> bool:
+    """True while the conversation that published ``payload`` still exists (#8837).
+
+    Every share create since sharing shipped has written the owner's sidecar
+    (``SESSION_DIR/<sid>.json``) before returning the link, external sessions
+    included (they get a metadata-only sidecar), and every snapshot records that
+    ``source_session_id``. So a stat of that one path answers the question. The
+    sidecar is never opened: this runs for anonymous requests, and a sidecar can
+    be tens of MiB. A snapshot without a valid owner id, or whose owner's sidecar
+    is gone (the conversation was deleted, including by a delete from before
+    this check existed), is not served.
+    """
+    sid = payload.get("source_session_id")
+    if not isinstance(sid, str) or not sid:
+        return False
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(sid):
+            return False
+        return (models.SESSION_DIR / f"{sid}.json").is_file()
+    except Exception:
+        logger.debug("Failed to check the owner of a share snapshot", exc_info=True)
+        return False
+
+
 def load_share(token: str) -> dict | None:
+    """The public view of a share, or ``None`` (the caller answers 404).
+
+    A refused snapshot (revoked, or its conversation no longer exists) gives the
+    same ``None`` as an unknown token (#8837).
+    """
     try:
         path = _share_path(token)
     except ValueError:
@@ -1169,7 +1200,57 @@ def load_share(token: str) -> dict | None:
         return None
     if payload.get("revoked_at"):
         return None
+    if not _share_owner_exists(payload):
+        return None
     return _public_share_payload(payload)
+
+
+def revoke_share_owned_by(token: str, session_id: str) -> bool:
+    """Revoke the snapshot under ``token`` if ``session_id`` published it (#8837).
+
+    For deleting a conversation. A compression continuation inherits its
+    parent's token, and refreshing its share rewrites the snapshot under that
+    token with the continuation as owner; deleting the parent must not revoke
+    that link, so only a snapshot this session owns is touched.
+
+    Returns True when no unrevoked snapshot of ``session_id`` remains under
+    ``token`` (revoked now or before, absent, unparseable, or owned by another
+    session), False when the snapshot could not be read or the revoke could not
+    be written; the caller then refuses the delete.
+    """
+    token = str(token or "").strip()
+    session_id = str(session_id or "").strip()
+    if not token or not session_id:
+        return True
+    try:
+        path = _share_path(token)
+    except ValueError:
+        return True  # nothing can be stored under an invalid token
+    with _SHARE_LOCK:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return True
+        except UnicodeDecodeError:
+            return True  # load_share() cannot decode it either, so it serves nothing
+        except Exception:
+            logger.warning("Failed to read share snapshot %s to revoke it", path, exc_info=True)
+            return False
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return True  # load_share() cannot parse it either, so it serves nothing
+        if not isinstance(payload, dict) or payload.get("revoked_at"):
+            return True
+        if str(payload.get("source_session_id") or "") != session_id:
+            return True
+        payload["revoked_at"] = time.time()
+        try:
+            _write_json_atomic(path, payload)
+        except Exception:
+            logger.warning("Failed to revoke share snapshot %s", path, exc_info=True)
+            return False
+    return True
 
 
 def revoke_share(session) -> bool:

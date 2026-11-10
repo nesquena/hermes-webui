@@ -2814,6 +2814,11 @@ async function loadSession(sid){
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
+  // #8701: the INFLIGHT entry (and its stream) before this load's first await.
+  // A send during the awaits replaces or re-points it; the other-stream prompt
+  // skip below then must not apply to the new turn's prompt.
+  const _inflightAtLoadStart=INFLIGHT[sid];
+  const _inflightStreamAtLoadStart=String((_inflightAtLoadStart&&_inflightAtLoadStart.streamId)||'').trim();
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
@@ -3316,7 +3321,11 @@ async function loadSession(sid){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
-      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId));
+      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId),
+      INFLIGHT[sid]===_inflightAtLoadStart
+        &&String(INFLIGHT[sid].streamId||'').trim()===_inflightStreamAtLoadStart
+        &&_inflightNamesOtherStream(INFLIGHT[sid],activeStreamId)
+        &&!!String((S.session&&S.session.pending_user_message)||'').trim());
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -5146,13 +5155,28 @@ function _inflightTurnOwnerStart(session,inflight,activeStreamId){
   return Number.isFinite(start)&&start>0?start:0;
 }
 
+// True when the INFLIGHT snapshot names a stream other than the active one: a
+// stale in-memory entry (missed `done`) whose prompt belongs to another turn.
+function _inflightNamesOtherStream(inflight,activeStreamId){
+  const active=String(activeStreamId||'').trim();
+  const own=String((inflight&&inflight.streamId)||'').trim();
+  return !!(active&&own&&own!==active);
+}
+
 // `turnOwnerStart` (optional): the server start of the turn this INFLIGHT tail
 // belongs to (_inflightTurnOwnerStart). When known it places the recovered
 // prompt instead of the prompt's client-clock `_ts`, which can trail the
 // server start by latency or skew and so claim a previous turn's rows, and it
 // stamps the copy so the pending merge reuses it rather than adding a second
-// one (`_recoveredPromptCopyForTurn`).
-function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart){
+// one (`_recoveredPromptCopyForTurn`). `promptFromOtherStream` (optional;
+// loadSession sets it when _inflightNamesOtherStream AND the server sends a
+// non-blank pending_user_message, the field getPendingSessionMessage reads, AND
+// the entry and its stream id are the ones the load started with):
+// the snapshot's prompt is not this turn's, so it is not placed; the pending
+// merge supplies the running turn's prompt, and placing both showed it twice
+// (#8701). Without a server prompt the snapshot's row stays, or the turn
+// would show none.
+function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart, promptFromOtherStream){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
   const ownerStart=Number.isFinite(Number(turnOwnerStart))&&Number(turnOwnerStart)>0?Number(turnOwnerStart):0;
@@ -5180,6 +5204,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerSta
     const candidate=tail[tailIdx];
     if(!candidate) continue;
     const isUser=String(candidate.role||'')==='user';
+    if(isUser&&tailIdx===promptTailIdx&&promptFromOtherStream) continue;
     if(isUser&&windowed&&tailIdx===promptTailIdx){
       // A windowed first page (msg_limit paging) can start INSIDE the running
       // turn: `base` then holds the turn's activity rows but not its `user`
@@ -6510,21 +6535,39 @@ function _positionSessionActionMenu(anchorEl){
       rect=_projectPickerAnchorRect(anchorEl,_projectPickerVisibleBounds());
     }
   }
+  // Fixed coordinates and getBoundingClientRect use the layout viewport, but
+  // the visible part can be smaller AND offset (Android browser chrome,
+  // on-screen keyboard, pinch zoom). A low row's menu placed against
+  // window.innerHeight runs off the bottom of the screen. The project picker
+  // already reads the visible box via _projectPickerVisibleBounds, so the
+  // session menu places against the same box. typeof-guarded so
+  // extracted-function Node harnesses stay self-contained.
+  const _menuBounds=(typeof _projectPickerVisibleBounds==='function')
+    ?_projectPickerVisibleBounds()
+    :{top:0,left:0,bottom:window.innerHeight,right:window.innerWidth};
+  const _vTop=Number.isFinite(_menuBounds.top)?_menuBounds.top:0;
+  const _vLeft=Number.isFinite(_menuBounds.left)?_menuBounds.left:0;
+  const _vBottom=Number.isFinite(_menuBounds.bottom)?_menuBounds.bottom:window.innerHeight;
+  const _vRight=Number.isFinite(_menuBounds.right)?_menuBounds.right:window.innerWidth;
   const menuW=Math.min(280, Math.max(220, _sessionActionMenu.scrollWidth || 220));
   let left=rect.pointAnchored?rect.left:rect.right-menuW;
-  if(left<8) left=8;
-  if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+  if(left<_vLeft+8) left=_vLeft+8;
+  if(left+menuW>_vRight-8) left=_vRight-menuW-8;
   _sessionActionMenu.style.left=left+'px';
-  _sessionActionMenu.style.top='8px';
+  _sessionActionMenu.style.top=(_vTop+8)+'px';
   // Reset any prior clamp so we measure the menu's natural height.
   _sessionActionMenu.style.maxHeight='';
-  const menuH=_sessionActionMenu.offsetHeight || 0;
+  // scrollHeight is the truthful content height when a CSS max-height cap is
+  // holding the box shorter (offsetHeight then reports the cap, not the
+  // content). A stale first layout (content missing/empty at measure time)
+  // is corrected by the rAF re-position in _mountSessionActionMenu below.
+  const menuH=Math.max(_sessionActionMenu.scrollHeight||0,_sessionActionMenu.offsetHeight||0);
   const margin=8;
-  const maxAvail=window.innerHeight-margin*2;
+  const maxAvail=Math.max(0,_vBottom-_vTop-margin*2);
   let top=rect.bottom+6;
   // Prefer flipping above the row when the menu would overflow the bottom and
   // there's room above.
-  if(top+menuH>window.innerHeight-margin && rect.top>menuH+12){
+  if(top+menuH>_vBottom-margin && rect.top>_vTop+menuH+12){
     top=rect.top-menuH-6;
   }
   // If the menu is taller than the viewport, or still overflows after the flip
@@ -6532,11 +6575,11 @@ function _positionSessionActionMenu(anchorEl){
   // its height to the viewport and let it scroll instead of clipping off-screen.
   if(menuH>maxAvail){
     _sessionActionMenu.style.maxHeight=maxAvail+'px';
-    top=margin;
+    top=_vTop+margin;
   } else {
     // Clamp vertically so the whole menu stays on-screen at both edges.
-    if(top+menuH>window.innerHeight-margin) top=window.innerHeight-margin-menuH;
-    if(top<margin) top=margin;
+    if(top+menuH>_vBottom-margin) top=_vBottom-margin-menuH;
+    if(top<_vTop+margin) top=_vTop+margin;
   }
   _sessionActionMenu.style.top=top+'px';
 }
@@ -6628,6 +6671,16 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   const row=anchorEl.closest('.session-item,.session-child-session');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
+  // The first measure can race late-arriving content (fonts, locale strings)
+  // and read a short menu that then grows past the viewport. Re-measure once
+  // layout settles; the second pass is idempotent when nothing changed.
+  if(typeof requestAnimationFrame==='function'){
+    const _settledMenu=menu;
+    requestAnimationFrame(()=>{
+      if(_sessionActionMenu!==_settledMenu||!_settledMenu.isConnected) return;
+      _positionSessionActionMenu(_sessionActionAnchor);
+    });
+  }
   _playSessionActionMenuEntrance(menu);
   const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
   // True while a Tab pressed in the menu moves the focus.
@@ -11788,6 +11841,9 @@ function renderSessionListFromCache(){
           }
           row.oncontextmenu=(e)=>{
             if(readOnlyChild) return;
+            // Same rename-input exemption as the main row handler below:
+            // never swallow the text toolbar inside an editable title.
+            if(e.target&&e.target.closest&&e.target.closest('.session-title-input')) return;
             e.preventDefault();
             if(e.pointerType==='touch'||e.pointerType==='pen') return;
             e.stopPropagation();
@@ -11875,6 +11931,9 @@ function renderSessionListFromCache(){
     }
     el.oncontextmenu=(e)=>{
       if(readOnly) return;
+      // Rename input keeps its default action: a long-press inside the
+      // editable title must still raise the Android cut/copy/paste toolbar.
+      if(e.target&&e.target.closest&&e.target.closest('.session-title-input')) return;
       e.preventDefault();
       if(e.pointerType==='touch'||e.pointerType==='pen') return;
       e.stopPropagation();
