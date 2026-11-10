@@ -22,7 +22,6 @@ PRODUCER-COMPOSED, exactly like the reviewer probes:
 No hand-built composite key is used as an oracle anywhere in this file.
 """
 
-import copy
 import sqlite3
 from collections import OrderedDict
 
@@ -389,7 +388,6 @@ def test_bounded_display_prefix_proof_survives_settled_stable_ids(monkeypatch, t
     must still yield the bounded floor (1050) instead of falling back to the
     full read.
     """
-    import api.models as models
     import api.routes as routes
 
     sid = "webui_8672_c67_f3"
@@ -425,7 +423,6 @@ def test_bounded_display_prefix_still_refuses_a_genuine_prefix_mismatch(
     A state.db row whose visible identity differs from the sidecar's must
     still refuse the bounded read and select the full-read fallback.
     """
-    import api.models as models
     import api.routes as routes
 
     sid = "webui_8672_c67_f3_mismatch"
@@ -453,7 +450,6 @@ def test_bounded_display_prefix_still_refuses_a_genuine_prefix_mismatch(
 
 def test_bounded_display_prefix_still_refuses_a_null_clock(monkeypatch, tmp_path):
     """C67-F3 control: null clocks still refuse the bounded display read."""
-    import api.models as models
     import api.routes as routes
 
     sid = "webui_8672_c67_f3_null"
