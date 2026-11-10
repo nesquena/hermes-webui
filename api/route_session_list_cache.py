@@ -9,7 +9,12 @@ from collections import OrderedDict
 from pathlib import Path
 
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
-from api.models import _active_state_db_path, _active_stream_ids, _content_fingerprint_readable
+from api.models import (
+    ALL_PROFILES_ROSTER_INCOMPLETE,
+    _active_state_db_path,
+    _active_stream_ids,
+    _content_fingerprint_readable,
+)
 from api.profiles import _profiles_match
 
 
@@ -34,14 +39,22 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 # Rebuild-rate floor (2026-10-28). The stamp above changes whenever ANY writer
-# touches state.db or the session index — a live agent session does that on every
-# message and tool call — so on a busy host the entry "changes" on nearly every
-# poll, and each change forces a FULL all_sessions() rebuild (it re-parses every
-# transcript in the store). Measured with three concurrent agent sessions: 50
-# rebuilds in 12 min, 847 s of total stall, worst single /api/sessions request
-# 60.6 s while the machine sat at load 14 (a warm rebuild costs ~1.2 s of parsing
-# and multiples of that under contention). Serving a payload at most this many
-# seconds old bounds the staleness a client can see and caps the rebuild RATE.
+# touches state.db, the session index or the gateway metadata, and each change
+# forces a FULL all_sessions() rebuild (it re-parses every transcript in the
+# store). Measured with three concurrent agent sessions: 50 rebuilds in 12 min,
+# 847 s of total stall, worst single /api/sessions request 60.6 s while the
+# machine sat at load 14 (a warm rebuild costs ~1.2 s of parsing and multiples
+# of that under contention).
+#
+# What the floor actually coalesces is narrower than that measurement: only
+# movement a state.db commit cannot produce, i.e. the session index and gateway
+# metadata being rewritten while state.db's stat pair and content fingerprint
+# (and, for an all-profiles key, every profile's, from a complete roster) stay
+# identical. A committed message, rename or delete in state.db always rebuilds
+# on the next request (the reconciliation contract; see
+# `_session_list_cache_stamp_hold_evidence`), so a busy writer that commits to
+# state.db on every message is NOT rate-capped by this floor. Inside the floor a
+# held payload is at most this many seconds old. (#8694)
 # The runtime overlay (active stream, pending flags, sort order) is applied on
 # every response regardless of the cache, so only structural row data (title,
 # counts, membership) can be this stale; a settings write or a structural change
@@ -414,6 +427,11 @@ def _session_list_cache_key(
 # (#8694)
 _STAMP_HOLD_EVIDENCE_INDEXES = (0, 1, 5, 6)
 
+# Appended to an all-profiles state stamp built from a PARTIAL roster: the same
+# marker ``_all_profiles_cli_contexts`` puts in its cache key. Not a 3-tuple, so
+# it can never be read as a profile's (stat, wal-stat, fingerprint) entry. (#8694)
+_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE = ALL_PROFILES_ROSTER_INCOMPLETE
+
 
 def _session_list_cache_stamp_hold_evidence(stamp, all_profiles: bool = False):
     """Return the evidence a floor hold may rely on, or ``None`` when unknown.
@@ -449,7 +467,12 @@ def _session_list_cache_stamp_hold_evidence(stamp, all_profiles: bool = False):
 
 
 def _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles: bool) -> bool:
-    """True only when every fingerprint the hold depends on was actually read."""
+    """True only when every fingerprint the hold depends on was actually read.
+
+    For an all-profiles key that also means the roster itself was complete: a
+    readable fingerprint for every profile the roster SAW says nothing about a
+    profile it could not enumerate or resolve. (#8694)
+    """
     if not _content_fingerprint_readable(stamp[5]):
         return False
     all_profiles_stamp = stamp[6]
@@ -460,11 +483,13 @@ def _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles: bool) -
     if not isinstance(all_profiles_stamp, (tuple, list)):
         return False
     if not all_profiles_stamp:
-        # ``_all_profiles_cli_contexts`` degrades to an empty context list when it
-        # cannot resolve a single profile home (its ``api.profiles`` import
-        # fails). An empty stamp therefore carries NO per-profile fingerprint —
-        # unknown evidence, not proof that nothing committed — and two of them
-        # compare equal. (#8694)
+        # An empty stamp carries NO per-profile fingerprint — unknown evidence,
+        # not proof that nothing committed — and two of them compare equal.
+        # (#8694)
+        return False
+    if _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE in all_profiles_stamp:
+        # ``_all_profiles_cli_contexts`` skipped a profile (directory
+        # enumeration or home resolution failed), so the roster is a subset.
         return False
     for profile_stamp in all_profiles_stamp:
         if not isinstance(profile_stamp, tuple) or len(profile_stamp) != 3:
@@ -767,8 +792,8 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
     all_profiles_state_stamp = None
     if _cache_all_profiles:
         try:
-            from api.models import _all_profiles_cli_contexts
-            contexts, _ = _all_profiles_cli_contexts()
+            from api.models import _all_profiles_cli_contexts, all_profiles_roster_incomplete
+            contexts, roster_key = _all_profiles_cli_contexts()
             all_profiles_state_stamp = tuple(
                 (
                     _session_list_cache_path_stamp(ctx_db),
@@ -777,6 +802,11 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
                 )
                 for _home, ctx_db, _prof in contexts
             )
+            if all_profiles_roster_incomplete(roster_key):
+                # A profile the roster could not see can commit without moving
+                # any entry above. Carry the marker so this stamp is never
+                # evidence that "every profile is unchanged". (#8694)
+                all_profiles_state_stamp = all_profiles_state_stamp + (_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE,)
         except Exception:
             all_profiles_state_stamp = None
 

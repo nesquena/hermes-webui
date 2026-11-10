@@ -11276,8 +11276,30 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
     return hermes_home, db_path, cli_profile, cache_key
 
 
+# Trailing element of the cache key ``_all_profiles_cli_contexts`` returns when
+# it could NOT see every profile: the named-profile directory enumeration failed,
+# a profile's home failed to resolve, or ``api.profiles`` itself failed to import.
+# The contexts it returns are then a SUBSET of the real roster, and a profile it
+# skipped can commit without moving anything the caller compares. A 1-tuple, so
+# it can never be mistaken for a 3-tuple roster entry, and hashable/comparable by
+# value, so two incomplete keys still compare equal exactly as before. (#8694)
+ALL_PROFILES_ROSTER_INCOMPLETE = ('<all-profiles-roster-incomplete>',)
+
+
+def all_profiles_roster_incomplete(cache_key) -> bool:
+    """True when ``cache_key`` (from ``_all_profiles_cli_contexts``) marks a partial roster."""
+    return isinstance(cache_key, tuple) and ALL_PROFILES_ROSTER_INCOMPLETE in cache_key
+
+
 def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], tuple]:
-    """Return per-profile CLI scan contexts plus a cache key fragment."""
+    """Return per-profile CLI scan contexts plus a cache key fragment.
+
+    Best-effort by design: a profile that cannot be enumerated or resolved is
+    skipped rather than failing the whole sidebar. When that happens the cache
+    key ends with ``ALL_PROFILES_ROSTER_INCOMPLETE`` so a consumer can tell "these
+    are all the profiles" from "these are the profiles I managed to see". Only
+    the former is evidence that nothing outside ``contexts`` changed. (#8694)
+    """
     try:
         from api.profiles import (
             _profiles_root,
@@ -11285,19 +11307,32 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
             get_hermes_home_for_profile,
         )
     except Exception:
-        return [], ()
+        return [], (ALL_PROFILES_ROSTER_INCOMPLETE,)
 
     contexts: list[tuple[Path, Path, str | None]] = []
     cache_entries: list[tuple[str, str, object]] = []
     seen_homes: set[str] = set()
+    complete = True
 
     def _add_context(profile_name) -> None:
+        nonlocal complete
         try:
             hermes_home = Path(get_hermes_home_for_profile(profile_name)).expanduser().resolve()
+        except ValueError:
+            # The resolver's containment refusal (a named profile directory that
+            # resolves outside the profiles root): WebUI deliberately never reads
+            # that home, so excluding it is a policy decision, not lost evidence.
+            logger.debug("All-profiles CLI excluded profile %r", profile_name, exc_info=True)
+            return
         except Exception:
+            complete = False
+            logger.debug("All-profiles CLI home resolution failed for %r", profile_name, exc_info=True)
             return
         home_key = _path_cache_key(hermes_home)
-        if not home_key or home_key in seen_homes:
+        if not home_key:
+            complete = False
+            return
+        if home_key in seen_homes:
             return
         seen_homes.add(home_key)
         db_path = hermes_home / 'state.db'
@@ -11308,19 +11343,28 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
     try:
         _add_context(get_active_profile_name())
     except Exception:
-        pass
+        complete = False
     # The root profile, then one home per directory under the named-profile
     # root. Deliberately not list_profiles_api(): that builds the picker's rows,
     # skill counts included, and this scan needs only the homes (#7940).
     _add_context('default')
     try:
-        for entry in sorted(_profiles_root().iterdir()):
+        try:
+            entries = sorted(_profiles_root().iterdir())
+        except FileNotFoundError:
+            # No named-profile root yet (a fresh install): the roster is just the
+            # profiles added above, and that is a complete observation.
+            entries = []
+        for entry in entries:
             if not entry.is_dir():
                 continue
             _add_context(entry.name)
     except Exception:
+        complete = False
         logger.debug("All-profiles CLI directory enumeration failed", exc_info=True)
 
+    if not complete:
+        cache_entries.append(ALL_PROFILES_ROSTER_INCOMPLETE)
     return contexts, tuple(cache_entries)
 
 

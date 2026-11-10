@@ -8121,15 +8121,16 @@ let _deferredActiveSessionExternalRefreshReason = '';
 let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
-// Coalescing window for SSE-driven sidebar refreshes. It used to be 300 ms,
-// which is below what the server can even serve: `_SESSIONS_CACHE_MIN_REFRESH_SECONDS`
-// (10 s) means a second `/api/sessions` inside that floor returns the SAME cached
-// payload, so re-fetching three times a second buys no freshness — it only
-// re-renders the sidebar and re-pays the request. Measured 2026-10-30: 65
+// Coalescing window for SSE-driven sidebar refreshes. It used to be 300 ms, so a
+// streaming session's burst of `sessions_changed` events re-fetched `/api/sessions`
+// several times a second. Inside the server's `_SESSIONS_CACHE_MIN_REFRESH_SECONDS`
+// floor a refresh that only saw session-index or gateway-metadata churn is served
+// the same cached payload; a state.db commit still rebuilds (#8694), so the
+// refetch rate also drives the server's rebuild rate. Measured 2026-10-30: 65
 // `/api/sessions` per minute from one client, gaps of 0-2 s, sidebar p99 1.8 s.
-// 5 s halves the server's floor and caps a continuously-streaming session at 12
-// refreshes/min instead of 200, while a burst of `sessions_changed` events from
-// one tool call still costs a single refresh.
+// 5 s caps a continuously-streaming session at 12 refreshes/min instead of 200,
+// while a burst of `sessions_changed` events from one tool call still costs a
+// single refresh.
 const _SESSION_EVENTS_REFRESH_COALESCE_MS = 5000;
 let _sessionEventsRefreshPendingRequest = null;
 let _sessionEventsReconnectTimer = 0;
