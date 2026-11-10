@@ -459,14 +459,19 @@ def test_session_list_cache_rate_floor_never_holds_an_unreadable_fingerprint(mon
     fingerprint = {"value": models._CONTENT_FINGERPRINT_UNREADABLE}
 
     def _changing_stat_stamp(_key):
+        # Only the holdable movement changes (gateway metadata [2], session index
+        # [3]); the state.db stat pair [0]/[1] and the settings stat stay put. The
+        # stat pair alone would refuse the hold, so a moving pair would make this
+        # test pass without ever reaching the unreadable-fingerprint guard it pins.
+        # (#8986 independent review R2)
         stat["generation"] += 1
         generation = stat["generation"]
         return (
-            (generation, 1),
-            (generation, 2),
+            (1, 1),
+            (1, 2),
             (generation, 3),
             (generation, 4),
-            (generation, 5),
+            (1, 5),
             fingerprint["value"],
             None,
             0,

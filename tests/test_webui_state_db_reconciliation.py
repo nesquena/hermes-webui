@@ -709,8 +709,10 @@ def test_api_sessions_reconciles_a_committed_append_under_transient_fingerprint_
     )
 
     # Immediate next request: the same transient-lock schedule repeats on its
-    # fingerprint read, so only the unreadable-fingerprint guard can let the
-    # committed rows through instead of the floor holding the cached entry.
+    # fingerprint read. The append also moved the state.db stat pair (asserted
+    # above), so the hold evidence differs either way: this pins the end-to-end
+    # reconciliation, while the unreadable-fingerprint guard on its own is pinned
+    # by test_session_list_cache_rate_floor_never_holds_an_unreadable_fingerprint.
     second = _GetHandler("/api/sessions?sidebar_source=webui")
     routes.handle_get(second, urlparse(second.path))
     assert second.status == 200

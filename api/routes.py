@@ -3922,9 +3922,11 @@ def _get_cached_session_list_payload(
                         invalidation_stamp = _session_list_cache_invalidation_stamp(key)
                         source_stamp = _session_list_cache_source_stamp_snapshot(key)
                         if source_stamp is None:
-                            # Unknown pre-build evidence: serve this request from a
-                            # fresh build but certify nothing. Retrying cannot
-                            # produce a snapshot the producer just failed to read.
+                            # Unknown pre-build evidence: build and certify nothing.
+                            # The request that started this background rebuild was
+                            # already served the stale payload, and the next request
+                            # revalidates. Retrying cannot produce a snapshot the
+                            # producer just failed to read.
                             return
                         roster_epoch = _route_session_list_cache._session_list_cache_roster_epoch()
                         try:

@@ -427,6 +427,12 @@ def _session_list_cache_key(
 # is what let a committed rename/delete stay hidden for the whole floor: master
 # was always saved by this same stat movement, and the floor suppressed it.
 # (#8694)
+#
+# Residual (#8987): the pair has 1 ms mtime resolution and a reused WAL keeps
+# its size, so a commit landing in the same millisecond tick as the write before
+# the pre-build snapshot can leave the pair equal. Such a commit can be held for
+# the rest of the floor (at most 10 s from insertion); a non-colliding witness
+# (the -shm WAL-index header) is the follow-up.
 _STAMP_HOLD_EVIDENCE_INDEXES = (0, 1, 5, 6)
 
 # Appended to an all-profiles state stamp built from a PARTIAL roster: the same
