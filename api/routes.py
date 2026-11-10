@@ -16803,24 +16803,55 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     out_day = _get_outbound_domains(day_start, day_end)
     out_month = _get_outbound_domains(month_start, month_end)
 
-    def _ip_to_domain(ip):
-        # Bounded reverse-DNS: a slow resolver must not stall the panel.
-        try:
-            import concurrent.futures as _futures
-            import socket as _socket
-            with _futures.ThreadPoolExecutor(max_workers=1) as pool:
-                hostname = pool.submit(_socket.gethostbyaddr, ip).result(timeout=1)
-            return hostname[0]
-        except Exception:
-            return ip
+    def _resolve_domains(ips):
+        """Best-effort reverse-DNS for `ips` under one shared wall-clock deadline.
 
-    def _format_ips(counter):
-        return [{"ip": ip, "count": count, "domain": _ip_to_domain(ip)}
+        A per-lookup ``with ThreadPoolExecutor(...)`` cannot bound this: its
+        ``__exit__`` runs ``shutdown(wait=True)``, which waits out the
+        in-flight lookup long after ``result(timeout=...)`` has given up on
+        it, so a slow resolver still stalls the whole request. Resolve the
+        candidates in parallel on short-lived DAEMON threads instead —
+        daemon threads cannot block interpreter exit — and fall back to the
+        raw IP for anything unanswered. The thread count is bounded by the
+        number of displayed candidates.
+        """
+        import socket as _socket
+        import threading as _threading
+        names = {}
+
+        def _lookup(ip):
+            try:
+                names[ip] = _socket.gethostbyaddr(ip)[0]
+            except Exception:
+                names[ip] = ip
+
+        workers = [
+            _threading.Thread(target=_lookup, args=(ip,), daemon=True)
+            for ip in ips
+        ]
+        for worker in workers:
+            worker.start()
+        deadline = time.monotonic() + 1.0
+        for worker in workers:
+            worker.join(max(0.0, deadline - time.monotonic()))
+        return names
+
+    def _format_ips(counter, names):
+        return [{"ip": ip, "count": count, "domain": names.get(ip, ip)}
                 for ip, count in counter.most_common(10)]
 
+    # One resolution pass covers both cards' candidates (<= 20 lookups).
+    _seen = set()
+    _resolve_queue = []
+    for _ip, _count in ip_counts_day.most_common(10) + ip_counts_month.most_common(10):
+        if _ip not in _seen:
+            _seen.add(_ip)
+            _resolve_queue.append(_ip)
+    _names = _resolve_domains(_resolve_queue)
+
     return j(handler, {
-        "inbound_ips_day": _format_ips(ip_counts_day),
-        "inbound_ips_month": _format_ips(ip_counts_month),
+        "inbound_ips_day": _format_ips(ip_counts_day, _names),
+        "inbound_ips_month": _format_ips(ip_counts_month, _names),
         "outbound_domains_day": out_day,
         "outbound_domains_month": out_month,
         "inbound_source": inbound_source,

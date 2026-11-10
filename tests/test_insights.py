@@ -3166,3 +3166,53 @@ def test_insights_traffic_keeps_inbound_for_unbound_session(monkeypatch, tmp_pat
     assert data["inbound_source"] == "ok"
     assert [r["ip"] for r in data["inbound_ips_day"]] == ["192.168.1.1"]
 
+
+def test_insights_traffic_slow_resolver_does_not_stall_request(monkeypatch, tmp_path):
+    """A resolver slower than the deadline must not stall the request.
+
+    The old per-lookup ``with ThreadPoolExecutor(...)`` ran
+    ``shutdown(wait=True)`` on exit, so ``result(timeout=1)`` still waited
+    out the in-flight lookup. The handler must now return on its own
+    deadline and keep the raw-IP fallback.
+    """
+    import calendar as _calendar
+    import pathlib
+    import socket as _socket
+    import time as _time
+    import types
+
+    import api.models as models
+    import api.routes as routes
+
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] "
+        "\"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+
+    def _slow_gethostbyaddr(ip):
+        _time.sleep(1.6)
+        return (ip, [], [ip])
+
+    monkeypatch.setattr(_socket, "gethostbyaddr", _slow_gethostbyaddr)
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: pathlib.Path("/nonexistent/state.db")
+    )
+
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    started = _time.monotonic()
+    routes._handle_insights_traffic(handler, parsed)
+    elapsed = _time.monotonic() - started
+
+    assert handler.status == 200
+    data = handler.json_body()
+    assert elapsed < 1.5, f"request stalled {elapsed:.2f}s on a slow resolver"
+    assert data["inbound_ips_day"][0]["ip"] == "192.168.1.1"
+    # Unanswered lookup keeps the raw IP as the displayed domain.
+    assert data["inbound_ips_day"][0]["domain"] == "192.168.1.1"
+
