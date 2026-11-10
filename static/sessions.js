@@ -2461,6 +2461,39 @@ async function newSession(flash, options={}){
     // provider, so a value match there is a pair match by construction.)
     const freshExplicitPickOwns=(value)=>!!(freshExplicitPickValue
       &&freshExplicitPickValue===String(value||'').trim());
+    // The persisted arm needs a different comparison, because the marker and
+    // the persisted pair record the SAME pick in two shapes: the marker holds
+    // the picker's RAW selection, while the persisted pair holds the
+    // NORMALISED model id — a named custom route's option is the qualified
+    // @<provider>:<model> form and the picker's model-state resolver strips
+    // that duplicated custom prefix before persisting it (#6884). Comparing
+    // the two verbatim therefore rejected EVERY qualified custom pick as soon
+    // as a later empty catalogue refresh cleared the <select> and the persisted
+    // arm became the only source left: the New Chat then posted with NEITHER
+    // model NOR provider. Compare model IDENTITIES instead — and keep the
+    // provider out of it, since the persisted store is SHARED and another tab
+    // may have rewritten it (provider authority stays on the marker, #8576
+    // greptile P1 2026-11-08). The picker arm above is unaffected: the option
+    // the user picked is still selected, so its raw value still matches the
+    // marker.
+    const _freshPickModelIdentity=(value)=>{
+      const raw=String(value||'').trim();
+      if(!raw||raw.charAt(0)!=='@') return raw;
+      const provider=(typeof _providerFromModelValue==='function')
+        ?String(_providerFromModelValue(raw)||'').trim():'';
+      if(!provider) return raw;
+      const prefix='@'+provider+':';
+      return raw.toLowerCase().startsWith(prefix.toLowerCase())?raw.slice(prefix.length):raw;
+    };
+    const freshExplicitPickIdentity=freshExplicitPickValue
+      ?_freshPickModelIdentity(freshExplicitPickValue):'';
+    const freshExplicitPickIdentityOwns=(value)=>{
+      if(!freshExplicitPickValue||!freshExplicitPickIdentity) return false;
+      const candidate=String(value||'').trim();
+      if(!candidate) return false;
+      return freshExplicitPickValue===candidate
+        ||freshExplicitPickIdentity===_freshPickModelIdentity(candidate);
+    };
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
@@ -2491,14 +2524,17 @@ async function newSession(flash, options={}){
         // No pending profile switch: the persisted pair is this profile's own
         // preference and may pass as-is.
         newModelState=_persistedModelState;
-      }else if(freshExplicitPickOwns(_persistedModelState&&_persistedModelState.model)){
+      }else if(freshExplicitPickIdentityOwns(_persistedModelState&&_persistedModelState.model)){
         // Under the armed gate the persisted pair is SHARED localStorage:
         // another tab can rewrite it between this tab's pick and this New
         // Chat. Matching the model alone admitted that tab's
         // same-model/different-provider pair and supplied the wrong
         // model_provider (#8576, greptile P1 2026-11-08). Keep the stored
         // pair's model (the pick wrote its normalised id there), but take the
-        // provider from the marker itself — never from the shared store.
+        // provider from the marker itself — never from the shared store. The
+        // comparison is by model IDENTITY (see freshExplicitPickIdentityOwns):
+        // the marker holds the picker's raw qualified value while this pair
+        // holds the normalised id.
         newModelState={
           model:_persistedModelState.model,
           model_provider:(freshExplicitPick&&freshExplicitPick.model_provider)||null,
