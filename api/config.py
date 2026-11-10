@@ -654,10 +654,14 @@ def _private_config_env_binding(home) -> dict:
     env = profile_env_binding(home)
     is_global = _agent_global_env_rule()
     if is_global is not None:
-        for name, value in os.environ.items():
+        # Iterate names, not items(): another worker may restore its env (removing a
+        # key) between the listing and the read, and items() then raises KeyError.
+        for name in os.environ:
             try:
                 if name != "HERMES_HOME" and is_global(name):
-                    env[name] = value
+                    value = os.environ.get(name)
+                    if value is not None:
+                        env[name] = value
             except Exception:
                 continue
     return env

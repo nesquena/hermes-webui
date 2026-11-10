@@ -818,3 +818,45 @@ def test_a_recursive_yaml_alias_does_not_fail_the_job(homes, runtime, make_sessi
     assert job["status"] == "done", job.get("error")
     assert runtime.agents[0]["base_url"] == "http://work-lab.invalid/v1"
     assert runtime.agents[0]["api_key"] == "work-lab-key"
+
+
+def test_a_global_variable_removed_mid_read_is_skipped(homes, monkeypatch):
+    """Codex r6: another worker can restore its env (removing a key) while the private
+    read collects the Agent's process-global variables. ``os.environ.items()`` fetches
+    each value after listing the names, so a removed key raised ``KeyError`` and
+    failed the compression job. A name that vanishes is now skipped."""
+    import collections.abc
+    import os as _real_os
+
+    from api import config
+
+    class VanishingEnviron(collections.abc.Mapping):
+        """Lists a global that is gone by the time its value is read."""
+
+        _data = {"API_SERVER_PORT": "18080", "WORK_ONLY_NOT_GLOBAL": "x"}
+
+        def __iter__(self):
+            return iter(list(self._data) + ["VANISHING_GLOBAL"])
+
+        def __len__(self):
+            return len(self._data) + 1
+
+        def __getitem__(self, name):
+            return self._data[name]
+
+    class OsProxy:
+        environ = VanishingEnviron()
+
+        def __getattr__(self, name):
+            return getattr(_real_os, name)
+
+    monkeypatch.setattr(
+        config, "_agent_global_env_rule", lambda: (lambda name: name in {"API_SERVER_PORT", "VANISHING_GLOBAL"})
+    )
+    monkeypatch.setattr(config, "os", OsProxy())
+
+    env = config._private_config_env_binding(homes.work)
+
+    assert env["API_SERVER_PORT"] == "18080"
+    assert "VANISHING_GLOBAL" not in env
+    assert "WORK_ONLY_NOT_GLOBAL" not in env
