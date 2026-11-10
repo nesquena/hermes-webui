@@ -29,6 +29,7 @@ from collections import OrderedDict
 import json
 from pathlib import Path
 import threading
+import time
 
 import pytest
 import yaml
@@ -152,7 +153,7 @@ def test_gateway_worker_sends_session_profile_override_not_ambient(
 
         def __iter__(self):
             yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
-            yield b'data: [DONE]\n\n'
+            yield b"data: [DONE]\n\n"
 
     def fake_urlopen(req, timeout=0):
         captured["body"] = req.data.decode("utf-8")
@@ -302,7 +303,7 @@ def test_dispatch_captures_session_profile_cfg_and_passes_to_gateway_worker(
 
         def __iter__(self):
             yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
-            yield b'data: [DONE]\n\n'
+            yield b"data: [DONE]\n\n"
 
     def fake_urlopen(req, timeout=0):
         captured["body"] = req.data.decode("utf-8")
@@ -396,7 +397,7 @@ def test_dispatch_snapshot_survives_concurrent_profile_a_reload(
 
         def __iter__(self):
             yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
-            yield b'data: [DONE]\n\n'
+            yield b"data: [DONE]\n\n"
 
     def fake_urlopen(req, timeout=0):
         if not barrier.fired:
@@ -508,9 +509,7 @@ def test_dispatch_snapshot_is_deep_copied_when_profile_home_is_active(
         live.get("agent", {}).get("reasoning_overrides")
     )
     # Values still resolve to profile B's snapshot.
-    assert (
-        session_cfg["agent"]["reasoning_overrides"][_MODEL] == "high"
-    )
+    assert session_cfg["agent"]["reasoning_overrides"][_MODEL] == "high"
 
 
 def test_dispatch_snapshot_is_isolated_for_divergent_profile_home(
@@ -581,10 +580,9 @@ def test_snapshot_for_profile_home_is_decoupled_from_live_cache(
     live = cfg.get_config()
     assert snap is not live
     assert snap.get("agent") is not live.get("agent")
-    assert (
-        snap.get("agent", {}).get("reasoning_overrides") is not
-        live.get("agent", {}).get("reasoning_overrides")
-    )
+    assert snap.get("agent", {}).get("reasoning_overrides") is not live.get(
+        "agent", {}
+    ).get("reasoning_overrides")
     # A later in-place mutation of the live cache cannot reach the snapshot.
     live["agent"]["reasoning_overrides"][_MODEL] = "none"
     assert snap["agent"]["reasoning_overrides"][_MODEL] == "high"
@@ -594,7 +592,15 @@ def test_snapshot_for_profile_home_survives_concurrent_reloads(
     two_profiles, tmp_path, monkeypatch
 ):
     """Stress: a reload thread clearing/repopulating the shared cache must
-    not tear snapshots being taken concurrently (greptile P1 shape)."""
+    not tear snapshots being taken concurrently (greptile P1 shape).
+
+    The reloader paces itself between passes. Spinning it flat out against the
+    non-reentrant ``_cfg_lock`` starves the snapshot thread on a loaded CI
+    runner (the race window is tiny, so the loop made no progress and the whole
+    test rode the 60s pytest timeout). Pacing keeps the interleaving while
+    bounding the wall clock, and the iteration count is asserted so a
+    starved run fails loudly instead of hanging.
+    """
     cfg, profile_a_home, profile_b_home = two_profiles
 
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(profile_b_home / "config.yaml"))
@@ -613,22 +619,27 @@ def test_snapshot_for_profile_home_survives_concurrent_reloads(
 
     def reloader():
         try:
-            while not stop.is_set():
+            while not stop.wait(0.001):
                 cfg.reload_config()
         except Exception as exc:  # pragma: no cover - failure surfaces via errors
             errors.append(exc)
 
     reloader_thread = threading.Thread(target=reloader, daemon=True)
     reloader_thread.start()
+    deadline = time.monotonic() + 30.0
+    iterations = 0
     try:
-        for _ in range(300):
+        while iterations < 300 and time.monotonic() < deadline:
             snap = get_config_snapshot_for_profile_home(profile_b_home)
             assert isinstance(snap, dict)
             assert snap["agent"]["reasoning_overrides"][_MODEL] == "high"
+            iterations += 1
     finally:
         stop.set()
         reloader_thread.join(timeout=10)
+    assert not reloader_thread.is_alive(), "reload thread did not stop"
     assert not errors, f"reload thread failed: {errors!r}"
+    assert iterations > 0, "snapshot loop made no progress against the reloader"
 
 
 def test_snapshot_divergent_home_expands_target_profiles_env(tmp_path, monkeypatch):
