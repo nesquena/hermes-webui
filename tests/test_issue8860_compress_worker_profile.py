@@ -21,7 +21,12 @@ from pathlib import Path
 import pytest
 
 from api import config, oauth, profiles, routes
-from tests.test_sprint46 import _FakeAgent, _FakeHandler, _make_session
+from tests.test_sprint46 import (
+    _FakeAgent,
+    _FakeHandler,
+    _install_fake_compression_runtime,
+    _make_session,
+)
 
 _REFUSAL = "/compress is unavailable on gateway-backed sessions"
 _MARKER = "gateway_admission_checked"
@@ -44,6 +49,9 @@ def profile_pair(tmp_path, monkeypatch, cleanup_test_sessions):
     monkeypatch.setattr(config, "cfg", cache)
     monkeypatch.setattr(config, "_cfg_path", None)
     monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    # The job imports hermes_cli.runtime_provider and run_agent; stub them as test_sprint46 does, so these tests run
+    # without the Agent installed (CI installs none).
+    _install_fake_compression_runtime(monkeypatch, _FakeAgent)
     monkeypatch.setattr(routes, "ensure_agent_runtime_current", lambda: None)
     monkeypatch.setattr(routes, "require_ai_agent_class", lambda: _FakeAgent)
     monkeypatch.setattr(
