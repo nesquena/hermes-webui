@@ -20067,6 +20067,15 @@ def handle_post(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/session/new":
+        # Reject a non-string or ill-formed profile before anything is created
+        # (#8862). None/"" still mean "use the active profile".
+        _raw_new_profile = body.get("profile")
+        if _raw_new_profile not in (None, ""):
+            if not isinstance(_raw_new_profile, str):
+                return bad(handler, "invalid profile", 400)
+            from api.profiles import _PROFILE_ID_RE
+            if not _PROFILE_ID_RE.fullmatch(_raw_new_profile):
+                return bad(handler, "invalid profile", 400)
         workspace_prev_session_id = body.get("prev_session_id")
         if workspace_prev_session_id and not _session_id_visible_to_request_profile(
             handler, workspace_prev_session_id, emit_error=False
