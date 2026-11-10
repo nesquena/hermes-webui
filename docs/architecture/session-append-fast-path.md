@@ -360,6 +360,22 @@ now, where the previous round had to argue each one out.
   the longer prefix. The jump-to-start full load establishes the widest
   proof there is and every row's provenance, so it must not cost the next
   focus reload its fast path.
+- **A paged-in head survives a concurrent reload (2026-11-09).** The
+  bounded/full replace path never merges two responses' rows, but it also
+  must not drop rows the client gained while its request was in flight:
+  `_loadOlderMessages` completing a *Load older* during a focus/SSE reload
+  moves the held head earlier, and the reload's window — sized for the
+  pre-prepend view — then starts newer than that head, so taking it
+  wholesale silently discarded the prepend (the view read `100-150 @
+  offset 100` where `70-150 @ offset 70` was on screen). The replace
+  therefore snapshots the held head before the fetch and, when the head
+  moved earlier and the response's window still starts after it, re-fetches
+  authoritatively from the live view: a widened bounded window covering the
+  held head when that width fits under the ceiling, else master's bare full
+  document — the only response that starts at row 0. Still no merge: the
+  view stays exactly one response's rows. Pinned by
+  `test_bounded_reload_drops_no_prepended_rows` and its no-prepend control
+  `test_bounded_reload_without_a_prepend_keeps_the_tail_replace`.
 - The append branch keeps the loaded session-level tool card list across
   loadSession's metadata adoption (the `messages=0` response carries
   `tool_calls: []`), merges the response's rebased new owners into it, and

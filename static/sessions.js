@@ -4655,6 +4655,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   let _appendPreLength = -1;
   let _appendPreAnchorRow = null;
   let _appendPreOldestIdx = -1;
+  // #7925 re-gate (2026-11-09, lost prepend): the replace path has no anchor
+  // to drift from, but it has the same race — snapshot the held head so a
+  // prepend that lands while the fetch is in flight (a Load older completing
+  // during a focus/SSE reload) is visible when the response arrives.
+  let _replacePreOldestIdx = _oldestIdx;
   if (_appendFastPath) {
     const lastRenderedIdx = _oldestIdx + S.messages.length - 1;
     const anchorFp = _appendAnchorRowFingerprint(S.messages[S.messages.length - 1]);
@@ -4848,6 +4853,50 @@ async function _ensureMessagesLoaded(sid, opts) {
       if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
     }
     if (!_ownsLoad() || !data || !data.session) return;
+  }
+  // #7925 re-gate (2026-11-09, lost prepend): the replace below takes the
+  // response's window as the whole view. When a Load older completed while
+  // this request was in flight, _loadOlderMessages moved the held head
+  // earlier (prepending server rows onto it) — and the response, sized for
+  // the view as it was when the request went out, then starts NEWER than
+  // that head, so taking it wholesale silently drops every prepended row:
+  // the view read 100-150 @ offset 100 where 70-150 @ offset 70 was on
+  // screen (CharlesMcquade's repro). The no-prepend control never trips
+  // this — the head does not move, and the window starts exactly at it.
+  //
+  // The remedy stays inside the by-construction contract — no merge of two
+  // responses' rows: re-fetch authoritatively from the view as it stands.
+  // The width is the one that covers the held head (the held rows, or the
+  // rows from the held start through this response's own authoritative
+  // count), and when that width no longer fits under the ceiling the
+  // request is master's bare full document — the only response that starts
+  // at row 0 and therefore cannot drop held rows. A second prepend racing
+  // the widened fetch lands on the same test once more and takes the full
+  // document.
+  if (_replacePreOldestIdx >= 0 && _oldestIdx < _replacePreOldestIdx &&
+      (Number(data.session._messages_offset) || 0) > _oldestIdx) {
+    const _heldRowCount = (Array.isArray(S.messages) ? S.messages : []).filter(m => m && m.role).length;
+    const _serverRowCount = Number(data.session.message_count) || 0;
+    const _coveringLimit = Math.max(
+      _heldRowCount,
+      _serverRowCount - _oldestIdx,
+      (typeof _INITIAL_MSG_LIMIT === 'number' ? _INITIAL_MSG_LIMIT : 30)
+    );
+    const _coveringFitsCeiling = _coveringLimit > 0 && _coveringLimit <= _msgLimitMax;
+    for (let _coveringAttempt = 0; _coveringAttempt < 2; _coveringAttempt++) {
+      const _coveringBareFull = !_coveringFitsCeiling || _coveringAttempt > 0;
+      try {
+        data = await api(
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0` +
+            (_coveringBareFull ? '' : `&msg_limit=${_coveringLimit}&expand_renderable=1`),
+          {timeoutMs:120000}
+        );
+      } finally {
+        if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
+      }
+      if (!_ownsLoad() || !data || !data.session) return;
+      if ((Number(data.session._messages_offset) || 0) <= _oldestIdx) break;
+    }
   }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
