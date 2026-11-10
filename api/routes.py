@@ -16608,35 +16608,65 @@ def _get_outbound_domains(start_dt, end_dt):
         return []
 
 
-# Shared, bounded reverse-DNS workers for the traffic panel. Creating a
-# thread per candidate per request is unbounded under load: a slow resolver
-# leaves workers behind after the request has returned, so repeated
-# refreshes pile up and `Thread.start()` eventually fails. One process-wide
-# pool caps the worker count, and it is NEVER shut down per request —
-# executor exit waits for in-flight lookups, which would reintroduce the
-# stall this replaced. `_REVERSE_DNS_OUTSTANDING` caps queued-but-unfinished
-# lookups so a busy resolver degrades to raw IPs instead of accumulating
-# work.
-_REVERSE_DNS_POOL = None
-_REVERSE_DNS_POOL_LOCK = threading.Lock()
-_REVERSE_DNS_WORKERS = 4
-_REVERSE_DNS_MAX_OUTSTANDING = 24
+# Reverse-DNS for the traffic panel is best-effort. `socket.gethostbyaddr`
+# is a blocking C call with no timeout, so it must never run on the request
+# path: it runs on short-lived DAEMON threads (daemon threads cannot hold up
+# process exit) under a global cap of outstanding lookups. The cap is
+# released when a lookup actually FINISHES, not when the request returns —
+# otherwise a stalled resolver lets every refresh add more live workers.
+# At the cap, or when a worker cannot be started, the handler keeps the raw
+# IP.
+_REVERSE_DNS_MAX_OUTSTANDING = 40
 _REVERSE_DNS_OUTSTANDING = 0
 _REVERSE_DNS_OUTSTANDING_LOCK = threading.Lock()
+_REVERSE_DNS_TIMEOUT = 1.0
 
 
-def _reverse_dns_pool():
-    """Return the shared reverse-DNS worker pool, creating it on first use."""
-    global _REVERSE_DNS_POOL
-    if _REVERSE_DNS_POOL is None:
-        with _REVERSE_DNS_POOL_LOCK:
-            if _REVERSE_DNS_POOL is None:
-                import concurrent.futures as _futures
-                _REVERSE_DNS_POOL = _futures.ThreadPoolExecutor(
-                    max_workers=_REVERSE_DNS_WORKERS,
-                    thread_name_prefix="webui-rdns",
-                )
-    return _REVERSE_DNS_POOL
+def _resolve_inbound_domains(ips):
+    """Best-effort reverse-DNS for `ips`; raw IP for anything unresolved."""
+    import socket as _socket
+    import threading as _threading
+
+    fallback = {ip: ip for ip in ips}
+    if not ips:
+        return fallback
+
+    global _REVERSE_DNS_OUTSTANDING
+    with _REVERSE_DNS_OUTSTANDING_LOCK:
+        if _REVERSE_DNS_OUTSTANDING + len(ips) > _REVERSE_DNS_MAX_OUTSTANDING:
+            return fallback
+        _REVERSE_DNS_OUTSTANDING += len(ips)
+
+    names = {}
+
+    def _lookup(ip):
+        try:
+            names[ip] = _socket.gethostbyaddr(ip)[0]
+        except Exception:
+            names[ip] = ip
+        finally:
+            with _REVERSE_DNS_OUTSTANDING_LOCK:
+                global _REVERSE_DNS_OUTSTANDING
+                _REVERSE_DNS_OUTSTANDING -= 1
+
+    workers = []
+    started = 0
+    try:
+        for ip in ips:
+            worker = _threading.Thread(target=_lookup, args=(ip,), daemon=True)
+            worker.start()
+            workers.append(worker)
+            started += 1
+    except RuntimeError:
+        # Thread creation failed under pressure: release the slots for the
+        # lookups that never started, so the cap tracks live work only.
+        with _REVERSE_DNS_OUTSTANDING_LOCK:
+            _REVERSE_DNS_OUTSTANDING -= (len(ips) - started)
+
+    deadline = time.monotonic() + _REVERSE_DNS_TIMEOUT
+    for worker in workers:
+        worker.join(max(0.0, deadline - time.monotonic()))
+    return names
 
 
 def _handle_insights_traffic(handler, parsed) -> bool:
@@ -16834,57 +16864,6 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     out_day = _get_outbound_domains(day_start, day_end)
     out_month = _get_outbound_domains(month_start, month_end)
 
-    def _resolve_domains(ips):
-        """Best-effort reverse-DNS for `ips` under one shared wall-clock deadline.
-
-        Falls back to the raw IP when the deadline passes, when the shared
-        pool is at capacity, or when the pool refuses work.
-
-        A per-lookup ``with ThreadPoolExecutor(...)`` cannot bound this: its
-        exit waits for the in-flight lookup long after ``result(timeout=...)``
-        has given up on it, so a slow resolver still stalls the whole
-        request. A thread per candidate per request is no better — a slow
-        resolver leaves workers behind after the request returns, so
-        repeated refreshes pile up. Both are replaced by the shared, bounded
-        worker pool plus the outstanding-lookup cap below.
-        """
-        global _REVERSE_DNS_OUTSTANDING
-
-        import concurrent.futures as _futures
-        import socket as _socket
-
-        fallback = {ip: ip for ip in ips}
-        if not ips:
-            return fallback
-
-        with _REVERSE_DNS_OUTSTANDING_LOCK:
-            if _REVERSE_DNS_OUTSTANDING + len(ips) > _REVERSE_DNS_MAX_OUTSTANDING:
-                # Busy: keep the raw IPs rather than queue more lookups.
-                return fallback
-            _REVERSE_DNS_OUTSTANDING += len(ips)
-        try:
-            try:
-                pool = _reverse_dns_pool()
-                future_to_ip = {
-                    pool.submit(_socket.gethostbyaddr, ip): ip for ip in ips
-                }
-            except RuntimeError:
-                return fallback
-            done, not_done = _futures.wait(future_to_ip, timeout=1.0)
-            for fut in not_done:
-                fut.cancel()
-            names = dict(fallback)
-            for fut in done:
-                ip = future_to_ip[fut]
-                try:
-                    names[ip] = fut.result()[0]
-                except Exception:
-                    pass
-            return names
-        finally:
-            with _REVERSE_DNS_OUTSTANDING_LOCK:
-                _REVERSE_DNS_OUTSTANDING -= len(ips)
-
     def _format_ips(counter, names):
         return [{"ip": ip, "count": count, "domain": names.get(ip, ip)}
                 for ip, count in counter.most_common(10)]
@@ -16896,7 +16875,7 @@ def _handle_insights_traffic(handler, parsed) -> bool:
         if _ip not in _seen:
             _seen.add(_ip)
             _resolve_queue.append(_ip)
-    _names = _resolve_domains(_resolve_queue)
+    _names = _resolve_inbound_domains(_resolve_queue)
 
     return j(handler, {
         "inbound_ips_day": _format_ips(ip_counts_day, _names),

@@ -3261,3 +3261,40 @@ def test_insights_traffic_returns_raw_ips_when_dns_pool_is_busy(monkeypatch, tmp
     assert data["inbound_ips_day"][0]["ip"] == "192.168.1.1"
     assert data["inbound_ips_day"][0]["domain"] == "192.168.1.1"
 
+
+def test_resolve_inbound_domains_releases_cap_on_completion(monkeypatch):
+    """The outstanding cap tracks live lookups, not returned requests.
+
+    Releasing the slot when the request gives up would let a stalled
+    resolver accumulate one live worker per refresh.
+    """
+    import socket as _socket
+    import time as _time
+
+    import api.routes as routes
+
+    def _slow_gethostbyaddr(ip):
+        _time.sleep(1.5)
+        return ("host-" + ip, [], [ip])
+
+    monkeypatch.setattr(_socket, "gethostbyaddr", _slow_gethostbyaddr)
+
+    # Let a lookup left behind by an earlier test release its slot first, so
+    # the accounting below starts from a clean slate (the counter is
+    # process-global by design).
+    settle = _time.monotonic() + 3.0
+    while routes._REVERSE_DNS_OUTSTANDING != 0 and _time.monotonic() < settle:
+        _time.sleep(0.02)
+    monkeypatch.setattr(routes, "_REVERSE_DNS_OUTSTANDING", 0)
+
+    names = routes._resolve_inbound_domains(["10.0.0.1"])
+    # The request returned at its deadline, but the lookup is still running,
+    # so its slot must still be held and the raw IP shown.
+    assert routes._REVERSE_DNS_OUTSTANDING == 1
+    assert names.get("10.0.0.1", "10.0.0.1") == "10.0.0.1"
+
+    deadline = _time.monotonic() + 3.0
+    while routes._REVERSE_DNS_OUTSTANDING > 0 and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert routes._REVERSE_DNS_OUTSTANDING == 0
+
