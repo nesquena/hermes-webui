@@ -15766,6 +15766,134 @@ def _visible_key_occurrence_compatible(key, identities) -> bool:
     )
 
 
+def _consumption_cursor(container: dict, slot, remaining) -> dict:
+    """Return the merge-local consumption cursor stored at ``container[slot]``.
+
+    The cursor is the amortized-linear contract of the duplicate probes
+    (#8672 review P2, round 5).  It remembers how far an ordered candidate
+    list has already been consumed, so a replay never restarts the walk at
+    the beginning and re-inspects every candidate whose replay capacity is
+    gone -- that restart is the deterministic quadratic the review
+    reproduced: N NULL-clock replays of one repeated prompt cost N(N+1)/2
+    candidate visits (501501 at N=1001, 2003001 at N=2001).
+
+    The cursor is keyed on the caller's live capacity map and keeps a strong
+    reference to it, so a recycled ``id()`` can never alias a stale cursor
+    and a different merge starts from the beginning.  Capacity-blind callers
+    (``remaining is None``) never consume anything, so their cursor never
+    advances and the historical first-match walk is preserved byte for byte.
+    """
+    cursor = container.get(slot)
+    if cursor is None or cursor.get("remaining") is not remaining:
+        cursor = {"remaining": remaining, "position": 0}
+        container[slot] = cursor
+    return cursor
+
+
+def _unconsumed_candidates(ordered, cursor: dict, remaining):
+    """Yield ``ordered`` from the cursor, past the consumed prefix.
+
+    The cursor advances past the candidates at the FRONT of the list whose
+    replay capacity is gone.  Their capacity is monotone (the merge only ever
+    decrements it), so an exhausted candidate stays exhausted for the rest of
+    the merge and re-inspecting it on every incoming row is pure waste: that
+    restart is the deterministic quadratic the review reproduced -- N
+    NULL-clock replays of one repeated prompt cost N(N+1)/2 candidate visits
+    (501501 at N=1001, 2003001 at N=2001).  The position never moves back, so
+    each index is crossed at most once and the advancement stays amortized
+    linear in the length of the list.
+
+    Only the PREFIX is skipped.  A consumed candidate that sits BEHIND an
+    unconsumed one stays reachable: the caller's own filters decide per row
+    which candidate it needs (a clocked replay needs a different same-clock
+    candidate every row, in an order the build order does not follow), so it
+    is offered again and rejected by the caller exactly as before.  Every
+    candidate is still offered in build order with all of the caller's gates
+    applied in their historical order, so the candidate a caller picks -- and
+    therefore every merged row -- is unchanged; only the repeated work goes
+    away.
+
+    Capacity-blind callers (``remaining is None``) never consume anything, so
+    their cursor never advances and the historical walk is preserved byte for
+    byte.
+    """
+    if remaining is None:
+        yield from ordered
+        return
+    position = cursor["position"]
+    total = len(ordered)
+    while position < total and not _visible_key_capacity_remaining(
+        ordered[position], remaining
+    ):
+        position += 1
+    cursor["position"] = position
+    for index in range(position, total):
+        yield ordered[index]
+
+
+def _available_candidate(ordered, container, slot, remaining, identities):
+    """Return the first unconsumed, compatible candidate of ``ordered``.
+
+    ``ordered`` is a merge-stable candidate list (materialised once, never
+    mutated afterwards) and ``container[slot]`` owns the merge-local
+    consumption cursor for it -- see :func:`_consumption_cursor` and
+    :func:`_unconsumed_candidates` for why that cursor keeps the consumption
+    amortized linear.  The gates keep their historical order (capacity, then
+    identity compatibility), so the candidate returned is the one the
+    uncached walk would have returned.
+    """
+    if not ordered:
+        return None
+    cursor = _consumption_cursor(container, slot, remaining)
+    for candidate in _unconsumed_candidates(ordered, cursor, remaining):
+        if not _visible_key_capacity_remaining(candidate, remaining):
+            continue
+        if _visible_key_occurrence_compatible(candidate, identities):
+            return candidate
+    return None
+
+
+def _identity_candidates(container: dict) -> list:
+    """Return the merge-stable identity-bearing candidates of a group/bucket.
+
+    ``by_identity`` is complete once the lookup is built and is never mutated
+    afterwards, so its values are materialised into a list on first use: the
+    duplicate probes then walk it BY INDEX from the merge-local cursor instead
+    of restarting ``.values()`` on every incoming row (#8672 review P2, round
+    5).  A group and a clock bucket share this shape, so both use it.
+    """
+    ordered = container.get("identity_order")
+    if ordered is None:
+        ordered = list((container.get("by_identity") or {}).values())
+        container["identity_order"] = ordered
+    return ordered
+
+
+def _fallback_candidates(group: dict) -> list:
+    """Return the group's last-resort candidate order, materialised once.
+
+    ``_first_compatible_member``'s historical order is the clock-less
+    anonymous row, the clock-less representative and then every member.
+    Expanding that tuple per call rebuilt the whole member list every time --
+    the same repeated-prefix shape the review flagged -- so it is built once
+    here and walked through the merge-local cursor instead.
+    """
+    ordered = group.get("fallback_order")
+    if ordered is None:
+        clockless = group.get("clockless") or {}
+        ordered = [
+            candidate
+            for candidate in (
+                clockless.get("anonymous"),
+                clockless.get("representative"),
+                *(group.get("members") or []),
+            )
+            if candidate is not None
+        ]
+        group["fallback_order"] = ordered
+    return ordered
+
+
 def _clockless_duplicate_candidate(group: dict, identities, remaining=None):
     """Return a clock-unestablished representative compatible with ``identities``.
 
@@ -15825,6 +15953,18 @@ def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
     must not be rescanned per incoming row.  The ordered member list is only
     walked once the preferred candidate is EXHAUSTED, so replay capacity is
     consumed one occurrence at a time (C67-F1).
+
+    Those remaining ordered walks -- the group's identity index and a
+    same-clock bucket's -- start at a MERGE-LOCAL cursor instead of at the
+    beginning (#8672 review P2, round 5).  Restarting them per incoming row
+    made every NULL-clock replay re-inspect every candidate whose replay
+    capacity had already been consumed: N replays of one repeated prompt cost
+    N(N+1)/2 candidate visits (501501 at N=1001, 2003001 at N=2001) with the
+    real producer, the real SQLite reader and the real merge.  The cursor
+    skips an exhausted candidate once for the whole merge, which keeps the
+    consumption amortized linear while the candidate-specific namespace
+    conflicts, the clock separation and the one-to-one occurrence capacities
+    stay exactly as they were.
     """
     exact = group.get("by_occurrence", {}).get(occurrence)
     if exact is not None and _visible_key_capacity_remaining(exact, remaining):
@@ -15859,13 +15999,16 @@ def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
             # The bucket's representative already absorbed its replay.  Another
             # occurrence at the SAME clock is still a compatible saved row, so
             # the replay must land on it instead of being appended (C67-F1).
-            for candidate in bucket_by_identity.values():
-                if not _visible_key_capacity_remaining(candidate, remaining):
-                    continue
-                if not _visible_key_occurrence_compatible(candidate, identities):
-                    continue
-                return candidate
-            return None
+            # The walk starts at the bucket's merge-local cursor, so a
+            # candidate whose capacity is gone is skipped once for the whole
+            # merge instead of once per incoming row (#8672 review P2, round 5).
+            return _available_candidate(
+                _identity_candidates(bucket),
+                bucket,
+                "identity_cursor",
+                remaining,
+                identities,
+            )
         # No row establishes this clock.  A different ESTABLISHED clock stays
         # distinct, but a clock-unestablished copy of the same turn is still
         # compatible and must be checked BEFORE the incoming clock is
@@ -15899,12 +16042,19 @@ def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
                 return None
         # The namespace check above proved no group identity contradicts
         # ours, so the first identity-bearing row is a compatible
-        # representative -- resolved without scanning the bucket.
-        for candidate in by_identity.values():
-            if not _visible_key_capacity_remaining(candidate, remaining):
-                continue
-            if not _visible_key_occurrence_compatible(candidate, identities):
-                continue
+        # representative -- resolved without scanning the bucket.  The walk
+        # runs from the group's merge-local cursor, so a candidate whose
+        # replay capacity is already consumed is skipped once for the whole
+        # merge rather than once per incoming NULL-clock replay (#8672 review
+        # P2, round 5: that restart was the N(N+1)/2 work bound).
+        candidate = _available_candidate(
+            _identity_candidates(group),
+            group,
+            "identity_cursor",
+            remaining,
+            identities,
+        )
+        if candidate is not None:
             return candidate
         return _first_compatible_member(group, identities, remaining)
     # Neither a clock nor a private identity: a pure wildcard, so the first
@@ -15917,24 +16067,25 @@ def _first_compatible_member(group: dict, identities, remaining=None):
 
     The fallback of last resort for the shapes the O(1) probes cannot answer
     (an exhausted representative, or a group whose only members are
-    clock-less).  It walks the ordered member list once and stops at the
-    first compatible row with replay capacity left, so consumption stays
-    one-to-one without rescanning a whole same-clock bucket (C67-F1).
+    clock-less).  Its historical order -- the clock-less anonymous row, the
+    clock-less representative, then every member in build order -- is
+    materialised once (:func:`_fallback_candidates`) and walked through the
+    merge-local cursor (:func:`_available_candidate`).
+
+    That is the same repair the group's identity index got (#8672 review P2,
+    round 5): expanding the member tuple per call rebuilt the whole list every
+    time, and restarting the walk re-inspected every member whose replay
+    capacity was already consumed.  Skipping an exhausted member once per
+    merge keeps the consumption one-to-one without rescanning a consumed
+    prefix, so a group with many members stays amortized linear.
     """
-    clockless = group.get("clockless") or {}
-    for candidate in (
-        clockless.get("anonymous"),
-        clockless.get("representative"),
-        *(group.get("members") or []),
-    ):
-        if candidate is None:
-            continue
-        if not _visible_key_occurrence_compatible(candidate, identities):
-            continue
-        if not _visible_key_capacity_remaining(candidate, remaining):
-            continue
-        return candidate
-    return None
+    return _available_candidate(
+        _fallback_candidates(group),
+        group,
+        "fallback_cursor",
+        remaining,
+        identities,
+    )
 
 
 def _matching_visible_duplicate(
@@ -16033,7 +16184,19 @@ def _matching_visible_duplicate(
         lookup = _build_visible_duplicate_lookup(visible_keys)
     loose_content = None
     loose_by_key = lookup.setdefault("loose_by_key", {})
-    for existing_key in lookup.get("by_role", {}).get(role, []):
+    # Merge-local cursor per role (#8672 review P2, round 5).  The role's
+    # candidate list is built once with the lookup and never mutated, so the
+    # walk starts where the previous replay stopped instead of re-inspecting
+    # every candidate whose replay capacity is already consumed -- the same
+    # restart that made the clock-free index probe quadratic (N(N+1)/2
+    # candidate visits for N replays of one repeated prompt).  Only the
+    # capacity filter is permanent, so every other gate below still runs for
+    # every candidate exactly as before.
+    role_candidates = lookup.get("by_role", {}).get(role) or []
+    role_cursor = _consumption_cursor(lookup, ("role_cursor", role), remaining)
+    for existing_key in _unconsumed_candidates(
+        role_candidates, role_cursor, remaining
+    ):
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         existing_sidecar = _visible_key_field(
@@ -16062,9 +16225,11 @@ def _matching_visible_duplicate(
         # its own visible identity, so a second replay of the same repeated
         # turn must land on the NEXT compatible occurrence rather than on an
         # exhausted representative -- otherwise the merge refuses the skip and
-        # appends the turn a second time (#8672 gate C67-F1).  Callers that do
-        # not track capacity (``remaining is None``) keep the historical
-        # first-match behaviour byte for byte.
+        # appends the turn a second time (#8672 gate C67-F1).  The cursor
+        # above has already stepped past the exhausted PREFIX, so this gate
+        # only ever fires for an exhausted candidate that sits behind an
+        # unconsumed one; callers that do not track capacity (``remaining is
+        # None``) keep the historical first-match behaviour byte for byte.
         if not _visible_key_capacity_remaining(existing_key, remaining):
             continue
         # Exact visible-key equality was checked above. For very large payloads
