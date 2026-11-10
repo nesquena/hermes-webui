@@ -29,8 +29,12 @@ except Exception:  # pragma: no cover - depends on installed hermes-agent
     judge_goal = None  # type: ignore
 
 try:  # Older hermes-agent builds predate inline completion contracts.
-    from hermes_cli.goals import parse_contract  # type: ignore
+    from hermes_cli.goals import (  # type: ignore
+        CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE,
+        parse_contract,
+    )
 except Exception:  # pragma: no cover - depends on installed hermes-agent
+    CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = ""  # type: ignore
     parse_contract = None  # type: ignore
 
 GoalManager = _NativeGoalManager  # type: ignore
@@ -171,6 +175,11 @@ class _ProfileGoalManager:
         self._scoped(save_goal, self.session_id, snapshot)
 
 
+def _state_has_contract(state: Any) -> bool:
+    contract = getattr(state, "contract", None)
+    return contract is not None and not contract.is_empty()
+
+
 class _LegacyProfileGoalManager:
     """Explicit-DB fallback for Hermes versions without profile context."""
 
@@ -292,7 +301,9 @@ class _LegacyProfileGoalManager:
         if judge_goal is None:
             verdict, reason = "continue", "goal judge unavailable"
         else:
-            verdict, reason, *_ = judge_goal(state.goal, str(last_response or ""))
+            # Judge against the parsed contract too: state.goal holds only the headline.
+            contract_kwargs = {"contract": state.contract} if _state_has_contract(state) else {}
+            verdict, reason, *_ = judge_goal(state.goal, str(last_response or ""), **contract_kwargs)
         state.last_verdict = verdict
         state.last_reason = reason
 
@@ -337,6 +348,10 @@ class _LegacyProfileGoalManager:
     def next_continuation_prompt(self) -> Optional[str]:
         if not self._state or self._state.status != "active":
             return None
+        if _state_has_contract(self._state) and CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE:
+            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(
+                goal=self._state.goal, contract_block=self._state.contract.render_block()
+            )
         return CONTINUATION_PROMPT_TEMPLATE.format(goal=self._state.goal)
 
 

@@ -1170,6 +1170,35 @@ def test_legacy_profile_goal_manager_stores_inline_contract(monkeypatch, tmp_pat
     assert mgr.state.contract.stop_when == "the schema needs a migration"
 
 
+def test_legacy_profile_goal_manager_judges_and_continues_with_contract(monkeypatch, tmp_path):
+    """The fallback manager's judge and continuation prompt both see every contract field."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setattr(webui_goals, "_native_profile_context_api", lambda _home: None)
+    judged = []
+
+    def fake_judge(goal, response, **kwargs):
+        judged.append((goal, kwargs.get("contract")))
+        return "continue", "not yet", False, None, False
+
+    monkeypatch.setattr(webui_goals, "judge_goal", fake_judge)
+    webui_goals.goal_command_payload("sid-legacy-judge", _CONTRACT_GOAL_TEXT, profile_home=tmp_path)
+    mgr = webui_goals._manager("sid-legacy-judge", profile_home=tmp_path)
+
+    result = mgr.evaluate_after_turn("working on it")
+
+    goal, contract = judged[0]
+    assert goal == "Ship the export endpoint"
+    assert contract.outcome == "GET /export returns CSV for every active account"
+    assert contract.verification.startswith("uv run pytest tests/test_export.py passes")
+    assert contract.constraints == "existing export tests stay unchanged"
+    assert contract.boundaries == "api/export.py and tests/test_export.py only"
+    assert contract.stop_when == "the schema needs a migration"
+    prompt = result["continuation_prompt"]
+    for line in _CONTRACT_GOAL_TEXT.splitlines()[1:]:
+        assert line.split(": ", 1)[1] in prompt
+
+
 def test_goal_command_payload_double_dash_sets_goal_starting_with_control_word(monkeypatch):
     """`/goal -- <text>` sets goal text that starts with gate or another control word."""
     from api import goals as webui_goals

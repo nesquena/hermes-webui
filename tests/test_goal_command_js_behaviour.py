@@ -204,6 +204,7 @@ const S = {
   } else if (scenario === 'parse_multiline_goal') {
     out.parsed = parseCommand('/goal  Ship it\noutcome: CSV\n\nstop when:  a migration');
     out.singleLine = parseCommand('/goal   ship   the feature ');
+    out.personality = parseCommand('/personality Alpha\nBeta');
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -287,3 +288,5 @@ def test_parse_command_keeps_line_boundaries_for_goal_contract_lines(driver_path
     assert out["parsed"] == {"name": "goal", "args": "Ship it\noutcome: CSV\nstop when: a migration"}
     # Single-line arguments are still whitespace-collapsed as before.
     assert out["singleLine"] == {"name": "goal", "args": "ship the feature"}
+    # Other commands keep the old normalization, so a multi-word name still matches its config key.
+    assert out["personality"] == {"name": "personality", "args": "Alpha Beta"}

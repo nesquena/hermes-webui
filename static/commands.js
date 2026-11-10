@@ -51,6 +51,7 @@ function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
   const name=parts[0].toLowerCase();
+  if(name!=='goal')return {name,args:parts.slice(1).join(' ').trim()};
   // Keep line boundaries: /goal reads inline contract fields line by line.
   const args=text.slice(1).replace(/^\S*/,'').split('\n')
     .map(line=>line.split(/\s+/).filter(Boolean).join(' '))
