@@ -3010,3 +3010,159 @@ def test_get_outbound_domains_aggregates_by_domain_on_real_sqlite(tmp_path, monk
     domains = {r["domain"]: r["calls"] for r in result}
     # /v1 + /v2 combine under one domain; the out-of-window 999 is excluded.
     assert domains == {"api.example.com": 55, "other.test": 10}
+
+
+def test_get_outbound_domains_attributes_by_row_last_seen(tmp_path, monkeypatch):
+    """Window attribution uses the usage row's own activity, not session start.
+
+    A session started long before the window can still have made requests
+    inside it (it must not vanish from the card), and a session started
+    inside the window must not dump calls it made after the window closed
+    into that card.
+    """
+    import sqlite3
+    from datetime import datetime, timedelta
+
+    import api.models as models
+    import api.routes as routes
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL)")
+    conn.execute(
+        "CREATE TABLE session_model_usage "
+        "(session_id TEXT, billing_base_url TEXT, api_call_count INTEGER, "
+        "first_seen REAL, last_seen REAL)"
+    )
+    now = datetime.now()
+    old = (now - timedelta(days=90)).timestamp()
+    recent = now.timestamp()
+    future = (now + timedelta(days=90)).timestamp()
+    rows = [
+        # Session started before the window, but its calls land inside it.
+        ("old_session_active_now", old, "https://active.example/v1", 7, old, recent),
+        # Session started inside the window, calls continued past the end.
+        ("new_session_still_running", recent, "https://overrun.example/v1", 500, recent, future),
+        # No activity in the window at all.
+        ("stale", old, "https://stale.example/v1", 999, old, old),
+    ]
+    for sid, started, url, calls, first_seen, last_seen in rows:
+        conn.execute("INSERT INTO sessions VALUES (?, ?)", (sid, started))
+        conn.execute(
+            "INSERT INTO session_model_usage VALUES (?, ?, ?, ?, ?)",
+            (sid, url, calls, first_seen, last_seen),
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    result = routes._get_outbound_domains(
+        now - timedelta(days=1), now + timedelta(days=1)
+    )
+    domains = {r["domain"]: r["calls"] for r in result}
+    assert domains == {"active.example": 7}
+
+
+def test_insights_traffic_suppresses_inbound_for_profile_bound_session(monkeypatch, tmp_path):
+    """A profile-bound SSO session gets no global inbound rankings.
+
+    The nginx log is host-level and shared by every user of the proxy, so
+    its entries cannot be attributed to the requesting profile; serving them
+    would expose other users' client IPs and hostnames.
+    """
+    import calendar as _calendar
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.auth as auth
+    import api.models as models
+    import api.routes as routes
+
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] "
+        "\"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+    monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+
+    # Profile-bound trusted session (SSO group -> profile mapping).
+    monkeypatch.setattr(
+        auth,
+        "ensure_trusted_auth_session",
+        lambda handler: {
+            "auth_type": "trusted",
+            "username": "alice",
+            "bound_profile": "alice",
+        },
+    )
+    # Keep the outbound half hermetic too.
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: pathlib.Path("/nonexistent/state.db")
+    )
+
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    routes._handle_insights_traffic(handler, parsed)
+
+    assert handler.status == 200
+    data = handler.json_body()
+    assert data["inbound_ips_day"] == []
+    assert data["inbound_ips_month"] == []
+    assert data["inbound_source"] == "unavailable"
+
+
+def test_insights_traffic_keeps_inbound_for_unbound_session(monkeypatch, tmp_path):
+    """An unbound session (no profile binding) still gets inbound rankings.
+
+    Only profile-bound SSO sessions share the host log with other users;
+    without a group->profile mapping there is no cross-profile boundary to
+    protect, so the rankings stay available.
+    """
+    import calendar as _calendar
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.auth as auth
+    import api.models as models
+    import api.routes as routes
+
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] "
+        "\"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+    monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+
+    # Trusted session with no group -> profile mapping: bound_profile is None.
+    monkeypatch.setattr(
+        auth,
+        "ensure_trusted_auth_session",
+        lambda handler: {
+            "auth_type": "trusted",
+            "username": "alice",
+            "bound_profile": None,
+        },
+    )
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: pathlib.Path("/nonexistent/state.db")
+    )
+
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    routes._handle_insights_traffic(handler, parsed)
+
+    assert handler.status == 200
+    data = handler.json_body()
+    assert data["inbound_source"] == "ok"
+    assert [r["ip"] for r in data["inbound_ips_day"]] == ["192.168.1.1"]
+

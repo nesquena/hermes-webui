@@ -16542,7 +16542,23 @@ def _parse_nginx_date(dt_str):
 
 
 def _get_outbound_domains(start_dt, end_dt):
-    """Query Hermes state.db for top 10 outbound provider domains in the window."""
+    """Query Hermes state.db for top 10 outbound provider domains in the window.
+
+    Each ``session_model_usage`` row is a cumulative per-key total
+    (session, model, provider, url, mode, task) carrying its own
+    ``first_seen``/``last_seen`` activity timestamps.  Attribute the row to
+    the window containing its own most recent activity rather than the
+    SESSION's ``started_at``: a session started before the window can still
+    have made requests inside it (it would otherwise contribute nothing),
+    and a session started inside the window must not dump its whole
+    lifetime total into a window it has already outlived.  This mirrors
+    ``/api/insights``, which stamps a session as
+    ``COALESCE(ended_at, started_at, 0)`` — its last activity, not its
+    birth.  ``last_seen`` is NULL only for rows written before that column
+    was backfilled; those fall back to the session start.  A state DB from
+    before the column existed at all falls back the same way rather than
+    failing the query (which would silently empty both outbound cards).
+    """
     try:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
@@ -16552,14 +16568,24 @@ def _get_outbound_domains(start_dt, end_dt):
         with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("""
+            # Older agent state DBs may predate the per-row activity
+            # timestamps; pick the expression on what is actually there.
+            _usage_cols = {
+                r[1] for r in cur.execute("PRAGMA table_info(session_model_usage)").fetchall()
+            }
+            _activity_ts = (
+                "COALESCE(smu.last_seen, s.started_at)"
+                if "last_seen" in _usage_cols
+                else "s.started_at"
+            )
+            cur.execute(f"""
                 SELECT RTRIM(smu.billing_base_url, '/') as billing_base_url, SUM(smu.api_call_count) as calls
                 FROM session_model_usage smu
                 JOIN sessions s ON s.id = smu.session_id
                 WHERE smu.billing_base_url IS NOT NULL
                   AND smu.billing_base_url != ''
-                  AND s.started_at >= ?
-                  AND s.started_at <= ?
+                  AND {_activity_ts} >= ?
+                  AND {_activity_ts} <= ?
                 GROUP BY RTRIM(smu.billing_base_url, '/')
             """, (start_dt.timestamp(), end_dt.timestamp()))
             rows = cur.fetchall()
@@ -16685,7 +16711,23 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     
     ip_counts_day = _collections.Counter()
     ip_counts_month = _collections.Counter()
-    
+
+    # Inbound rankings come from a HOST-LEVEL nginx log. A profile-bound
+    # session (SSO group->profile mapping, `bound_profile` on the trusted
+    # session) shares that one log with every other user of the proxy, so
+    # its entries cannot be attributed to the requesting profile: serving
+    # them would expose other users' client IPs and hostnames. Suppress the
+    # global inbound rankings in that mode; the outbound cards are unaffected
+    # because they are read from this profile's own state.db.
+    try:
+        from api.auth import ensure_trusted_auth_session
+        _session_info = ensure_trusted_auth_session(handler)
+    except Exception:
+        _session_info = None
+    inbound_suppressed = bool(
+        str((_session_info or {}).get("bound_profile") or "").strip()
+    )
+
     # Inbound IPs from nginx logs. Read with the server's own permissions
     # first (the production image has no sudo); fall back to `sudo cat`
     # only when the log is present but unreadable. Rotated .gz files are
@@ -16737,21 +16779,25 @@ def _handle_insights_traffic(handler, parsed) -> bool:
             return (-int(m.group(1)), p)
         return (0, p)
 
-    inbound_source = "ok" if readable else "missing"
-    for filepath in sorted(candidates, key=sort_key):
-        try:
-            for line in _iter_log_lines(filepath):
-                m = nginx_date_re.match(line)
-                if m:
-                    ip = m.group(1)
-                    dt = _parse_nginx_date(m.group(2))
-                    if dt:
-                        if day_start <= dt <= day_end:
-                            ip_counts_day[ip] += 1
-                        if month_start <= dt <= month_end:
-                            ip_counts_month[ip] += 1
-        except Exception:
-            continue
+    inbound_source = (
+        "unavailable" if inbound_suppressed
+        else ("ok" if readable else "missing")
+    )
+    if not inbound_suppressed:
+        for filepath in sorted(candidates, key=sort_key):
+            try:
+                for line in _iter_log_lines(filepath):
+                    m = nginx_date_re.match(line)
+                    if m:
+                        ip = m.group(1)
+                        dt = _parse_nginx_date(m.group(2))
+                        if dt:
+                            if day_start <= dt <= day_end:
+                                ip_counts_day[ip] += 1
+                            if month_start <= dt <= month_end:
+                                ip_counts_month[ip] += 1
+            except Exception:
+                continue
 
     # Outbound domains from Hermes state.db
     out_day = _get_outbound_domains(day_start, day_end)
