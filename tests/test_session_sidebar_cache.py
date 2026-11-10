@@ -656,6 +656,9 @@ def test_session_list_cache_rate_floor_declines_a_locked_participating_profile(
     _make_fingerprint_db(profile_db, 3)
 
     monkeypatch.setattr(routes, "_active_state_db_path", lambda: str(active_db))
+    # A stream leaked by an earlier test file would turn the stamp into the
+    # streaming 7-tuple; pin "no active streams" as this file's other tests do.
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
     monkeypatch.setattr(
         models, "_all_profiles_cli_contexts", lambda: ([("home", profile_db, "bravo")], None)
     )

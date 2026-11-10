@@ -11,7 +11,6 @@ from pathlib import Path
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
 from api.models import (
     ALL_PROFILES_ROSTER_INCOMPLETE,
-    _CONTENT_FINGERPRINT_UNREADABLE,
     _active_state_db_path,
     _active_stream_ids,
     _content_fingerprint_readable,
@@ -439,6 +438,10 @@ _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE = ALL_PROFILES_ROSTER_INCOMPLETE
 # `_session_list_cache_state_db_fingerprint_impl`). (#8694)
 _STATE_DB_ABSENT_FINGERPRINT = ('<state-db-absent>',)
 
+# Appended (as a 9th element) to a stamp whose build saw a partial read; a
+# 9-tuple is never hold evidence. (#8694 senior review r3)
+_SESSION_LIST_CACHE_PARTIAL_BUILD = ('<partial-build>',)
+
 
 def _session_list_cache_roster_epoch():
     """The (partial-roster, partial-row-load) epochs before a build, or ``None`` when unknowable."""
@@ -451,18 +454,19 @@ def _session_list_cache_roster_epoch():
 
 
 def _session_list_cache_mark_partial_build(source_stamp, roster_epoch_before):
-    """Mark a pre-build stamp unknown when a read DURING the build was partial.
+    """Withdraw a stored stamp's hold evidence when a read DURING the build was partial.
 
     The stamp's reads happened before the build; the builder reads again. If its
     roster read skipped a profile, or its row load failed or was incomplete and
     served stale / last-known-good rows, the payload can miss rows the stamp's
-    evidence already covers, and the rate floor would hold that payload. Marking
-    the stored stamp makes it unknown evidence: the next request revalidates, as
-    on master. An all-profiles stamp gets the roster-incomplete marker; a
-    single-profile stamp gets an unreadable content fingerprint. An unknowable
-    epoch marks too (the safe direction). Another thread's partial read during
-    the build marks it as well, which only costs one extra rebuild.
-    (#8694 senior review r1 + r2)
+    evidence already covers, and the rate floor would hold that payload. The mark
+    is a 9th element (``_SESSION_LIST_CACHE_PARTIAL_BUILD``): a 9-tuple is never
+    hold evidence, so the floor won't hold this entry, while
+    ``_session_list_cache_comparable_stamp`` strips the mark so FRESH and
+    stale-while-revalidate reuse work exactly as on master. An unknowable epoch
+    marks too (the safe direction). Another thread's partial read during the
+    build marks it as well, which only costs the hold for that entry.
+    (#8694 senior review r1 + r2 + r3)
     """
     if not isinstance(source_stamp, tuple) or len(source_stamp) != 8:
         return source_stamp
@@ -473,16 +477,24 @@ def _session_list_cache_mark_partial_build(source_stamp, roster_epoch_before):
         and epoch_after == roster_epoch_before
     ):
         return source_stamp
-    all_profiles_stamp = source_stamp[6]
-    if isinstance(all_profiles_stamp, tuple):
-        if _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE in all_profiles_stamp:
-            return source_stamp
-        return (
-            source_stamp[:6]
-            + (all_profiles_stamp + (_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE,),)
-            + source_stamp[7:]
-        )
-    return source_stamp[:5] + (_CONTENT_FINGERPRINT_UNREADABLE,) + source_stamp[6:]
+    return source_stamp + (_SESSION_LIST_CACHE_PARTIAL_BUILD,)
+
+
+def _session_list_cache_comparable_stamp(stamp):
+    """The stamp a stored entry is compared with for FRESH/age, partial-build mark removed.
+
+    The mark only withdraws the entry's right to be HELD by the rate floor; it
+    must not make the entry unequal to an unchanged source, or a source that is
+    partial on every load (an unreadable profile, a corrupt optional pass) turns
+    every request into a blocking rebuild where master served the TTL cache.
+    """
+    if (
+        isinstance(stamp, tuple)
+        and len(stamp) == 9
+        and stamp[8] is _SESSION_LIST_CACHE_PARTIAL_BUILD
+    ):
+        return stamp[:8]
+    return stamp
 
 
 def _session_list_cache_stamp_hold_evidence(stamp, all_profiles: bool = False):
@@ -577,7 +589,7 @@ def _session_list_cache_probe(
         if not entry:
             return None, _SESSION_LIST_CACHE_MISSING
         ts, stamp, payload = entry
-        if stamp != current_stamp:
+        if _session_list_cache_comparable_stamp(stamp) != current_stamp:
             # Rebuild-rate floor: while a writer keeps touching state.db/index the
             # stamp differs on almost every poll. Inside the floor, serve what we
             # have instead of paying another full rebuild — but only when the

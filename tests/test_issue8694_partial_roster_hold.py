@@ -452,12 +452,38 @@ def test_a_failed_row_load_inside_the_builder_declines_the_hold(store, monkeypat
     assert ids(r._get_cached_session_list_payload(key=key, builder=build)) == ["a", "n", "z"]
 
 
-def test_mark_partial_build_marks_a_single_profile_stamp_unreadable(monkeypatch):
+def test_mark_partial_build_withdraws_the_hold_but_not_freshness(monkeypatch):
     import api.route_session_list_cache as cache
 
     stamp = (1, 2, 3, 4, 5, ("fp",), None, 8)
     monkeypatch.setattr(cache, "_session_list_cache_roster_epoch", lambda: (0, 1))
     marked = cache._session_list_cache_mark_partial_build(stamp, (0, 0))
-    assert marked[5] is models._CONTENT_FINGERPRINT_UNREADABLE and marked[:5] == stamp[:5] and marked[6:] == stamp[6:]
     assert cache._session_list_cache_stamp_hold_evidence(marked) is None
+    assert cache._session_list_cache_comparable_stamp(marked) == stamp
     assert cache._session_list_cache_mark_partial_build(stamp, (0, 1)) == stamp
+
+
+def test_a_load_that_is_partial_on_every_build_still_serves_the_ttl_cache(store, monkeypatch):
+    """Senior review r3: the partial-build mark withdraws the HOLD only.
+
+    A source that is partial on every load (an unreadable profile, a corrupt
+    optional pass) moves the epoch during every build. If the mark made the
+    stored stamp unequal to an unchanged source, every request would become a
+    blocking rebuild, where master serves the TTL cache.
+    """
+    r = store.r
+    key = r._session_list_cache_key(active_profile="default", all_profiles=False,
+        show_cli_sessions=True, show_previous_messaging_sessions=False, show_cron_sessions=False)
+    builds = []
+
+    def build():
+        builds.append(1)
+        models._note_partial_cli_sessions_load()  # this build's row load was partial
+        return {"sessions": [], "cli_count": 0, "active_profile": "default",
+                "all_profiles": False, "other_profile_count": 0}
+
+    r._get_cached_session_list_payload(key=key, builder=build)
+    _payload, status = r._session_list_cache_probe(key)
+    assert status == r._SESSION_LIST_CACHE_FRESH
+    r._get_cached_session_list_payload(key=key, builder=build)
+    assert len(builds) == 1
