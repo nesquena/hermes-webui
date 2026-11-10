@@ -330,11 +330,13 @@ def test_chat_todos_i18n_keys_in_all_locales():
     # (many _label helpers contain them). The same contract is verified by the
     # per-locale parity tests (test_chinese_locale.py etc.) which use a full
     # quote-aware extractor — here we assert presence of the 6 chat-todos keys.
-    header_re = re.compile(r"^\s+'?([a-zA-Z-]+)'?\s*:\s*\{", re.MULTILINE)
+    # Top-level locale headers use exactly two spaces. Do not identify them
+    # by looking for _lang in a fixed-size prefix: translated copy before
+    # the metadata can grow without changing the locale or its keys.
+    header_re = re.compile(r"^  '?([a-zA-Z-]+)'?: \{", re.MULTILINE)
     locale_headers = [
         (m.start(), m.group(1))
         for m in header_re.finditer(src)
-        if "_lang" in src[m.end() : m.end() + 800]
     ]
     assert len(locale_headers) >= 14, f"expected >=14 locales, got {locale_headers}"
     for i, (start, locale_key) in enumerate(locale_headers):
@@ -342,6 +344,23 @@ def test_chat_todos_i18n_keys_in_all_locales():
         block = src[start:end]
         missing = sorted(k for k in expected if k not in block)
         assert not missing, f"{locale_key} missing chat-todos keys: {missing}"
+
+
+@pytest.mark.parametrize("locale_marker", ["en", "es", "'zh-Hant'"])
+def test_chat_todos_locale_coverage_rejects_missing_keys(monkeypatch, locale_marker):
+    """A longer locale prefix must not hide a missing tray translation."""
+    src = _read_static("static/i18n.js")
+    start = src.index(f"\n  {locale_marker}: {{")
+    end = src.index("\n  },", start)
+    block = src[start:end]
+    assert "todos_tray_summary_active" in block
+    block = block.replace("todos_tray_summary_active", "missing_active_summary", 1)
+    src = src[:start] + block + src[end:]
+    monkeypatch.setattr(f"{__name__}._read_static", lambda _path: src)
+    with pytest.raises(
+        AssertionError, match="missing chat-todos keys:.*todos_tray_summary_active"
+    ):
+        test_chat_todos_i18n_keys_in_all_locales()
 
 
 def test_chat_todos_desktop_tray_is_an_in_flow_strip():
