@@ -1,23 +1,39 @@
 """Regression tests for alphabetical project chip & picker sorting (#6393, PR #6577).
 
 Covers:
-- Canonical presentation helper _projectsSortedByName()
+- Shipped presentation helper _projectsSortedByName() extracted directly from static/sessions.js
 - Case-insensitive base sensitivity collation and deterministic project_id tie-breaker
-- Insertion of Zulu, alpha, Bravo, Alpha, and an accented name (e.g. Éclair)
-- Source array immutability
-- Foreign profile filter preservation
+- Insertion of Zulu, alpha, Bravo, Alpha, and an accented name (Éclair)
+- Source array immutability and new array reference (spread copy)
+- Consumer function binding across _showBatchProjectPicker, renderSessionListFromCache, and _showProjectPicker
+- Project picker refresh recompute binding
+- Foreign profile filtering contract executed via extracted production helper and filter
 """
+
 import json
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from tests.js_source_extract import extract_function
+
 ROOT = Path(__file__).resolve().parents[1]
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+SESSIONS_JS_PATH = ROOT / "static" / "sessions.js"
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+
+def _read_sessions_js() -> str:
+    return SESSIONS_JS_PATH.read_text(encoding="utf-8")
 
 
 def _run_node(script: str) -> dict:
     proc = subprocess.run(
-        ["node", "-e", script],
+        [NODE, "-e", script],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -26,82 +42,70 @@ def _run_node(script: str) -> dict:
     return json.loads(proc.stdout.strip())
 
 
-def test_sessions_js_structural_anchors():
-    assert "function _projectsSortedByName(projects=_allProjects)" in SESSIONS_JS
-    assert "for(const p of _projectsSortedByName())" in SESSIONS_JS
+def test_consumer_functions_bound_to_projects_sorted_by_name():
+    src = _read_sessions_js()
+    consumer_names = [
+        "_showBatchProjectPicker",
+        "renderSessionListFromCache",
+        "_showProjectPicker",
+    ]
+    for name in consumer_names:
+        body = extract_function(src, name)
+        assert "for(const p of _projectsSortedByName())" in body, (
+            f"{name} does not call _projectsSortedByName() in its loop"
+        )
+        assert "for(const p of _allProjects)" not in body, (
+            f"{name} still references raw _allProjects in loop"
+        )
+        assert "for(const p of(_allProjects||[]))" not in body, (
+            f"{name} still references fallback _allProjects loop"
+        )
+
+    # Refresh path inside _showProjectPicker recomputes visibleProjects
+    show_picker_body = extract_function(src, "_showProjectPicker")
+    assert "_projectsSortedByName(_allProjects)" in show_picker_body, (
+        "_showProjectPicker refreshChoices does not use _projectsSortedByName(_allProjects)"
+    )
+    assert "visibleProjects=_allProjects.filter" not in show_picker_body, (
+        "_showProjectPicker refreshChoices reverted to plain _allProjects.filter"
+    )
 
 
-def test_projects_sorted_by_name_deterministic_ordering():
-    script = """
-    function _projectsSortedByName(projects){
-      return [...(projects||[])].sort((a,b)=>
-        String(a?.name||"").localeCompare(String(b?.name||""), undefined, {sensitivity:"base"}) ||
-        String(a?.project_id||"").localeCompare(String(b?.project_id||""))
-      );
-    }
+def test_projects_sorted_by_name_ordering_and_immutability():
+    src = _read_sessions_js()
+    sort_helper = extract_function(src, "_projectsSortedByName")
 
-    const original = [
-      { project_id: "p-zulu", name: "Zulu" },
-      { project_id: "p-alpha-2", name: "alpha" },
-      { project_id: "p-bravo", name: "Bravo" },
-      { project_id: "p-alpha-1", name: "Alpha" },
-      { project_id: "p-eclair", name: "Éclair" },
-    ];
+    input_projects = [
+        {"project_id": "p-zulu", "name": "Zulu"},
+        {"project_id": "p-alpha-2", "name": "alpha"},
+        {"project_id": "p-bravo", "name": "Bravo"},
+        {"project_id": "p-alpha-1", "name": "Alpha"},
+        {"project_id": "p-eclair", "name": "Éclair"},
+    ]
 
-    const originalCopy = JSON.stringify(original);
-    const sorted = _projectsSortedByName(original);
-    const notMutated = JSON.stringify(original) === originalCopy;
+    script = f"""
+    {sort_helper}
 
-    // Simulate batch picker loop
-    const batchPickerNames = [];
-    for (const p of _projectsSortedByName(original)) {
-      batchPickerNames.push(p.name + ":" + p.project_id);
-    }
+    const input = {json.dumps(input_projects)};
+    const inputBefore = JSON.stringify(input);
+    const sorted = _projectsSortedByName(input);
+    const inputAfter = JSON.stringify(input);
 
-    // Simulate sidebar chip loop
-    const sidebarChipNames = [];
-    for (const p of _projectsSortedByName(original)) {
-      sidebarChipNames.push(p.name + ":" + p.project_id);
-    }
+    let _allProjects = input;
+    const sortedDefaultParam = _projectsSortedByName();
 
-    // Simulate session project picker loop with foreign profile filtering
-    const sessionProfile = 'work';
-    const _profileHidesProject = (projProfile) => {
-      if(!sessionProfile || !projProfile) return false;
-      if(projProfile === sessionProfile) return false;
-      if(projProfile === 'default' || sessionProfile === 'default') return false;
-      return true;
-    };
-
-    const projectsWithProfiles = [
-      { project_id: "p-zulu", name: "Zulu", profile: "work" },
-      { project_id: "p-alpha-2", name: "alpha", profile: "work" },
-      { project_id: "p-bravo", name: "Bravo", profile: "personal" }, // should be hidden
-      { project_id: "p-alpha-1", name: "Alpha", profile: "work" },
-      { project_id: "p-eclair", name: "Éclair", profile: "default" }, // default profile kept
-    ];
-
-    const sessionPickerNames = [];
-    for (const p of _projectsSortedByName(projectsWithProfiles)) {
-      if (_profileHidesProject(p.profile)) continue;
-      sessionPickerNames.push(p.name + ":" + p.project_id);
-    }
-
-    console.log(JSON.stringify({
-      notMutated,
-      sortedNames: sorted.map(p => p.name + ":" + p.project_id),
-      batchPickerNames,
-      sidebarChipNames,
-      sessionPickerNames,
-    }));
+    console.log(JSON.stringify({{
+      notMutated: inputBefore === inputAfter,
+      isDifferentArray: sorted !== input,
+      sortedNames: sorted.map(p => `${{p.name}}:${{p.project_id}}`),
+      sortedDefaultParamNames: sortedDefaultParam.map(p => `${{p.name}}:${{p.project_id}}`),
+    }}));
     """
     out = _run_node(script)
 
     assert out["notMutated"] is True
+    assert out["isDifferentArray"] is True
 
-    # Deterministic collation:
-    # 'Alpha' / 'alpha' group together at the start, tie-broken deterministically by project_id ('p-alpha-1' < 'p-alpha-2')
-    # Followed by 'Bravo', 'Éclair', 'Zulu'
     expected_order = [
         "Alpha:p-alpha-1",
         "alpha:p-alpha-2",
@@ -110,11 +114,92 @@ def test_projects_sorted_by_name_deterministic_ordering():
         "Zulu:p-zulu",
     ]
     assert out["sortedNames"] == expected_order
-    assert out["batchPickerNames"] == expected_order
-    assert out["sidebarChipNames"] == expected_order
+    assert out["sortedDefaultParamNames"] == expected_order
 
-    # Session picker filtered out 'personal' (Bravo), but kept 'default' (Éclair) and matching 'work'
-    assert out["sessionPickerNames"] == [
+
+def test_projects_sorted_by_name_tie_break_and_base_sensitivity():
+    """Verify tie-break order when names differ only by case.
+
+    Raw collation puts lowercase 'alpha' before uppercase 'Alpha' ('Alpha'.localeCompare('alpha') === 1).
+    With {sensitivity: 'base'}, both compare equal and the project_id tie-breaker decides.
+    """
+    src = _read_sessions_js()
+    sort_helper = extract_function(src, "_projectsSortedByName")
+
+    # input A: tie-break order (p-a < p-b) is opposite of raw collation order (alpha < Alpha)
+    input_a = [
+        {"name": "Alpha", "project_id": "p-a"},
+        {"name": "alpha", "project_id": "p-b"},
+    ]
+    # input B: starts with p-b first, proving tie-break reorders even if comparator returned 0 without tie-breaker
+    input_b = [
+        {"name": "alpha", "project_id": "p-b"},
+        {"name": "Alpha", "project_id": "p-a"},
+    ]
+
+    script = f"""
+    {sort_helper}
+
+    const sortedA = _projectsSortedByName({json.dumps(input_a)});
+    const sortedB = _projectsSortedByName({json.dumps(input_b)});
+
+    console.log(JSON.stringify({{
+      idsA: sortedA.map(p => p.project_id),
+      idsB: sortedB.map(p => p.project_id),
+    }}));
+    """
+    out = _run_node(script)
+
+    assert out["idsA"] == ["p-a", "p-b"]
+    assert out["idsB"] == ["p-a", "p-b"]
+
+
+def test_foreign_profile_filtering_contract():
+    """Verify foreign profile filtering using extracted production helper and filter."""
+    src = _read_sessions_js()
+    sort_helper = extract_function(src, "_projectsSortedByName")
+    picker_body = extract_function(src, "_showProjectPicker")
+
+    match_hides = re.search(
+        r"const _profileHidesProject\s*=\s*\(projProfile\)\s*=>\s*\{[\s\S]*?\};",
+        picker_body,
+    )
+    assert match_hides, "_profileHidesProject definition not found in _showProjectPicker"
+    profile_hides_def = match_hides.group(0)
+
+    match_vis = re.search(
+        r"const visibleProjects\s*=\s*_projectsSortedByName\(_allProjects\)\s*\.filter\(p\s*=>\s*!_profileHidesProject\(p\.profile\)\);",
+        picker_body,
+    )
+    assert match_vis, "visibleProjects pipeline statement not found in _showProjectPicker"
+    visible_projects_stmt = match_vis.group(0)
+
+    projects_with_profiles = [
+        {"project_id": "p-zulu", "name": "Zulu", "profile": "work"},
+        {"project_id": "p-alpha-2", "name": "alpha", "profile": "work"},
+        {"project_id": "p-bravo", "name": "Bravo", "profile": "personal"},
+        {"project_id": "p-alpha-1", "name": "Alpha", "profile": "work"},
+        {"project_id": "p-eclair", "name": "Éclair", "profile": "default"},
+    ]
+
+    script = f"""
+    {sort_helper}
+
+    const session = {{ profile: "work" }};
+    const sessionProfile = session ? (session.profile || undefined) : undefined;
+    {profile_hides_def}
+
+    const _allProjects = {json.dumps(projects_with_profiles)};
+    {visible_projects_stmt}
+
+    console.log(JSON.stringify({{
+      visibleLabels: visibleProjects.map(p => `${{p.name}}:${{p.project_id}}`),
+    }}));
+    """
+    out = _run_node(script)
+
+    # 'personal' (Bravo) dropped; 'default' (Éclair) and matching 'work' kept in sorted order
+    assert out["visibleLabels"] == [
         "Alpha:p-alpha-1",
         "alpha:p-alpha-2",
         "Éclair:p-eclair",
