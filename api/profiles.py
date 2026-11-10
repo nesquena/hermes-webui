@@ -1040,13 +1040,20 @@ def _named_profile_home_for_reads(path) -> Path | None:
 
     Classification order:
 
-    1. The installed Agent's ``named_profile_home`` is authoritative: it stops
-       at a ``.hermes`` component and proves the ``profiles`` parent is a real
-       Hermes root, so a legitimate default/custom home that merely sits under
-       a coincidental ``profiles/`` ancestor is not a named home. A ``None``
-       answer is only re-examined through the resolved profiles root, for the
-       symlinked-profiles case where the component was resolved away.
-    2. When the classifier is unavailable (Agent-absent deployment) or raises,
+    1. A path under the RESOLVED profiles root is owned by that root's logical
+       ``<root>/profiles/<id>`` home, and that confirmed mapping comes first.
+       When ``profiles`` is a symlink whose target itself sits under another
+       ``profiles`` root, the resolved path the readers pass carries a second
+       ``profiles`` ancestor — every ancestor classifier then answers with that
+       (possibly live) ancestor instead of the requested child, so the guard
+       would validate the wrong home. The logical child keeps the
+       identity/tombstone checks meaningful through the symlink.
+    2. Outside that root the installed Agent's ``named_profile_home`` is
+       authoritative: it stops at a ``.hermes`` component and proves the
+       ``profiles`` parent is a real Hermes root, so a legitimate
+       default/custom home that merely sits under a coincidental ``profiles/``
+       ancestor is not a named home.
+    3. When the classifier is unavailable (Agent-absent deployment) or raises,
        the import-independent shape grammar decides, with the same ``.hermes``
        stop boundary — a path that still *looks* named is denied rather than
        admitted while classification cannot be confirmed.
@@ -1056,28 +1063,24 @@ def _named_profile_home_for_reads(path) -> Path | None:
     except Exception:
         return None
 
-    def _shape_or_resolved() -> Path | None:
-        named = _named_profile_home_shape(current)
-        if named is not None:
-            return named
-        return _named_home_under_resolved_profiles_root(current)
+    # Confirmed configured-root ownership outranks every ancestor classifier:
+    # the resolved root maps the path back to its logical home, which is the
+    # home whose identity/tombstone must be checked.
+    resolved_home = _named_home_under_resolved_profiles_root(current)
+    if resolved_home is not None:
+        return resolved_home
 
     try:
         from hermes_constants import named_profile_home
     except Exception:
         named_profile_home = None
     if named_profile_home is None:
-        return _shape_or_resolved()
+        return _named_profile_home_shape(current)
     try:
-        named = named_profile_home(current)
+        return named_profile_home(current)
     except Exception:
         # Classifier failed: fall back to the shape grammar (fail closed).
-        return _shape_or_resolved()
-    if named is not None:
-        return named
-    # Authoritative "not a named home" — unless a symlinked profiles root
-    # stripped the ``profiles`` component before this check saw the path.
-    return _named_home_under_resolved_profiles_root(current)
+        return _named_profile_home_shape(current)
 
 
 def is_live_profile_home_for_reads(home) -> bool:
@@ -1088,12 +1091,13 @@ def is_live_profile_home_for_reads(home) -> bool:
     ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
     are not under ``profiles/`` and stay readable.
 
-    Classification prefers the installed Agent's ``named_profile_home(actual_home)``
-    classifier (see :func:`_named_profile_home_for_reads`), which preserves the
-    ``.hermes`` boundary and profiles-root provenance; named homes are then
-    liveness-checked on their canonical home. The import-independent fallback
-    keeps Agent-absent deployments working: provably non-named homes are
-    admitted, uncertain named homes are denied.
+    Classification first honours the configured RESOLVED profiles root (the
+    logical home owned by that root, see :func:`_named_profile_home_for_reads`),
+    then falls back to the installed Agent's ``named_profile_home(actual_home)``
+    classifier, which preserves the ``.hermes`` boundary and profiles-root
+    provenance; named homes are then liveness-checked on their canonical home.
+    The import-independent fallback keeps Agent-absent deployments working:
+    provably non-named homes are admitted, uncertain named homes are denied.
 
     Fails CLOSED for named homes: when the liveness helpers cannot be imported
     or the check raises, a named home is treated as NOT readable. AGENTS.md
