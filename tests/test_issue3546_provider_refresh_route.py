@@ -21,11 +21,15 @@ model picker rebuilds immediately.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import shutil
 import subprocess
+import sys
+import types
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -228,6 +232,7 @@ def _run_node(script: str) -> dict:
 # replay exercises the real control flow.
 _LIVE_MODEL_REPLAY_PREAMBLE = """
 const _liveModelCache={};
+const _liveModelMembership={};
 const _liveModelFetchPending=new Set();
 const _liveModelFetchOwners=new Map();
 let _liveModelInvalidationEpoch=0;
@@ -637,6 +642,7 @@ function _getOptionProviderId(opt){
   return '';
 }
 const _liveModelCache={};
+const _liveModelMembership={};
 const _liveModelFetchPending=new Set();
 const _liveModelFetchOwners=new Map();
 let _liveModelInvalidationEpoch=0;
@@ -815,11 +821,13 @@ def test_settings_reconcile_is_wired_and_additive():
         "the Settings re-arm must ask for reconciliation, not a plain append"
     )
     fetch_live = _extract_function_body(ui, "async function _fetchLiveModels(")
-    assert "_addLiveModelsToSelect(provider,data.models,sel,opts)" in fetch_live, (
-        "the fresh-response path must forward the reconcile mode"
+    assert "_addLiveModelsToSelect(provider,data.models,sel,opts," in fetch_live, (
+        "the fresh-response path must forward the reconcile mode and the "
+        "membership authority (pruneAuthorized)"
     )
-    assert "_addLiveModelsToSelect(provider,_liveModelCache[provider],sel,opts)" in fetch_live, (
-        "the cached-response path must forward the reconcile mode too"
+    assert "_addLiveModelsToSelect(provider,_liveModelCache[provider],sel,opts," in fetch_live, (
+        "the cached-response path must forward the reconcile mode and the "
+        "cached membership authority too"
     )
 
 
@@ -1208,9 +1216,12 @@ def test_empty_membership_reconcile_is_wired_to_the_pruner():
     add = _extract_function_body(ui, "function _addLiveModelsToSelect(")
     # The reconcile runs against the refreshed set, which is EMPTY for an
     # authoritative empty membership — that is what prunes the live-only
-    # choices.
-    assert "if(reconcile&&refreshed) _dropStaleLiveModelOptions(provider,refreshed,sel);" in add, (
-        "#6919: the append path must reconcile after adding the fresh payload"
+    # choices. The prune is additionally gated on the payload's membership
+    # authority (gate C63-F1): fallback/truncated/malformed lists must only
+    # enrich, never remove.
+    assert "if(reconcile&&refreshed&&pruneAuthorized!==false) _dropStaleLiveModelOptions(provider,refreshed,sel);" in add, (
+        "#6919: the append path must reconcile after adding the fresh payload, "
+        "guarded by the membership authority flag"
     )
     assert "const refreshed=reconcile?new Set():null;" in add, (
         "#6919: the reconcile set must start EMPTY, so an authoritative empty "
@@ -1523,3 +1534,460 @@ def test_prune_uses_the_same_identity_as_dedup():
         "C48-F3: the pruner must resolve the NORMALIZED identity of each live "
         "option — a fresh vendor/model must match an existing vendor/Model"
     )
+
+
+# ---------------------------------------------------------------------------
+# #6919 (gate C63-F1): prune only from a VALIDATED, COMPLETE membership.
+#
+# /api/models/live is a dropdown-enrichment surface, not an unconditional
+# complete-membership authority. Three schedules make its list non-empty (or
+# plain-empty) while saying nothing about what the provider no longer offers:
+#
+#   1. a discovery outage served as the configured fallback;
+#   2. a successful catalog truncated to the display budget;
+#   3. a list-shaped response whose rows carry no usable model id.
+#
+# The endpoint now carries `authoritative` (a live discovery produced this
+# list, rather than a config/static fallback) and `complete` (the list is the
+# whole catalog, not a display slice) separately from list non-emptiness, and
+# the picker only removes options when both hold. Genuine empty and full
+# discoveries keep pruning (controls).
+# ---------------------------------------------------------------------------
+
+
+# ── Backend: the handler must publish authority/completeness ────────────────
+
+
+class _FakeLiveHTTPResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+        return False
+
+
+def _stub_provider_model_ids(monkeypatch, fn):
+    """Install a hermes_cli.models.provider_model_ids stub."""
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []
+    models = types.ModuleType("hermes_cli.models")
+    models.provider_model_ids = fn
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", models)
+
+
+def _run_live_handler(
+    monkeypatch,
+    *,
+    provider,
+    config_data,
+    response_body=None,
+    fail=False,
+    provider_models=None,
+):
+    """Invoke the real ``routes._handle_live_models`` and return the payload."""
+    import urllib.request
+
+    import api.config as config
+    import api.profiles as profiles
+    import api.routes as routes
+
+    routes._clear_live_models_cache()
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
+    monkeypatch.setattr(config, "get_config", lambda: config_data)
+    monkeypatch.setattr(config, "_resolve_provider_alias", lambda p: p)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "cfg", config_data, raising=False)
+    if provider_models is not None:
+        monkeypatch.setattr(config, "_PROVIDER_MODELS", provider_models)
+    _stub_provider_model_ids(monkeypatch, lambda _provider: [])
+
+    def _fake_urlopen(req, timeout=None):
+        if fail:
+            raise OSError("probe failed")
+        return _FakeLiveHTTPResponse(json.dumps(response_body).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    parsed = urlparse(f"/api/models/live?provider={provider}")
+    payload = routes._handle_live_models(object(), parsed)
+    routes._clear_live_models_cache()
+    return payload
+
+
+_CUSTOM_PROVIDER = {
+    "name": "Test Gateway",
+    "base_url": "https://gateway.example/v1",
+    "api_key": "sk-test",
+}
+_CUSTOM_CONFIG = {
+    "model": {"provider": "custom:test-gateway"},
+    "custom_providers": [_CUSTOM_PROVIDER],
+}
+
+
+def test_discovery_outage_fallback_is_not_authoritative(monkeypatch):
+    """Variant 1: a failed probe published as the configured fallback is an
+    enrichment list, not membership authority — the payload must say so."""
+    provider = dict(_CUSTOM_PROVIDER, model="chat-default")
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data={
+            "model": {"provider": "custom:test-gateway"},
+            "custom_providers": [provider],
+        },
+        fail=True,
+    )
+    assert [m["id"] for m in payload["models"]] == ["chat-default"], (
+        "the configured fallback must still be served (enrichment preserved)"
+    )
+    assert payload.get("authoritative") is False, (
+        "C63-F1: a config fallback served after a discovery outage must be "
+        "marked non-authoritative, or the picker reads its omissions as removals"
+    )
+    assert payload.get("complete") is True
+    assert "error" not in payload, (
+        "the fallback keeps the pre-existing non-empty success shape"
+    )
+
+
+def test_truncated_discovery_is_not_complete(monkeypatch):
+    """Variant 2: a valid catalog sliced to the display budget is still a
+    partial view — it must not authorize removals."""
+    catalog = [f"model-{i}" for i in range(31)]
+    live_only = catalog[20]
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        response_body={"data": [{"id": mid} for mid in catalog]},
+    )
+    ids = [m["id"] for m in payload["models"]]
+    assert len(ids) == 15, f"the display budget must still cap the payload, got {ids}"
+    assert live_only not in ids, "fixture: the live-only model must sit outside the slice"
+    assert payload.get("authoritative") is True, (
+        "a successful discovery is authoritative"
+    )
+    assert payload.get("complete") is False, (
+        "C63-F1: a display-budget slice must be marked incomplete, or the "
+        "picker prunes the models the window left out"
+    )
+
+
+def test_malformed_member_rows_are_not_an_authoritative_empty(monkeypatch):
+    """Variant 3: {"data": [{}]} is a malformed catalog, not 'no models'."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        response_body={"data": [{}]},
+    )
+    assert payload["models"] == []
+    assert payload.get("error") == "no_models_discovered", (
+        "C63-F1: a list-shaped payload whose rows yield no usable ID must be "
+        "published as a discovery failure, not as an authoritative empty set"
+    )
+    assert payload.get("authoritative") is False
+
+
+def test_genuine_empty_discovery_is_an_authoritative_empty(monkeypatch):
+    """Control: a successful {"data": []} IS authoritative membership."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        response_body={"data": []},
+    )
+    assert payload["models"] == []
+    assert "error" not in payload
+    assert payload.get("authoritative") is True
+    assert payload.get("complete") is True
+
+
+def test_full_discovery_is_authoritative_and_complete(monkeypatch):
+    """Control: an untruncated live catalog authorizes reconciliation."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        response_body={"data": [{"id": "a"}, {"id": "b"}]},
+    )
+    assert [m["id"] for m in payload["models"]] == ["a", "b"]
+    assert payload.get("authoritative") is True
+    assert payload.get("complete") is True
+
+
+def test_static_fallback_is_not_authoritative(monkeypatch):
+    """Control: the static catalog fallback is served but never authorizes
+    removals either."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="fakebuiltin",
+        config_data={"model": {"provider": "fakebuiltin"}},
+        provider_models={"fakebuiltin": [{"id": "static-a"}, {"id": "static-b"}]},
+    )
+    assert [m["id"] for m in payload["models"]] == ["static-a", "static-b"]
+    assert payload.get("authoritative") is False, (
+        "C63-F1: a static fallback is a last resort, not membership authority"
+    )
+    assert payload.get("complete") is True
+
+
+# ── Client: the picker must only prune from an authoritative complete list ──
+
+
+# The maintainer's hydrated Settings picker: a selected live model, an
+# UNSELECTED live-only model, a static catalog row and a sibling provider's
+# option. A completed live fetch hydrates it, then Refresh Models dispatches
+# the replacement whose payload each variant below controls.
+_GATE_HYDRATED_PICKER = """
+  const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  group.appendChild(_mk('model-x',''));   // static catalog row
+  group.appendChild(_mk('@custom:cpa:selected',_LIVE_TITLE,{provider:'custom:cpa',live:'1'}));
+  group.appendChild(_mk('@custom:cpa:live-only',_LIVE_TITLE,{provider:'custom:cpa',live:'1'}));
+  const otherGroup=_el('optgroup',{dataset:{provider:'other'}});
+  otherGroup.appendChild(_mk('other/model',_LIVE_TITLE,{provider:'other',live:'1'}));
+  const sel=_makeSelect([group,otherGroup],'@custom:cpa:selected');
+  _settingsSel=sel;
+
+  const first=_fetchLiveModels('custom:cpa',sel,null,{reconcile:true});
+  await _tick();
+  fetchDeferreds[0].resolve({json:async()=>({models:[
+    {id:'selected',label:'Selected'},
+    {id:'live-only',label:'Live Only'},
+  ],authoritative:true,complete:true})});
+  await first;
+  await _tick();
+  const beforeHydrate=group.children.map(o=>o.value);
+
+  invalidateLiveModelCache();
+  await _tick();
+  const dispatched=fetchUrls.length;
+"""
+
+
+def _replay_gate_payload(payload) -> dict:
+    """Resolve the Refresh Models replacement with the given JSON payload and
+    report the resulting Settings picker."""
+    scenario = _GATE_HYDRATED_PICKER + """
+  fetchDeferreds[1].resolve({json:async()=>(%s)});
+  await _tick();
+  await _tick();
+  process.stdout.write(JSON.stringify({
+    beforeHydrate:beforeHydrate,
+    dispatched:dispatched,
+    after:group.children.map(o=>o.value),
+    otherAfter:otherGroup.children.map(o=>o.value),
+    selectedAfter:sel.value,
+  }));
+""" % json.dumps(payload)
+    return _replay_empty_membership(scenario)
+
+
+def test_non_authoritative_fallback_payload_does_not_prune_live_only_option():
+    """Variant 1 at the picker: a fallback payload enriches but never removes.
+
+    The configured fallback omits the previously discovered live-only model —
+    that omission is not evidence the provider dropped it, so the option must
+    survive while the fallback ids are still appended (enrichment preserved).
+    """
+    result = _replay_gate_payload(
+        {
+            "provider": "custom:cpa",
+            "models": [{"id": "configured-a", "label": "Configured A"}],
+            "count": 1,
+            "authoritative": False,
+            "complete": True,
+        }
+    )
+    assert result["beforeHydrate"] == [
+        "model-x",
+        "@custom:cpa:selected",
+        "@custom:cpa:live-only",
+    ], f"unexpected hydrated picker: {result['beforeHydrate']}"
+    assert result["dispatched"] == 2, "the invalidation must dispatch one replacement"
+    assert "@custom:cpa:live-only" in result["after"], (
+        "C63-F1: a non-authoritative config fallback must NOT prune the "
+        f"unselected live-only option — got {result['after']}"
+    )
+    assert "@custom:cpa:configured-a" in result["after"], (
+        "the fallback list must still ENRICH the picker — "
+        f"got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+    assert "model-x" in result["after"] and "@custom:cpa:selected" in result["after"], (
+        f"selected/static choices must survive — got {result['after']}"
+    )
+    assert result["otherAfter"] == ["other/model"], (
+        f"the sibling provider must survive — got {result['otherAfter']}"
+    )
+
+
+def test_truncated_payload_does_not_prune_models_outside_the_window():
+    """Variant 2 at the picker: absence from a display slice is not a removal."""
+    slice_models = [{"id": f"slice-{i}", "label": f"Slice {i}"} for i in range(15)]
+    result = _replay_gate_payload(
+        {
+            "provider": "custom:cpa",
+            "models": slice_models,
+            "count": len(slice_models),
+            "authoritative": True,
+            "complete": False,
+        }
+    )
+    assert "@custom:cpa:live-only" in result["after"], (
+        "C63-F1: a display-budget slice must NOT prune the live-only model it "
+        f"left out — got {result['after']}"
+    )
+    assert "@custom:cpa:slice-0" in result["after"] and "@custom:cpa:slice-14" in result["after"], (
+        f"the returned slice must still enrich the picker — got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+    assert result["otherAfter"] == ["other/model"]
+
+
+def test_malformed_plain_empty_payload_does_not_prune_live_only_option():
+    """Variant 3 at the picker: a plain empty list marked non-authoritative is
+    a malformed catalog, not 'this provider offers no models'."""
+    result = _replay_gate_payload(
+        {
+            "provider": "custom:cpa",
+            "models": [],
+            "count": 0,
+            "authoritative": False,
+            "complete": True,
+        }
+    )
+    assert "@custom:cpa:live-only" in result["after"], (
+        "C63-F1: a malformed catalog published as a plain empty list must NOT "
+        f"prune the live-only option — got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+    assert result["otherAfter"] == ["other/model"]
+
+
+def test_genuine_empty_authoritative_payload_still_prunes():
+    """Control: a genuine empty membership (validated, complete) still
+    reconciles the picker to 'no models'."""
+    result = _replay_gate_payload(
+        {
+            "provider": "custom:cpa",
+            "models": [],
+            "count": 0,
+            "authoritative": True,
+            "complete": True,
+        }
+    )
+    assert "@custom:cpa:live-only" not in result["after"], (
+        "a genuine authoritative empty list must still drop the unselected "
+        f"live-only option — got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+    assert "@custom:cpa:selected" in result["after"] and "model-x" in result["after"], (
+        f"selected/static choices must survive — got {result['after']}"
+    )
+    assert result["otherAfter"] == ["other/model"]
+
+
+# ── Production-composed: the REAL handler payload through the REAL picker ───
+
+
+def test_composed_outage_fallback_chain_keeps_the_live_only_option(monkeypatch):
+    """Variant 1 end to end: the real handler's fallback payload, fed to the
+    real fetch/add/prune chain, must not delete the live-only option."""
+    provider = dict(_CUSTOM_PROVIDER, model="chat-default")
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data={
+            "model": {"provider": "custom:test-gateway"},
+            "custom_providers": [provider],
+        },
+        fail=True,
+    )
+    result = _replay_gate_payload(payload)
+    assert "@custom:cpa:live-only" in result["after"], (
+        "C63-F1: the real outage-fallback payload pruned a live-only option — "
+        f"got {result['after']}"
+    )
+    assert "@custom:cpa:chat-default" in result["after"], (
+        f"the fallback enrichment must still happen — got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+    assert result["otherAfter"] == ["other/model"]
+
+
+def test_composed_truncated_chain_keeps_the_live_only_option(monkeypatch):
+    """Variant 2 end to end: the real truncated payload through the real
+    picker chain."""
+    catalog = [f"model-{i}" for i in range(31)]
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        response_body={"data": [{"id": mid} for mid in catalog]},
+    )
+    result = _replay_gate_payload(payload)
+    assert "@custom:cpa:live-only" in result["after"], (
+        "C63-F1: the real display-budget payload pruned a live-only option — "
+        f"got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+    assert result["otherAfter"] == ["other/model"]
+
+
+def test_composed_malformed_chain_keeps_the_live_only_option(monkeypatch):
+    """Variant 3 end to end: {"data": [{}]} from the real resolver through the
+    real picker chain."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        response_body={"data": [{}]},
+    )
+    result = _replay_gate_payload(payload)
+    assert "@custom:cpa:live-only" in result["after"], (
+        "C63-F1: the malformed-catalog payload pruned a live-only option — "
+        f"got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+
+
+def test_composed_genuine_empty_chain_still_prunes(monkeypatch):
+    """Control end to end: a genuine empty discovery still reconciles the
+    picker to 'no models'."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        response_body={"data": []},
+    )
+    result = _replay_gate_payload(payload)
+    assert "@custom:cpa:live-only" not in result["after"], (
+        "a genuine authoritative empty discovery must still prune — "
+        f"got {result['after']}"
+    )
+    assert "@custom:cpa:selected" in result["after"] and "model-x" in result["after"]
+    assert result["otherAfter"] == ["other/model"]
+
+
+def test_composed_failure_empty_chain_keeps_the_live_only_option(monkeypatch):
+    """Control end to end: a failed discovery with no configured fallback is
+    published with the ``error`` marker and must leave the picker untouched."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        fail=True,
+    )
+    assert payload.get("error") == "no_models_discovered"
+    result = _replay_gate_payload(payload)
+    assert "@custom:cpa:live-only" in result["after"], (
+        "a discovery failure must not prune the picker — "
+        f"got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+    assert result["otherAfter"] == ["other/model"]

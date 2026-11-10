@@ -5818,6 +5818,12 @@ async function populateModelDropdown(opts={}){
 
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
+// #6919 (gate C63-F1): the authority/completeness flags that came with the
+// cached list. The cache stores the models array for the append path, but a
+// later reconcile needs to know whether that list is a validated, complete
+// membership — a cached config/static fallback or display-budget slice must
+// never authorize removals.
+const _liveModelMembership={};
 // Tracks providers for which a live-model fetch is in flight.
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
@@ -5844,8 +5850,10 @@ function invalidateLiveModelCache(providerId){
   _liveModelInvalidationEpoch++;
   if(providerId){
     delete _liveModelCache[providerId];
+    delete _liveModelMembership[providerId];
   }else{
     for(const k in _liveModelCache) delete _liveModelCache[k];
+    for(const k in _liveModelMembership) delete _liveModelMembership[k];
   }
   // #6919: the Settings → Conversation picker is a second live-model receiver,
   // distinct from the composer dropdown. The epoch advance above revokes its
@@ -5927,7 +5935,14 @@ function _dropStaleLiveModelOptions(provider, freshValues, sel){
 // Only the reconcile path reconciles. The plain append path (the composer)
 // keeps its empty-array no-op, and a non-empty `models` array never takes
 // this branch.
-function _addLiveModelsToSelect(provider, models, sel, opts){
+//
+// #6919 (gate C63-F1): `pruneAuthorized` is the payload's membership
+// authority — a caller that knows the list is a config/static fallback, a
+// display-budget slice or a malformed catalog passes false, and the fresh
+// list only ENRICHES the picker. Removals are reconciled solely from a
+// validated, complete membership. When the argument is omitted (older
+// callers, direct replays) the previous reconcile behaviour is kept.
+function _addLiveModelsToSelect(provider, models, sel, opts, pruneAuthorized){
   if(!provider||!models||!sel) return 0;
   const currentVal=sel.value;
   const reconcile=!!(opts&&opts.reconcile);
@@ -6033,7 +6048,9 @@ function _addLiveModelsToSelect(provider, models, sel, opts){
   // reconciles the picker to "this provider offers no models" — the pruner
   // drops the live-only choices and keeps the selection, the catalog-origin
   // options and the other providers' options.
-  if(reconcile&&refreshed) _dropStaleLiveModelOptions(provider,refreshed,sel);
+  // #6919 (gate C63-F1): only a payload the caller marked as validated and
+  // complete may remove options.
+  if(reconcile&&refreshed&&pruneAuthorized!==false) _dropStaleLiveModelOptions(provider,refreshed,sel);
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
   if(providerGroup&&typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(providerGroup);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
@@ -6067,7 +6084,14 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts=null){
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel,opts);
+    // #6919 (gate C63-F1): a cached list remembers whether it was a
+    // validated, complete membership. Without the flags (older payloads) the
+    // previous reconcile behaviour is kept.
+    const _cachedMembership=_liveModelMembership[provider];
+    const _cachedPruneAuthorized=_cachedMembership
+      ? !!(_cachedMembership.authoritative!==false&&_cachedMembership.complete!==false)
+      : true;
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel,opts,_cachedPruneAuthorized);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
@@ -6095,10 +6119,26 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts=null){
     const _hasModels=!!(_modelsList&&_modelsList.length);
     const _authoritativeEmpty=!!(_modelsList&&!_modelsList.length&&!data.error);
     if(!_hasModels&&!_authoritativeEmpty) return;
+    // #6919 (gate C63-F1): removals may only be reconciled from a VALIDATED,
+    // COMPLETE catalog. The endpoint carries authority and completeness
+    // separately from list non-emptiness: a discovery outage served as a
+    // config/static fallback, a catalog truncated to the display budget, or
+    // a malformed catalog published as an empty list still ENRICHES the
+    // picker, but its omissions are not evidence of an upstream removal.
+    // Payloads without the flags (older servers) keep the previous behaviour.
+    const _pruneAuthorized=_hasModels
+      ? !!(data&&data.authoritative!==false&&data.complete!==false)
+      : !!(_authoritativeEmpty&&data&&data.authoritative!==false);
     if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
-    if(_hasModels) _liveModelCache[provider]=data.models;
+    if(_hasModels){
+      _liveModelCache[provider]=data.models;
+      _liveModelMembership[provider]={
+        authoritative:!!(data&&data.authoritative!==false),
+        complete:!!(data&&data.complete!==false),
+      };
+    }
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,data.models,sel,opts);
+    const added=_addLiveModelsToSelect(provider,data.models,sel,opts,_pruneAuthorized);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
       console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
