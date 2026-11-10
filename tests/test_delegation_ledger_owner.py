@@ -125,6 +125,78 @@ def test_failed_home_binding_never_runs_against_the_ambient_ledger(world, monkey
     assert peu.legacy_async_delivery_dedupe_size() == 0
 
 
+def _wait_for(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_drain_startup_recovers_from_one_enumeration_failure_without_another_restore(world, monkeypatch):
+    from api import background_process as bp
+
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.05)
+    registry = types.SimpleNamespace(restore_completions=lambda: None, completion_queue=queue.Queue())
+    registry_mod = types.ModuleType("tools.process_registry")
+    registry_mod.process_registry = registry
+    monkeypatch.setitem(sys.modules, "tools.process_registry", registry_mod)
+    monkeypatch.setattr(bp, "recover_processes_for_webui", lambda: 0)
+    monkeypatch.setattr(bp, "_DRAIN_THREAD", None)
+    restores = []
+    real_restore = peu.restore_durable_process_completions
+
+    def counted_restore(reg):
+        restores.append(reg)
+        real_restore(reg)
+
+    monkeypatch.setattr(bp, "restore_durable_process_completions", counted_restore)
+    listed = world["profiles"].list_profiles_api
+    failures = iter([True])
+
+    def flaky():
+        if next(failures, False):
+            raise RuntimeError("transient enumeration failure")
+        return listed()
+
+    monkeypatch.setattr(world["profiles"], "list_profiles_api", flaky)
+    try:
+        assert bp.start_drain_thread()
+        replayed = sorted([("restore", str(world["root"])), ("restore", str(world["named"]))])
+        assert _wait_for(lambda: sorted(world["calls"]) == replayed)
+    finally:
+        bp.stop_drain_thread()
+    assert restores == [registry]  # the drain entered startup restore exactly once
+    assert peu._NON_LAUNCH_REPLAY_DONE
+
+
+def test_failed_startup_enumeration_keeps_a_single_retry_timer(world, monkeypatch):
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.2)
+    registry = types.SimpleNamespace(restore_completions=lambda: None, completion_queue=queue.Queue())
+    attempts = []
+    armed = []
+    real_timer = peu.threading.Timer
+
+    def recording_timer(*args, **kwargs):
+        timer = real_timer(*args, **kwargs)
+        armed.append(timer)
+        return timer
+
+    def failing():
+        attempts.append(time.monotonic())
+        raise RuntimeError("enumeration still failing")
+
+    monkeypatch.setattr(peu.threading, "Timer", recording_timer)
+    monkeypatch.setattr(world["profiles"], "list_profiles_api", failing)
+    for _ in range(10):
+        peu.restore_durable_process_completions(registry)
+    assert len(attempts) == 10
+    assert len(armed) == 1  # repeated failures share one pending retry
+    assert _wait_for(lambda: len(attempts) >= 11)  # the timer itself retried
+    assert _wait_for(lambda: len(armed) == 2)  # and re-armed exactly one successor
+    assert sum(t.is_alive() for t in armed) <= 1
+    assert world["calls"] == []
+
+
 def test_startup_replay_retries_by_itself_after_enumeration_failure(world, monkeypatch):
     monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.05)
     registry = types.SimpleNamespace(restore_completions=lambda: None, completion_queue=queue.Queue())
