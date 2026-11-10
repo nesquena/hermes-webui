@@ -150,7 +150,7 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "function ensureSessionEventsSSE()" in SESSIONS_JS
     assert "new EventSource('api/sessions/events')" in SESSIONS_JS
     assert "addEventListener('sessions_changed'" in SESSIONS_JS
-    assert "function _scheduleSessionEventsRefresh(reason, opts={})" in SESSIONS_JS
+    assert "function _scheduleSessionEventsRefresh(reason, opts={}, schedule={})" in SESSIONS_JS
     assert "let _sessionEventsRefreshPendingRequest = null;" in SESSIONS_JS
     assert "_sessionEventsNeedsRefreshOnOpen = true" in SESSIONS_JS
     assert "void _refreshSessionListAfterSidebarResume('focus')" in SESSIONS_JS
@@ -163,7 +163,7 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "const refreshActive = !!(opts && opts.refreshActive)" in SESSIONS_JS
     assert "if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list')" in SESSIONS_JS
     assert "_sessionListRefreshPendingRequest = {" in SESSIONS_JS
-    assert "_scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts)" in SESSIONS_JS
+    assert "_scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts, {prompt:true})" in SESSIONS_JS
     assert "ensureSessionEventsSSE();" in SESSIONS_JS
     assert "document._hermesSessionEventsVisibilityHook" in SESSIONS_JS
     ensure_fn = SESSIONS_JS[SESSIONS_JS.find("function ensureSessionEventsSSE()") :]
@@ -193,6 +193,7 @@ def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():
     functions = "\n\n".join(
         [
             _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS"),
+            _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_BURST_MS"),
             merge_body,
             _function_body(SESSIONS_JS, "_refreshSidebarForBackgroundChurn"),
             _function_body(SESSIONS_JS, "refreshSessionList"),
@@ -212,6 +213,8 @@ def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():
         let _sessionListRefreshInFlight = false;
         let _sessionListRefreshPendingRequest = null;
         let _sessionEventsRefreshTimer = 0;
+        let _sessionEventsLastRefreshAt = 0;
+        let _sessionEventsRefreshDueAt = 0;
         let _sessionEventsRefreshPendingRequest = null;
         {functions}
         (async() => {{
@@ -236,7 +239,10 @@ def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():
 def test_session_list_external_refresh_forced_resume_survives_hidden_inflight_refresh():
     """Queued resume refreshes must keep `force:true` even after a hidden invalidation."""
     functions = "\n\n".join(
-        [_constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS")]
+        [
+            _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS"),
+            _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_BURST_MS"),
+        ]
         + [
             _function_body(SESSIONS_JS, name)
             for name in (
@@ -273,6 +279,8 @@ def test_session_list_external_refresh_forced_resume_survives_hidden_inflight_re
         let _sessionListRefreshInFlight = false;
         let _sessionListRefreshPendingRequest = null;
         let _sessionEventsRefreshTimer = 0;
+        let _sessionEventsLastRefreshAt = 0;
+        let _sessionEventsRefreshDueAt = 0;
         let _sessionEventsRefreshPendingRequest = null;
         {functions}
         (async() => {{
@@ -302,7 +310,10 @@ def test_session_list_external_refresh_forced_resume_survives_hidden_inflight_re
 def test_session_events_refresh_timer_merges_pending_force_and_active_options():
     """The debounce window must not drop force or active-refresh intent."""
     functions = "\n\n".join(
-        [_constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS")]
+        [
+            _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS"),
+            _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_BURST_MS"),
+        ]
         + [
             _function_body(SESSIONS_JS, name)
             for name in (
@@ -325,6 +336,8 @@ def test_session_events_refresh_timer_merges_pending_force_and_active_options():
         let _sessionListRefreshInFlight = false;
         let _sessionListRefreshPendingRequest = null;
         let _sessionEventsRefreshTimer = 0;
+        let _sessionEventsLastRefreshAt = 0;
+        let _sessionEventsRefreshDueAt = 0;
         let _sessionEventsRefreshPendingRequest = null;
         {functions}
         (async() => {{
@@ -498,3 +511,87 @@ def test_same_width_force_reload_invalidates_visible_message_cache():
     invalidate_pos = ensure_body.index("if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();")
     replace_pos = ensure_body.index("S.messages = msgs;")
     assert invalidate_pos < replace_pos
+
+
+def _session_events_throttle_harness(steps: str) -> list:
+    """Run the real `_scheduleSessionEventsRefresh` against a fake clock and timers."""
+    functions = "\n\n".join(
+        [
+            _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS"),
+            _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_BURST_MS"),
+            _function_body(SESSIONS_JS, "_mergeSessionListRefreshOptions"),
+            _function_body(SESSIONS_JS, "_scheduleSessionEventsRefresh"),
+        ]
+    )
+    script = textwrap.dedent(
+        f"""
+        let clock = 100000;
+        Date.now = () => clock;
+        const timers = new Map();
+        let nextId = 1;
+        global.setTimeout = (cb, ms) => {{ const id = nextId++; timers.set(id, {{cb, at: clock + ms}}); return id; }};
+        global.clearTimeout = (id) => {{ timers.delete(id); }};
+        const fired = [];
+        global.refreshSessionList = async (reason, opts) => {{ fired.push({{at: clock, reason}}); }};
+        function advance(ms) {{
+          const end = clock + ms;
+          for (;;) {{
+            let due = null;
+            for (const [id, t] of timers) if (t.at <= end && (!due || t.at < due[1].at)) due = [id, t];
+            if (!due) break;
+            timers.delete(due[0]);
+            clock = due[1].at;
+            due[1].cb();
+          }}
+          clock = end;
+        }}
+        let _sessionEventsRefreshTimer = 0;
+        let _sessionEventsLastRefreshAt = 0;
+        let _sessionEventsRefreshDueAt = 0;
+        let _sessionEventsRefreshPendingRequest = null;
+        {functions}
+        {steps}
+        process.stdout.write(JSON.stringify(fired.map((f) => ({{after: f.at - 100000, reason: f.reason}}))));
+        """
+    )
+    return _run_node(script)
+
+
+def test_an_isolated_session_event_paints_after_the_burst_window_not_the_cap():
+    # #8694 senior review: a trailing-only 5 s timer made a single rename/delete
+    # from another tab wait the whole cap.
+    fired = _session_events_throttle_harness(
+        "_scheduleSessionEventsRefresh('event', {force:true}); advance(10000);"
+    )
+    assert fired == [{"after": 300, "reason": "event"}]
+
+
+def test_session_events_within_the_cap_coalesce_to_one_refresh_per_window():
+    fired = _session_events_throttle_harness(
+        """
+        _scheduleSessionEventsRefresh('event', {force:true});
+        advance(1000);
+        for (let i = 0; i < 20; i++) { _scheduleSessionEventsRefresh('event', {force:true}); advance(200); }
+        advance(10000);
+        """
+    )
+    # One leading refresh at 300 ms, then the burst waits for last + 5000 ms.
+    assert fired == [{"after": 300, "reason": "event"}, {"after": 5300, "reason": "event"}]
+
+
+def test_a_parked_user_refresh_is_never_held_behind_the_event_cap():
+    # A new chat or a pull that arrived while another refresh was in flight is
+    # re-sent by refreshSessionList with `prompt`; it must not wait for the cap,
+    # and it pulls an already-pending capped event timer forward.
+    fired = _session_events_throttle_harness(
+        """
+        _scheduleSessionEventsRefresh('event', {force:true});
+        advance(400);
+        _scheduleSessionEventsRefresh('event', {force:true});
+        advance(100);
+        _scheduleSessionEventsRefresh('pull', {}, {prompt:true});
+        advance(10000);
+        """
+    )
+    # 500 ms + the 300 ms burst window, carrying the merged (latest) reason.
+    assert fired == [{"after": 300, "reason": "event"}, {"after": 800, "reason": "pull"}]

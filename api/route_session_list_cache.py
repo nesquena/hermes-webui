@@ -57,8 +57,10 @@ _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 # held payload is at most this many seconds old. (#8694)
 # The runtime overlay (active stream, pending flags, sort order) is applied on
 # every response regardless of the cache, so only structural row data (title,
-# counts, membership) can be this stale; a settings write or a structural change
-# still invalidates through the separate invalidation stamp.
+# counts, membership) can be this stale. Settings are not hold evidence either:
+# every setting that shapes the payload is part of the cache KEY, and the
+# sidebar-visibility toggles clear the cache outright, so other settings churn
+# is coalesced like index churn.
 _SESSIONS_CACHE_MIN_REFRESH_SECONDS = 10.0
 # Consumer-facing statuses for `_session_list_cache_probe`. `held` is the explicit
 # "inside the rebuild-rate floor, serve this and do NOT start a rebuild" contract:
@@ -432,6 +434,51 @@ _STAMP_HOLD_EVIDENCE_INDEXES = (0, 1, 5, 6)
 # it can never be read as a profile's (stat, wal-stat, fingerprint) entry. (#8694)
 _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE = ALL_PROFILES_ROSTER_INCOMPLETE
 
+# A profile's state.db that does not exist: readable evidence (see
+# `_session_list_cache_state_db_fingerprint_impl`). (#8694)
+_STATE_DB_ABSENT_FINGERPRINT = ('<state-db-absent>',)
+
+
+def _session_list_cache_roster_epoch():
+    """The partial-roster epoch before a build, or ``None`` when unknowable."""
+    try:
+        from api.models import all_profiles_partial_roster_epoch
+
+        return all_profiles_partial_roster_epoch()
+    except Exception:
+        return None
+
+
+def _session_list_cache_mark_partial_build(source_stamp, roster_epoch_before):
+    """Mark a pre-build stamp incomplete when a roster read DURING the build was partial.
+
+    The stamp's own roster read happened before the build; the builder reads the
+    roster again. If that second read skipped a profile, the payload is missing
+    that profile's rows while the stamp says every profile was seen, so the
+    rate floor would hold the incomplete payload. Appending the marker makes the
+    stored stamp unknown evidence: the next request revalidates, as on master.
+    An unknowable epoch marks too (the safe direction). (#8694 senior review)
+    """
+    if not isinstance(source_stamp, tuple) or len(source_stamp) != 8:
+        return source_stamp
+    all_profiles_stamp = source_stamp[6]
+    if not isinstance(all_profiles_stamp, tuple):
+        return source_stamp
+    if _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE in all_profiles_stamp:
+        return source_stamp
+    roster_epoch_after = _session_list_cache_roster_epoch()
+    if (
+        roster_epoch_before is not None
+        and roster_epoch_after is not None
+        and roster_epoch_after == roster_epoch_before
+    ):
+        return source_stamp
+    return (
+        source_stamp[:6]
+        + (all_profiles_stamp + (_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE,),)
+        + source_stamp[7:]
+    )
+
 
 def _session_list_cache_stamp_hold_evidence(stamp, all_profiles: bool = False):
     """Return the evidence a floor hold may rely on, or ``None`` when unknown.
@@ -733,6 +780,17 @@ def _session_list_cache_state_db_fingerprint(state_db_path: Path | None):
 
 def _session_list_cache_state_db_fingerprint_impl(state_db_path: Path | None):
     if state_db_path is None:
+        return None
+    try:
+        os.stat(state_db_path)
+    except FileNotFoundError:
+        # No state.db yet (a profile created but never used): a real, readable
+        # observation, unlike an unreadable read. Its creation moves the file
+        # stat this stamp also carries, so it can never certify a commit away;
+        # treating it as unknown instead would switch the all-profiles hold off
+        # for good on every install with one unused profile. (#8694 senior review)
+        return _STATE_DB_ABSENT_FINGERPRINT
+    except OSError:
         return None
     try:
         from api.models import _sqlite_content_fingerprint

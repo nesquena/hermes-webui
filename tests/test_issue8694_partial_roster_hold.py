@@ -291,14 +291,93 @@ def test_an_unimportable_profiles_module_is_an_incomplete_roster(monkeypatch):
 
 
 def test_partial_and_complete_roster_keys_differ_for_the_cli_cache(store, two_profiles, monkeypatch):
+    # A failed active-profile lookup leaves the context list itself unchanged,
+    # so only the marker can tell the two keys apart (senior review finding 6).
     complete_contexts, complete_key = models._all_profiles_cli_contexts()
-    _fail_roster_enumeration(monkeypatch, two_profiles.roster)
+
+    def boom():
+        raise RuntimeError("controlled active-profile lookup failure")
+
+    monkeypatch.setattr(two_profiles.profiles, "get_active_profile_name", boom)
     partial_contexts, partial_key = models._all_profiles_cli_contexts()
+    assert partial_contexts == complete_contexts
     assert complete_key != partial_key
     assert (
         models._all_profiles_cli_cache_key(complete_contexts, complete_key, None, True)
         != models._all_profiles_cli_cache_key(partial_contexts, partial_key, None, True)
     )
+
+
+def test_a_partial_roster_read_by_the_builder_declines_the_hold(store, two_profiles, monkeypatch):
+    """The stamp's roster read was complete, but the BUILDER's own read was not.
+
+    Senior review finding 2: the payload then misses bravo's rows while the stamp
+    says every profile was seen, so the floor held the incomplete payload. The
+    partial-roster epoch moves during the build and the stored stamp is marked.
+    """
+    r = store.r
+    key = r._session_list_cache_key(active_profile="default", all_profiles=True,
+        show_cli_sessions=True, show_previous_messaging_sessions=False, show_cron_sessions=False)
+    original_iterdir = Path.iterdir
+    fail_next = []
+
+    def iterdir(path):
+        if path == two_profiles.roster and fail_next:
+            fail_next.pop()
+            raise PermissionError("controlled one-time enumeration failure inside the builder")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    builds = []
+
+    def build():
+        builds.append(1)
+        if len(builds) == 1:
+            fail_next.append(1)
+        contexts, _ = models._all_profiles_cli_contexts()
+        return {"sessions": [{"session_id": ctx[2]} for ctx in contexts], "cli_count": 0,
+                "active_profile": "default", "all_profiles": True, "other_profile_count": 0}
+
+    first = r._get_cached_session_list_payload(key=key, builder=build)
+    assert [row["session_id"] for row in first["sessions"]] == ["default"], "the builder's read was partial"
+    store.gateway.write_text(json.dumps({"external_metadata_tick": 3}))
+    _payload, status = r._session_list_cache_probe(key)
+    assert status != r._SESSION_LIST_CACHE_HELD
+    second = r._get_cached_session_list_payload(key=key, builder=build)
+    assert sorted(row["session_id"] for row in second["sessions"]) == ["bravo", "default"]
+    assert len(builds) == 2
+
+
+def test_a_profile_without_a_state_db_keeps_the_complete_roster_hold(store, two_profiles, monkeypatch):
+    """Senior review finding 3: a created-but-never-used profile has no state.db.
+
+    That is a readable observation (its creation moves the file stat the stamp
+    also carries), not an unreadable fingerprint, so it must not switch the
+    all-profiles hold off for good.
+    """
+    two_profiles.foreign.unlink()
+    status, builds = _metadata_only_churn_builds(store, two_profiles, monkeypatch, roster_failure=None)
+    assert status == store.r._SESSION_LIST_CACHE_HELD
+    assert builds == 1
+
+
+def test_creating_a_profiles_state_db_revalidates(store, two_profiles):
+    r = store.r
+    two_profiles.foreign.unlink()
+    key = r._session_list_cache_key(active_profile="default", all_profiles=True,
+        show_cli_sessions=True, show_previous_messaging_sessions=False, show_cron_sessions=False)
+    builds = []
+
+    def build():
+        builds.append(1)
+        return {"sessions": [], "cli_count": 0, "active_profile": "default",
+                "all_profiles": True, "other_profile_count": 0}
+
+    r._get_cached_session_list_payload(key=key, builder=build)
+    shutil.copyfile(store.db, two_profiles.foreign)
+    store.gateway.write_text(json.dumps({"external_metadata_tick": 4}))
+    _payload, status = r._session_list_cache_probe(key)
+    assert status != r._SESSION_LIST_CACHE_HELD
 
 
 def test_stamp_readability_rejects_the_incomplete_marker():

@@ -3926,6 +3926,7 @@ def _get_cached_session_list_payload(
                             # fresh build but certify nothing. Retrying cannot
                             # produce a snapshot the producer just failed to read.
                             return
+                        roster_epoch = _route_session_list_cache._session_list_cache_roster_epoch()
                         try:
                             payload = builder()
                         except Exception:
@@ -3933,6 +3934,9 @@ def _get_cached_session_list_payload(
                                 "session list stale-cache background rebuild failed"
                             )
                             return
+                        source_stamp = _route_session_list_cache._session_list_cache_mark_partial_build(
+                            source_stamp, roster_epoch
+                        )
                         if (
                             _session_list_cache_invalidation_stamp(key) == invalidation_stamp
                             and _session_list_cache_set(
@@ -3977,7 +3981,11 @@ def _get_cached_session_list_payload(
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
                 source_stamp = _session_list_cache_source_stamp_snapshot(key)
+                roster_epoch = _route_session_list_cache._session_list_cache_roster_epoch()
                 payload = builder()
+                source_stamp = _route_session_list_cache._session_list_cache_mark_partial_build(
+                    source_stamp, roster_epoch
+                )
                 if source_stamp is None:
                     # Unknown pre-build evidence: correct for this request, never
                     # certified. Retrying cannot produce a snapshot the producer
@@ -4049,7 +4057,11 @@ def _get_cached_session_list_payload(
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
     source_stamp = _session_list_cache_source_stamp_snapshot(key)
+    roster_epoch = _route_session_list_cache._session_list_cache_roster_epoch()
     payload = builder()
+    source_stamp = _route_session_list_cache._session_list_cache_mark_partial_build(
+        source_stamp, roster_epoch
+    )
     if (
         source_stamp is not None
         and _session_list_cache_invalidation_stamp(key) == invalidation_stamp

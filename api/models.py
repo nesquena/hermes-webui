@@ -11285,6 +11285,26 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
 # value, so two incomplete keys still compare equal exactly as before. (#8694)
 ALL_PROFILES_ROSTER_INCOMPLETE = ('<all-profiles-roster-incomplete>',)
 
+# Bumped every time ``_all_profiles_cli_contexts`` returns a partial roster, by
+# any caller on any thread. The session-list cache reads it around a build: the
+# builder does its own roster read, and if THAT read was partial the payload it
+# produced is missing a profile even when the stamp's earlier read was complete.
+# A bump from another thread merely makes that build decline the hold too, which
+# is the safe direction. (#8694 senior review)
+_ALL_PROFILES_PARTIAL_ROSTER_EPOCH_LOCK = threading.Lock()
+_ALL_PROFILES_PARTIAL_ROSTER_EPOCH = 0
+
+
+def all_profiles_partial_roster_epoch() -> int:
+    """How many partial all-profiles rosters this process has produced so far."""
+    return _ALL_PROFILES_PARTIAL_ROSTER_EPOCH
+
+
+def _note_partial_all_profiles_roster() -> None:
+    global _ALL_PROFILES_PARTIAL_ROSTER_EPOCH
+    with _ALL_PROFILES_PARTIAL_ROSTER_EPOCH_LOCK:
+        _ALL_PROFILES_PARTIAL_ROSTER_EPOCH += 1
+
 
 def all_profiles_roster_incomplete(cache_key) -> bool:
     """True when ``cache_key`` (from ``_all_profiles_cli_contexts``) marks a partial roster."""
@@ -11307,6 +11327,7 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
             get_hermes_home_for_profile,
         )
     except Exception:
+        _note_partial_all_profiles_roster()
         return [], (ALL_PROFILES_ROSTER_INCOMPLETE,)
 
     contexts: list[tuple[Path, Path, str | None]] = []
@@ -11364,6 +11385,7 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
         logger.debug("All-profiles CLI directory enumeration failed", exc_info=True)
 
     if not complete:
+        _note_partial_all_profiles_roster()
         cache_entries.append(ALL_PROFILES_ROSTER_INCOMPLETE)
     return contexts, tuple(cache_entries)
 

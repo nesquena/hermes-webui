@@ -8121,17 +8121,19 @@ let _deferredActiveSessionExternalRefreshReason = '';
 let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
-// Coalescing window for SSE-driven sidebar refreshes. It used to be 300 ms, so a
-// streaming session's burst of `sessions_changed` events re-fetched `/api/sessions`
-// several times a second. Inside the server's `_SESSIONS_CACHE_MIN_REFRESH_SECONDS`
-// floor a refresh that only saw session-index or gateway-metadata churn is served
-// the same cached payload; a state.db commit still rebuilds (#8694), so the
-// refetch rate also drives the server's rebuild rate. Measured 2026-10-30: 65
-// `/api/sessions` per minute from one client, gaps of 0-2 s, sidebar p99 1.8 s.
-// 5 s caps a continuously-streaming session at 12 refreshes/min instead of 200,
-// while a burst of `sessions_changed` events from one tool call still costs a
-// single refresh.
+// Coalescing for SSE-driven sidebar refreshes. Every `sessions_changed` publish
+// clears the server's session-list cache, so an event-driven refresh always
+// rebuilds: this client-side cap is its only rate limit. It used to be a 300 ms
+// trailing debounce, so a streaming session's burst of events re-fetched
+// `/api/sessions` several times a second. Measured 2026-10-30: 65 `/api/sessions`
+// per minute from one client, gaps of 0-2 s, sidebar p99 1.8 s. The cap holds a
+// continuously-streaming session to 12 event-driven refreshes/min instead of 200;
+// an isolated event still paints after the 300 ms burst window (see
+// `_scheduleSessionEventsRefresh`). (#8694)
 const _SESSION_EVENTS_REFRESH_COALESCE_MS = 5000;
+const _SESSION_EVENTS_REFRESH_BURST_MS = 300;
+let _sessionEventsLastRefreshAt = 0;
+let _sessionEventsRefreshDueAt = 0;
 let _sessionEventsRefreshPendingRequest = null;
 let _sessionEventsReconnectTimer = 0;
 let _sessionEventsNeedsRefreshOnOpen = false;
@@ -8443,22 +8445,43 @@ async function refreshSessionList(reason='manual', opts={}){
     _sessionListRefreshInFlight = false;
     const pendingRequest = _sessionListRefreshPendingRequest;
     _sessionListRefreshPendingRequest = null;
-    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts);
+    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts, {prompt:true});
   }
 }
 
-function _scheduleSessionEventsRefresh(reason, opts={}){
+function _scheduleSessionEventsRefresh(reason, opts={}, schedule={}){
   _sessionEventsRefreshPendingRequest = {
     reason: reason || (_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.reason) || 'event',
     opts:_mergeSessionListRefreshOptions(_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.opts, opts),
   };
-  if(_sessionEventsRefreshTimer) return;
+  // Throttle, not a trailing-only debounce (#8694 senior review): an isolated
+  // event — a rename or delete from another tab, a cron finishing — paints after
+  // the short burst window, and only events arriving within
+  // `_SESSION_EVENTS_REFRESH_COALESCE_MS` of the last event-driven refresh wait
+  // for that cap. A PARKED request (`schedule.prompt`: a new chat, a pull or a
+  // resume that arrived while another refresh was in flight) was asked for by
+  // the user or the UI, so it re-sends after the burst window and is never held
+  // behind the cap; it also pulls an already-pending capped timer forward.
+  const now = Date.now();
+  const delay = (schedule && schedule.prompt)
+    ? _SESSION_EVENTS_REFRESH_BURST_MS
+    : Math.max(
+        _SESSION_EVENTS_REFRESH_BURST_MS,
+        _sessionEventsLastRefreshAt + _SESSION_EVENTS_REFRESH_COALESCE_MS - now,
+      );
+  if(_sessionEventsRefreshTimer){
+    if(now + delay >= _sessionEventsRefreshDueAt) return;
+    clearTimeout(_sessionEventsRefreshTimer);
+  }
+  _sessionEventsRefreshDueAt = now + delay;
   _sessionEventsRefreshTimer = setTimeout(() => {
     _sessionEventsRefreshTimer = 0;
+    _sessionEventsRefreshDueAt = 0;
+    _sessionEventsLastRefreshAt = Date.now();
     const request = _sessionEventsRefreshPendingRequest || {reason:'event', opts:{}};
     _sessionEventsRefreshPendingRequest = null;
     void refreshSessionList(request.reason||'event', request.opts);
-  }, _SESSION_EVENTS_REFRESH_COALESCE_MS);
+  }, delay);
 }
 
 function _sessionEventTargetsActiveSession(payload){
