@@ -445,6 +445,52 @@ def test_the_switch_passes_the_stored_pair_and_the_requested_id(monkeypatch):
     assert (seen["base_url"], seen["api_key"], seen["caller_key_only"]) == (A, "KV", True)
 
 
+# Fable finding 4 on #8956: the chat passes ``explicitly_picked`` to resolve_model_provider (api/streaming.py), the
+# switch's requested-id helper doesn't. The flag only decides whether a cold custom proxy keeps a vendor prefix on the
+# model id. The provider and URL, which the lookup's route and key depend on, are the same either way.
+P = "https://p.proxy.test/v1"
+Q = "https://q.other.test/v1"
+PICKED_SHAPES = [
+    ("native-record", "custom:proxy",
+     {"model": {"provider": "custom:proxy", "default": "openai/gpt-5.4", "base_url": P, "api_key": "KP"},
+      "providers": {"custom:proxy": {"base_url": P, "api_key": "KP"}}}),
+    ("legacy-entry", "custom:proxy",
+     {"model": {"provider": "custom:proxy", "default": "openai/gpt-5.4"},
+      "custom_providers": [{"name": "proxy", "base_url": P, "api_key": "KP"}]}),
+    ("bare-custom-model-block", "custom",
+     {"model": {"provider": "custom", "default": "openai/gpt-5.4", "base_url": P, "api_key": "KP"}}),
+    ("named-record", "custom:proxy",
+     {"model": {"provider": "custom:proxy", "default": "m-x"},
+      "providers": {"one": {"name": "proxy", "base_url": P, "api_key": "KP"},
+                    "two": {"name": "other", "base_url": Q, "api_key": "KQ"}}}),
+    ("raw-named-record", "proxy",
+     {"model": {"provider": "proxy", "default": "openai/gpt-5.4"}, "providers": {"proxy": {"base_url": P, "api_key": "KP"}}}),
+]
+PICKED_MODELS = ["openai/gpt-5.4", "anthropic/claude-sonnet-4-5", "meta-llama/llama-3-70b", "gpt-5.4", "m-x"]
+
+
+@pytest.mark.parametrize("model", PICKED_MODELS)
+@pytest.mark.parametrize("name,provider,cfg", PICKED_SHAPES, ids=[s[0] for s in PICKED_SHAPES])
+def test_the_chats_provider_is_independent_of_explicitly_picked(monkeypatch, name, provider, cfg, model):
+    _use(cfg, monkeypatch)
+    ctx = config.model_with_provider_context(model, provider)
+    unpicked = config.resolve_model_provider(ctx, explicitly_picked=False)
+    picked = config.resolve_model_provider(ctx, explicitly_picked=True)
+    assert (picked[1], picked[2]) == (unpicked[1], unpicked[2])
+
+
+def test_explicitly_picked_is_live_on_a_cold_proxy(monkeypatch):
+    """Keeps the test above non-vacuous: on a cold custom proxy the flag does change the model id (a picked
+    ``anthropic/claude-sonnet-4-5`` keeps its prefix, an unpicked one loses it), and only the model id."""
+    _use(PICKED_SHAPES[0][2], monkeypatch)
+    ctx = config.model_with_provider_context("anthropic/claude-sonnet-4-5", "custom:proxy")
+    unpicked = config.resolve_model_provider(ctx, explicitly_picked=False)
+    picked = config.resolve_model_provider(ctx, explicitly_picked=True)
+    assert picked[0] == "anthropic/claude-sonnet-4-5"
+    assert picked[0] != unpicked[0]
+    assert (picked[1], picked[2]) == (unpicked[1], unpicked[2]) == ("custom:proxy", P)
+
+
 # ── Streaming: no change needed. Its lookups pass the chat's merged bundle and send that pair ────────────────
 # api/streaming.py sets resolved_* from the merged bundle (the chat's pair, provider "custom" for a named custom
 # provider) and builds the Agent from it. Two lookup forms read it: the Agent-fallback sites

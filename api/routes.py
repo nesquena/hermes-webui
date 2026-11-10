@@ -9632,9 +9632,13 @@ def _context_length_config_api_key_and_owner(
 
     When the session's provider is switched off (``enabled: false`` on its
     authoritative record, :func:`_context_lookup_provider_disabled`), the selection
-    takes no key at all (#8938). The Agent refuses that session, custom or built-in,
-    so the chat sends no key, neither the record's nor the model block's; falling
-    through to the model block would send a key the chat never sends. Any other
+    takes no key at all (#8938). The Agent's resolver refuses that session, custom or
+    built-in, but api/streaming.py drops that refusal (#8974) and the chat may still
+    route: through WebUI's merge for a custom session, or through ``AIAgent``'s own
+    resolution for a built-in one, which can pick an enabled twin (``OpenAI`` beside a
+    switched-off ``openai``). The selection doesn't predict that route. It takes no
+    key, neither the switched-off record's nor the model block's; where the chat does
+    route, the lookup gets the default window (cost-only, #8974). Any other
     switched-off record matching the provider (another spelling of it) is skipped,
     as the Agent's matcher skips it, and the selection reads on exactly as if that
     record weren't there: the chat routes the same with or without it.
