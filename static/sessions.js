@@ -8457,17 +8457,24 @@ function _scheduleSessionEventsRefresh(reason, opts={}, schedule={}){
   // Throttle, not a trailing-only debounce (#8694 senior review): an isolated
   // event — a rename or delete from another tab, a cron finishing — paints after
   // the short burst window, and only events arriving within
-  // `_SESSION_EVENTS_REFRESH_COALESCE_MS` of the last event-driven refresh wait
-  // for that cap. A PARKED request (`schedule.prompt`: a new chat, a pull or a
+  // `_SESSION_EVENTS_REFRESH_COALESCE_MS` of the last refresh this timer fired
+  // (an event-driven one or a parked re-send) wait for that cap. A PARKED request (`schedule.prompt`: a new chat, a pull or a
   // resume that arrived while another refresh was in flight) was asked for by
   // the user or the UI, so it re-sends after the burst window and is never held
   // behind the cap; it also pulls an already-pending capped timer forward.
+  // The cap is clamped to its own length: `Date.now()` follows the wall clock,
+  // and after a backward clock step `_sessionEventsLastRefreshAt` lies in the
+  // future, which would otherwise freeze every event refresh for the size of the
+  // step (#8694 senior review r2).
   const now = Date.now();
   const delay = (schedule && schedule.prompt)
     ? _SESSION_EVENTS_REFRESH_BURST_MS
-    : Math.max(
-        _SESSION_EVENTS_REFRESH_BURST_MS,
-        _sessionEventsLastRefreshAt + _SESSION_EVENTS_REFRESH_COALESCE_MS - now,
+    : Math.min(
+        _SESSION_EVENTS_REFRESH_COALESCE_MS,
+        Math.max(
+          _SESSION_EVENTS_REFRESH_BURST_MS,
+          _sessionEventsLastRefreshAt + _SESSION_EVENTS_REFRESH_COALESCE_MS - now,
+        ),
       );
   if(_sessionEventsRefreshTimer){
     if(now + delay >= _sessionEventsRefreshDueAt) return;

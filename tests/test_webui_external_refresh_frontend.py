@@ -595,3 +595,21 @@ def test_a_parked_user_refresh_is_never_held_behind_the_event_cap():
     )
     # 500 ms + the 300 ms burst window, carrying the merged (latest) reason.
     assert fired == [{"after": 300, "reason": "event"}, {"after": 800, "reason": "pull"}]
+
+
+def test_a_backward_wall_clock_step_never_freezes_event_refreshes():
+    # #8694 senior review r2: `Date.now()` follows the wall clock. After a step
+    # back, the last refresh lies "in the future"; unclamped, the next event
+    # waited the size of the step (an hour here) and every later event folded
+    # into that timer. The cap is clamped to its own length.
+    fired = _session_events_throttle_harness(
+        """
+        _scheduleSessionEventsRefresh('event', {force:true});
+        advance(1000);
+        clock -= 3600 * 1000;
+        _scheduleSessionEventsRefresh('event', {force:true});
+        advance(10000);
+        """
+    )
+    # Stepped back at +1000 ms; the next event fires at most one cap later.
+    assert fired == [{"after": 300, "reason": "event"}, {"after": 1000 - 3600 * 1000 + 5000, "reason": "event"}]

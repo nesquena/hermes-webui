@@ -11,6 +11,7 @@ from pathlib import Path
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
 from api.models import (
     ALL_PROFILES_ROSTER_INCOMPLETE,
+    _CONTENT_FINGERPRINT_UNREADABLE,
     _active_state_db_path,
     _active_stream_ids,
     _content_fingerprint_readable,
@@ -440,44 +441,48 @@ _STATE_DB_ABSENT_FINGERPRINT = ('<state-db-absent>',)
 
 
 def _session_list_cache_roster_epoch():
-    """The partial-roster epoch before a build, or ``None`` when unknowable."""
+    """The (partial-roster, partial-row-load) epochs before a build, or ``None`` when unknowable."""
     try:
-        from api.models import all_profiles_partial_roster_epoch
+        from api.models import all_profiles_partial_roster_epoch, cli_sessions_partial_load_epoch
 
-        return all_profiles_partial_roster_epoch()
+        return (all_profiles_partial_roster_epoch(), cli_sessions_partial_load_epoch())
     except Exception:
         return None
 
 
 def _session_list_cache_mark_partial_build(source_stamp, roster_epoch_before):
-    """Mark a pre-build stamp incomplete when a roster read DURING the build was partial.
+    """Mark a pre-build stamp unknown when a read DURING the build was partial.
 
-    The stamp's own roster read happened before the build; the builder reads the
-    roster again. If that second read skipped a profile, the payload is missing
-    that profile's rows while the stamp says every profile was seen, so the
-    rate floor would hold the incomplete payload. Appending the marker makes the
-    stored stamp unknown evidence: the next request revalidates, as on master.
-    An unknowable epoch marks too (the safe direction). (#8694 senior review)
+    The stamp's reads happened before the build; the builder reads again. If its
+    roster read skipped a profile, or its row load failed or was incomplete and
+    served stale / last-known-good rows, the payload can miss rows the stamp's
+    evidence already covers, and the rate floor would hold that payload. Marking
+    the stored stamp makes it unknown evidence: the next request revalidates, as
+    on master. An all-profiles stamp gets the roster-incomplete marker; a
+    single-profile stamp gets an unreadable content fingerprint. An unknowable
+    epoch marks too (the safe direction). Another thread's partial read during
+    the build marks it as well, which only costs one extra rebuild.
+    (#8694 senior review r1 + r2)
     """
     if not isinstance(source_stamp, tuple) or len(source_stamp) != 8:
         return source_stamp
-    all_profiles_stamp = source_stamp[6]
-    if not isinstance(all_profiles_stamp, tuple):
-        return source_stamp
-    if _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE in all_profiles_stamp:
-        return source_stamp
-    roster_epoch_after = _session_list_cache_roster_epoch()
+    epoch_after = _session_list_cache_roster_epoch()
     if (
         roster_epoch_before is not None
-        and roster_epoch_after is not None
-        and roster_epoch_after == roster_epoch_before
+        and epoch_after is not None
+        and epoch_after == roster_epoch_before
     ):
         return source_stamp
-    return (
-        source_stamp[:6]
-        + (all_profiles_stamp + (_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE,),)
-        + source_stamp[7:]
-    )
+    all_profiles_stamp = source_stamp[6]
+    if isinstance(all_profiles_stamp, tuple):
+        if _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE in all_profiles_stamp:
+            return source_stamp
+        return (
+            source_stamp[:6]
+            + (all_profiles_stamp + (_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE,),)
+            + source_stamp[7:]
+        )
+    return source_stamp[:5] + (_CONTENT_FINGERPRINT_UNREADABLE,) + source_stamp[6:]
 
 
 def _session_list_cache_stamp_hold_evidence(stamp, all_profiles: bool = False):

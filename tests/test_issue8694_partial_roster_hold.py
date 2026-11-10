@@ -391,3 +391,73 @@ def test_stamp_readability_rejects_the_incomplete_marker():
     assert cache._session_list_cache_stamp_hold_evidence(partial, True) is None
     # A single-profile key never reads the all-profiles collection.
     assert cache._session_list_cache_stamp_fingerprints_readable(partial, False) is True
+
+
+
+def test_a_failed_row_load_inside_the_builder_declines_the_hold(store, monkeypatch):
+    """Senior review r2 finding 2: the same problem as the builder's roster read, for ROWS.
+
+    The stamp's fingerprint read is fine; then the builder's own state.db read
+    fails ("database is locked") and ``get_cli_sessions`` serves last-known-good
+    rows that predate a Desktop commit. The payload is stored under the newer
+    stamp, so without a mark the floor held it through gateway-metadata churn and
+    the committed row stayed hidden. The partial-load epoch moves during that
+    build, the stored single-profile stamp is marked unreadable, and the next
+    request rebuilds (master's behaviour).
+    """
+    r = store.r
+    key = r._session_list_cache_key(active_profile="default", all_profiles=False,
+        show_cli_sessions=True, show_previous_messaging_sessions=False, show_cron_sessions=False)
+    monkeypatch.setattr(models, "_cli_sessions_streaming_freeze_marker", lambda: None)
+
+    def resolve(source_filter=None, include_claude_code=True, **_kw):
+        cache_key = (str(store.db.parent), "", str(store.db), str(source_filter or ""),
+                     models._sqlite_file_stat_cache_key(store.db), bool(include_claude_code), "", "", "")
+        return store.db.parent, store.db, None, cache_key
+
+    monkeypatch.setattr(models, "_resolve_cli_sessions_context", resolve)
+    fail = []
+
+    def load(home, db, profile, **_kw):
+        if fail:
+            fail.pop()
+            raise sqlite3.OperationalError("database is locked")
+        with sqlite3.connect(db) as c:
+            return [{"session_id": row[0]} for row in c.execute("SELECT id FROM sessions ORDER BY id")]
+
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", load)
+    if hasattr(models, "clear_cli_sessions_cache"):
+        models.clear_cli_sessions_cache()
+    builds = []
+
+    def build():
+        builds.append(1)
+        rows = models.get_cli_sessions()
+        return {"sessions": [{"session_id": s["session_id"]} for s in rows], "cli_count": len(rows),
+                "active_profile": "default", "all_profiles": False, "other_profile_count": 0}
+
+    def ids(payload):
+        return sorted(row["session_id"] for row in payload["sessions"])
+
+    assert ids(r._get_cached_session_list_payload(key=key, builder=build)) == ["a", "z"]
+    with sqlite3.connect(store.db) as c:
+        c.execute("INSERT INTO sessions VALUES('n','committed by Desktop')")
+        c.execute("INSERT INTO messages VALUES(3,'n')")
+    fail.append(1)  # only the builder's read hits the lock
+    stale = r._get_cached_session_list_payload(key=key, builder=build)
+    assert ids(stale) == ["a", "z"], "the builder served last-known-good rows"
+    store.gateway.write_text(json.dumps({"external_metadata_tick": 51}))
+    _payload, status = r._session_list_cache_probe(key)
+    assert status != r._SESSION_LIST_CACHE_HELD
+    assert ids(r._get_cached_session_list_payload(key=key, builder=build)) == ["a", "n", "z"]
+
+
+def test_mark_partial_build_marks_a_single_profile_stamp_unreadable(monkeypatch):
+    import api.route_session_list_cache as cache
+
+    stamp = (1, 2, 3, 4, 5, ("fp",), None, 8)
+    monkeypatch.setattr(cache, "_session_list_cache_roster_epoch", lambda: (0, 1))
+    marked = cache._session_list_cache_mark_partial_build(stamp, (0, 0))
+    assert marked[5] is models._CONTENT_FINGERPRINT_UNREADABLE and marked[:5] == stamp[:5] and marked[6:] == stamp[6:]
+    assert cache._session_list_cache_stamp_hold_evidence(marked) is None
+    assert cache._session_list_cache_mark_partial_build(stamp, (0, 1)) == stamp
