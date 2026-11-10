@@ -1069,3 +1069,245 @@ def test_frontend_goal_control_command_keeps_pending_marker():
     assert re.search(r"_stillPending\.model\s*===\s*_goalModel", post_request)
     assert re.search(r"_stillPending\.model_provider", post_request)
     assert re.search(r"_clearPendingSessionModel\(activeSid\)", post_request)
+
+
+_CONTRACT_GOAL_TEXT = (
+    "Ship the export endpoint\n"
+    "outcome: GET /export returns CSV for every active account\n"
+    "verification: uv run pytest tests/test_export.py passes and the response shows a CSV header\n"
+    "constraints: existing export tests stay unchanged\n"
+    "boundaries: api/export.py and tests/test_export.py only\n"
+    "stop when: the schema needs a migration"
+)
+
+
+def test_goal_command_payload_parses_inline_contract_fields(monkeypatch, tmp_path):
+    """Inline contract lines become the goal's contract, not part of the goal text."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    payload = webui_goals.goal_command_payload("sid-contract", _CONTRACT_GOAL_TEXT)
+    state = webui_goals._manager("sid-contract").state
+
+    assert payload["ok"] is True
+    assert payload["kickoff_prompt"] == "Ship the export endpoint"
+    assert state.goal == "Ship the export endpoint"
+    assert state.contract.outcome == "GET /export returns CSV for every active account"
+    assert state.contract.verification.startswith("uv run pytest tests/test_export.py passes")
+    assert state.contract.constraints == "existing export tests stay unchanged"
+    assert state.contract.boundaries == "api/export.py and tests/test_export.py only"
+    assert state.contract.stop_when == "the schema needs a migration"
+
+
+def test_goal_command_payload_keeps_plain_goal_without_contract(monkeypatch):
+    """Plain goal text is still passed through unchanged with no contract."""
+    from api import goals as webui_goals
+
+    calls = []
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.state = None
+
+        def set(self, goal, **kwargs):
+            calls.append((goal, kwargs))
+            return SimpleNamespace(goal=goal, max_turns=20)
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
+
+    payload = webui_goals.goal_command_payload("sid-plain", "fix: the flaky test")
+
+    assert payload["kickoff_prompt"] == "fix: the flaky test"
+    assert calls == [("fix: the flaky test", {})]
+
+
+def test_goal_gate_command_is_refused_and_keeps_goal(monkeypatch, tmp_path):
+    """/goal gate … never replaces the goal, adds a gate, or kicks off a turn."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    webui_goals.goal_command_payload("sid-gate", "ship the feature")
+    for args in ("gate add uv run pytest", "gate", "GATE list"):
+        payload = webui_goals.goal_command_payload("sid-gate", args)
+        assert payload["ok"] is False
+        assert payload["error"] == "unsupported_gate"
+        assert "kickoff_prompt" not in payload or not payload["kickoff_prompt"]
+
+    state = webui_goals._manager("sid-gate").state
+    assert state.goal == "ship the feature"
+    assert not state.gates
+
+
+def test_goal_command_payload_keeps_contract_of_long_goal(monkeypatch, tmp_path):
+    """Contract lines after a long headline still reach the contract, not the truncated goal."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    headline = "Ship the export endpoint " + "with careful detail " * 120
+
+    webui_goals.goal_command_payload("sid-long", headline + "\nverification: pytest passes")
+    state = webui_goals._manager("sid-long").state
+
+    assert state.goal == headline.strip()
+    assert "verification:" not in state.goal
+    assert state.contract.verification == "pytest passes"
+
+
+def test_legacy_profile_goal_manager_stores_inline_contract(monkeypatch, tmp_path):
+    """The explicit-DB fallback manager keeps the parsed contract too."""
+    from api import goals as webui_goals
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    monkeypatch.setattr(webui_goals, "_native_profile_context_api", lambda _home: None)
+
+    webui_goals.goal_command_payload("sid-legacy", _CONTRACT_GOAL_TEXT, profile_home=tmp_path)
+    mgr = webui_goals._manager("sid-legacy", profile_home=tmp_path)
+
+    assert isinstance(mgr, webui_goals._LegacyProfileGoalManager)
+    assert mgr.state.goal == "Ship the export endpoint"
+    assert mgr.state.contract.stop_when == "the schema needs a migration"
+
+
+def test_goal_command_payload_double_dash_sets_goal_starting_with_control_word(monkeypatch):
+    """`/goal -- <text>` sets goal text that starts with gate or another control word."""
+    from api import goals as webui_goals
+
+    calls = []
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.state = None
+
+        def set(self, goal, **kwargs):
+            calls.append(goal)
+            return SimpleNamespace(goal=goal, max_turns=20)
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
+
+    gate_goal = webui_goals.goal_command_payload("sid-dash", "-- gate the release behind a flag")
+    pause_goal = webui_goals.goal_command_payload("sid-dash", "-- pause the cron")
+
+    assert gate_goal["ok"] is True and gate_goal["kickoff_prompt"] == "gate the release behind a flag"
+    assert pause_goal["ok"] is True and pause_goal["kickoff_prompt"] == "pause the cron"
+    assert calls == ["gate the release behind a flag", "pause the cron"]
+
+
+@pytest.mark.parametrize("adapter_mode", ["", "legacy-journal", "runner-local"])
+def test_goal_endpoint_refuses_gate_without_kickoff_or_goal_change(monkeypatch, tmp_path, adapter_mode):
+    """POST /api/goal `gate add …` is a 400 refusal before any kickoff setup, in every adapter mode."""
+    from api import goals as webui_goals
+    from api import routes
+
+    existing = SimpleNamespace(
+        goal="ship the feature", status="active", turns_used=0, max_turns=20,
+        last_verdict=None, last_reason=None, paused_reason=None, gates=[],
+    )
+    set_calls = []
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.state = existing
+
+        def set(self, goal, **kwargs):
+            set_calls.append(goal)
+            raise AssertionError("a gate command must not set the goal")
+
+    class FakeSession:
+        session_id = "sid-goal-route"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("kickoff setup must not run for /goal gate")
+
+    session = FakeSession()
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", adapter_mode)
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", fail)
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fail)
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fail)
+    monkeypatch.setattr(routes, "build_runtime_adapter", fail, raising=False)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(
+        object(),
+        {
+            "session_id": "sid-goal-route",
+            "args": "gate add uv run pytest tests/test_export.py",
+            "workspace": str(tmp_path),
+            "model": "gpt-5.5",
+            "model_provider": "openai-codex",
+            "explicit_model_pick": True,
+        },
+    )
+
+    assert result["status"] == 400
+    assert result["payload"]["ok"] is False
+    assert result["payload"]["error"] == "unsupported_gate"
+    assert "/goal gate is not supported" in result["payload"]["message"]
+    assert "stream_id" not in result["payload"]
+    assert "kickoff_prompt" not in result["payload"]
+    assert set_calls == []
+    assert existing.goal == "ship the feature" and existing.gates == []
+    assert not hasattr(session, "model_explicit_pick_signature")
+
+
+def test_goal_endpoint_stores_inline_contract_and_kicks_off_headline(monkeypatch, tmp_path):
+    """POST /api/goal with contract lines stores the contract and starts the headline turn."""
+    from api import goals as webui_goals
+    from api import routes
+    pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+
+    class FakeSession:
+        session_id = "sid-goal-contract-route"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    started = []
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_WEBUI_RUNTIME_ADAPTER", raising=False)
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: None)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **_: (model, provider, False),
+    )
+
+    def fake_start(session, **kwargs):
+        started.append(kwargs)
+        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(
+        object(),
+        {"session_id": "sid-goal-contract-route", "args": _CONTRACT_GOAL_TEXT, "workspace": str(tmp_path)},
+    )
+    state = webui_goals._manager("sid-goal-contract-route").state
+
+    assert result["status"] == 200
+    assert started and started[0]["msg"] == "Ship the export endpoint"
+    assert state.goal == "Ship the export endpoint"
+    assert state.contract.verification.startswith("uv run pytest tests/test_export.py passes")
+    assert state.contract.stop_when == "the schema needs a migration"

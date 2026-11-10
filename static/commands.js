@@ -51,7 +51,10 @@ function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
   const name=parts[0].toLowerCase();
-  const args=parts.slice(1).join(' ').trim();
+  // Keep line boundaries: /goal reads inline contract fields line by line.
+  const args=text.slice(1).replace(/^\S*/,'').split('\n')
+    .map(line=>line.split(/\s+/).filter(Boolean).join(' '))
+    .filter(Boolean).join('\n');
   return {name,args};
 }
 
@@ -1673,7 +1676,10 @@ async function cmdGoal(args){
     attachLiveStream(activeSid,r.stream_id,[]);
     if(typeof renderSessionList==='function')void renderSessionList();
   }catch(e){
-    const err=String((e&&e.message)||e||'Goal command failed');
+    let err=String((e&&e.message)||e||'Goal command failed');
+    // A refused /goal (e.g. the unsupported /goal gate) explains itself in
+    // `message`; `error` is only the machine-readable code.
+    try{const body=JSON.parse((e&&e.body)||'');if(body&&body.message)err=String(body.message);}catch(_){}
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});
     showToast(err,3000);

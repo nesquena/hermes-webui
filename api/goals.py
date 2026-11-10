@@ -28,6 +28,11 @@ except Exception:  # pragma: no cover - depends on installed hermes-agent
     GoalState = None  # type: ignore
     judge_goal = None  # type: ignore
 
+try:  # Older hermes-agent builds predate inline completion contracts.
+    from hermes_cli.goals import parse_contract  # type: ignore
+except Exception:  # pragma: no cover - depends on installed hermes-agent
+    parse_contract = None  # type: ignore
+
 GoalManager = _NativeGoalManager  # type: ignore
 
 _DB_CACHE: dict[str, Any] = {}
@@ -227,7 +232,7 @@ class _LegacyProfileGoalManager:
             return f"✓ Goal done ({turns}): {s.goal}"
         return f"Goal ({s.status}, {turns}): {s.goal}"
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None):
+    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Any = None):
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
@@ -238,6 +243,7 @@ class _LegacyProfileGoalManager:
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
             created_at=time.time(),
             last_turn_at=0.0,
+            **({"contract": contract} if contract is not None else {}),
         )
         self._state = state
         self._save(state)
@@ -522,6 +528,31 @@ def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Pa
         logger.debug("Goal state restore failed for %s: %s", session_id, exc)
 
 
+def is_goal_gate_command(args: str) -> bool:
+    """Return True when /goal args are a ``gate`` subcommand rather than goal text."""
+    words = str(args or "").split(None, 1)
+    return bool(words) and words[0].lower() == "gate"
+
+
+def goal_gate_refusal_payload(state: Any = None) -> Dict[str, Any]:
+    """Refuse /goal gate without touching the goal.
+
+    Gates are shell commands rerun after every turn with no later approval, and
+    WebUI has no rule yet for who may add them.
+    """
+    return _payload(
+        ok=False,
+        action="gate",
+        error="unsupported_gate",
+        message=(
+            "/goal gate is not supported in WebUI: gates run shell commands after every "
+            "turn without another approval. The current goal is unchanged. "
+            "To set a goal that starts with the word gate, use /goal -- <text>."
+        ),
+        state=state,
+    )
+
+
 def goal_command_payload(
     session_id: str,
     args: str = "",
@@ -536,8 +567,12 @@ def goal_command_payload(
     - /goal pause pauses
     - /goal resume resumes without auto-starting a turn
     - /goal clear|stop|done clears
+    - /goal gate ... is refused without touching the goal: gates run shell
+      commands after every turn and WebUI has no rule yet for who may add them
+    - /goal -- <text> sets goal text that starts with a control word
     - /goal <text> sets a new active goal and returns kickoff_prompt so the
-      caller can start the first normal user-role turn immediately.
+      caller can start the first normal user-role turn immediately. Inline
+      ``outcome:``/``verification:``/... lines become the completion contract.
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -604,6 +639,9 @@ def goal_command_payload(
             state=getattr(mgr, "state", None),
         )
 
+    if is_goal_gate_command(text):
+        return goal_gate_refusal_payload(getattr(mgr, "state", None))
+
     if stream_running:
         return _payload(
             ok=False,
@@ -615,8 +653,18 @@ def goal_command_payload(
             ),
         )
 
+    if text.split(None, 1)[0] == "--":
+        # `/goal -- <text>` sets goal text that starts with a control word.
+        text = text[2:].strip()
+    # Split inline contract lines off the headline the way Hermes Agent's
+    # /goal handler does; text without contract lines is stored verbatim.
+    goal_text, set_kwargs = text, {}
+    if parse_contract is not None:
+        headline, contract = parse_contract(text)
+        if not contract.is_empty():
+            goal_text, set_kwargs = headline or text, {"contract": contract}
     try:
-        state = mgr.set(text)
+        state = mgr.set(goal_text, **set_kwargs)
     except ValueError as exc:
         return _payload(ok=False, action="set", error="invalid_goal", message=f"Invalid goal: {exc}")
 

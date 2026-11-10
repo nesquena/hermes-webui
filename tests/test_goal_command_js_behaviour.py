@@ -128,6 +128,7 @@ function extractFunc(name) {
   return src.slice(start, i);
 }
 eval(extractFunc('cmdGoal'));
+eval(extractFunc('parseCommand'));
 
 // ---- scenario state ----
 const SID = 'sid-6705-behaviour';
@@ -189,6 +190,20 @@ const S = {
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
     out.markerAfter = readPending(SID);
+  } else if (scenario === 'gate_refused_shows_message') {
+    // The server refuses /goal gate with HTTP 400; api() throws with the body.
+    _nextResponse = () => {
+      const body = JSON.stringify({ ok: false, error: 'unsupported_gate', message: 'gate refused, goal unchanged' });
+      const err = new Error('unsupported_gate');
+      err.status = 400;
+      err.body = body;
+      throw err;
+    };
+    await cmdGoal('gate add uv run pytest');
+    out.lastMessage = S.messages[S.messages.length - 1];
+  } else if (scenario === 'parse_multiline_goal') {
+    out.parsed = parseCommand('/goal  Ship it\noutcome: CSV\n\nstop when:  a migration');
+    out.singleLine = parseCommand('/goal   ship   the feature ');
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -258,3 +273,17 @@ def test_goal_kickoff_without_marker_sends_no_explicit_pick(driver_path):
     out = _run_scenario(driver_path, "no_marker_no_pick")
     assert "explicit_model_pick" not in out["payload"]
     assert out["markerAfter"] is None
+
+
+def test_goal_refusal_shows_server_message_not_error_code(driver_path):
+    """A refused /goal gate shows the server's explanation, not the bare error code."""
+    out = _run_scenario(driver_path, "gate_refused_shows_message")
+    assert out["lastMessage"]["content"] == "**Goal command failed:** gate refused, goal unchanged"
+
+
+def test_parse_command_keeps_line_boundaries_for_goal_contract_lines(driver_path):
+    """The /goal contract parser works line by line, so parseCommand must not flatten newlines."""
+    out = _run_scenario(driver_path, "parse_multiline_goal")
+    assert out["parsed"] == {"name": "goal", "args": "Ship it\noutcome: CSV\nstop when: a migration"}
+    # Single-line arguments are still whitespace-collapsed as before.
+    assert out["singleLine"] == {"name": "goal", "args": "ship the feature"}
