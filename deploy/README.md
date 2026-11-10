@@ -67,7 +67,7 @@ sudo passwd deployer
 
 # 5. Verify (the PAM gate prompts for the password; --fail surfaces
 #    HTTP errors instead of printing an error page as success)
-curl --fail --user deployer -k https://<your-host>:8787/api/status
+curl --fail --user deployer -k https://<your-host>:8787/health
 ```
 
 ## Architecture
