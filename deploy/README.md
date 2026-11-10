@@ -56,7 +56,11 @@ sudo nginx -t && sudo systemctl reload nginx
 #     correct password for other users (e.g. deployer). Set the `user`
 #     directive in /etc/nginx/nginx.conf to `user root;` and restart
 #     nginx. See Security notes for the tradeoff.
-sudo sed -i -E 's/^\s*user\s+\w+;/user root;/' /etc/nginx/nginx.conf
+#     The pattern must allow a hyphen in the account name: `\w` does not
+#     match `-`, so `s/^\s*user\s+\w+;/…/` silently no-ops on Debian's
+#     default `user www-data;` — the exact case this step targets.
+sudo sed -i -E 's/^[[:space:]]*user[[:space:]]+[A-Za-z0-9_-]+;/user root;/' /etc/nginx/nginx.conf
+sudo grep -qE '^[[:space:]]*user[[:space:]]+root;' /etc/nginx/nginx.conf || echo "WARNING: nginx worker user not set to root — PAM logins will fail" >&2
 sudo systemctl restart nginx
 
 # 4. Create system users that PAM will authenticate.
