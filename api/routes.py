@@ -21344,6 +21344,35 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            try:
+                # Exact sibling from Session.save()'s torn-byte salvage (#8807).
+                # Do not use a prefix glob: only this known suffix.
+                p.with_suffix('.json.torn').unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session torn salvage file %s", p.with_suffix('.json.torn'))
+            # Session.save() may leave `<sid>.json.torn.tmp.<pid>.<thread>` when
+            # salvage rename/cleanup is denied (#8807 gate R1). Match that exact
+            # producer grammar only — never a broad prefix that could hit a
+            # neighboring session id.
+            try:
+                torn_tmp_re = re.compile(
+                    rf'^{re.escape(p.name)}\.torn\.tmp\.\d+\.\d+$'
+                )
+                for sibling in p.parent.iterdir():
+                    if not sibling.is_file():
+                        continue
+                    if torn_tmp_re.fullmatch(sibling.name):
+                        try:
+                            sibling.unlink(missing_ok=True)
+                        except Exception:
+                            logger.debug(
+                                "Failed to unlink session torn salvage temp %s",
+                                sibling,
+                            )
+            except Exception:
+                logger.debug(
+                    "Failed to scan torn salvage temps for session file %s", p
+                )
             if sidecar_deleted and not is_messaging_session:
                 try:
                     _record_webui_deleted_session_tombstone(sid)
