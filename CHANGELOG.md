@@ -121,6 +121,8 @@
 
 ### Fixed
 
+- **Gateway-backed sessions refuse the features that would run the agent inside WebUI.** `/btw`, `/background`, `/compress`, the non-streaming `/api/chat` and the one-shot helper calls (update summaries, commit messages) build an in-process agent. On a gateway-backed deployment they failed with a provider-credential error or quietly ran a turn outside the gateway. They now return 409 with `code: "gateway_mode_unsupported"` and the feature name, before any session, stream or compression job is created. Non-gateway setups are unchanged. Thanks @samikrc. (#8860, fixes #8821)
+
 - **`POST /api/session/new` refuses a profile value that is not a profile name.** The route passed the request body's `profile` straight to workspace resolution and session creation, so a forged body could create a session (and, with `worktree: true`, a worktree and a saved file) under a non-profile value and get a 200. It now validates the optional profile at the top of the handler, with the same rule the other routes use, before any read, cache or write. Thanks @webtecnica. (#8886, fixes #8862)
 
 - **A session still saves when its old file was cut mid-character.** If a session's previous JSON file ended in the middle of a multi-byte UTF-8 character, the shrink-backup read in `Session.save()` raised an uncaught `UnicodeDecodeError` and the good in-memory session was never saved. An undecodable old file is now handled like malformed JSON, and when a shrink backup is due it copies the old file's exact bytes. Normal saves are unchanged. Thanks @balabommablock-cpu. (#8807, fixes #8798)
