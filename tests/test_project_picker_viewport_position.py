@@ -1911,7 +1911,8 @@ def test_picker_refresh_reconciles_by_identity_and_no_scroll_focus_for_replaceme
     script = _DRIVER_PREFIX + _REFRESH_FAKE_EXTENSIONS + _show_project_picker_source() + r"""
 openPicker(260);
 const rowsBefore = mountedPicker.querySelectorAll('.project-picker-item[data-project-id]');
-rowsBefore.find(row => row.getAttribute('data-project-id') === 'p1').focus();
+const p1Index = rowsBefore.findIndex(row => row.getAttribute('data-project-id') === 'p1');
+rowsBefore[p1Index].focus();
 _allProjects.splice(_allProjects.findIndex(p => p.project_id === 'p1'), 1);
 const focusBefore = focusCalls.length;
 _openProjectPicker.refreshChoices();
@@ -1921,12 +1922,16 @@ const survivorsKept = rowsAfter.every(row => {
   return before === row;
 });
 const refreshFocus = focusCalls.slice(focusBefore);
+// The replacement is the row that now sits where the deleted one was; with the
+// alphabetical presentation order that is not the next project id.
+const replacement = rowsAfter[Math.min(p1Index, rowsAfter.length - 1)];
 console.log(JSON.stringify({
   survivorsKept,
   moves: refreshMoves,
   refreshFocusCount: refreshFocus.length,
   lastPreventScroll: refreshFocus.length ? refreshFocus[refreshFocus.length - 1].preventScroll : null,
   activeId: document.activeElement && document.activeElement.getAttribute('data-project-id'),
+  expectedId: replacement && replacement.getAttribute('data-project-id'),
   ids: rowsAfter.map(r => r.getAttribute('data-project-id')),
 }));
 """
@@ -1937,7 +1942,7 @@ console.log(JSON.stringify({
     assert data["moves"] == [], "Surviving choices must not be DOM-moved"
     assert data["refreshFocusCount"] == 1, "Only the replacement focus may run"
     assert data["lastPreventScroll"] is True, "The replacement focus must be a no-scroll focus"
-    assert data["activeId"] == "p2"
+    assert data["activeId"] == data["expectedId"]
     assert "p1" not in data["ids"]
 
 
