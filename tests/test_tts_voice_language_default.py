@@ -148,20 +148,41 @@ def _fail_if_called(*_a, **_kw):
     raise AssertionError("Edge voice resolution ran where it must not")
 
 
+def _deny_provider_credentials(monkeypatch, *keys):
+    """Make the missing-key precondition explicit instead of environmental.
+
+    The credential check falls back to ``_load_env_file(profile_home/".env")``
+    when the variable is unset, so clearing ``os.environ`` alone is not
+    isolation: a real key on the host would let the request reach provider I/O
+    (measured: with ``OPENAI_API_KEY`` set, the handler resolves the provider
+    host and raises before this test's 503 assertion). Clear every key the
+    branch reads and stub the env-file loader, as
+    ``tests/test_issue4982_openai_tts.py`` does.
+    """
+    import api.onboarding as onboarding
+
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_kw: {})
+
+
 def test_openai_request_never_reads_edge_config(monkeypatch):
     monkeypatch.setattr(routes, "_default_edge_voice", _fail_if_called)
+    _deny_provider_credentials(monkeypatch, "OPENAI_API_KEY", "VOICE_TOOLS_OPENAI_KEY")
     h = _post({"text": "hello", "engine": "openai"}, client="10.42.0.1")
     routes._handle_tts(h, None)
-    # No OpenAI key in the test env: the request stops at the credential check.
-    assert h.status == 503
+    # No OpenAI credential anywhere: the request stops at the credential check.
+    assert h.status == 503, h.payload()
+    assert "OpenAI API key not configured" in (h.payload() or {}).get("error", "")
 
 
 def test_elevenlabs_request_never_reads_edge_config(monkeypatch):
     monkeypatch.setattr(routes, "_default_edge_voice", _fail_if_called)
-    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    _deny_provider_credentials(monkeypatch, "ELEVENLABS_API_KEY")
     h = _post({"text": "hello", "engine": "elevenlabs"}, client="10.42.0.2")
     routes._handle_tts(h, None)
-    assert h.status in (503,)
+    assert h.status == 503, h.payload()
+    assert "ELEVENLABS_API_KEY not configured" in (h.payload() or {}).get("error", "")
 
 
 def test_profile_mismatch_is_409_without_reading_config(monkeypatch):
