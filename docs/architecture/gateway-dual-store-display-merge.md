@@ -105,9 +105,16 @@ Nothing else pairs. A row without that proof renders as it did before this
 reconciliation existed: a duplicate row is a cosmetic wart, a hidden reply
 is lost data.
 
-Only a pair with exactly one identified row reconciles; pairs where both or
-neither carry an id are left to the merge-key and dedup lanes below. The
-pass is linear in the number of rows.
+Two rows that both carry a stable id stay distinct messages. A pair with one
+identified row folds into it. A pair with no stable id on either side -- the
+gateway's display prompt has none, only its context copy does -- folds into
+the sidecar row, and only when the Agent row still has the timestamp the
+sidecar recorded for it (the stamped one, or for a row copied verbatim from
+state.db, its own). Such a survivor is admitted with the identified rows and
+kept out of the coarse pools below: its one cross-store twin is already
+proven, so it neither absorbs another Agent row with the same text in the
+same second nor is absorbed by one. The pass is linear in the number of
+rows.
 
 ## What travels, and in which direction
 
@@ -182,7 +189,9 @@ identity, input immutability, the identity-compatibility guard, the exact
 row-id lane, the shapes that broke every text-based fallback (an old turn
 whose Agent copy is gone against a later Telegram turn with the same text, a
 repeated prompt, rows before the first prompt, renumbered rows), the private
-reader identity, a reissued row id, one id on two sidecar rows, and the
+reader identity, a reissued row id, one id on two sidecar rows, proven pairs
+with no stable id on either side (including an end-to-end gateway turn
+written to a real state.db and reloaded from disk), and the
 gateway writeback stamping (one-turn window, the stamped timestamp, dropped
 inherited ids on the turn rows and on the eagerly saved display row, a
 failure that keeps the reply, no read for a superseded stream).

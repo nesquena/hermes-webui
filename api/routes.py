@@ -13282,9 +13282,10 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 ),
             )
 
-            # Unidentified position -> the identified twin it folds into.
-            # Pairs where both or neither carry an id stay with the merge-key
-            # and dedup lanes below.
+            # Folded position -> the twin it folds into: the identified row,
+            # or the sidecar row when neither carries a stable id (the
+            # gateway's display prompt has none; only its context copy does).
+            # Two identified rows stay distinct messages.
             survivor_for = {}
             # Exact lane, the only pairing: the same state.db row id, and the
             # same text, on one row per store. A rewrite (/retry, /undo,
@@ -13301,7 +13302,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     continue
                 agent_row, sidecar_row = ordered[agent_side[0]][0], ordered[sidecar_side[0]][0]
                 if (
-                    _identified(sidecar_row) == _identified(agent_row)
+                    (_identified(sidecar_row) and _identified(agent_row))
                     or _cross_store_pairing_key(agent_row, from_sidecar=False)
                     != _cross_store_pairing_key(sidecar_row, from_sidecar=True)
                     or not _cross_store_pairable(sidecar_row, agent_row)
@@ -13309,12 +13310,28 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                         STATE_DB_ROW_TIMESTAMP_KEY in sidecar_row
                         and sidecar_row[STATE_DB_ROW_TIMESTAMP_KEY] != agent_row.get("timestamp")
                     )
+                    # With no stable id on either side, the Agent's own
+                    # timestamp is required: the stamped one, or for a row
+                    # copied verbatim from state.db, its own.
+                    or (
+                        not _identified(sidecar_row)
+                        and not _identified(agent_row)
+                        and sidecar_row.get(STATE_DB_ROW_TIMESTAMP_KEY, sidecar_row.get("timestamp"))
+                        != agent_row.get("timestamp")
+                    )
                 ):
                     continue
-                if _identified(sidecar_row):
-                    survivor_for[agent_side[0]] = sidecar_side[0]
-                else:
+                if _identified(agent_row):
                     survivor_for[sidecar_side[0]] = agent_side[0]
+                else:
+                    survivor_for[agent_side[0]] = sidecar_side[0]
+            # An unidentified survivor is admitted with the identified rows
+            # and kept out of the coarse pools below: its one cross-store
+            # twin is already proven, so it must neither absorb another
+            # Agent row with the same text nor be absorbed by one.
+            unidentified_survivors = {
+                position for position in survivor_for.values() if not _identified(ordered[position][0])
+            }
             seen_message_keys = set()
             kept_positions = set()
             # An unidentified row with no paired survivor falls back to
@@ -13359,7 +13376,11 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             for identified_pass in (True, False):
                 for position, (msg, from_sidecar, _index) in enumerate(ordered):
                     has_identity = _identified(msg)
-                    if has_identity != identified_pass:
+                    if (has_identity or position in unidentified_survivors) != identified_pass:
+                        continue
+                    if position in unidentified_survivors:
+                        seen_unmatched_exact_keys.add((from_sidecar, _session_message_dedup_key(msg)))
+                        kept_positions.add(position)
                         continue
                     if has_identity:
                         key = _session_message_merge_key(msg)
@@ -13368,13 +13389,16 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                         seen_message_keys.add(key)
                         kept_positions.add(position)
                         continue
+                    exact_key = (from_sidecar, _session_message_dedup_key(msg))
                     survivor = survivor_for.get(position)
                     if survivor in kept_positions:
                         _reconcile_cross_store_twin(
                             survivor, ordered[survivor][0], msg, from_sidecar
                         )
+                        # A byte-identical copy in the same store is still
+                        # the same message.
+                        seen_unmatched_exact_keys.add(exact_key)
                         continue
-                    exact_key = (from_sidecar, _session_message_dedup_key(msg))
                     if exact_key in seen_unmatched_exact_keys:
                         continue
                     cross_key = _session_message_merge_key(msg)

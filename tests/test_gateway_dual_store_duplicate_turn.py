@@ -204,6 +204,8 @@ import copy
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 import api.models as models
 import api.routes as routes
 
@@ -1888,3 +1890,172 @@ def test_a_display_row_without_a_proven_stamp_loses_its_inherited_one(tmp_path, 
 
     assert [m.get("_state_db_row_id") for m in saved.messages] == [None, None]
 
+
+
+# ---------------------------------------------------------------------------
+# The gateway's display prompt carries no stable id (only its context copy
+# does), so a proven pair may have no stable id on either side. It folds
+# into the sidecar row, which is then admitted like an identified row and
+# kept out of the coarse pools: its one cross-store twin is already proven.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ts_user, ts_reply",
+    [(1794298528.8887627, 1794298530.1234567), (1762790000, 1762790001)],
+)
+def test_real_gateway_turn_renders_once_after_a_reload(tmp_path, monkeypatch, ts_user, ts_reply):
+    """End to end, in the shape production writes: a real state.db, the real
+    reader and worker, an eagerly saved prompt with no stable id, and the
+    session reloaded from disk before the merge."""
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "
+            "role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, "
+            "tool_name TEXT, api_content TEXT, reasoning TEXT, active INTEGER DEFAULT 1)"
+        )
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    monkeypatch.setattr(models, "_get_profile_home", lambda profile: tmp_path)
+    read_run_rows = models.state_db_session_rows_after
+
+    def agent_writes_the_run(sid, floor, profile=None):
+        with sqlite3.connect(db_path) as conn:
+            conn.executemany(
+                "INSERT INTO messages (session_id, role, content, timestamp, tool_calls, tool_call_id, "
+                "tool_name, reasoning) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (sid, "user", "continue", ts_user, None, None, None, None),
+                    (sid, "assistant", "", ts_user + 0.1, '[{"id": "c1", "type": "function"}]', None, None, None),
+                    (sid, "tool", "ok", ts_user + 0.2, None, "c1", "x", None),
+                    (sid, "assistant", "Done.", ts_reply, None, None, None, "thinking"),
+                ],
+            )
+        return read_run_rows(sid, 0, profile=profile)
+
+    saved = _run_gateway_turn(tmp_path, monkeypatch, rows_after=agent_writes_the_run, checkpoint={})
+    assert not saved.messages[0].get("id"), "the display prompt has no stable id"
+
+    models.SESSIONS.clear()
+    session = models.get_session(saved.session_id)
+    cli_messages = models.get_cli_session_messages(session.session_id, include_row_identity=True)
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["content"] for m in merged if m["role"] == "user"] == ["continue"]
+    assert [m.get("reasoning") for m in merged if m["content"] == "Done."] == ["thinking"]
+    assert all("_state_db_row_id" not in m for m in merged if m["role"] == "tool")
+
+
+def test_proven_pair_without_stable_ids_folds_into_the_sidecar_row():
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "go", "timestamp": 100.2, "attachments": ["a.png"],
+             "_state_db_row_id": 10, "_state_db_row_timestamp": 99.0},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "go", "timestamp": 99.0, "api_content": "go[bytes]", "_state_db_row_id": 10},
+        {"role": "tool", "content": "ok", "timestamp": 99.5, "tool_call_id": "c1", "_state_db_row_id": 11},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    prompts = [m for m in merged if m["role"] == "user"]
+    assert len(prompts) == 1
+    assert prompts[0]["attachments"] == ["a.png"], "the sidecar row survives"
+    assert prompts[0]["api_content"] == "go[bytes]", "the Agent payload moves onto it"
+    assert "api_content" not in session.messages[0], "on a copy"
+
+
+def test_a_proven_survivor_does_not_absorb_another_same_second_agent_row():
+    """A Telegram prompt with the same text in the same second as the sidecar
+    copy is a different message; the survivor's twin is already proven."""
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "continue", "timestamp": 100.2,
+             "_state_db_row_id": 10, "_state_db_row_timestamp": 99.0},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "continue", "timestamp": 99.0, "_state_db_row_id": 10},
+        {"role": "user", "content": "continue", "timestamp": 100.5, "reasoning": "telegram", "_state_db_row_id": 12},
+        {"role": "assistant", "content": "x", "timestamp": 101.0, "_state_db_row_id": 13},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [(m["timestamp"], m.get("reasoning")) for m in merged if m["role"] == "user"] == [
+        (100.2, None),
+        (100.5, "telegram"),
+    ]
+
+
+def test_a_proven_survivor_is_not_absorbed_by_another_turns_agent_row():
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "continue", "timestamp": 100.2, "attachments": ["a.png"],
+             "_state_db_row_id": 10, "_state_db_row_timestamp": 103.0},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "continue", "timestamp": 100.1, "_state_db_row_id": 5},
+        {"role": "user", "content": "continue", "timestamp": 103.0, "_state_db_row_id": 10},
+        {"role": "assistant", "content": "x", "timestamp": 104.0, "_state_db_row_id": 13},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [(m["timestamp"], m.get("attachments")) for m in merged if m["role"] == "user"] == [
+        (100.1, None),
+        (100.2, ["a.png"]),
+    ]
+
+
+def test_without_stable_ids_a_row_id_needs_the_agents_own_timestamp():
+    """A sidecar row copied from state.db carries the row id but no stamp;
+    its own timestamp must then be the Agent's, or a reissued id could fold
+    another turn's row."""
+    cli_messages = [
+        {"role": "user", "content": "go", "timestamp": 900.0, "_state_db_row_id": 7},
+        {"role": "tool", "content": "ok", "timestamp": 901.0, "tool_call_id": "c1", "_state_db_row_id": 8},
+    ]
+
+    copied = SimpleNamespace(messages=[{"role": "user", "content": "go", "timestamp": 900.0, "_state_db_row_id": 7}])
+    merged = routes._merged_session_messages_for_display(copied, cli_messages)
+    assert [m["content"] for m in merged] == ["go", "ok"]
+
+    reissued = SimpleNamespace(messages=[{"role": "user", "content": "go", "timestamp": 5.0, "_state_db_row_id": 7}])
+    merged = routes._merged_session_messages_for_display(reissued, cli_messages)
+    assert [m["timestamp"] for m in merged if m["role"] == "user"] == [5.0, 900.0]
+
+
+def test_two_identified_rows_with_one_row_id_stay_distinct():
+    session = SimpleNamespace(
+        messages=[{"id": "u1", "role": "user", "content": "go", "timestamp": 1.1, "_state_db_row_id": 1}]
+    )
+    cli_messages = [
+        {"id": "agent-u1", "role": "user", "content": "go", "timestamp": 1.0, "_state_db_row_id": 1},
+        {"role": "tool", "content": "ok", "timestamp": 2.0, "tool_call_id": "c1", "_state_db_row_id": 2},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m.get("id") for m in merged if m["role"] == "user"] == ["agent-u1", "u1"]
+
+
+def test_an_exact_agent_copy_of_a_folded_row_still_collapses():
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "continue", "timestamp": 99.3,
+             "_state_db_row_id": 10, "_state_db_row_timestamp": 99.0},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "continue", "timestamp": 99.0, "_state_db_row_id": 10},
+        {"role": "user", "content": "continue", "timestamp": 99.0, "_state_db_row_id": 11},
+        {"role": "assistant", "content": "x", "timestamp": 101.0, "_state_db_row_id": 12},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["timestamp"] for m in merged if m["role"] == "user"] == [99.3]
