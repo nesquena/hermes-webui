@@ -432,21 +432,61 @@ def _gitignore_snapshot(root: Path) -> _GitignoreSnapshot:
         return _GitignoreSnapshot(GITIGNORE_UNKNOWN)
 
 
+#: What the installed helper appends, byte for byte, when the file did not end
+#: with a newline: the entry alone. With a missing trailing newline it writes
+#: one first, so the appended run is ``\n`` + this entry.
+_WORKTREES_ENTRY_LINE = f"{WORKTREES_DIRNAME}/\n".encode()
+
+
 def _is_the_agents_entry(after: bytes, before: bytes | None) -> bool:
-    """True only when *after* is *before* plus the entry the Agent appends.
+    """True only when *after* is *before* plus the exact bytes the Agent appends.
 
     The installed helper writes ``.worktrees/\\n`` (prefixed by ``\\n`` when the
-    file did not end with one), so the only change attributable to it is a
-    suffix that strips to exactly that entry. Anything else — another writer's
-    line, a wholesale rewrite, a mangled join — is not ours to undo.
+    file did not end with one), so the only change attributable to it is that
+    run of bytes. The suffix is compared verbatim, never normalised: a user who
+    edits the appended rule to a bare ``.worktrees`` has made an edit of their
+    own, and a ``strip()`` here would read it as the Agent's authority to delete
+    or rewrite it. Anything else — another writer's line, a wholesale rewrite, a
+    mangled join — is not ours to undo.
     """
     prior = before or b""
     if not after.startswith(prior):
         return False
-    return after[len(prior):].strip() in (
-        WORKTREES_DIRNAME.encode(),
-        f"{WORKTREES_DIRNAME}/".encode(),
-    )
+    separator = b"" if not prior or prior.endswith(b"\n") else b"\n"
+    return after[len(prior) :] == separator + _WORKTREES_ENTRY_LINE
+
+
+def _read_all(fd: int) -> bytes:
+    """Read *fd* from the start to EOF."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _unlink_if_it_is_still_the_file_we_read(path: Path, fd: int) -> None:
+    """Unlink *path* only while it still names the inode open as *fd*.
+
+    ``unlink`` takes a path, so between the attribution read and the call the
+    path can be pointed at a file an editor just saved. Writing or unlinking
+    through the wrong path is how a user's edit is lost; identity is checked
+    against the descriptor we already hold instead.
+    """
+    held = os.fstat(fd)
+    try:
+        at_path = os.stat(path)
+    except OSError:
+        return
+    if (at_path.st_dev, at_path.st_ino) != (held.st_dev, held.st_ino):
+        logger.debug(
+            "leaving %s alone: it was replaced while its change was being attributed",
+            path,
+        )
+        return
+    os.unlink(path)
 
 
 def _restore_gitignore(root: Path, before: _GitignoreSnapshot) -> None:
@@ -459,31 +499,58 @@ def _restore_gitignore(root: Path, before: _GitignoreSnapshot) -> None:
     concurrent edit or a file another writer created is left alone: this
     function can undo only what it can attribute, and deleting or rewriting
     someone else's ``.gitignore`` is worse than a stray ignore line.
+
+    The file is opened once and every step — the attribution read, the
+    re-verification read, the truncate-and-write — happens on that descriptor,
+    so a save that lands after the check is seen by the second read and the
+    entry is left in place. There is no path-based ownership heuristic to get
+    wrong: if the bytes are not still ours, nothing is written.
     """
     if before.state == GITIGNORE_UNKNOWN:
         logger.debug("leaving %s alone: its prior content could not be read", root / ".gitignore")
         return
     path = root / ".gitignore"
     try:
-        after = path.read_bytes()
-    except OSError:
-        # Unreadable now as well, or gone (a dangling symlink reads as
-        # FileNotFoundError): either way there is nothing to put back.
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        # Gone (or a dangling symlink): there is nothing to put back.
         return
-    if not _is_the_agents_entry(after, before.content):
-        logger.debug(
-            "leaving %s alone: its change is not the Agent's %s entry",
-            path,
-            WORKTREES_DIRNAME,
-        )
+    except OSError:
+        logger.debug("leaving %s alone: it could not be opened", path, exc_info=True)
         return
     try:
+        after = _read_all(fd)
+        if not _is_the_agents_entry(after, before.content):
+            logger.debug(
+                "leaving %s alone: its change is not the Agent's %s entry",
+                path,
+                WORKTREES_DIRNAME,
+            )
+            return
+        if after == (before.content or b""):
+            # The helper found the entry already there and wrote nothing.
+            return
+        if _read_all(fd) != after:
+            # An editor saved between the two reads. The change is no longer
+            # provably the Agent's, so the entry stays rather than the edit
+            # being lost.
+            logger.debug(
+                "leaving %s alone: it changed while its change was being attributed",
+                path,
+            )
+            return
         if before.state == GITIGNORE_ABSENT:
-            path.unlink()
+            _unlink_if_it_is_still_the_file_we_read(path, fd)
         else:
-            path.write_bytes(before.content or b"")
+            # ftruncate does not move the offset, and the reads above left it at
+            # EOF: without the seek the write would land after a run of NULs.
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, before.content or b"")
     except OSError:
         logger.debug("could not restore %s", path, exc_info=True)
+    finally:
+        os.close(fd)
 
 
 def _ensure_worktrees_ignored(root: Path) -> None:

@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from api import worktrees as api_worktrees
 from api.worktree_placement import (
     PLACEMENT_MAIN,
     PLACEMENT_MOVE_FAILED,
@@ -32,6 +33,16 @@ from api.worktree_placement import (
 )
 from api.worktrees import create_worktree_for_workspace
 from tests import _worktree_git as wt
+
+#: Whether mode bits can actually deny a read in this process.
+#:
+#: The platform check comes first and is structural: Windows has no
+#: ``os.geteuid``, so an expression that calls it before looking at ``os.name``
+#: raises at import time and turns a test that should skip into a collection
+#: error. ``hasattr`` covers the same gap on any platform without a POSIX uid.
+_MODE_BITS_DENY_READS = (
+    os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0
+)
 
 
 def _lock_reason(primary: Path, tree: Path) -> str | None:
@@ -302,9 +313,119 @@ def test_a_concurrent_gitignore_edit_is_not_clobbered(tmp_path):
     )
 
 
+@pytest.mark.parametrize("gitignore", [None, "node_modules/\n"])
+def test_a_bare_worktrees_rule_is_not_ours_to_delete(tmp_path, gitignore):
+    """The helper appends ``.worktrees/`` *with* its newline. A user who edits
+    that rule down to a bare ``.worktrees`` has made an edit of their own, and
+    stripping the suffix read it as the Agent's authority: the file was deleted
+    when it had not existed before, or truncated back over the edit when it had.
+    """
+    primary, session = _session_checkout(tmp_path, gitignore)
+    edited = ".worktrees" if gitignore is None else "node_modules/\n.worktrees"
+
+    def user_edit(root: Path, info: dict) -> None:
+        wt.write(root / ".gitignore", edited)
+
+    info = create_worktree_for_workspace(
+        session, setup=_producer_then("hermes-bare-rule", user_edit)
+    )
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == edited
+
+
+def test_a_gitignore_that_already_ignored_the_trees_is_untouched(tmp_path):
+    """Native no-op: the helper found ``.worktrees/`` already listed and wrote
+    nothing, so there is no edit to undo. Restore must not truncate the file to
+    the snapshot on the strength of a suffix that was there before the call."""
+    primary, session = _session_checkout(tmp_path, "node_modules/\n.worktrees/\n")
+
+    info = create_worktree_for_workspace(
+        session, setup=wt.agent_producer(name="hermes-already-ignored")
+    )
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == (
+        "node_modules/\n.worktrees/\n"
+    )
+
+
+def test_the_agents_entry_after_a_file_without_a_trailing_newline_is_undone(tmp_path):
+    """Native shape: the helper writes its own newline before the entry when the
+    file did not end with one, so the prior bytes (no trailing newline) are put
+    back unchanged."""
+    primary, session = _session_checkout(tmp_path, "node_modules/")
+
+    info = create_worktree_for_workspace(
+        session, setup=wt.agent_producer(name="hermes-no-newline")
+    )
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == "node_modules/"
+
+
+def test_a_save_after_the_attribution_read_is_not_overwritten(tmp_path, monkeypatch):
+    """An editor that saves between the attribution read and the destructive
+    write must win. The replacement here still ends with the native entry, so
+    the suffix verdict taken before it was written authorises the restore: only
+    the second read of the same descriptor, immediately before writing, notices
+    the file is no longer the one the change was attributed to.
+    """
+    primary, session = _session_checkout(tmp_path, "node_modules/\n")
+    saved = "node_modules/\ndist/\n.worktrees/\n"
+
+    def save_after_the_verdict(root: Path, info: dict) -> None:
+        real = api_worktrees._is_the_agents_entry
+
+        def attributing_then_saved(after: bytes, before: bytes | None) -> bool:
+            ours = real(after, before)
+            if ours:
+                wt.write(root / ".gitignore", saved)
+            return ours
+
+        monkeypatch.setattr(api_worktrees, "_is_the_agents_entry", attributing_then_saved)
+
+    info = create_worktree_for_workspace(
+        session, setup=_producer_then("hermes-raced", save_after_the_verdict)
+    )
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == saved
+
+
+def test_the_agent_created_file_survives_a_rename_save(tmp_path, monkeypatch):
+    """An editor that saves by renaming a new file over the path leaves the
+    bytes identical, so the second read cannot tell and only the inode says the
+    file is not the one the change was attributed to. Unlinking by path would
+    delete the user's file anyway.
+    """
+    primary, session = _session_checkout(tmp_path, None)
+
+    def rename_after_the_verdict(root: Path, info: dict) -> None:
+        real = api_worktrees._is_the_agents_entry
+
+        def attributing_then_renamed(after: bytes, before: bytes | None) -> bool:
+            ours = real(after, before)
+            if ours:
+                ignore = root / ".gitignore"
+                replacement = root / ".gitignore.saved"
+                replacement.write_bytes(ignore.read_bytes())
+                os.replace(replacement, ignore)
+            return ours
+
+        monkeypatch.setattr(api_worktrees, "_is_the_agents_entry", attributing_then_renamed)
+
+    info = create_worktree_for_workspace(
+        session, setup=_producer_then("hermes-rename-save", rename_after_the_verdict)
+    )
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == ".worktrees/\n"
+
+
 @pytest.mark.skipif(
-    os.geteuid() == 0 or os.name == "nt",
-    reason="needs a non-root POSIX user: root reads straight through a 000 mode",
+    not _MODE_BITS_DENY_READS,
+    reason="needs a non-root POSIX user: root and Windows both read through a 000 mode",
 )
 def test_an_unreadable_gitignore_is_not_deleted(tmp_path):
     """An unreadable snapshot is not an absent file. Read permission is not
@@ -397,8 +518,8 @@ def test_unknown_admin_dir_query_refuses_the_move_before_unlocking(tmp_path, mon
 
 
 @pytest.mark.skipif(
-    os.geteuid() == 0 or os.name == "nt",
-    reason="needs a non-root POSIX user: root reads straight through a 000 mode",
+    not _MODE_BITS_DENY_READS,
+    reason="needs a non-root POSIX user: root and Windows both read through a 000 mode",
 )
 def test_unreadable_lock_file_refuses_the_move_before_unlocking(tmp_path, monkeypatch):
     """A lock file that exists but cannot be read is ``unknown``, not
@@ -447,7 +568,7 @@ def test_genuinely_unlocked_tree_moves_and_stays_unlocked(tmp_path):
 
 
 @pytest.mark.skipif(
-    os.geteuid() == 0 or os.name == "nt",
+    not _MODE_BITS_DENY_READS,
     reason="needs a non-root POSIX user: root and Windows ignore the destination permissions",
 )
 def test_failed_move_after_unlock_restores_the_lock(tmp_path):
