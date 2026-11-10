@@ -58,7 +58,12 @@ from api.goal_continuation_store import _ROLLBACK_RECEIPT_TTL_SECONDS as _TTL  #
 from tests.test_issue7862_round18_findings import (  # noqa: E402
     _arm_and_consume,
     _cancel_deferred_timer,
-    clean_registry,
+    # Imported under its own name so pytest can DISCOVER this fixture in this
+    # module: a fixture is only visible to a test that imports it by name.
+    # The module-level name is shadowed by the fixture parameters of the same
+    # name inside the test bodies, which ruff reports as F811/F401 — hence the
+    # scoped noqa with the reason inline.
+    clean_registry,  # noqa: F401
 )
 
 
@@ -105,7 +110,7 @@ class TestALiveRecoveryDoesNotRepublishDischargedWork:
     ran.
     """
 
-    def test_the_recovery_drops_a_handoff_a_peer_discharged(self, clean_registry):
+    def test_the_recovery_drops_a_handoff_a_peer_discharged(self, clean_registry):  # noqa: F811
         store = clean_registry
         early_sid = "sess-r19-recover-early"
         late_sid = "sess-r19-recover-late"
@@ -187,7 +192,7 @@ class TestALiveRecoveryDoesNotRepublishDischargedWork:
         )
 
     def test_a_live_restore_still_preserves_an_unrelated_live_handoff(
-        self, clean_registry
+        self, clean_registry  # noqa: F811
     ):
         """Control: the round-16 CORE preservation must survive the reconcile.
 
