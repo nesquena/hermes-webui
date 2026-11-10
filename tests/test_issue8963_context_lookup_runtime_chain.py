@@ -18,6 +18,7 @@ Streaming needs no change: its five lookup sites pass the chat's merged bundle (
 from it), and the lookup returns that pair. The stream rows below pin it.
 """
 import copy
+import re
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -214,12 +215,14 @@ def test_an_exact_switched_off_record_beside_a_legacy_entry_keeps_the_chats_lega
 
 
 def test_the_lookup_adds_no_switched_off_verdict_on_the_chat_route(monkeypatch):
-    """#8938 item 1's ``_context_lookup_provider_disabled`` is the config selection's own. The chat-route helper
-    consults no switched-off verdict at all: the merge it runs is the chat's."""
+    """#8938 item 1's ``_context_lookup_provider_disabled`` is the config selection's own. Neither GET nor the model
+    switch consults it on the chat route: the merge they run is the chat's. The spy answers "switched off" for every
+    call, so a consulted verdict would also show up as a dropped key."""
     seen = []
     monkeypatch.setattr(routes, "_context_lookup_provider_disabled", lambda *a, **k: seen.append(a) or True)
     cfg = _cfg({"custom:h": {"base_url": A, "api_key": "KX", "enabled": False}}, legacy=EXACT_OFF_BESIDE_LEGACY[0][1])
     assert _get(cfg, monkeypatch) == [(L, "KL")]
+    assert _switch(cfg, monkeypatch) == [(L, "KL")]
     assert seen == []
 
 
@@ -234,10 +237,12 @@ def test_streaming_drops_the_agents_resolution_error_and_routes_through_the_merg
     head = src.rindex("_rt = resolve_runtime_provider_with_anthropic_env_lock(", 0, warn)
     assert "_rt = {}" in src[head - 1500:head]
     assert "except Exception as _e:" in src[head:warn]
-    tail = src[warn:warn + 4000]
-    assert "_runtime_bundle = _resolve_runtime_connection_bundle(" in tail
-    assert "raise_for_custom_provider_route(_runtime_bundle)" in tail
-    assert "raise" not in src[warn:warn + 200].split("\n", 1)[1].split("\n", 1)[0]
+    bundle = src.index("_runtime_bundle = _resolve_runtime_connection_bundle(", warn)
+    assert bundle - warn < 4000
+    assert "raise_for_custom_provider_route(_runtime_bundle)" in src[bundle:bundle + 2000]
+    # Between the dropped error and the merge nothing stops the turn: no raise, no return (comments aside).
+    code = [line.split("#", 1)[0] for line in src[warn:bundle].splitlines()[1:]]
+    assert not [line for line in code if re.search(r"\b(raise|return)\b", line)], code
 
 
 def _streaming_bundle(cfg, monkeypatch, provider):
