@@ -119,6 +119,12 @@
 
 ### Fixed
 
+- **A session still saves when its old file was cut mid-character.** If a session's previous JSON file ended in the middle of a multi-byte UTF-8 character, the shrink-backup read in `Session.save()` raised an uncaught `UnicodeDecodeError` and the good in-memory session was never saved. An undecodable old file is now handled like malformed JSON, and when a shrink backup is due it copies the old file's exact bytes. Normal saves are unchanged. Thanks @balabommablock-cpu. (#8807, fixes #8798)
+
+- **Test drivers decode piped input as UTF-8 across chunk boundaries.** Thirteen test files feed `static/*.js` through a small node driver that joined raw stdin chunks, so a multi-byte character split across two chunks arrived as replacement characters and broke the test intermittently (seen on macOS). Each driver now sets `process.stdin.setEncoding('utf8')` first. Tests only. (#8933)
+
+- **The test suite no longer writes into your real Hermes skills folder.** The session test server linked the developer's real `~/.hermes/skills` into its test home, so tests that save and delete a skill wrote through to it, and a failure between the two left a test skill behind. The test home now starts with no skills, as on CI. Tests only. (#8932, fixes #8929)
+
 - **The clarify-timeout tests follow the installed Agent's default.** Agent `177dbc1bcbf1` changed the canonical clarify timeout default from 3600 to 90 seconds, and WebUI uses the Agent's resolver by design, so two tests that hard-coded 3600 failed with current Agents. For absent or invalid values they now expect the installed Agent's own answer, and a new test pins WebUI's inline fallback (3600) when the Agent package can't be imported. Test-only; WebUI clarify prompts follow the Agent's default as before. (#8943, fixes #8942)
 
 - **The docs link check can no longer cancel a release check.** The broken-link step in `docs-ci` was meant to be informational, but it had no time limit of its own: when GitHub throttled its requests, the job's 8-minute limit cancelled the whole job, and a cancelled check stops a release merge. The step now has its own 5-minute limit, so a slow run ends as an informational failure and the job stays green. It also skips `CONTRIBUTORS.md`, whose ~470 GitHub profile links come from GitHub's own merged-PR list. CI-only; no app change. (#8946, fixes #8945)
