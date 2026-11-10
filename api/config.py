@@ -630,6 +630,41 @@ def _config_view() -> dict:
     return private if private is not None else cfg
 
 
+def _expand_private_config(raw: dict) -> dict:
+    """Expand ``${VAR}`` in a private config read the way the Agent does for this profile (#8970).
+
+    Inside a named profile's worker scope the Agent's own expander
+    (``hermes_cli.config._expand_env_vars``) reads each reference through
+    ``agent.secret_scope.get_secret``: the profile's ``.env`` first, process-global
+    deployment variables (for example ``API_SERVER_PORT``) from the process env, and
+    nothing else, because a scope serving a routed profile never falls through to
+    another profile's process env. That is what the chat's runtime reads for this
+    profile, so it is used only while that holds: a secret scope is bound, it serves a
+    routed profile (``serves_routed_profile()``), and the Agent resolves references
+    through the scope (``_env_ref_lookup``). Otherwise, or if the expander fails,
+    WebUI's own expansion runs under the scope's thread env with the process-env
+    fallback blocked, which leaves an unresolved reference verbatim: fail closed.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    try:
+        from agent.secret_scope import current_secret_scope, serves_routed_profile
+        from hermes_cli import config as agent_config
+
+        if (
+            current_secret_scope() is not None
+            and serves_routed_profile()
+            and callable(getattr(agent_config, "_env_ref_lookup", None))
+        ):
+            expanded = agent_config._expand_env_vars(raw)
+            if isinstance(expanded, dict):
+                return expanded
+    except Exception:
+        logger.debug("private config: Agent env expansion unavailable", exc_info=True)
+    expanded = _expand_env_vars(raw)
+    return expanded if isinstance(expanded, dict) else {}
+
+
 @contextmanager
 def thread_private_config():
     """Serve THIS thread's config reads from a private read of its config.yaml (#8970).
@@ -640,15 +675,15 @@ def thread_private_config():
     directly, so it holds whichever profile refilled it last. A detached worker
     that runs one session's job enters this scope INSIDE its profile scope
     (``profile_scope_for_detached_worker``): the file ``_get_config_path()`` now
-    names is read once, directly, the way ``get_config_for_profile_home`` reads a
-    diverging profile (``${VAR}`` expanded under the scope's thread env). While
+    names is read once, directly, with ``${VAR}`` expanded the way the Agent
+    expands it under the scope's secret scope (:func:`_expand_private_config`). While
     the path still matches, ``get_config()``, ``get_config_snapshot()`` and the
     resolvers on this thread serve that dict; the shared cache is neither read
     nor refilled, so other profiles' requests are unaffected. The previous state
     is restored on exit, including on exceptions.
     """
     config_path = _get_config_path()
-    private = _load_yaml_config_file(config_path)
+    private = _expand_private_config(_load_yaml_config_file_raw(config_path))
     _apply_config_defaults(private)
     previous = getattr(_thread_ctx, "private_config", None)
     _thread_ctx.private_config = (config_path, private)

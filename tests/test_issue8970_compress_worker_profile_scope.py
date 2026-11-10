@@ -605,3 +605,109 @@ def test_renamed_root_alias_keeps_the_root_env_for_templated_config(
 
     assert job["status"] == "done", job.get("error")
     assert agents and agents[0]["provider"] == "openai"
+
+
+# ── ${VAR} expansion in the private read (Codex r2) ──────────────────────────
+
+
+def _real_agent_runtime(monkeypatch):
+    """The real Agent modules, with only its credential resolver and AIAgent stubbed."""
+    runtime_provider = pytest.importorskip("hermes_cli.runtime_provider")
+    secret_scope = pytest.importorskip("agent.secret_scope")
+    if not hasattr(secret_scope, "serves_routed_profile"):
+        pytest.skip("installed Agent predates serves_routed_profile")
+
+    agents = []
+
+    class RecordingAgent:
+        def __init__(self, **kwargs):
+            self.context_compressor = _FakeCompressor()
+            agents.append(kwargs)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = RecordingAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        runtime_provider,
+        "resolve_runtime_provider",
+        lambda requested=None, **_kw: {
+            "api_key": f"runtime-key-{requested}",
+            "provider": requested,
+            "base_url": "https://runtime.invalid/v1",
+        },
+    )
+    return agents
+
+
+def test_a_named_profile_endpoint_on_a_process_global_variable_still_resolves(
+    homes, make_session, monkeypatch
+):
+    """A ``${API_SERVER_PORT}``-style endpoint expands as the Agent expands it.
+
+    The Agent reads process-global deployment variables from the process env
+    even inside a routed profile's secret scope; master's worker read them
+    through the shared cache. Leaving the reference verbatim would hand the
+    client ``http://127.0.0.1:${API_SERVER_PORT}/v1`` and fail the job.
+    """
+    agents = _real_agent_runtime(monkeypatch)
+    (homes.work / "config.yaml").write_text(
+        "model:\n"
+        "  provider: custom:lab\n"
+        "  default: lab-model\n"
+        "platform_toolsets:\n"
+        "  cli: []\n"
+        "custom_providers:\n"
+        "  - name: lab\n"
+        "    base_url: http://127.0.0.1:${API_SERVER_PORT}/v1\n"
+        "    api_key: work-lab-key\n"
+        "    model: lab-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("API_SERVER_PORT", "18080")
+
+    sid = make_session("work", model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
+
+    assert job["status"] == "done", job.get("error")
+    assert agents and agents[0]["base_url"] == "http://127.0.0.1:18080/v1"
+
+
+def test_the_private_read_never_falls_back_to_a_process_only_secret(homes, monkeypatch):
+    """Inside the named profile's scope: the profile ``.env`` wins, process-global
+    variables expand, and a process-only secret stays verbatim (no fallback to
+    another profile's process env). ``${env:VAR}`` follows the same rule."""
+    from api import config, profiles
+
+    _real_agent_runtime(monkeypatch)
+    (homes.work / "config.yaml").write_text(
+        "custom_providers:\n"
+        "  - name: lab\n"
+        "    base_url: http://127.0.0.1:${API_SERVER_PORT}/v1\n"
+        "    api_key: ${LAB_PROCESS_ONLY_SECRET}\n"
+        "    key_env: ${env:LAB_PROCESS_ONLY_SECRET}\n"
+        "    model: ${WORK_LAB_MODEL}\n",
+        encoding="utf-8",
+    )
+    (homes.work / ".env").write_text("WORK_LAB_MODEL=work-model\n", encoding="utf-8")
+    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    monkeypatch.setenv("LAB_PROCESS_ONLY_SECRET", "process-secret-value")
+    monkeypatch.setenv("WORK_LAB_MODEL", "process-model")
+
+    seen = {}
+
+    def run():
+        with profiles.profile_scope_for_detached_worker("work", "manual compression"), (
+            config.thread_private_config()
+        ) as private:
+            seen["record"] = dict(private["custom_providers"][0])
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(30)
+
+    record = seen["record"]
+    assert record["base_url"] == "http://127.0.0.1:18080/v1"
+    assert record["model"] == "work-model"
+    assert record["api_key"] == "${LAB_PROCESS_ONLY_SECRET}"
+    assert record["key_env"] == "${env:LAB_PROCESS_ONLY_SECRET}"
+    assert "process-secret-value" not in json.dumps(seen)
