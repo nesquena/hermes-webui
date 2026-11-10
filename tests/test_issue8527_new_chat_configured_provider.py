@@ -2695,6 +2695,157 @@ def test_loaded_session_custom_pick_survives_a_later_empty_catalog_refresh():
 
 
 # ---------------------------------------------------------------------------
+# Maintainer re-gate (2026-11-10, PR #8576 bounded follow-up): a QUALIFIED
+# custom pick must survive a LATER empty catalogue refresh.
+#
+# A named custom route renders its dropdown option in the qualified
+# @<provider>:<model> form, so the boot-time change handler records the RAW
+# qualified value in the session-scoped marker while the persisted pair the
+# same pick wrote holds the NORMALISED model id (_modelStateForSelect strips
+# the custom namespace's duplicated prefix, #6884). Once a later empty
+# catalogue refresh clears the <select>, the persisted arm is the only source
+# left — and it compared the marker's raw qualified value against the
+# normalised persisted model VERBATIM, so it rejected the pick and
+# /api/session/new went out with NEITHER model NOR provider.
+#
+# The residual predates the reviewed fixes (the same gap exists on the
+# predecessor branch): an incompletely closed fresh-pick requirement, not a
+# regression introduced by them. The fix compares normalised model IDENTITIES
+# while provider authority stays on the marker.
+# ---------------------------------------------------------------------------
+
+# The qualified pick the user makes on the loaded destination session: a
+# named custom route's option is @custom:review-route:gpt-5.4-mini, so the
+# marker records that qualified value and the persisted pair the same pick
+# writes holds the stripped model id.
+_QUALIFIED_CUSTOM_PICK = {"value": "gpt-5.4-mini", "provider": "custom:review-route"}
+_QUALIFIED_CUSTOM_VALUE = "@custom:review-route:gpt-5.4-mini"
+_QUALIFIED_CUSTOM_PAIR = {"model": "gpt-5.4-mini", "model_provider": "custom:review-route"}
+
+
+def _assert_qualified_pick_evidence(result, label):
+    """The pick really produced the two differently-shaped records the fix has
+    to reconcile: the RAW qualified value in the session-scoped marker, the
+    NORMALISED pair in the shared persisted store and on the loaded session."""
+    after_pick = result["afterPickEvidence"]
+    assert after_pick["explicitPick"] == {
+        "value": _QUALIFIED_CUSTOM_VALUE, "model_provider": "custom:review-route",
+    }, (
+        f"[{label}] the boot change handler must record the picker's raw "
+        f"qualified value; got {after_pick['explicitPick']!r}"
+    )
+    assert after_pick["persisted"] == _QUALIFIED_CUSTOM_PAIR, (
+        f"[{label}] the persisted pair must hold the normalised model id; got "
+        f"{after_pick['persisted']!r}"
+    )
+    assert after_pick["sessionModel"] == _QUALIFIED_CUSTOM_PAIR["model"], (
+        f"[{label}] the loaded session must hold the pick's normalised model; "
+        f"got {after_pick['sessionModel']!r}"
+    )
+    assert after_pick["sessionModelProvider"] == "custom:review-route", (
+        f"[{label}] the loaded session must hold the pick's provider; got "
+        f"{after_pick['sessionModelProvider']!r}"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_qualified_custom_pick_survives_a_later_empty_catalog_refresh(flow):
+    """The bounded RED case: after a model-less switch with an EMPTY catalogue,
+    a QUALIFIED custom pick on the loaded destination session must still reach
+    New Chat once a LATER empty refresh has quarantined the picker again.
+
+    RED on the reviewed head: the marker holds the raw qualified value
+    ('@custom:review-route:gpt-5.4-mini') while the persisted pair holds the
+    normalised model ('gpt-5.4-mini'); the verbatim comparison rejected the
+    pick and the POST carried NEITHER model NOR model_provider.
+    """
+    result = _run_refresh_driver(_loaded_session_pick_scenario(
+        flow, _EMPTY_CATALOG_PAYLOAD, _STALE_SAME_MODEL_PICKER,
+        customPick=_QUALIFIED_CUSTOM_PICK,
+        postPickRefresh=True,
+    ))
+    assert result["ok"], result.get("error")
+
+    _assert_qualified_pick_evidence(result, "qualified pick")
+
+    # The later empty refresh quarantined the picker again and left the
+    # one-shot gate armed, so the persisted arm is the only source left.
+    after_repick = result["afterRepickRefresh"]
+    assert after_repick["guard"], (
+        "the second empty refresh must leave the reset gate armed"
+    )
+    assert after_repick["pickerOptions"] == [], (
+        "the second empty refresh must quarantine the picker again; got "
+        f"{after_repick['pickerOptions']!r}"
+    )
+    assert result["afterRepickRefreshEvidence"]["explicitPick"] == {
+        "value": _QUALIFIED_CUSTOM_VALUE, "model_provider": "custom:review-route",
+    }, (
+        "the marker must survive the catalog refresh; got "
+        f"{result['afterRepickRefreshEvidence']['explicitPick']!r}"
+    )
+
+    bodies = result["newSessionBodies"]
+    _assert_switch_created_model_less_first(bodies, flow, "qualified pick")
+    body = bodies[-1]
+    assert body.get("profile") == _SWITCH_NAME, (
+        f"the request must be scoped to the destination profile; got "
+        f"{body.get('profile')!r}"
+    )
+    assert body.get("model") == _QUALIFIED_CUSTOM_PAIR["model"], (
+        "the qualified pick must survive the later empty refresh — the marker "
+        f"and the persisted pair name the same model identity; got "
+        f"{body.get('model')!r}"
+    )
+    assert body.get("model_provider") == "custom:review-route", (
+        "the marker's own provider must travel (never the previous profile's "
+        f"route); got {body.get('model_provider')!r}"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_qualified_pick_keeps_its_provider_against_another_tabs_rewrite(flow):
+    """The identity comparison must not reopen the cross-tab hole: the shared
+    persisted store still belongs to another tab, so provider authority stays
+    on the marker even when the candidate is a qualified pick.
+
+    RED on the reviewed head: the verbatim comparison rejected the qualified
+    pick outright, so the POST carried no model at all.
+    """
+    result = _run_refresh_driver(_loaded_session_pick_scenario(
+        flow, _EMPTY_CATALOG_PAYLOAD, _STALE_SAME_MODEL_PICKER,
+        customPick=_QUALIFIED_CUSTOM_PICK,
+        postPickRefresh=True,
+        postPickPersistedOverride={
+            "model": _QUALIFIED_CUSTOM_PAIR["model"],
+            "model_provider": "other-tab-route",
+        },
+    ))
+    assert result["ok"], result.get("error")
+
+    _assert_qualified_pick_evidence(result, "qualified pick, other tab")
+
+    assert result["afterNewSessionEvidence"]["persisted"] == {
+        "model": _QUALIFIED_CUSTOM_PAIR["model"], "model_provider": "other-tab-route",
+    }, (
+        "the other tab's stored pair must be the persisted evidence under "
+        f"test; got {result['afterNewSessionEvidence']['persisted']!r}"
+    )
+
+    bodies = result["newSessionBodies"]
+    _assert_switch_created_model_less_first(bodies, flow, "qualified pick, other tab")
+    body = bodies[-1]
+    assert body.get("model") == _QUALIFIED_CUSTOM_PAIR["model"], (
+        "the pick itself must still reach New Chat; got "
+        f"{body.get('model')!r}"
+    )
+    assert body.get("model_provider") == "custom:review-route", (
+        "the marker's provider must win over another tab's same-model/"
+        f"different-provider rewrite; got {body.get('model_provider')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Greptile review 2026-11-08 (PR #8576) — three follow-ups
 # ---------------------------------------------------------------------------
 #
