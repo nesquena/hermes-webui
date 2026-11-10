@@ -1041,6 +1041,32 @@ def _chat_start_requested_profile(body):
     return requested_profile, False
 
 
+def _new_session_requested_profile(body):
+    """Parse /api/session/new's optional ``profile``: ``(value, invalid)``.
+
+    ``None``/absent/``""`` keeps the pre-#8862 behaviour (the active profile
+    applies).  A non-string JSON value or a string that isn't a profile id is a
+    malformed request, so the route answers 400 before any session, worktree or
+    memory write (#8862).  A well-formed but unknown name is still returned as
+    valid: whether an unknown profile should be refused is a product decision,
+    not part of this guard.
+    """
+    raw_profile = body.get("profile")
+    if raw_profile is None or raw_profile == "":
+        return None, False
+    if not isinstance(raw_profile, str):
+        return raw_profile, True
+    try:
+        from api.profiles import _PROFILE_ID_RE
+    except ImportError:
+        # Pre-profile-install deployments: nothing to validate against, so keep
+        # forwarding the value exactly as before.
+        return raw_profile, False
+    if not _PROFILE_ID_RE.fullmatch(raw_profile):
+        return raw_profile, True
+    return raw_profile, False
+
+
 def _owner_readings_visible(readings, handler) -> bool:
     """Whether any of ``session_owner_readings_readonly``'s readings is visible to the request."""
     return any(
@@ -20203,6 +20229,13 @@ def handle_post(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/session/new":
+        # #8862: a forged request used to reach new_session()/worktree creation
+        # with whatever ``profile`` it sent (int, bool, list, dict, "../evil").
+        # Refuse a malformed value here, before any read, cache or write; the
+        # absent/None/"" case still means "the active profile".
+        requested_profile, requested_profile_invalid = _new_session_requested_profile(body)
+        if requested_profile_invalid:
+            return bad(handler, "invalid profile", 400)
         workspace_prev_session_id = body.get("prev_session_id")
         if workspace_prev_session_id and not _session_id_visible_to_request_profile(
             handler, workspace_prev_session_id, emit_error=False
@@ -20210,7 +20243,7 @@ def handle_post(handler, parsed) -> bool:
             workspace_prev_session_id = None
         try:
             workspace = _resolve_new_session_workspace(
-                body, workspace_prev_session_id, profile=body.get("profile") or None
+                body, workspace_prev_session_id, profile=requested_profile or None
             )
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
@@ -20334,7 +20367,7 @@ def handle_post(handler, parsed) -> bool:
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
+            profile=requested_profile or None,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
