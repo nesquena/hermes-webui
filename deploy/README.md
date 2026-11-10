@@ -21,9 +21,13 @@ level — no `HERMES_WEBUI_PASSWORD` is needed.
 
 1. **`hermes-webui.service`** — systemd unit that runs `./start.sh` on
    `127.0.0.1:8788` (loopback only, backend port differs from external port).
+   Its `ExecStartPre` runs `check-env.sh` to fail fast on an `.env` conflict.
 2. **`nginx-webui.conf`** — nginx TLS + PAM + Host-rewrite reverse proxy on
    port 8787.
 3. **`webui-auth.pam`** — PAM service config for `auth_pam` module.
+4. **`check-env.sh`** — pre-start guard: refuses to boot when `.env` pins a
+   different `HERMES_WEBUI_PORT`/`HERMES_WEBUI_HOST` than the unit requires
+   (`.env` overrides the unit, so the conflict is otherwise a silent 502).
 
 ## Installation
 
@@ -32,8 +36,19 @@ level — no `HERMES_WEBUI_PASSWORD` is needed.
 #    hermes-webui.service runs as User=hermeswebui; without the account,
 #    systemd fails before start.sh runs. If you instead run the unit as
 #    your existing installation owner, change User=/Group= in the unit.
+#
+#    The unit runs ExecStartPre=deploy/check-env.sh, which refuses to start
+#    when .env contradicts the address the unit requires. That check exists
+#    because start.sh sources .env AFTER inheriting the unit's Environment=
+#    values (`set -a; source .env`) and bootstrap.py loads .env again on
+#    import — so **.env always wins** over the unit. A stale
+#    HERMES_WEBUI_PORT=8787 left in .env would start the backend on 8787
+#    while nginx proxies to 8788, and the only symptom is a silent 502.
+#    Remove those keys from .env (the unit provides them) or set them to the
+#    same values.
 sudo useradd --system --home /opt/hermes-webui --shell /usr/sbin/nologin hermeswebui
 sudo chown -R hermeswebui:hermeswebui /opt/hermes-webui
+sudo chmod 755 /opt/hermes-webui/deploy/check-env.sh
 
 # 1. Install the systemd unit (edit HERMES_WEBUI_ALLOWED_ORIGINS to your
 #    external origin https://<server_name>:8787 — see Security notes)
@@ -90,6 +105,12 @@ Browser  -->  nginx (port 8787, TLS, PAM auth)  -->  hermes-webui.service (port 
 - The backend **must** stay on `127.0.0.1` (`HERMES_WEBUI_HOST=127.0.0.1`) — never
   bind to `0.0.0.0` unless you also set `HERMES_WEBUI_PASSWORD` for built-in auth.
 - Do **not** set `HERMES_WEBUI_PASSWORD` — PAM auth at the proxy replaces it.
+- **`.env` overrides the unit.** `start.sh` sources `.env` after inheriting the
+  unit's `Environment=` values, and `bootstrap.py` loads it again, so a
+  `HERMES_WEBUI_PORT`/`HERMES_WEBUI_HOST` in `.env` silently wins. The unit's
+  `ExecStartPre` (`deploy/check-env.sh`) refuses to start when those disagree
+  with `127.0.0.1:8788` rather than serving a 502 — check `journalctl` if the
+  unit will not start.
 - PAM requires nginx workers to run as root (`user root;` in `nginx.conf`,
   Installation step 3b): `pam_unix` checks passwords against `/etc/shadow`,
   which only root can read, and its `unix_chkpwd` helper verifies only the
