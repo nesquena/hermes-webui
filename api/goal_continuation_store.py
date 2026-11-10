@@ -308,6 +308,57 @@ def _dirty_restore_survives_the_merge(sid: str, record: dict, fence: dict) -> bo
     return not _record_is_retired(sid, record)
 
 
+def _reconcile_local_state_with_disk_unlocked(disk: dict, disk_handoffs: dict) -> int:
+    """Drop local records/tokens the durable tables no longer carry.
+
+    #7862 re-gate round 19 (P1, "completed work returns after recovery"): the
+    registry is no longer only written at startup — the deferred handoff
+    recovery re-runs ``restore_goal_continuations()`` in a LIVE process, and
+    that restore's closing snapshot serialises THIS process's in-memory tables.
+    An entry a peer discharged (a launched handoff) or consumed (a pending
+    record) between the passes therefore has to be reconciled away here, under
+    the same file transaction, or the snapshot republishes it and a later
+    restart restores work that already ran.
+
+    This is the drop half of the merge in ``_merge_disk_state_unlocked``,
+    shared so the two writers cannot drift:
+
+    * a record absent from disk was consumed or retired by a peer — except a
+      rollback-restored record whose own snapshot write failed (the warm-path
+      ENOSPC fence, round 16 CORE finding 3), which is absent on disk by
+      construction and stays exempt until it lands;
+    * a handoff absent from disk was discharged or taken over by a peer —
+      except a token this process deliberately withheld from disk (an adoption
+      conversion, whose in-memory copy anchors the receipt's liveness).
+
+    Returns the number of dropped entries. Callers hold a transaction.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+
+    dropped = 0
+    for sid in [s for s in PENDING_GOAL_CONTINUATION_RECORDS if s not in disk]:
+        fence = _RESTORE_WRITE_FAILED_SESSIONS.get(sid)
+        if fence is not None and _dirty_restore_survives_the_merge(
+            sid, PENDING_GOAL_CONTINUATION_RECORDS.get(sid) or {}, fence
+        ):
+            continue
+        _RESTORE_WRITE_FAILED_SESSIONS.pop(sid, None)
+        # A peer consumed or retired this intent: the durable state is the
+        # truth, and this stale copy must not be re-spent or republished.
+        PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
+        PENDING_GOAL_CONTINUATION.discard(sid)
+        _RETIRED_GENERATIONS.pop(sid, None)
+        dropped += 1
+    for key in [k for k in _CONTINUATION_HANDOFF_TOKENS if k not in disk_handoffs]:
+        if _CONTINUATION_HANDOFF_TOKENS[key].get("_handoff_adopted_into_record"):
+            # Withheld from disk by design, not lost: keep the conversion
+            # marker and the token it anchors.
+            continue
+        del _CONTINUATION_HANDOFF_TOKENS[key]
+        dropped += 1
+    return dropped
+
+
 def _merge_disk_state_unlocked() -> None:
     """Reload the durable state into memory; callers hold a transaction.
 
@@ -398,30 +449,10 @@ def _merge_disk_state_unlocked() -> None:
             continue
         if gen_i > int(_TOMBSTONES.get(sid) or 0):
             _TOMBSTONES[sid] = gen_i
-    for sid in [s for s in PENDING_GOAL_CONTINUATION_RECORDS if s not in disk]:
-        # #7862 re-gate round 15 (should-fix, warm-path ENOSPC): a rollback
-        # whose restore snapshot could not commit left a live record with no
-        # disk copy. Dropping it here ("absent on disk => gone") made the
-        # warm retry run as an ordinary turn; the session stays exempt until
-        # its record lands on disk again.
-        #
-        # #7862 re-gate round 16 (CORE finding 3): the exemption is FENCED by
-        # the token and generation the restore put in memory, and a newer
-        # retirement tombstone ends it. Without that fence a peer's clear was
-        # imported while the dirty record was unconditionally retained, and
-        # the next unrelated snapshot republished a cleared goal next to its
-        # own newer tombstone.
-        fence = _RESTORE_WRITE_FAILED_SESSIONS.get(sid)
-        if fence is not None and _dirty_restore_survives_the_merge(
-            sid, PENDING_GOAL_CONTINUATION_RECORDS.get(sid) or {}, fence
-        ):
-            continue
-        _RESTORE_WRITE_FAILED_SESSIONS.pop(sid, None)
-        # A peer consumed or retired this intent: the durable state is the
-        # truth, and this stale copy must not be re-spent or republished.
-        PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
-        PENDING_GOAL_CONTINUATION.discard(sid)
-        _RETIRED_GENERATIONS.pop(sid, None)
+    # The drop half of the reconciliation (records a peer consumed/retired,
+    # tokens a peer discharged/took over) is shared with the live restore's
+    # snapshot path; see ``_reconcile_local_state_with_disk_unlocked``.
+    _reconcile_local_state_with_disk_unlocked(disk, disk_handoffs)
     for sid, record in disk.items():
         # #7862 re-gate round 16 (CORE finding 3): a durable record covered by
         # a retirement tombstone describes an intent the user explicitly
@@ -484,12 +515,9 @@ def _merge_disk_state_unlocked() -> None:
     #     second goal worker (round 16, CORE finding 1).
     for key, record in disk_handoffs.items():
         _CONTINUATION_HANDOFF_TOKENS[key] = dict(record)
-    for key in [k for k in _CONTINUATION_HANDOFF_TOKENS if k not in disk_handoffs]:
-        if _CONTINUATION_HANDOFF_TOKENS[key].get("_handoff_adopted_into_record"):
-            # Withheld from disk by design, not lost: keep the conversion
-            # marker and the token it anchors.
-            continue
-        del _CONTINUATION_HANDOFF_TOKENS[key]
+    # The absent-on-disk tokens (a peer discharge/takeover, or the adoption
+    # conversion this process withholds) were already reconciled above by
+    # ``_reconcile_local_state_with_disk_unlocked``.
     # #7862 re-gate round 18 (P1, "late rollback repeats completed work"):
     # merge the durable spend ledger. The section is ADDITIVE evidence -- a
     # peer's spend of a generation is exactly what a rollback in THIS process
@@ -2644,7 +2672,9 @@ def restore_goal_continuations() -> int:
     # startup restore is a registry writer too — it takes the cross-process
     # lock so a second process's restore (or any concurrent writer) cannot
     # interleave with its adopt/drop decisions. It does its own disk read
-    # below, so the generic merge is deliberately NOT run here.
+    # below, so the generic merge's ADOPTION half is deliberately NOT run
+    # here; its reconciliation (drop) half must run, because this restore's
+    # closing snapshot serialises the in-memory tables (round 19).
     try:
         with _registry_transaction():
             disk, disk_tombstones, disk_handoffs, disk_spent = _load_file_sections()
@@ -2658,6 +2688,23 @@ def restore_goal_continuations() -> int:
                         if _stamp >= _target.get(_attempt, 0.0):
                             _target[_attempt] = _stamp
             _prune_spent_generations_unlocked()
+            # #7862 re-gate round 19 (P1, "completed work returns after
+            # recovery"): a restore is no longer startup-only — the deferred
+            # handoff recovery re-runs it in a LIVE process, and the closing
+            # snapshot below serialises THIS process's tables. Reconcile them
+            # with disk FIRST, under the same transaction: a handoff another
+            # process discharged after the startup skip cached it here (or a
+            # record a peer consumed) must not be written back, or a later
+            # restart restores work that already ran.
+            _reconciled_stale = _reconcile_local_state_with_disk_unlocked(
+                disk, disk_handoffs
+            )
+            if _reconciled_stale:
+                logger.info(
+                    "Goal continuation registry: reconciled %d stale local "
+                    "entr(ies) away before the restore snapshot",
+                    _reconciled_stale,
+                )
             # SILENT finding 3: a session deleted while this process was down
             # must not have its intent restored. The delete's retirement write
             # can fail (ENOSPC) after the WebUI tombstone landed, and a cold
@@ -3048,7 +3095,11 @@ def restore_goal_continuations() -> int:
                     "continuation handoff(s) (already launched or retired)",
                     dropped,
                 )
-            if restored or dropped:
+            if restored or dropped or _reconciled_stale:
+                # #7862 re-gate round 19: the reconciled stale entries are
+                # memory-only (disk already lacks them), but a live restore
+                # still commits its reconciled view so the file and the tables
+                # this process will serialise from now on cannot disagree.
                 if _write_registry_unlocked(
                     PENDING_GOAL_CONTINUATION_RECORDS,
                     context=f"restore count={restored} dropped={dropped}",

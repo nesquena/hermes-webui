@@ -1714,7 +1714,19 @@ async function send(){
   // same boundary the POST path applies) makes the steer condition below see
   // the identity and fall through to the queue branches, which already carry
   // the token. A genuine turn keeps its text and still steers.
-  if(!(options&&options.goalContinuationId)&&!_goalContinuationId
+  //
+  // #7862 re-gate round 19 (P1, "wrapped sends spend resume tokens"): this
+  // early claim exists ONLY for that busy routing — it must not run on an
+  // idle send. Idle sends build their final text later (the ``/use`` skill
+  // wrapper can prepend its directive envelope to the composer text), and the
+  // POST boundary claims on THAT final text: ``_isLiteralResumeContinue``
+  // then correctly refuses a wrapped send, which previously stayed an
+  // ordinary turn. Claiming here while idle spent the one-shot resume token
+  // on the typed text before the wrapper changed what was actually posted,
+  // and the server admits any request carrying the token — the continuation
+  // was consumed by a turn that was not the ``continue`` the resume asked for.
+  if((S.busy||compressionRunning)
+     && !(options&&options.goalContinuationId)&&!_goalContinuationId
      && typeof _claimResumeGoalContinuationToken==='function'
      && _isLiteralResumeContinue(text)&&!S.pendingFiles.length
      && S.session&&S.session.session_id){
