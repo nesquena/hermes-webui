@@ -687,7 +687,7 @@ def _expand_private_config_closed(obj, is_global):
     if isinstance(obj, str):
 
         def value(match):
-            name, verbatim = match.group(1), match.group(0)
+            name, verbatim = match.group(1).strip(), match.group(0)
             try:
                 if is_global is not None and is_global(name):
                     return os.environ.get(name, verbatim)

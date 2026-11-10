@@ -713,14 +713,17 @@ def test_the_private_read_never_falls_back_to_a_process_only_secret(homes, monke
     assert "process-secret-value" not in json.dumps(seen)
 
 
+@pytest.mark.parametrize("spelling", ["${API_SERVER_PORT}", "${ API_SERVER_PORT }"])
 @pytest.mark.parametrize("case", ["server_own_profile", "no_home_override", "older_agent"])
 def test_the_closed_expansion_still_reads_the_agents_process_global_variables(
-    homes, make_session, monkeypatch, case
+    homes, make_session, monkeypatch, case, spelling
 ):
     """Codex r3: when the Agent's expander can't be trusted to stay closed (the named
     profile is the server's own profile, the Hermes-home override is unavailable, or
     the Agent predates ``serves_routed_profile``), the closed expansion still reads
-    the Agent's process-global variables from the process env, and nothing else."""
+    the Agent's process-global variables from the process env, and nothing else.
+    A name padded with spaces is read the way WebUI's own lookup reads it (stripped),
+    as master's shared-cache expansion did (Codex r4)."""
     import hermes_constants
     from agent import secret_scope
     from api import config, profiles
@@ -740,7 +743,7 @@ def test_the_closed_expansion_still_reads_the_agents_process_global_variables(
         "  cli: []\n"
         "custom_providers:\n"
         "  - name: lab\n"
-        "    base_url: http://127.0.0.1:${API_SERVER_PORT}/v1\n"
+        f"    base_url: http://127.0.0.1:{spelling}/v1\n"
         "    api_key: work-lab-key\n"
         "    model: lab-model\n"
         "    key_env: ${LAB_PROCESS_ONLY_SECRET}\n",
