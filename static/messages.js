@@ -2600,8 +2600,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){
     INFLIGHT[activeSid].lastRunJournalSeq=0;
     INFLIGHT[activeSid].lastRunJournalEventId='';
+    INFLIGHT[activeSid].memoryRecall='';
   }
   INFLIGHT[activeSid].streamId=streamId;
+  // A reattach resumes after the journal cursor, past the memory_recall event.
+  if(INFLIGHT[activeSid].memoryRecall&&typeof _noteLiveMemoryRecall==='function'){
+    _noteLiveMemoryRecall(activeSid,streamId,INFLIGHT[activeSid].memoryRecall);
+  }
   if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
   if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
@@ -2816,6 +2821,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       toolCalls:inflight.toolCalls||[],
       lastAssistantText:inflight.lastAssistantText||'',
       lastReasoningText:inflight.lastReasoningText||'',
+      memoryRecall:inflight.memoryRecall||'',
       lastRunJournalSeq:inflight.lastRunJournalSeq||0,
       lastRunJournalEventId:inflight.lastRunJournalEventId||'',
       journalReplayFromStart:!!inflight.journalReplayFromStart,
@@ -7573,6 +7579,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(d.session_id&&d.session_id!==activeSid) return;
         if(!d.message) return;
         if(typeof _noteLiveMemoryRecall==='function') _noteLiveMemoryRecall(activeSid,streamId,String(d.message));
+        // Kept with the stream's recovery state: a reload resumes after the
+        // journal cursor, past this event.
+        const _recallInflight=INFLIGHT[activeSid];
+        if(_recallInflight&&_recallInflight.memoryRecall!==String(d.message)){
+          _recallInflight.memoryRecall=String(d.message);
+          persistInflightState();
+        }
         if(!S.session||S.session.session_id!==activeSid) return;
         if(typeof _syncLiveAssistantMemoryRecall==='function') _syncLiveAssistantMemoryRecall();
       }catch(_){}

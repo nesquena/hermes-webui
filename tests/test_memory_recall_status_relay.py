@@ -210,6 +210,9 @@ def test_memory_recall_lands_in_the_live_turn_in_node():
         globalThis.$ = (id) => id === 'liveAssistantTurn' ? liveTurn : null;
         globalThis.setComposerStatus = () => { throw new Error('composer touched'); };
         const S = {session: {session_id: 'sid-1'}, activeStreamId: 'stream-1'};
+        const INFLIGHT = {'sid-1': {streamId: 'stream-1'}};
+        let persisted = 0;
+        function persistInflightState() { persisted++; }
         function expect(condition, message) { if (!condition) throw new Error(message); }
 
         __HELPERS__
@@ -237,9 +240,14 @@ def test_memory_recall_lands_in_the_live_turn_in_node():
                'msg-role assistant|msg-memory-recall|assistant-turn-blocks',
                'own line between the assistant name and the turn body');
 
-        // Re-syncing and replayed events after a reconnect keep one chip.
+        // Kept with the stream's recovery state, so a reload can restore it.
+        expect(INFLIGHT['sid-1'].memoryRecall === RECALL, 'stored on INFLIGHT');
+        expect(persisted === 1, 'recovery state persisted once');
+
+        // Re-syncing and replayed events after a reconnect keep one line.
         _syncLiveAssistantMemoryRecall();
         deliver({session_id: 'sid-1', message: RECALL});
+        expect(persisted === 1, 'a replayed event does not persist again');
         expect(liveTurn.children.filter((c) => c.className === 'msg-memory-recall').length === 1,
                'one line per turn');
 
@@ -311,3 +319,108 @@ def test_settled_rows_and_live_paths_apply_the_recall_line():
         assert "_syncLiveAssistantMemoryRecall();" in _function_source(UI_JS, name), name
     done = MESSAGES_JS[MESSAGES_JS.index("lastAsst._ts=Date.now()/1000;"):]
     assert done.index("lastAsst._memoryRecall=_recall;") < 400
+
+
+# ── Mid-stream reload ─────────────────────────────────────────────────────────
+# A reload resumes the stream after the recovery cursor, past the memory_recall
+# event, so both recovery sources (browser INFLIGHT and the server's journal
+# snapshot) carry the line, and the reattach hands it back to the live turn.
+
+
+def _journal_event(event, payload, *, session_id="session-1", run_id="stream-1", seq=1):
+    return {
+        "event": event,
+        "seq": seq,
+        "event_id": f"{run_id}:{seq}",
+        "session_id": session_id,
+        "run_id": run_id,
+        "payload": payload,
+    }
+
+
+def test_memory_recall_from_events_reads_this_owner_only():
+    from api.run_journal import memory_recall_from_events
+
+    events = [
+        _journal_event("memory_recall", {"session_id": "session-1", "message": RECALL}),
+        _journal_event("token", {"text": "hello"}, seq=2),
+        _journal_event("memory_recall", {"message": "🧠 Other — recalled 9 memories"},
+                       run_id="stream-2", seq=3),
+        _journal_event("memory_recall", {"message": "🧠 Other — recalled 9 memories"},
+                       session_id="session-2", seq=4),
+        _journal_event("memory_recall", {"message": "   "}, seq=5),
+        _journal_event("memory_recall", "not a dict", seq=6),
+    ]
+    assert memory_recall_from_events("session-1", "stream-1", events) == RECALL
+    assert memory_recall_from_events("session-1", "stream-1", events[1:2]) == ""
+
+
+def test_live_journal_snapshot_carries_memory_recall(monkeypatch):
+    from api import routes
+
+    stream_id = "stream-1"
+    events = [
+        _journal_event("memory_recall", {"session_id": "session-1", "message": RECALL}),
+        _journal_event("token", {"text": "partial answer"}, seq=2),
+    ]
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda sid: {"session_id": "session-1", "run_id": sid, "last_seq": 2,
+                     "last_event_id": f"{sid}:2"} if sid == stream_id else None,
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {"events": events}
+        if session_id == "session-1" and run_id == stream_id else {"events": []},
+    )
+    snapshot = routes._run_journal_live_snapshot(stream_id)
+    assert snapshot is not None
+    assert snapshot["memory_recall"] == RECALL
+    # The session payload keeps it on the way to the browser.
+    assert routes._runtime_journal_snapshot_for_session_payload(snapshot)["memory_recall"] == RECALL
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_server_snapshot_recovery_keeps_memory_recall_in_node():
+    from tests.test_inflight_stream_reuse import _function_decl
+
+    sessions_js = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+    script = "\n".join([
+        "const assert=require('assert');",
+        _function_decl(sessions_js, "_serverLiveSnapshotToolId"),
+        _function_decl(sessions_js, "_serverLiveSnapshotInflight"),
+        f"const RECALL={json.dumps(RECALL)};",
+        """
+const inflight=_serverLiveSnapshotInflight({
+  stream_id:'stream-1', last_seq:7, last_event_id:'stream-1:7',
+  last_assistant_text:'partial answer', memory_recall:RECALL,
+}, []);
+assert.strictEqual(inflight.memoryRecall, RECALL);
+assert.strictEqual(inflight.lastRunJournalSeq, 7);
+const without=_serverLiveSnapshotInflight({stream_id:'stream-1', last_seq:3, last_assistant_text:'x'}, []);
+assert.strictEqual(without.memoryRecall, '');
+""",
+    ])
+    completed = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_reload_paths_carry_memory_recall():
+    from tests.test_inflight_stream_reuse import _function_body
+
+    sessions_js = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+    # localStorage round trip.
+    assert "memoryRecall:state.memoryRecall||''" in _function_body(UI_JS, "_compactInflightState")
+    assert "memoryRecall:inflight.memoryRecall||''" in MESSAGES_JS
+    load = _function_body(sessions_js, "loadSession")
+    assert "memoryRecall:String(stored.memoryRecall||'')" in load
+    # Whichever recovery source wins keeps the line from the other.
+    assert "if(!liveRecoveryInflight.memoryRecall){" in load
+    assert "liveRecoveryInflight.memoryRecall=_recall;" in load
+    # The reattach hands it back to the live turn, and a new stream starts empty.
+    attach = _function_body(MESSAGES_JS, "attachLiveStream")
+    assert "_noteLiveMemoryRecall(activeSid,streamId,INFLIGHT[activeSid].memoryRecall);" in attach
+    reset = attach[attach.index("if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){"):]
+    assert reset.index("INFLIGHT[activeSid].memoryRecall='';") < reset.index("INFLIGHT[activeSid].streamId=streamId;")

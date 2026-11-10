@@ -13173,6 +13173,7 @@ function _compactInflightState(state){
     toolCalls,
     lastAssistantText:state.lastAssistantText||'',
     lastReasoningText:state.lastReasoningText||'',
+    memoryRecall:state.memoryRecall||'',
     lastRunJournalSeq:state.lastRunJournalSeq||0,
     lastRunJournalEventId:state.lastRunJournalEventId||'',
     journalReplayFromStart:!!state.journalReplayFromStart,

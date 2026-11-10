@@ -1946,6 +1946,7 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     journalSnapshot:true,
     lastAssistantText,
     lastReasoningText,
+    memoryRecall:String(snapshot.memory_recall||snapshot.memoryRecall||''),
     lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
     lastRunJournalEventId:String(snapshot.last_event_id||snapshot.lastEventId||''),
     anchorActivityScene,
@@ -3257,6 +3258,7 @@ async function loadSession(sid){
         reattach:true,
         lastAssistantText:String(stored.lastAssistantText||''),
         lastReasoningText:String(stored.lastReasoningText||''),
+        memoryRecall:String(stored.memoryRecall||''),
         lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
         lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
@@ -3285,8 +3287,17 @@ async function loadSession(sid){
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
+  // Whichever recovery source wins, keep the turn's memory recall line from
+  // either one; both resume after the memory_recall event.
+  const _localMemoryRecall=(INFLIGHT[sid]&&String(INFLIGHT[sid].streamId||'')===String(activeStreamId||''))
+    ? String(INFLIGHT[sid].memoryRecall||'')
+    : '';
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
   if(liveRecoveryInflight){
+    if(!liveRecoveryInflight.memoryRecall){
+      const _recall=_localMemoryRecall||String(serverLiveSnapshot&&serverLiveSnapshot.memoryRecall||'');
+      if(_recall) liveRecoveryInflight.memoryRecall=_recall;
+    }
     INFLIGHT[sid]=liveRecoveryInflight;
     _notifyRunJournalSideEffectRecoveryTruncation(
       liveRecoveryInflight,sid,activeStreamId
