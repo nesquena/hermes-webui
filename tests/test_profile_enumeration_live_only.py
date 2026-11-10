@@ -341,3 +341,103 @@ def test_symlinked_profiles_root_reads_live_named_home(tmp_path, monkeypatch):
     active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("liveprof")
     assert other_jobs == []
     assert [j["name"] for j in active_jobs] == ["live-job"], [j["name"] for j in active_jobs]
+
+
+# ── Maintainer residual (2026-11-08): resolved-root ownership must precede an
+# ── unrelated live named ancestor ───────────────────────────────────────────
+
+def _make_symlinked_root_beneath_live_ancestor(tmp_path: Path):
+    """The maintainer's layout: the configured ``profiles`` root is a symlink
+    whose target itself lives under an unrelated real ``profiles`` root.
+
+        local/.hermes/profiles -> foreign/.hermes/profiles/storage
+        foreign/.hermes/profiles/storage/config.yaml   # live named ancestor
+        foreign/.hermes/profiles/storage/actualprof/   # requested child
+
+    The resolved child path therefore carries a second ``profiles`` ancestor
+    (``storage``) that the native classifier reports as a live named home.
+    """
+    base = tmp_path / "local" / ".hermes"
+    base.mkdir(parents=True)
+    (base / "config.yaml").write_text("model: base\n", encoding="utf-8")
+    storage = tmp_path / "foreign" / ".hermes" / "profiles" / "storage"
+    storage.mkdir(parents=True)
+    (storage / "config.yaml").write_text("model: storage\n", encoding="utf-8")
+    (base / "profiles").symlink_to(storage, target_is_directory=True)
+    child = storage / "actualprof"
+    child.mkdir()
+    return base, storage, child
+
+
+def _assert_reader_receives_resolved_child(monkeypatch, base, storage, child):
+    """Pin the trap: the reader resolves the child (``profiles`` gone from the
+    path) while the native ancestor classifier names the live ``storage`` home.
+    """
+    from api import profiles as webui_profiles
+    import hermes_constants
+
+    _point_runtime_at_base(monkeypatch, base, [{"name": "actualprof", "visible": True}])
+    resolved = webui_profiles.get_hermes_home_for_profile("actualprof")
+    assert resolved == child
+    assert resolved.parent.name != "profiles"  # the `profiles` component was resolved away
+    # The trap is real: the native ancestor classifier reports the live
+    # `storage` profile home for the resolved child path.
+    assert hermes_constants.named_profile_home(resolved) == storage
+    return resolved
+
+
+def test_resolved_root_child_markerless_denied_despite_live_ancestor(tmp_path, monkeypatch):
+    """Residual: the guard must validate the logical CHILD's identity, not the
+    live ``storage`` ancestor the native classifier reports. A markerless
+    child is a ghost shell — reading it would recreate cron dirs inside it."""
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    base, storage, child = _make_symlinked_root_beneath_live_ancestor(tmp_path)
+    resolved = _assert_reader_receives_resolved_child(monkeypatch, base, storage, child)
+
+    assert webui_profiles.is_live_profile_home_for_reads(resolved) is False
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("actualprof")
+    assert active_jobs == [] and other_jobs == []
+    assert not (child / "cron").exists()
+
+
+def test_resolved_root_child_tombstoned_denied_despite_live_ancestor(tmp_path, monkeypatch):
+    """Residual: the tombstone beside the RESOLVED root's ``<id>`` (reachable
+    through the symlink) must deny the child even though the ancestor is live."""
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    base, storage, child = _make_symlinked_root_beneath_live_ancestor(tmp_path)
+    # Same identity marker as a live profile, so only the tombstone decides.
+    (child / "config.yaml").write_text("model: child\n", encoding="utf-8")
+    (storage / ".deleted").mkdir()
+    (storage / ".deleted" / "actualprof").write_text("deleted\n", encoding="utf-8")
+
+    resolved = _assert_reader_receives_resolved_child(monkeypatch, base, storage, child)
+
+    assert webui_profiles.is_live_profile_home_for_reads(resolved) is False
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("actualprof")
+    assert active_jobs == [] and other_jobs == []
+    assert not (child / "cron").exists()
+
+
+def test_resolved_root_live_child_reads_through_live_named_ancestor(tmp_path, monkeypatch):
+    """Control: the fix must not over-deny — a LIVE child under the same
+    symlinked root keeps its saved job through the real reader."""
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    base, storage, child = _make_symlinked_root_beneath_live_ancestor(tmp_path)
+    (child / "config.yaml").write_text("model: child\n", encoding="utf-8")
+    _write_saved_default_job(child, "actualprof")
+
+    resolved = _assert_reader_receives_resolved_child(monkeypatch, base, storage, child)
+
+    assert webui_profiles.is_live_profile_home_for_reads(resolved) is True
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("actualprof")
+    assert other_jobs == []
+    assert [j["name"] for j in active_jobs] == ["actualprof-job"], [j["name"] for j in active_jobs]
