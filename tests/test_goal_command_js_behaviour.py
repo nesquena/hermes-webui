@@ -129,6 +129,7 @@ function extractFunc(name) {
 }
 eval(extractFunc('cmdGoal'));
 eval(extractFunc('parseCommand'));
+eval(extractFunc('cmdPersonality'));
 
 // ---- scenario state ----
 const SID = 'sid-6705-behaviour';
@@ -205,6 +206,11 @@ const S = {
     out.parsed = parseCommand('/goal  Ship it\noutcome: CSV\n\nstop when:  a migration');
     out.singleLine = parseCommand('/goal   ship   the feature ');
     out.personality = parseCommand('/personality Alpha\nBeta');
+  } else if (scenario === 'personality_multiline_name') {
+    _nextResponse = () => ({ ok: true });
+    const parsed = parseCommand('/personality Alpha\nBeta');
+    await cmdPersonality(parsed.args);
+    out.calls = _apiCalls;
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -290,3 +296,11 @@ def test_parse_command_keeps_line_boundaries_for_goal_contract_lines(driver_path
     assert out["singleLine"] == {"name": "goal", "args": "ship the feature"}
     # Other commands keep the old normalization, so a multi-word name still matches its config key.
     assert out["personality"] == {"name": "personality", "args": "Alpha Beta"}
+
+
+def test_personality_multiline_name_reaches_set_endpoint_normalized(driver_path):
+    """`/personality Alpha\\nBeta` still selects the configured `Alpha Beta` personality."""
+    out = _run_scenario(driver_path, "personality_multiline_name")
+    assert out["calls"] == [
+        {"url": "/api/personality/set", "body": {"session_id": "sid-6705-behaviour", "name": "Alpha Beta"}}
+    ]
