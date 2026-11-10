@@ -718,10 +718,10 @@ def test_the_private_read_never_falls_back_to_a_process_only_secret(homes, monke
 def test_the_closed_expansion_still_reads_the_agents_process_global_variables(
     homes, make_session, monkeypatch, case, spelling
 ):
-    """Codex r3: when the Agent's expander can't be trusted to stay closed (the named
-    profile is the server's own profile, the Hermes-home override is unavailable, or
-    the Agent predates ``serves_routed_profile``), the closed expansion still reads
-    the Agent's process-global variables from the process env, and nothing else.
+    """Codex r3: whatever the Agent's scope (the named profile is the server's own
+    profile, the Hermes-home override is unavailable, or the Agent predates
+    ``serves_routed_profile``), the private read still reads the Agent's
+    process-global variables from the process env, and nothing else from it.
     A name padded with spaces is read the way WebUI's own lookup reads it (stripped),
     as master's shared-cache expansion did (Codex r4)."""
     import hermes_constants
@@ -771,3 +771,50 @@ def test_the_closed_expansion_still_reads_the_agents_process_global_variables(
     assert seen["record"]["base_url"] == "http://127.0.0.1:18080/v1"
     assert seen["record"]["key_env"] == "${LAB_PROCESS_ONLY_SECRET}"
     assert "process-secret-value" not in json.dumps(seen)
+
+
+def test_a_failed_profile_env_resolution_keeps_process_only_secrets_out(homes, monkeypatch):
+    """Opus r1: when the worker's profile-env resolution raises, its fallback binds
+    no thread env and no process-env block. The private read still expands against
+    the profile's own binding, so a secret that lives only in the server process env
+    never reaches the named profile's config."""
+    from api import config, profiles
+
+    (homes.work / "config.yaml").write_text(
+        "custom_providers:\n"
+        "  - name: lab\n"
+        "    base_url: http://lab.invalid/v1\n"
+        "    api_key: ${LAB_KEY}\n"
+        "    model: lab-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_KEY", "proc-only-root-secret")
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("profile env unavailable")
+
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", unavailable)
+    seen = {}
+
+    def run():
+        with profiles.profile_scope_for_detached_worker("work", "manual compression"):
+            with config.thread_private_config() as private:
+                seen["record"] = dict(private["custom_providers"][0])
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(30)
+    assert seen["record"]["api_key"] == "${LAB_KEY}"
+    assert "proc-only-root-secret" not in json.dumps(seen)
+
+
+def test_a_recursive_yaml_alias_does_not_fail_the_job(homes, runtime, make_session):
+    """Opus r1: a recursive YAML alias elsewhere in the profile's config.yaml must not
+    fail the compression job; the profile's ordinary settings are still served, as
+    the #8032 helper serves them."""
+    (homes.work / "config.yaml").write_text(WORK_CONFIG + "loop: &L\n  - *L\n", encoding="utf-8")
+    sid = make_session("work", model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
+    assert job["status"] == "done", job.get("error")
+    assert runtime.agents[0]["base_url"] == "http://work-lab.invalid/v1"
+    assert runtime.agents[0]["api_key"] == "work-lab-key"

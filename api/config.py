@@ -630,41 +630,6 @@ def _config_view() -> dict:
     return private if private is not None else cfg
 
 
-def _expand_private_config(raw: dict) -> dict:
-    """Expand ``${VAR}`` in a private config read the way the Agent does for this profile (#8970).
-
-    Inside a named profile's worker scope the Agent's own expander
-    (``hermes_cli.config._expand_env_vars``) reads each reference through
-    ``agent.secret_scope.get_secret``: the profile's ``.env`` first, process-global
-    deployment variables (for example ``API_SERVER_PORT``) from the process env, and
-    nothing else, because a scope serving a routed profile never falls through to
-    another profile's process env. That is what the chat's runtime reads for this
-    profile, so it is used only while that holds: a secret scope is bound, it serves a
-    routed profile (``serves_routed_profile()``), and the Agent resolves references
-    through the scope (``_env_ref_lookup``). Otherwise (the named profile is the
-    server's own profile, the Hermes-home override is unavailable, an older Agent),
-    or if the expander fails, the closed expansion below runs.
-    """
-    if not isinstance(raw, dict) or not raw:
-        return {}
-    try:
-        from agent.secret_scope import current_secret_scope, serves_routed_profile
-        from hermes_cli import config as agent_config
-
-        if (
-            current_secret_scope() is not None
-            and serves_routed_profile()
-            and callable(getattr(agent_config, "_env_ref_lookup", None))
-        ):
-            expanded = agent_config._expand_env_vars(raw)
-            if isinstance(expanded, dict):
-                return expanded
-    except Exception:
-        logger.debug("private config: Agent env expansion unavailable", exc_info=True)
-    expanded = _expand_private_config_closed(raw, _agent_global_env_rule())
-    return expanded if isinstance(expanded, dict) else {}
-
-
 def _agent_global_env_rule():
     """The Agent's process-global variable rule (``agent.secret_scope._is_global_env``), else None."""
     try:
@@ -674,33 +639,28 @@ def _agent_global_env_rule():
     return _is_global_env if callable(_is_global_env) else None
 
 
-def _expand_private_config_closed(obj, is_global):
-    """Closed ``${VAR}`` expansion for the private config read (#8970).
+def _private_config_env_binding(home) -> dict:
+    """The env a named profile's private config read expands against (#8970).
 
-    A variable the Agent classifies as process-global (``is_global``: deployment
-    settings such as ``API_SERVER_PORT``, never credentials) reads the process env,
-    as the Agent's ``get_secret`` reads it in every scope. Every other variable
-    reads only the scope's thread env (the profile ``.env``), with the process-env
-    fallback blocked by the worker scope, and an unresolved reference stays
-    verbatim. Without the Agent's rule nothing reads the process env.
+    The profile's own #8032 binding (:func:`api.profiles.profile_env_binding`: its
+    ``.env`` and ``HERMES_HOME``, never the server process env), plus the variables
+    the Agent classifies as process-global (``agent.secret_scope._is_global_env``:
+    deployment settings such as ``API_SERVER_PORT``, never credentials), which the
+    Agent's ``get_secret`` reads from the process env in every scope. Without the
+    Agent's rule nothing is added.
     """
-    if isinstance(obj, str):
+    from api.profiles import profile_env_binding
 
-        def value(match):
-            name, verbatim = match.group(1).strip(), match.group(0)
+    env = profile_env_binding(home)
+    is_global = _agent_global_env_rule()
+    if is_global is not None:
+        for name, value in os.environ.items():
             try:
-                if is_global is not None and is_global(name):
-                    return os.environ.get(name, verbatim)
+                if name != "HERMES_HOME" and is_global(name):
+                    env[name] = value
             except Exception:
-                pass
-            return _thread_local_env_value(name, verbatim)
-
-        return re.sub(r"\${([^}]+)}", value, obj)
-    if isinstance(obj, dict):
-        return {k: _expand_private_config_closed(v, is_global) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_expand_private_config_closed(item, is_global) for item in obj]
-    return obj
+                continue
+    return env
 
 
 @contextmanager
@@ -713,15 +673,22 @@ def thread_private_config():
     directly, so it holds whichever profile refilled it last. A detached worker
     that runs one session's job enters this scope INSIDE its profile scope
     (``profile_scope_for_detached_worker``): the file ``_get_config_path()`` now
-    names is read once, directly, with ``${VAR}`` expanded the way the Agent
-    expands it under the scope's secret scope (:func:`_expand_private_config`). While
+    names is read once, directly, and expanded with the #8032 helper
+    (:func:`api.profiles.expand_profile_config`) against the profile's own binding
+    plus the Agent's process-global variables (:func:`_private_config_env_binding`). While
     the path still matches, ``get_config()``, ``get_config_snapshot()`` and the
     resolvers on this thread serve that dict; the shared cache is neither read
     nor refilled, so other profiles' requests are unaffected. The previous state
     is restored on exit, including on exceptions.
     """
+    from api.profiles import expand_profile_config, get_active_hermes_home
+
     config_path = _get_config_path()
-    private = _expand_private_config(_load_yaml_config_file_raw(config_path))
+    home = get_active_hermes_home()
+    private = expand_profile_config(
+        home, _load_yaml_config_file_raw(config_path), env=_private_config_env_binding(home)
+    )
+    private = private if isinstance(private, dict) else {}
     _apply_config_defaults(private)
     previous = getattr(_thread_ctx, "private_config", None)
     _thread_ctx.private_config = (config_path, private)
@@ -6130,7 +6097,7 @@ def canonical_model_provider_lane(model_id: str, model_provider: str | None = No
 
 def get_effective_default_model(config_data: dict | None = None) -> str:
     """Resolve the effective Hermes default model from config, then env overrides."""
-    active_cfg = config_data if config_data is not None else cfg
+    active_cfg = config_data if config_data is not None else _config_view()
     default_model = DEFAULT_MODEL
 
     model_cfg = active_cfg.get("model", {})
