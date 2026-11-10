@@ -20266,17 +20266,22 @@ def handle_post(handler, parsed) -> bool:
         requested_profile, requested_profile_invalid = _new_session_requested_profile(body)
         if requested_profile_invalid:
             return bad(handler, "invalid profile", 400)
+        # Stage timers: one [SLOW] line (same 2s threshold / _safe_webui_print
+        # route as GET /api/session) so tail latency can be attributed.
+        _sn_t0 = time.monotonic()
         workspace_prev_session_id = body.get("prev_session_id")
         if workspace_prev_session_id and not _session_id_visible_to_request_profile(
             handler, workspace_prev_session_id, emit_error=False
         ):
             workspace_prev_session_id = None
+        _sn_t1 = time.monotonic()
         try:
             workspace = _resolve_new_session_workspace(
                 body, workspace_prev_session_id, profile=requested_profile or None
             )
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        _sn_t2 = time.monotonic()
         worktree_info = None
         worktree_skipped = None
         # Three-value worktree model (#6022): an explicit body value always
@@ -20329,6 +20334,7 @@ def handle_post(handler, parsed) -> bool:
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
+        _sn_t3 = time.monotonic()
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
@@ -20393,6 +20399,7 @@ def handle_post(handler, parsed) -> bool:
                 # thread the drain snapshot already missed).
                 if _register_background_commit_thread(t):
                     t.start()
+        _sn_t4 = time.monotonic()
         s = new_session(
             workspace=workspace,
             model=model,
@@ -20402,12 +20409,14 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
+        _sn_t5 = time.monotonic()
         if worktree_info:
             publish_session_list_changed(
                 "session_new",
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
+        _sn_t6 = time.monotonic()
         payload = {
             "session": public_session_projection(s.compact() | {"messages": s.messages})
         }
@@ -20415,7 +20424,24 @@ def handle_post(handler, parsed) -> bool:
             # Config-default worktree was skipped (non-git workspace); tell the
             # client the session is plain so the UI doesn't assume isolation.
             payload["worktree_skipped"] = worktree_skipped
-        return j(handler, payload)
+        _sn_t7 = time.monotonic()
+        resp = j(handler, payload)
+        _sn_t8 = time.monotonic()
+        _sn_total_ms = (_sn_t8 - _sn_t0) * 1000
+        _slow_print = getattr(handler, '_safe_webui_print', None)
+        if callable(_slow_print) and _sn_total_ms >= 2000:
+            _slow_print(
+                "[SLOW] session_new total=%.1fms prev_check=%.1fms workspace=%.1fms "
+                "worktree=%.1fms prep=%.1fms new_session=%.1fms publish=%.1fms "
+                "projection=%.1fms json_write=%.1fms" % (
+                    _sn_total_ms,
+                    (_sn_t1 - _sn_t0) * 1000, (_sn_t2 - _sn_t1) * 1000,
+                    (_sn_t3 - _sn_t2) * 1000, (_sn_t4 - _sn_t3) * 1000,
+                    (_sn_t5 - _sn_t4) * 1000, (_sn_t6 - _sn_t5) * 1000,
+                    (_sn_t7 - _sn_t6) * 1000, (_sn_t8 - _sn_t7) * 1000,
+                )
+            )
+        return resp
 
     if parsed.path == "/api/session/compression-recovery/start":
         return _handle_session_compression_recovery_start(handler, body)
