@@ -17,6 +17,17 @@ TMPDIR/TEMP/TMP — inside a FRESH CHILD PROCESS, import ``tests/conftest.py``
 there, and assert the exported variables and ``tempfile.gettempdir()`` all moved
 outside that fake production home. They were verified red against the
 pre-repair conftest and green on the repaired one.
+
+The seeding has to cover every variable the platform reads the home from.
+``pathlib.Path.home()`` is ``Path("~").expanduser()``, which resolves through
+``HOME`` on POSIX but through ``USERPROFILE`` on Windows — so a child that only
+inherits a repointed ``HOME`` still anchors its production-home check on the
+REAL user's ``~/.hermes`` on Windows, accepts the seeded scratch directory, and
+fails both unsafe-inheritance assertions even though the repair works. The
+probe therefore exports ``USERPROFILE`` alongside ``HOME``, asserts the child
+resolved the seeded home, and can re-run the discriminator under the Windows
+rule (``PROBE_WINDOWS_HOME``) so that half is covered on a POSIX runner too —
+``tests.yml`` only ever runs this suite on ubuntu.
 """
 
 from __future__ import annotations
@@ -37,8 +48,15 @@ CONFTEST = REPO_ROOT / "tests" / "conftest.py"
 # environment it leaves behind. ``PROBE_PRECACHE_TEMPDIR`` seeds
 # ``tempfile.tempdir`` BEFORE the import — gettempdir() caches its first answer
 # for the life of the process, so the repair's cache reset must beat it.
+# ``PROBE_WINDOWS_HOME`` makes the child resolve its home the way Windows does
+# (``Path.home()`` is ``Path("~").expanduser()``, i.e. ``ntpath.expanduser``,
+# which reads USERPROFILE and ignores HOME), so the Windows half of the seeding
+# is exercised on a POSIX runner.
 _PROBE = """
-import importlib.util, json, os, sys, tempfile
+import importlib.util, json, ntpath, os, pathlib, sys, tempfile
+
+if os.environ.pop("PROBE_WINDOWS_HOME", ""):
+    pathlib.Path.home = classmethod(lambda cls: pathlib.Path(ntpath.expanduser("~")))
 
 precached = os.environ.pop("PROBE_PRECACHE_TEMPDIR", "")
 if precached:
@@ -49,6 +67,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 print(json.dumps({
+    "home": str(pathlib.Path.home()),
     "TMPDIR": os.environ.get("TMPDIR"),
     "TEMP": os.environ.get("TEMP"),
     "TMP": os.environ.get("TMP"),
@@ -57,28 +76,46 @@ print(json.dumps({
 """
 
 
-def _run_conftest_probe(tmp_path: Path, *, temp_root: Path, pre_cache: bool = False) -> dict:
+def _run_conftest_probe(
+    tmp_path: Path,
+    *,
+    temp_root: Path,
+    pre_cache: bool = False,
+    windows_home: bool = False,
+) -> dict:
     """Import ``tests/conftest.py`` in a fresh child with a seeded environment.
 
-    ``temp_root`` is exported as TMPDIR/TEMP/TMP and ``HOME`` is repointed at a
-    fake production home under ``tmp_path``, so the repair's outside-home check
-    is anchored on a tree this test owns. An explicit safe state dir keeps the
-    cold import alive on the UNREPAIRED conftest as well: its default state dir
-    derives from ``gettempdir()`` and the production-proximity guard refuses to
-    import once that lands inside the seeded home — pinning it isolates the
-    temp-root behaviour under test instead of tripping that guard.
+    ``temp_root`` is exported as TMPDIR/TEMP/TMP and the fake production home
+    under ``tmp_path`` is exported as BOTH ``HOME`` and ``USERPROFILE``, so the
+    child's ``Path.home()`` — which reads HOME on POSIX and USERPROFILE on
+    Windows — always lands on a tree this test owns. Seeding only HOME left a
+    Windows child anchored on the real user's ``~/.hermes``: it accepted the
+    seeded scratch dir and both unsafe-inheritance tests failed even on the
+    repaired conftest (Greptile review of #8898). ``windows_home`` additionally
+    makes the child resolve its home by the Windows rule, to reproduce that on a
+    POSIX runner.
+
+    An explicit safe state dir keeps the cold import alive on the UNREPAIRED
+    conftest as well: its default state dir derives from ``gettempdir()`` and the
+    production-proximity guard refuses to import once that lands inside the
+    seeded home — pinning it isolates the temp-root behaviour under test instead
+    of tripping that guard.
     """
     home = tmp_path / "home"
     env = dict(os.environ)
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["TMPDIR"] = env["TEMP"] = env["TMP"] = str(temp_root)
     env.pop("HERMES_HOME", None)
     env.pop("HERMES_WEBUI_TEST_STATE_ROOT", None)
     env.pop("HERMES_WEBUI_TEST_PORT", None)
     env["HERMES_WEBUI_TEST_STATE_DIR"] = str(tmp_path / "safe-state")
     env.pop("PROBE_PRECACHE_TEMPDIR", None)
+    env.pop("PROBE_WINDOWS_HOME", None)
     if pre_cache:
         env["PROBE_PRECACHE_TEMPDIR"] = str(temp_root)
+    if windows_home:
+        env["PROBE_WINDOWS_HOME"] = "1"
     out = subprocess.run(
         [sys.executable, "-c", _PROBE, str(CONFTEST)],
         cwd=str(REPO_ROOT),
@@ -90,7 +127,16 @@ def _run_conftest_probe(tmp_path: Path, *, temp_root: Path, pre_cache: bool = Fa
     assert out.returncode == 0, (
         f"importing {CONFTEST} in a fresh process failed:\n{out.stderr}"
     )
-    return json.loads(out.stdout.strip().splitlines()[-1])
+    payload = json.loads(out.stdout.strip().splitlines()[-1])
+    assert payload.get("home") == str(home), (
+        f"the conftest child resolved its home to {payload.get('home')!r}, not "
+        f"the seeded fake home {str(home)!r}; conftest derives its "
+        "production-home guard from Path.home(), so it must repoint every "
+        "variable the platform resolves the home from (HOME on POSIX, "
+        "USERPROFILE on Windows) or the check anchors on the real ~/.hermes "
+        "and accepts the unsafe inherited temp root"
+    )
+    return payload
 
 
 def _assert_temp_root_escaped_home(payload: dict, production_home: Path, label: str):
@@ -135,6 +181,24 @@ def test_unsafe_inherited_temp_env_is_repointed_outside_the_fake_home(tmp_path):
     payload = _run_conftest_probe(tmp_path, temp_root=scratch)
     production_home = (tmp_path / "home" / ".hermes").resolve()
     _assert_temp_root_escaped_home(payload, production_home, "unsafe inherited env")
+
+
+def test_unsafe_inherited_temp_env_is_repointed_under_windows_home_rules(tmp_path):
+    """The discriminator again, with the child resolving its home like Windows.
+
+    ``Path.home()`` reads USERPROFILE on Windows and ignores HOME, so a probe
+    that seeds only HOME leaves the child's production-home anchor on the real
+    user's ``~/.hermes``: it then accepts the seeded scratch directory and the
+    unsafe-inheritance assertions fail even though the repair works. Fails on a
+    probe that seeds only HOME (the child reports the real home back, and
+    TEMP_ROOT_STILL_INSIDE_HOME follows); this suite only runs on ubuntu in CI,
+    so without the emulated rule nothing would catch that on a POSIX runner.
+    """
+    scratch = tmp_path / "home" / ".hermes" / "cache" / "scratch"
+    scratch.mkdir(parents=True)
+    payload = _run_conftest_probe(tmp_path, temp_root=scratch, windows_home=True)
+    production_home = (tmp_path / "home" / ".hermes").resolve()
+    _assert_temp_root_escaped_home(payload, production_home, "windows home rule")
 
 
 def test_precached_tempdir_inside_the_home_is_reset_and_repointed(tmp_path):
