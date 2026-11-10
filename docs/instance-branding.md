@@ -212,6 +212,12 @@ without `openat` retain the existing workspace API's pathname fallback and
 reject observed symlinks; that fallback does not provide the same race protection.
 Same-user code capable of modifying server state is outside this trust boundary.
 
+Identity reads reuse a bounded process-local completeness check while the state
+root, revision, directory and file identities, sizes and nanosecond modification/
+change times stay unchanged. Missing, replaced, edited or symlinked derivatives
+invalidate that check and restore the native fallback. Public asset responses
+still use anchored reads and validate the bytes they serve.
+
 ## PWA, prefix, cache and lifecycle
 
 Branding is applied per request after the shell template cache and before
@@ -241,8 +247,11 @@ manifests and versioned branding resources; it does not precache the manifest.
 API/auth caching is unchanged. An offline navigation may retain an older shell.
 
 After a successful editor write, reload the page. Existing tabs compare the
-effective revision on `pageshow`/return to visibility and reload if it changed;
-there is no background polling. Fresh/reloaded clients receive one server
+effective revision on `pageshow`/return to visibility and ask before reloading
+if it changed. Unsaved editors, including scheduled-job prompts, remain intact
+when the user declines. Repeated returns with the same revision do not prompt
+again; save the work and reload manually to apply it later. There is no background
+polling. Fresh/reloaded clients receive one server
 identity without localStorage migration.
 
 Browser/OS policy controls refresh of an already-installed PWA icon or name.

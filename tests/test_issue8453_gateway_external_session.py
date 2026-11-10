@@ -176,6 +176,9 @@ def test_source_badge_tracks_chat_availability_when_switching_sessions(filename,
     start = re.search(rf"^function {name}\(", source, re.M).start()
     end = re.search(r"^(?:async )?function \w+\(", source[start + 1:], re.M)
     function = source[start:start + 1 + end.start()] if end else source[start:]
+    if filename == "panels.js":
+        helper_start = source.index("function _syncInstanceNameBadge(")
+        function = source[helper_start:start] + function
     script = r"""
 const assert=require('node:assert/strict');
 const element=()=>({children:[],hidden:false,

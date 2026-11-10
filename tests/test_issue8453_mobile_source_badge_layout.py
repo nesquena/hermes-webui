@@ -29,7 +29,9 @@ def test_source_badge_leaves_room_for_title_and_touch_controls(browser, width, d
     source = (ROOT / "static/panels.js").read_text(encoding="utf-8")
     start = source.index("function syncAppTitlebar(")
     end = re.search(r"^(?:async )?function \w+\(", source[start + 1:], re.M)
-    sync = source[start:start + 1 + end.start()]
+    # Include the real instance-label dependency, just as the full page does.
+    helper_start = source.index("function _syncInstanceNameBadge(")
+    sync = source[helper_start:start + 1 + end.start()]
     page = browser.new_page(viewport={"width": width, "height": 700},
                             is_mobile=width <= 640, has_touch=width <= 640)
     try:

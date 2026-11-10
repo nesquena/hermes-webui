@@ -5,6 +5,7 @@
 
 const LOCALES = {
   en: {
+    instance_branding_reload_confirm: 'The installation name or icons changed. Reload now? Unsaved changes will be lost. Cancel to keep editing and reload manually after saving.',
     composer_placeholder_read_only: 'Read-only in WebUI',
     composer_read_only_connection: 'How to connect',
     offline_title: 'Connection lost',
