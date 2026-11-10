@@ -641,9 +641,9 @@ def _expand_private_config(raw: dict) -> dict:
     another profile's process env. That is what the chat's runtime reads for this
     profile, so it is used only while that holds: a secret scope is bound, it serves a
     routed profile (``serves_routed_profile()``), and the Agent resolves references
-    through the scope (``_env_ref_lookup``). Otherwise, or if the expander fails,
-    WebUI's own expansion runs under the scope's thread env with the process-env
-    fallback blocked, which leaves an unresolved reference verbatim: fail closed.
+    through the scope (``_env_ref_lookup``). Otherwise (the named profile is the
+    server's own profile, the Hermes-home override is unavailable, an older Agent),
+    or if the expander fails, the closed expansion below runs.
     """
     if not isinstance(raw, dict) or not raw:
         return {}
@@ -661,8 +661,46 @@ def _expand_private_config(raw: dict) -> dict:
                 return expanded
     except Exception:
         logger.debug("private config: Agent env expansion unavailable", exc_info=True)
-    expanded = _expand_env_vars(raw)
+    expanded = _expand_private_config_closed(raw, _agent_global_env_rule())
     return expanded if isinstance(expanded, dict) else {}
+
+
+def _agent_global_env_rule():
+    """The Agent's process-global variable rule (``agent.secret_scope._is_global_env``), else None."""
+    try:
+        from agent.secret_scope import _is_global_env
+    except Exception:
+        return None
+    return _is_global_env if callable(_is_global_env) else None
+
+
+def _expand_private_config_closed(obj, is_global):
+    """Closed ``${VAR}`` expansion for the private config read (#8970).
+
+    A variable the Agent classifies as process-global (``is_global``: deployment
+    settings such as ``API_SERVER_PORT``, never credentials) reads the process env,
+    as the Agent's ``get_secret`` reads it in every scope. Every other variable
+    reads only the scope's thread env (the profile ``.env``), with the process-env
+    fallback blocked by the worker scope, and an unresolved reference stays
+    verbatim. Without the Agent's rule nothing reads the process env.
+    """
+    if isinstance(obj, str):
+
+        def value(match):
+            name, verbatim = match.group(1), match.group(0)
+            try:
+                if is_global is not None and is_global(name):
+                    return os.environ.get(name, verbatim)
+            except Exception:
+                pass
+            return _thread_local_env_value(name, verbatim)
+
+        return re.sub(r"\${([^}]+)}", value, obj)
+    if isinstance(obj, dict):
+        return {k: _expand_private_config_closed(v, is_global) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_private_config_closed(item, is_global) for item in obj]
+    return obj
 
 
 @contextmanager

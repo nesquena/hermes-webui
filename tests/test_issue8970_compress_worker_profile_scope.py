@@ -711,3 +711,60 @@ def test_the_private_read_never_falls_back_to_a_process_only_secret(homes, monke
     assert record["api_key"] == "${LAB_PROCESS_ONLY_SECRET}"
     assert record["key_env"] == "${env:LAB_PROCESS_ONLY_SECRET}"
     assert "process-secret-value" not in json.dumps(seen)
+
+
+@pytest.mark.parametrize("case", ["server_own_profile", "no_home_override", "older_agent"])
+def test_the_closed_expansion_still_reads_the_agents_process_global_variables(
+    homes, make_session, monkeypatch, case
+):
+    """Codex r3: when the Agent's expander can't be trusted to stay closed (the named
+    profile is the server's own profile, the Hermes-home override is unavailable, or
+    the Agent predates ``serves_routed_profile``), the closed expansion still reads
+    the Agent's process-global variables from the process env, and nothing else."""
+    import hermes_constants
+    from agent import secret_scope
+    from api import config, profiles
+
+    agents = _real_agent_runtime(monkeypatch)
+    if case == "server_own_profile":
+        monkeypatch.setattr(hermes_constants, "_PINNED_PROCESS_HERMES_HOME", str(homes.work))
+    elif case == "no_home_override":
+        monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
+    else:
+        monkeypatch.delattr(secret_scope, "serves_routed_profile")
+    (homes.work / "config.yaml").write_text(
+        "model:\n"
+        "  provider: custom:lab\n"
+        "  default: lab-model\n"
+        "platform_toolsets:\n"
+        "  cli: []\n"
+        "custom_providers:\n"
+        "  - name: lab\n"
+        "    base_url: http://127.0.0.1:${API_SERVER_PORT}/v1\n"
+        "    api_key: work-lab-key\n"
+        "    model: lab-model\n"
+        "    key_env: ${LAB_PROCESS_ONLY_SECRET}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    monkeypatch.setenv("LAB_PROCESS_ONLY_SECRET", "process-secret-value")
+
+    sid = make_session("work", model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
+    assert job["status"] == "done", job.get("error")
+    assert agents and agents[0]["base_url"] == "http://127.0.0.1:18080/v1"
+
+    seen = {}
+
+    def run():
+        with profiles.profile_scope_for_detached_worker("work", "manual compression"), (
+            config.thread_private_config()
+        ) as private:
+            seen["record"] = dict(private["custom_providers"][0])
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(30)
+    assert seen["record"]["base_url"] == "http://127.0.0.1:18080/v1"
+    assert seen["record"]["key_env"] == "${LAB_PROCESS_ONLY_SECRET}"
+    assert "process-secret-value" not in json.dumps(seen)
