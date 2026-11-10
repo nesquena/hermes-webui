@@ -1090,6 +1090,14 @@ function makeStorage(seed) {
     getItem(k) { return store.has(String(k)) ? store.get(String(k)) : null; },
     setItem(k, v) { store.set(String(k), String(v)); },
     removeItem(k) { store.delete(String(k)); },
+    // Raw dump for assertions that must see the real KEY a marker was stored
+    // under (a no-op _pickerExplicitPickKey would silently collapse every
+    // session onto the literal 'undefined' key).
+    _dump() {
+      const out = {};
+      for (const [k, v] of store.entries()) out[String(k)] = String(v);
+      return out;
+    },
   };
 }
 const localStorage = makeStorage(scenario.seededLocalStorage);
@@ -1387,7 +1395,7 @@ for (const name of __INVALIDATE_FNS__) {
 // read by newSession's quarantine escape) and the persisted-model-state
 // read/write/clear pair the picker fallback and the switch writers use.
 for (const name of [
-  '_rememberExplicitPickerPick', '_readExplicitPickerPick', '_clearExplicitPickerPick',
+  '_pickerExplicitPickKey', '_rememberExplicitPickerPick', '_readExplicitPickerPick', '_clearExplicitPickerPick',
   '_writePersistedModelState', '_readPersistedModelState', '_clearPersistedModelState',
 ]) {
   vm.runInContext(extractFunction(srcUi, name), context);
@@ -1425,6 +1433,30 @@ const evidence = () => JSON.parse(vm.runInContext(`JSON.stringify({
     ? _readExplicitPickerPick(S.session.session_id) : null,
   persisted: (typeof _readPersistedModelState === 'function') ? _readPersistedModelState() : null,
 })`, context));
+
+// Probe a session-scoped explicit-picker marker by session id through the REAL
+// helper (see the _pickerExplicitPickKey extraction above). A test uses this to
+// prove the marker is keyed by the session that owns the pick instead of being
+// collapsed onto one shared key.
+const markerProbe = (sid) => {
+  if (!sid) return null;
+  return JSON.parse(vm.runInContext(
+    `JSON.stringify((typeof _readExplicitPickerPick === 'function') ? _readExplicitPickerPick(${JSON.stringify(String(sid))}) : null)`,
+    context));
+};
+const _staleSid = scenario.staleSessionId || null;
+// Snapshot BEFORE the schedule runs: proves the fixture was really seeded, so
+// a missing marker afterwards is the writer's clear and not a bad fixture.
+const initialStaleMarker = markerProbe(_staleSid);
+// Common output tail: the raw storage dumps expose the REAL keys markers and
+// persisted pairs were written under, so an assertion cannot pass on a helper
+// that collapsed every session onto one key.
+const common = () => ({
+  initialStaleMarker: initialStaleMarker,
+  finalStaleMarker: markerProbe(_staleSid),
+  sessionStorage: sessionStorage._dump(),
+  localStorage: localStorage._dump(),
+});
 
 const switched = scenario.flow === 'loadSwitch'
   ? context._switchProfileForSessionLoad(scenario.switchName)
@@ -1544,6 +1576,9 @@ if (scenario.schedule === 'delayedOldCatalog') {
         afterRefresh,
         afterPick: snapshot(),
         afterPickEvidence: evidence(),
+        // Raw dump right after the pick: the marker assertions must see the
+        // REAL key (session-scoped), not just agree with themselves.
+        sessionStorageAfterPick: sessionStorage._dump(),
         ...(extra || {}),
       });
       // No customPick = the user made no selection at all (control arm).
@@ -1560,6 +1595,16 @@ if (scenario.schedule === 'delayedOldCatalog') {
           }))
         : state
     ))
+    .then((state) => {
+      // Simulate ANOTHER TAB rewriting the shared persisted pair after this
+      // tab's pick (same model, different provider). The production writer is
+      // used so the stored shape is exactly the real one.
+      if (scenario.postPickPersistedOverride) {
+        const o = scenario.postPickPersistedOverride;
+        context._writePersistedModelState(o.model, o.model_provider || null);
+      }
+      return state;
+    })
     .then((state) => context.newSession(false, scenario.newSessionOptions || {}).then(() => ({
       ...state,
       afterNewSession: snapshot(),
@@ -1568,12 +1613,14 @@ if (scenario.schedule === 'delayedOldCatalog') {
     .then((state) => {
       process.stdout.write(JSON.stringify({
         ok: true,
+        ...common(),
         calls: calls,
         newSessionBodies: newSessionBodies,
         sessionUpdateCount: _sessionUpdateCount,
         afterRefresh: state.afterRefresh,
         afterPick: state.afterPick,
         afterPickEvidence: state.afterPickEvidence,
+        sessionStorageAfterPick: state.sessionStorageAfterPick || null,
         afterRepickRefresh: state.afterRepickRefresh || null,
         afterRepickRefreshEvidence: state.afterRepickRefreshEvidence || null,
         afterNewSession: state.afterNewSession,
@@ -1590,14 +1637,21 @@ if (scenario.schedule === 'delayedOldCatalog') {
     .then(() => context.populateModelDropdown({freshness: 'session_visit'}))
     .then(() => {
       const afterRefresh = snapshot();
-      return context.newSession(false, scenario.newSessionOptions || {}).then(() => afterRefresh);
+      // Probe BEFORE the New Chat: proves the profile writer itself dropped
+      // the old conversation's marker, independently of newSession()'s own
+      // clear at the end of the request body build.
+      const staleMarkerAfterRefresh = markerProbe(_staleSid);
+      return context.newSession(false, scenario.newSessionOptions || {})
+        .then(() => ({afterRefresh, staleMarkerAfterRefresh}));
     })
-    .then((afterRefresh) => {
+    .then((state) => {
       process.stdout.write(JSON.stringify({
         ok: true,
+        ...common(),
         calls: calls,
         newSessionBodies: newSessionBodies,
-        afterRefresh: afterRefresh,
+        afterRefresh: state.afterRefresh,
+        staleMarkerAfterRefresh: state.staleMarkerAfterRefresh,
         afterNewSession: snapshot(),
       }));
     })
@@ -2637,4 +2691,194 @@ def test_loaded_session_custom_pick_survives_a_later_empty_catalog_refresh():
     assert body.get("model") == _CUSTOM_PICK["value"], (
         "the persisted pair the pick wrote must carry it into New Chat after "
         f"the picker was quarantined again; got {body.get('model')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Greptile review 2026-11-08 (PR #8576) — three follow-ups
+# ---------------------------------------------------------------------------
+#
+# 1. P1 "Old picks cross profiles": switching profiles still has the OLD
+#    conversation in S.session when the automatic New Chat runs, and the
+#    session-scoped explicit-pick marker written for that conversation let its
+#    still-selected picker through the armed reset gate.
+# 2. P1 "Another tab replaces the provider": the persisted-pair admission
+#    compared only the MODEL, although the marker records the pair. A
+#    same-model/different-provider pair written to the SHARED persisted store
+#    by another tab supplied the wrong model_provider.
+# 3. P2 "Tests miss marker ownership": the driver's Proxy supplied a no-op
+#    _pickerExplicitPickKey, so every marker was stored under the literal
+#    "undefined" key. Fresh writes and reads agreed and the suite could pass
+#    without ever checking which session owns a pick. The driver now extracts
+#    the real helper; the tests below assert the real session-scoped keys.
+# ---------------------------------------------------------------------------
+
+# The pick the user made on the OLD profile's existing conversation: the
+# marker is written under THAT session's id, and the stale picker still shows
+# the same pair when the switch creates the destination's session.
+_OLD_CONVERSATION_PICK = {"value": _DEST_DEFAULT, "model_provider": "old-route"}
+_OLD_CONVERSATION_MARKER = json.dumps(_OLD_CONVERSATION_PICK)
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_old_conversation_pick_cannot_leak_into_the_destination_new_chat(flow):
+    """Greptile P1 (2026-11-08): old picks must not cross profiles.
+
+    A model picked on an existing conversation of the OLD profile leaves a
+    session-scoped marker under that conversation's id. Both profile-transition
+    writers still hold that conversation in ``S.session`` while the destination
+    session is created, and newSession() reads the marker for the session it is
+    replacing — so unless the profile boundary drops it, the marker authorizes
+    the still-selected stale picker and the automatic New Chat sends the old
+    profile's model + provider.
+
+    RED on the reviewed head: the destination session carried
+    ``{model: google/gemini-2.5-pro, model_provider: old-route}``.
+    """
+    result = _run_refresh_driver(_model_less_switch_scenario(
+        flow,
+        _EMPTY_CATALOG_PAYLOAD,
+        _STALE_SAME_MODEL_PICKER,
+        # The tab stays on the OLD profile's conversation for this chain (the
+        # session-load writer is fed by a cross-profile sidebar click).
+        session=_OLD_SESSION,
+        messages=_OLD_MESSAGES,
+        # The catalog fetch FAILS, so the catch branch keeps the previous
+        # profile's option selected with the gate still armed: the exact shape
+        # in which the marker lets that stale picker through.
+        modelsFetchError="catalog backend unreachable",
+        seededSessionStorage={
+            "hermes-webui-explicit-picker-pick:old-sid": _OLD_CONVERSATION_MARKER,
+        },
+        staleSessionId="old-sid",
+    ))
+    assert result["ok"], result.get("error")
+
+    # Fixture precondition: the marker really is stored under the OLD
+    # conversation's id and the REAL key helper reads it back.
+    assert result["initialStaleMarker"] == _OLD_CONVERSATION_PICK, (
+        "the old conversation's marker must be seeded under its own session "
+        f"id; got {result['initialStaleMarker']!r}"
+    )
+
+    bodies = result["newSessionBodies"]
+    assert bodies, "the switch chain must create at least one session"
+    for index, body in enumerate(bodies):
+        assert body.get("profile") == _SWITCH_NAME, (
+            f"request {index} must be scoped to the destination profile; got "
+            f"{body.get('profile')!r}"
+        )
+        assert body.get("model") in (None, ""), (
+            "a pick made on the OLD profile's conversation must not reach the "
+            f"destination's New Chat (request {index}); got "
+            f"{body.get('model')!r}"
+        )
+        assert body.get("model_provider") in (None, ""), (
+            "a pick made on the OLD profile's conversation must not pin its "
+            f"provider on the destination's New Chat (request {index}); got "
+            f"{body.get('model_provider')!r}"
+        )
+
+    # The profile transition must also leave no marker behind for the chained
+    # New Chat (the session-load writer is the one where newSession() itself
+    # has not run yet when the writer returns).
+    assert result["staleMarkerAfterRefresh"] is None, (
+        "the profile transition must clear the old conversation's "
+        f"explicit-pick marker; got {result['staleMarkerAfterRefresh']!r}"
+    )
+
+
+# The pair ANOTHER TAB writes to the shared persisted store after this tab's
+# pick: same model, different provider — the collision the model-only
+# comparison admitted.
+_OTHER_TAB_PERSISTED = {"model": _CUSTOM_PICK["value"], "model_provider": "other-tab-route"}
+
+
+def test_persisted_pair_from_another_tab_cannot_replace_the_pick_provider():
+    """Greptile P1 (2026-11-08): another tab must not replace the provider.
+
+    After the loaded-session pick, a later empty catalogue refresh clears the
+    picker, so newSession() reads the persisted pair — which lives in SHARED
+    localStorage. Matching its model alone admitted a same-model/different-
+    provider pair another tab had written and supplied the wrong
+    ``model_provider``.
+
+    RED on the reviewed head: the creation body carried
+    ``model: gpt-5.4-mini, model_provider: other-tab-route`` although the user's
+    pick recorded no provider.
+    """
+    result = _run_refresh_driver(_loaded_session_pick_scenario(
+        "loadSwitch", _EMPTY_CATALOG_PAYLOAD, _STALE_SAME_MODEL_PICKER,
+        # A later empty refresh clears the picker again — the persisted arm is
+        # then the only source newSession() reads (the reviewer's shape).
+        postPickRefresh=True,
+        postPickPersistedOverride=dict(_OTHER_TAB_PERSISTED),
+    ))
+    assert result["ok"], result.get("error")
+
+    # The pick itself recorded the model with NO provider...
+    assert result["afterPickEvidence"]["explicitPick"] == {
+        "value": _CUSTOM_PICK["value"], "model_provider": None,
+    }, (
+        f"the marker must record the pick's own pair; got "
+        f"{result['afterPickEvidence']['explicitPick']!r}"
+    )
+    # ...while the shared store holds the other tab's provider when New Chat
+    # builds its body.
+    assert result["afterNewSessionEvidence"]["persisted"] == _OTHER_TAB_PERSISTED, (
+        "the other tab's stored pair must be the persisted evidence under test; "
+        f"got {result['afterNewSessionEvidence']['persisted']!r}"
+    )
+
+    bodies = result["newSessionBodies"]
+    assert len(bodies) == 1, f"expected exactly one New Chat POST; got {len(bodies)}"
+    body = bodies[0]
+    assert body.get("model") == _CUSTOM_PICK["value"], (
+        "the pick itself must still reach New Chat; got "
+        f"{body.get('model')!r}"
+    )
+    assert body.get("model_provider") in (None, ""), (
+        "the marker's own pair must travel; another tab's same-model/"
+        f"different-provider pair supplied {body.get('model_provider')!r}"
+    )
+
+
+def test_explicit_pick_marker_is_keyed_by_the_owning_session():
+    """Greptile P2 (2026-11-08): the marker must be stored per session.
+
+    With a no-op ``_pickerExplicitPickKey`` every marker collapses onto the
+    literal ``"undefined"`` key: fresh writes and reads still agree, so the
+    suite could pass without ever checking WHICH session owns a pick. The
+    driver now extracts the real helper; this asserts the marker lands under
+    the owning session's key, that no shared key exists, and that New Chat
+    clears that very key.
+    """
+    pick = {"value": "gpt-5.4-mini", "provider": "openai"}
+    result = _run_refresh_driver(_loaded_session_pick_scenario(
+        "switch", _EMPTY_CATALOG_PAYLOAD, _STALE_SAME_MODEL_PICKER,
+        customPick=pick,
+    ))
+    assert result["ok"], result.get("error")
+
+    # The canonical switch auto-created 'new-sid'; the pick was made on it.
+    after_pick = result["sessionStorageAfterPick"]
+    assert isinstance(after_pick, dict), (
+        f"the driver must expose the raw sessionStorage dump; got {after_pick!r}"
+    )
+    key = "hermes-webui-explicit-picker-pick:new-sid"
+    assert key in after_pick, (
+        "the marker must be stored under the session that owns the pick; "
+        f"stored keys were {sorted(after_pick)!r}"
+    )
+    assert json.loads(after_pick[key]) == {
+        "value": "@openai:gpt-5.4-mini", "model_provider": "openai",
+    }, f"unexpected marker payload: {after_pick[key]!r}"
+    assert "hermes-webui-explicit-picker-pick:undefined" not in after_pick, (
+        "a no-op _pickerExplicitPickKey would collapse every marker onto the "
+        f"literal 'undefined' key; stored keys were {sorted(after_pick)!r}"
+    )
+    # New Chat replaces the session and must clear that same real key.
+    assert key not in result["sessionStorage"], (
+        "New Chat must clear the session-scoped marker of the session it "
+        f"replaces; stored keys were {sorted(result['sessionStorage'])!r}"
     )
