@@ -5672,6 +5672,13 @@ let _showArchived = false;  // toggle to show archived sessions
 let _sessionSelectMode = false;  // batch select mode
 const _selectedSessions = new Set();  // selected session IDs
 let _allProjects = [];  // cached project list
+
+function _projectsSortedByName(projects=_allProjects){
+  return [...(projects||[])].sort((a,b)=>
+    String(a?.name||"").localeCompare(String(b?.name||""), undefined, {sensitivity:"base"}) ||
+    String(a?.project_id||"").localeCompare(String(b?.project_id||""))
+  );
+}
 // Sentinel value for the _activeProject state when filtering to sessions
 // that have no project_id assigned. Distinct from real project IDs so the
 // equality check below can branch cleanly on it. The literal string is
@@ -6380,7 +6387,7 @@ function _showBatchProjectPicker(openerEl){
       showToast('Removed from project');exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
     }catch(e){showToast('Move failed: '+(e.message||e));}
   };picker.appendChild(none);
-  for(const p of(_allProjects||[])){
+  for(const p of _projectsSortedByName()){
     const item=_projectPickerItem();
     if(p.color){const dot=document.createElement('span');dot.className='color-dot';
       dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';item.appendChild(dot);}
@@ -10891,7 +10898,7 @@ function renderSessionListFromCache(){
       bar.appendChild(noneChip);
     }
     // Project chips
-    for(const p of _allProjects){
+    for(const p of _projectsSortedByName()){
       const chip=document.createElement('span');
       chip.className='project-chip'+(p.project_id===_activeProject?' active':'');
       if(p.color){
@@ -12942,7 +12949,7 @@ function _showProjectPicker(session, anchorEl){
     };
     return item;
   };
-  for(const p of _allProjects){
+  for(const p of _projectsSortedByName()){
     const item=_projectPickerChoice(p);
     if(item) picker.appendChild(item);
   }
@@ -12988,7 +12995,8 @@ function _showProjectPicker(session, anchorEl){
     const oldItems=Array.from(picker.querySelectorAll('.project-picker-item'));
     const oldProjectItems=Array.from(picker.querySelectorAll('.project-picker-item[data-project-id]'))
       .filter(item=>String(item.getAttribute('data-project-id')||'')!=='');
-    const visibleProjects=_allProjects.filter(p=>!_profileHidesProject(p.profile));
+    const visibleProjects=_projectsSortedByName(_allProjects)
+      .filter(p=>!_profileHidesProject(p.profile));
     const unchanged=oldProjectItems.length===visibleProjects.length
       &&oldProjectItems.every((item,index)=>
         String(item.getAttribute('data-project-id')||'')===String(visibleProjects[index].project_id)
