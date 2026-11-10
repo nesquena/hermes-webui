@@ -240,8 +240,11 @@ def test_streaming_drops_the_agents_resolution_error_and_routes_through_the_merg
     bundle = src.index("_runtime_bundle = _resolve_runtime_connection_bundle(", warn)
     assert bundle - warn < 4000
     assert "raise_for_custom_provider_route(_runtime_bundle)" in src[bundle:bundle + 2000]
-    # Between the dropped error and the merge nothing stops the turn: no raise, no return (comments aside).
-    code = [line.split("#", 1)[0] for line in src[warn:bundle].splitlines()[1:]]
+    # From the except line to the merge nothing stops the turn: no raise, no return (comments aside). Starting at the
+    # except line also covers a raise added inside the except block before the warning print.
+    exc = src.index("except Exception as _e:", head)
+    assert exc < warn
+    code = [line.split("#", 1)[0] for line in src[exc:bundle].splitlines()[1:]]
     assert not [line for line in code if re.search(r"\b(raise|return)\b", line)], code
 
 
