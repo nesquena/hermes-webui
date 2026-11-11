@@ -121,6 +121,8 @@
 
 ### Fixed
 
+- **A session file swapped mid-turn for a copy of another session's file can no longer make a delayed write land on that other session (#9001, fixes #9000).** The write resolver reloads the worker's session by id; if the file now holds another session's body, it returned that session, so an ephemeral cancel deleted the other session's file and the turn-end cwd mirror wrote the other session's `state.db` row. It now refuses the copy-loaded object on the way out, and all three callers already skip the write when it does. Sessions whose files weren't swapped are unaffected.
+
 - **Gateway-backed sessions refuse the features that would run the agent inside WebUI.** `/btw`, `/background`, `/compress`, the non-streaming `/api/chat` and the one-shot helper calls (update summaries, commit messages) build an in-process agent. On a gateway-backed deployment they failed with a provider-credential error or quietly ran a turn outside the gateway. They now return 409 with `code: "gateway_mode_unsupported"` and the feature name, before any session, stream or compression job is created. Non-gateway setups are unchanged. Thanks @samikrc. (#8860, fixes #8821)
 
 - **`POST /api/session/new` refuses a profile value that is not a profile name.** The route passed the request body's `profile` straight to workspace resolution and session creation, so a forged body could create a session (and, with `worktree: true`, a worktree and a saved file) under a non-profile value and get a 200. It now validates the optional profile at the top of the handler, with the same rule the other routes use, before any read, cache or write. Thanks @webtecnica. (#8886, fixes #8862)
@@ -582,6 +584,10 @@
 ### Internal
 
 - **Four test files now check the right thing on every supported Agent (#9003).** On the oldest Agent the compat matrix supports (v2026.9.24), the #8517 memory tests replaced the Agent's `agent.memory_manager` with an empty stand-in that hid names the Agent itself imports, a #8827 `vllm` case assumed an alias newer Agents added, and #7940 asserted pre-#7972 counts; on newer Agents two tests skipped where they could assert. The stand-ins now copy the real module minus the seam under test, the skips fire only on the seams an Agent really lacks, and #7940 asserts per Agent capability. Tests only.
+
+- **The git credential tests no longer reach the developer's real credential store (#8961, refs #8931).** On macOS with Homebrew git, `tests/test_update_git_security.py` and `tests/test_workspace_git.py` re-applied the system `osxkeychain` helper to their local test servers, so they could write test credentials into the login keychain or hang for 30 s. A test-owned `git` wrapper now points the system and global git config at empty files after WebUI's own scrub, those two files plus `tests/test_git_trust_regressions.py` and `tests/test_updates.py` opt in, Git older than 2.32 skips the opted-in tests, and four guards with a fake host helper fail if the host's helpers are ever reached. Tests only.
+
+- **`TestConflictError` no longer fails in focused or partial test runs (#8903).** Its two tests reach the update-conflict branch only after the #7293 active-run fence, and chat-start tests elsewhere can leave runs registered, so in a partial run the fence refused the update and the tests failed. They now start with the run registries emptied in place and restore them afterwards. Tests only.
 
 - **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
 
