@@ -49,6 +49,7 @@ import ast
 import inspect
 import io
 import json
+import pathlib
 import sys
 import textwrap
 import types
@@ -61,9 +62,13 @@ import api.config as config
 
 
 # The installed Hermes agent that ships the real native resolver.
-_REAL_AGENT_ROOT = "/home/xiaobao/.hermes/hermes-agent"
-if _REAL_AGENT_ROOT not in sys.path:
-    sys.path.insert(0, _REAL_AGENT_ROOT)
+# Resolved portably (env var -> HERMES_HOME -> repo sibling -> ~/.hermes) so
+# this guard does not pin a contributor's personal path and still runs on CI.
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+from conftest import HERMES_AGENT as _REAL_AGENT_ROOT  # noqa: E402
+
+if _REAL_AGENT_ROOT is not None and str(_REAL_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REAL_AGENT_ROOT))
 
 
 def _real_hermes_available() -> bool:
