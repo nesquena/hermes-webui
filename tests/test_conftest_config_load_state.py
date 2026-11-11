@@ -46,3 +46,8 @@ def test_guard_changes_nothing_for_a_test_that_left_the_state_alone():
     with pytest.raises(StopIteration):
         next(guard)
     assert _load_state() == before
+
+
+def test_config_load_state_guard_wraps_every_test(request):
+    """The guard is autouse: every test runs inside it, without asking for it."""
+    assert "_restore_config_load_state" in request.fixturenames
