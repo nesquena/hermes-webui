@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +34,7 @@ from tests.test_issue8517_profile_scoped_memory import (  # noqa: F401  (fixture
     SharedInstanceMemoryProvider,
     _cached_agent,
     _key,
+    _memory_manager_twin,
     assert_cached_memoryless,
     bank_rows,
     hc,
@@ -250,7 +250,7 @@ def test_scoped_construction_keeps_builtin_memory(hc, homes, scope_state):
 # ── 2. Agents without claim_instance (before 2026-10-17) ─────────────────────
 
 def _agent_without_claim_seam(monkeypatch):
-    monkeypatch.setitem(sys.modules, "agent.memory_manager", types.ModuleType("agent.memory_manager"))
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", _memory_manager_twin())
 
 
 def test_no_claim_seam_multi_profile_never_repoints_a_shared_instance(
