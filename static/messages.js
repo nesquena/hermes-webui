@@ -7019,31 +7019,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #8989 — the settled payload embeds the FULL transcript
           // (`_session_payload_with_full_messages`), so the adoption above turns a
-          // bounded tail window into a fully loaded session: the resident row count
-          // jumped 53 -> 1,064 on a ~1,100-message session and stayed there until a
-          // reload, making every later transcript re-render, height-cache sync and
-          // scroll computation run over the whole history. When this session was
-          // already on a truncated window, keep it bounded: adopt the same
-          // "loaded rows + appended rows" width a same-session reload asks for
-          // (and #7925's widening re-fetch uses), sliced off the tail of the
-          // settled transcript, with the absolute offset so Load-earlier paging
-          // keeps working. Nothing is sent to the server and the session object
-          // keeps the authoritative full metadata; only the resident rows are
-          // windowed. Optional helper: harnesses that predate it keep the legacy
-          // adoption.
+          // bounded tail window into a fully loaded session (resident rows jumped
+          // 53 -> 1,064 on a ~1,100-message session), making every later
+          // re-render, height-cache sync and scroll computation run over the whole
+          // history. When the session was already on a truncated window, keep it
+          // bounded: adopt the same "loaded rows + appended rows" width a
+          // same-session reload asks for (and #7925's widening re-fetch uses),
+          // sliced off the settled transcript's tail, with the absolute offset so
+          // Load-earlier paging keeps working. Nothing is sent to the server and
+          // the session object keeps the authoritative full metadata; only the
+          // resident rows are windowed. Optional helper: older harnesses keep the
+          // legacy adoption.
           const _doneTailWindow=(typeof _boundedDoneTailWindow==='function')
             ? _boundedDoneTailWindow(_preSettleSession,_preSettleOldestIdx,_preSettleMessagesTruncated,_preSettle,d.session)
             : null;
           const _doneSettledSession=_doneTailWindow?_doneTailWindow.session:d.session;
           if(_doneTailWindow){
             // Re-run the #3018 carry-forward against the windowed slice so the
-            // ephemeral per-turn fields still land on the rows the reader is
-            // looking at. The earlier pass over the full payload is kept as-is:
-            // it is O(N) with tiny constants (one map build over the resident
-            // rows plus a field copy), against the O(N) re-render / height-cache
-            // / scroll work this windowing protects — and leaving the original
-            // statement byte-identical keeps the harness extraction anchors that
-            // drive the done-listener regressions stable.
+            // ephemeral per-turn fields land on the rows the reader sees. The
+            // earlier full-payload pass is kept as-is: it is O(N) with tiny
+            // constants, against the O(N) re-render / height-cache / scroll work
+            // this windowing protects, and leaving it byte-identical keeps the
+            // harness extraction anchors stable.
             S.messages=_carryForwardEphemeralTurnFields(_preSettle,_doneTailWindow.messages);
             if(typeof _messagesTruncated!=='undefined')_messagesTruncated=_doneTailWindow.truncated;
           }
