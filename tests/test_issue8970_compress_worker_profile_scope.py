@@ -1633,13 +1633,15 @@ def test_a_nested_private_scope_restores_the_outer_binding(homes):
 
 def test_the_private_binding_keeps_the_profiles_own_hermes_home(homes, monkeypatch, stand_in_secret_scope):
     """``HERMES_HOME`` stays the profile's home even when the Agent's rule calls it
-    process-global and the process env names another profile (another worker's
-    mirror): the binding and a ``${HERMES_HOME}`` in the private read both say work."""
+    process-global and the process env names another profile (in the live env, another
+    worker's mirror; in the process env view, the launch value): the binding and a
+    ``${HERMES_HOME}`` in the private read both say work. The binding always carries the
+    profile's own ``HERMES_HOME``, and globals only fill names it lacks."""
     from api import config, profiles
 
     stand_in_secret_scope.global_names.update({"HERMES_HOME", "API_SERVER_PORT"})
     monkeypatch.setenv("HERMES_HOME", str(homes.root))
-    _launch_env(monkeypatch, API_SERVER_PORT="18080")
+    _launch_env(monkeypatch, HERMES_HOME=str(homes.root), API_SERVER_PORT="18080")
     (homes.work / "config.yaml").write_text(
         "terminal:\n  cwd: ${HERMES_HOME}/workspace\n  port: ${API_SERVER_PORT}\n", encoding="utf-8"
     )
