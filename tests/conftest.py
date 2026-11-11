@@ -851,6 +851,50 @@ def allow_real_repo_git(monkeypatch):
     yield
 
 
+# ── Host git config isolation for the git-credential tests (#8931) ───────────
+# Opt-in through ``pytestmark = pytest.mark.usefixtures("isolated_host_git_config")``
+# (tests/test_update_git_security.py, tests/test_workspace_git.py). Why and how:
+# tests/_git_host_config_isolation.py.
+from tests import _git_host_config_isolation as _host_git_isolation  # noqa: E402
+
+
+@pytest.fixture
+def host_git(request, monkeypatch, tmp_path_factory):
+    """The git a test's children would run without the isolation shim.
+
+    Parametrize indirectly with ``EMULATED_HOST_WITH_SENTINEL_HELPERS`` to run
+    the test on an emulated developer machine whose system and global git config
+    name a sentinel credential helper.
+    """
+    if os.name == "nt":
+        return None
+    if getattr(request, "param", None) == _host_git_isolation.EMULATED_HOST_WITH_SENTINEL_HELPERS:
+        real = _host_git_isolation.resolve_host_git()
+        if real is None or not _host_git_isolation.git_supports_config_redirects(real.executable):
+            pytest.skip("emulating host git config needs Git 2.32+ (GIT_CONFIG_SYSTEM)")
+        return _host_git_isolation.emulate_host_with_sentinel_helpers(
+            monkeypatch, tmp_path_factory.mktemp("emulated-host"),
+        )
+    return _host_git_isolation.resolve_host_git()
+
+
+@pytest.fixture
+def isolated_host_git_config(host_git, monkeypatch, tmp_path_factory):
+    """Run this test's git children without the host's system/global git config.
+
+    POSIX only: the shim is a shell script, which Windows' CreateProcess would not
+    find as ``git``.
+    """
+    if host_git is None:
+        return None
+    # Real host git, even when host_git is the emulated one: its wrapper execs it.
+    real = _host_git_isolation.resolve_host_git()
+    _host_git_isolation.require_config_redirects((real or host_git).executable)
+    return _host_git_isolation.isolate_git_from_host_config(
+        monkeypatch, tmp_path_factory.mktemp("host-git-isolation"), host_git,
+    )
+
+
 # ── Environment isolation for tests ────────────────────────────────────────
 # HERMES_WEBUI_SKIP_ONBOARDING is set by hosting providers (e.g. Agent37) and
 # by some isolated test harnesses to short-circuit the onboarding wizard.
