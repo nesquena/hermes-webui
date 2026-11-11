@@ -862,3 +862,237 @@ def test_a_global_variable_removed_mid_read_is_skipped(homes, monkeypatch):
     assert env["API_SERVER_PORT"] == "18080"
     assert "VANISHING_GLOBAL" not in env
     assert "WORK_ONLY_NOT_GLOBAL" not in env
+
+
+# ── #8981 review B1: the server's OWN named profile reads its deployment env ──
+
+
+WORK_DEPLOY_TEMPLATED = """\
+model:
+  provider: custom:lab
+  default: lab-model
+platform_toolsets:
+  cli: [terminal, file]
+custom_providers:
+  - name: lab
+    base_url: http://work-lab.invalid/v1
+    api_key: ${LAB_DEPLOY_KEY}
+    model: lab-model
+"""
+
+
+def _deploy_env(monkeypatch, value="deploy-injected-key"):
+    """``LAB_DEPLOY_KEY`` set only in the launcher/deployment env (container or
+    service env, ``api.paths.STARTUP_ENV``), never in any profile ``.env``."""
+    from api import paths
+
+    monkeypatch.setenv("LAB_DEPLOY_KEY", value)
+    monkeypatch.setattr(
+        paths, "STARTUP_ENV", types.MappingProxyType({**paths.STARTUP_ENV, "LAB_DEPLOY_KEY": value})
+    )
+
+
+def _serve_as_process_profile(monkeypatch, home):
+    """Pin *home* as the profile this process serves as its own, with the call
+    ``_set_hermes_home()`` makes at startup and on a process-wide switch
+    (``_pin_process_profile_home`` -> the Agent's ``pin_process_hermes_home``).
+    ``None`` leaves the Agent unpinned. Both pins are restored afterwards."""
+    import hermes_constants
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", profiles._PROCESS_PROFILE_HOME)
+    monkeypatch.setattr(
+        hermes_constants,
+        "_PINNED_PROCESS_HERMES_HOME",
+        getattr(hermes_constants, "_PINNED_PROCESS_HERMES_HOME", None),
+        raising=False,
+    )
+    if home is None:
+        hermes_constants.pin_process_hermes_home(None)
+    else:
+        profiles._pin_process_profile_home(home)
+
+
+def _private_record(profile_name):
+    """The first ``custom_providers`` record of the worker's private config read."""
+    from api import config, profiles
+
+    seen = {}
+
+    def run():
+        with profiles.profile_scope_for_detached_worker(profile_name, "manual compression"), (
+            config.thread_private_config()
+        ) as private:
+            seen["record"] = dict(private["custom_providers"][0])
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(30)
+    return seen["record"]
+
+
+@pytest.mark.parametrize("mode", ["isolated", "sticky"])
+def test_the_servers_own_named_profile_reads_its_deployment_env(
+    homes, runtime, make_session, monkeypatch, mode
+):
+    """B1: a named profile that is the process's OWN profile ((a) isolated mode,
+    (b) the sticky process-wide active profile) expands ``${VAR}`` from the
+    deployment env as well, as the Agent's ``get_secret`` falls through to the
+    process env for an unrouted task (and ``.663``'s worker did). Needs the
+    Agent's own-home rule, so it skips without the Agent."""
+    pytest.importorskip("hermes_constants")
+    from api import profiles
+
+    (homes.work / "config.yaml").write_text(WORK_DEPLOY_TEMPLATED, encoding="utf-8")
+    _deploy_env(monkeypatch)
+    if mode == "isolated":
+        monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(homes.work))
+    else:
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(homes.root))
+        monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_DOTENV", {})
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+    monkeypatch.setenv("HERMES_HOME", str(homes.work))
+    _serve_as_process_profile(monkeypatch, homes.work)
+
+    sid = make_session("work", model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
+
+    assert job["status"] == "done", job.get("error")
+    assert runtime.agents[0]["base_url"] == "http://work-lab.invalid/v1"
+    assert runtime.agents[0]["api_key"] == "deploy-injected-key"
+
+
+@pytest.mark.parametrize(
+    "process_home, session_profile",
+    [("root", "work"), ("work", "other"), ("unpinned", "work")],
+)
+def test_a_routed_named_profile_still_ignores_the_deployment_env(
+    homes, runtime, make_session, monkeypatch, process_home, session_profile
+):
+    """B1's fall-through is for the process's own home only. A routed named
+    profile (root serves the process, or another named profile does) keeps the
+    closed rule and never sees a deployment-env secret, with the Agent's
+    functions present. An unpinned Agent follows ``HERMES_HOME``, which the
+    worker's env scope mirrors to the session's home, so it is not trusted."""
+    pytest.importorskip("hermes_constants")
+    from api import profiles
+
+    other = homes.base / "profiles" / "other"
+    other.mkdir(parents=True)
+    for home in (homes.work, other):
+        (home / "config.yaml").write_text(WORK_DEPLOY_TEMPLATED, encoding="utf-8")
+    _deploy_env(monkeypatch)
+    pinned = {"root": homes.root, "work": homes.work, "unpinned": None}[process_home]
+    if pinned is not None and pinned != homes.root:
+        monkeypatch.setattr(profiles, "_active_profile", pinned.name)
+    monkeypatch.setenv("HERMES_HOME", str(pinned or homes.work))
+    _serve_as_process_profile(monkeypatch, pinned)
+
+    assert _private_record(session_profile)["api_key"] == "${LAB_DEPLOY_KEY}"
+    sid = make_session(session_profile, model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
+
+    assert job["status"] == "error"
+    assert "deploy-injected-key" not in json.dumps(runtime.agents)
+
+
+def test_the_own_profile_read_keeps_its_env_first_and_drops_another_launch_homes_env(
+    homes, monkeypatch
+):
+    """B1's deployment env is the launch-time snapshot under the profile's own
+    ``.env`` (which wins), without the values a shell launcher sourced from
+    ANOTHER launch home's ``.env`` (the #8435 provenance rule): after a
+    process-wide switch from the launch profile, the Agent's process env no
+    longer holds those either."""
+    pytest.importorskip("hermes_constants")
+    from api import paths, profiles
+
+    (homes.work / "config.yaml").write_text(
+        "custom_providers:\n"
+        "  - name: lab\n"
+        "    base_url: http://lab.invalid/v1\n"
+        "    api_key: ${LAB_DEPLOY_KEY}\n"
+        "    model: ${LAB_MODEL}\n"
+        "    key_env: ${LAUNCH_HOME_KEY}\n",
+        encoding="utf-8",
+    )
+    (homes.work / ".env").write_text("LAB_MODEL=work-dotenv-model\n", encoding="utf-8")
+    startup = {
+        **paths.STARTUP_ENV,
+        "LAB_DEPLOY_KEY": "deploy-injected-key",
+        "LAB_MODEL": "launcher-model",
+        "LAUNCH_HOME_KEY": "launch-home-secret",
+    }
+    monkeypatch.setattr(paths, "STARTUP_ENV", types.MappingProxyType(startup))
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(homes.root))
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_DOTENV", {"LAUNCH_HOME_KEY": "launch-home-secret"})
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+    _serve_as_process_profile(monkeypatch, homes.work)
+
+    record = _private_record("work")
+
+    assert record["api_key"] == "deploy-injected-key"
+    assert record["model"] == "work-dotenv-model"
+    assert record["key_env"] == "${LAUNCH_HOME_KEY}"
+
+
+@pytest.mark.parametrize("agent_shape", ["no_hermes_constants", "no_own_home_functions"])
+def test_without_the_agents_own_home_rule_the_closed_rule_holds(
+    homes, runtime, make_session, monkeypatch, agent_shape
+):
+    """Without the Agent (CI) or without its own-home functions, even the process's
+    own named profile (isolated mode, the launch home) keeps the closed rule:
+    a deployment-env-only secret stays the literal ``${VAR}``. Runs with no Agent."""
+    from api import profiles
+
+    if agent_shape == "no_hermes_constants":
+        monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    else:
+        monkeypatch.setitem(sys.modules, "hermes_constants", types.ModuleType("hermes_constants"))
+    (homes.work / "config.yaml").write_text(WORK_DEPLOY_TEMPLATED, encoding="utf-8")
+    _deploy_env(monkeypatch)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(homes.work))
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(homes.work))
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+
+    assert _private_record("work")["api_key"] == "${LAB_DEPLOY_KEY}"
+    sid = make_session("work", model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
+    assert job["status"] == "error"
+    assert "deploy-injected-key" not in json.dumps(runtime.agents)
+
+
+# ── #8981 review O1: root sessions keep master's scope exactly ──────────────
+
+
+@pytest.mark.parametrize("profile", ["default", "kinni"])
+def test_root_sessions_keep_masters_scope_under_a_named_process_profile(
+    homes, runtime, make_session, monkeypatch, profile
+):
+    """O1: a root (or renamed-root alias) session compressed while a named profile
+    is process-active keeps ``.663``'s scope: no request-profile binding, so the
+    worker neither refills the shared cache nor mixes two profiles (provider from
+    the stale shared alias, toolsets from a root refill). Which profile it uses is
+    the pre-existing residual; this pins only that it is ONE profile."""
+    from api import config, profiles
+
+    monkeypatch.setattr(profiles, "_root_profile_name_cache", {"default", "kinni"})
+    monkeypatch.setattr(profiles, "_root_profile_name_cache_loaded", True)
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+    sid = make_session(profile, model_provider=None)
+    _fill_shared_cache_as("work")
+    before = _shared_cache_state()
+
+    job, worker_name = _run_job_on_fresh_thread(sid)
+
+    assert job["status"] == "done", job.get("error")
+    assert worker_name not in runtime.refresh_threads
+    assert _shared_cache_state() == before
+    kwargs = runtime.agents[0]
+    one_profile = {
+        ("openrouter", json.dumps(config._resolve_cli_toolsets({"platform_toolsets": {"cli": ["web"]}}))),
+        ("deepseek", json.dumps(config._resolve_cli_toolsets({"platform_toolsets": {"cli": ["terminal", "file"]}}))),
+    }
+    assert (kwargs["provider"], json.dumps(kwargs["enabled_toolsets"])) in one_profile

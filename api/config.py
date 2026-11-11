@@ -639,6 +639,50 @@ def _agent_global_env_rule():
     return _is_global_env if callable(_is_global_env) else None
 
 
+def _agent_serves_home_as_its_own(home) -> bool:
+    """Is *home* the profile this process serves as its own, by the Agent's rule (#8981 B1)?
+
+    The home ``hermes_constants.get_routing_process_hermes_home()`` names, compared with
+    ``hermes_home_key``: the Agent's ``get_secret`` falls through to the process env only
+    for that home. Not ``serves_routed_profile()``, which answers for the CALLER's bound
+    scope. The pin must be set (``_set_hermes_home`` sets it): unpinned, the Agent follows
+    ``HERMES_HOME``, which this worker's env scope mirrors to the session's home. False
+    without the Agent or these functions, which keeps the closed rule.
+    """
+    try:
+        import hermes_constants as hc
+    except Exception:
+        return False
+    routing_home = getattr(hc, "get_routing_process_hermes_home", None)
+    home_key = getattr(hc, "hermes_home_key", None)
+    is_pinned = getattr(hc, "process_hermes_home_is_pinned", None)
+    if not (callable(routing_home) and callable(home_key) and callable(is_pinned)):
+        return False
+    try:
+        return bool(is_pinned()) and home_key(home) == home_key(routing_home())
+    except Exception:
+        return False
+
+
+def _own_profile_launch_env(home) -> dict:
+    """The launch-time env (``api.paths.STARTUP_ENV``) for the process's own profile at *home*,
+    without the values a shell launcher sourced from ANOTHER launch home's ``.env`` (the #8435
+    provenance rule: a non-empty value equal to that ``.env``'s value is dropped)."""
+    from api import paths, profiles
+
+    launch_home = profiles._INITIAL_HERMES_HOME
+    try:
+        same_home = bool(launch_home) and Path(launch_home).expanduser().resolve() == Path(home).expanduser().resolve()
+    except Exception:
+        same_home = False
+    launch_dotenv = profiles._INITIAL_HERMES_HOME_DOTENV if launch_home and not same_home else {}
+    return {
+        k: v
+        for k, v in paths.STARTUP_ENV.items()
+        if not (str(v or "").strip() and k in launch_dotenv and str(launch_dotenv[k] or "").strip() == str(v).strip())
+    }
+
+
 def _private_config_env_binding(home) -> dict:
     """The env a named profile's private config read expands against (#8970).
 
@@ -647,11 +691,15 @@ def _private_config_env_binding(home) -> dict:
     the Agent classifies as process-global (``agent.secret_scope._is_global_env``:
     deployment settings such as ``API_SERVER_PORT``, never credentials), which the
     Agent's ``get_secret`` reads from the process env in every scope. Without the
-    Agent's rule nothing is added.
+    Agent's rule nothing is added. The process's OWN profile (#8981 B1) also reads the
+    launch-time deployment env under its ``.env``, as the Agent's ``get_secret`` does;
+    a routed profile never does.
     """
     from api.profiles import profile_env_binding
 
     env = profile_env_binding(home)
+    if _agent_serves_home_as_its_own(home):
+        env = {**_own_profile_launch_env(home), **env}
     is_global = _agent_global_env_rule()
     if is_global is not None:
         # Iterate names, not items(): another worker may restore its env (removing a

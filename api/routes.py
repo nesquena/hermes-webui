@@ -35279,31 +35279,29 @@ def _run_manual_compression_job(sid, body):
         if session is not None:
             from api import profiles as profiles_api
 
-            # #8970: bind the session profile's request TLS together with its
+            # #8970: a named profile binds its request TLS together with its
             # env (the #3957 detached-worker scope), so TLS-resolved reads use
             # the session's profile: the view-only guard's state.db, the #8690
             # ambiguity verdict, a named custom:<slug> record and the helper
-            # agent's toolsets. A named profile also gets a private read of its
-            # config.yaml for this thread, which get_config(),
-            # get_config_snapshot() and the model/provider resolvers serve, so
-            # the job neither reads nor refills the process-wide config cache
-            # that other profiles' requests share. Root and profile-less
-            # sessions keep that shared cache, and keep master's env scope
-            # exactly: profile_scope_for_detached_worker binds no env for a
-            # root profile, but a renamed root alias still needs the root .env
-            # and secret scope that profile_env_for_background_worker applies.
+            # agent's toolsets. It also gets a private read of its config.yaml
+            # for this thread, which get_config(), get_config_snapshot() and
+            # the model/provider resolvers serve, so the job neither reads nor
+            # refills the process-wide config cache that other profiles'
+            # requests share. Root, renamed-root and profile-less sessions keep
+            # master's scope exactly (#8981 O1): no request-profile binding, the
+            # shared cache, and the root .env and secret scope that
+            # profile_env_for_background_worker applies to a renamed root alias.
             profile = str(getattr(session, "profile", "") or "").strip()
-            named_profile = bool(profile) and not _is_root_profile(profile)
-            with profiles_api.profile_scope_for_detached_worker(
-                profile, "manual compression", logger_override=logger
-            ), (
-                api_config.thread_private_config()
-                if named_profile
-                else profiles_api.profile_env_for_background_worker(
+            if profile and not _is_root_profile(profile):
+                with profiles_api.profile_scope_for_detached_worker(
+                    profile, "manual compression", logger_override=logger
+                ), api_config.thread_private_config():
+                    _handle_session_compress(memory_handler, body)
+            else:
+                with profiles_api.profile_env_for_background_worker(
                     session, "manual compression", logger_override=logger
-                )
-            ):
-                _handle_session_compress(memory_handler, body)
+                ):
+                    _handle_session_compress(memory_handler, body)
         else:
             _handle_session_compress(memory_handler, body)
         status = int(memory_handler.status or 500)
