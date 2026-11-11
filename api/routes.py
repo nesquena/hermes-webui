@@ -22217,6 +22217,30 @@ def handle_post(handler, parsed) -> bool:
             )
         return j(handler, result)
 
+    if parsed.path == "/api/commands/skills/resolve":
+        from api.commands import resolve_skill_command
+
+        command = str(body.get("command", "") or "").strip()
+        if not command:
+            return bad(handler, "command is required")
+
+        session_id = str(body.get("session_id", "") or "").strip() or None
+        if session_id and not _session_id_visible_to_request_profile(
+            handler, session_id, emit_error=False
+        ):
+            # Never template ${HERMES_SESSION_ID} with a session that belongs
+            # to another profile (#5896 gate-fail #3).
+            session_id = None
+
+        try:
+            return j(handler, resolve_skill_command(command, session_id=session_id))
+        except KeyError:
+            return bad(handler, "Skill command not found", 404)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except RuntimeError as e:
+            return bad(handler, _sanitize_error(e), 500)
+
     if parsed.path == "/api/commands/exec":
         from api.commands import execute_agent_command, execute_plugin_command
 
@@ -30427,6 +30451,7 @@ def _start_chat_stream_for_session(
     s,
     *,
     msg: str,
+    agent_message: str | None = None,
     attachments=None,
     workspace: str,
     model: str,
@@ -30701,6 +30726,8 @@ def _start_chat_stream_for_session(
                             goal_related=goal_related,
                             moa_config=moa_config,
                         )
+                    if agent_message:
+                        worker_kwargs["agent_message"] = agent_message
                     if backend_is_gateway:
                         from api.gateway_chat import _mark_gateway_run_starting
 
@@ -30933,6 +30960,7 @@ def _start_run(
     s,
     *,
     msg: str,
+    agent_message: str | None = None,
     attachments,
     workspace: str,
     model,
@@ -31027,6 +31055,7 @@ def _start_run(
             return _start_chat_stream_for_session(
                 s,
                 msg=request.message,
+                agent_message=agent_message,
                 attachments=request.attachments,
                 workspace=request.workspace or workspace,
                 model=request.model or model,
@@ -31062,6 +31091,7 @@ def _start_run(
                 StartRunRequest(
                     session_id=s.session_id,
                     message=msg,
+                    agent_message=agent_message,
                     attachments=attachments,
                     workspace=workspace,
                     profile=getattr(s, "profile", None),
@@ -31081,6 +31111,7 @@ def _start_run(
     return _start_chat_stream_for_session(
         s,
         msg=msg,
+        agent_message=agent_message,
         attachments=attachments,
         workspace=workspace,
         model=model,
@@ -32156,6 +32187,11 @@ def _handle_chat_start(handler, body, diag=None):
         msg = str(msg if msg is not None else body.get("message", "")).strip()
         if not msg:
             return bad(handler, "message is required")
+        # Optional agent-only payload: when the frontend pre-resolved a /<skill>
+        # slash command, `message` stays the RAW `/skill …` command (persisted /
+        # displayed / titled as-is) while `agent_message` carries the expanded
+        # skill payload that the model must see (#5896 re-gate).
+        agent_message = str(body.get("agent_message") or "").strip() or None
         diag.stage("normalize_attachments") if diag else None
         if attachments is None:
             attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
@@ -32292,6 +32328,7 @@ def _handle_chat_start(handler, body, diag=None):
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
         start_run_kwargs = {
             "msg": msg,
+            "agent_message": agent_message,
             "attachments": attachments,
             "workspace": workspace,
             "model": model,
@@ -32499,6 +32536,9 @@ def _handle_chat_sync(handler, body):
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
+    # Same RAW/agent-only split as /api/chat/start (#5896): `message` stays the
+    # RAW slash command; `agent_message` carries the expanded skill payload.
+    agent_message = str(body.get("agent_message") or "").strip() or None
     try:
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
@@ -32691,6 +32731,7 @@ def _handle_chat_sync(handler, body):
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata_before_boundary,
                 _settle_current_turn_boundary,
+                _rewrite_context_user_turn,
                 _sanitize_messages_for_agent,
                 _agent_replay_settle_projection,
                 _compact_session_image_parts_for_persistence,
@@ -32759,7 +32800,7 @@ def _handle_chat_sync(handler, body):
             )
 
             _sync_run_kwargs = dict(
-                user_message=workspace_ctx + msg,
+                user_message=workspace_ctx + (agent_message or msg),
                 system_message=workspace_system_msg,
                 # Threaded to the settle's replay dedupe so only rows the
                 # current turn owns are appended when the replayed prefix
@@ -32936,6 +32977,11 @@ def _handle_chat_sync(handler, body):
                 "active_turn_identity": _active_turn_identity,
             },
         )
+        if agent_message:
+            # RAW/agent-only split: the sync path persists the raw command but
+            # must keep the model context on the resolved skill payload for the
+            # next turn (round-3 re-gate).
+            _rewrite_context_user_turn(s, agent_message, msg)
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":

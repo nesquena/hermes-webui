@@ -7824,6 +7824,11 @@ async function switchToProfile(name) {
     // reconciliation below; every other exit releases it in `finally`.
     _tabVisGuardHeld = true;
     if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
+    // Slash command metadata (skills, agent commands, bundles) is
+    // profile-scoped: drop the previous profile's cached lists so the next
+    // dropdown/autocomplete/send-path lookup rebuilds for the new profile
+    // (#5896 gate-fail #7).
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }

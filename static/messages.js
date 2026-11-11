@@ -1762,6 +1762,7 @@ async function send(){
     return;
   }
   let _slashDisplayTextOverride=null;
+  let _skillAgentMessage=null;
   let _pendingMoaConfig=null;
   // #8717: the session and composer text that issued a slash command,
   // captured before the metadata awaits in the intercept below. Composer
@@ -1961,6 +1962,35 @@ async function send(){
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
           $('msg').value='';autoResize();hideCmdDropdown();return;
+        }
+      }
+      // ── Skill commands: `/skill-name [args]` resolved server-side ──
+      // The RAW slash command stays the user-visible/persisted message; the
+      // server-side expansion travels separately (agent_message) so the model
+      // sees the skill content without corrupting the transcript (#5896 re-gate).
+      // Match the cached skill by normalized slug (`/my_skill` == `my-skill`),
+      // mirroring the Agent contract's `_` → `-` normalization.
+      if(!_bundleCmd && !_agentCmd && _parsedCmd && typeof loadSkillCommands==='function'){
+        try {
+          const _skillCache = await loadSkillCommands();
+          const _slug = typeof _skillCommandSlug==='function'
+            ? _skillCommandSlug(_parsedCmd.name)
+            : String(_parsedCmd.name||'').toLowerCase();
+          if(Array.isArray(_skillCache) && _slug && _skillCache.find(s => s.name === _slug)){
+            // First-message skill sends must resolve against a real session so
+            // ${HERMES_SESSION_ID} templates correctly (#5896 gate-fail #3).
+            if(!S.session){await newSession();await renderSessionList();}
+            const _resolved = typeof resolveSkillCommand==='function'
+              ? await resolveSkillCommand(text, S.session && S.session.session_id)
+              : null;
+            const _skillMessage = String(_resolved&&_resolved.message||'').trim();
+            if(_skillMessage){
+              _skillAgentMessage = _skillMessage;
+            }
+          }
+        } catch(_e){
+          // Silently fall through — send the raw text, the agent still
+          // sees /skill-name in its input and may call skill_view itself.
         }
       }
       // #7683 [CORE]: the fail-closed guard runs LAST, after every dispatch
@@ -2226,7 +2256,8 @@ async function send(){
       // (#6885 again). The explicit empty string keeps the key present so the
       // server can tell "genuine turn" from "pre-upgrade tab that must still
       // get marker admission".
-      goal_continuation_id:_goalContinuationId||''
+      goal_continuation_id:_goalContinuationId||'',
+      agent_message:_skillAgentMessage||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
