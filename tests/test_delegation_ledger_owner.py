@@ -134,6 +134,7 @@ def test_persistent_restore_failure_warning_is_rate_limited(world, monkeypatch, 
     assert _wait_for(lambda: len(attempts) >= 4)
     warnings = [r for r in caplog.records if "Failed to restore pending async delegations" in r.getMessage()]
     assert len(warnings) == 1
+    assert warnings[0].exc_info and warnings[0].exc_info[0] is RuntimeError  # the traceback is kept
 
 
 def test_unreadable_or_incomplete_enumeration_is_unknown(world, monkeypatch):

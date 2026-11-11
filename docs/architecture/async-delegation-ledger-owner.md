@@ -17,7 +17,10 @@ restores nothing (#7214).
   WebUI is never treated as absent. Entries that are not directories (stray
   files, dangling or looping symlinks) and tombstoned profiles, whose ledger
   the Agent refuses to open, are skipped. Any other entry that cannot be
-  resolved makes the enumeration incomplete.
+  resolved makes the enumeration incomplete. That includes a profile folder
+  that is a live symlink to a directory outside the Hermes home: the Agent may
+  serve that ledger but WebUI's containment check cannot read it, so the scan
+  fails closed rather than treating its rows as missing.
   - `found`: the origin session's profile ledger has the row (provenance
     decides, even if another ledger also has it); otherwise, exactly one
     authorized ledger has the row.
