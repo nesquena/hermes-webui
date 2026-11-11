@@ -88,6 +88,11 @@ _loaded_profile_env_keys: set[str] = set()
 # profile's .env never reaches it, so a reader that must not see another profile's
 # values (the private config read's Agent-global names) reads this, not os.environ.
 _process_env_baseline = MappingProxyType(dict(STARTUP_ENV))
+# Serializes _reload_dotenv's copy, apply and publish (#8981 gate r2): two concurrent
+# reloads (two provider saves, onboarding and a switch) would each publish their own
+# copy, and the older one could drop what the newer one applied. A dedicated leaf lock:
+# switch_profile() already holds the non-reentrant _profile_lock when it reloads.
+_dotenv_reload_lock = threading.Lock()
 
 
 def process_env_baseline() -> MappingProxyType:
@@ -1954,11 +1959,12 @@ def _reload_dotenv(home: Path):
 
     # Every change below is mirrored into a copy of the process baseline, published
     # when this returns, so readers never see a worker's mirror (#8981).
-    baseline = dict(_process_env_baseline)
-    try:
-        _apply_profile_dotenv(home, baseline)
-    finally:
-        _process_env_baseline = MappingProxyType(baseline)
+    with _dotenv_reload_lock:
+        baseline = dict(_process_env_baseline)
+        try:
+            _apply_profile_dotenv(home, baseline)
+        finally:
+            _process_env_baseline = MappingProxyType(baseline)
 
 
 def _apply_profile_dotenv(home: Path, baseline: dict) -> None:
