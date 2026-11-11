@@ -16709,7 +16709,15 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 try:
                     import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    if getattr(s, '_sidecar_names_other_session', None):
+                        # #9000: loaded from a copy of another session's file, so
+                        # s.path is that other conversation. Never delete it.
+                        logger.info(
+                            "Not removing /btw file for %s: it holds session %r (#9000)",
+                            session_id, s.session_id,
+                        )
+                    else:
+                        pathlib.Path(s.path).unlink(missing_ok=True)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions

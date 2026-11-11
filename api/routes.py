@@ -32462,6 +32462,15 @@ def _current_cwd_sync_target(sid):
             cur = get_session(sid)
         except KeyError:
             return None
+        if getattr(cur, "_sidecar_names_other_session", None):
+            # #9000: the file was replaced with a copy of another session's file.
+            # The reloaded object carries that session's id, workspace and profile,
+            # so the mirror would rewrite the other session's state.db row.
+            logger.info(
+                "Skipping cwd sync for %s: its file now holds session %r (#9000)",
+                sid, cur.session_id,
+            )
+            return None
         return (cur.session_id, cur.workspace, getattr(cur, "profile", None))
 
 
