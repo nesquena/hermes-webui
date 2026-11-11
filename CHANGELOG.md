@@ -581,6 +581,8 @@
 
 ### Internal
 
+- **The git credential tests no longer reach the developer's real credential store (#8961, refs #8931).** On macOS with Homebrew git, `tests/test_update_git_security.py` and `tests/test_workspace_git.py` re-applied the system `osxkeychain` helper to their local test servers, so they could write test credentials into the login keychain or hang for 30 s. A test-owned `git` wrapper now points the system and global git config at empty files after WebUI's own scrub, the two files opt in, Git older than 2.32 skips them, and four guards with a fake host helper fail if the host's helpers are ever reached. Tests only.
+
 - **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
 
 - **The local full test suite passes in the release sandbox (test-only).** Twenty-one tests failed only because of the host: no package index, the worktree's git dir hidden from git, `HOME=/tmp`, unmapped supplementary groups, no network route for Chromium, a process-wide truststore injection, and two newer-Agent shape changes. They now pass there, or skip with the missing condition named (package index, spare group, Agent org skill mirror). No product code changes, and CI still runs the packaging tests.
