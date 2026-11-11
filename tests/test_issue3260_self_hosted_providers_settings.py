@@ -21,6 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
+# Every env var apply_self_hosted_provider_setup() can write into os.environ for the
+# providers this file exercises (_SUPPORTED_PROVIDER_SETUPS[...]["env_var"]).
+_SELF_HOSTED_ENV_VARS = tuple(
+    onboarding._SUPPORTED_PROVIDER_SETUPS[provider]["env_var"] for provider in ("ollama", "lmstudio")
+)
+
 
 _DRIVER = r"""
 const fs = require('fs');
@@ -215,6 +221,11 @@ def isolated_self_hosted_env(monkeypatch, tmp_path):
     monkeypatch.setattr(onboarding, "_get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(onboarding, "_get_config_path", lambda: fake_config_path)
     monkeypatch.setattr(config, "_get_config_path", lambda: fake_config_path)
+    # The real setup writes os.environ[env_var] directly. delenv() alone records nothing
+    # for an absent var, so setenv() first makes undo() restore the original state.
+    for env_var in _SELF_HOSTED_ENV_VARS:
+        monkeypatch.setenv(env_var, "x")
+        monkeypatch.delenv(env_var)
     yield tmp_path, fake_config_path
     config.cfg.clear()
     config.cfg.update(old_cfg)
