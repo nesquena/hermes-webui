@@ -664,18 +664,15 @@ def _agent_serves_home_as_its_own(home) -> bool:
         return False
 
 
-def _own_profile_launch_env(home) -> dict:
-    """The launch-time env (``api.paths.STARTUP_ENV``) for the process's own profile at *home*,
-    without the values a shell launcher sourced from ANOTHER launch home's ``.env`` (the #8435
-    provenance rule: a non-empty value equal to that ``.env``'s value is dropped)."""
+def _own_profile_launch_env() -> dict:
+    """The launch-time env (``api.paths.STARTUP_ENV``) for the process's own profile, without
+    the values a shell launcher sourced from the launch home's ``.env`` (the #8435 provenance
+    rule: a non-empty value equal to that ``.env``'s value is dropped). The caller layers the
+    profile's own ``.env`` on top, so when the launch home IS this profile its values return
+    from the file, and another launch home's never reach it."""
     from api import paths, profiles
 
-    launch_home = profiles._INITIAL_HERMES_HOME
-    try:
-        same_home = bool(launch_home) and Path(launch_home).expanduser().resolve() == Path(home).expanduser().resolve()
-    except Exception:
-        same_home = False
-    launch_dotenv = profiles._INITIAL_HERMES_HOME_DOTENV if launch_home and not same_home else {}
+    launch_dotenv = profiles._INITIAL_HERMES_HOME_DOTENV
     return {
         k: v
         for k, v in paths.STARTUP_ENV.items()
@@ -699,7 +696,7 @@ def _private_config_env_binding(home) -> dict:
 
     env = profile_env_binding(home)
     if _agent_serves_home_as_its_own(home):
-        env = {**_own_profile_launch_env(home), **env}
+        env = {**_own_profile_launch_env(), **env}
     is_global = _agent_global_env_rule()
     if is_global is not None:
         # Iterate names, not items(): another worker may restore its env (removing a
