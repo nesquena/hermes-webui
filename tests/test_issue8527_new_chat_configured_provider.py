@@ -3033,3 +3033,135 @@ def test_explicit_pick_marker_is_keyed_by_the_owning_session():
         "New Chat must clear the session-scoped marker of the session it "
         f"replaces; stored keys were {sorted(result['sessionStorage'])!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer re-gate (2026-11-10, PR #8576 bounded follow-up): a FOREIGN
+# qualifier in the SHARED persisted pair must not reach the backend parser.
+#
+# The persisted arm's identity-only admission compares the marker's model
+# IDENTITY, so another tab's same-model pair passes the check — but the head
+# then forwarded the admitted shared model string VERBATIM. A pair written as
+# ``{"model": "@openai:gpt-5.4-mini", "model_provider": "openai"}`` therefore
+# posted ``{"model": "@openai:gpt-5.4-mini", "model_provider":
+# "custom:review-route"}``, and the backend's deliberate qualifier precedence
+# (``_session_model_state_from_request`` gives an embedded ``@provider:``
+# qualifier priority over ``model_provider``) resolved the new session to
+# provider ``openai`` instead of the marker's ``custom:review-route``.
+#
+# The fix constructs BOTH outgoing fields from the current tab's marker-owned
+# selection through the picker's own normalisation contract
+# (``_modelStateForSelect``): the posted model is the pick's normalised id and
+# the provider is the marker's. The backend parser is deliberately UNCHANGED;
+# the tests below drive the REAL parser to prove the client payload no longer
+# needs that precedence to resolve the wrong provider.
+# ---------------------------------------------------------------------------
+
+# Another tab's rewrites of the SHARED persisted pair after this tab's
+# qualified pick. 'foreign_qualified' is the maintainer's reproduction: the
+# same model id wrapped in a DIFFERENT provider's qualifier. 'bare' is the
+# same-model/different-provider rewrite the earlier round already covered,
+# kept as the control arm; 'none' is the tab's own write.
+_FOREIGN_QUALIFIED_REWRITE = {
+    "model": "@openai:gpt-5.4-mini",
+    "model_provider": "openai",
+}
+_BARE_REWRITE = {"model": "gpt-5.4-mini", "model_provider": "other-tab-route"}
+
+
+def _resolve_new_session_model_state(body):
+    """Run a captured New Chat body through the REAL backend parser.
+
+    Exactly the call ``POST /api/session/new`` makes
+    (``api/routes.py``: ``_session_model_state_from_request(body["model"],
+    body["model_provider"])``). The catalog is stubbed so the parser's slow
+    path cannot depend on the machine's live providers.
+    """
+    from unittest.mock import patch
+
+    from api.routes import _session_model_state_from_request
+
+    with patch("api.routes.get_available_models", return_value={
+        "active_provider": "openai",
+        "default_model": "",
+        "groups": [],
+    }):
+        return _session_model_state_from_request(
+            body.get("model"), body.get("model_provider"),
+        )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+@pytest.mark.parametrize("rewrite", ["foreign_qualified", "bare", "none"])
+def test_qualified_pick_survives_a_shared_rewrite_at_the_backend_parser(flow, rewrite):
+    """The marker's provider must survive another tab's rewrite of the shared
+    persisted pair ALL THE WAY THROUGH the real backend parser.
+
+    RED on the reviewed head for the foreign-qualified rewrite: the admitted
+    shared model string was forwarded verbatim, so the POST carried
+    ``{"model": "@openai:gpt-5.4-mini", "model_provider":
+    "custom:review-route"}`` and the parser resolved provider ``openai``.
+    The bare rewrite and the no-rewrite control kept the marker's provider
+    before the fix and must keep doing so.
+    """
+    rewrites = {
+        "foreign_qualified": _FOREIGN_QUALIFIED_REWRITE,
+        "bare": _BARE_REWRITE,
+    }
+    extra = {}
+    if rewrite != "none":
+        extra["postPickPersistedOverride"] = dict(rewrites[rewrite])
+    result = _run_refresh_driver(_loaded_session_pick_scenario(
+        flow, _EMPTY_CATALOG_PAYLOAD, _STALE_SAME_MODEL_PICKER,
+        customPick=_QUALIFIED_CUSTOM_PICK,
+        postPickRefresh=True,
+        **extra,
+    ))
+    assert result["ok"], result.get("error")
+    label = f"{flow}/{rewrite}"
+    _assert_qualified_pick_evidence(result, label)
+
+    if rewrite != "none":
+        assert result["afterNewSessionEvidence"]["persisted"] == rewrites[rewrite], (
+            f"[{label}] the other tab's pair must be the persisted evidence "
+            f"under test; got {result['afterNewSessionEvidence']['persisted']!r}"
+        )
+
+    bodies = result["newSessionBodies"]
+    _assert_switch_created_model_less_first(bodies, flow, label)
+    body = bodies[-1]
+    assert body.get("model") == _QUALIFIED_CUSTOM_PAIR["model"], (
+        f"[{label}] the pick's own normalised model id must be posted — never "
+        f"a differently qualified shared string; got {body.get('model')!r}"
+    )
+    assert body.get("model_provider") == "custom:review-route", (
+        f"[{label}] the marker's provider must travel; got "
+        f"{body.get('model_provider')!r}"
+    )
+
+    resolved_model, resolved_provider = _resolve_new_session_model_state(body)
+    assert resolved_provider == "custom:review-route", (
+        f"[{label}] the REAL backend parser must resolve the marker's "
+        f"provider; got {resolved_provider!r} for model {resolved_model!r}"
+    )
+
+
+def test_foreign_qualified_payload_still_resolves_to_the_embedded_provider():
+    """The backend's qualifier precedence is deliberate and stays untouched.
+
+    A payload that pairs a foreign ``@provider:`` qualifier with a different
+    ``model_provider`` still resolves to the EMBEDDED provider. That is
+    precisely why the client must stop posting that shape (the test above)
+    rather than why the parser should change: hiding the wrong client payload
+    behind a precedence edit would break every caller that legitimately sends
+    a qualified model.
+    """
+    resolved_model, resolved_provider = _resolve_new_session_model_state({
+        "model": "@openai:gpt-5.4-mini",
+        "model_provider": "custom:review-route",
+    })
+    assert resolved_provider == "openai", (
+        "the parser must keep giving an embedded @provider: qualifier "
+        f"precedence over model_provider; got {resolved_provider!r} for "
+        f"model {resolved_model!r}"
+    )
