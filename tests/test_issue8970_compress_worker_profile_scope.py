@@ -1046,6 +1046,8 @@ def test_without_the_agents_own_home_rule_the_closed_rule_holds(
     a deployment-env-only secret stays the literal ``${VAR}``. Runs with no Agent."""
     from api import profiles
 
+    # Both shapes make WebUI cache "no Hermes-home override"; restore it for later tests.
+    monkeypatch.setattr(profiles, "_hermes_home_override_available", profiles._hermes_home_override_available)
     if agent_shape == "no_hermes_constants":
         monkeypatch.setitem(sys.modules, "hermes_constants", None)
     else:
