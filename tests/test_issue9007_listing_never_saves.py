@@ -303,3 +303,80 @@ def test_a_foreign_poll_never_overwrites_a_turn_the_owner_checkpoints(store, mon
     assert len(cold.messages) == 3
     assert cold.pending_user_message == "accepted next prompt"
     assert cold.active_stream_id == "new-live-stream"
+
+
+OTHER = "other-9007"
+
+
+def _kind(directory, home, kind):
+    """Lay out one sidecar shape; return the id the listing reads it by."""
+    from api import models
+
+    if kind in ("unsafe", "missing"):
+        return "../escape-9007" if kind == "unsafe" else SID
+    path = _sidecar(directory, home, partials=kind in ("duplicate-partials", "names-other"))
+    if kind in ("corrupt", "empty"):
+        path.write_text("{not json" if kind == "corrupt" else "", encoding="utf-8")
+        return SID
+    body = json.loads(path.read_text(encoding="utf-8"))
+    if kind == "legacy":
+        body.pop("anchor_scene_index")
+        body.pop("message_count")
+    elif kind == "names-other":
+        body["session_id"] = OTHER
+    elif kind == "no-session-id":
+        body.pop("session_id")
+    elif kind == "share-fields-after-body":
+        body.update(share_token="tok-9007", share_created_at=5.0)
+    path.write_text(json.dumps(body), encoding="utf-8")
+    # A draft under each id, so a draft read under the wrong id shows.
+    for draft_id in (SID, OTHER):
+        draft = models._session_draft_path(draft_id)
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_text(json.dumps({"text": f"draft for {draft_id}"}), encoding="utf-8")
+    return SID
+
+
+def _outcome(read, sid):
+    from api import models
+
+    models._LEGACY_SIDECAR_FACTS.clear()
+    try:
+        session = read(sid)
+    except Exception as exc:
+        return ("raises", type(exc).__name__)
+    if session is None:
+        return None
+    compact = session.compact(include_runtime=True, active_stream_ids=set())
+    if compact["session_id"] not in (SID, OTHER):
+        compact["session_id"] = "<made up: the body names no session>"
+    return {
+        "compact": compact,
+        "messages": session.messages,
+        "composer_draft": session.composer_draft,
+        "names_other_session": getattr(session, "_sidecar_names_other_session", None),
+        "share_fields_misplaced": getattr(session, "_share_fields_misplaced", None),
+        "legacy_facts": [dict(entry) for entry in models._LEGACY_SIDECAR_FACTS.values()],
+    }
+
+
+@pytest.mark.parametrize("kind", [
+    "ordinary", "duplicate-partials", "legacy", "names-other", "no-session-id",
+    "share-fields-after-body", "corrupt", "empty", "missing", "unsafe",
+])
+def test_the_listing_read_is_session_load_without_the_save(store, saves, kind):
+    """What the three listing paths get back is what Session.load returned them, on every sidecar
+    shape they can meet; only the save is gone."""
+    from api import models
+
+    directory, home = store
+    sid = _kind(directory, home, kind)
+    path = directory / f"{SID}.json"
+    before = path.read_bytes() if path.exists() else None
+
+    listed = _outcome(models._load_session_for_listing, sid)
+    assert saves == []
+    assert (path.read_bytes() if path.exists() else None) == before
+    loaded = _outcome(models.Session.load, sid)  # may repair-save; it runs second
+
+    assert listed == loaded
