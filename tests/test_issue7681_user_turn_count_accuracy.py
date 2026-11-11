@@ -1796,7 +1796,7 @@ def test_leading_whitespace_plus_header_only_payload_is_not_a_live_ask():
 # Both are pinned here against the agent's classifier, not against webui itself.
 
 # Resolved portably (#7681 re-gate finding 3): the previous hard-coded
-# /home/xiaobao paths made the drift guard skip everywhere but the
+# absolute home paths made the drift guard skip everywhere but the
 # contributor's own machine — CI included — so the guard never ran there.
 # HERMES_HOME (an explicit agent/env root) and the standard installed
 # location under ~/.hermes are the authoritative sources; the oracle is the
