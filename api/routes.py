@@ -7048,7 +7048,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
         # so the messaging-fork concern only applies to the materialize fallback
         # below (and the heuristic record-check would mis-trip on mock sessions).
         from api.gateway_sessions import configured as gateway_session_configured
-        canonical_chat = for_chat and webui_gateway_chat_enabled(get_config()) and gateway_session_configured(vars(s))
+        canonical_chat = for_chat and webui_gateway_chat_enabled(chat_backend_config_for_session(vars(s), get_config())) and gateway_session_configured(vars(s))
         if getattr(s, "read_only", False) and not canonical_chat:
             raise PermissionError("read-only imported session")
         # A previously-persisted subagent sidecar (#5307) is view-only and
@@ -7114,7 +7114,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
     # and state.db (not a WebUI sidecar) is the source of truth for them, so
     # materializing a writable sidecar would fork the title/state.
     from api.gateway_sessions import configured as gateway_session_configured
-    canonical_chat = for_chat and webui_gateway_chat_enabled(get_config()) and gateway_session_configured(cli_meta)
+    canonical_chat = for_chat and webui_gateway_chat_enabled(chat_backend_config_for_session(cli_meta, get_config())) and gateway_session_configured(cli_meta)
     if (cli_meta.get("read_only") or _is_messaging_session_record(cli_meta)) and not canonical_chat:
         raise PermissionError("read-only imported session")
 
@@ -14616,6 +14616,7 @@ from api.streaming import (
 from api.gateway_chat import (
     GatewayExternalSessionReadOnly,
     _run_gateway_chat_streaming,
+    chat_backend_config_for_session,
     gateway_session_chat_read_only_reason,
     refuse_on_gateway_backend,
     webui_gateway_chat_enabled,
@@ -23639,7 +23640,9 @@ def handle_post(handler, parsed) -> bool:
         from api.updates import summarize_update_payload
 
         # One-shot model call resolved by the WebUI process; in gateway mode
-        # there is no route for it.
+        # there is no route for it. No session context exists here, so the
+        # request profile is the only rule available (#8971 item 1 notes the
+        # owning-profile rule for the session-scoped sites).
         if refuse_on_gateway_backend(
             handler, "/api/updates/summary", get_config_snapshot()
         ):
@@ -29004,6 +29007,21 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
+def _session_chat_backend_config(sid) -> dict:
+    """Chat-backend refusal config for a request targeting an existing session.
+
+    #8971 item 1: the session's owning profile decides whether the backend is
+    the gateway, not the request thread's active profile. A missing session
+    has no owning profile — keep the request profile's rule there so the
+    response for a bogus session_id is unchanged.
+    """
+    try:
+        s = get_session(str(sid))
+    except Exception:
+        return get_config_snapshot()
+    return chat_backend_config_for_session(vars(s), get_config_snapshot())
+
+
 def _handle_btw(handler, body):
     """POST /api/btw — ephemeral side question using session context.
 
@@ -29017,7 +29035,7 @@ def _handle_btw(handler, body):
         return bad(handler, str(e))
     # Runs the in-process agent by design; refuse before creating the hidden
     # session while the backend is the gateway.
-    if refuse_on_gateway_backend(handler, "/btw", get_config_snapshot()):
+    if refuse_on_gateway_backend(handler, "/btw", _session_chat_backend_config(body["session_id"])):
         return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
@@ -29114,7 +29132,7 @@ def _handle_background(handler, body):
         return bad(handler, str(e))
     # Runs the in-process agent by design; refuse before creating the hidden
     # session while the backend is the gateway.
-    if refuse_on_gateway_backend(handler, "/background", get_config_snapshot()):
+    if refuse_on_gateway_backend(handler, "/background", _session_chat_backend_config(body["session_id"])):
         return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
@@ -32031,7 +32049,7 @@ def _handle_chat_start(handler, body, diag=None):
                 }, status=409)
             from api.gateway_sessions import configured as gateway_session_configured
             if reason == "not_claimable":
-                if not (webui_gateway_chat_enabled(get_config()) and gateway_session_configured(vars(synth))):
+                if not (webui_gateway_chat_enabled(chat_backend_config_for_session(vars(synth), get_config())) and gateway_session_configured(vars(synth))):
                     # Foreign store says this session is read-only / owned by
                     # a non-WebUI process (messaging, claude_code,
                     # external_agent, cron, gateway/unknown, or explicit
@@ -32083,7 +32101,7 @@ def _handle_chat_start(handler, body, diag=None):
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         from api.gateway_sessions import configured as gateway_session_configured, model_change_requested
-        if not _hidden_session and webui_gateway_chat_enabled(get_config()) and gateway_session_configured(vars(s)):
+        if not _hidden_session and webui_gateway_chat_enabled(chat_backend_config_for_session(vars(s), get_config())) and gateway_session_configured(vars(s)):
             if body.get("regenerate") or body.get("attachments"):
                 return bad(handler, "Gateway session continuation currently supports text messages. Use the original client for attachments or regeneration.", 400)
             if model_change_requested(s, body):
@@ -32192,7 +32210,12 @@ def _handle_chat_start(handler, body, diag=None):
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
         config_snapshot = get_config_snapshot()
-        gateway_chat_enabled = webui_gateway_chat_enabled(config_snapshot)
+        # The session's owning profile decides the backend (#8971 item 1), so
+        # admission and every refusal site answer the same rule. config_snapshot
+        # stays the request profile's for model/MoA resolution below.
+        gateway_chat_enabled = webui_gateway_chat_enabled(
+            chat_backend_config_for_session(vars(s), config_snapshot)
+        )
         if body.get("moa_config"):
             if gateway_chat_enabled:
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
@@ -32478,7 +32501,7 @@ def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
     # Builds an in-process agent; a gateway-backed WebUI must not execute a
     # turn outside the gateway (it also usually has no model credentials).
-    if refuse_on_gateway_backend(handler, "/api/chat", get_config_snapshot()):
+    if refuse_on_gateway_backend(handler, "/api/chat", _session_chat_backend_config(body["session_id"])):
         return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
@@ -33526,7 +33549,7 @@ def _handle_git_commit_message(handler, body):
     # One-shot model call resolved by the WebUI process; in gateway mode there
     # is no route for it.
     if refuse_on_gateway_backend(
-        handler, "/api/git/commit-message", get_config_snapshot()
+        handler, "/api/git/commit-message", _session_chat_backend_config(body.get("session_id"))
     ):
         return
     from api.workspace_git import (
@@ -33564,7 +33587,7 @@ def _handle_git_commit_message_selected(handler, body):
     # One-shot model call resolved by the WebUI process; in gateway mode there
     # is no route for it.
     if refuse_on_gateway_backend(
-        handler, "/api/git/commit-message-selected", get_config_snapshot()
+        handler, "/api/git/commit-message-selected", _session_chat_backend_config(body.get("session_id"))
     ):
         return
     from api.workspace_git import (
@@ -35462,10 +35485,11 @@ def _handle_session_compress_start(handler, body):
         return bad(handler, str(e))
 
     # Compression runs an in-process agent and would act on the WebUI's copy of
-    # the transcript, not the gateway's; refuse before starting a job.
-    if refuse_on_gateway_backend(handler, "/compress", get_config_snapshot()):
-        return
+    # the transcript, not the gateway's; refuse before starting a job. The
+    # session is read (never mutated) to resolve its owning profile's backend.
     sid = str(body.get("session_id") or "").strip()
+    if refuse_on_gateway_backend(handler, "/compress", _session_chat_backend_config(sid)):
+        return
     if not sid:
         return bad(handler, "session_id is required")
     try:
@@ -35619,10 +35643,12 @@ def _handle_session_compress(handler, body):
         return bad(handler, str(e))
 
     # Same in-process/gateway mismatch as /compress/start: refuse before
-    # touching the session. The manual-compression worker was admitted by
-    # /compress/start's identical check and marks its handler; trust that.
+    # mutating anything, resolving the backend from the session's owning
+    # profile (a read, not a mutation). The manual-compression worker was
+    # admitted by /compress/start's identical check and marks its handler;
+    # trust that.
     if getattr(handler, "gateway_admission_checked", False) is not True:
-        if refuse_on_gateway_backend(handler, "/compress", get_config_snapshot()):
+        if refuse_on_gateway_backend(handler, "/compress", _session_chat_backend_config(str(body.get("session_id") or ""))):
             return
     sid = str(body.get("session_id") or "").strip()
     if not sid:

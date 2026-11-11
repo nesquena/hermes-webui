@@ -399,6 +399,36 @@ def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None 
     return webui_chat_backend_mode(config_data, environ) == "gateway"
 
 
+def chat_backend_config_for_session(session, config_data=None) -> dict:
+    """Chat-backend eligibility comes from the session's owning profile (#8971).
+
+    ``get_config_snapshot()`` answers for the request thread's active profile,
+    so with mixed backends across profiles a session could be refused — or
+    admitted to an in-process agent — by another profile's setting. Resolve the
+    owning profile's config instead, the same rule ``config_for_session()``
+    already gives workers, ``gateway_session_chat_read_only_reason()`` and the
+    native-transport model-change guard. ``config_data`` is the fallback for
+    callers with no session context (the request snapshot) and for resolution
+    failures; fail-open here only picks the pre-#8860 rule, never a local
+    in-process turn the owning profile did not ask for — a session whose
+    profile resolves to gateway mode still refuses through the sites below.
+    """
+    from api.gateway_sessions import config_for_session
+
+    try:
+        resolved = config_for_session(session)
+    except Exception:
+        logger.exception(
+            "owning-profile config resolution failed; using the request profile's rule"
+        )
+        resolved = None
+    # An empty dict is a valid, fully-local owning-profile answer — only a
+    # resolution failure (None / non-dict) falls back to the request rule.
+    if isinstance(resolved, dict):
+        return resolved
+    return config_data if isinstance(config_data, dict) else {}
+
+
 class GatewayExternalSessionReadOnly(PermissionError):
     pass
 
