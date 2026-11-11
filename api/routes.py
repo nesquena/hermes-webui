@@ -25906,11 +25906,40 @@ def _handle_live_models(handler, parsed):
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
 
+        # #6919 (gate C63-F1, variant: degraded placeholder): a non-empty
+        # resolver result is not by itself the account's catalog. The
+        # producer's contract marks a curated list served BECAUSE the live
+        # catalog was unavailable: ``hermes_cli.models_catalog_static``
+        # defines ``CuratedFallbackModels(list[str])`` — "a curated list
+        # served because the provider's live catalog was unavailable. The
+        # disk cache treats it as a placeholder, never as the account's
+        # real catalog (#107391)" — and ``_static_catalog`` returns exactly
+        # that subclass when a provider HAS a live fetcher that declined
+        # ("A provider with a live fetcher that declined is serving a
+        # placeholder; one without any live source is serving its
+        # authoritative catalog"). ``get_codex_model_ids`` documents the
+        # same contract. Deriving authority from ``len(ids)`` dropped that
+        # provenance and let an outage placeholder prune live-only
+        # options, so keep the distinction the producer already makes.
+        # The marker is read through its own defensive import: an agent
+        # build without the class degrades to the previous behaviour
+        # instead of discarding the resolver's answer entirely.
+        _degraded_placeholder = False
+        if ids:
+            try:
+                from hermes_cli.models_catalog_static import CuratedFallbackModels as _CuratedFallbackModels
+                _degraded_placeholder = isinstance(ids, _CuratedFallbackModels)
+            except Exception as _marker_err:
+                logger.debug("CuratedFallbackModels marker unavailable for %s: %s", provider, _marker_err)
+                _degraded_placeholder = False
+
         if ids:
             # #6919: the agent's resolver produced a real catalog, so this
-            # response is authoritative membership.
+            # response is authoritative membership — unless the producer
+            # labelled it an outage placeholder (see above), which still
+            # ENRICHES the picker but never authorizes removals.
             _discovery_succeeded = True
-            _membership_authoritative = True
+            _membership_authoritative = not _degraded_placeholder
 
         if not ids:
             custom_provider_entry = None
@@ -26040,16 +26069,27 @@ def _handle_live_models(handler, parsed):
                             _body = json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
+                        # #6919 (gate C63-F1, variant: mixed rows): count the
+                        # rows that yield no usable ID as well as the ones
+                        # that do. A catalog with SOME malformed rows still
+                        # has usable survivors, but the survivors are no
+                        # longer the provider's complete membership — the
+                        # dropped rows may have been real models this parser
+                        # failed to read — so the answer may ENRICH the
+                        # picker without claiming authority.
                         _member_rows = 0
+                        _dropped_member_rows = 0
                         if isinstance(_body, dict):
                             _data = _body.get("data", [])
                             if isinstance(_data, list):
                                 _member_rows = len(_data)
-                                ids = [
-                                    m.get("id", "")
-                                    for m in _data
-                                    if isinstance(m, dict) and m.get("id")
-                                ]
+                                ids = []
+                                for _row in _data:
+                                    _mid = _row.get("id") if isinstance(_row, dict) else None
+                                    if isinstance(_mid, str) and _mid.strip():
+                                        ids.append(_mid)
+                                    else:
+                                        _dropped_member_rows += 1
                         elif isinstance(_body, list):
                             # A bare list is row-shaped too: keep only rows that
                             # yield a usable string ID (a bare dict row without
@@ -26060,6 +26100,8 @@ def _handle_live_models(handler, parsed):
                                 _mid = _row.get("id") if isinstance(_row, dict) else _row
                                 if isinstance(_mid, str) and _mid.strip():
                                     ids.append(_mid.strip())
+                                else:
+                                    _dropped_member_rows += 1
 
                         # #6919: the endpoint answered, but an HTTP 200 alone
                         # does not make the answer a MODEL LIST. A body like
@@ -26080,7 +26122,12 @@ def _handle_live_models(handler, parsed):
                         # usable model ID (e.g. {"data": [{}]}) are a malformed
                         # catalog, NOT an authoritative empty one — publishing
                         # that as a plain empty membership made the picker
-                        # prune live choices the provider still offers.
+                        # prune live choices the provider still offers. The
+                        # same validation applies when only SOME rows are
+                        # malformed ({"data": [{"id": "fresh"}, {}]}): the
+                        # surviving rows enrich the picker, but a catalog we
+                        # had to filter is not a complete membership and must
+                        # not authorize removals.
                         _valid_model_list_shape = (
                             (isinstance(_body, dict) and isinstance(_body.get("data"), list))
                             or isinstance(_body, list)
@@ -26090,6 +26137,10 @@ def _handle_live_models(handler, parsed):
                             _discovery_succeeded = True
                             if ids:
                                 _membership_authoritative = True
+                        if _dropped_member_rows:
+                            # Partially malformed catalog: enrich, never prune.
+                            _membership_authoritative = False
+                            _membership_complete = False
 
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
@@ -26177,16 +26228,22 @@ def _handle_live_models(handler, parsed):
                         # shape is a failed discovery, not an authoritative
                         # empty membership. Rows that yield no usable ID are a
                         # malformed catalog too (gate C63-F1), not an
-                        # authoritative empty one.
+                        # authoritative empty one — and a PARTIALLY malformed
+                        # catalog (mixed valid/malformed rows) only enriches:
+                        # the surviving rows are usable, but the filtered
+                        # catalog is not a complete membership.
                         _compat_rows = 0
+                        _compat_dropped_rows = 0
                         _compat_valid = False
                         if isinstance(_body, dict) and isinstance(_body.get("data"), list):
                             _compat_rows = len(_body.get("data") or [])
-                            ids = [
-                                m.get("id", "")
-                                for m in _body.get("data") or []
-                                if isinstance(m, dict) and m.get("id")
-                            ]
+                            ids = []
+                            for _row in _body.get("data") or []:
+                                _mid = _row.get("id") if isinstance(_row, dict) else None
+                                if isinstance(_mid, str) and _mid.strip():
+                                    ids.append(_mid)
+                                else:
+                                    _compat_dropped_rows += 1
                             _compat_valid = True
                         elif isinstance(_body, list):
                             _compat_rows = len(_body)
@@ -26195,6 +26252,8 @@ def _handle_live_models(handler, parsed):
                                 _mid = _row.get("id") if isinstance(_row, dict) else _row
                                 if isinstance(_mid, str) and _mid.strip():
                                     ids.append(_mid.strip())
+                                else:
+                                    _compat_dropped_rows += 1
                             _compat_valid = True
                         if _compat_valid and not (_compat_rows and not ids):
                             _discovery_succeeded = True
@@ -26210,6 +26269,10 @@ def _handle_live_models(handler, parsed):
                                 "Live fetch from %s returned an unsupported model-list shape",
                                 provider,
                             )
+                        if _compat_dropped_rows:
+                            # Partially malformed catalog: enrich, never prune.
+                            _membership_authoritative = False
+                            _membership_complete = False
                 except Exception as _fetch_err:
                     logger.debug("Live fetch from %s failed: %s", provider, _fetch_err)
                     # Fall through to static list below

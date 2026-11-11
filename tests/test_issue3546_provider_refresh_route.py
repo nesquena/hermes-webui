@@ -1568,13 +1568,29 @@ class _FakeLiveHTTPResponse(io.BytesIO):
 
 
 def _stub_provider_model_ids(monkeypatch, fn):
-    """Install a hermes_cli.models.provider_model_ids stub."""
+    """Install a hermes_cli.models.provider_model_ids stub.
+
+    Also installs ``hermes_cli.models_catalog_static`` with a
+    ``CuratedFallbackModels`` marker mirroring the producer's contract
+    (``hermes_cli/models_catalog_static.py``: "a curated list served
+    because the provider's live catalog was unavailable ... a
+    placeholder, never as the account's real catalog"), so the handler's
+    provenance check sees the same shape the real resolver returns.
+    """
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []
     models = types.ModuleType("hermes_cli.models")
     models.provider_model_ids = fn
+    catalog_static = types.ModuleType("hermes_cli.models_catalog_static")
+
+    class CuratedFallbackModels(list):
+        """Stub twin of the producer's degraded-result marker."""
+
+    catalog_static.CuratedFallbackModels = CuratedFallbackModels
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.models", models)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models_catalog_static", catalog_static)
+    return CuratedFallbackModels
 
 
 def _run_live_handler(
@@ -1585,6 +1601,8 @@ def _run_live_handler(
     response_body=None,
     fail=False,
     provider_models=None,
+    resolver_ids=None,
+    resolver_placeholder=False,
 ):
     """Invoke the real ``routes._handle_live_models`` and return the payload."""
     import urllib.request
@@ -1603,7 +1621,19 @@ def _run_live_handler(
     monkeypatch.setattr(routes, "cfg", config_data, raising=False)
     if provider_models is not None:
         monkeypatch.setattr(config, "_PROVIDER_MODELS", provider_models)
-    _stub_provider_model_ids(monkeypatch, lambda _provider: [])
+
+    def _resolver(_provider):
+        if resolver_ids is None:
+            return []
+        # The producer marks a degraded discovery with the list subclass, so
+        # the stub must return the SAME class the handler will import.
+        from hermes_cli.models_catalog_static import CuratedFallbackModels
+
+        if resolver_placeholder:
+            return CuratedFallbackModels(list(resolver_ids))
+        return list(resolver_ids)
+
+    _stub_provider_model_ids(monkeypatch, _resolver)
 
     def _fake_urlopen(req, timeout=None):
         if fail:
@@ -1784,6 +1814,44 @@ def _replay_gate_payload(payload) -> dict:
     selectedAfter:sel.value,
   }));
 """ % json.dumps(payload)
+    return _replay_empty_membership(scenario)
+
+
+# The same hydrated picker, but the browser cache is pre-populated instead of
+# a replacement fetch: this is the SECOND receiver path (a later
+# _fetchLiveModels() call replays _liveModelCache/_liveModelMembership without
+# touching the network), which is where a stale authoritative flag pruned
+# live-only options too.
+_CACHED_MEMBERSHIP_PICKER = """
+  const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  group.appendChild(_mk('model-x',''));   // static catalog row
+  group.appendChild(_mk('@custom:cpa:selected',_LIVE_TITLE,{provider:'custom:cpa',live:'1'}));
+  group.appendChild(_mk('@custom:cpa:live-only',_LIVE_TITLE,{provider:'custom:cpa',live:'1'}));
+  const otherGroup=_el('optgroup',{dataset:{provider:'other'}});
+  otherGroup.appendChild(_mk('other/model',_LIVE_TITLE,{provider:'other',live:'1'}));
+  const sel=_makeSelect([group,otherGroup],'@custom:cpa:selected');
+  _settingsSel=sel;
+
+  _liveModelCache['custom:cpa']=%s;
+  _liveModelMembership['custom:cpa']=%s;
+
+  const cached=_fetchLiveModels('custom:cpa',sel,null,{reconcile:true});
+  await cached;
+  await _tick();
+  process.stdout.write(JSON.stringify({
+    after:group.children.map(o=>o.value),
+    otherAfter:otherGroup.children.map(o=>o.value),
+    selectedAfter:sel.value,
+    fetched:fetchUrls.length,
+  }));
+
+"""
+
+
+def _replay_cached_membership(models, membership) -> dict:
+    """Replay the browser-cache path: a cached payload plus the membership
+    flags the fresh-response path stored for it."""
+    scenario = _CACHED_MEMBERSHIP_PICKER % (json.dumps(models), json.dumps(membership))
     return _replay_empty_membership(scenario)
 
 
@@ -1991,3 +2059,200 @@ def test_composed_failure_empty_chain_keeps_the_live_only_option(monkeypatch):
     )
     assert result["selectedAfter"] == "@custom:cpa:selected"
     assert result["otherAfter"] == ["other/model"]
+
+
+# ── C63-F1 residual 1: a MIXED valid/malformed catalog ────────────────────
+#
+# {"data": [{"id": "fresh"}, {}]} and ["fresh", {}] drop the malformed row
+# but keep a usable one. The surviving rows still ENRICH the picker; they
+# must not claim the provider's complete membership, because a catalog we
+# had to filter may be missing models the parse failed to read. Publishing
+# authoritative:true/complete:true here made the production replay prune a
+# live-only option on both the fresh-response and the browser-cache path.
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"data": [{"id": "fresh"}, {}]},
+        ["fresh", {}],
+    ],
+    ids=["data-wrapper", "bare-list"],
+)
+def test_mixed_valid_and_malformed_rows_do_not_claim_membership(monkeypatch, body):
+    """Variant: surviving rows enrich, but the filtered catalog is neither
+    authoritative nor complete."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="custom:test-gateway",
+        config_data=_CUSTOM_CONFIG,
+        response_body=body,
+    )
+    assert [m["id"] for m in payload["models"]] == ["fresh"], (
+        "C63-F1: the usable row must still ENRICH the picker — "
+        f"got {payload['models']}"
+    )
+    assert payload.get("authoritative") is False, (
+        "C63-F1: a catalog with malformed rows mixed in is not the provider's "
+        f"membership — got {payload}"
+    )
+    assert payload.get("complete") is False, (
+        "C63-F1: rows dropped by the parser may have been real models, so the "
+        f"survivors are not a complete catalog — got {payload}"
+    )
+    assert "error" not in payload, "the answer still carries a usable list"
+
+
+def test_composed_mixed_rows_chain_keeps_the_live_only_option(monkeypatch):
+    """End to end, both client paths: the real mixed-rows payload must
+    enrich without pruning the live-only option."""
+    for body in ({"data": [{"id": "fresh"}, {}]}, ["fresh", {}]):
+        payload = _run_live_handler(
+            monkeypatch,
+            provider="custom:test-gateway",
+            config_data=_CUSTOM_CONFIG,
+            response_body=body,
+        )
+        membership = {
+            "authoritative": bool(payload.get("authoritative")),
+            "complete": bool(payload.get("complete")),
+        }
+        # fresh-response path (the replacement fetch resolves the payload)
+        result = _replay_gate_payload(payload)
+        assert "@custom:cpa:live-only" in result["after"], (
+            f"C63-F1: the mixed-rows payload pruned a live-only option on the "
+            f"fresh-response path — got {result['after']}"
+        )
+        assert "@custom:cpa:fresh" in result["after"], (
+            f"the surviving row must still enrich the picker — got {result['after']}"
+        )
+        assert result["selectedAfter"] == "@custom:cpa:selected"
+        assert result["otherAfter"] == ["other/model"]
+        # browser-cache path (a later receiver replays the cached payload)
+        cached = _replay_cached_membership(payload["models"], membership)
+        assert cached["fetched"] == 0, (
+            "the browser-cache replay must not dispatch a fetch — "
+            f"got {cached['fetched']}"
+        )
+        assert "@custom:cpa:live-only" in cached["after"], (
+            f"C63-F1: the cached mixed-rows payload pruned a live-only option — "
+            f"got {cached['after']}"
+        )
+        assert "@custom:cpa:fresh" in cached["after"], (
+            f"the cached survivors must still enrich — got {cached['after']}"
+        )
+        assert cached["selectedAfter"] == "@custom:cpa:selected"
+        assert cached["otherAfter"] == ["other/model"]
+
+
+# ── C63-F1 residual 2: the resolver's DEGRADED PLACEHOLDER ────────────────
+#
+# provider_model_ids() marks a curated list served because the live catalog
+# was unavailable: hermes_cli.models_catalog_static.CuratedFallbackModels
+# ("a placeholder, never as the account's real catalog"). Deriving authority
+# from len(ids) dropped that provenance and let an outage placeholder prune
+# live-only options. The flags must come from the producer's contract.
+
+
+def test_degraded_resolver_placeholder_is_not_authoritative(monkeypatch):
+    """Variant: a CuratedFallbackModels result enriches but never authorizes
+    removals — the resolver is not replaced, only its provenance is honoured."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="fakebuiltin",
+        config_data={"model": {"provider": "fakebuiltin"}},
+        resolver_ids=["placeholder-a", "placeholder-b"],
+        resolver_placeholder=True,
+    )
+    assert [m["id"] for m in payload["models"]] == ["placeholder-a", "placeholder-b"], (
+        "the placeholder must still ENRICH the picker (the resolver and its "
+        f"modules stay in place) — got {payload['models']}"
+    )
+    assert payload.get("authoritative") is False, (
+        "C63-F1: the producer's degraded-result marker must survive into the "
+        f"payload — got {payload}"
+    )
+    assert payload.get("complete") is True
+    assert "error" not in payload, "a non-empty placeholder keeps the success shape"
+
+
+def test_live_resolver_result_is_still_authoritative(monkeypatch):
+    """Control: an unmarked (live) resolver result keeps full authority — the
+    provenance check must not blanket-disable pruning for built-ins."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="fakebuiltin",
+        config_data={"model": {"provider": "fakebuiltin"}},
+        resolver_ids=["live-a", "live-b"],
+    )
+    assert [m["id"] for m in payload["models"]] == ["live-a", "live-b"]
+    assert payload.get("authoritative") is True, (
+        f"a live resolver result is authoritative membership — got {payload}"
+    )
+    assert payload.get("complete") is True
+
+
+def test_composed_degraded_placeholder_chain_keeps_the_live_only_option(monkeypatch):
+    """End to end, both client paths: the real placeholder payload enriches
+    without pruning."""
+    payload = _run_live_handler(
+        monkeypatch,
+        provider="fakebuiltin",
+        config_data={"model": {"provider": "fakebuiltin"}},
+        resolver_ids=["placeholder-a"],
+        resolver_placeholder=True,
+    )
+    membership = {
+        "authoritative": bool(payload.get("authoritative")),
+        "complete": bool(payload.get("complete")),
+    }
+    result = _replay_gate_payload(payload)
+    assert "@custom:cpa:live-only" in result["after"], (
+        "C63-F1: the degraded placeholder pruned a live-only option on the "
+        f"fresh-response path — got {result['after']}"
+    )
+    assert "@custom:cpa:placeholder-a" in result["after"], (
+        f"the placeholder must still enrich — got {result['after']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected"
+    assert result["otherAfter"] == ["other/model"]
+
+    cached = _replay_cached_membership(payload["models"], membership)
+    assert cached["fetched"] == 0, (
+        f"the browser-cache replay must not fetch — got {cached['fetched']}"
+    )
+    assert "@custom:cpa:live-only" in cached["after"], (
+        "C63-F1: the cached degraded placeholder pruned a live-only option — "
+        f"got {cached['after']}"
+    )
+    assert "@custom:cpa:placeholder-a" in cached["after"], (
+        f"the cached placeholder must still enrich — got {cached['after']}"
+    )
+    assert cached["selectedAfter"] == "@custom:cpa:selected"
+    assert cached["otherAfter"] == ["other/model"]
+
+
+def test_composed_live_placeholder_control_still_prunes(monkeypatch):
+    """Control end to end: the SAME ids served without the degraded marker
+    keep full authority and still reconcile the picker — provenance
+    detection is not a blanket opt-out for built-in providers."""
+    payload_live = _run_live_handler(
+        monkeypatch,
+        provider="fakebuiltin",
+        config_data={"model": {"provider": "fakebuiltin"}},
+        resolver_ids=["catalog-a"],
+    )
+    result = _replay_gate_payload(payload_live)
+    assert "@custom:cpa:live-only" not in result["after"], (
+        f"a live authoritative catalog must still prune — got {result['after']}"
+    )
+    cached = _replay_cached_membership(
+        payload_live["models"],
+        {
+            "authoritative": bool(payload_live.get("authoritative")),
+            "complete": bool(payload_live.get("complete")),
+        },
+    )
+    assert "@custom:cpa:live-only" not in cached["after"], (
+        f"the cached live catalog must still prune — got {cached['after']}"
+    )
