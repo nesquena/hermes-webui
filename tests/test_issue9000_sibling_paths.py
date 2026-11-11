@@ -207,3 +207,66 @@ def test_btw_answer_still_removes_its_own_session_file(store, monkeypatch):  # n
     assert "done" in events, events
     assert not (store / f"{OWN}.json").exists()
     assert (store / f"{VICTIM}.json").exists()
+
+
+# --- the sync chat route ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_sync_chat_refuses_a_session_swapped_for_another(store, tmp_path, monkeypatch, swap):  # noqa: F811 -- pytest fixture parameter
+    """``POST /api/chat`` (the sync route) loads the session by id and runs the whole turn under
+    the loaded object's ``session_id``. For a marked object that is the other session, so the
+    route must refuse before building the Agent, as ``/api/chat/start`` does."""
+    import api.routes as routes
+
+    victim_before = _victim(store, workspace=tmp_path).read_bytes()
+    _own(store, tmp_path / "own")
+    if swap:
+        _swap(store)
+    runtime = types.ModuleType("hermes_cli.runtime_provider")
+    runtime.resolve_runtime_provider = lambda requested=None, **_kw: {
+        "provider": requested or "test-provider", "api_key": "synthetic-key", "base_url": None}
+    cli = types.ModuleType("hermes_cli")
+    cli.runtime_provider = runtime
+    for name, module in (("hermes_cli", cli), ("hermes_cli.runtime_provider", runtime)):
+        monkeypatch.setitem(sys.modules, name, module)
+    built = []
+
+    class _Agent:
+        def __init__(self, **kwargs):
+            built.append(kwargs.get("session_id"))
+            self.session_id = kwargs.get("session_id")
+            self._session_db = None
+            self.session_prompt_tokens = self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0.0
+            self.context_compressor = self._last_error = self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **kwargs):
+            history = list(kwargs.get("conversation_history") or [])
+            return {"status": "ok", "messages": history + [{"role": "assistant", "content": "answer"}]}
+
+    replies = []
+    monkeypatch.setattr(routes, "require_ai_agent_class", lambda: _Agent)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda ws, **_k: ws)
+    monkeypatch.setattr(routes, "j", lambda _h, obj, *a, **k: replies.append(("j", k.get("status", 200), obj)) or True)
+    monkeypatch.setattr(routes, "bad", lambda _h, msg, code=400: replies.append(("bad", code, msg)) or True)
+
+    class _Handler:
+        headers = {"Content-Type": "application/json"}
+        command = "POST"
+        path = "/api/chat"
+        client_address = ("127.0.0.1", 0)
+
+    with mock.patch.object(routes, "resolve_model_provider", return_value=("m", "test-provider", None), create=True), \
+         mock.patch("api.config.resolve_model_provider", return_value=("m", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+        routes._handle_chat_sync(_Handler(), {"session_id": OWN, "message": "hi"})
+
+    assert (store / f"{VICTIM}.json").read_bytes() == victim_before
+    if swap:
+        assert built == [], "the sync route built an Agent under the other session's id"
+        assert replies == [("bad", 404, "Session not found")], replies
+    else:
+        assert built == [OWN]
+        assert replies and replies[0][0] == "j" and replies[0][1] == 200, replies

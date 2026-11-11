@@ -32492,6 +32492,10 @@ def _handle_chat_sync(handler, body):
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
     s = get_session(body["session_id"])
+    if getattr(s, "_sidecar_names_other_session", None):
+        # #9000: the file holds a copy of another session's file, so the loaded
+        # object carries that session's id; the turn would run under it.
+        return bad(handler, "Session not found", 404)
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
