@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from unittest import mock
 
 import api.config as config
 import api.onboarding as onboarding
@@ -227,14 +228,16 @@ def isolated_self_hosted_env(monkeypatch, tmp_path):
     # or the next test reloads the shared test home config.yaml over its in-memory cfg.
     monkeypatch.setattr(config, "_cfg_path", config._cfg_path)
     monkeypatch.setattr(config, "_cfg_fingerprint", config._cfg_fingerprint)
-    # The real setup writes os.environ[env_var] directly. delenv() alone records nothing
-    # for an absent var, so setenv() first makes undo() restore the original state.
-    for env_var in _SELF_HOSTED_ENV_VARS:
-        monkeypatch.setenv(env_var, "x")
-        monkeypatch.delenv(env_var)
     # Its _reload_dotenv() also rebinds the set of keys it owns; restore that marker too.
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", profiles._loaded_profile_env_keys)
-    yield tmp_path, fake_config_path
+    # The real setup writes os.environ[env_var] directly, and its _reload_dotenv() first
+    # pops every key the previous load owned, so snapshot and restore the whole mapping
+    # (monkeypatch.delenv() records nothing for an absent var). The provider vars start
+    # absent so an ambient value can't change what the setup writes.
+    with mock.patch.dict(os.environ):
+        for env_var in _SELF_HOSTED_ENV_VARS:
+            os.environ.pop(env_var, None)
+        yield tmp_path, fake_config_path
     config.cfg.clear()
     config.cfg.update(old_cfg)
     config._cfg_mtime = old_mtime
