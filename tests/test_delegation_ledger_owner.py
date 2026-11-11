@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -83,6 +84,56 @@ def test_profile_missing_from_the_cached_display_list_is_still_found(world, monk
     world["sessions"]["s-1"] = "named"
     assert owner_mod.resolve_ledger_owner(_event()) == owner_mod.LedgerOwner("found", world["named"])
     assert world["named"] in owner_mod.authorized_ledger_homes()
+
+
+def _real_profile_paths(world, monkeypatch):
+    # The fixture stubs name -> home; use the real containment-checked resolver here.
+    profiles = world["profiles"]
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: world["root"] if name in (None, "", "default") else profiles._resolve_named_profile_home(name),
+    )
+
+
+def test_broken_symlinks_under_profiles_do_not_make_enumeration_incomplete(world, monkeypatch, tmp_path):
+    _real_profile_paths(world, monkeypatch)
+    profiles_dir = world["root"] / "profiles"
+    (profiles_dir / "dangling-out").symlink_to(tmp_path / "does-not-exist")
+    (profiles_dir / "dangling-in").symlink_to(profiles_dir / "does-not-exist")
+    (profiles_dir / "loop").symlink_to(profiles_dir / "loop")
+    _ledger(world["named"], "d-1")
+    assert owner_mod.authorized_ledger_homes() == [world["root"], world["named"]]
+    # No session provenance: the lookup must still find the row instead of deferring forever.
+    assert owner_mod.resolve_ledger_owner(_event()) == owner_mod.LedgerOwner("found", world["named"])
+
+
+def test_tombstoned_profile_is_not_scanned(world, monkeypatch):
+    _real_profile_paths(world, monkeypatch)
+    gone = world["root"] / "profiles" / "gone"
+    gone.mkdir()
+    (world["root"] / "profiles" / ".deleted").mkdir()
+    sys.modules["hermes_constants"].named_profile_is_deleted = lambda home: Path(home).name == "gone"
+    assert owner_mod.authorized_ledger_homes() == [world["root"], world["named"]]
+
+
+def test_persistent_restore_failure_warning_is_rate_limited(world, monkeypatch, caplog):
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(peu, "_monotonic", lambda: 1000.0)
+    caplog.set_level("INFO", logger=peu.logger.name)
+    attempts = []
+
+    def failing(_q):
+        attempts.append(1)
+        if len(attempts) >= 4:
+            peu.ASYNC_DELIVERY_ROUTING_RETRY_SECONDS = 3600  # park the loop so the count is stable
+        raise RuntimeError("ledger refused")
+
+    sys.modules["tools.async_delegation"].restore_undelivered_completions = failing
+    assert peu._arm_async_delegation_restore_sweep(queue.Queue(), 0.0, ledger_home=world["named"])
+    assert _wait_for(lambda: len(attempts) >= 4)
+    warnings = [r for r in caplog.records if "Failed to restore pending async delegations" in r.getMessage()]
+    assert len(warnings) == 1
 
 
 def test_unreadable_or_incomplete_enumeration_is_unknown(world, monkeypatch):

@@ -14,7 +14,10 @@ restores nothing (#7214).
   recorded profile first, then the authorized existing ledgers. Authorized
   ledgers are the root home plus the profile directories read from disk on each
   call, not the cached profile list the UI shows, so a profile created outside
-  WebUI is never treated as absent.
+  WebUI is never treated as absent. Entries that are not directories (stray
+  files, dangling or looping symlinks) and tombstoned profiles, whose ledger
+  the Agent refuses to open, are skipped. Any other entry that cannot be
+  resolved makes the enumeration incomplete.
   - `found`: the origin session's profile ledger has the row (provenance
     decides, even if another ledger also has it); otherwise, exactly one
     authorized ledger has the row.
@@ -41,6 +44,14 @@ restores nothing (#7214).
   authorized ledger. If enumeration is incomplete, a single delayed timer
   retries the replay, because the background drain calls the restore only once
   at startup. Atomic claims make a repeated launch-ledger restore harmless.
+  Each restore is the Agent's `restore_undelivered_completions()`, which is not
+  read-only: under each profile's home it also runs the Agent's abandoned-run
+  recovery (`running` rows whose owner PID is not alive become `unknown`) and
+  marks pending rows older than the 48 h replay cap `dropped`. The same writes
+  happen when that profile's own process next starts; whether WebUI should make
+  them for other profiles is an open scope question on the PR. A failing
+  restore retries on the 5 s routing interval and logs at most once per 300 s
+  per ledger.
 
 ## Out of scope
 

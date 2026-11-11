@@ -11,10 +11,23 @@ from typing import Any, Iterator, Literal, Mapping
 
 @dataclass(frozen=True)
 class LedgerOwner:
-    # found: one authorized ledger has the row; missing: none has it (legacy
-    # no-row event); unknown: unreadable, incomplete or ambiguous.
+    # found: the origin session's ledger has the row, or else exactly one
+    # authorized ledger has it; missing: none has it (legacy no-row event);
+    # unknown: no provenance match and unreadable, incomplete or ambiguous.
     status: Literal["found", "missing", "unknown"]
     home: Path | None = None
+
+
+def _profile_is_deleted(home: Path) -> bool:
+    """The Agent's tombstone check; Agent cores without it have no tombstones."""
+    try:
+        from hermes_constants import named_profile_is_deleted
+    except (ImportError, AttributeError):
+        return False
+    try:
+        return bool(named_profile_is_deleted(home))
+    except OSError:
+        return False
 
 
 def _authorized_homes() -> tuple[list[Path], bool]:
@@ -36,6 +49,8 @@ def _authorized_homes() -> tuple[list[Path], bool]:
     for entry in entries:
         if not profiles._PROFILE_ID_RE.fullmatch(entry.name):
             continue
+        if not entry.is_dir():
+            continue  # stray file, dangling or looping symlink: not a profile
         try:
             home = Path(profiles.get_hermes_home_for_profile(entry.name)).resolve()
             home.stat()
@@ -44,8 +59,8 @@ def _authorized_homes() -> tuple[list[Path], bool]:
         except Exception:
             complete = False
             continue
-        if home.is_dir() and home not in homes:
-            homes.append(home)
+        if home.is_dir() and home not in homes and not _profile_is_deleted(home):
+            homes.append(home)  # the Agent refuses to open a tombstoned profile's ledger
     return homes, complete
 
 

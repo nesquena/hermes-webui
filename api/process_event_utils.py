@@ -46,14 +46,14 @@ _THROTTLED_LOG_AT: dict[str, float] = {}
 _monotonic = time.monotonic
 
 
-def _log_throttled(key: str, level: int, message: str, *args: Any) -> None:
+def _log_throttled(key: str, level: int, message: str, *args: Any, exc_info: bool = False) -> None:
     now = _monotonic()
     with _THROTTLED_LOG_LOCK:
         last = _THROTTLED_LOG_AT.get(key)
         if last is not None and now - last < _THROTTLED_LOG_INTERVAL_SECONDS:
             return
         _THROTTLED_LOG_AT[key] = now
-    logger.log(level, message, *args)
+    logger.log(level, message, *args, exc_info=exc_info)
 
 
 def _log_owner_unknown_deferral(delegation_id: str) -> None:
@@ -371,7 +371,9 @@ def _arm_async_delegation_restore_sweep(
                     with ledger_home_scope(home):
                         restore_undelivered_completions(target_queue)
                 except Exception:
-                    logger.warning(
+                    _log_throttled(
+                        f"restore:{home}",
+                        logging.WARNING,
                         "Failed to restore pending async delegations; retrying sweep",
                         exc_info=True,
                     )
