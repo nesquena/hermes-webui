@@ -317,3 +317,57 @@ def test_edited_file_does_not_reuse_the_previous_owner(isolated_sessions):
     path.write_text(json.dumps(data), encoding="utf-8")
     assert models.Session.load_metadata_only(SID).profile == "other"
     assert models.Session.load_metadata_only(SID).profile == "other"
+
+
+@pytest.mark.parametrize("profile", ["work", None])
+def test_counted_layout_without_prefix_profile_is_full_read_once(isolated_sessions, monkeypatch, profile):
+    """A prefix with the count keys but no ``profile`` gets one full parse per file version too.
+
+    ``Session.load`` used to cache facts only for files without
+    ``anchor_scene_index``, so this layout found no owner in the cache and took a
+    full parse on every metadata read (the sidebar polls; gate finding, Codex).
+    """
+    directory, _cache = isolated_sessions
+    _write_sidecar(directory, "counted", profile=profile)
+    calls = _count_full_loads(monkeypatch)
+    for _ in range(3):
+        stub = models.Session.load_metadata_only(SID)
+        assert stub.profile == profile
+        assert stub.title == TITLE
+    assert calls == [SID]
+    assert getattr(stub, "_loaded_metadata_only", False)
+
+
+def test_prefix_and_owner_come_from_one_file_version(isolated_sessions, monkeypatch):
+    """A file replaced between the prefix read and the cache lookup never mixes versions.
+
+    Version A names no owner (the root profile's session); version B is
+    another profile's session whose owner a full load already cached. A stub
+    built from A's prefix with B's owner would show the root profile's title
+    under ``work`` (gate finding, Codex). The lookup is pinned to the version
+    the prefix came from, so the read falls back to the full load instead.
+    """
+    directory, _cache = isolated_sessions
+    path = directory / f"{SID}.json"
+    version_a = {"session_id": SID, "title": "Root profile title", "created_at": 1.0, "updated_at": 2.0,
+                 "messages": MESSAGES}
+    version_b = {"session_id": SID, "title": "Work title", "created_at": 1.0, "updated_at": 3.0,
+                 "messages": MESSAGES, "profile": "work"}
+    path.write_text(json.dumps(version_a), encoding="utf-8")
+    real_prefix = models._read_metadata_json_prefix
+    swapped = []
+
+    def _prefix_then_replace(p, *a, **k):
+        prefix = real_prefix(p, *a, **k)
+        if not swapped:
+            swapped.append(True)
+            path.write_text(json.dumps(version_b), encoding="utf-8")
+            assert models.Session.load(SID).profile == "work"  # caches B's owner for B's signature
+            assert models._legacy_sidecar_facts_get(SID)["profile"] == "work"
+        return prefix
+
+    monkeypatch.setattr(models, "_read_metadata_json_prefix", _prefix_then_replace)
+    stub = models.Session.load_metadata_only(SID)
+    assert swapped
+    assert (stub.title, stub.profile) in {("Root profile title", None), ("Work title", "work")}
+    assert (stub.title, stub.profile) == ("Work title", "work")

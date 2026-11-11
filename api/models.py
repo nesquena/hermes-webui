@@ -2609,7 +2609,13 @@ class Session:
             # modern case benefit needs the READ side redesigned to build a
             # metadata stub from cached facts — a separate change; until then
             # this stays legacy-only.
-            if 'anchor_scene_index' not in data:
+            #
+            # #8857: a sidecar whose metadata prefix lacks 'profile' (an older or
+            # outside writer put it after the body, or wrote none) needs its
+            # owner from this cache too, whatever its layout, or every metadata
+            # read of it would take a full parse. So cache those as well; their
+            # count and scene index are this parse's, so no reader can be misled.
+            if 'anchor_scene_index' not in data or not _profile_in_metadata_prefix(data):
                 try:
                     _legacy_sidecar_facts_put(
                         sid,
@@ -2640,6 +2646,10 @@ class Session:
         if not p.exists():
             return None
         try:
+            # #8857: the version the prefix comes from. Facts combined with the
+            # prefix below must describe this same version (see
+            # _legacy_sidecar_facts_get's expected_sig; None never matches).
+            _prefix_sig = _sidecar_stat_signature(p)
             prefix = _read_metadata_json_prefix(p)
             if not prefix:
                 return cls.load(sid)
@@ -2652,12 +2662,12 @@ class Session:
             # outside writer put it after 'messages', or wrote none) would give
             # the stub profile=None, the legacy no-profile owner. Take it from
             # the legacy-facts entry a full load recorded for this exact file
-            # (stat signature), else from the full read. save() writes
-            # 'profile' before 'messages' even when it is None, so sidecars it
-            # writes never get here.
+            # version (the signature taken before the prefix read), else from
+            # the full read. save() writes 'profile' before 'messages' even
+            # when it is None, so sidecars it writes never get here.
             _facts = None
             if 'profile' not in parsed:
-                _facts = _legacy_sidecar_facts_get(sid)
+                _facts = _legacy_sidecar_facts_get(sid, expected_sig=_prefix_sig)
                 if _facts is None or 'profile' not in _facts:
                     return cls.load(sid)
                 parsed['profile'] = _facts['profile']
@@ -2704,7 +2714,7 @@ class Session:
                 and 'anchor_scene_index' not in parsed
             ):
                 if _facts is None:
-                    _facts = _legacy_sidecar_facts_get(sid)
+                    _facts = _legacy_sidecar_facts_get(sid, expected_sig=_prefix_sig)
                 if _facts is not None:
                     parsed['anchor_scene_index'] = _facts.get('scene_index') or {}
                     session = cls(**parsed)
@@ -6754,18 +6764,43 @@ def set_session_reasoning_effort(session_id_or_session, value, *, profile=_KEEP_
 
 # ``_legacy_sidecar_facts_put(profile=...)`` default: no owner recorded (#8857).
 _FACTS_PROFILE_UNSET = object()
+# ``_legacy_sidecar_facts_get(expected_sig=...)`` default: no version pinned.
+_FACTS_SIG_ANY = object()
 
 
-def _legacy_sidecar_facts_get(sid):
+def _profile_in_metadata_prefix(data):
+    """Whether ``load_metadata_only``'s prefix of this sidecar holds ``profile`` (#8857).
+
+    The prefix reader stops at the first top-level ``messages`` or
+    ``anchor_activity_scenes`` key, and ``json.loads`` keeps the file's key
+    order, so the parsed dict answers it without re-reading the file.
+    """
+    for key in data:
+        if key == 'profile':
+            return True
+        if key in ('messages', 'anchor_activity_scenes'):
+            return False
+    return False
+
+
+def _legacy_sidecar_facts_get(sid, *, expected_sig=_FACTS_SIG_ANY):
     """Return cached authoritative facts for a LEGACY sidecar, or None (#5854).
 
     Only returns a hit when the file's current stat signature matches the cached
     one, so a stale entry can never be served after an edit.
+
+    #8857: a caller that combines the facts with something it read from the
+    file earlier (the metadata prefix) passes the signature it took before that
+    read as ``expected_sig``. The lookup then misses unless the file is still
+    that version, so a prefix from one version never gets another version's
+    facts (its owner, above all) when the file is replaced in between.
     """
     if not is_safe_session_id(sid):
         return None
     sig = _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
     if sig is None:
+        return None
+    if expected_sig is not _FACTS_SIG_ANY and sig != expected_sig:
         return None
     with _LEGACY_SIDECAR_FACTS_LOCK:
         hit = _LEGACY_SIDECAR_FACTS.get(sig)
