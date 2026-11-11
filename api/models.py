@@ -13583,9 +13583,10 @@ def _reconciled_visible_count_for_sidebar(
         session = None
     if session is None or getattr(session, '_loaded_metadata_only', False):
         # Metadata-only stubs carry messages=[] by contract; the sidecar
-        # transcript needs a full load (bounded to this one session).
+        # transcript needs a full load (bounded to this one session). A sidebar
+        # poll holds no session lock, so the read must not save (#9007).
         try:
-            session = Session.load(str(sid))
+            session = _load_session_for_listing(str(sid))
         except Exception:
             return None
     if session is None:

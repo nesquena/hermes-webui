@@ -3,9 +3,9 @@
 ``Session.load(sid)`` repairs as it reads: a sidecar with adjacent duplicate partials is collapsed and
 saved back from the freshly loaded, detached object. Three read-only paths behind ``GET /api/sessions``
 called it: the #4985 orphan-prune probe, the ``all_sessions()`` index backfill and its full-scan
-fallback. They run for sessions the requesting profile doesn't own and without the session's lock, so a
+fallback, and the #7882 state.db growth overlay's visible-count reconciliation. They run for sessions the requesting profile doesn't own and without the session's lock, so a
 poll from ``default`` could save ``work``'s session from an old copy while the owner checkpointed a newer
-turn, and the newer turn was lost. The three paths now read through ``_load_session_for_listing``, which
+turn, and the newer turn was lost. The four paths now read through ``_load_session_for_listing``, which
 collapses in memory only; what the listing shows is unchanged.
 """
 
@@ -325,9 +325,13 @@ def _kind(directory, home, kind):
         path.write_text("{not json" if kind == "corrupt" else "", encoding="utf-8")
         return SID
     body = json.loads(path.read_text(encoding="utf-8"))
-    if kind in ("legacy", "legacy-duplicate-partials"):
+    if kind in ("legacy", "legacy-duplicate-partials", "legacy-with-scenes"):
         body.pop("anchor_scene_index")
         body.pop("message_count")
+        if kind == "legacy-with-scenes":
+            # The facts cache keeps a scene fingerprint built from these bodies.
+            body["anchor_activity_scenes"] = {"scene-a": {"updated_at": 4.5, "body": "x"},
+                                              "scene-b": {"updated_at": 6.25, "body": "y"}}
     elif kind == "names-other":
         body["session_id"] = OTHER
     elif kind == "no-session-id":
@@ -371,12 +375,13 @@ def _outcome(read, sid):
 
 
 @pytest.mark.parametrize("kind", [
-    "ordinary", "duplicate-partials", "legacy", "legacy-duplicate-partials", "names-other",
+    "ordinary", "duplicate-partials", "legacy", "legacy-duplicate-partials", "legacy-with-scenes",
+    "names-other",
     "no-session-id", "share-fields-after-body", "checkpoint-fact", "corrupt", "empty", "missing",
     "unsafe",
 ])
 def test_the_listing_read_is_session_load_without_the_save(store, saves, kind):
-    """What the three listing paths get back is what Session.load returned them, on every sidecar
+    """What the listing paths get back is what Session.load returned them, on every sidecar
     shape they can meet; only the save is gone."""
     from api import models
 
@@ -391,3 +396,127 @@ def test_the_listing_read_is_session_load_without_the_save(store, saves, kind):
     loaded = _outcome(models.Session.load, sid)  # may repair-save; it runs second
 
     assert listed == loaded
+
+
+# The fourth site: the #7882 state.db growth overlay. While a turn is in progress the agent's
+# state.db holds more rows than the sidecar, and the sidebar reconciles the visible count from a
+# full sidecar read (``_reconciled_visible_count_for_sidebar``). Adapted from the independent
+# review's repro.
+OVERLAY = "overlay-9007"
+
+
+def _overlay_store(monkeypatch, tmp_path):
+    """A sidecar ending in two identical partials, plus a state.db that has grown past it (the
+    next prompt landed). Returns the sidecar path."""
+    import api.config as config
+    import api.models as models
+    import api.profiles as profiles
+    import api.routes as routes
+
+    directory = tmp_path / "sessions"
+    directory.mkdir()
+    for module in (config, models, routes):
+        monkeypatch.setattr(module, "STATE_DIR", tmp_path, raising=False)
+        monkeypatch.setattr(module, "SESSION_DIR", directory, raising=False)
+        monkeypatch.setattr(module, "SESSION_INDEX_FILE", directory / "_index.json", raising=False)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict(), raising=False)
+    monkeypatch.setattr(models, "_LEGACY_SIDECAR_FACTS", OrderedDict())
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
+    monkeypatch.setattr(routes, "load_settings", lambda: {"show_cli_sessions": False})
+    monkeypatch.setattr(models, "_start_session_index_rebuild_thread", lambda: None)
+    now = time.time()
+    messages = [{"role": "user", "content": "hello", "timestamp": now - 60}, dict(PARTIAL), dict(PARTIAL)]
+    session = models.Session(session_id=OVERLAY, title="Named", workspace=str(tmp_path), model="m",
+                              messages=messages, created_at=now - 60, updated_at=now - 59)
+    session.save(touch_updated_at=False)  # sidecar and index row; save does not collapse
+    path = directory / f"{OVERLAY}.json"
+    assert sum(1 for m in json.loads(path.read_text())["messages"] if m == PARTIAL) == 2
+    conn = sqlite3.connect(str(tmp_path / "state.db"))
+    try:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+                     "started_at REAL, message_count INTEGER)")
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, "
+                     "content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT)")
+        rows = [("user", "hello", now - 60), ("assistant", "same", now - 58), ("assistant", "same", now - 57),
+                ("user", "next turn", now + 1)]
+        conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?)", (OVERLAY, "webui", "Named", "m", now - 60, len(rows)))
+        for role, content, ts in rows:
+            conn.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)",
+                         (OVERLAY, role, content, ts))
+        conn.commit()
+    finally:
+        conn.close()
+    routes._session_list_cache_clear()
+    return path, now
+
+
+def _poll_sidebar():
+    from api import routes
+
+    routes._session_list_cache_clear()
+    handler = _Handler()
+    routes.handle_get(handler, urlparse("/api/sessions"))
+    assert handler.status == 200, handler.status
+
+
+def test_the_growth_overlay_never_saves_the_session_it_reads(monkeypatch, tmp_path, saves, reads):
+    path, _ = _overlay_store(monkeypatch, tmp_path)
+    saves.clear()  # the setup's own save wrote the sidecar
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+
+    _poll_sidebar()
+
+    assert any("_reconciled_visible_count_for_sidebar" in stack for stack in reads), reads
+    assert OVERLAY not in saves, "the sidebar's growth overlay saved the session it reads"
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    assert not list(path.parent.rglob("*.bak*"))
+
+
+def test_a_growth_overlay_poll_never_overwrites_a_turn_the_owner_checkpoints(monkeypatch, tmp_path):
+    """The overlay's read pauses after the collapse; the owner appends the next turn under its
+    lock and saves; the poll resumes. The turn must survive."""
+    import api.config as config
+    from api import models
+
+    path, now = _overlay_store(monkeypatch, tmp_path)
+    read_done, resume = threading.Event(), threading.Event()
+    errors = []
+    real = models._collapse_adjacent_duplicate_partials
+
+    def pausing_collapse(messages):
+        result = real(messages)
+        if threading.current_thread().name == POLL_THREAD and result[1] and not read_done.is_set():
+            read_done.set()
+            if not resume.wait(15):
+                raise RuntimeError("barrier timed out")
+        return result
+
+    monkeypatch.setattr(models, "_collapse_adjacent_duplicate_partials", pausing_collapse)
+
+    def poll():
+        try:
+            _poll_sidebar()
+        except Exception as exc:  # surfaced below
+            errors.append(repr(exc))
+
+    thread = threading.Thread(target=poll, name=POLL_THREAD)
+    thread.start()
+    try:
+        assert read_done.wait(15), "the poll never reached the overlay's read"
+        with config._get_session_agent_lock(OVERLAY):
+            current = models.Session.load(OVERLAY)
+            current.messages.append({"role": "user", "content": "next turn", "timestamp": now + 1})
+            current.pending_user_message = "next turn"
+            current.active_stream_id = "live"
+            current.pending_started_at = now + 1
+            current.save(touch_updated_at=False)
+    finally:
+        resume.set()
+        thread.join(15)
+    assert not errors, errors
+
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after.get("pending_user_message") == "next turn"
+    assert [m.get("content") for m in after["messages"]] == ["hello", "same", "next turn"]
