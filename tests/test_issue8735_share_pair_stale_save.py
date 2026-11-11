@@ -49,19 +49,13 @@ def _make_session(sid, title, text, workspace):
 
 
 def _persist_pair(session, token, created_at=1000.0):
-    """Write the pair through the production share patch.
-
-    Tolerant on purpose: on the pre-fix head the patch does not exist yet and the
-    pair is written by a plain save, which keeps the RED honest (the defect is in
-    the *other* writers, not in how the pair is persisted here).
-    """
-    updater = getattr(session, "update_session_share_fields", None)
-    if updater is not None:
-        updater(token=token, created_at=created_at)
-        return
-    session.share_token = token
-    session.share_created_at = created_at
-    session.save(touch_updated_at=False)
+    """Write the pair through the canonical module share writer."""
+    sid = getattr(session, "session_id", session)
+    return models.update_session_share_fields(
+        sid,
+        share_token=token,
+        share_created_at=created_at,
+    )
 
 
 def _persisted_pair(session_dir: Path, sid: str):
@@ -135,7 +129,14 @@ def test_evicted_writer_cannot_put_an_old_share_token_back(store):
     assert _persisted_pair(session_dir, "sess-a")[0] == token_new, (
         "the stale save wrote the old share token back over the newer one"
     )
-    assert models.Session.load("sess-a").title == "Session A renamed"
+    loaded = models.Session.load("sess-a")
+    assert loaded.title == "Session A renamed"
+    assert [m["content"] for m in loaded.messages] == ["A words", "later answer"]
+
+
+def test_session_has_no_update_session_share_fields_method():
+    """Ensure Session class has no update_session_share_fields method (#8950 single-writer)."""
+    assert not hasattr(models.Session, "update_session_share_fields")
 
 
 def test_revoke_after_a_stale_save_leaves_no_live_url(store):

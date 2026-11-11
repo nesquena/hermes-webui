@@ -20,13 +20,14 @@ actually receives.
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import pytest
 
-from api import models, shares
+from api import models, shares, streaming
 from tests._pytest_port import BASE
 
 
@@ -39,6 +40,7 @@ def store(tmp_path, monkeypatch):
     share_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(shares, "SHARES_DIR", share_dir)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
     return session_dir, share_dir
 
 
@@ -174,6 +176,54 @@ def test_legacy_snapshot_without_source_session_id_keeps_working(store):
     assert shares.load_share(token) is None
 
 
+def test_revoke_after_compression_accepts_verified_continuation(store):
+    """P1: revoke_share accepts a durably verified compression continuation."""
+    session_dir, share_dir = store
+    parent_sid = "sess-comp-parent"
+    child_sid = "sess-comp-child"
+    parent = _make_session(parent_sid, "Parent Session", "Parent content", session_dir)
+    created = shares.create_or_refresh_share(parent)
+    token = created["share_token"]
+    parent = _seed_share_token(session_dir, parent_sid, token)
+
+    # Durable compression migration
+    models.SESSIONS[parent_sid] = parent
+    agent_lock = threading.Lock()
+    assert streaming._migrate_compression_session_ownership(
+        parent, parent_sid, child_sid, agent_lock
+    ) is True
+    child = parent
+    assert child.session_id == child_sid
+    assert child.parent_session_id == parent_sid
+    assert child.share_token == token
+    child.save(touch_updated_at=False)
+
+    # Unrelated session cannot revoke (raises ShareTokenOwnershipError)
+    unrelated = _make_session("sess-comp-intruder", "Intruder", "words", session_dir)
+    unrelated = _seed_share_token(session_dir, "sess-comp-intruder", token)
+    with pytest.raises(shares.ShareTokenOwnershipError):
+        shares.revoke_share(unrelated)
+
+    # Verified child continuation can revoke
+    assert shares.revoke_share(child) is True
+    assert shares.load_share(token) is None
+
+
+def test_ownerless_snapshot_is_not_served(store):
+    """P1: A snapshot without a verifiable owner is fail-closed and not served."""
+    session_dir, share_dir = store
+    session = _make_session("sess-ownerless-unit", "Ownerless", "words", session_dir)
+    created = shares.create_or_refresh_share(session)
+    token = created["share_token"]
+
+    path = share_dir / f"{token}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("source_session_id", None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert shares.load_share(token) is None
+
+
 # ── HTTP surface: the refusal must be a named 409, never a 500 or a mute 200 ──
 # These two run against the shared test server (autouse ``test_server``); the
 # sessions are written straight to the store so the server's first read of them
@@ -244,4 +294,104 @@ def test_create_endpoint_mints_a_new_token_and_leaves_the_other_link_alone():
     stolen, status = _get(f"/api/share/{payload['share']['token']}")
     assert status == 200
     assert stolen["share"]["title"] == "HTTP B2"
+
+
+def test_revoke_endpoint_accepts_verified_compression_continuation():
+    """P1: /api/share/revoke returns 200 for verified continuation and public GET returns 404."""
+    session_dir, share_dir = models.SESSION_DIR, shares.SHARES_DIR
+    parent_sid = "http-8734-comp-parent"
+    child_sid = "http-8734-comp-child"
+    parent = _make_session(parent_sid, "Parent Session", "Parent words", session_dir)
+    models.SESSIONS[parent_sid] = parent
+
+    created, status = _post("/api/share/create", {"session_id": parent_sid})
+    assert status == 200, created
+    token = created["share"]["token"]
+    parent = models.Session.load(parent_sid)
+    models.SESSIONS[parent_sid] = parent
+
+    # Public read works for the parent
+    pub, status = _get(f"/api/share/{token}")
+    assert status == 200, pub
+    assert pub["share"]["title"] == "Parent Session"
+
+    # Migrate ownership via real compression transition
+    agent_lock = threading.Lock()
+    migrated = streaming._migrate_compression_session_ownership(
+        parent,
+        parent_sid,
+        child_sid,
+        agent_lock,
+    )
+    assert migrated is True
+    assert parent.session_id == child_sid
+    assert parent.parent_session_id == parent_sid
+    assert parent.share_token == token
+    parent.save(touch_updated_at=False)
+
+    # An unrelated session attempting to revoke gets 409
+    _make_session("http-8734-comp-intruder", "Intruder", "Intruder words", session_dir)
+    _seed_share_token(session_dir, "http-8734-comp-intruder", token)
+    refused, status = _post("/api/share/revoke", {"session_id": "http-8734-comp-intruder"})
+    assert status == 409, refused
+    assert "http-8734-comp-parent" in refused["error"]
+    assert "http-8734-comp-intruder" in refused["error"]
+
+    # Verified continuation revoking returns 200
+    revoked, status = _post("/api/share/revoke", {"session_id": child_sid})
+    assert status == 200, revoked
+    assert revoked.get("ok") is True
+
+    # Anonymous GET of the same token now returns 404
+    anon, status = _get(f"/api/share/{token}")
+    assert status == 404, anon
+    payload = json.loads((share_dir / f"{token}.json").read_text(encoding="utf-8"))
+    assert payload.get("revoked_at") is not None
+
+
+def test_session_delete_leaves_no_anonymous_access_for_ownerless_and_stamped_shares():
+    """P1: Both owner-stamped and ownerless snapshots yield 404 after /api/session/delete."""
+    session_dir, share_dir = models.SESSION_DIR, shares.SHARES_DIR
+
+    # 1. Owner-stamped snapshot
+    stamped_sid = "http-8734-stamped"
+    stamped_session = _make_session(stamped_sid, "Stamped", "stamped words", session_dir)
+    created_stamped = shares.create_or_refresh_share(stamped_session)
+    stamped_token = created_stamped["share_token"]
+    _seed_share_token(session_dir, stamped_sid, stamped_token)
+
+    pub, status = _get(f"/api/share/{stamped_token}")
+    assert status == 200, pub
+    assert pub["share"]["title"] == "Stamped"
+
+    del_resp, status = _post("/api/session/delete", {"session_id": stamped_sid})
+    assert status == 200, del_resp
+
+    pub, status = _get(f"/api/share/{stamped_token}")
+    assert status == 404, pub
+
+    # 2. Ownerless snapshot (legacy/missing source_session_id)
+    ownerless_sid = "http-8734-ownerless"
+    ownerless_session = _make_session(ownerless_sid, "Ownerless", "ownerless words", session_dir)
+    created_ownerless = shares.create_or_refresh_share(ownerless_session)
+    ownerless_token = created_ownerless["share_token"]
+    _seed_share_token(session_dir, ownerless_sid, ownerless_token)
+
+    # Pop source_session_id to make it ownerless
+    token_path = share_dir / f"{ownerless_token}.json"
+    payload = json.loads(token_path.read_text(encoding="utf-8"))
+    payload.pop("source_session_id", None)
+    token_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    # Fail-closed: ownerless snapshot is not served even before delete
+    pub, status = _get(f"/api/share/{ownerless_token}")
+    assert status == 404, pub
+
+    # Run through /api/session/delete
+    del_resp, status = _post("/api/session/delete", {"session_id": ownerless_sid})
+    assert status == 200, del_resp
+
+    # Anonymous access remains 404
+    pub, status = _get(f"/api/share/{ownerless_token}")
+    assert status == 404, pub
 

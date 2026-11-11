@@ -1142,14 +1142,20 @@ def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
     return False
 
 
-def _read_share_snapshot(token: str, *, expected_session_id: str | None = None) -> dict | None:
+def _read_share_snapshot(
+    token: str,
+    *,
+    expected_session_id: str | None = None,
+    allow_continuation: bool = False,
+) -> dict | None:
     """Read a snapshot from disk, enforcing ownership when *expected_session_id* is given.
 
     Returns the raw snapshot payload dict, or ``None`` when the file is missing
     or unparseable. Raises :class:`ShareTokenOwnershipError` when the snapshot
     exists, carries a non-empty ``source_session_id``, and does not match
-    *expected_session_id*. Legacy snapshots without ``source_session_id`` are
-    accepted for any session (migration compatibility).
+    *expected_session_id* (unless *allow_continuation* is true and the expected
+    session is a verified compression continuation of the owner). Legacy snapshots
+    without ``source_session_id`` are accepted for any session (migration compatibility).
     """
     token = str(token or "").strip()
     if not token:
@@ -1170,7 +1176,12 @@ def _read_share_snapshot(token: str, *, expected_session_id: str | None = None) 
     if expected_session_id is not None:
         expected = str(expected_session_id or "").strip()
         owner = _snapshot_owner(payload)
-        if owner and expected and owner != expected:
+        if (
+            owner
+            and expected
+            and owner != expected
+            and not (allow_continuation and _is_compression_continuation(expected, owner))
+        ):
             raise ShareTokenOwnershipError(token, owner, expected)
     return payload
 
@@ -1270,15 +1281,16 @@ def _share_owner_exists(payload: dict) -> bool:
     included (they get a metadata-only sidecar), and every snapshot records that
     ``source_session_id``. So a stat of that one path answers the question. The
     sidecar is never opened: this runs for anonymous requests, and a sidecar can
-    be tens of MiB. A snapshot without a valid owner id, or whose owner's sidecar
-    is gone (the conversation was deleted, including by a delete from before
-    this check existed), is not served.
+    be tens of MiB. A snapshot without a valid, verifiable owner id, or whose owner's
+    sidecar is gone (the conversation was deleted), is fail-closed and not served
+    (#8950).
     """
-    if "source_session_id" not in payload:
-        return True  # legacy snapshot from before source_session_id existed
-    sid = payload.get("source_session_id")
-    if not isinstance(sid, str) or not sid:
+    if not isinstance(payload, dict):
         return False
+    sid = payload.get("source_session_id")
+    if not isinstance(sid, str) or not sid.strip():
+        return False
+    sid = sid.strip()
     try:
         from api import models
 
@@ -1363,7 +1375,12 @@ def revoke_share(session) -> bool:
         # #8734: revoke must prove the token is this session's. Otherwise the
         # request would take down another session's link while its owner still
         # shows it as shared. Raises ShareTokenOwnershipError (named refusal).
-        payload = _read_share_snapshot(token, expected_session_id=session_id)
+        # #8950: accept a durably verified compression continuation as owner.
+        payload = _read_share_snapshot(
+            token,
+            expected_session_id=session_id,
+            allow_continuation=True,
+        )
         if not isinstance(payload, dict):
             return True
         try:

@@ -2007,12 +2007,6 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
-        # #8735: the share pair has exactly one writer
-        # (``update_session_share_fields``). While this flag is false, a
-        # whole-session save keeps the pair the FILE names instead of its own
-        # copy, so an object that outlived the LRU cache cannot write an older
-        # token back over a newer one.
-        self._share_pair_dirty = False
         # The share pair this object last loaded or saved; save() uses it to
         # tell an own change from a stale snapshot (#8399).
         self._share_token_saved = self.share_token
@@ -2071,25 +2065,6 @@ class Session:
         # lands. Lock order: persist -> _INDEX_WRITE_LOCK -> LOCK.
         with _session_persist_lock(self.session_id):
             return self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
-
-    def update_session_share_fields(self, token=None, created_at=None) -> None:
-        """Write the share pair — the ONLY writer of ``share_token`` (#8735).
-
-        Holding the same persistence lock ``save()`` takes, the pair is set on
-        this object and written by one flagged save. Every other whole-session
-        save keeps whatever the sidecar names (see ``_save_locked``), so a copy
-        that never received this patch cannot roll the pair back — which is how
-        a writer that left the LRU cache used to restore a revoked token and
-        leave the newer public URL unreachable by revoke.
-        """
-        with _session_persist_lock(self.session_id):
-            self.share_token = str(token).strip() if token else None
-            self.share_created_at = created_at
-            self._share_pair_dirty = True
-            try:
-                self._save_locked(touch_updated_at=False)
-            finally:
-                self._share_pair_dirty = False
 
     def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
@@ -2153,7 +2128,7 @@ class Session:
         # stale copy from writing an old token back over a newer one that revoke
         # could then no longer reach.
         on_disk_share = _persisted_share_fields(self.path)
-        if on_disk_share is not _SHARE_FIELDS_ABSENT and not getattr(self, '_share_pair_dirty', False):
+        if on_disk_share is not _SHARE_FIELDS_ABSENT:
             share_baseline = (
                 getattr(self, '_share_token_saved', self.share_token),
                 getattr(self, '_share_created_at_saved', self.share_created_at),
