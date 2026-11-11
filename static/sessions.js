@@ -2529,15 +2529,35 @@ async function newSession(flash, options={}){
         // another tab can rewrite it between this tab's pick and this New
         // Chat. Matching the model alone admitted that tab's
         // same-model/different-provider pair and supplied the wrong
-        // model_provider (#8576, greptile P1 2026-11-08). Keep the stored
-        // pair's model (the pick wrote its normalised id there), but take the
-        // provider from the marker itself — never from the shared store. The
-        // comparison is by model IDENTITY (see freshExplicitPickIdentityOwns):
-        // the marker holds the picker's raw qualified value while this pair
-        // holds the normalised id.
+        // model_provider (#8576, greptile P1 2026-11-08). The comparison is
+        // by model IDENTITY (see freshExplicitPickIdentityOwns): the marker
+        // holds the picker's raw qualified value while this pair holds the
+        // normalised id.
+        //
+        // #8576 maintainer follow-up (2026-11-10): identity-only admission
+        // must NOT forward the shared model string it admitted. Another
+        // tab's pair can carry a FOREIGN @<provider>: qualifier around the
+        // very same model id — @openai:gpt-5.4-mini against a marker that
+        // owns @custom:review-route:gpt-5.4-mini — and the backend gives an
+        // embedded qualifier precedence over model_provider, so the posted
+        // pair {model:"@openai:gpt-5.4-mini", model_provider:
+        // "custom:review-route"} resolved to provider openai. Build BOTH
+        // outgoing fields from THIS tab's marker-owned selection through the
+        // picker's own normalisation contract instead — the same
+        // _modelStateForSelect resolver the picker arm above uses, which
+        // strips a custom provider's duplicated @<provider>: prefix — so the
+        // model sent is the pick's own normalised id and never a differently
+        // qualified shared string. The provider stays on the marker (the
+        // contract resolves the same one from the qualified value). The
+        // backend's deliberate qualifier precedence is NOT touched: the
+        // client simply stops sending a payload that needs it.
+        const _markerSelection=(typeof _modelStateForSelect==='function'&&freshExplicitPickValue)
+          ? _modelStateForSelect(modelSelForNew,freshExplicitPickValue)
+          : null;
         newModelState={
-          model:_persistedModelState.model,
-          model_provider:(freshExplicitPick&&freshExplicitPick.model_provider)||null,
+          model:(_markerSelection&&_markerSelection.model)||_persistedModelState.model,
+          model_provider:(freshExplicitPick&&freshExplicitPick.model_provider)
+            ||(_markerSelection&&_markerSelection.model_provider)||null,
         };
       }
     }
