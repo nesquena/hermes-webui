@@ -1042,6 +1042,32 @@ def _chat_start_requested_profile(body):
     return requested_profile, False
 
 
+def _new_session_requested_profile(body):
+    """Parse /api/session/new's optional ``profile``: ``(value, invalid)``.
+
+    ``None``/absent/``""`` keeps the pre-#8862 behaviour (the active profile
+    applies).  A non-string JSON value or a string that isn't a profile id is a
+    malformed request, so the route answers 400 before any session, worktree or
+    memory write (#8862).  A well-formed but unknown name is still returned as
+    valid: whether an unknown profile should be refused is a product decision,
+    not part of this guard.
+    """
+    raw_profile = body.get("profile")
+    if raw_profile is None or raw_profile == "":
+        return None, False
+    if not isinstance(raw_profile, str):
+        return raw_profile, True
+    try:
+        from api.profiles import _PROFILE_ID_RE
+    except ImportError:
+        # Pre-profile-install deployments: nothing to validate against, so keep
+        # forwarding the value exactly as before.
+        return raw_profile, False
+    if not _PROFILE_ID_RE.fullmatch(raw_profile):
+        return raw_profile, True
+    return raw_profile, False
+
+
 def _owner_readings_visible(readings, handler) -> bool:
     """Whether any of ``session_owner_readings_readonly``'s readings is visible to the request."""
     return any(
@@ -9225,7 +9251,12 @@ def _context_lookup_origin(url: object) -> str:
         return ""
     try:
         parts = urlsplit(text if "://" in text else f"https://{text}")
-        host = (parts.hostname or "").lower()
+        # ``hostname`` lowercases only up to the first "%". A DNS name is case-insensitive throughout (percent-encoded
+        # letters included), so lowercase it in full. An IPv6 literal (the only host with ":") keeps its zone ID as
+        # written: a zone ID names an interface (case-sensitive), and the client connects to it as written.
+        host = parts.hostname or ""
+        if ":" not in host:
+            host = host.lower()
         port = parts.port or (80 if parts.scheme == "http" else 443)
     except ValueError:
         return ""
@@ -9503,46 +9534,164 @@ def _context_length_config_api_key_for_provider(
     return _context_length_config_api_key_and_owner(provider, cfg)[0]
 
 
+def _context_lookup_resolve_key(raw_api_key, raw_key_env=None) -> str:
+    """Resolve a config source's declared key: a literal, a ``${VAR}`` reference or
+    ``key_env``, stripped. Unresolved references and blanks resolve to ``""``."""
+    api_key_text = str(raw_api_key or "").strip()
+    if (
+        api_key_text.startswith("${")
+        and api_key_text.endswith("}")
+        and len(api_key_text) > 3
+    ):
+        resolved = api_config._thread_local_env_value(api_key_text[2:-1]).strip()
+        if resolved:
+            return resolved
+    elif api_key_text:
+        return api_key_text
+    key_env = str(raw_key_env or "").strip()
+    if key_env:
+        resolved = api_config._thread_local_env_value(key_env).strip()
+        if resolved:
+            return resolved
+    return ""
+
+
+def _context_lookup_record_key(record: dict) -> str:
+    """The key a ``providers.<id>`` record declares for the chat: ``api_key``, a ``${VAR}``
+    reference, or the variable named by ``key_env``, as on exp-v0.52.660.
+
+    A record's ``api_key_env`` spelling is not read (#8938 item 2, deferred to #8963). The chat
+    does send that key on some routes: WebUI's own merge respells it to ``key_env`` for a named
+    ``custom:<name>`` route, and the Agent's resolver reads ``key_env`` or ``api_key_env`` on any
+    block it resolves itself (``runtime_provider_custom._key_env_secret``). But every attempt to
+    predict here which record's ``api_key_env`` the chat reads drifted from the chat's own
+    selection: WebUI's provider tables lag the Agent's registry, asking the Agent cost a config
+    parse per record, the generic ``custom`` record is shared by placeholder sessions, and a
+    case or whitespace variant of a ``custom:`` key is matched here but not by the merge. Each
+    drift sent a key the chat doesn't send or lost one it does. So the lookup sends less than
+    the chat on those routes (a context window from the default), never more; taking the pair
+    from the chat's own runtime chain, as GET does since #8951, is #8963.
+
+    On a legacy ``custom_providers`` entry and on the model block the lookup reads ``key_env``
+    alone (:func:`_context_lookup_resolve_key`), which is what WebUI's merge reads there for a
+    named ``custom:<name>`` route (#8959).
+    """
+    return _context_lookup_resolve_key(record.get("api_key"), record.get("key_env"))
+
+
+def _context_lookup_requested_provider(model: str | None, provider: str | None) -> str:
+    """The provider id the chat asks the Agent for, as the Agent reads it (#8938).
+
+    WebUI's chat resolves the session's model and provider with
+    ``api.config.resolve_model_provider`` and passes that provider to the Agent,
+    which lowercases it (``resolve_requested_provider``) and then checks
+    ``providers.<that id>.enabled`` before anything else. The id is the session's
+    own spelling, not its alias resolution (``ollama`` stays ``ollama``), except
+    where the chat rewrites it (a legacy configured ``local`` becomes ``custom``).
+
+    Call it with the session's STORED model and provider, as the chat resolves
+    them, exactly once. It is not idempotent: resolution can strip a provider
+    prefix from the model (``openai/m-x`` -> ``m-x``), and resolving that bare id
+    again may match another provider's model list. Callers that already hold the
+    resolved provider (GET, the streaming sites) pass it to the lookup as is.
+    Without a model, or if resolution fails, this is the cleaned provider id.
+    """
+    model_text = str(model or "").strip()
+    if model_text:
+        try:
+            from api.config import resolve_model_provider
+
+            resolved = resolve_model_provider(model_with_provider_context(model_text, provider or None))[1]
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip().lower()
+        except Exception:
+            logger.debug("context lookup: requested provider resolution failed", exc_info=True)
+    return str(_clean_session_model_provider(provider) or "").strip().lower()
+
+
+def _context_lookup_provider_disabled(provider: str, providers_cfg: dict, requested: str = "") -> bool:
+    """Whether the session's own provider is switched off, by the record the chat obeys (#8938).
+
+    The authoritative record decides, never another spelling of it. For a
+    ``custom:`` id that is WebUI's own verdict,
+    ``api_config._native_custom_provider_record``: an exact ``providers[<id>]``
+    key outranks every alias, including its disabled verdict, and without one a
+    disabled record naming the identity leaves the route with no authority. For
+    any other id it is the exact key the Agent's ``_raise_if_provider_disabled``
+    reads: ``requested``, the id the chat asks the Agent for
+    (:func:`_context_lookup_requested_provider`; ``ollama``, not ``custom``;
+    ``claude``, not ``anthropic``), falling back to ``provider``. A disabled record under the
+    resolved id (``providers.custom`` for an ``ollama`` session) switches nothing
+    off, as the chat still routes and sends the model block's key. A disabled
+    alias beside an enabled record switches nothing off either: the Agent's
+    matcher skips the alias and the chat keeps the record's key.
+
+    When two records claim a ``custom:`` identity (WebUI's helper raises
+    ``AmbiguousCustomProviderError``), the verdict falls back to that exact key. The
+    chat refuses some of these shapes and routes others through one record, so
+    ambiguity itself decides nothing here and the selection reads on as before.
+    """
+    pid = str(provider or "").strip().lower()
+    if not isinstance(providers_cfg, dict) or not pid:
+        return False
+    if pid.startswith("custom:"):
+        slug = api_config._custom_provider_slug_key(pid)
+        if slug:
+            try:
+                return bool(api_config._native_custom_provider_record(providers_cfg, pid, slug)[1])
+            except api_config.AmbiguousCustomProviderError:
+                pass
+    exact = providers_cfg.get(str(requested or "").strip().lower() or pid)
+    return isinstance(exact, dict) and not api_config._raw_provider_record_enabled(exact)
+
+
 def _context_length_config_api_key_and_owner(
     provider: str | None,
     cfg: dict | None,
+    *,
+    requested_provider: str | None = None,
 ) -> tuple[str, frozenset]:
     """Return (config/env API key for the metadata lookup, origins that key owns).
 
     The key's own origins are its source's base URL, plus the provider's fixed
     metadata hosts when the source is that provider's own: a built-in
     ``providers.<id>`` record, or the model block configured for that provider (#8822).
+
+    When the session's provider is switched off (``enabled: false`` on its
+    authoritative record, :func:`_context_lookup_provider_disabled`), the selection
+    takes no key at all (#8938). The Agent's resolver refuses that session, custom or
+    built-in, but api/streaming.py drops that refusal (#8974) and the chat may still
+    route: through WebUI's merge for a custom session, or through ``AIAgent``'s own
+    resolution for a built-in one, which can pick an enabled twin (``OpenAI`` beside a
+    switched-off ``openai``). The selection doesn't predict that route. It takes no
+    key, neither the switched-off record's nor the model block's; where the chat does
+    route, the lookup gets the default window (cost-only, #8974). Any other
+    switched-off record matching the provider (another spelling of it) is skipped,
+    as the Agent's matcher skips it, and the selection reads on exactly as if that
+    record weren't there: the chat routes the same with or without it.
+
+    ``requested_provider`` is the id the chat asks the Agent for, the key the Agent
+    checks (:func:`_context_lookup_requested_provider`). Without it, ``provider`` is
+    taken as the requested id.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
+    requested = str(requested_provider or _clean_session_model_provider(provider) or "").strip().lower()
     provider = _canonical_context_provider(provider)
-
-    def _resolve_key(raw_api_key, raw_key_env=None) -> str:
-        api_key_text = str(raw_api_key or "").strip()
-        if (
-            api_key_text.startswith("${")
-            and api_key_text.endswith("}")
-            and len(api_key_text) > 3
-        ):
-            resolved = api_config._thread_local_env_value(api_key_text[2:-1]).strip()
-            if resolved:
-                return resolved
-        elif api_key_text:
-            return api_key_text
-        key_env = str(raw_key_env or "").strip()
-        if key_env:
-            resolved = api_config._thread_local_env_value(key_env).strip()
-            if resolved:
-                return resolved
-        return ""
+    _resolve_key = _context_lookup_resolve_key
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        for provider_key, provider_cfg in providers_cfg.items():
-            if not isinstance(provider_cfg, dict):
+        matching = [
+            (provider_key, provider_cfg)
+            for provider_key, provider_cfg in providers_cfg.items()
+            if isinstance(provider_cfg, dict) and _providers_match_for_context(provider_key, provider)
+        ]
+        if _context_lookup_provider_disabled(provider, providers_cfg, requested):
+            return "", frozenset()
+        for provider_key, provider_cfg in matching:
+            if not api_config._raw_provider_record_enabled(provider_cfg):
                 continue
-            if not _providers_match_for_context(provider_key, provider):
-                continue
-            api_key = _resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env"))
+            api_key = _context_lookup_record_key(provider_cfg)
             if api_key:
                 builtin = not str(provider_key or "").strip().lower().startswith("custom:")
                 return api_key, _context_lookup_owned_origins(
@@ -9561,6 +9710,74 @@ def _context_length_config_api_key_and_owner(
                     own_provider=provider if (provider and model_provider) else "",
                 )
     return "", frozenset()
+
+
+def _context_lookup_key_value(api_key: object) -> str:
+    """The comparable value of a selected key for #8918's same-value rule: the
+    stripped string, or ``""`` for a non-string (token source), a blank, or an
+    unresolved ``${VAR}`` reference. Declared keys go through
+    ``_context_lookup_resolve_key``, which strips the same way."""
+    if not isinstance(api_key, str):
+        return ""
+    value = api_key.strip()
+    if value.startswith("${") and value.endswith("}"):
+        return ""
+    return value
+
+
+def _context_lookup_same_value_origins(api_key: object, cfg: dict | None) -> frozenset:
+    """Origins owned by every config source that declares exactly this key value (#8918).
+
+    A key may go to a URL that a source holding the same value declares: that
+    source already sends this exact credential there, so the lookup exposes
+    nothing new. A holder is a source that declares the key itself (``api_key``
+    or ``key_env``): a ``providers.<id>`` record, a ``custom_providers`` entry, or
+    the model block. Each grants the URLs it declares; a built-in record, or the
+    model block configured for a built-in provider, also grants that provider's
+    own fixed hosts, never another provider's. Blanks, unresolved references and
+    token sources grant nothing.
+
+    A record the user switched off (``enabled: false``) is no holder (#8938): the
+    Agent refuses a session on it, so it sends its key nowhere. A legacy
+    ``custom_providers`` entry stays a holder when switched off, because the
+    Agent's legacy view still routes it and the chat still sends its key (the
+    same reason ``api_config``'s identity claims keep counting legacy rows). A
+    record's ``api_key_env`` spelling grants nothing (:func:`_context_lookup_record_key`;
+    #8938 item 2, deferred to #8963).
+    """
+    value = _context_lookup_key_value(api_key)
+    if not value:
+        return frozenset()
+    cfg = cfg if isinstance(cfg, dict) else {}
+    owned = set()
+    providers_cfg = cfg.get("providers") or {}
+    if isinstance(providers_cfg, dict):
+        for provider_key, provider_cfg in providers_cfg.items():
+            if not api_config._raw_provider_record_enabled(provider_cfg):
+                continue
+            if _context_lookup_record_key(provider_cfg) != value:
+                continue
+            builtin = not str(provider_key or "").strip().lower().startswith("custom:")
+            owned |= _context_lookup_owned_origins(
+                *_context_lookup_record_urls(provider_cfg),
+                own_provider=_canonical_context_provider(provider_key) if builtin else "",
+            )
+    custom_providers = cfg.get("custom_providers")
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            if _context_lookup_resolve_key(entry.get("api_key"), entry.get("key_env")) != value:
+                continue
+            owned |= _context_lookup_owned_origins(*_context_lookup_record_urls(entry))
+    model_cfg = cfg.get("model")
+    if isinstance(model_cfg, dict):
+        if _context_lookup_resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env")) == value:
+            owned |= _context_lookup_owned_origins(
+                model_cfg.get("base_url"),
+                own_provider=_canonical_context_provider(model_cfg.get("provider")),
+            )
+    return frozenset(owned)
 
 
 def _context_lookup_agent_fallback(agent, resolved_api_key=None, resolved_base_url=None, resolved_provider=None) -> dict:
@@ -9591,13 +9808,25 @@ def _context_length_lookup_inputs_for_model(
     fallback_api_key: object = None,
     fallback_base_url: str | None = None,
     fallback_provider: str | None = None,
+    requested_provider: str | None = None,
+    caller_key_only: bool = False,
 ) -> _ContextLengthLookupInputs:
     """Return the effective metadata resolver inputs for a WebUI model.
+
+    ``requested_provider`` (#8938) is the id the chat asks the Agent for, which
+    decides whether the session's provider is switched off. Callers passing an
+    already-resolved ``provider`` (GET, the streaming sites) leave it unset: that
+    provider is the chat's id. A caller holding only the stored provider (model
+    switch) passes :func:`_context_lookup_requested_provider` of the stored values.
 
     ``agent.model_metadata.get_model_context_length`` understands global
     ``config_context_length`` and custom-provider overrides, but only when the
     matching base URL is supplied. WebUI also owns ``providers.<provider>.models``
     overrides, so normalize those here and keep route/session-save/SSE aligned.
+
+    ``caller_key_only``: the caller already decided the key (GET /api/session's
+    chat-route lookup, #8928): use ``api_key`` or no key, and never select one
+    from config. Every other output (URL fill, context overrides) is unchanged.
     """
     model_for_lookup = str(model or "").strip()
     if not model_for_lookup:
@@ -9614,6 +9843,10 @@ def _context_length_lookup_inputs_for_model(
 
     bare_model, explicit_provider = _split_provider_qualified_model(model_for_lookup)
     effective_provider = _canonical_context_provider(provider or explicit_provider)
+    # #8938: the id the chat asks the Agent for, the key it checks for enabled: false.
+    requested_provider = str(requested_provider or "").strip().lower() or (
+        _clean_session_model_provider(provider or explicit_provider) or ""
+    )
     effective_base_url = str(base_url or "").strip()
     # #8822: a caller's key owns only the URL the caller passed with it (plus its
     # provider's fixed metadata hosts). With no caller URL it owns no URL.
@@ -9623,6 +9856,7 @@ def _context_length_lookup_inputs_for_model(
     if isinstance(model_cfg, dict):
         if not effective_provider:
             effective_provider = _canonical_context_provider(model_cfg.get("provider"))
+            requested_provider = requested_provider or _clean_session_model_provider(model_cfg.get("provider")) or ""
         if not effective_base_url:
             # #7535: the global model.base_url may only fill an empty slot when
             # the session provider IS the configured model.provider owner
@@ -9727,7 +9961,7 @@ def _context_length_lookup_inputs_for_model(
                 effective_provider = entry_slug
             if not effective_base_url and entry_base:
                 effective_base_url = entry_base
-            if not effective_api_key:
+            if not effective_api_key and not caller_key_only:
                 effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider or entry_slug)
                 effective_api_key_owned = _context_lookup_owned_origins(*_context_lookup_record_urls(entry))
             custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
@@ -9747,17 +9981,25 @@ def _context_length_lookup_inputs_for_model(
         ):
             global_context_length = _positive_context_length(raw_cfg_ctx)
 
-    if not effective_api_key:
-        effective_api_key, effective_api_key_owned = _context_length_config_api_key_and_owner(effective_provider, cfg)
+    if not effective_api_key and not caller_key_only:
+        effective_api_key, effective_api_key_owned = _context_length_config_api_key_and_owner(
+            effective_provider, cfg, requested_provider=requested_provider
+        )
 
     # #8822: a key goes only where its own source sends it. The Agent contacts the
     # base URL's host plus the provider's fixed metadata hosts; if any of those is
     # not owned by the key's source, the lookup sends no key (it still runs, and
     # falls back to catalog or default limits). This never changes the URL.
-    if effective_api_key and not (
-        _context_lookup_contacted_origins(effective_provider, effective_base_url) <= effective_api_key_owned
-    ):
-        effective_api_key = ""
+    # A host is also owned when a config source holding the same key value owns
+    # it (#8918): a caller key that arrived without a URL, or a key the config
+    # selection took from a source without one, can still go where another
+    # holder of that exact credential already sends it.
+    if effective_api_key:
+        contacted = _context_lookup_contacted_origins(effective_provider, effective_base_url)
+        if not contacted <= effective_api_key_owned and not (
+            contacted <= effective_api_key_owned | _context_lookup_same_value_origins(effective_api_key, cfg)
+        ):
+            effective_api_key = ""
 
     # A fallback key (the Agent's own key at the streaming sites) is used only when
     # the config selection left none, and only under the caller-key rule: it owns
@@ -10822,6 +11064,8 @@ def _resolve_context_length_for_session_model(
     *,
     base_url: str | None = None,
     api_key: str | None = None,
+    requested_provider: str | None = None,
+    caller_key_only: bool = False,
 ) -> int:
     """Best-effort current context window for a session model.
 
@@ -10843,6 +11087,8 @@ def _resolve_context_length_for_session_model(
             base_url=base_url,
             api_key=api_key,
             cfg=_cfg_for_cl if isinstance(_cfg_for_cl, dict) else {},
+            requested_provider=requested_provider,
+            caller_key_only=caller_key_only,
         )
         try:
             return _get_cl(
@@ -10869,6 +11115,11 @@ def _session_context_length_lookup_state(
     This stays config-based and side-effect-free for GET /api/session. It avoids
     a live provider catalog rebuild while still aligning the reload path with
     the base URL / custom-provider key shape used by streaming saves. (#4248)
+    For a named custom provider the URL and key are the chat route's (#8928), and
+    the key is final: pass ``caller_key_only`` for that provider (see
+    :func:`_session_context_lookup_uses_chat_route`). The model switch takes the
+    same pair for such a provider (#8963). A route the merge refuses (the chat's
+    own verdict, switched-off records included) looks up without a key.
     """
     model_for_lookup = str(model or "").strip()
     provider_for_lookup = str(provider or "").strip()
@@ -10886,21 +11137,60 @@ def _session_context_length_lookup_state(
         base_url_for_lookup = str(resolved_base_url or "").strip()
     except Exception:
         logger.debug("session context-length lookup state resolution failed", exc_info=True)
-    if provider_for_lookup.startswith("custom:"):
+    if _session_context_lookup_uses_chat_route(provider_for_lookup):
+        # #8928: ask the host the session chats with, with the chat's key. For a
+        # named custom provider WebUI's own half of the chat's routing chain decides
+        # both (the merge api/streaming.py's _resolve_runtime_connection_bundle
+        # applies, then raise_for_custom_provider_route). lookup_only keeps it a
+        # read: config-declared credentials only, no credential pool or key_cmd, a
+        # host-gated env key never sent (only read, by the keyless declaration),
+        # and the Agent's resolve_runtime_provider is never called
+        # (it can select or refresh pool entries, refresh OAuth credentials and
+        # probe a local server). The key is the route's or none: a session that
+        # can't chat, or a keyless record (the merge sent the no-auth placeholder),
+        # looks up without one, and the caller passes caller_key_only so config
+        # selection can't add one. Keylessness is the selected record's own verdict
+        # (the merge's only gate on the placeholder), never a string comparison: a
+        # key the user configured as "dummy-key" is still the chat's key.
+        api_key_for_lookup = ""
         try:
-            from api.config import resolve_custom_provider_connection
+            from api.config import (
+                _custom_provider_runtime_bundle_with_provenance,
+                raise_for_custom_provider_route,
+                resolve_custom_provider_connection,
+            )
 
-            custom_key, custom_base = resolve_custom_provider_connection(provider_for_lookup)
-            custom_base = str(custom_base or "").strip()
-            if not base_url_for_lookup:
-                base_url_for_lookup = custom_base
-            # #8822: the record's key owns only the record's own URL. When the model
-            # block overrides the URL, the lookup selects the key for that URL itself.
-            if _context_lookup_origin(base_url_for_lookup) == _context_lookup_origin(custom_base):
-                api_key_for_lookup = str(custom_key or "").strip()
+            route, custom = _custom_provider_runtime_bundle_with_provenance(
+                provider_for_lookup,
+                None,
+                base_url_for_lookup or None,
+                {},
+                lookup_provider=provider_for_lookup,
+                connection_resolver=resolve_custom_provider_connection,
+                lookup_only=True,
+            )
+            raise_for_custom_provider_route(route)
+            route_url = str(route.get("base_url") or "").strip()
+            if route_url:
+                base_url_for_lookup = route_url
+            # #8963: no switched-off verdict of the lookup's own here. The chat
+            # obeys this merge: api/streaming.py prints and drops the Agent's
+            # resolve_runtime_provider error (its switched-off ValueError too) and
+            # routes through the same merge, so a route it builds is the chat's.
+            route_key = route.get("api_key")
+            keyless = bool(isinstance(custom, dict) and custom.get("keyless"))
+            if isinstance(route_key, str) and not keyless:
+                route_key = route_key.strip()
+                if route_key:
+                    api_key_for_lookup = route_key
         except Exception:
-            logger.debug("custom provider context-length connection resolution failed", exc_info=True)
+            logger.debug("session context-length lookup: the session's chat route is unavailable", exc_info=True)
     return model_for_lookup, provider_for_lookup, base_url_for_lookup, api_key_for_lookup
+
+
+def _session_context_lookup_uses_chat_route(provider: str | None) -> bool:
+    """True when the context lookup takes its URL and key from the chat route: GET /api/session (#8928) and the model switch (#8963)."""
+    return str(provider or "").strip().startswith("custom:")
 
 
 def _session_model_identity_matches(
@@ -11075,10 +11365,31 @@ def _invalidate_session_route_state_if_changed(
     if changed:
         session.last_used_model = None
         session.gateway_routing = None
-        session.context_length = _resolve_context_length_for_session_model(
-            session.model,
-            session.model_provider,
-        )
+        # #8938: the stored provider is raw; the chat asks the Agent for its resolution.
+        requested_provider = _context_lookup_requested_provider(session.model, session.model_provider)
+        if _session_context_lookup_uses_chat_route(requested_provider):
+            # #8963: a named custom provider's URL and key are the chat route's, as on
+            # GET (#8928), not a config selection that predicts the chat's record. The
+            # rest of the lookup (a per-model context_length under the stored spelling,
+            # e.g. providers.mylab for a raw-named session) still reads the stored pair.
+            _lookup_model, lookup_provider, lookup_url, lookup_key = _session_context_length_lookup_state(
+                session.model,
+                session.model_provider,
+            )
+            session.context_length = _resolve_context_length_for_session_model(
+                session.model,
+                session.model_provider,
+                base_url=lookup_url,
+                api_key=lookup_key,
+                requested_provider=requested_provider,
+                caller_key_only=_session_context_lookup_uses_chat_route(lookup_provider),
+            )
+        else:
+            session.context_length = _resolve_context_length_for_session_model(
+                session.model,
+                session.model_provider,
+                requested_provider=requested_provider,
+            )
         session.threshold_tokens = 0
         session.last_prompt_tokens = 0
 
@@ -14307,6 +14618,7 @@ from api.gateway_chat import (
     GatewayExternalSessionReadOnly,
     _run_gateway_chat_streaming,
     gateway_session_chat_read_only_reason,
+    refuse_on_gateway_backend,
     webui_gateway_chat_enabled,
 )
 from api.run_drain import (  # #7293
@@ -17396,6 +17708,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 _provider_for_lookup,
                 base_url=_base_url_for_lookup,
                 api_key=_api_key_for_lookup,
+                caller_key_only=_session_context_lookup_uses_chat_route(_provider_for_lookup),
             )
             _model_changed_for_context = not _session_model_identity_matches(
                 _stored_model_for_lookup,
@@ -19955,6 +20268,13 @@ def handle_post(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/session/new":
+        # #8862: a forged request used to reach new_session()/worktree creation
+        # with whatever ``profile`` it sent (int, bool, list, dict, "../evil").
+        # Refuse a malformed value here, before any read, cache or write; the
+        # absent/None/"" case still means "the active profile".
+        requested_profile, requested_profile_invalid = _new_session_requested_profile(body)
+        if requested_profile_invalid:
+            return bad(handler, "invalid profile", 400)
         workspace_prev_session_id = body.get("prev_session_id")
         if workspace_prev_session_id and not _session_id_visible_to_request_profile(
             handler, workspace_prev_session_id, emit_error=False
@@ -19962,7 +20282,7 @@ def handle_post(handler, parsed) -> bool:
             workspace_prev_session_id = None
         try:
             workspace = _resolve_new_session_workspace(
-                body, workspace_prev_session_id, profile=body.get("profile") or None
+                body, workspace_prev_session_id, profile=requested_profile or None
             )
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
@@ -20086,7 +20406,7 @@ def handle_post(handler, parsed) -> bool:
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
+            profile=requested_profile or None,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
@@ -21232,6 +21552,35 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            try:
+                # Exact sibling from Session.save()'s torn-byte salvage (#8807).
+                # Do not use a prefix glob: only this known suffix.
+                p.with_suffix('.json.torn').unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session torn salvage file %s", p.with_suffix('.json.torn'))
+            # Session.save() may leave `<sid>.json.torn.tmp.<pid>.<thread>` when
+            # salvage rename/cleanup is denied (#8807 gate R1). Match that exact
+            # producer grammar only — never a broad prefix that could hit a
+            # neighboring session id.
+            try:
+                torn_tmp_re = re.compile(
+                    rf'^{re.escape(p.name)}\.torn\.tmp\.\d+\.\d+$'
+                )
+                for sibling in p.parent.iterdir():
+                    if not sibling.is_file():
+                        continue
+                    if torn_tmp_re.fullmatch(sibling.name):
+                        try:
+                            sibling.unlink(missing_ok=True)
+                        except Exception:
+                            logger.debug(
+                                "Failed to unlink session torn salvage temp %s",
+                                sibling,
+                            )
+            except Exception:
+                logger.debug(
+                    "Failed to scan torn salvage temps for session file %s", p
+                )
             if sidecar_deleted and not is_messaging_session:
                 try:
                     _record_webui_deleted_session_tombstone(sid)
@@ -23298,6 +23647,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload
 
+        # One-shot model call resolved by the WebUI process; in gateway mode
+        # there is no route for it.
+        if refuse_on_gateway_backend(
+            handler, "/api/updates/summary", get_config_snapshot()
+        ):
+            return
         updates = body.get("updates") if isinstance(body, dict) else {}
         target = body.get("target") if isinstance(body, dict) else None
 
@@ -28669,6 +29024,10 @@ def _handle_btw(handler, body):
         require(body, "question")
     except ValueError as e:
         return bad(handler, str(e))
+    # Runs the in-process agent by design; refuse before creating the hidden
+    # session while the backend is the gateway.
+    if refuse_on_gateway_backend(handler, "/btw", get_config_snapshot()):
+        return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
     _admission_refusal = run_admission_closed_response()
@@ -28762,6 +29121,10 @@ def _handle_background(handler, body):
         require(body, "prompt")
     except ValueError as e:
         return bad(handler, str(e))
+    # Runs the in-process agent by design; refuse before creating the hidden
+    # session while the backend is the gateway.
+    if refuse_on_gateway_backend(handler, "/background", get_config_snapshot()):
+        return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
     _admission_refusal = run_admission_closed_response()
@@ -32108,11 +32471,24 @@ def _current_cwd_sync_target(sid):
             cur = get_session(sid)
         except KeyError:
             return None
+        if getattr(cur, "_sidecar_names_other_session", None):
+            # #9000: the file was replaced with a copy of another session's file.
+            # The reloaded object carries that session's id, workspace and profile,
+            # so the mirror would rewrite the other session's state.db row.
+            logger.info(
+                "Skipping cwd sync for %s: its file now holds session %r (#9000)",
+                sid, cur.session_id,
+            )
+            return None
         return (cur.session_id, cur.workspace, getattr(cur, "profile", None))
 
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
+    # Builds an in-process agent; a gateway-backed WebUI must not execute a
+    # turn outside the gateway (it also usually has no model credentials).
+    if refuse_on_gateway_backend(handler, "/api/chat", get_config_snapshot()):
+        return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
     _admission_refusal = run_admission_closed_response()
@@ -32125,6 +32501,10 @@ def _handle_chat_sync(handler, body):
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
     s = get_session(body["session_id"])
+    if getattr(s, "_sidecar_names_other_session", None):
+        # #9000: the file holds a copy of another session's file, so the loaded
+        # object carries that session's id; the turn would run under it.
+        return bad(handler, "Session not found", 404)
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
@@ -33152,6 +33532,12 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
 
 
 def _handle_git_commit_message(handler, body):
+    # One-shot model call resolved by the WebUI process; in gateway mode there
+    # is no route for it.
+    if refuse_on_gateway_backend(
+        handler, "/api/git/commit-message", get_config_snapshot()
+    ):
+        return
     from api.workspace_git import (
         GitWorkspaceError,
         clean_generated_commit_message,
@@ -33184,6 +33570,12 @@ def _handle_git_commit_message(handler, body):
 
 
 def _handle_git_commit_message_selected(handler, body):
+    # One-shot model call resolved by the WebUI process; in gateway mode there
+    # is no route for it.
+    if refuse_on_gateway_backend(
+        handler, "/api/git/commit-message-selected", get_config_snapshot()
+    ):
+        return
     from api.workspace_git import (
         GitWorkspaceError,
         clean_generated_commit_message,
@@ -34994,6 +35386,11 @@ def _manual_compression_status_payload(job):
 
 def _run_manual_compression_job(sid, body):
     memory_handler = _ManualCompressionMemoryHandler()
+    # This job exists only because /compress/start passed the gateway check on
+    # the request thread, where the chat's profile is known. The worker thread
+    # has no per-request profile, so _handle_session_compress must trust that
+    # admission instead of re-reading config here. Only this worker sets it.
+    memory_handler.gateway_admission_checked = True
     try:
         try:
             session = get_session(sid)
@@ -35073,6 +35470,10 @@ def _handle_session_compress_start(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
 
+    # Compression runs an in-process agent and would act on the WebUI's copy of
+    # the transcript, not the gateway's; refuse before starting a job.
+    if refuse_on_gateway_backend(handler, "/compress", get_config_snapshot()):
+        return
     sid = str(body.get("session_id") or "").strip()
     if not sid:
         return bad(handler, "session_id is required")
@@ -35226,6 +35627,12 @@ def _handle_session_compress(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
 
+    # Same in-process/gateway mismatch as /compress/start: refuse before
+    # touching the session. The manual-compression worker was admitted by
+    # /compress/start's identical check and marks its handler; trust that.
+    if getattr(handler, "gateway_admission_checked", False) is not True:
+        if refuse_on_gateway_backend(handler, "/compress", get_config_snapshot()):
+            return
     sid = str(body.get("session_id") or "").strip()
     if not sid:
         return bad(handler, "session_id is required")

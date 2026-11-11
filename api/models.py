@@ -2341,10 +2341,14 @@ class Session:
                 existing = None
                 existing_guarded_messages = None
                 existing_exact_replay_rows_removed = 0
+                existing_bytes = None
                 existing_msg_count = _prefix_message_count(self.path)
                 if existing_msg_count is None:
-                    existing_text = self.path.read_text(encoding='utf-8')
                     try:
+                        # A sidecar cut inside a multi-byte character is
+                        # handled like malformed JSON (#8798), so it cannot
+                        # stop the valid in-memory snapshot from saving.
+                        existing_text = self.path.read_text(encoding='utf-8')
                         existing = json.loads(existing_text)
                         existing_messages = existing.get('messages') or []
                         existing_msg_count = len(existing_messages)
@@ -2353,11 +2357,15 @@ class Session:
                                 existing_guarded_messages,
                                 existing_exact_replay_rows_removed,
                             ) = _deduplicate_exact_stable_messages(existing_messages)
-                    except (json.JSONDecodeError, ValueError, AttributeError):
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, AttributeError):
                         existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(guarded_messages or [])
+                # Preserve when the on-disk count is known-positive *or*
+                # unknown (-1 after UnicodeDecodeError / corrupt JSON). An
+                # unmarked torn sidecar sets -1, and must not lose its raw
+                # bytes to an empty active/pending snapshot (#8807 gate R2).
                 if (
-                    existing_msg_count > 0
+                    existing_msg_count != 0
                     and incoming_msg_count == 0
                     and (self.active_stream_id or self.pending_user_message)
                 ):
@@ -2375,8 +2383,14 @@ class Session:
                     if existing_text is None:
                         # The .bak body is the one thing that needs the full text,
                         # and a shrink is the one time it is needed.
-                        existing_text = self.path.read_text(encoding='utf-8')
-                    if existing is None:
+                        try:
+                            existing_text = self.path.read_text(encoding='utf-8')
+                        except UnicodeDecodeError:
+                            # The prefix count was readable but the body is
+                            # cut mid-character (#8798). Back up the exact
+                            # bytes below instead of aborting the save.
+                            existing_bytes = self.path.read_bytes()
+                    if existing is None and existing_text is not None:
                         try:
                             existing = json.loads(existing_text)
                             existing_messages = existing.get('messages') or []
@@ -2395,10 +2409,13 @@ class Session:
                     # failure mode pre-fix was "backup is lost"; with
                     # this fix the backup either lands cleanly or doesn't
                     # land at all.
+                    bak_tmp = None
+                    salvage_tmp = None
                     try:
                         backup_text = existing_text
                         if (
-                            existing_exact_replay_rows_removed
+                            backup_text is not None
+                            and existing_exact_replay_rows_removed
                             and isinstance(existing, dict)
                             and isinstance(existing_guarded_messages, list)
                         ):
@@ -2418,20 +2435,57 @@ class Session:
                                 existing_exact_replay_rows_removed,
                                 self.session_id,
                             )
-                        bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
-                        )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(backup_text)
-                            bf.flush()
-                            os.fsync(bf.fileno())
-                        _safe_replace(bak_tmp, bak_path)
+                        if backup_text is None:
+                            # Undecodable old sidecar (#8798 / #8807 P1): never
+                            # publish torn bytes onto the recovery ``.json.bak``.
+                            # Keep any readable backup as-is (count vs the
+                            # uncommitted incoming snapshot does not matter —
+                            # primary publication may still fail). Park the raw
+                            # bytes on a non-recovery sibling for manual salvage.
+                            salvage_path = self.path.with_suffix('.json.torn')
+                            salvage_tmp = salvage_path.with_name(
+                                f'{salvage_path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                            )
+                            with open(salvage_tmp, 'wb') as bf:
+                                bf.write(existing_bytes)
+                                bf.flush()
+                                os.fsync(bf.fileno())
+                            _safe_replace(salvage_tmp, salvage_path)
+                            if _readable_recovery_backup(bak_path):
+                                logger.warning(
+                                    "Kept existing backup for session %s; "
+                                    "undecodable old sidecar salvaged at %s",
+                                    self.session_id,
+                                    salvage_path.name,
+                                )
+                            else:
+                                logger.warning(
+                                    "Old sidecar for session %s is not valid UTF-8; "
+                                    "salvaged bytes at %s (not a recovery backup)",
+                                    self.session_id,
+                                    salvage_path.name,
+                                )
+                        else:
+                            bak_tmp = bak_path.with_suffix(
+                                f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                            )
+                            with open(bak_tmp, 'w', encoding='utf-8') as bf:
+                                bf.write(backup_text)
+                                bf.flush()
+                                os.fsync(bf.fileno())
+                            # Only rename a temp this save just wrote; a stale
+                            # one left by an earlier failed save must never
+                            # land on the backup (#8807 gate).
+                            _safe_replace(bak_tmp, bak_path)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.
-                        try:
-                            bak_tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                        for _tmp in (bak_tmp, salvage_tmp):
+                            if _tmp is None:
+                                continue
+                            try:
+                                _tmp.unlink(missing_ok=True)
+                            except Exception:
+                                pass
         except OSError:
             pass
 
@@ -6291,6 +6345,23 @@ def _sidecar_stat_signature(path):
 
 
 _MESSAGE_COUNT_MARKER = 1
+
+
+def _readable_recovery_backup(bak_path) -> bool:
+    """True when ``bak_path`` is a readable session recovery can use (#8807).
+
+    Count relative to an uncommitted incoming snapshot is irrelevant: a
+    failed primary publication must not have already swapped this file for
+    undecodable bytes.
+    """
+    try:
+        data = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    messages = data.get('messages')
+    return isinstance(messages, list)
 
 
 def _prefix_message_count(path):

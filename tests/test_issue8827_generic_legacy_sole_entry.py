@@ -21,6 +21,17 @@ def _lookup(monkeypatch, cfg, session, **kwargs):
     return (r.base_url or "").rstrip("/"), r.api_key or ""
 
 
+def _agent_aliases_to_custom(session):
+    """Whether the installed Agent's ``hermes_cli.models._PROVIDER_ALIASES`` (the table
+    api.config._resolve_provider_alias reads first) maps ``session`` to the generic
+    ``custom`` provider. Called only with an Agent present (``requires_agent``). If the
+    table is gone, WebUI loses those aliases too, so the import error fails the test
+    instead of skipping it."""
+    from hermes_cli.models import _PROVIDER_ALIASES as aliases
+
+    return session in aliases and aliases[session] == "custom"
+
+
 # vllm and ollama are generic sessions only through the Agent's provider tables; without an Agent (CI),
 # v0.52.544 also returns no URL or key for them, so those two need the Agent.
 @pytest.mark.parametrize(
@@ -30,6 +41,11 @@ def _lookup(monkeypatch, cfg, session, **kwargs):
 )
 @pytest.mark.parametrize("name", ["local", "My LLM"])
 def test_generic_session_takes_the_sole_legacy_entry(monkeypatch, session, name):
+    if session == "vllm" and not _agent_aliases_to_custom("vllm"):
+        # The table gained ("vllm", "custom") in Agent 7a5c71584484 (#62213, first tagged
+        # rc.15-v0.21.5). Before it (v2026.9.24) the table has no vllm entry, so a vllm
+        # session is not generic, on v0.52.544 too.
+        pytest.skip("installed Agent's hermes_cli.models._PROVIDER_ALIASES does not map vllm to custom")
     got = _lookup(monkeypatch, {"custom_providers": [dict(ENTRY, name=name)]}, session)
     assert got == (ENTRY_URL, "K-entry")
 
