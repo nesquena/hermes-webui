@@ -65,7 +65,7 @@ def writeback_owner():
         clear_session_writeback_owner_if_owned(OWN, STREAM)
 
 
-def test_the_resolver_refuses_a_session_reloaded_from_a_copy(store):
+def test_the_resolver_refuses_a_session_reloaded_from_a_copy(store):  # noqa: F811 -- the fixture parameter shadows its import
     from api import models
     from api.streaming import _resolve_current_session_for_write
 
@@ -82,7 +82,7 @@ def test_the_resolver_refuses_a_session_reloaded_from_a_copy(store):
     assert _resolve_current_session_for_write(snapshot) is None
 
 
-def test_an_ephemeral_cancel_never_deletes_the_session_a_copy_names(store, writeback_owner):
+def test_an_ephemeral_cancel_never_deletes_the_session_a_copy_names(store, writeback_owner):  # noqa: F811 -- the fixture parameter shadows its import
     from api.streaming import _finalize_cancelled_turn
 
     _victim(store)
@@ -101,7 +101,7 @@ def test_an_ephemeral_cancel_never_deletes_the_session_a_copy_names(store, write
 # --- what still resolves and finalizes, as before -------------------------------------------
 
 
-def test_an_ordinary_session_still_resolves_to_its_own_object(store):
+def test_an_ordinary_session_still_resolves_to_its_own_object(store):  # noqa: F811 -- the fixture parameter shadows its import
     from api import models
     from api.streaming import _resolve_current_session_for_write
 
@@ -117,7 +117,7 @@ def test_an_ordinary_session_still_resolves_to_its_own_object(store):
     assert current is models.get_session(OWN), "the resolver must return the cached current object"
 
 
-def test_an_ephemeral_cancel_still_removes_its_own_file(store, writeback_owner):
+def test_an_ephemeral_cancel_still_removes_its_own_file(store, writeback_owner):  # noqa: F811 -- the fixture parameter shadows its import
     """Positive control for the refusal above: with no swap, the same call reaches the unlink
     and removes the session's own (ephemeral) file, and only that file."""
     from api.streaming import _finalize_cancelled_turn
