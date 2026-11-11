@@ -294,8 +294,7 @@ def test_file_operations_on_a_copy_never_write_the_session_it_names(store, monke
         raw.pop("message_count", None)
         raw.pop("anchor_scene_index", None)
         path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-        # (The stub takes the #8857 expected_sig keyword too.)
-        monkeypatch.setattr(models, "_legacy_sidecar_facts_get", lambda sid, **_k: {"message_count": 2, "scene_index": {}})
+        monkeypatch.setattr(models, "_legacy_sidecar_facts_get", lambda sid: {"message_count": 2, "scene_index": {}})
     before = _files(store)
 
     stub = models.Session.load_metadata_only(COPY)

@@ -14,17 +14,24 @@ Metadata-only routes then judged the session by the wrong owner: the owner got
 404 on ``GET /api/session?messages=0`` and the sidebar's missing-index recovery
 listed the row under ``default``. The current writer puts ``profile`` in the
 prefix (``null`` included), so only older or outside writers produce this
-layout. A prefix without ``profile`` now takes its owner from the legacy-facts
-entry a full load recorded for that exact file, else from the full read.
+layout. A prefix without ``profile`` now makes the read take the whole file
+once, without ``Session.load``'s self-heal write, so the title and the owner
+come from one read. Nothing about the owner is cached: the earlier fix cached it
+under the file's stat signature, and a rewrite that kept the signature (same
+size, same timestamp tick) or a symlink swap then paired the new file's title
+with the previous owner (release gate finding).
 """
 from __future__ import annotations
 
 import collections
 import io
 import json
+import os
 import urllib.parse
 
 import pytest
+
+import time
 
 import api.config as config
 import api.models as models
@@ -260,92 +267,173 @@ def test_outside_writer_without_any_profile_key_still_loads_as_legacy(isolated_s
 
 
 def _count_full_loads(monkeypatch):
+    """Record each ``Session.load`` call as ``(sid, repair)``."""
     calls = []
     real_load = models.Session.load.__func__
 
     def _counting_load(cls, sid, *a, **k):
-        calls.append(sid)
+        calls.append((sid, k.get("_repair", True)))
         return real_load(cls, sid, *a, **k)
 
     monkeypatch.setattr(models.Session, "load", classmethod(_counting_load))
     return calls
 
 
+def _files(directory):
+    return {path.name: path.read_bytes() for path in sorted(directory.iterdir())}
+
+
+def _raw(owner, title, layout="counted", messages=MESSAGES, scenes=None):
+    """One version of the sidecar, ``profile`` after ``messages`` (an older or outside writer)."""
+    head = {"session_id": SID, "title": title, "created_at": 1.0, "updated_at": 2.0}
+    if layout == "counted":
+        head.update({"message_count": len(messages), "anchor_scene_index": {}})
+    if scenes is not None:
+        # The pre-#5854 layout: scene bodies before the count and the messages.
+        head["anchor_activity_scenes"] = scenes
+    return json.dumps({**head, "messages": messages, "profile": owner})
+
+
+def _same_signature_for_every_version(monkeypatch):
+    """The gate's case, made deterministic: every version of the file has one stat signature.
+
+    A same-size rewrite inside one timestamp tick, or a symlink swap between two
+    files written in the same tick, keeps ``(mtime_ns, size, ctime_ns)``. The
+    live repro needed thousands of rewrites to land one; pinning the signature
+    hands any cache keyed by it that collision on every rewrite.
+    """
+    monkeypatch.setattr(models, "_sidecar_stat_signature", lambda path: ("pinned", str(path)))
+
+
+def _assert_work_never_sees(monkeypatch, title):
+    handler = _get_metadata(monkeypatch, "work")
+    assert handler.status in (404, 409), handler.payload()
+    assert title.encode() not in bytes(handler.body)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("profile", ["work", None])
-def test_profileless_legacy_prefix_is_full_read_once_then_served_with_its_owner(
-    isolated_sessions, monkeypatch, profile,
+def test_profileless_prefix_takes_one_full_read_per_metadata_read_and_writes_nothing(
+    isolated_sessions, monkeypatch, layout, profile,
 ):
-    """#5854 keeps an unchanged legacy file to one full parse; #8857 keeps that with the owner.
+    """No owner cache: every metadata read of this layout is one full read that never writes.
 
-    The facts entry the full load records carries the owner the parse found
-    (None when the file names none), so later reads of the same file are served
-    from the prefix with that owner instead of the legacy None.
+    The owner then comes from the same read as the title, and another
+    profile's sidebar poll, which lands here, leaves the file alone.
     """
     directory, _cache = isolated_sessions
-    _write_sidecar(directory, "no_count", profile=profile)
+    _write_sidecar(directory, layout, profile=profile)
+    before = _files(directory)
     calls = _count_full_loads(monkeypatch)
     for _ in range(3):
-        stub = models.Session.load_metadata_only(SID)
-        assert stub.profile == profile
-        assert stub.title == TITLE
-    assert calls == [SID]
-    assert getattr(stub, "_loaded_metadata_only", False)
-    assert stub._metadata_message_count == len(MESSAGES)
+        loaded = models.Session.load_metadata_only(SID)
+        assert (loaded.title, loaded.profile) == (TITLE, profile)
+        # A metadata-only stub with the file's counts, like the prefix path's.
+        assert getattr(loaded, "_loaded_metadata_only", False)
+        assert (loaded.messages, loaded.tool_calls, loaded.anchor_activity_scenes) == ([], [], {})
+        assert loaded.compact()["message_count"] == len(MESSAGES)
+    assert calls == [(SID, False)] * 3
+    assert _files(directory) == before
 
 
-def test_facts_entry_without_an_owner_never_vouches_for_one(isolated_sessions, monkeypatch):
-    """An entry stored without ``profile`` (any other writer of the cache) means a full read."""
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_rewrite_that_keeps_the_signature_never_keeps_the_previous_owner(isolated_sessions, monkeypatch, layout):
     directory, _cache = isolated_sessions
-    path = _write_sidecar(directory, "no_count")
-    models._legacy_sidecar_facts_put(
-        SID, len(MESSAGES), {}, expected_sig=models._sidecar_stat_signature(path),
-    )
-    assert models._legacy_sidecar_facts_get(SID) is not None
-    calls = _count_full_loads(monkeypatch)
+    _same_signature_for_every_version(monkeypatch)
+    path = directory / f"{SID}.json"
+    path.write_text(_raw("work", "WORK TITLE", layout), encoding="utf-8")
+    assert models.Session.load(SID).profile == "work"
     assert models.Session.load_metadata_only(SID).profile == "work"
-    assert calls == [SID]
+    path.write_text(_raw("evil", "EVIL TITLE", layout), encoding="utf-8")
+    loaded = models.Session.load_metadata_only(SID)
+    assert (loaded.title, loaded.profile) == ("EVIL TITLE", "evil")
+    _assert_work_never_sees(monkeypatch, "EVIL TITLE")
 
 
-def test_edited_file_does_not_reuse_the_previous_owner(isolated_sessions):
-    """The facts entry is keyed by the file's stat signature: a rewrite re-reads the owner."""
+def test_symlink_swapped_there_and_back_reads_the_current_target(isolated_sessions, monkeypatch):
     directory, _cache = isolated_sessions
-    path = _write_sidecar(directory, "no_count")
-    assert models.Session.load_metadata_only(SID).profile == "work"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    data["profile"] = "other"
-    data["title"] = TITLE + " (moved)"  # a different size, so the signature differs
-    path.write_text(json.dumps(data), encoding="utf-8")
-    assert models.Session.load_metadata_only(SID).profile == "other"
-    assert models.Session.load_metadata_only(SID).profile == "other"
+    _same_signature_for_every_version(monkeypatch)
+    store = directory.parent / "store"
+    store.mkdir()
+    work, evil = store / "work.json", store / "evil.json"
+    work.write_text(_raw("work", "WORK TITLE"), encoding="utf-8")
+    evil.write_text(_raw("evil", "EVIL TITLE"), encoding="utf-8")
+    path = directory / f"{SID}.json"
+
+    def point_at(target):
+        link = directory / ".swap"
+        link.symlink_to(target)
+        os.replace(link, path)
+
+    point_at(work)
+    assert models.Session.load(SID).profile == "work"
+    for target, expected in ((evil, ("EVIL TITLE", "evil")), (work, ("WORK TITLE", "work"))):
+        point_at(target)
+        loaded = models.Session.load_metadata_only(SID)
+        assert (loaded.title, loaded.profile) == expected
+    point_at(evil)
+    _assert_work_never_sees(monkeypatch, "EVIL TITLE")
 
 
-@pytest.mark.parametrize("profile", ["work", None])
-def test_counted_layout_without_prefix_profile_is_full_read_once(isolated_sessions, monkeypatch, profile):
-    """A prefix with the count keys but no ``profile`` gets one full parse per file version too.
+def test_duplicate_partial_sidecar_is_not_rewritten_by_a_metadata_read(isolated_sessions, monkeypatch):
+    """``Session.load`` collapses adjacent duplicate partials and saves with a ``.bak``.
 
-    ``Session.load`` used to cache facts only for files without
-    ``anchor_scene_index``, so this layout found no owner in the cache and took a
-    full parse on every metadata read (the sidebar polls; gate finding, Codex).
+    A metadata read, which can be another profile's sidebar poll, must keep that
+    collapse in memory (#8834, #9007): the file and the directory stay as they were.
     """
     directory, _cache = isolated_sessions
-    _write_sidecar(directory, "counted", profile=profile)
+    partial = {"role": "assistant", "content": "interrupted", "_partial": True}
+    messages = [{"role": "user", "content": "hello", "timestamp": 1.5}, partial, dict(partial)]
+    (directory / f"{SID}.json").write_text(_raw("evil", TITLE, "counted", messages), encoding="utf-8")
+    before = _files(directory)
+    loaded = models.Session.load_metadata_only(SID)
+    assert loaded.profile == "evil"
+    assert getattr(loaded, "_loaded_metadata_only", False) and loaded.messages == []
+    _assert_work_never_sees(monkeypatch, TITLE)
+    assert _files(directory) == before
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_malformed_body_is_a_miss_that_never_reaches_the_repairing_load(isolated_sessions, monkeypatch, layout):
+    """The prefix parses but the body doesn't: no repairing fallback, no write, no title."""
+    directory, _cache = isolated_sessions
+    text = _raw("evil", TITLE, layout)
+    (directory / f"{SID}.json").write_text(text[: text.index('"messages"') + 20], encoding="utf-8")
+    before = _files(directory)
     calls = _count_full_loads(monkeypatch)
-    for _ in range(3):
-        stub = models.Session.load_metadata_only(SID)
-        assert stub.profile == profile
-        assert stub.title == TITLE
-    assert calls == [SID]
-    assert getattr(stub, "_loaded_metadata_only", False)
+    assert models.Session.load_metadata_only(SID) is None
+    assert calls == [(SID, False)]
+    assert _files(directory) == before
 
 
-def test_prefix_and_owner_come_from_one_file_version(isolated_sessions, monkeypatch):
-    """A file replaced between the prefix read and the cache lookup never mixes versions.
+def test_legacy_layout_count_and_scenes_move_with_the_owner(isolated_sessions, monkeypatch):
+    """Pre-#5854 layout (scenes before the count): count, scenes and owner come from one read."""
+    directory, _cache = isolated_sessions
+    _same_signature_for_every_version(monkeypatch)
+    path = directory / f"{SID}.json"
 
-    Version A names no owner (the root profile's session); version B is
-    another profile's session whose owner a full load already cached. A stub
-    built from A's prefix with B's owner would show the root profile's title
-    under ``work`` (gate finding, Codex). The lookup is pinned to the version
-    the prefix came from, so the read falls back to the full load instead.
+    def scene(name):
+        return {name: {"version": 1, "updated_at": 1000.0, "scene": {"activity_rows": []}}}
+
+    path.write_text(_raw("work", "WORK TITLE", "no_count", scenes=scene("scene-a")), encoding="utf-8")
+    first = models.Session.load_metadata_only(SID)
+    assert (first.profile, first.compact()["message_count"]) == ("work", len(MESSAGES))
+    assert models._session_scene_keys(first) == {"scene-a"}
+    more = MESSAGES + [{"role": "user", "content": "again", "timestamp": 1.7}]
+    path.write_text(_raw("evil", "EVIL TITLE", "no_count", more, scene("scene-b")), encoding="utf-8")
+    second = models.Session.load_metadata_only(SID)
+    assert (second.title, second.profile, second.compact()["message_count"]) == ("EVIL TITLE", "evil", len(more))
+    assert models._session_scene_keys(second) == {"scene-b"}
+    _assert_work_never_sees(monkeypatch, "EVIL TITLE")
+
+
+def test_file_replaced_after_the_prefix_read_is_read_whole_from_its_new_version(isolated_sessions, monkeypatch):
+    """A file replaced between the prefix read and the full read never mixes versions.
+
+    Version A names no owner (the root profile's session); version B is another
+    profile's. The stub must not show A's title under B's owner (gate finding,
+    Codex). The prefix only decides that the whole file is needed; the title and
+    the owner both come from the full read.
     """
     directory, _cache = isolated_sessions
     path = directory / f"{SID}.json"
@@ -362,12 +450,69 @@ def test_prefix_and_owner_come_from_one_file_version(isolated_sessions, monkeypa
         if not swapped:
             swapped.append(True)
             path.write_text(json.dumps(version_b), encoding="utf-8")
-            assert models.Session.load(SID).profile == "work"  # caches B's owner for B's signature
-            assert models._legacy_sidecar_facts_get(SID)["profile"] == "work"
+            assert models.Session.load(SID).profile == "work"
         return prefix
 
     monkeypatch.setattr(models, "_read_metadata_json_prefix", _prefix_then_replace)
     stub = models.Session.load_metadata_only(SID)
     assert swapped
-    assert (stub.title, stub.profile) in {("Root profile title", None), ("Work title", "work")}
     assert (stub.title, stub.profile) == ("Work title", "work")
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_stale_stream_cleanup_after_the_read_never_overwrites_a_newer_turn(isolated_sessions, monkeypatch, layout):
+    """The read returns a stub, so stale-stream cleanup reloads the canonical session (#1558).
+
+    Gate repro (Codex): ``?messages=0`` reads the session while the file still
+    names a dead stream; a send then saves a new live stream and prompt under the
+    session lock; the earlier request's cleanup runs on what it read. Given a
+    detached full session it saved that older copy over the send, nulling the
+    stream and the prompt. Given a stub it reloads the canonical session, whose
+    stream is live, and writes nothing.
+    """
+    directory, cache = isolated_sessions
+    path = directory / f"{SID}.json"
+    head = {"session_id": SID, "title": TITLE, "workspace": str(directory), "created_at": 1.0, "updated_at": 2.0,
+            "active_stream_id": "dead-stream"}
+    if layout == "counted":
+        head.update({"message_count": len(MESSAGES), "anchor_scene_index": {}})
+    path.write_text(json.dumps({**head, "messages": MESSAGES, "profile": None}), encoding="utf-8")
+    observed = models.get_session(SID, metadata_only=True)
+    assert getattr(observed, "_loaded_metadata_only", False)
+    assert observed.active_stream_id == "dead-stream"
+    current = models.get_session(SID)
+    monkeypatch.setitem(config.STREAMS, "new-live-stream", config.create_stream_channel())
+    with config._get_session_agent_lock(SID):
+        current.active_stream_id = "new-live-stream"
+        current.pending_user_message = "accepted next prompt"
+        current.pending_started_at = time.time()
+        current.save(touch_updated_at=False)
+    before = path.read_bytes()
+    routes._clear_stale_stream_state(observed)
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert (after["active_stream_id"], after["pending_user_message"]) == ("new-live-stream", "accepted next prompt")
+    assert path.read_bytes() == before
+    assert len(after["messages"]) == len(MESSAGES)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_stub_visible_count_leaves_out_hidden_rows(isolated_sessions, layout):
+    """A stub's compact() trusts its stored visible count and never walks messages.
+
+    The file has no ``visible_message_count`` key, so the stub takes it from the
+    same read, leaving out hidden ``delegation_wakeup`` rows, as a full load's
+    compact() does. Counting the raw messages would show the hidden row.
+    """
+    directory, _cache = isolated_sessions
+    hidden = {"role": "user", "content": "wakeup", "timestamp": 1.7, "_source": "delegation_wakeup"}
+    msgs = MESSAGES + [hidden]
+    head = {"session_id": SID, "title": TITLE, "created_at": 1.0, "updated_at": 2.0}
+    if layout == "counted":
+        head.update({"message_count": len(msgs), "anchor_scene_index": {}})
+    (directory / f"{SID}.json").write_text(json.dumps({**head, "messages": msgs, "profile": "work"}), encoding="utf-8")
+    stub = models.Session.load_metadata_only(SID)
+    assert getattr(stub, "_loaded_metadata_only", False) and stub.profile == "work"
+    full = models.Session.load(SID).compact()
+    assert full["visible_message_count"] == len(MESSAGES)
+    compact = stub.compact()
+    assert (compact["message_count"], compact["visible_message_count"]) == (len(msgs), len(MESSAGES))

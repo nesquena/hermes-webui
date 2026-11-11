@@ -218,11 +218,7 @@ _SIDECAR_METADATA_CACHE_MAX = 2000
 # large-scene session would full-parse on every poll (recreating the #4633
 # churn for legacy files) and could not be LRU-evicted. Populated once per file
 # from a full Session.load(); keyed by the sidecar's stat signature so any edit
-# invalidates it. Bounded. Value: {"message_count": int, "scene_index": dict},
-# plus "profile" (#8857: the owner the full load found, None included) when
-# the writer recorded it; an entry without "profile" never vouches for an owner.
-# Also populated for any sidecar whose metadata prefix lacks "profile", whatever
-# its layout, because load_metadata_only() takes that owner from here.
+# invalidates it. Bounded. Value: {"message_count": int, "scene_index": dict}.
 _LEGACY_SIDECAR_FACTS_LOCK = threading.Lock()
 _LEGACY_SIDECAR_FACTS: "collections.OrderedDict[tuple, dict]" = collections.OrderedDict()
 _LEGACY_SIDECAR_FACTS_MAX = 2000
@@ -2533,7 +2529,9 @@ class Session:
                 )
 
     @classmethod
-    def load(cls, sid):
+    def load(cls, sid, *, _repair=True):
+        # ``_repair=False``: a read that must not write (#8857); see the
+        # duplicate-partial self-heal below.
         # Validate session ID format to prevent path traversal.  API/gateway
         # session ids may contain hyphens (for example ``api-*`` and
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
@@ -2575,7 +2573,12 @@ class Session:
         if _names_other_session:
             # Mark it so save() refuses. Loads still return it as before.
             session._sidecar_names_other_session = sid
-        if _collapsed_partials and _names_other_session:
+        if _collapsed_partials and not _repair:
+            # #8857: a read that must not write (load_metadata_only, which
+            # another profile's sidebar poll can reach) keeps the collapse in
+            # memory only and skips the facts cache, as below.
+            pass
+        elif _collapsed_partials and _names_other_session:
             # Keep the collapse in memory only (see above), and skip the legacy
             # facts cache: the file still holds the uncollapsed transcript.
             logger.info(
@@ -2603,32 +2606,23 @@ class Session:
             # modern layout, so no legacy caching is needed.)
             #
             # WHY STILL GATED, and not "obviously" broadened to modern files: the
-            # count and scene facts are only READ from the two sites that reach
-            # them when the cheap prefix carried NEITHER message_count NOR
-            # anchor_scene_index — i.e. legacy layouts (see the `if ... and
-            # 'anchor_scene_index' not in parsed` guards in load_metadata_only()
-            # and the eviction-count helper). A modern sidecar that overflows the
-            # budget therefore never consults an entry written for it, so
-            # populating one is dead work that also stores entries no consumer
-            # can use. Making the modern case benefit needs the READ side
-            # redesigned to build a metadata stub from cached facts — a separate
-            # change; until then this stays legacy-only.
-            #
-            # #8857: the one exception is the owner. load_metadata_only() also
-            # reads this cache whenever the prefix lacks 'profile' (an older or
-            # outside writer put it after the body, or wrote none), whatever the
-            # layout, or every metadata read of such a file would take a full
-            # parse. So cache those as well; their count and scene index are this
-            # parse's, so no reader can be misled.
-            if 'anchor_scene_index' not in data or not _profile_in_metadata_prefix(data):
+            # cache is only READ from the two sites that reach it when the cheap
+            # prefix carried NEITHER message_count NOR anchor_scene_index — i.e.
+            # legacy layouts (see the `if ... and 'anchor_scene_index' not in
+            # parsed` guards in load_metadata_only() and the eviction-count
+            # helper). A modern sidecar that overflows the budget therefore
+            # never consults an entry written for it, so populating one is dead
+            # work that also stores entries no consumer can use. Making the
+            # modern case benefit needs the READ side redesigned to build a
+            # metadata stub from cached facts — a separate change; until then
+            # this stays legacy-only.
+            if 'anchor_scene_index' not in data:
                 try:
                     _legacy_sidecar_facts_put(
                         sid,
                         len(getattr(session, 'messages', None) or []),
                         _anchor_scene_index_from_records(getattr(session, 'anchor_activity_scenes', None)),
                         expected_sig=_pre_read_sig,
-                        # #8857: the owner, for a prefix that lacks 'profile'.
-                        profile=data.get('profile'),
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
@@ -2651,10 +2645,6 @@ class Session:
         if not p.exists():
             return None
         try:
-            # #8857: the version the prefix comes from. Facts combined with the
-            # prefix below must describe this same version (see
-            # _legacy_sidecar_facts_get's expected_sig; None never matches).
-            _prefix_sig = _sidecar_stat_signature(p)
             prefix = _read_metadata_json_prefix(p)
             if not prefix:
                 return cls.load(sid)
@@ -2665,17 +2655,42 @@ class Session:
             # #8857: 'profile' names the owner that metadata-only routes and the
             # sidebar judge the session by. A prefix without it (an older or
             # outside writer put it after 'messages', or wrote none) would give
-            # the stub profile=None, the legacy no-profile owner. Take it from
-            # the legacy-facts entry a full load recorded for this exact file
-            # version (the signature taken before the prefix read), else from
-            # the full read. save() writes 'profile' before 'messages' even
-            # when it is None, so sidecars it writes never get here.
-            _facts = None
+            # the stub profile=None, the legacy no-profile owner. Read the whole
+            # file instead, once, so the title and the owner come from the same
+            # read whatever replaced the file after the prefix read. Nothing is
+            # cached: an owner cached under anything but the file's content can
+            # pair one version's title with another version's owner. The read
+            # never writes (another profile's sidebar poll lands here), and a
+            # failed read is a miss, never the repairing fallback below. WebUI
+            # never writes this layout: save() has put 'profile' before
+            # 'messages' (None included) since #959, and the earlier __dict__
+            # dump put the timestamps after 'messages' too, so those files fail
+            # the check above. Only other writers' files get here.
+            # It still returns a metadata-only stub: callers that save
+            # (stale-stream cleanup, #1558) reload the canonical session for a
+            # stub, but would save a detached full copy over a newer turn.
+            # __init__ took count, visible count and scene fingerprint from the
+            # file's own keys; a file without them gets them from this read
+            # (a stub's compact() trusts these and never walks messages).
             if 'profile' not in parsed:
-                _facts = _legacy_sidecar_facts_get(sid, expected_sig=_prefix_sig)
-                if _facts is None or 'profile' not in _facts:
-                    return cls.load(sid)
-                parsed['profile'] = _facts['profile']
+                try:
+                    session = cls.load(sid, _repair=False)
+                    if session is None:
+                        return None
+                    if session._metadata_message_count is None:
+                        session._metadata_message_count = len(session.messages or [])
+                    if session._anchor_scene_index is None:
+                        session._anchor_scene_index = _anchor_scene_index_from_records(session.anchor_activity_scenes)
+                    if session._metadata_visible_message_count is None:
+                        session._metadata_visible_message_count = sum(
+                            1 for m in (session.messages or []) if not is_hidden_transcript_row(m)
+                        )
+                    session.messages, session.tool_calls, session.anchor_activity_scenes = [], [], {}
+                    session._loaded_metadata_only = True
+                    return session
+                except Exception:
+                    logger.debug("metadata read of %s failed", sid, exc_info=True)
+                    return None
             # #8852: mark a stub whose body names another session, as
             # Session.load does, so writers that bypass save() refuse it too.
             _names_other_session = parsed.get('session_id') != sid
@@ -2718,8 +2733,7 @@ class Session:
                 sidecar_message_count is None
                 and 'anchor_scene_index' not in parsed
             ):
-                if _facts is None:
-                    _facts = _legacy_sidecar_facts_get(sid, expected_sig=_prefix_sig)
+                _facts = _legacy_sidecar_facts_get(sid)
                 if _facts is not None:
                     parsed['anchor_scene_index'] = _facts.get('scene_index') or {}
                     session = cls(**parsed)
@@ -6767,45 +6781,16 @@ def set_session_reasoning_effort(session_id_or_session, value, *, profile=_KEEP_
         return previous
 
 
-# ``_legacy_sidecar_facts_put(profile=...)`` default: no owner recorded (#8857).
-_FACTS_PROFILE_UNSET = object()
-# ``_legacy_sidecar_facts_get(expected_sig=...)`` default: no version pinned.
-_FACTS_SIG_ANY = object()
-
-
-def _profile_in_metadata_prefix(data):
-    """Whether ``load_metadata_only``'s prefix of this sidecar holds ``profile`` (#8857).
-
-    The prefix reader stops at the first top-level ``messages`` or
-    ``anchor_activity_scenes`` key, and ``json.loads`` keeps the file's key
-    order, so the parsed dict answers it without re-reading the file.
-    """
-    for key in data:
-        if key == 'profile':
-            return True
-        if key in ('messages', 'anchor_activity_scenes'):
-            return False
-    return False
-
-
-def _legacy_sidecar_facts_get(sid, *, expected_sig=_FACTS_SIG_ANY):
+def _legacy_sidecar_facts_get(sid):
     """Return cached authoritative facts for a LEGACY sidecar, or None (#5854).
 
     Only returns a hit when the file's current stat signature matches the cached
     one, so a stale entry can never be served after an edit.
-
-    #8857: a caller that combines the facts with something it read from the
-    file earlier (the metadata prefix) passes the signature it took before that
-    read as ``expected_sig``. The lookup then misses unless the file is still
-    that version, so a prefix from one version never gets another version's
-    facts (its owner, above all) when the file is replaced in between.
     """
     if not is_safe_session_id(sid):
         return None
     sig = _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
     if sig is None:
-        return None
-    if expected_sig is not _FACTS_SIG_ANY and sig != expected_sig:
         return None
     with _LEGACY_SIDECAR_FACTS_LOCK:
         hit = _LEGACY_SIDECAR_FACTS.get(sig)
@@ -6815,7 +6800,7 @@ def _legacy_sidecar_facts_get(sid, *, expected_sig=_FACTS_SIG_ANY):
     return None
 
 
-def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig, profile=_FACTS_PROFILE_UNSET):
+def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig):
     """Cache authoritative facts for a legacy sidecar keyed by its stat signature.
 
     #5854 TOCTOU guard: ``expected_sig`` (MANDATORY) is the signature captured
@@ -6825,10 +6810,6 @@ def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig, 
     describe the old content; caching them under the new signature would serve
     stale data. Pass ``None`` explicitly only if the caller genuinely has no
     snapshot (then this is a no-op, refusing to cache unverified facts).
-
-    #8857: ``profile`` is the owner the same parse found (``None`` when the
-    file names none). An entry stored without it never vouches for an owner:
-    a metadata read whose prefix lacks ``profile`` then takes the full read.
     """
     if not is_safe_session_id(sid):
         return
@@ -6842,8 +6823,6 @@ def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig, 
         return
     entry = {"message_count": message_count,
              "scene_index": dict(scene_index) if isinstance(scene_index, dict) else {}}
-    if profile is not _FACTS_PROFILE_UNSET:
-        entry["profile"] = profile
     with _LEGACY_SIDECAR_FACTS_LOCK:
         _LEGACY_SIDECAR_FACTS[sig] = entry
         _LEGACY_SIDECAR_FACTS.move_to_end(sig)
