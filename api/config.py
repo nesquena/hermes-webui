@@ -687,33 +687,40 @@ def _private_config_env_binding(home) -> dict:
     ``.env`` and ``HERMES_HOME``, never the server process env), plus the variables
     the Agent classifies as process-global (``agent.secret_scope._is_global_env``:
     deployment settings such as ``API_SERVER_PORT``, never credentials), taken from the
-    launch-time env (``api.paths.STARTUP_ENV``) under the profile's own values. That is
-    what this profile's own chat resolves: the Agent reads them from the process env,
-    which during that chat holds the launch env plus the profile's mirrored ``.env``.
-    The live process env is never read, because another profile's chat may be mirroring
-    its ``.env`` there. Without the Agent's rule nothing is added. The process's OWN
-    profile (#8981 B1) also reads the launch-time deployment env under its ``.env``, as
-    the Agent's ``get_secret`` does; a routed profile never does.
+    process env as WebUI set it (:func:`api.profiles.process_env_baseline`: the launch env
+    plus what ``_reload_dotenv`` applied at startup or on a process-wide switch, minus what
+    it cleared) under the profile's own values. That is what this profile's own chat
+    resolves: the Agent reads them from the process env, which during that chat holds that
+    baseline plus the profile's mirrored ``.env``. The live process env is never read,
+    because another profile's chat may be mirroring its ``.env`` there. Without the Agent's
+    rule nothing is added. The process's OWN profile (#8981 B1) also reads the launch-time
+    deployment env under its ``.env``, as the Agent's ``get_secret`` does; a routed profile
+    never does.
     """
-    from api.profiles import profile_env_binding
+    from api import profiles
 
-    env = profile_env_binding(home)
-    if _agent_serves_home_as_its_own(home):
-        env = {**_own_profile_launch_env(), **env}
+    env = profiles.profile_env_binding(home)
     is_global = _agent_global_env_rule()
-    if is_global is not None:
-        from api import paths
 
-        # Launch-time values only, never the live process env: a chat worker mirrors its
-        # own profile's .env there for the length of its run, so another profile's
-        # API_SERVER_PORT would redirect this profile's endpoint, and this profile's key
-        # and transcript would follow it. The profile's own binding wins.
-        for name, value in paths.STARTUP_ENV.items():
-            try:
-                if name != "HERMES_HOME" and is_global(name):
-                    env.setdefault(name, value)
-            except Exception:
-                continue
+    def _global(name) -> bool:
+        try:
+            return is_global is not None and name != "HERMES_HOME" and bool(is_global(name))
+        except Exception:
+            return False
+
+    if _agent_serves_home_as_its_own(home):
+        # Global names come only from the baseline below, so the launch env can't bring
+        # back one that a process-wide switch has since cleared.
+        env = {**{k: v for k, v in _own_profile_launch_env().items() if not _global(k)}, **env}
+    if is_global is not None:
+        # The process env as WebUI set it (the launch env plus what _reload_dotenv applied,
+        # minus what it cleared), never the live process env: a chat worker mirrors its own
+        # profile's .env there for the length of its run, so another profile's
+        # API_SERVER_PORT would redirect this profile's endpoint, and this profile's key and
+        # transcript would follow it. The profile's own binding wins.
+        for name, value in profiles.process_env_baseline().items():
+            if _global(name):
+                env.setdefault(name, value)
     return env
 
 

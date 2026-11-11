@@ -16,6 +16,7 @@ runtime credential resolver.
 
 import copy
 import json
+import os
 import sys
 import threading
 import time
@@ -640,19 +641,24 @@ def _real_agent_runtime(monkeypatch):
 
 
 def _launch_env(monkeypatch, **values):
-    """Set (or, with None, remove) names in the launch-time env, ``api.paths.STARTUP_ENV``,
-    where a deployment value such as ``API_SERVER_PORT`` lives in production."""
+    """Set (or, with None, remove) names in the launch-time env, where a deployment value
+    such as ``API_SERVER_PORT`` lives in production: ``api.paths.STARTUP_ENV``, and the
+    process baseline WebUI starts from (``api.profiles.process_env_baseline()``)."""
     import types
 
-    from api import paths
+    from api import paths, profiles
 
-    env = dict(paths.STARTUP_ENV)
-    for name, value in values.items():
-        if value is None:
-            env.pop(name, None)
-        else:
-            env[name] = value
-    monkeypatch.setattr(paths, "STARTUP_ENV", types.MappingProxyType(env))
+    for module, attr, current in (
+        (paths, "STARTUP_ENV", paths.STARTUP_ENV),
+        (profiles, "_process_env_baseline", profiles.process_env_baseline()),
+    ):
+        env = dict(current)
+        for name, value in values.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        monkeypatch.setattr(module, attr, types.MappingProxyType(env))
 
 
 def test_a_named_profile_endpoint_on_a_process_global_variable_still_resolves(
@@ -857,6 +863,84 @@ def test_another_profiles_live_mirror_never_reaches_the_private_read(homes, monk
 
     (homes.work / ".env").write_text("API_SERVER_PORT=18181\n", encoding="utf-8")
     assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18181"
+
+
+def _global_port_rule(monkeypatch):
+    from api import config
+
+    monkeypatch.setattr(config, "_agent_global_env_rule", lambda: (lambda name: name == "API_SERVER_PORT"))
+
+
+def test_a_global_a_process_wide_switch_cleared_never_comes_back(homes, monkeypatch):
+    """Release gate r2 (#8981): the launch profile's ``.env`` loaded ``API_SERVER_PORT``; a
+    process-wide switch to ``default`` cleared it. The launch snapshot still has it, and
+    reading that brought the old profile's port back, so work's key and transcript went to
+    the old endpoint. Global names come from the process baseline WebUI maintains, which
+    the switch cleared."""
+    from api import config, profiles
+
+    _global_port_rule(monkeypatch)
+    _launch_env(monkeypatch, API_SERVER_PORT="18080")
+    monkeypatch.setenv("API_SERVER_PORT", "18080")  # restored at teardown
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_PORT"})
+    assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18080"
+
+    profiles._reload_dotenv(homes.root)  # the switch to default; root's .env lacks the key
+
+    assert "API_SERVER_PORT" not in profiles.process_env_baseline()
+    assert "API_SERVER_PORT" not in config._private_config_env_binding(homes.work)
+    # Nor through the own-profile launch merge.
+    monkeypatch.setattr(config, "_agent_serves_home_as_its_own", lambda home: True)
+    monkeypatch.setattr(config, "_own_profile_launch_env",
+                        lambda: {"API_SERVER_PORT": "18080", "LAB_DEPLOY_ONLY": "deploy"})
+    env = config._private_config_env_binding(homes.work)
+    assert "API_SERVER_PORT" not in env
+    assert env["LAB_DEPLOY_ONLY"] == "deploy"
+
+
+def test_a_global_the_startup_dotenv_load_supplies_still_resolves(homes, monkeypatch):
+    """Release gate r2 (#8981): WebUI's own startup ``_reload_dotenv`` (no launcher export)
+    put ``API_SERVER_PORT`` in the process env, where every profile's chat reads it. The
+    launch snapshot predates that load, so the private read left ``${API_SERVER_PORT}``
+    unresolved and compression failed. The process baseline includes what it applied."""
+    from api import config, profiles
+
+    _global_port_rule(monkeypatch)
+    _launch_env(monkeypatch, API_SERVER_PORT=None)
+    monkeypatch.delenv("API_SERVER_PORT", raising=False)  # restored at teardown
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    (homes.root / ".env").write_text("API_SERVER_PORT=18080\n", encoding="utf-8")
+    assert "API_SERVER_PORT" not in config._private_config_env_binding(homes.work)
+
+    profiles._reload_dotenv(homes.root)  # startup
+
+    assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18080"
+
+
+def test_the_baseline_follows_reload_dotenv_and_never_a_worker_mirror(homes, monkeypatch):
+    from api import profiles
+
+    _launch_env(monkeypatch, LAB_LAUNCH_ONLY="launch")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    for name in ("LAB_FROM_DOTENV", "HERMES_WEBUI_ISOLATED_PROFILE"):
+        monkeypatch.delenv(name, raising=False)  # restored at teardown
+    (homes.root / ".env").write_text(
+        "LAB_FROM_DOTENV=from-dotenv\nHERMES_WEBUI_ISOLATED_PROFILE=0\n", encoding="utf-8"
+    )
+    profiles._reload_dotenv(homes.root)
+    monkeypatch.setenv("LAB_WORKER_MIRROR", "mirror")  # a chat worker's mirror, mid-run
+
+    baseline = profiles.process_env_baseline()
+    assert baseline["LAB_LAUNCH_ONLY"] == "launch"
+    assert baseline["LAB_FROM_DOTENV"] == "from-dotenv"
+    assert "LAB_WORKER_MIRROR" not in baseline
+    # A protected key the .env may not set reaches neither the process env nor the baseline.
+    assert baseline.get("HERMES_WEBUI_ISOLATED_PROFILE") == os.environ.get("HERMES_WEBUI_ISOLATED_PROFILE")
+    assert baseline.get("HERMES_WEBUI_ISOLATED_PROFILE") != "0"
+
+    profiles._reload_dotenv(homes.work)  # a process-wide switch; work's .env is absent
+    assert "LAB_FROM_DOTENV" not in profiles.process_env_baseline()
+    assert "LAB_FROM_DOTENV" not in os.environ
 
 
 def test_another_profiles_live_mirror_never_redirects_the_compression_request(

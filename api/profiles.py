@@ -18,11 +18,12 @@ import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from types import MappingProxyType
 from typing import Optional
 
 from api import yaml_compat as yaml
 
-from api.paths import _atomic_write_text
+from api.paths import STARTUP_ENV, _atomic_write_text
 from api.session_events import publish_session_list_changed
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,17 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+# The process env as WebUI itself sets it (#8981): the launch env plus what
+# _reload_dotenv() applied (at startup, on a process-wide switch, after onboarding
+# saves a key), minus what it cleared. A chat worker's temporary mirror of its own
+# profile's .env never reaches it, so a reader that must not see another profile's
+# values (the private config read's Agent-global names) reads this, not os.environ.
+_process_env_baseline = MappingProxyType(dict(STARTUP_ENV))
+
+
+def process_env_baseline() -> MappingProxyType:
+    """The process env as WebUI set it, without any worker's mirror (#8981)."""
+    return _process_env_baseline
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -1938,11 +1950,25 @@ def _reload_dotenv(home: Path):
     applying the current profile's .env. This prevents API keys and other
     profile-scoped secrets from leaking across profile switches.
     """
+    global _loaded_profile_env_keys, _process_env_baseline
+
+    # Every change below is mirrored into a copy of the process baseline, published
+    # when this returns, so readers never see a worker's mirror (#8981).
+    baseline = dict(_process_env_baseline)
+    try:
+        _apply_profile_dotenv(home, baseline)
+    finally:
+        _process_env_baseline = MappingProxyType(baseline)
+
+
+def _apply_profile_dotenv(home: Path, baseline: dict) -> None:
+    """The body of :func:`_reload_dotenv`; each ``os.environ`` change also goes to *baseline*."""
     global _loaded_profile_env_keys
 
     # Remove keys loaded from the previous profile first.
     for key in list(_loaded_profile_env_keys):
         os.environ.pop(key, None)
+        baseline.pop(key, None)
     _loaded_profile_env_keys = set()
 
     env_path = home / '.env'
@@ -1968,6 +1994,7 @@ def _reload_dotenv(home: Path):
                         )
                         continue
                     os.environ[k] = v
+                    baseline[k] = v
                     loaded_keys.add(k)
         _loaded_profile_env_keys = loaded_keys
     except Exception:
