@@ -2892,3 +2892,176 @@ def test_a_disabled_space_alias_does_not_shadow_the_entry(monkeypatch):
         "test-skENTRY",
         "http://entry.example/v1",
     ), "a switched-off record owns nothing, so the entry serves the route"
+
+
+def _catalog_probes(monkeypatch, tmp_path, cfg_body):
+    """Run the real catalog build with HTTP intercepted; return (probes, catalog)."""
+    import json
+    import urllib.request
+
+    probes: list[dict] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "live-model"}]}).encode("utf-8")
+
+    def _fake_urlopen(req, timeout=None):
+        probes.append(
+            {"url": req.full_url, "authorization": req.headers.get("Authorization")}
+        )
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    _stub_provider_modules(monkeypatch, [])
+    cfg_path = _write_cfg(tmp_path, cfg_body)
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+    _load(cfg_path)
+    config._cfg_path = cfg_path
+    config._cfg_mtime = config.Path(cfg_path).stat().st_mtime
+    return probes, config.get_available_models(force_refresh=True)
+
+
+def test_the_catalog_probe_does_not_lend_the_shared_key_to_a_keyless_entry(monkeypatch, tmp_path):
+    """Catalog discovery must refuse the convention key the chat path refuses (r41).
+
+    The chat resolver answers ``(None, url)`` for a keyless bare-CJK entry, but the
+    catalog loop called ``_resolve_custom_record_key`` without the record-level
+    decision, so the same entry probed its ``/v1/models`` with the shared
+    ``CUSTOM_CUSTOM_API_KEY`` another provider owns. Asserted on the real
+    Authorization header of the request the catalog builds, paired with the
+    resolver, not on the helper predicate.
+    """
+    BASE = "http://127.0.0.1:8400/v1"
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "test-skSHARED")
+    probes, _catalog = _catalog_probes(
+        monkeypatch,
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        "custom_providers:\n"
+        "  - name: 晨光\n"
+        f"    base_url: {BASE}\n"
+        "    model: chat-model\n",
+    )
+
+    model_probes = [p for p in probes if p["url"].startswith(BASE)]
+    assert model_probes, f"the entry's endpoint must be probed; got {probes}"
+    assert [p["authorization"] for p in model_probes] == [None], (
+        "a keyless fallback entry must not probe with the name it does not own"
+    )
+    assert config.resolve_custom_provider_connection("custom:晨光") == (None, BASE), (
+        "the catalog must agree with the chat resolver about this entry's credential"
+    )
+
+
+def test_the_catalog_probe_keeps_the_convention_key_an_explicit_entry_owns(monkeypatch, tmp_path):
+    """The control: a ``custom:``-prefixed entry keeps its working credential (r41).
+
+    Suppressing the lookup for every non-ASCII id would break a provider that
+    authenticates through ``CUSTOM_CUSTOM_API_KEY`` today, so the refusal stays
+    record-level.
+    """
+    BASE = "http://127.0.0.1:8401/v1"
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "test-skSHARED")
+    probes, _catalog = _catalog_probes(
+        monkeypatch,
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        "custom_providers:\n"
+        "  - name: custom:晨光\n"
+        f"    base_url: {BASE}\n"
+        "    model: chat-model\n",
+    )
+
+    model_probes = [p for p in probes if p["url"].startswith(BASE)]
+    assert [p["authorization"] for p in model_probes] == ["Bearer test-skSHARED"], (
+        "an explicit entry owns the convention variable and must keep sending it"
+    )
+    assert config.resolve_custom_provider_connection("custom:晨光") == (
+        "test-skSHARED",
+        BASE,
+    ), "the prefixed entry's own convention credential must survive"
+
+
+@pytest.mark.parametrize("spelling", ["${PROVIDER_NAME}", "晨光"])
+@pytest.mark.parametrize("same_endpoint", [True, False])
+def test_a_save_judges_the_pre_click_route_by_the_expanded_identity(
+    monkeypatch, tmp_path, spelling, same_endpoint
+):
+    """Ownership and connection decisions see ONE expanded pre-click snapshot (r41).
+
+    The r39 expansion made ``_selected_fallback_entry`` find a ``${VAR}``-named
+    entry, while ``_model_block_serves_selected_custom_provider`` still judged the
+    raw document. The two disagreed: on a same-endpoint keyless entry the block
+    WAS the credential authority, yet the raw name matched nothing, so the Save
+    popped ``model.base_url`` and ``model.key_env`` and the route lost its working
+    key. Both endpoint relationships are pinned: the inherited credential survives
+    at the block's own endpoint, and a genuinely different endpoint still has the
+    old route's sources removed.
+    """
+    SAME_URL = "https://same.invalid/v1"
+    OTHER_URL = "https://other.invalid/v1"
+    entry_url = SAME_URL if same_endpoint else OTHER_URL
+    monkeypatch.setenv("PROVIDER_NAME", "晨光")
+    monkeypatch.setenv("MODEL_KEY", "test-skMODEL")
+
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        f"  base_url: {SAME_URL}\n"
+        "  key_env: MODEL_KEY\n"
+        "custom_providers:\n"
+        f"  - name: {spelling}\n"
+        f"    base_url: {entry_url}\n"
+        "    model: chat-model\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    assert config.set_hermes_default_model("chat-model", provider="custom:晨光")["ok"] is True
+
+    raw_disk = config._load_yaml_config_file_raw(cfg_path)
+    assert raw_disk["custom_providers"][0]["name"] == spelling, (
+        "the document keeps the name exactly as the user wrote it"
+    )
+
+    config._cfg_path = cfg_path
+    config._cfg_mtime = config.Path(cfg_path).stat().st_mtime
+    _load(cfg_path)
+    key, base_url = config.resolve_custom_provider_connection("custom:晨光")
+
+    if same_endpoint:
+        assert raw_disk["model"].get("base_url") == SAME_URL, (
+            "the block served this endpoint before the click and must keep it"
+        )
+        assert raw_disk["model"].get("key_env") == "MODEL_KEY", (
+            "an inherited credential of the same-endpoint route must survive the Save"
+        )
+        assert (key, base_url) == ("test-skMODEL", SAME_URL), (
+            "the reloaded route must still authenticate exactly as it did before the click"
+        )
+    else:
+        assert "base_url" not in raw_disk["model"], (
+            "a different endpoint must not inherit the previous route's endpoint"
+        )
+        assert "key_env" not in raw_disk["model"], (
+            "a different endpoint must not inherit the previous route's credential"
+        )
+        assert (key, base_url) == (None, OTHER_URL), (
+            "the entry's own endpoint serves, keyless, exactly as its ASCII twin does"
+        )
