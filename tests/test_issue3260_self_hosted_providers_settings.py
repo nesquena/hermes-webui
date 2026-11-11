@@ -232,6 +232,8 @@ def isolated_self_hosted_env(monkeypatch, tmp_path):
     for env_var in _SELF_HOSTED_ENV_VARS:
         monkeypatch.setenv(env_var, "x")
         monkeypatch.delenv(env_var)
+    # Its _reload_dotenv() also rebinds the set of keys it owns; restore that marker too.
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", profiles._loaded_profile_env_keys)
     yield tmp_path, fake_config_path
     config.cfg.clear()
     config.cfg.update(old_cfg)
