@@ -1491,3 +1491,89 @@ def test_the_private_read_applies_the_config_defaults(homes):
         )
 
     assert _in_private_scope("work", read) == (config._DEFAULT_AGENT_PERSONALITIES["helpful"], False)
+
+
+
+# ── Agent-only pins, CI-visible with stand-ins (#8981 review) ────────────────
+
+
+def test_renamed_root_alias_keeps_the_root_env_with_a_stand_in_agent(
+    homes, runtime, make_session, monkeypatch, stand_in_secret_scope
+):
+    """The renamed-root env scope with no real Agent (its Agent variant is
+    ``test_renamed_root_alias_keeps_the_root_env_for_templated_config``): a session
+    on a renamed root alias runs in master's ``profile_env_for_background_worker``
+    scope, which binds root's ``.env`` as the Agent secret scope. Without that scope
+    the templated record name can't be expanded, so it claims every name and the
+    #8690 ambiguity verdict refuses the job."""
+    from api import profiles
+
+    (homes.root / "config.yaml").write_text(
+        "model:\n"
+        "  provider: openai\n"
+        "  default: probe-model\n"
+        "platform_toolsets:\n"
+        "  cli: []\n"
+        "custom_providers:\n"
+        "  - name: ${GATE_EXTRA_PROVIDER}\n"
+        "    base_url: https://lab.invalid/v1\n"
+        "    api_key: synthetic-lab-key\n",
+        encoding="utf-8",
+    )
+    (homes.root / ".env").write_text("GATE_EXTRA_PROVIDER=lab\n", encoding="utf-8")
+    monkeypatch.delenv("GATE_EXTRA_PROVIDER", raising=False)
+    monkeypatch.setattr(profiles, "_active_profile", "kinni")
+    monkeypatch.setattr(profiles, "_root_profile_name_cache", {"default", "kinni"})
+    monkeypatch.setattr(profiles, "_root_profile_name_cache_loaded", True)
+
+    sid = make_session("kinni", model_provider="openai")
+    job, _ = _run_job_on_fresh_thread(sid)
+
+    assert job["status"] == "done", job.get("error")
+    assert runtime.agents and runtime.agents[0]["provider"] == "openai"
+
+
+@pytest.mark.parametrize("spelling", ["${API_SERVER_PORT}", "${ API_SERVER_PORT }"])
+@pytest.mark.parametrize("case", ["server_own_profile", "routed_profile"])
+def test_the_closed_expansion_reads_process_global_variables_with_a_stand_in_agent(
+    homes, runtime, make_session, monkeypatch, stand_in_hermes_constants, stand_in_secret_scope, case, spelling
+):
+    """The process-global expansion rule with no real Agent (its Agent variant is
+    ``test_the_closed_expansion_still_reads_the_agents_process_global_variables``):
+    the private read takes the variables the Agent's rule calls process-global from
+    the process env, and nothing else from it, whether the named profile is the
+    process's own (B1, launch snapshot) or a routed one. A padded name is read
+    stripped."""
+    from api import profiles
+
+    stand_in_secret_scope.global_names.add("API_SERVER_PORT")
+    if case == "server_own_profile":
+        monkeypatch.setattr(profiles, "_active_profile", "work")
+        stand_in_hermes_constants(homes.work)
+    else:
+        stand_in_hermes_constants(homes.root)
+    (homes.work / "config.yaml").write_text(
+        "model:\n"
+        "  provider: custom:lab\n"
+        "  default: lab-model\n"
+        "platform_toolsets:\n"
+        "  cli: []\n"
+        "custom_providers:\n"
+        "  - name: lab\n"
+        f"    base_url: http://127.0.0.1:{spelling}/v1\n"
+        "    api_key: work-lab-key\n"
+        "    model: lab-model\n"
+        "    key_env: ${LAB_PROCESS_ONLY_SECRET}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    monkeypatch.setenv("LAB_PROCESS_ONLY_SECRET", "process-secret-value")
+
+    sid = make_session("work", model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
+    assert job["status"] == "done", job.get("error")
+    assert runtime.agents[0]["base_url"] == "http://127.0.0.1:18080/v1"
+
+    record = _private_record("work")
+    assert (record["base_url"], record["key_env"]) == ("http://127.0.0.1:18080/v1", "${LAB_PROCESS_ONLY_SECRET}")
+    assert "process-secret-value" not in json.dumps([record, runtime.agents], default=str)
