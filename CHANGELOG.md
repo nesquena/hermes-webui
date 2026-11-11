@@ -121,6 +121,8 @@
 
 ### Fixed
 
+- **A deleted or marker-less profile home no longer shows in the profile dropdown or gets cron folders written into it (#8897).** The fast profile listing checked only that a folder existed and had a valid name, so a tombstoned profile still appeared, and opening Tasks (`/api/crons`) created `cron/` and `cron/output/` inside it. The listing now applies the same live-profile checks as the Agent, and each cross-profile cron read skips a home that isn't live, so a stale cookie or an outdated row can't resurrect it. The default and custom homes outside `profiles/` are unaffected. Thanks @chhxbchhxb!
+
 - **Gateway-backed sessions refuse the features that would run the agent inside WebUI.** `/btw`, `/background`, `/compress`, the non-streaming `/api/chat` and the one-shot helper calls (update summaries, commit messages) build an in-process agent. On a gateway-backed deployment they failed with a provider-credential error or quietly ran a turn outside the gateway. They now return 409 with `code: "gateway_mode_unsupported"` and the feature name, before any session, stream or compression job is created. Non-gateway setups are unchanged. Thanks @samikrc. (#8860, fixes #8821)
 
 - **`POST /api/session/new` refuses a profile value that is not a profile name.** The route passed the request body's `profile` straight to workspace resolution and session creation, so a forged body could create a session (and, with `worktree: true`, a worktree and a saved file) under a non-profile value and get a 200. It now validates the optional profile at the top of the handler, with the same rule the other routes use, before any read, cache or write. Thanks @webtecnica. (#8886, fixes #8862)
