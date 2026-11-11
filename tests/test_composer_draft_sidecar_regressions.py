@@ -1617,19 +1617,19 @@ def test_autosave_and_delete_lock_step_does_not_recreate_draft(tmp_path, monkeyp
 
     saved_to_replace = threading.Event()
     allow_replace = threading.Event()
-    original_safe_replace = models._safe_replace
+    original_safe_replace = models._replace_with_retry
     replace_error = {}
 
-    def slow_safe_replace(src, dst):
+    def slow_safe_replace(src, dst, publish):
         saved_to_replace.set()
         allow_replace.wait()
         try:
-            return original_safe_replace(src, dst)
+            return original_safe_replace(src, dst, publish)
         except Exception as exc:
             replace_error["error"] = exc
             raise
 
-    monkeypatch.setattr(models, "_safe_replace", slow_safe_replace)
+    monkeypatch.setattr(models, "_replace_with_retry", slow_safe_replace)
 
     def autosave_worker(errors):
         try:

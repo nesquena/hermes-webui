@@ -3496,8 +3496,8 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_started_at = None
     session.pending_user_source = None
     try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
+        from api.models import _remove_session_with_draft
+        _remove_session_with_draft(session.path)
     except Exception:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
@@ -7648,6 +7648,18 @@ def _migrate_compression_session_ownership(
     new_sid: str,
     agent_lock,
 ) -> bool:
+    """Publish compression authority after any in-flight old-identity draft."""
+    from api.models import _draft_lifecycle_lock_for_session_id
+    with _draft_lifecycle_lock_for_session_id(old_sid):
+        return _migrate_compression_session_ownership_locked(s, old_sid, new_sid, agent_lock)
+
+
+def _migrate_compression_session_ownership_locked(
+    s,
+    old_sid: str,
+    new_sid: str,
+    agent_lock,
+) -> bool:
     """Atomically publish a durable compression continuation."""
     from api import models as _models
     from api.paths import _atomic_write_text
@@ -7659,6 +7671,11 @@ def _migrate_compression_session_ownership(
         getattr(s, 'pre_compression_continuation_session_id', None),
         getattr(s, 'parent_session_id', None),
     )
+    previous_draft_identity = s._composer_draft_session_id
+    previous_draft_fallback = copy.deepcopy(s._composer_draft)
+    # The old lifecycle lock serializes this read with acknowledged saves and
+    # explicit clears. Capture before permanently rebinding the store identity.
+    continuation_draft = copy.deepcopy(s.composer_draft)
     old_path = SESSION_DIR / f'{old_sid}.json'
     index_path = _models.SESSION_INDEX_FILE
     index_row_snapshot = None
@@ -7786,7 +7803,9 @@ def _migrate_compression_session_ownership(
                 if SESSION_AGENT_LOCKS.get(new_sid) is not agent_lock:
                     raise RuntimeError("continuation lock changed during publish")
 
+                s._composer_draft = continuation_draft
                 s.session_id = new_sid
+                s._composer_draft_session_id = new_sid
                 s.pre_compression_snapshot = False
                 s.pre_compression_continuation_session_id = None
                 s.parent_session_id = old_sid
@@ -7812,6 +7831,8 @@ def _migrate_compression_session_ownership(
                 SESSIONS[new_sid] = existing_new_session
             if SESSIONS.get(old_sid) is None:
                 SESSIONS[old_sid] = s
+            s._composer_draft_session_id = previous_draft_identity
+            s._composer_draft = previous_draft_fallback
             s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
             with SESSION_AGENT_LOCKS_LOCK:
                 if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
@@ -16722,8 +16743,9 @@ def _run_agent_streaming(
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
                 try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    from api.models import _remove_session_with_draft
+                    with _agent_lock:
+                        _remove_session_with_draft(s.path)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions

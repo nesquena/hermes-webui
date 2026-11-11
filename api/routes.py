@@ -32,7 +32,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing, nullcontext
+from contextlib import closing, nullcontext, ExitStack
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -1257,7 +1257,7 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     }
 
 
-def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True) -> bool:
+def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True, request_profile=None) -> bool:
     """Return whether ``sid`` belongs to the active profile.
 
     On a profile mismatch, the helper mirrors the detail-load endpoint's
@@ -1279,7 +1279,9 @@ def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = T
         if emit_error:
             bad(handler, "Session not found", 404)
         return False
-    if not _session_visible_to_active_profile(session_profile, handler):
+    visible = (_session_visible_to_active_profile(session_profile, handler) if request_profile is None
+               else _profiles_match(session_profile, request_profile))
+    if not visible:
         if emit_error:
             if session_profile:
                 j(handler, {
@@ -1344,7 +1346,7 @@ def _stream_id_visible_to_request_profile(
     return _session_id_visible_to_request_profile(handler, owner_session_id, emit_error=emit_error)
 
 
-def _guard_request_session_visibility(handler, parsed, body=None, method="GET") -> bool:
+def _guard_request_session_visibility(handler, parsed, body=None, method="GET", *, request_profile=None) -> bool:
     """Apply request session-profile visibility check to request-supplied IDs.
 
     Covers top-level `session_id` in the query/body. Routes that accept session
@@ -1354,9 +1356,10 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
     if _request_session_visibility_exempt(method, getattr(parsed, "path", "")):
         return True
     sid = parse_qs(getattr(parsed, "query", "") or "").get("session_id", [None])[0]
-    if not _session_id_visible_to_request_profile(handler, sid):
+    authority = {"request_profile": request_profile} if request_profile is not None else {}
+    if not _session_id_visible_to_request_profile(handler, sid, **authority):
         return False
-    if isinstance(body, dict) and not _session_id_visible_to_request_profile(handler, body.get("session_id")):
+    if isinstance(body, dict) and not _session_id_visible_to_request_profile(handler, body.get("session_id"), **authority):
         return False
     return True
 
@@ -14232,6 +14235,12 @@ from api.models import (
     Session,
     get_cli_session_by_id,
     get_session,
+    get_session_for_draft,
+    _draft_lifecycle_lock_for_session_id,
+    _draft_owner_is_current,
+    _draft_owner_revision,
+    _draft_owner_revisions_are_current,
+    _remove_session_with_draft,
     get_session_profile_readonly,
     get_sidecar_session_profile_readonly,
     session_owner_readings_readonly,
@@ -14482,11 +14491,14 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     return _resolve_from_rows(rows)
 
 
-def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile) -> bool:
-    """Confirm one bounded compression edge from current on-disk metadata."""
+def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile, *, revisions=None) -> bool:
+    """Read an edge optimistically, retaining every revision before its read."""
+    observed = [] if revisions is None else revisions
+    observed.append((snapshot_sid, _draft_owner_revision(snapshot_sid)))
     snapshot_meta = _persisted_session_meta_prefix(snapshot_sid)
+    observed.append((continuation_sid, _draft_owner_revision(continuation_sid)))
     continuation_meta = _persisted_session_meta_prefix(continuation_sid)
-    return bool(
+    authorized = bool(
         snapshot_meta
         and continuation_meta
         and _profiles_match(snapshot_meta.get("profile"), request_profile)
@@ -14496,6 +14508,7 @@ def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, reques
         and _profiles_match(continuation_meta.get("profile"), request_profile)
         and _safe_first(continuation_meta.get("parent_session_id")) == snapshot_sid
     )
+    return authorized and (revisions is not None or _draft_owner_revisions_are_current(observed))
 
 
 def _draft_pre_compression_continuation_session_authority(
@@ -14550,11 +14563,15 @@ def _draft_pre_compression_continuation_session_authority(
 
 
 def _draft_compression_edges_still_authorized(edges, request_profile) -> bool:
-    """Recheck each bounded lineage edge after acquiring the final target lock."""
-    return all(
-        _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile)
+    """Scan outside the lock, then validate all edge records together."""
+    revisions = []
+    authorized = all(
+        _draft_compression_edge_is_authorized(
+            snapshot_sid, continuation_sid, request_profile, revisions=revisions,
+        )
         for snapshot_sid, continuation_sid in edges
     )
+    return authorized and _draft_owner_revisions_are_current(revisions)
 
 from api.workspace import (
     load_workspaces,
@@ -19774,6 +19791,8 @@ def _llm_update_summary(system_prompt: str, user_prompt: str, active_profile: st
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    # Cookie-less draft requests must also retain their entry-time authority.
+    request_profile = _get_active_profile_name() if parsed.path == "/api/session/draft" else None
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
     if parsed.path == "/api/csp-report":
         if diag:
@@ -19879,7 +19898,8 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
-    if not _guard_request_session_visibility(handler, parsed, body=body, method="POST"):
+    authority = {"request_profile": request_profile} if request_profile is not None else {}
+    if not _guard_request_session_visibility(handler, parsed, body=body, method="POST", **authority):
         if diag:
             diag.finish()
         return True
@@ -21002,24 +21022,45 @@ def handle_post(handler, parsed) -> bool:
         def _draft_mark(name):
             _draft_stages.append((name, _draft_time.monotonic()))
         _draft_mark("enter")
+
+        def _draft_authority_unconfirmed():
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "Draft authority could not be confirmed",
+                    "code": "draft_authority_unconfirmed",
+                },
+                status=409,
+            )
+
         if handler.command == "GET":
             query = parse_qs(parsed.query)
             sid = query.get("session_id", [""])[0] if parsed.query else ""
             if not sid:
                 return bad(handler, "session_id is required", 400)
-            try:
-                s = get_session(sid)
-            except KeyError:
-                return bad(handler, "Session not found", 404)
-            draft = getattr(s, "composer_draft", {}) or {}
-            return j(handler, {"draft": draft})
+            if not is_safe_session_id(sid):
+                return bad(handler, "Invalid session_id", 400)
+            with _draft_lifecycle_lock_for_session_id(sid):
+                try:
+                    s = get_session_for_draft(sid)
+                except KeyError:
+                    return bad(handler, "Session not found", 404)
+                if not _profiles_match(getattr(s, "profile", None), request_profile):
+                    return _draft_authority_unconfirmed()
+                draft = getattr(s, "composer_draft", {}) or {}
+                if not _draft_owner_is_current(s):
+                    return _draft_authority_unconfirmed()
+                return j(handler, {"draft": draft})
         # POST
         try:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
-        if _session_is_subagent_view_only(sid):
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session_id", 400)
+        if _is_subagent_child_session_id(sid):
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
@@ -21063,10 +21104,18 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            s = get_session_for_draft(sid, allow_missing_cached=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _profiles_match(getattr(s, "profile", None), request_profile):
+            return _draft_authority_unconfirmed()
+        if str(getattr(s, 'source_tag', '') or getattr(s, 'raw_source', '')
+               or getattr(s, 'session_source', '') or '').strip().lower() == 'subagent':
+            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         _draft_mark("after_get_session")
+        # Ordinary saves own only the small draft lifecycle. Snapshot authority
+        # and first-shell publication retain transcript-before-draft ordering.
+        needs_agent_lock = bool(getattr(s, 'pre_compression_snapshot', False)) or not (SESSION_DIR / f'{sid}.json').exists()
         # Optional compare-and-clear: only write when the stored draft still equals
         # if_text (and if_files when given), so a stale retire keeps newer drafts.
         if_text = body.get("if_text")
@@ -21074,26 +21123,17 @@ def handle_post(handler, parsed) -> bool:
         unchanged = False
         request_sid = sid
         request_session = s
-        request_profile = getattr(request_session, "profile", None)
         authoritative_sid = request_sid
         _MAX_DRAFT_AUTHORITY_HOPS = 4
         _seen_authority_sids = {authoritative_sid}
         _validated_compression_edges = []
         resolved_once = False
 
-        def _draft_authority_unconfirmed():
-            return j(
-                handler,
-                {
-                    "ok": False,
-                    "error": "Draft authority could not be confirmed",
-                    "code": "draft_authority_unconfirmed",
-                },
-                status=409,
-            )
-
         for _hop in range(_MAX_DRAFT_AUTHORITY_HOPS):
-            with _get_session_agent_lock(authoritative_sid):
+            with ExitStack() as draft_locks:
+                if needs_agent_lock:
+                    draft_locks.enter_context(_get_session_agent_lock(authoritative_sid))
+                draft_locks.enter_context(_draft_lifecycle_lock_for_session_id(authoritative_sid))
                 _draft_mark("acquired_lock")
                 # A successful parent check releases that lock before this hop
                 # acquires the child lock. Revalidate every traversed edge here
@@ -21103,7 +21143,7 @@ def handle_post(handler, parsed) -> bool:
                 ):
                     return _draft_authority_unconfirmed()
                 try:
-                    request_session = get_session(authoritative_sid)
+                    request_session = get_session_for_draft(authoritative_sid)
                 except KeyError:
                     return j(
                         handler,
@@ -21126,6 +21166,10 @@ def handle_post(handler, parsed) -> bool:
                     return _draft_authority_unconfirmed()
                 if not _profiles_match(getattr(request_session, "profile", None), request_profile):
                     return _draft_authority_unconfirmed()
+                if not _draft_owner_is_current(request_session):
+                    # Same SID and captured profile on every bounded retry.
+                    # Re-read the draft too, preserving compare/clear semantics.
+                    continue
 
                 if resolved_sid != authoritative_sid:
                     if resolved_sid in _seen_authority_sids:
@@ -21136,6 +21180,11 @@ def handle_post(handler, parsed) -> bool:
 
                 continuation_sid = None
                 if getattr(request_session, "pre_compression_snapshot", False):
+                    if not needs_agent_lock:
+                        # Rotation became durable after preflight. Release the
+                        # draft lock before taking the transcript authority lock.
+                        needs_agent_lock = True
+                        continue
                     continuation_session, continuation_sid = (
                         _draft_pre_compression_continuation_session_authority(
                             request_session,
@@ -21170,6 +21219,9 @@ def handle_post(handler, parsed) -> bool:
                         status=409,
                     )
 
+                if str(getattr(request_session, 'source_tag', '') or getattr(request_session, 'raw_source', '')
+                       or getattr(request_session, 'session_source', '') or '').strip().lower() == 'subagent':
+                    return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
                 # #7855 CORE (round 6): the goal-continuation token is part of
                 # the draft. Apply the write through the shared projection so
                 # the token follows exactly the same rules as the text: stored
@@ -21183,12 +21235,16 @@ def handle_post(handler, parsed) -> bool:
                     str(current_draft.get("text") or "") != if_text
                     or (isinstance(if_files, list) and list(current_draft.get("files") or []) != if_files)
                 ):
+                    if not _draft_owner_is_current(request_session):
+                        continue
                     return j(handler, {"ok": True, "draft": current_draft, "unchanged": True, "mismatch": True})
                 next_draft = _project_session_draft_write(
                     {"text": text, "files": files, "goal_continuation_id": goal_continuation_id},
                     current_draft,
                 )
                 if next_draft == current_draft:
+                    if not _draft_owner_is_current(request_session):
+                        continue
                     unchanged = True
                     saved_draft = current_draft
                 else:
@@ -21196,13 +21252,13 @@ def handle_post(handler, parsed) -> bool:
                     _draft_files = next_draft.get("files", []) or []
                     _has_meaningful_draft = bool(_draft_text) or bool(_draft_files)
                     if not (SESSION_DIR / f"{authoritative_sid}.json").exists() and _has_meaningful_draft:
-                        # The owner-record save below runs under LOCK, and Session.save()
-                        # takes the #7881 per-session persist lock, whose order is
-                        # persist -> _INDEX_WRITE_LOCK -> LOCK. Take persist first so
-                        # this path never waits on it while holding LOCK (a concurrent
-                        # same-id save holds persist and waits on LOCK in its index
-                        # write). save() re-enters the RLock.
-                        with _session_persist_lock(authoritative_sid), LOCK:
+                        # The owner-record save below is a create-only publication:
+                        # Session.save(only_if_absent=True) takes the owner gate, not
+                        # the #7881 per-session persist lock, and skips the index, so
+                        # LOCK alone keeps the persist -> _INDEX_WRITE_LOCK -> LOCK
+                        # order. A real owner must remain able to publish during
+                        # shell preparation or backoff.
+                        with LOCK:
                             if SESSIONS.get(authoritative_sid) is not request_session:
                                 return j(
                                     handler,
@@ -21236,7 +21292,14 @@ def handle_post(handler, parsed) -> bool:
                                 draft_session.save(
                                     touch_updated_at=False,
                                     skip_index=True,
+                                    only_if_absent=True,
                                 )
+                            # Success or collision proves this SID was durable.
+                            # Deletion before re-resolution must not recreate it.
+                            request_session._draft_identity_persisted = True
+                        # Whether we won or lost creation, re-resolve and project
+                        # from the durable owner; never overwrite the winner.
+                        continue
                     # Draft persistence is not conversation activity. Touching updated_at
                     # here makes the active-session external-refresh poll force-reload the
                     # current chat every few seconds while the user is typing, and that
@@ -21246,10 +21309,12 @@ def handle_post(handler, parsed) -> bool:
                     ):
                         return _draft_authority_unconfirmed()
                     _draft_mark("before_save")
-                    _save_session_draft(authoritative_sid, next_draft)
+                    if _save_session_draft(authoritative_sid, next_draft, owner=request_session) is False:
+                        continue
                     _draft_mark("after_save")
-                    request_session.composer_draft = next_draft
-                    saved_draft = request_session.composer_draft
+                    # Never assign back to a cached object that compression may
+                    # have rebound while this fixed-identity write was in flight.
+                    saved_draft = next_draft
                 sid = authoritative_sid
                 resolved_once = True
                 break
@@ -21500,27 +21565,36 @@ def handle_post(handler, parsed) -> bool:
             # sidecar under it also finds this delete counted, and a patch that
             # read the sidecar replaces it before the unlink, not after.
             late_share_tokens = []
-            with _session_persist_lock(sid):
-                # A share create that published after the revoke above and
-                # persisted before this lock left its token in the sidecar.
-                try:
-                    from api.models import _persisted_share_fields
-
-                    persisted = _persisted_share_fields(p)
-                    if isinstance(persisted, tuple) and persisted[0]:
-                        late_share_tokens.append(str(persisted[0]))
-                except Exception:
-                    logger.warning("Failed to re-read the share token of %s", sid, exc_info=True)
-                with LOCK:
-                    SESSIONS.pop(sid, None)
-                    # #7738: recorded with the eviction, so a writer waiting on the
-                    # session lock cannot save the empty-shell fallback back to disk.
-                    _DELETED_SESSION_IDS.add(sid)
-                    _DELETED_SESSION_GENERATION[sid] = _DELETED_SESSION_GENERATION.get(sid, 0) + 1  # #8864
+            # The owner and its draft are removed in one draft lifecycle step.
+            with _draft_lifecycle_lock_for_session_id(sid):
+                with _session_persist_lock(sid):
+                    # A share create that published after the revoke above and
+                    # persisted before this lock left its token in the sidecar.
                     try:
-                        p.unlink(missing_ok=True)
+                        from api.models import _persisted_share_fields
+
+                        persisted = _persisted_share_fields(p)
+                        if isinstance(persisted, tuple) and persisted[0]:
+                            late_share_tokens.append(str(persisted[0]))
                     except Exception:
-                        logger.debug("Failed to unlink session file %s", p)
+                        logger.warning("Failed to re-read the share token of %s", sid, exc_info=True)
+                    with LOCK:
+                        SESSIONS.pop(sid, None)
+                        # #7738: recorded with the eviction, so a writer waiting on the
+                        # session lock cannot save the empty-shell fallback back to disk.
+                        _DELETED_SESSION_IDS.add(sid)
+                        _DELETED_SESSION_GENERATION[sid] = _DELETED_SESSION_GENERATION.get(sid, 0) + 1  # #8864
+                        try:
+                            p.unlink(missing_ok=True)
+                        except Exception:
+                            logger.debug("Failed to unlink session file %s", p)
+                sidecar_deleted = not p.exists()
+                try:
+                    draft_deleted = bool(_delete_session_draft(sid))
+                except Exception:
+                    logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
+                    draft_deleted = False
+                draft_delete_failed = not draft_deleted
             # Revoked after the locks, so the snapshot write never runs under the persist lock.
             for token in late_share_tokens:
                 try:
@@ -21528,13 +21602,6 @@ def handle_post(handler, parsed) -> bool:
                         logger.warning("Failed to revoke a late share of deleted session %s", sid)
                 except Exception:
                     logger.warning("Failed to revoke a late share of deleted session %s", sid, exc_info=True)
-            sidecar_deleted = not p.exists()
-            try:
-                draft_deleted = bool(_delete_session_draft(sid))
-            except Exception:
-                logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
-                draft_deleted = False
-            draft_delete_failed = not draft_deleted
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -24086,6 +24153,7 @@ def _handle_session_export(handler, parsed):
     # ``redact_session_data`` path so export context_messages uses the same
     # alias-stripping boundary as the visible transcript.
     snapshot = dict(s.__dict__)
+    snapshot['composer_draft'] = getattr(s, 'composer_draft', None) or {}
     if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
         state_messages = get_state_db_session_messages(
             sid, profile=getattr(s, "profile", None), include_row_identity=True,
@@ -28819,6 +28887,7 @@ def _handle_memory_read(handler, parsed=None):
 
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
+    skipped = 0
     phase1_removed_ids = set()
     draft_delete_failed = False
 
@@ -28828,7 +28897,8 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             continue
         try:
             session_lock = _get_session_agent_lock(p.stem)
-            if not session_lock.acquire(timeout=5):
+            if not session_lock.acquire(timeout=0.1):
+                skipped += 1
                 logger.debug("Session %s is busy; leaving it for later cleanup", p.stem)
                 continue
             # #8837: share create and revoke serialize on the per-session share
@@ -28844,36 +28914,37 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                     logger.debug("Session %s has a share operation in flight; leaving it for later cleanup", p.stem)
                     continue
                 share_lock = candidate_share_lock
-                s = Session.load(p.stem)
-                if zero_only:
-                    should_delete = s and len(s.messages) == 0
-                else:
-                    should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-                if should_delete and getattr(s, "share_token", None):
-                    # #8837: a published link is served only while this sidecar
-                    # exists, and revoke finds its token here. Sharing an
-                    # external (CLI/messaging) conversation writes a
-                    # metadata-only sidecar with no messages while the
-                    # transcript stays in state.db, so "empty" does not mean
-                    # gone. Only a deliberate delete ends a live link.
-                    should_delete = False
-                if should_delete:
-                    with LOCK:
-                        SESSIONS.pop(p.stem, None)
-                        p.unlink(missing_ok=True)
-                    session_deleted = not p.exists()
-                    if session_deleted:
-                        phase1_removed_ids.add(p.stem)
-                    try:
-                        draft_deleted = bool(_delete_session_draft(p.stem))
-                    except Exception:
-                        logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
-                        draft_delete_failed = True
-                        draft_deleted = False
-                    if not draft_deleted:
-                        draft_delete_failed = True
-                    if session_deleted:
-                        cleaned += 1
+                with _draft_lifecycle_lock_for_session_id(p.stem):
+                    s = Session.load(p.stem)
+                    if zero_only:
+                        should_delete = s and len(s.messages) == 0
+                    else:
+                        should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                    if should_delete and getattr(s, "share_token", None):
+                        # #8837: a published link is served only while this sidecar
+                        # exists, and revoke finds its token here. Sharing an
+                        # external (CLI/messaging) conversation writes a
+                        # metadata-only sidecar with no messages while the
+                        # transcript stays in state.db, so "empty" does not mean
+                        # gone. Only a deliberate delete ends a live link.
+                        should_delete = False
+                    if should_delete:
+                        with LOCK:
+                            SESSIONS.pop(p.stem, None)
+                            p.unlink(missing_ok=True)
+                        session_deleted = not p.exists()
+                        if session_deleted:
+                            phase1_removed_ids.add(p.stem)
+                        try:
+                            draft_deleted = bool(_delete_session_draft(p.stem))
+                        except Exception:
+                            logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
+                            draft_delete_failed = True
+                            draft_deleted = False
+                        if not draft_deleted:
+                            draft_delete_failed = True
+                        if session_deleted:
+                            cleaned += 1
             finally:
                 if share_lock is not None:
                     share_lock.release()
@@ -28892,7 +28963,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 continue
             try:
                 session_lock = _get_session_agent_lock(sid)
-                acquired = session_lock.acquire(timeout=5)
+                acquired = session_lock.acquire(timeout=0.1)
             except Exception:
                 logger.debug("Failed to acquire session lock during draft cleanup for %s", sid, exc_info=True)
                 draft_delete_failed = True
@@ -28997,11 +29068,12 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 "ok": False,
                 "error": "Failed to delete one or more session drafts",
                 "cleaned": cleaned,
+                "skipped": skipped,
                 "draft_delete_failed": True,
             },
             status=500,
         )
-    return j(handler, {"ok": True, "cleaned": cleaned})
+    return j(handler, {"ok": True, "cleaned": cleaned, "skipped": skipped})
 
 
 def _handle_btw(handler, body):
@@ -29192,7 +29264,8 @@ def _handle_background(handler, body):
             # clutter the sidebar or SESSION_DIR. The index is pruned on the
             # next rebuild via _index_entry_exists().
             try:
-                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                with _get_session_agent_lock(bg_sid):
+                    _remove_session_with_draft(SESSION_DIR / f"{bg_sid}.json")
             except Exception:
                 pass
         except Exception:
@@ -29725,7 +29798,7 @@ def _restore_chat_start_entry_sidecar(provenance) -> None:
     if sidecar_unknown:
         raise OSError("chat-start entry sidecar bytes are unavailable")
     if sidecar_bytes is None:
-        sidecar_path.unlink(missing_ok=True)
+        _remove_session_with_draft(sidecar_path)
     else:
         from api.models import _note_sidecar_write
 
