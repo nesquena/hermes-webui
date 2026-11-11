@@ -14571,14 +14571,15 @@ function _gatewayLocalUnprovenNoteHtml(lifecycle){
   const cut=template.indexOf('{cmd}');
   if(cut<0) return template;  // no placeholder: nothing for this machine to run
   const before=template.slice(0,cut).trim();
-  const after=template.slice(cut+5).trim();
+  const rem=template.slice(cut+5).trim();
+  const after=/\p{L}/u.test(rem)?rem:'';
   const codeStyle='display:block;font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-inline-bg);color:var(--code-text);padding:4px 6px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
   // Keep each `--flag` whole when the chip wraps: a break inside `--profile`
   // left a bare `--` at the line end, which reads as the end-of-options marker.
   // The pattern only matches `--` plus letters/hyphens in the already escaped
   // text, so it cannot touch an entity or markup.
   const cmdHtml=esc(command).replace(/(^|\s)(--[a-z][a-z-]*)/g,'$1<span style="white-space:nowrap">$2</span>');
-  const block=`<div class="gateway-start-cmd" data-gateway-cmd-block style="display:flex;align-items:flex-start;gap:6px;margin:6px 0 4px"><code style="${codeStyle}">${cmdHtml}</code><button class="sm-btn gateway-copy-cmd-btn" type="button" data-gateway-cmd="${esc(command)}" onclick="_copyGatewayStartCommand(this)" style="flex-shrink:0;padding:3px 8px;font-size:11px">${esc(t('copy'))}</button></div>`;
+  const block=`<div class="gateway-start-cmd" data-gateway-cmd-block style="display:flex;align-items:flex-start;gap:6px;margin:6px 0 4px"><code style="${codeStyle}">${cmdHtml}</code><button class="sm-btn gateway-copy-cmd-btn" type="button" data-gateway-cmd="${esc(command)}" onclick="_copyGatewayStartCommand(this)" style="flex:0 0 auto;padding:3px 8px;font-size:11px">${esc(t('copy'))}</button></div>`;
   return `${before?`<div>${before}</div>`:''}${block}${after?`<div>${after}</div>`:''}`;
 }
 function _copyGatewayStartCommand(btn){
@@ -14591,10 +14592,14 @@ function _copyGatewayStartCommand(btn){
   const fail=()=>{if(typeof showToast==='function') showToast(t('copy_failed'));};
   const done=()=>{
     if(!btn) return;
-    const orig=btn.textContent;
+    if(btn._copyTimer) clearTimeout(btn._copyTimer);
     btn.textContent=t('copied');
     if(btn.classList&&btn.classList.add) btn.classList.add('copied');
-    setTimeout(()=>{btn.textContent=orig;if(btn.classList&&btn.classList.remove) btn.classList.remove('copied');},1500);
+    btn._copyTimer=setTimeout(()=>{
+      btn.textContent=t('copy');
+      if(btn.classList&&btn.classList.remove) btn.classList.remove('copied');
+      btn._copyTimer=null;
+    },1500);
   };
   if(typeof _copyText==='function'){_copyText(text).then(done).catch(fail);return;}
   if(typeof navigator!=='undefined'&&navigator&&navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done).catch(fail);return;}
@@ -14642,7 +14647,7 @@ function _renderGatewayStatus(r){
   if(r.platforms&&r.platforms.length){
     badges=r.platforms.map(p=>{
       const icon=platformIcons[p.name]||'📡';
-      return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-inline-bg);color:var(--code-text);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
+      return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-inline-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
     }).join(' ');
   }
   // #8621: the card shows one separator, and it is the one the translator

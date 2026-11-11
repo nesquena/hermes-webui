@@ -1172,7 +1172,7 @@ _UNPROVEN = {"managed": False, "reason": "local_gateway_unproven", "start_comman
 _ESC_SRC = UI_JS[UI_JS.index("const esc=s=>") : UI_JS.index("\n", UI_JS.index("const esc=s=>"))]
 _EN_LOCAL_UNPROVEN = (
     "WebUI hasn't confirmed this Gateway runs on this machine. "
-    "If it does, start it once with {cmd}; WebUI can manage it after that."
+    "If it does, WebUI can manage it after you start it once with {cmd}."
 )
 
 
@@ -1360,15 +1360,14 @@ def test_renderer_unproven_start_command_sits_in_its_own_block():
     assert code, block.group(0)
     assert "display:block" in code.group(1).replace(" ", "")
 
-    # The translation is split at {cmd}: the text before it stays above the
-    # block, the text after it resumes below it, each as its own line.
+    # The translation places {cmd} at the end of the sentence: the text
+    # before it introduces the command, and nothing renders after the block.
     before, after = html.split(block.group(0))
     before_text = re.sub(r"<[^>]+>", "", before)
     after_text = re.sub(r"<[^>]+>", "", after)
     assert before.rstrip().endswith("</div>")
-    assert after.lstrip().startswith("<div>")
     assert before_text.strip().endswith("start it once with")
-    assert after_text.strip().startswith("; WebUI can manage it after that.")
+    assert after_text.strip() == ""
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -1388,6 +1387,51 @@ def test_renderer_unproven_copy_button_copies_the_exact_start_command():
     assert result["copied"] == [command]
     assert result["label"] == "Copied!"
     assert result["toasts"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_copy_button_does_not_stretch():
+    html = _unproven_card()
+    block = re.search(r"<div[^>]*data-gateway-cmd-block[^>]*>(.*?)</div>", html, re.S)
+    assert block, html
+    button = re.search(r'<button class="[^"]*gateway-copy-cmd-btn"[^>]*style="([^"]*)"', block.group(1))
+    assert button, block.group(1)
+    style = button.group(1).replace(" ", "")
+    assert "flex:00auto" in style
+    assert "flex-shrink" not in style
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_copy_button_double_click_restores_label():
+    body = extract_function(PANELS_JS, "_copyGatewayStartCommand")
+    harness = f"""
+const _strings = {json.dumps(_COPY_STRINGS)};
+const t = (k) => Object.prototype.hasOwnProperty.call(_strings, k) ? _strings[k] : '[' + k + ']';
+const _copyText = () => Promise.resolve();
+{body}
+const btn = {{
+  textContent: 'Copy',
+  classList: {{ add() {{}}, remove() {{}} }},
+  getAttribute(name) {{ return name === 'data-gateway-cmd' ? 'hermes gateway start' : null; }},
+}};
+_copyGatewayStartCommand(btn);
+setTimeout(() => {{
+  const firstLabel = btn.textContent;
+  _copyGatewayStartCommand(btn);
+  setTimeout(() => {{
+    const secondLabel = btn.textContent;
+    setTimeout(() => {{
+      process.stdout.write(JSON.stringify({{ firstLabel, secondLabel, finalLabel: btn.textContent }}));
+    }}, 1600);
+  }}, 10);
+}}, 10);
+"""
+    proc = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["firstLabel"] == "Copied!"
+    assert result["secondLabel"] == "Copied!"
+    assert result["finalLabel"] == "Copy"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -1452,7 +1496,7 @@ def test_renderer_platform_badges_use_the_inline_code_colours():
     for badge in badges:
         style = badge.replace(" ", "")
         assert "background:var(--code-inline-bg)" in style, badge
-        assert "color:var(--code-text)" in style, badge
+        assert "color:var(--code-text)" not in style, badge
         assert "--code-bg" not in style, badge
     assert "Telegram" in html and "Web" in html
 
@@ -1495,6 +1539,23 @@ def test_gateway_local_unproven_copy_exists_once_per_locale_with_external_note()
     assert I18N_JS.count("gateway_local_unproven:") == len(with_external)
     assert values["en"] == _EN_LOCAL_UNPROVEN
     assert all(values[name] != values["en"] for name in with_external if name != "en")
+
+
+def test_gateway_local_unproven_command_closes_the_sentence_in_every_locale():
+    blocks = _locale_blocks()
+    with_external = [name for name, body in blocks.items() if "gateway_external_managed:" in body]
+    assert len(with_external) == 15
+
+    for name in with_external:
+        body = blocks[name]
+        match = re.search(r"^\s*gateway_local_unproven: '((?:[^'\\]|\\.)*)',$", body, re.M)
+        assert match, name
+        val = match.group(1).replace("\\'", "'")
+        cut = val.index("{cmd}")
+        after_cmd = val[cut + len("{cmd}"):]
+        assert not any(c.isalpha() for c in after_cmd), (
+            f"Locale {name} has letters after {{cmd}}: {after_cmd!r}"
+        )
 
 
 # ── follow-up D: the start hint names the target profile ─────────────────
