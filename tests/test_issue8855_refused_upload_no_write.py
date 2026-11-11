@@ -180,8 +180,8 @@ def test_resident_foreign_copy_is_refused_without_promotion(isolated_sessions, m
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_unverifiable_owner_fails_closed_and_writes_nothing(isolated_sessions, monkeypatch, route):
-    """#8834's fail-closed rule: a sidecar whose body names another session must not reach Session.load,
-    whose collapse save would write the file that body names (#8852)."""
+    """An unverifiable owner (here a body naming another session) is refused before any load, as on the
+    session routes (#8853). Master served this upload; neither file may be written."""
     directory, cache, attachments, workspace = isolated_sessions
     path = _sidecar(directory, profile="default", body_sid="other-8855")
     before = path.read_bytes()
@@ -195,6 +195,51 @@ def test_unverifiable_owner_fails_closed_and_writes_nothing(isolated_sessions, m
     assert not path.with_suffix(".json.bak").exists()
     assert not other.with_suffix(".json.bak").exists()
     assert SID not in cache and "other-8855" not in cache
+
+
+# Truncated sidecars. In the first the owner can't be read at all; in the second it sits before the break.
+OWNER_UNREADABLE = '{"session_id": "legacy-8855", "profile": "work", "title": '
+OWNER_READABLE = '{"session_id": "legacy-8855", "profile": "work", "messages": ['
+
+
+@pytest.mark.parametrize("active", ["default", "work"])
+@pytest.mark.parametrize("route", ROUTES)
+def test_sidecar_with_unreadable_owner_is_refused_without_a_write(isolated_sessions, monkeypatch, route, active):
+    """No profile can verify the owner: the same 404 for everyone, nothing written or cached. Master
+    answered 400 with the parser's message (deliberate change, as on the session routes)."""
+    directory, cache, attachments, workspace = isolated_sessions
+    path = directory / f"{SID}.json"
+    path.write_text(OWNER_UNREADABLE, encoding="utf-8")
+    before = path.read_bytes()
+    assert _call(route, monkeypatch, active=active) == NOT_FOUND
+    _assert_untouched(path, before, cache, attachments, workspace)
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_corrupt_sidecar_with_readable_owner(isolated_sessions, monkeypatch, route):
+    """The owner can be read before the break: other profiles get the 404; the owner's request goes to the
+    load and gets master's 400 parse error. Neither writes or caches anything."""
+    directory, cache, attachments, workspace = isolated_sessions
+    path = directory / f"{SID}.json"
+    path.write_text(OWNER_READABLE, encoding="utf-8")
+    before = path.read_bytes()
+    assert _call(route, monkeypatch, active="default") == NOT_FOUND
+    _assert_untouched(path, before, cache, attachments, workspace)
+    body, status = _call(route, monkeypatch, active="work")
+    assert status == 400 and "Session not found" not in str(body)
+    _assert_untouched(path, before, cache, attachments, workspace)
+
+
+@pytest.mark.parametrize("active", ["default", "work"])
+@pytest.mark.parametrize("route", ROUTES)
+def test_non_string_owner_is_refused_without_a_write(isolated_sessions, monkeypatch, route, active):
+    """``"profile": 123`` names no profile: the same 404, and the duplicate partials are not collapsed.
+    Master served the upload and saved the collapse (deliberate change, as on the session routes)."""
+    directory, cache, attachments, workspace = isolated_sessions
+    path = _sidecar(directory, profile=123)
+    before = path.read_bytes()
+    assert _call(route, monkeypatch, active=active) == NOT_FOUND
+    _assert_untouched(path, before, cache, attachments, workspace)
 
 
 @pytest.mark.parametrize("owner,active", [("work", "work"), (None, "default")], ids=["named_owner", "legacy_root"])
