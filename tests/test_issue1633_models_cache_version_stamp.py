@@ -13,11 +13,12 @@ the cache on the very next /api/models call instead of lingering for 24h.
 """
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests._updates_module_isolation import updates_module_unloaded
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -73,9 +74,9 @@ def test_current_webui_version_returns_none_when_module_missing(monkeypatch):
     Required so cache reads/writes during very early server boot don't wedge
     the startup sequence on AttributeError.
     """
-    monkeypatch.delitem(sys.modules, "api.updates", raising=False)
-    from api.config import _current_webui_version
-    assert _current_webui_version() is None
+    with updates_module_unloaded():
+        from api.config import _current_webui_version
+        assert _current_webui_version() is None
 
 
 # ── Disk cache version stamping ──────────────────────────────────────────
@@ -97,14 +98,14 @@ def test_save_omits_webui_version_when_runtime_unknown(isolated_cache, monkeypat
     """If api.updates isn't loaded (very early boot), save still works but
     skips the version stamp. The next load with a known runtime version will
     treat the file as invalid (fail-safe rebuild on first real call)."""
-    monkeypatch.delitem(sys.modules, "api.updates", raising=False)
-    from api import config
+    with updates_module_unloaded():
+        from api import config
 
-    config._save_models_cache_to_disk(_shape_cache())
-    on_disk = json.load(open(isolated_cache))
-    assert "_webui_version" not in on_disk
-    # Schema version is always written — it doesn't depend on api.updates
-    assert on_disk["_schema_version"] == config._MODELS_CACHE_SCHEMA_VERSION
+        config._save_models_cache_to_disk(_shape_cache())
+        on_disk = json.load(open(isolated_cache))
+        assert "_webui_version" not in on_disk
+        # Schema version is always written — it doesn't depend on api.updates
+        assert on_disk["_schema_version"] == config._MODELS_CACHE_SCHEMA_VERSION
 
 
 def test_save_only_writes_known_keys(isolated_cache, with_runtime_version):
@@ -220,11 +221,11 @@ def test_load_skips_version_check_when_runtime_unknown(isolated_cache, monkeypat
     }
     json.dump(cache, open(isolated_cache, "w"))
 
-    monkeypatch.delitem(sys.modules, "api.updates", raising=False)
-    loaded = config._load_models_cache_from_disk()
-    # Loadable because runtime version was unknown — once api.updates loads,
-    # the next call would re-validate.
-    assert loaded is not None
+    with updates_module_unloaded():
+        loaded = config._load_models_cache_from_disk()
+        # Loadable because runtime version was unknown — once api.updates loads,
+        # the next call would re-validate.
+        assert loaded is not None
 
 
 # ── Validity helpers ─────────────────────────────────────────────────────
