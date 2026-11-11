@@ -8560,13 +8560,20 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # previous provider, not against a block that already names the new one.
         previous_config_data = dict(config_data)
         previous_config_data["model"] = dict(model_cfg)
+        # Ownership and connection questions are asked of the EXPANDED identities
+        # the picker mints from, while the document keeps its references. Judging
+        # them on the raw snapshot disagreed with ``_selected_fallback_entry``,
+        # which expands a ``${VAR}`` name: a same-endpoint keyless entry WAS the
+        # block's own route, the raw name matched nothing, and the Save dropped the
+        # inherited ``base_url``/``key_env`` (#8164 r41).
+        previous_decision_data = _expand_env_vars(previous_config_data)
         # Judge "the block served the selected entry" against the PRE-CLICK snapshot
         # once and reuse it: the picker copies the selected entry's own URL into the
         # block, so after the click the on-disk "same URL" test can no longer tell
         # shape A (the block served that URL, correct) from shape K (the block served
         # a different host, a credential leak).
         block_served_selected = persisted_provider != previous_provider and (
-            _model_block_serves_selected_custom_provider(persisted_provider, previous_config_data)
+            _model_block_serves_selected_custom_provider(persisted_provider, previous_decision_data)
         )
 
         # Whether the selected provider names a fallback-derived entry is asked on
@@ -8577,7 +8584,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # ``CUSTOM_<SLUG>_API_KEY`` the entry itself is denied, so a variable
         # belonging to another provider travelled to this entry's endpoint
         # (#8164 greptile P1).
-        selected_fallback_entry = _selected_fallback_entry(persisted_provider, config_data)
+        selected_fallback_entry = _selected_fallback_entry(persisted_provider, previous_decision_data)
 
         # Keep an env reference when it already resolves to the value being
         # saved (the user re-saved what the UI displayed); a changed value is
@@ -8701,7 +8708,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             and not str(advanced.get("base_url") or "").strip()
             and not model_cfg.get("base_url")
         ):
-            _route_endpoint = _selected_route_endpoint(persisted_provider, previous_config_data)
+            _route_endpoint = _selected_route_endpoint(persisted_provider, previous_decision_data)
             if _route_endpoint:
                 model_cfg["base_url"] = _route_endpoint
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):
@@ -12834,8 +12841,17 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _named_custom_groups[_slug] = (_cp.get("display_name") or _cp_name, [])
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
+                # Same record-level decision the chat resolvers apply: a fallback
+                # entry must not probe with a convention variable it does not own,
+                # or the catalog sends another provider's key to this endpoint
+                # while the chat path correctly sends none (#8164 r41).
                 _cp_api_key = _resolve_custom_record_key(
-                    _cp.get("api_key"), _cp.get("key_env"), _slug,
+                    _cp.get("api_key"),
+                    _cp.get("key_env"),
+                    _slug,
+                    allow_convention_key=_custom_provider_record_may_take_convention_key(
+                        _cp, "custom_providers", cfg, _slug
+                    ),
                 ) or ""
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
