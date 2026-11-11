@@ -218,7 +218,11 @@ _SIDECAR_METADATA_CACHE_MAX = 2000
 # large-scene session would full-parse on every poll (recreating the #4633
 # churn for legacy files) and could not be LRU-evicted. Populated once per file
 # from a full Session.load(); keyed by the sidecar's stat signature so any edit
-# invalidates it. Bounded. Value: {"message_count": int, "scene_index": dict}.
+# invalidates it. Bounded. Value: {"message_count": int, "scene_index": dict},
+# plus "profile" (#8857: the owner the full load found, None included) when
+# the writer recorded it; an entry without "profile" never vouches for an owner.
+# Also populated for any sidecar whose metadata prefix lacks "profile", whatever
+# its layout, because load_metadata_only() takes that owner from here.
 _LEGACY_SIDECAR_FACTS_LOCK = threading.Lock()
 _LEGACY_SIDECAR_FACTS: "collections.OrderedDict[tuple, dict]" = collections.OrderedDict()
 _LEGACY_SIDECAR_FACTS_MAX = 2000
@@ -2599,22 +2603,23 @@ class Session:
             # modern layout, so no legacy caching is needed.)
             #
             # WHY STILL GATED, and not "obviously" broadened to modern files: the
-            # cache is only READ from the two sites that reach it when the cheap
-            # prefix carried NEITHER message_count NOR anchor_scene_index — i.e.
-            # legacy layouts (see the `if ... and 'anchor_scene_index' not in
-            # parsed` guards in load_metadata_only() and the eviction-count
-            # helper). A modern sidecar that overflows the budget therefore
-            # never consults an entry written for it, so populating one is dead
-            # work that also stores entries no consumer can use. Making the
-            # modern case benefit needs the READ side redesigned to build a
-            # metadata stub from cached facts — a separate change; until then
-            # this stays legacy-only.
+            # count and scene facts are only READ from the two sites that reach
+            # them when the cheap prefix carried NEITHER message_count NOR
+            # anchor_scene_index — i.e. legacy layouts (see the `if ... and
+            # 'anchor_scene_index' not in parsed` guards in load_metadata_only()
+            # and the eviction-count helper). A modern sidecar that overflows the
+            # budget therefore never consults an entry written for it, so
+            # populating one is dead work that also stores entries no consumer
+            # can use. Making the modern case benefit needs the READ side
+            # redesigned to build a metadata stub from cached facts — a separate
+            # change; until then this stays legacy-only.
             #
-            # #8857: a sidecar whose metadata prefix lacks 'profile' (an older or
-            # outside writer put it after the body, or wrote none) needs its
-            # owner from this cache too, whatever its layout, or every metadata
-            # read of it would take a full parse. So cache those as well; their
-            # count and scene index are this parse's, so no reader can be misled.
+            # #8857: the one exception is the owner. load_metadata_only() also
+            # reads this cache whenever the prefix lacks 'profile' (an older or
+            # outside writer put it after the body, or wrote none), whatever the
+            # layout, or every metadata read of such a file would take a full
+            # parse. So cache those as well; their count and scene index are this
+            # parse's, so no reader can be misled.
             if 'anchor_scene_index' not in data or not _profile_in_metadata_prefix(data):
                 try:
                     _legacy_sidecar_facts_put(
