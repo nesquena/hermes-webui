@@ -13,13 +13,13 @@ PATH DISCOVERY:
     3. Common install paths (~/.hermes/hermes-agent)
     4. System python3 as a last resort
 """
+import copy
 import json
 import inspect
 import multiprocessing
 import os
 import pathlib
 import shutil
-import stat
 import subprocess
 import sys
 import time
@@ -585,6 +585,7 @@ requires_agent_modules = pytest.mark.skipif(
 )
 
 def pytest_configure(config):
+    _repo_git_guard.pytest_configure(config)  # records --basetemp for the guard (see tests/_real_repo_git_guard.py)
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
     config.addinivalue_line("markers", "requires_fcntl: skip when fcntl-backed file-descriptor operations are unavailable")
@@ -833,6 +834,66 @@ def allow_outbound_network(monkeypatch):
     yield
 
 
+# ── Real-checkout git guard ─────────────────────────────────────────────────
+# Installed once here, like the network guard above: see tests/_real_repo_git_guard.py.
+from tests import _real_repo_git_guard as _repo_git_guard  # noqa: E402
+
+from api.config import _AGENT_DIR as _PRODUCTION_AGENT_DIR  # noqa: E402  (the runtime's own discovery)
+
+_repo_git_guard.install(REPO_ROOT, HERMES_AGENT, _PRODUCTION_AGENT_DIR)
+pytest_runtest_logstart = _repo_git_guard.pytest_runtest_logstart
+pytest_runtest_makereport = _repo_git_guard.pytest_runtest_makereport
+
+
+@pytest.fixture
+def allow_real_repo_git(monkeypatch):
+    """Opt in to real mutating git against the checkout for one test."""
+    monkeypatch.setattr(subprocess, 'Popen', _repo_git_guard.REAL_POPEN)
+    yield
+
+
+# ── Host git config isolation for the git-credential tests (#8931) ───────────
+# Opt-in through ``pytestmark = pytest.mark.usefixtures("isolated_host_git_config")``
+# (tests/test_update_git_security.py, tests/test_workspace_git.py). Why and how:
+# tests/_git_host_config_isolation.py.
+from tests import _git_host_config_isolation as _host_git_isolation  # noqa: E402
+
+
+@pytest.fixture
+def host_git(request, monkeypatch, tmp_path_factory):
+    """The git a test's children would run without the isolation shim.
+
+    Parametrize indirectly with ``EMULATED_HOST_WITH_SENTINEL_HELPERS`` to run
+    the test on an emulated developer machine whose system and global git config
+    name a sentinel credential helper.
+    """
+    if os.name == "nt":
+        return None
+    if getattr(request, "param", None) == _host_git_isolation.EMULATED_HOST_WITH_SENTINEL_HELPERS:
+        real = _host_git_isolation.resolve_host_git()
+        if real is None or not _host_git_isolation.git_supports_config_redirects(real.executable):
+            pytest.skip("emulating host git config needs Git 2.32+ (GIT_CONFIG_SYSTEM)")
+        return _host_git_isolation.emulate_host_with_sentinel_helpers(
+            monkeypatch, tmp_path_factory.mktemp("emulated-host"),
+        )
+    return _host_git_isolation.resolve_host_git()
+
+
+@pytest.fixture
+def isolated_host_git_config(host_git, monkeypatch, tmp_path_factory):
+    """Run this test's git children without the host's system/global git config.
+
+    POSIX only: the shim is a shell script, which Windows' CreateProcess would not
+    find as ``git``.
+    """
+    if host_git is None:
+        return None
+    # Real host git, even when host_git is the emulated one: its wrapper execs it.
+    real = _host_git_isolation.resolve_host_git()
+    _host_git_isolation.require_config_redirects((real or host_git).executable)
+    return _host_git_isolation.isolate_git_from_host_config(
+        monkeypatch, tmp_path_factory.mktemp("host-git-isolation"), host_git,
+    )
 
 
 # ── Environment isolation for tests ────────────────────────────────────────
@@ -1131,24 +1192,6 @@ def _rmtree_retry(path):
     )
 
 
-def _seed_test_skills(real_skills: pathlib.Path, test_skills: pathlib.Path) -> None:
-    if not real_skills.exists() or test_skills.exists():
-        return
-    try:
-        test_skills.symlink_to(real_skills)
-    except OSError as exc:
-        if not WINDOWS or getattr(exc, "winerror", None) != 1314:
-            raise
-        shutil.copytree(real_skills, test_skills, copy_function=_copy2_readonly)
-
-
-def _copy2_readonly(source: str, destination: str) -> str:
-    copied = shutil.copy2(source, destination)
-    path = pathlib.Path(copied)
-    path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-    return copied
-
-
 # ── Session-scoped test server ────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1175,11 +1218,8 @@ def test_server():
     TEST_STATE_DIR.mkdir(parents=True)
     TEST_WORKSPACE.mkdir(parents=True)
 
-    # Symlink real skills into test home so skill-related tests work,
-    # but all write-heavy state stays isolated.
-    real_skills  = HERMES_HOME / 'skills'
-    test_skills  = TEST_STATE_DIR / 'skills'
-    _seed_test_skills(real_skills, test_skills)
+    # The test home starts with no skills: nothing from the real Hermes home is
+    # linked or copied in, so the test server's skill writes stay in test state.
 
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)
@@ -1375,6 +1415,40 @@ def _invalidate_models_cache_after_test():
         invalidate_models_cache()
     except Exception:
         pass
+
+
+# ── Per-test config disk-load state restore ──────────────────────────────────
+# About a hundred tests point config._get_config_path at a temp file and call
+# get_config(). The path-change branch then reloads _cfg_cache from that file
+# and records it in _cfg_path. monkeypatch puts _get_config_path back, but
+# _cfg_path, _cfg_mtime, _cfg_fingerprint and the cache contents are the
+# reload's, so the NEXT test's get_config() sees another path change and
+# reloads from disk over that test's in-memory cfg override (the path-change
+# branch skips the override guard). test_issue1807_codex_provider_card_live_models
+# -> test_issue2513_custom_provider_remote_models fails that way as a pair
+# (`assert 'custom:alpha-proxy' in {}`) and passes in the full run only because
+# the tests between them happen to reset the state.
+
+def _config_load_state_guard():
+    """Snapshot config's disk-load state; when resumed, put it back."""
+    from api import config
+    with config._cfg_lock:
+        saved = (
+            config._cfg_path,
+            config._cfg_mtime,
+            config._cfg_fingerprint,
+            copy.deepcopy(config._cfg_cache),
+        )
+    yield
+    with config._cfg_lock:
+        config._cfg_path, config._cfg_mtime, config._cfg_fingerprint, cache = saved
+        config._cfg_cache.clear()
+        config._cfg_cache.update(cache)
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_load_state():
+    yield from _config_load_state_guard()
 
 
 # ── Per-test hermes_cli module integrity guard ───────────────────────────────

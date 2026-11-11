@@ -123,8 +123,11 @@ def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
     ``skills/_org/.active_org``, so rewriting that marker changes the count
     while every directory and SKILL.md mtime stays the same. The switch-time
     clear used to hide that the mtime probe cannot see it; since #7940 a
-    fresh-window hit does no I/O either, so the recount lands on the
-    background revalidate the next stale hit triggers.
+    fresh-window hit does no I/O except the org marker read (#7972), so the
+    next read after the switch recounts, and a later stale-hit revalidate keeps it.
+
+    An agent without the org mirror walks every org dir, so the marker changes
+    nothing there; the same steps must then keep serving that count.
 
     Runs the real compute against the real agent package; a stub would count
     the same files whichever org is active.
@@ -132,12 +135,15 @@ def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
     skill_utils = pytest.importorskip("agent.skill_utils")
     if not getattr(skill_utils, "__file__", None):
         pytest.skip("agent.skill_utils is a test stub, not the real agent package")
-    if not hasattr(skill_utils, "read_active_org_id"):
+    if hasattr(skill_utils, "read_active_org_id"):
+        # plain + org_a's one skill, then plain + org_b's three.
+        counts_before, counts_after = (2, 2), (4, 4)
+    else:
         # Hermes Agent removed the skills/_org/<org_id>/ mirror and its
         # .active_org index gating from core (agent 64ad33e32da, 2026-10-03).
         # Such an agent walks every org dir, so the count legitimately does
         # not depend on the marker and api.profiles._active_org_marker() is None.
-        pytest.skip("installed Hermes Agent has no org skill mirror (.active_org gating)")
+        counts_before = counts_after = (5, 5)
     import api.profiles as profiles
 
     default_home = tmp_path / ".hermes"
@@ -159,7 +165,7 @@ def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
     )
     profiles._tls.profile = None
     try:
-        assert profiles._get_profile_skills_stats(default_home) == (2, 2)
+        assert profiles._get_profile_skills_stats(default_home) == counts_before
 
         # Same length and the old mtime back, so nothing but the content differs.
         before = marker.stat()
@@ -167,9 +173,11 @@ def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
         os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns))
         profiles.switch_profile("writer", process_wide=False)
 
-        # The fresh-window hit still serves the old counts zero-I/O; aging the
-        # entry to stale makes the next hit spawn the revalidate worker (run
-        # inline via the seam), which reads the new org marker and republishes.
+        # Still inside the fresh window: the hit compares the org marker.
+        assert profiles._get_profile_skills_stats(default_home) == counts_after
+
+        # Aging the entry to stale makes the next hit spawn the revalidate
+        # worker (run inline via the seam), which must keep that count.
         monkeypatch.setattr(
             profiles, "_start_skills_stats_revalidate_thread",
             lambda pd: profiles._revalidate_skills_stats_worker(pd),
@@ -179,7 +187,7 @@ def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
         profiles._SKILLS_STATS_CACHE[resolved] = (
             e, c, m, x, o, time.time() - profiles._SKILLS_STATS_REVALIDATE_AFTER - 1.0,
         )
-        assert profiles._get_profile_skills_stats(default_home) == (2, 2)  # stale hit
-        assert profiles._get_profile_skills_stats(default_home) == (4, 4)  # republished
+        assert profiles._get_profile_skills_stats(default_home) == counts_after  # stale hit
+        assert profiles._get_profile_skills_stats(default_home) == counts_after  # revalidated
     finally:
         profiles._tls.profile = None
