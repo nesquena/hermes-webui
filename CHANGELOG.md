@@ -583,6 +583,8 @@
 
 ### Internal
 
+- **Four test files now check the right thing on every supported Agent (#9003).** On the oldest Agent the compat matrix supports (v2026.9.24), the #8517 memory tests replaced the Agent's `agent.memory_manager` with an empty stand-in that hid names the Agent itself imports, a #8827 `vllm` case assumed an alias newer Agents added, and #7940 asserted pre-#7972 counts; on newer Agents two tests skipped where they could assert. The stand-ins now copy the real module minus the seam under test, the skips fire only on the seams an Agent really lacks, and #7940 asserts per Agent capability. Tests only.
+
 - **The git credential tests no longer reach the developer's real credential store (#8961, refs #8931).** On macOS with Homebrew git, `tests/test_update_git_security.py` and `tests/test_workspace_git.py` re-applied the system `osxkeychain` helper to their local test servers, so they could write test credentials into the login keychain or hang for 30 s. A test-owned `git` wrapper now points the system and global git config at empty files after WebUI's own scrub, those two files plus `tests/test_git_trust_regressions.py` and `tests/test_updates.py` opt in, Git older than 2.32 skips the opted-in tests, and four guards with a fake host helper fail if the host's helpers are ever reached. Tests only.
 
 - **`TestConflictError` no longer fails in focused or partial test runs (#8903).** Its two tests reach the update-conflict branch only after the #7293 active-run fence, and chat-start tests elsewhere can leave runs registered, so in a partial run the fence refused the update and the tests failed. They now start with the run registries emptied in place and restore them afterwards. Tests only.
