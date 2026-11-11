@@ -6553,11 +6553,19 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
 def _is_ollama_route(provider: str = '', model: str = '', base_url: str = '') -> bool:
     """Routes served by Ollama's OpenAI-compatible ``/v1`` endpoint (#8149).
 
-    Ollama IGNORES ``reasoning.enabled`` but honours ``reasoning.effort`` /
-    ``reasoning_effort`` — and worse, a bare ``reasoning: {"enabled": false}``
-    sent next to the user's ``reasoning_effort: "none"`` re-enables reasoning
-    (measured in #8149). Title generation must therefore shape the disable
-    differently on these routes.
+    The reasoning-off object injected for title generation is not sent verbatim
+    by current hermes-agent builds. ``call_llm`` / ``_build_call_kwargs`` pops
+    an ``extra_body["reasoning"]`` that carries an ``enabled`` key and promotes
+    it to ``reasoning_config``; ``_merge_aux_extra_body`` then lets the provider
+    profile project that config onto its own wire. Local Ollama URLs project to
+    top-level ``reasoning_effort: "none"`` plus ``think: false``, and Ollama
+    Cloud projects to ``reasoning_effort: "none"``. On current Agents, title
+    generation therefore already reaches the wire reasoning-off.
+
+    The explicit ``effort: "none"`` member is added on these routes so builds
+    and direct routes that ship ``extra_body.reasoning`` as-is still carry a
+    shape Ollama honours; on current Agents it is projected, not sent verbatim.
+    See #2083, #4161, #8149.
 
     Positively identified as Ollama via:
 
@@ -6639,21 +6647,64 @@ def _get_aux_title_config() -> dict:
 
 
 def _task_config_has_reasoning_override() -> bool:
-    """True when the title_generation task config already carries a reasoning setting.
+    """True when the title task config carries a meaningful reasoning setting.
 
-    hermes-agent's ``call_llm`` merges the caller's ``extra_body`` ON TOP of the
-    task's own ``extra_body`` (``effective_extra_body.update(extra_body)``), so
-    an injected ``reasoning`` key would silently replace the user's configured
-    ``reasoning`` object — and on Ollama a bare ``{"enabled": false}`` next to a
-    configured ``reasoning_effort: "none"`` even re-enables reasoning (#8149).
-    When the task config speaks for itself, don't inject anything (#8149).
+    ``call_llm`` merges the caller's ``extra_body`` on top of the task's own
+    (``effective_extra_body.update(extra_body)``), so an injected ``reasoning``
+    key replaces the user's configured value wholesale. Skipping the inject when
+    the task config already speaks for itself keeps an explicit user setting
+    intact (#8149).
+
+    Keys are matched case-insensitively after stripping. Empty, null, and
+    structurally empty values do not count as an override:
+
+      * ``reasoning_effort`` -- non-empty string.
+      * ``reasoning`` -- object with a bool ``enabled``, a non-empty ``effort``
+        string, or a positive ``max_tokens`` number.
+      * ``think`` / ``enable_thinking`` -- bool (including an explicit False).
+      * ``thinking`` -- bool, non-empty string, or non-empty object.
+      * ``thinking_budget`` -- positive number.
     """
     extra_body = _get_aux_title_config().get('extra_body')
     if not isinstance(extra_body, dict):
         return False
-    for key in extra_body:
-        if str(key).strip().lower() in ('reasoning', 'reasoning_effort'):
-            return True
+    for raw_key, value in extra_body.items():
+        key = str(raw_key).strip().lower()
+        if key == 'reasoning_effort':
+            if isinstance(value, str) and value.strip():
+                return True
+        elif key == 'reasoning':
+            if not isinstance(value, dict):
+                continue
+            if isinstance(value.get('enabled'), bool):
+                return True
+            effort = value.get('effort')
+            if isinstance(effort, str) and effort.strip():
+                return True
+            max_tokens = value.get('max_tokens')
+            if (
+                isinstance(max_tokens, (int, float))
+                and not isinstance(max_tokens, bool)
+                and max_tokens > 0
+            ):
+                return True
+        elif key in ('think', 'enable_thinking'):
+            if isinstance(value, bool):
+                return True
+        elif key == 'thinking':
+            if isinstance(value, bool):
+                return True
+            if isinstance(value, str) and value.strip():
+                return True
+            if isinstance(value, dict) and value:
+                return True
+        elif key == 'thinking_budget':
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value > 0
+            ):
+                return True
     return False
 
 
@@ -6898,17 +6949,24 @@ def generate_title_raw_via_aux(
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
     reasoning_extra = {}
-    # #8149: if the task config's own extra_body carries a reasoning setting,
-    # skip the inject so the user's value survives call_llm's merge (the
-    # caller's keys would otherwise replace it).
+    # #8149: skip the inject only on an Ollama route whose task config already
+    # carries a meaningful reasoning setting. On current Agents call_llm pops a
+    # reasoning object with an `enabled` key into reasoning_config and the
+    # provider profile projects it (local Ollama: reasoning_effort "none" plus
+    # think false; Ollama Cloud: reasoning_effort "none"), so the object below
+    # is projected, not sent verbatim. The explicit effort member keeps older
+    # or direct routes that forward extra_body.reasoning as-is correct.
+    #
+    # Non-Ollama routes keep master's unconditional bare inject even when the
+    # task config sets reasoning / reasoning_effort: those task shapes (e.g.
+    # OpenRouter reasoning.exclude) do not suppress generation, while the bare
+    # inject does.
+    ollama_route = _is_ollama_route(provider, model, base_url)
     if (
         not _route_rejects_reasoning_extra(provider, model, base_url)
-        and not _task_config_has_reasoning_override()
+        and (not ollama_route or not _task_config_has_reasoning_override())
     ):
-        if _is_ollama_route(provider, model, base_url):
-            # Ollama ignores `enabled` and honours `effort`; sending the bare
-            # disable there burns the title budget on hidden reasoning and
-            # cancels a user-configured reasoning_effort (#8149).
+        if ollama_route:
             reasoning_extra["reasoning"] = {"enabled": False, "effort": "none"}
         else:
             reasoning_extra["reasoning"] = {"enabled": False}
