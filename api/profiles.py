@@ -82,11 +82,13 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
-# The process env as WebUI itself sets it (#8981): the launch env plus what
-# _reload_dotenv() applied (at startup, on a process-wide switch, after onboarding
-# saves a key), minus what it cleared. A chat worker's temporary mirror of its own
-# profile's .env never reaches it, so a reader that must not see another profile's
-# values (the private config read's Agent-global names) reads this, not os.environ.
+# The process env as WebUI itself sets it for the profile this process serves (#8981):
+# the launch env plus what _reload_dotenv() applied for that profile's home (at startup,
+# on a process-wide switch, or when a save for that profile reloads its .env), minus what
+# it cleared. A reload of another profile's home (a save routed to it by the request's
+# profile) and a chat worker's temporary mirror of its own profile's .env never reach it,
+# so a reader that must not see another profile's values (the private config read's
+# Agent-global names) reads this, not os.environ.
 _process_env_baseline = MappingProxyType(dict(STARTUP_ENV))
 # Serializes _reload_dotenv's copy, apply and publish (#8981 gate r2): two concurrent
 # reloads (two provider saves, onboarding and a switch) would each publish their own
@@ -1958,13 +1960,32 @@ def _reload_dotenv(home: Path):
     global _loaded_profile_env_keys, _process_env_baseline
 
     # Every change below is mirrored into a copy of the process baseline, published
-    # when this returns, so readers never see a worker's mirror (#8981).
+    # when this returns, so readers never see a worker's mirror (#8981). Only a reload
+    # of the process profile's own home is published: a save routed to another profile
+    # still reloads that profile's .env into os.environ (unchanged), but its values must
+    # not become what every profile's private config read takes as the server's env.
     with _dotenv_reload_lock:
+        owned = _is_process_profile_home(home)
         baseline = dict(_process_env_baseline)
         try:
             _apply_profile_dotenv(home, baseline)
         finally:
-            _process_env_baseline = MappingProxyType(baseline)
+            if owned:
+                _process_env_baseline = MappingProxyType(baseline)
+
+
+def _is_process_profile_home(home) -> bool:
+    """True when *home* is the profile home this process serves (#8981).
+
+    Startup and a process-wide switch pin that home (``_set_hermes_home``) before they
+    reload, so their reloads qualify; a reload for a profile a request is routed to does
+    not. Fails closed: if either path can't be resolved, the reload isn't published.
+    """
+    try:
+        return Path(home).resolve() == Path(get_process_profile_home()).resolve()
+    except Exception:
+        logger.debug("Failed to compare %s with the process profile home", home, exc_info=True)
+        return False
 
 
 def _apply_profile_dotenv(home: Path, baseline: dict) -> None:

@@ -932,6 +932,16 @@ def _global_port_rule(monkeypatch):
     monkeypatch.setattr(config, "_agent_global_env_rule", lambda: (lambda name: name == "API_SERVER_PORT"))
 
 
+def _reload_as_process_profile(monkeypatch, home):
+    """What startup and a process-wide switch do: ``_set_hermes_home`` pins *home* as the
+    home this process serves, then ``_reload_dotenv`` loads it. Only such reloads move the
+    process baseline (#8981 narrow); the pin is restored at teardown."""
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(home))
+    profiles._reload_dotenv(home)
+
+
 def test_a_global_a_process_wide_switch_cleared_never_comes_back(homes, monkeypatch, real_reload_env):
     """Release gate r2 (#8981): the launch profile's ``.env`` loaded ``API_SERVER_PORT``; a
     process-wide switch to ``default`` cleared it. The launch snapshot still has it, and
@@ -946,7 +956,7 @@ def test_a_global_a_process_wide_switch_cleared_never_comes_back(homes, monkeypa
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_PORT"})
     assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18080"
 
-    profiles._reload_dotenv(homes.root)  # the switch to default; root's .env lacks the key
+    _reload_as_process_profile(monkeypatch, homes.root)  # the switch to default; root's .env lacks the key
 
     assert "API_SERVER_PORT" not in profiles.process_env_baseline()
     assert "API_SERVER_PORT" not in config._private_config_env_binding(homes.work)
@@ -973,7 +983,7 @@ def test_a_global_the_startup_dotenv_load_supplies_still_resolves(homes, monkeyp
     (homes.root / ".env").write_text("API_SERVER_PORT=18080\n", encoding="utf-8")
     assert "API_SERVER_PORT" not in config._private_config_env_binding(homes.work)
 
-    profiles._reload_dotenv(homes.root)  # startup
+    _reload_as_process_profile(monkeypatch, homes.root)  # startup
 
     assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18080"
 
@@ -989,7 +999,7 @@ def test_the_baseline_follows_reload_dotenv_and_never_a_worker_mirror(homes, mon
         "LAB_FROM_DOTENV=from-dotenv\nHERMES_WEBUI_ISOLATED_PROFILE=planted-by-dotenv\n", encoding="utf-8"
     )
     protected_before = profiles.process_env_baseline().get("HERMES_WEBUI_ISOLATED_PROFILE")
-    profiles._reload_dotenv(homes.root)
+    _reload_as_process_profile(monkeypatch, homes.root)
     monkeypatch.setenv("LAB_WORKER_MIRROR", "mirror")  # a chat worker's mirror, mid-run
 
     baseline = profiles.process_env_baseline()
@@ -1000,17 +1010,17 @@ def test_the_baseline_follows_reload_dotenv_and_never_a_worker_mirror(homes, mon
     assert baseline.get("HERMES_WEBUI_ISOLATED_PROFILE") == protected_before
     assert os.environ.get("HERMES_WEBUI_ISOLATED_PROFILE") != "planted-by-dotenv"
 
-    profiles._reload_dotenv(homes.work)  # a process-wide switch; work's .env is absent
+    _reload_as_process_profile(monkeypatch, homes.work)  # a process-wide switch; work's .env is absent
     assert "LAB_FROM_DOTENV" not in profiles.process_env_baseline()
     assert "LAB_FROM_DOTENV" not in os.environ
 
 
 def test_concurrent_reloads_never_lose_an_update_to_the_baseline(homes, monkeypatch, real_reload_env):
-    """Release gate r2 (#8981): two concurrent ``_reload_dotenv`` calls (two provider saves)
-    each copied the baseline and published their copy; the older one dropped the port the
-    newer one applied while ``os.environ`` kept it, so compression failed where chat
-    worked. The copy, apply and publish are now one critical section: the second reload
-    waits for the first."""
+    """Release gate r2 (#8981): two concurrent ``_reload_dotenv`` calls (here a save for the
+    process profile and a process-wide switch to ``other``) each copied the baseline and
+    published their copy; the older one dropped the port the newer one applied while
+    ``os.environ`` kept it, so compression failed where chat worked. The copy, apply and
+    publish are now one critical section: the second reload waits for the first."""
     import threading
     from pathlib import Path
 
@@ -1025,6 +1035,11 @@ def test_concurrent_reloads_never_lose_an_update_to_the_baseline(homes, monkeypa
     other.mkdir(parents=True, exist_ok=True)
     (other / ".env").write_text("API_SERVER_PORT=18080\n", encoding="utf-8")
     (homes.root / ".env").write_text("LAB_ROOT_ONLY=root\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(homes.root))  # restored at teardown
+
+    def switch_to_other():
+        profiles._PROCESS_PROFILE_HOME = str(other)  # _set_hermes_home's pin, then the reload
+        profiles._reload_dotenv(other)
 
     entered, release, second_waiting = threading.Event(), threading.Event(), threading.Event()
     real_lock = profiles._dotenv_reload_lock
@@ -1050,7 +1065,7 @@ def test_concurrent_reloads_never_lose_an_update_to_the_baseline(homes, monkeypa
 
     monkeypatch.setattr(Path, "read_text", paused_read)
     first = threading.Thread(target=profiles._reload_dotenv, args=(homes.root,), name="first-reload")
-    second = threading.Thread(target=profiles._reload_dotenv, args=(other,), name="second-reload")
+    second = threading.Thread(target=switch_to_other, name="second-reload")
     first.start()
     try:
         assert entered.wait(10)
@@ -1066,6 +1081,66 @@ def test_concurrent_reloads_never_lose_an_update_to_the_baseline(homes, monkeypa
     assert os.environ.get("API_SERVER_PORT") == "18080"
     assert profiles.process_env_baseline().get("API_SERVER_PORT") == "18080"
     assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18080"
+
+
+def test_a_reload_for_another_profile_never_reaches_the_baseline(homes, monkeypatch, real_reload_env):
+    """Release gate r2 at ``06bed56b`` (#8981): a save made while browsing as ``other``
+    (onboarding or a self-hosted provider save) reloads ``other``'s ``.env`` into the
+    process env, as before. ``other``'s running chat then restores the live env to its
+    pre-run snapshot. Had the baseline taken that reload, it would keep ``other``'s port
+    after the restore, and work's compression would send work's key and transcript there
+    while work's chat would not. Only reloads of the process profile's own home reach it."""
+    from api import config, profiles
+
+    _global_port_rule(monkeypatch)
+    _launch_env(monkeypatch, API_SERVER_PORT="37081")
+    monkeypatch.setenv("API_SERVER_PORT", "37081")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(homes.root))
+    other = homes.root / "profiles" / "other"
+    other.mkdir(parents=True, exist_ok=True)
+    (other / ".env").write_text("API_SERVER_PORT=37613\n", encoding="utf-8")
+
+    profiles._reload_dotenv(other)  # the request-scoped save, as on master
+    assert os.environ["API_SERVER_PORT"] == "37613"
+    assert profiles.process_env_baseline()["API_SERVER_PORT"] == "37081"
+
+    os.environ["API_SERVER_PORT"] = "37081"  # other's chat restores its pre-run snapshot
+    assert profiles.process_env_baseline()["API_SERVER_PORT"] == "37081"
+    assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "37081"
+
+
+def test_a_process_home_that_cannot_be_resolved_publishes_nothing(homes, monkeypatch, real_reload_env):
+    from api import profiles
+
+    _launch_env(monkeypatch, LAB_LAUNCH_ONLY="launch")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.delenv("LAB_FROM_DOTENV", raising=False)
+    (homes.root / ".env").write_text("LAB_FROM_DOTENV=from-dotenv\n", encoding="utf-8")
+
+    def broken():
+        raise RuntimeError("process home unavailable")
+
+    monkeypatch.setattr(profiles, "get_process_profile_home", broken)
+    profiles._reload_dotenv(homes.root)
+
+    assert os.environ["LAB_FROM_DOTENV"] == "from-dotenv"  # the process env, as before
+    assert "LAB_FROM_DOTENV" not in profiles.process_env_baseline()
+
+
+def test_a_process_home_pinned_through_a_symlink_still_owns_the_baseline(homes, monkeypatch, real_reload_env):
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.delenv("LAB_FROM_DOTENV", raising=False)
+    (homes.root / ".env").write_text("LAB_FROM_DOTENV=from-dotenv\n", encoding="utf-8")
+    link = homes.root.parent / "process-home-link"
+    link.symlink_to(homes.root, target_is_directory=True)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(link))
+
+    profiles._reload_dotenv(homes.root)
+
+    assert profiles.process_env_baseline()["LAB_FROM_DOTENV"] == "from-dotenv"
 
 
 def test_another_profiles_live_mirror_never_redirects_the_compression_request(

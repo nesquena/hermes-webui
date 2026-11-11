@@ -687,9 +687,11 @@ def _private_config_env_binding(home) -> dict:
     ``.env`` and ``HERMES_HOME``, never the server process env), plus the variables
     the Agent classifies as process-global (``agent.secret_scope._is_global_env``:
     deployment settings such as ``API_SERVER_PORT``, never credentials), taken from the
-    process env as WebUI set it (:func:`api.profiles.process_env_baseline`: the launch env
-    plus what ``_reload_dotenv`` applied at startup or on a process-wide switch, minus what
-    it cleared) under the profile's own values. That is what this profile's own chat
+    process env as WebUI set it for the profile this process serves
+    (:func:`api.profiles.process_env_baseline`: the launch env plus what ``_reload_dotenv``
+    applied for that profile's home at startup, on a process-wide switch or on a save for
+    it, minus what it cleared; never a reload for another profile) under the profile's own
+    values. That is what this profile's own chat
     resolves: the Agent reads them from the process env, which during that chat holds that
     baseline plus the profile's mirrored ``.env``. The live process env is never read,
     because another profile's chat may be mirroring its ``.env`` there. Without the Agent's
