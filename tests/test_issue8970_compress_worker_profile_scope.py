@@ -925,8 +925,9 @@ def test_the_baseline_follows_reload_dotenv_and_never_a_worker_mirror(homes, mon
     for name in ("LAB_FROM_DOTENV", "HERMES_WEBUI_ISOLATED_PROFILE"):
         monkeypatch.delenv(name, raising=False)  # restored at teardown
     (homes.root / ".env").write_text(
-        "LAB_FROM_DOTENV=from-dotenv\nHERMES_WEBUI_ISOLATED_PROFILE=0\n", encoding="utf-8"
+        "LAB_FROM_DOTENV=from-dotenv\nHERMES_WEBUI_ISOLATED_PROFILE=planted-by-dotenv\n", encoding="utf-8"
     )
+    protected_before = profiles.process_env_baseline().get("HERMES_WEBUI_ISOLATED_PROFILE")
     profiles._reload_dotenv(homes.root)
     monkeypatch.setenv("LAB_WORKER_MIRROR", "mirror")  # a chat worker's mirror, mid-run
 
@@ -935,8 +936,8 @@ def test_the_baseline_follows_reload_dotenv_and_never_a_worker_mirror(homes, mon
     assert baseline["LAB_FROM_DOTENV"] == "from-dotenv"
     assert "LAB_WORKER_MIRROR" not in baseline
     # A protected key the .env may not set reaches neither the process env nor the baseline.
-    assert baseline.get("HERMES_WEBUI_ISOLATED_PROFILE") == os.environ.get("HERMES_WEBUI_ISOLATED_PROFILE")
-    assert baseline.get("HERMES_WEBUI_ISOLATED_PROFILE") != "0"
+    assert baseline.get("HERMES_WEBUI_ISOLATED_PROFILE") == protected_before
+    assert os.environ.get("HERMES_WEBUI_ISOLATED_PROFILE") != "planted-by-dotenv"
 
     profiles._reload_dotenv(homes.work)  # a process-wide switch; work's .env is absent
     assert "LAB_FROM_DOTENV" not in profiles.process_env_baseline()

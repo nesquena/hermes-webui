@@ -468,6 +468,10 @@ def _restore_profile_home_globals():
     # independent of the value (covers a hypothetical None, though _active_profile
     # defaults to 'default'). _MISSING means "module wasn't loaded" → skip restore.
     saved_active_profile = getattr(prof_mod_pre, '_active_profile', _MISSING) if prof_mod_pre else _MISSING
+    # #8981: the process env baseline is module state that the real _reload_dotenv()
+    # updates in place; a test that calls it (switch, onboarding, #4586) must not leave
+    # its .env values there for later tests.
+    saved_env_baseline = getattr(prof_mod_pre, '_process_env_baseline', _MISSING) if prof_mod_pre else _MISSING
     # Re-derive the cached base-home global BEFORE the test runs too: a prior
     # test's teardown ordering (monkeypatch restoring sys.modules['api.profiles']
     # after this fixture's teardown) can leave the live module's
@@ -481,6 +485,8 @@ def _restore_profile_home_globals():
         else:
             os.environ[key] = val
     prof_mod_post = sys.modules.get('api.profiles')
+    if prof_mod_post is not None and saved_env_baseline is not _MISSING:
+        prof_mod_post._process_env_baseline = saved_env_baseline
     if prof_mod_post is not None and saved_active_profile is not _MISSING:
         prof_mod_post._active_profile = saved_active_profile
         # Also clear any leaked per-request thread-local profile (issue #798).
