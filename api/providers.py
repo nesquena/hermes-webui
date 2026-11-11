@@ -49,6 +49,7 @@ from api.config import (
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
+    _provider_models_are_discovered_catalog,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
@@ -1122,6 +1123,9 @@ def _providers_config_fingerprint(cfg: Any) -> str:
         return repr(cfg)
 
 
+_providers_cache_generation: int = 0
+
+
 def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
     """Return a profile-scoped cache key for ``get_providers()`` (#6010).
 
@@ -1135,11 +1139,20 @@ def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
         home_key = str(home.resolve())
     except OSError:
         home_key = str(home)
+    _models_built_at = None
+    try:
+        from api.config import _get_models_cache_path, _models_disk_cache_built_at
+
+        _models_built_at = _models_disk_cache_built_at(_get_models_cache_path())
+    except Exception:
+        pass
     return (
         home_key,
         _providers_file_mtime_ns(home / ".env"),
         _providers_file_mtime_ns(home / "config.yaml"),
         _providers_config_fingerprint(cfg),
+        _providers_cache_generation,
+        _models_built_at,
     )
 
 
@@ -1168,8 +1181,53 @@ def _store_cached_providers(cache_key: tuple[Any, ...], payload: dict[str, Any])
 
 def invalidate_providers_cache() -> None:
     """Clear cached ``GET /api/providers`` responses."""
+    global _providers_cache_generation
     with _providers_cache_lock:
         _providers_cache.clear()
+        _providers_cache_generation += 1
+
+
+def _live_custom_provider_catalog() -> dict | None:
+    """Resolve the canonical model catalog once for a provider response.
+
+    Several discovered cards in one response share this payload, so the
+    picker and the cards can never disagree, and the ``/v1/models`` probe is
+    not repeated per card.
+
+    Deliberately NOT ``prefer_cache=True``: on a cold cache that serves the
+    minimal static catalog, which still lists configured snapshot IDs —
+    exactly the retired-ID resurrection #8080 reports. The plain call shares
+    the picker's live rebuild (budgeted, cached, single-flight), so a card
+    can never disagree with the dropdown.
+    """
+    try:
+        from api.config import get_available_models
+
+        return get_available_models() or {}
+    except Exception:
+        logger.debug("live custom-provider catalog lookup failed", exc_info=True)
+        return {}
+
+
+def _live_custom_provider_models(slug: str) -> list[dict] | None:
+    """Return model entries from the live catalog for a custom provider slug."""
+    catalog = _live_custom_provider_catalog()
+    if not catalog or "groups" not in catalog:
+        return None
+    for group in catalog.get("groups", []):
+        if group.get("provider_id") == slug:
+            models = list(group.get("models", [])) + list(group.get("extra_models", []))
+            seen = set()
+            deduped = []
+            prefix = f"@{slug}:"
+            for m in models:
+                raw_id = m.get("id", "")
+                bare_id = raw_id[len(prefix):] if raw_id.startswith(prefix) else raw_id
+                if bare_id and bare_id not in seen:
+                    seen.add(bare_id)
+                    deduped.append({"id": bare_id, "label": m.get("label", bare_id)})
+            return deduped if deduped else None
+    return None
 
 
 def _load_env_file(env_path: Path) -> dict[str, str]:
@@ -3238,6 +3296,10 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
+            if _provider_models_are_discovered_catalog(cp):
+                live_models = _live_custom_provider_models(cp_id)
+                if live_models:
+                    cp_models = live_models
             cp_has_key = bool(_resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), cp_id))
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:

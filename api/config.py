@@ -1819,6 +1819,7 @@ def _custom_provider_entries(
             default_model = record.get("default_model")
             model = default_model if isinstance(default_model, str) else ""
         entry["model"] = model
+        entry["_is_native"] = True
         entries.append(entry)
     return entries
 
@@ -11766,6 +11767,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
+                _live_models = None
                 _cp_name = (_cp.get("name") or "").strip()
                 _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
@@ -11855,12 +11857,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # Collect configured model IDs as a fallback/sticky entry after live discovery.
                 _cp_labels = _configured_model_explicit_labels(_cp.get("models"))
                 _cp_model_ids: list[str] = []
-                _cp_model = _cp.get("model", "")
-                if _cp_model:
-                    _cp_model_ids.append(_cp_model)
-                for _cp_model_id in _configured_model_ids(_cp.get("models")):
-                    if _cp_model_id not in _cp_model_ids:
-                        _cp_model_ids.append(_cp_model_id)
+                _cp_sticky_default = str(_cp.get("model", "") or "").strip()
+                _live_id_set = {
+                    str(_lm.get("id") or "").strip() for _lm in (_live_models or [])
+                }
+                if _cp_sticky_default and _cp_sticky_default not in _live_id_set:
+                    if _cp_sticky_default not in _cp_model_ids:
+                        _cp_model_ids.append(_cp_sticky_default)
+
+                _is_native = bool(_cp.get("_is_native"))
+                _cp_live_won = bool(_live_models) and not _cp_has_configured_models
+                # Reconcile merge-versus-replace (#8080 vs #8428):
+                # Native custom providers (#8428) merge saved model IDs with live discovery.
+                # Legacy discovered custom_providers (#8080) retire stale plural IDs when
+                # the live probe succeeds, keeping only the singular sticky default.
+                # In all cases, a pinned allowlist or a failed/empty probe falls back to
+                # every configured ID.
+                if _is_native or not _cp_live_won:
+                    for _cp_model_id in _configured_model_ids(_cp.get("models")):
+                        if _cp_model_id not in _cp_model_ids:
+                            _cp_model_ids.append(_cp_model_id)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
