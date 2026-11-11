@@ -1313,3 +1313,181 @@ def test_the_own_profile_read_keeps_its_env_first_with_a_stand_in_agent(
         "work-dotenv-model",
         "${LAUNCH_HOME_KEY}",
     )
+
+
+
+# ── the private view in every resolver the job reads (#8981 review) ───────────
+
+ROOT_READERS_CONFIG = """\
+model:
+  provider: openrouter
+  default: root-default-model
+providers:
+  root-only:
+    base_url: http://root-only.invalid/v1
+"""
+
+WORK_READERS_CONFIG = """\
+model:
+  provider: lmstudio
+  default: vendor/work-default-model
+  base_url: http://work-lm.invalid/v1
+providers:
+  work-only:
+    base_url: http://work-only.invalid/v1
+custom_providers:
+  - name: lab
+    base_url: http://work-lab.invalid/v1
+    model: vendor/work-lab-model
+"""
+
+# reader -> (call, work's answer from the private view, root's answer from the shared alias)
+_PRIVATE_VIEW_READERS = {
+    "get_effective_default_model": (
+        lambda c: c.get_effective_default_model(),
+        "vendor/work-default-model",
+        "root-default-model",
+    ),
+    "_get_providers_cfg": (lambda c: sorted(c._get_providers_cfg()), ["work-only"], ["root-only"]),
+    "_get_provider_base_url": (lambda c: c._get_provider_base_url("lmstudio"), "http://work-lm.invalid/v1", None),
+    "_model_id_declared_in_config": (
+        lambda c: (
+            c._model_id_declared_in_config("vendor/work-default-model", "lmstudio"),
+            c._model_id_declared_in_config("vendor/work-lab-model", "custom:lab"),
+        ),
+        (True, True),
+        (False, False),
+    ),
+    "model_with_provider_context": (
+        lambda c: c.model_with_provider_context("probe-model", "openrouter"),
+        "@openrouter:probe-model",
+        "probe-model",
+    ),
+}
+
+
+@pytest.mark.parametrize("reader", sorted(_PRIVATE_VIEW_READERS))
+def test_each_resolver_reads_the_private_view_while_root_holds_the_shared_cache(homes, monkeypatch, reader):
+    """Every model/provider reader the job reaches serves the worker's private
+    config, never the shared alias another profile last filled. The root request's
+    answer from the shared alias is the control that the two differ."""
+    from api import config
+
+    for name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    (homes.root / "config.yaml").write_text(ROOT_READERS_CONFIG, encoding="utf-8")
+    (homes.work / "config.yaml").write_text(WORK_READERS_CONFIG, encoding="utf-8")
+    call, work_answer, root_answer = _PRIVATE_VIEW_READERS[reader]
+    _fill_shared_cache_as("default")
+    shared = []
+    _on_request_thread("default", lambda: shared.append(call(config)))
+
+    assert (_in_private_scope("work", lambda: call(config)), shared) == (work_answer, [root_answer])
+
+
+def test_a_work_session_on_another_provider_keeps_it_while_root_filled_the_shared_cache(
+    homes, runtime, make_session
+):
+    """The reviewer's routing case: a ``work`` session on ``openrouter`` (work's
+    default is ``deepseek``) while root (default ``openrouter``) last filled the
+    shared cache. Read from the shared alias, the session's provider looks like the
+    default, the model goes bare, and the private resolver sends it to deepseek."""
+    sid = make_session("work", model_provider="openrouter")
+    _fill_shared_cache_as("default")
+
+    job, _ = _run_job_on_fresh_thread(sid)
+
+    assert job["status"] == "done", job.get("error")
+    assert runtime.agents[0]["provider"] == "openrouter"
+
+
+def test_editing_the_private_snapshot_changes_neither_the_private_config_nor_the_shared_cache(homes):
+    """``get_config_snapshot()`` on the private scope returns a deep copy, as it does
+    for the shared cache: a caller that edits it (nested values included) changes
+    neither what the thread's later reads serve nor the shared cache."""
+    from api import config
+
+    _fill_shared_cache_as("default")
+    before = _shared_cache_state()
+
+    def edit_then_read():
+        snapshot = config.get_config_snapshot()
+        snapshot["model"]["provider"] = "edited-in-the-snapshot"
+        snapshot["custom_providers"].append({"name": "edited"})
+        served = config.get_config()
+        return (
+            served["model"]["provider"],
+            config._config_view()["model"]["provider"],
+            [entry["name"] for entry in served["custom_providers"]],
+        )
+
+    assert _in_private_scope("work", edit_then_read) == ("deepseek", "deepseek", ["lab"])
+    assert _shared_cache_state() == before
+
+
+def test_a_nested_private_scope_restores_the_outer_binding(homes):
+    """Leaving a nested private scope restores the outer one instead of clearing it:
+    the outer dict is served again, not the shared cache."""
+    from api import config
+
+    _fill_shared_cache_as("default")
+
+    def nest():
+        outer = config._thread_ctx.private_config
+        with config.thread_private_config() as inner:
+            inner_served = config.get_config() is inner
+        return (
+            inner_served,
+            config._thread_ctx.private_config is outer,
+            config.get_config() is outer[1],
+            config._config_view() is outer[1],
+        )
+
+    assert _in_private_scope("work", nest) == (True, True, True, True)
+
+
+def test_the_private_binding_keeps_the_profiles_own_hermes_home(homes, monkeypatch, stand_in_secret_scope):
+    """``HERMES_HOME`` stays the profile's home even when the Agent's rule calls it
+    process-global and the process env names another profile (another worker's
+    mirror): the binding and a ``${HERMES_HOME}`` in the private read both say work."""
+    from api import config, profiles
+
+    stand_in_secret_scope.global_names.update({"HERMES_HOME", "API_SERVER_PORT"})
+    monkeypatch.setenv("HERMES_HOME", str(homes.root))
+    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    (homes.work / "config.yaml").write_text(
+        "terminal:\n  cwd: ${HERMES_HOME}/workspace\n  port: ${API_SERVER_PORT}\n", encoding="utf-8"
+    )
+
+    env = config._private_config_env_binding(homes.work)
+    seen = {}
+
+    def run():
+        # The request TLS only, with no env mirror: os.environ still names root.
+        profiles.set_request_profile("work")
+        try:
+            with config.thread_private_config() as private:
+                seen["terminal"] = dict(private["terminal"])
+        finally:
+            profiles.clear_request_profile()
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(30)
+
+    assert (env["HERMES_HOME"], env["API_SERVER_PORT"]) == (str(homes.work), "18080")
+    assert seen["terminal"] == {"cwd": f"{homes.work}/workspace", "port": "18080"}
+
+
+def test_the_private_read_applies_the_config_defaults(homes):
+    """The private dict gets the same documented defaults the shared cache gets."""
+    from api import config
+
+    def read():
+        served = config.get_config()
+        return (
+            served["agent"]["personalities"].get("helpful"),
+            served["experimental"].get("unified_session_db"),
+        )
+
+    assert _in_private_scope("work", read) == (config._DEFAULT_AGENT_PERSONALITIES["helpful"], False)
