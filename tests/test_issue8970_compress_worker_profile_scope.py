@@ -1096,3 +1096,220 @@ def test_root_sessions_keep_masters_scope_under_a_named_process_profile(
         ("deepseek", json.dumps(config._resolve_cli_toolsets({"platform_toolsets": {"cli": ["terminal", "file"]}}))),
     }
     assert (kwargs["provider"], json.dumps(kwargs["enabled_toolsets"])) in one_profile
+
+
+
+# ── #8981 review: Agent-free pins (CI installs no Agent) ──────────────────────
+#
+# Stand-ins for the Agent modules WebUI reads here, planted in ``sys.modules``. With
+# an Agent installed a stand-in keeps the real module's other names, so the rest of
+# the job keeps working; in CI it holds only the names below.
+
+
+def _stand_in_module(monkeypatch, name, **overrides):
+    """Plant a stand-in for Agent module *name*: the real module's names when it is
+    importable, else none, plus *overrides*. Restored by ``monkeypatch``."""
+    import importlib
+
+    real = sys.modules.get(name)
+    if real is None:
+        try:
+            real = importlib.import_module(name)
+        except Exception:
+            real = None
+    stand_in = types.ModuleType(name)
+    if real is not None:
+        stand_in.__dict__.update({k: v for k, v in vars(real).items() if not k.startswith("__")})
+    stand_in.__dict__.update(overrides)
+    monkeypatch.setitem(sys.modules, name, stand_in)
+    return stand_in
+
+
+@pytest.fixture
+def stand_in_hermes_constants(monkeypatch):
+    """A stand-in ``hermes_constants`` with the three functions B1 reads
+    (``get_routing_process_hermes_home``, ``hermes_home_key``,
+    ``process_hermes_home_is_pinned``). ``serve(home, pinned=True)`` names *home*
+    as the process's routing home; unpinned, the Agent's routing home follows
+    ``HERMES_HOME``, which the worker mirrors to the session's home."""
+    from pathlib import Path
+
+    from api import profiles
+
+    # WebUI caches whether hermes_constants has the Hermes-home override; restore it.
+    monkeypatch.setattr(profiles, "_hermes_home_override_available", profiles._hermes_home_override_available)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", profiles._PROCESS_PROFILE_HOME)
+    state = types.SimpleNamespace(home=None, pinned=False)
+    _stand_in_module(
+        monkeypatch,
+        "hermes_constants",
+        get_routing_process_hermes_home=lambda: Path(state.home),
+        hermes_home_key=lambda home: str(Path(home).expanduser().resolve()),
+        process_hermes_home_is_pinned=lambda: state.pinned,
+    )
+
+    def serve(home, *, pinned=True):
+        state.home, state.pinned = home, pinned
+        if pinned:
+            profiles._PROCESS_PROFILE_HOME = str(home)
+
+    return serve
+
+
+@pytest.fixture
+def stand_in_secret_scope(monkeypatch):
+    """Stand-ins for the Agent's secret scope (``agent.secret_scope``: the scope
+    binding, ``get_secret`` and the process-global rule ``_is_global_env``, which
+    names exactly ``state.global_names``) and its config expander
+    (``hermes_cli.config._expand_env_vars``: ``${VAR}`` / ``${env:VAR}`` read through
+    ``get_secret`` under the bound scope, an unset reference left verbatim)."""
+    import contextvars
+    import os
+    import re
+
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "_secret_scope_available", profiles._secret_scope_available)
+    state = types.SimpleNamespace(global_names=set())
+    scope = contextvars.ContextVar("stand_in_secret_scope", default=None)
+
+    def is_global_env(name):
+        return name in state.global_names
+
+    def get_secret(name, default=None):
+        bound = scope.get()
+        if bound is None or is_global_env(name):
+            return os.environ.get(name, default)
+        return bound.get(name, default)
+
+    def expand_env_vars(value):
+        if isinstance(value, dict):
+            return {k: expand_env_vars(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [expand_env_vars(v) for v in value]
+        if not isinstance(value, str):
+            return value
+
+        def one(match):
+            name = match.group(1).strip()
+            name = name[len("env:"):].strip() if name.startswith("env:") else name
+            found = get_secret(name)
+            return match.group(0) if found is None else found
+
+        return re.sub(r"\$\{([^}]*)\}", one, value)
+
+    _stand_in_module(
+        monkeypatch,
+        "agent.secret_scope",
+        _is_global_env=is_global_env,
+        get_secret=get_secret,
+        set_secret_scope=lambda env: scope.set(dict(env)),
+        reset_secret_scope=scope.reset,
+        current_secret_scope=scope.get,
+    )
+    _stand_in_module(monkeypatch, "hermes_cli.config", _expand_env_vars=expand_env_vars)
+    return state
+
+
+def _in_private_scope(profile_name, fn):
+    """``fn()`` on a fresh worker thread inside the compression worker's two scopes
+    for *profile_name* (its detached-worker scope and its private config read)."""
+    from api import config, profiles
+
+    out = {}
+
+    def run():
+        try:
+            with profiles.profile_scope_for_detached_worker(profile_name, "manual compression"), (
+                config.thread_private_config()
+            ):
+                out["value"] = fn()
+        except BaseException as exc:  # re-raised on the test thread
+            out["error"] = exc
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(30)
+    assert not worker.is_alive()
+    if "error" in out:
+        raise out["error"]
+    return out["value"]
+
+
+# ── B1 with a stand-in Agent ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("case", ["own_home", "routed_from_root", "unpinned"])
+def test_b1_own_home_rule_with_a_stand_in_agent(
+    homes, runtime, make_session, monkeypatch, stand_in_hermes_constants, case
+):
+    """B1 with no real Agent: the process's own pinned named profile expands a
+    ``${VAR}`` from ``api.paths.STARTUP_ENV``; a routed profile (root is the
+    process's home) does not, nor does an unpinned Agent whose routing home merely
+    follows the session's mirrored ``HERMES_HOME``."""
+    from api import profiles
+
+    (homes.work / "config.yaml").write_text(WORK_DEPLOY_TEMPLATED, encoding="utf-8")
+    _deploy_env(monkeypatch)
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(homes.root))
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_DOTENV", {})
+    monkeypatch.setenv("HERMES_HOME", str(homes.work))
+    if case == "own_home":
+        monkeypatch.setattr(profiles, "_active_profile", "work")
+        stand_in_hermes_constants(homes.work)
+    elif case == "routed_from_root":
+        stand_in_hermes_constants(homes.root)
+    else:
+        stand_in_hermes_constants(homes.work, pinned=False)
+
+    record = _private_record("work")
+    sid = make_session("work", model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
+
+    if case == "own_home":
+        assert record["api_key"] == "deploy-injected-key"
+        assert job["status"] == "done", job.get("error")
+        assert runtime.agents[0]["api_key"] == "deploy-injected-key"
+    else:
+        assert record["api_key"] == "${LAB_DEPLOY_KEY}"
+        assert job["status"] == "error"
+        assert "deploy-injected-key" not in json.dumps(runtime.agents)
+
+
+def test_the_own_profile_read_keeps_its_env_first_with_a_stand_in_agent(
+    homes, monkeypatch, stand_in_hermes_constants
+):
+    """The provenance pin with no real Agent: the profile's ``.env`` wins over the
+    launch snapshot, and a value sourced from another launch home's ``.env`` is
+    dropped."""
+    from api import paths, profiles
+
+    (homes.work / "config.yaml").write_text(
+        "custom_providers:\n"
+        "  - name: lab\n"
+        "    base_url: http://lab.invalid/v1\n"
+        "    api_key: ${LAB_DEPLOY_KEY}\n"
+        "    model: ${LAB_MODEL}\n"
+        "    key_env: ${LAUNCH_HOME_KEY}\n",
+        encoding="utf-8",
+    )
+    (homes.work / ".env").write_text("LAB_MODEL=work-dotenv-model\n", encoding="utf-8")
+    startup = {
+        **paths.STARTUP_ENV,
+        "LAB_DEPLOY_KEY": "deploy-injected-key",
+        "LAB_MODEL": "launcher-model",
+        "LAUNCH_HOME_KEY": "launch-home-secret",
+    }
+    monkeypatch.setattr(paths, "STARTUP_ENV", types.MappingProxyType(startup))
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(homes.root))
+    monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_DOTENV", {"LAUNCH_HOME_KEY": "launch-home-secret"})
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+    stand_in_hermes_constants(homes.work)
+
+    record = _private_record("work")
+
+    assert (record["api_key"], record["model"], record["key_env"]) == (
+        "deploy-injected-key",
+        "work-dotenv-model",
+        "${LAUNCH_HOME_KEY}",
+    )
