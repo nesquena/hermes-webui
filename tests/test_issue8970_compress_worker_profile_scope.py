@@ -17,10 +17,12 @@ runtime credential resolver.
 import copy
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -659,6 +661,54 @@ def _launch_env(monkeypatch, **values):
             else:
                 env[name] = value
         monkeypatch.setattr(module, attr, types.MappingProxyType(env))
+
+
+_MODULE_INIT_PROBE = """
+import json
+import sys
+from pathlib import Path
+
+from api import config, profiles
+
+out = {"baseline": profiles.process_env_baseline().get("API_SERVER_PORT")}
+try:
+    import agent.secret_scope  # noqa: F401  (the Agent's global rule)
+except ImportError:
+    pass
+else:
+    out["binding"] = config._private_config_env_binding(Path(sys.argv[1])).get("API_SERVER_PORT")
+print(json.dumps(out))
+"""
+
+
+def test_a_deployment_only_global_reaches_the_baseline_through_real_module_init(tmp_path):
+    """The compose/systemd path: ``API_SERVER_PORT`` is set only in the environment the
+    server starts with, nothing patched. A fresh interpreter's module init must put it in
+    ``process_env_baseline()`` and, with the Agent's global rule present, in a routed
+    named profile's private read when that profile's ``.env`` lacks it. (Every other test
+    patches ``STARTUP_ENV`` and the baseline together through ``_launch_env``, so none of
+    them would notice a baseline that ignores the launch env.)"""
+    root = tmp_path / ".hermes"
+    work = root / "profiles" / "work"
+    work.mkdir(parents=True)
+    (work / ".env").write_text("WORK_ONLY_SETTING=1\n", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("API_SERVER_PORT", "PYTHONPATH")}
+    env.update(HERMES_HOME=str(root), API_SERVER_PORT="47321", HERMES_DISABLE_LAZY_INSTALLS="1")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _MODULE_INIT_PROBE, str(work)],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr[-2000:]
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out["baseline"] == "47321"
+    if "binding" in out:
+        assert out["binding"] == "47321"
 
 
 def test_a_named_profile_endpoint_on_a_process_global_variable_still_resolves(
