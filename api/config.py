@@ -686,11 +686,14 @@ def _private_config_env_binding(home) -> dict:
     The profile's own #8032 binding (:func:`api.profiles.profile_env_binding`: its
     ``.env`` and ``HERMES_HOME``, never the server process env), plus the variables
     the Agent classifies as process-global (``agent.secret_scope._is_global_env``:
-    deployment settings such as ``API_SERVER_PORT``, never credentials), which the
-    Agent's ``get_secret`` reads from the process env in every scope. Without the
-    Agent's rule nothing is added. The process's OWN profile (#8981 B1) also reads the
-    launch-time deployment env under its ``.env``, as the Agent's ``get_secret`` does;
-    a routed profile never does.
+    deployment settings such as ``API_SERVER_PORT``, never credentials), taken from the
+    launch-time env (``api.paths.STARTUP_ENV``) under the profile's own values. That is
+    what this profile's own chat resolves: the Agent reads them from the process env,
+    which during that chat holds the launch env plus the profile's mirrored ``.env``.
+    The live process env is never read, because another profile's chat may be mirroring
+    its ``.env`` there. Without the Agent's rule nothing is added. The process's OWN
+    profile (#8981 B1) also reads the launch-time deployment env under its ``.env``, as
+    the Agent's ``get_secret`` does; a routed profile never does.
     """
     from api.profiles import profile_env_binding
 
@@ -699,14 +702,16 @@ def _private_config_env_binding(home) -> dict:
         env = {**_own_profile_launch_env(), **env}
     is_global = _agent_global_env_rule()
     if is_global is not None:
-        # Iterate names, not items(): another worker may restore its env (removing a
-        # key) between the listing and the read, and items() then raises KeyError.
-        for name in os.environ:
+        from api import paths
+
+        # Launch-time values only, never the live process env: a chat worker mirrors its
+        # own profile's .env there for the length of its run, so another profile's
+        # API_SERVER_PORT would redirect this profile's endpoint, and this profile's key
+        # and transcript would follow it. The profile's own binding wins.
+        for name, value in paths.STARTUP_ENV.items():
             try:
                 if name != "HERMES_HOME" and is_global(name):
-                    value = os.environ.get(name)
-                    if value is not None:
-                        env[name] = value
+                    env.setdefault(name, value)
             except Exception:
                 continue
     return env

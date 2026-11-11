@@ -639,6 +639,22 @@ def _real_agent_runtime(monkeypatch):
     return agents
 
 
+def _launch_env(monkeypatch, **values):
+    """Set (or, with None, remove) names in the launch-time env, ``api.paths.STARTUP_ENV``,
+    where a deployment value such as ``API_SERVER_PORT`` lives in production."""
+    import types
+
+    from api import paths
+
+    env = dict(paths.STARTUP_ENV)
+    for name, value in values.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+    monkeypatch.setattr(paths, "STARTUP_ENV", types.MappingProxyType(env))
+
+
 def test_a_named_profile_endpoint_on_a_process_global_variable_still_resolves(
     homes, make_session, monkeypatch
 ):
@@ -663,7 +679,7 @@ def test_a_named_profile_endpoint_on_a_process_global_variable_still_resolves(
         "    model: lab-model\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    _launch_env(monkeypatch, API_SERVER_PORT="18080")
 
     sid = make_session("work", model="lab-model", model_provider="custom:lab")
     job, _ = _run_job_on_fresh_thread(sid)
@@ -689,7 +705,7 @@ def test_the_private_read_never_falls_back_to_a_process_only_secret(homes, monke
         encoding="utf-8",
     )
     (homes.work / ".env").write_text("WORK_LAB_MODEL=work-model\n", encoding="utf-8")
-    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    _launch_env(monkeypatch, API_SERVER_PORT="18080")
     monkeypatch.setenv("LAB_PROCESS_ONLY_SECRET", "process-secret-value")
     monkeypatch.setenv("WORK_LAB_MODEL", "process-model")
 
@@ -751,7 +767,7 @@ def test_the_closed_expansion_still_reads_the_agents_process_global_variables(
         "    key_env: ${LAB_PROCESS_ONLY_SECRET}\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    _launch_env(monkeypatch, API_SERVER_PORT="18080")
     monkeypatch.setenv("LAB_PROCESS_ONLY_SECRET", "process-secret-value")
 
     sid = make_session("work", model="lab-model", model_provider="custom:lab")
@@ -822,46 +838,55 @@ def test_a_recursive_yaml_alias_does_not_fail_the_job(homes, runtime, make_sessi
     assert runtime.agents[0]["api_key"] == "work-lab-key"
 
 
-def test_a_global_variable_removed_mid_read_is_skipped(homes, monkeypatch):
-    """Codex r6: another worker can restore its env (removing a key) while the private
-    read collects the Agent's process-global variables. ``os.environ.items()`` fetches
-    each value after listing the names, so a removed key raised ``KeyError`` and
-    failed the compression job. A name that vanishes is now skipped."""
-    import collections.abc
-    import os as _real_os
-
+def test_another_profiles_live_mirror_never_reaches_the_private_read(homes, monkeypatch):
+    """Release gate (#8981): a chat worker mirrors its own profile's ``.env`` into the live
+    process env for the length of its run. The private read took the Agent's process-global
+    names from there, so another profile's ``API_SERVER_PORT`` redirected ``work``'s endpoint,
+    and work's key and transcript reached that profile's server. The names now come from
+    the launch-time env only, and the profile's own ``.env`` wins."""
     from api import config
 
-    class VanishingEnviron(collections.abc.Mapping):
-        """Lists a global that is gone by the time its value is read."""
+    monkeypatch.setattr(config, "_agent_global_env_rule", lambda: (lambda name: name == "API_SERVER_PORT"))
+    monkeypatch.setenv("API_SERVER_PORT", "19999")  # another profile's chat, mid-run
 
-        _data = {"API_SERVER_PORT": "18080", "WORK_ONLY_NOT_GLOBAL": "x"}
+    _launch_env(monkeypatch, API_SERVER_PORT=None)
+    assert "API_SERVER_PORT" not in config._private_config_env_binding(homes.work)
 
-        def __iter__(self):
-            return iter(list(self._data) + ["VANISHING_GLOBAL"])
+    _launch_env(monkeypatch, API_SERVER_PORT="18080")
+    assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18080"
 
-        def __len__(self):
-            return len(self._data) + 1
+    (homes.work / ".env").write_text("API_SERVER_PORT=18181\n", encoding="utf-8")
+    assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18181"
 
-        def __getitem__(self, name):
-            return self._data[name]
 
-    class OsProxy:
-        environ = VanishingEnviron()
-
-        def __getattr__(self, name):
-            return getattr(_real_os, name)
-
-    monkeypatch.setattr(
-        config, "_agent_global_env_rule", lambda: (lambda name: name in {"API_SERVER_PORT", "VANISHING_GLOBAL"})
+def test_another_profiles_live_mirror_never_redirects_the_compression_request(
+    homes, make_session, monkeypatch
+):
+    """The same, end to end: ``work``'s compression on ``${API_SERVER_PORT}`` reaches the
+    launch-time port with work's key while another profile's chat has its own port mirrored."""
+    agents = _real_agent_runtime(monkeypatch)
+    (homes.work / "config.yaml").write_text(
+        "model:\n"
+        "  provider: custom:lab\n"
+        "  default: lab-model\n"
+        "platform_toolsets:\n"
+        "  cli: []\n"
+        "custom_providers:\n"
+        "  - name: lab\n"
+        "    base_url: http://127.0.0.1:${API_SERVER_PORT}/v1\n"
+        "    api_key: work-lab-key\n"
+        "    model: lab-model\n",
+        encoding="utf-8",
     )
-    monkeypatch.setattr(config, "os", OsProxy())
+    _launch_env(monkeypatch, API_SERVER_PORT="18080")
+    monkeypatch.setenv("API_SERVER_PORT", "19999")  # another profile's chat, mid-run
 
-    env = config._private_config_env_binding(homes.work)
+    sid = make_session("work", model="lab-model", model_provider="custom:lab")
+    job, _ = _run_job_on_fresh_thread(sid)
 
-    assert env["API_SERVER_PORT"] == "18080"
-    assert "VANISHING_GLOBAL" not in env
-    assert "WORK_ONLY_NOT_GLOBAL" not in env
+    assert job["status"] == "done", job.get("error")
+    assert agents and agents[0]["base_url"] == "http://127.0.0.1:18080/v1"
+    assert agents[0]["api_key"] == "work-lab-key"
 
 
 # ── #8981 review B1: the server's OWN named profile reads its deployment env ──
@@ -879,7 +904,6 @@ custom_providers:
     api_key: ${LAB_DEPLOY_KEY}
     model: lab-model
 """
-
 
 def _deploy_env(monkeypatch, value="deploy-injected-key"):
     """``LAB_DEPLOY_KEY`` set only in the launcher/deployment env (container or
@@ -1456,7 +1480,7 @@ def test_the_private_binding_keeps_the_profiles_own_hermes_home(homes, monkeypat
 
     stand_in_secret_scope.global_names.update({"HERMES_HOME", "API_SERVER_PORT"})
     monkeypatch.setenv("HERMES_HOME", str(homes.root))
-    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    _launch_env(monkeypatch, API_SERVER_PORT="18080")
     (homes.work / "config.yaml").write_text(
         "terminal:\n  cwd: ${HERMES_HOME}/workspace\n  port: ${API_SERVER_PORT}\n", encoding="utf-8"
     )
@@ -1568,7 +1592,7 @@ def test_the_closed_expansion_reads_process_global_variables_with_a_stand_in_age
         "    key_env: ${LAB_PROCESS_ONLY_SECRET}\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("API_SERVER_PORT", "18080")
+    _launch_env(monkeypatch, API_SERVER_PORT="18080")
     monkeypatch.setenv("LAB_PROCESS_ONLY_SECRET", "process-secret-value")
 
     sid = make_session("work", model="lab-model", model_provider="custom:lab")
