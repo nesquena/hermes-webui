@@ -974,6 +974,155 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+def _named_profile_home_shape(path) -> Path | None:
+    """Return the ``<root>/profiles/<id>`` component of *path*, using path shape only.
+
+    Import-independent fallback used when the installed Agent's classifier
+    (``hermes_constants.named_profile_home``) is unavailable, and as the
+    fail-closed proxy when that classifier raises. It preserves the same
+    ``.hermes`` stop boundary the classifier uses: a default home that merely
+    lives under a coincidental ``profiles/`` ancestor (for example
+    ``<root>/profiles/operator/.hermes``) is NOT called a named home, and only
+    the deepest matching component is authoritative.
+
+    It is deliberately looser than ``hermes_constants.named_profile_home`` in
+    provenance (it cannot prove the ``profiles`` parent is a real Hermes
+    root), so on Agent-absent deployments a custom home such as
+    ``<root>/profiles/project/custom-root`` may still be over-restrictively
+    treated as named and denied — the safe direction for a ghost shell.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+    for candidate in (current, *current.parents):
+        # Default-home boundary: a `.hermes` component ends the walk, exactly
+        # like the installed classifier, so an unrelated `profiles/` ancestor
+        # above it is never treated as a profiles root.
+        if candidate.name == ".hermes":
+            return None
+        if candidate.parent.name == "profiles" and not candidate.name.startswith("."):
+            if _PROFILE_ID_RE.fullmatch(candidate.name):
+                return candidate
+    return None
+
+
+def _named_home_under_resolved_profiles_root(path: Path) -> Path | None:
+    """Return the logical ``<root>/profiles/<id>`` home for a path under the RESOLVED profiles root.
+
+    ``get_hermes_home_for_profile()`` resolves the final path, so when
+    ``profiles`` itself is a symlink the home arrives as ``<resolved>/<id>`` —
+    the ``profiles`` component is gone and neither the shape grammar nor the
+    installed classifier can see it. The resolved root still identifies the
+    home, and the LOGICAL path keeps the identity the liveness checks need (the
+    ``.deleted`` tombstone lives beside ``profiles/<id>``, reachable through
+    the symlink). Only the first component under the root is a profile id;
+    deeper components are inside the home, not a second home.
+    """
+    try:
+        resolved_root = _profiles_root()
+        resolved = Path(path).resolve(strict=False)
+        if resolved == resolved_root or resolved_root not in resolved.parents:
+            return None
+        name = resolved.relative_to(resolved_root).parts[0]
+        if not _PROFILE_ID_RE.fullmatch(name):
+            return None
+    except Exception:
+        return None
+    return _DEFAULT_HERMES_HOME / "profiles" / name
+
+
+def _named_profile_home_for_reads(path) -> Path | None:
+    """Classify *path* as a named profile home; the caller checks its liveness.
+
+    Returns the canonical ``<root>/profiles/<id>`` home, or ``None`` for a
+    provably non-named (default/custom) home.
+
+    Classification order:
+
+    1. A path under the RESOLVED profiles root is owned by that root's logical
+       ``<root>/profiles/<id>`` home, and that confirmed mapping comes first.
+       When ``profiles`` is a symlink whose target itself sits under another
+       ``profiles`` root, the resolved path the readers pass carries a second
+       ``profiles`` ancestor — every ancestor classifier then answers with that
+       (possibly live) ancestor instead of the requested child, so the guard
+       would validate the wrong home. The logical child keeps the
+       identity/tombstone checks meaningful through the symlink.
+    2. Outside that root the installed Agent's ``named_profile_home`` is
+       authoritative: it stops at a ``.hermes`` component and proves the
+       ``profiles`` parent is a real Hermes root, so a legitimate
+       default/custom home that merely sits under a coincidental ``profiles/``
+       ancestor is not a named home.
+    3. When the classifier is unavailable (Agent-absent deployment) or raises,
+       the import-independent shape grammar decides, with the same ``.hermes``
+       stop boundary — a path that still *looks* named is denied rather than
+       admitted while classification cannot be confirmed.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+
+    # Confirmed configured-root ownership outranks every ancestor classifier:
+    # the resolved root maps the path back to its logical home, which is the
+    # home whose identity/tombstone must be checked.
+    resolved_home = _named_home_under_resolved_profiles_root(current)
+    if resolved_home is not None:
+        return resolved_home
+
+    try:
+        from hermes_constants import named_profile_home
+    except Exception:
+        named_profile_home = None
+    if named_profile_home is None:
+        return _named_profile_home_shape(current)
+    try:
+        return named_profile_home(current)
+    except Exception:
+        # Classifier failed: fall back to the shape grammar (fail closed).
+        return _named_profile_home_shape(current)
+
+
+def is_live_profile_home_for_reads(home) -> bool:
+    """Whether a cross-profile reader may touch *home*.
+
+    A named profile home must still be live — identity marker present and no
+    delete tombstone — or reading it would call ``ensure_dirs()`` and create
+    ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
+    are not under ``profiles/`` and stay readable.
+
+    Classification first honours the configured RESOLVED profiles root (the
+    logical home owned by that root, see :func:`_named_profile_home_for_reads`),
+    then falls back to the installed Agent's ``named_profile_home(actual_home)``
+    classifier, which preserves the ``.hermes`` boundary and profiles-root
+    provenance; named homes are then liveness-checked on their canonical home.
+    The import-independent fallback keeps Agent-absent deployments working:
+    provably non-named homes are admitted, uncertain named homes are denied.
+
+    Fails CLOSED for named homes: when the liveness helpers cannot be imported
+    or the check raises, a named home is treated as NOT readable. AGENTS.md
+    requires identity checks to deny access when safety cannot be confirmed —
+    returning ``True`` there let a stale profile name reach ``list_jobs()`` on
+    any helper failure, which is exactly the ghost-shell write this predicate
+    exists to prevent.
+    """
+    named = _named_profile_home_for_reads(home)
+    if named is None:
+        # Provably not under a profiles/ root: the default/custom home is readable.
+        return True
+    try:
+        from hermes_constants import named_profile_is_live
+
+        return bool(named_profile_is_live(named))
+    except Exception as exc:
+        logger.warning(
+            "profile liveness check failed for %s (%s) — denying cross-profile read",
+            named,
+            exc,
+        )
+        return False
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',
@@ -2575,6 +2724,8 @@ def _build_profile_rows_fast() -> list | None:
             _read_config_model,
             _check_gateway_running,
             _PROFILE_ID_RE as _UPSTREAM_PROFILE_ID_RE,
+            named_profile_has_identity,
+            named_profile_is_deleted,
         )
     except Exception:
         return None
@@ -2617,6 +2768,15 @@ def _build_profile_rows_fast() -> list | None:
             if not entry.is_dir():
                 continue
             if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
+                continue
+            # Upstream `_iter_named_profile_dirs()` lists a dir as a profile only when it
+            # carries an identity marker and is not tombstoned. This fast path used to
+            # stop at "is a dir + valid id", so a marker-less shell left behind by a
+            # delete (or by a recovery-artifact mkdir) showed up in the dropdown and was
+            # then read by /api/crons. Match upstream here or the two lists disagree.
+            if not named_profile_has_identity(entry):
+                continue
+            if named_profile_is_deleted(entry):
                 continue
             rows.append(_row(entry, entry.name, False))
 
