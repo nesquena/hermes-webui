@@ -412,15 +412,23 @@ def test_post_self_hosted_provider_rejects_invalid_provider(isolated_self_hosted
     assert "unsupported self-hosted provider" in body.get("error", "")
 
 
-def test_get_providers_exposes_self_hosted_flags_and_base_url(monkeypatch, tmp_path):
-    _install_fake_hermes_cli(monkeypatch)
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-    # get_config() reloads from disk whenever _cfg_path differs from the current config
-    # path, whatever is in memory. Give this test its own (absent) config path and pin
-    # _cfg_path to it, so a path an earlier test left behind can't reload over the cfg below.
+def _pin_own_config_path(monkeypatch, tmp_path):
+    """Give a test that sets ``config.cfg`` in memory its own (absent) config path.
+
+    ``get_config()`` reloads from disk whenever ``_cfg_path`` differs from the current
+    config path, whatever is in memory, so a path an earlier test left behind would
+    reload over the in-memory cfg. With both pinned to the same absent file and
+    ``_cfg_mtime`` set to 0.0 by the test, nothing reloads.
+    """
     own_config_path = tmp_path / "config.yaml"
     monkeypatch.setattr(config, "_get_config_path", lambda: own_config_path)
     monkeypatch.setattr(config, "_cfg_path", own_config_path)
+
+
+def test_get_providers_exposes_self_hosted_flags_and_base_url(monkeypatch, tmp_path):
+    _install_fake_hermes_cli(monkeypatch)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    _pin_own_config_path(monkeypatch, tmp_path)
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
     config.cfg.clear()
@@ -552,6 +560,7 @@ def test_provider_card_uses_backend_projection_authority_matrix(isolated_self_ho
 def test_saved_provider_payload_has_no_singular_model_authority(monkeypatch, tmp_path):
     _install_fake_hermes_cli(monkeypatch)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    _pin_own_config_path(monkeypatch, tmp_path)
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
     config.cfg.clear()
