@@ -581,6 +581,8 @@
 
 ### Internal
 
+- **`TestConflictError` no longer fails in focused or partial test runs (#8903).** Its two tests reach the update-conflict branch only after the #7293 active-run fence, and chat-start tests elsewhere can leave runs registered, so in a partial run the fence refused the update and the tests failed. They now start with the run registries emptied in place and restore them afterwards. Tests only.
+
 - **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
 
 - **The local full test suite passes in the release sandbox (test-only).** Twenty-one tests failed only because of the host: no package index, the worktree's git dir hidden from git, `HOME=/tmp`, unmapped supplementary groups, no network route for Chromium, a process-wide truststore injection, and two newer-Agent shape changes. They now pass there, or skip with the missing condition named (package index, spare group, Agent org skill mirror). No product code changes, and CI still runs the packaging tests.
