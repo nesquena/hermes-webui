@@ -39,6 +39,31 @@ _ASYNC_DELIVERY_RETRY_HOMES: set[Path | None] = set()
 _ASYNC_DELIVERY_RETRY_EVENTS: dict[str, dict] = {}
 _NON_LAUNCH_REPLAY_DONE = False
 _NON_LAUNCH_REPLAY_TIMER: threading.Timer | None = None
+# Repeating delivery conditions log once per interval per fixed key.
+_THROTTLED_LOG_INTERVAL_SECONDS = 300.0
+_THROTTLED_LOG_LOCK = threading.Lock()
+_THROTTLED_LOG_AT: dict[str, float] = {}
+_monotonic = time.monotonic
+
+
+def _log_throttled(key: str, level: int, message: str, *args: Any) -> None:
+    now = _monotonic()
+    with _THROTTLED_LOG_LOCK:
+        last = _THROTTLED_LOG_AT.get(key)
+        if last is not None and now - last < _THROTTLED_LOG_INTERVAL_SECONDS:
+            return
+        _THROTTLED_LOG_AT[key] = now
+    logger.log(level, message, *args)
+
+
+def _log_owner_unknown_deferral(delegation_id: str) -> None:
+    _log_throttled(
+        "owner-unknown",
+        logging.INFO,
+        "Deferring async delegation %s: owner unknown (ledger unreadable, ambiguous "
+        "or profile enumeration incomplete); will retry",
+        delegation_id,
+    )
 
 
 @dataclass(frozen=True)
@@ -256,7 +281,11 @@ def _replay_all_ledgers(completion_queue: Any) -> None:
     try:
         homes = authorized_ledger_homes()
     except Exception:
-        logger.warning("Unable to enumerate delegation ledgers; retrying replay later")
+        _log_throttled(
+            "ledger-enumeration",
+            logging.WARNING,
+            "Unable to enumerate delegation ledgers; retrying replay later",
+        )
         with _ASYNC_DELIVERY_RETRY_LOCK:
             if _NON_LAUNCH_REPLAY_TIMER is None:
 
@@ -391,6 +420,7 @@ def schedule_async_delegation_claim_retry(
         owner = resolve_ledger_owner(evt)
         if owner.status == "unknown":
             # Neither success nor rejection: resolve the event again later.
+            _log_owner_unknown_deferral(delegation_id)
             return _arm_async_delegation_restore_sweep(
                 completion_queue, retry_delay, deferred_event=evt
             )
@@ -505,6 +535,7 @@ def claim_async_delegation_delivery(
     owner = resolve_ledger_owner(evt)
     if owner.status == "unknown":
         # The caller's claim-None path schedules the deferred retry.
+        _log_owner_unknown_deferral(delegation_id)
         _release_bounded_local(delegation_id)
         return None
 
@@ -670,6 +701,8 @@ def _reset_legacy_async_delivery_dedupe_for_tests() -> None:
     global _NON_LAUNCH_REPLAY_TIMER
 
     _NON_LAUNCH_REPLAY_DONE = False
+    with _THROTTLED_LOG_LOCK:
+        _THROTTLED_LOG_AT.clear()
     with _LEGACY_ASYNC_DELIVERY_LOCK:
         _LEGACY_ASYNC_DELIVERY_IDS.clear()
     with _ASYNC_DELIVERY_RETRY_LOCK:

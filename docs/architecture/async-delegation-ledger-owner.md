@@ -15,11 +15,14 @@ restores nothing (#7214).
   ledgers are the root home plus the profile directories read from disk on each
   call, not the cached profile list the UI shows, so a profile created outside
   WebUI is never treated as absent.
-  - `found`: exactly one ledger has the row.
+  - `found`: the origin session's profile ledger has the row (provenance
+    decides, even if another ledger also has it); otherwise, exactly one
+    authorized ledger has the row.
   - `missing`: every ledger was readable and none has the row — a genuine legacy
     no-row event, handled as before under the ambient home.
-  - `unknown`: a ledger is unreadable, profile enumeration was incomplete, or
-    the row exists in more than one ledger.
+  - `unknown`: no provenance match, and a ledger is unreadable, profile
+    enumeration was incomplete, or the row exists in more than one ledger. The
+    event is deferred, not claimed, with a rate-limited INFO log.
   There is no owner cache, so there is no stale positive or negative entry.
 - **One owner per claim.** `claim_async_delegation_delivery` resolves once and
   stores `ledger_home` on the claim. ACK, release and retry after a release use

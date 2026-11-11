@@ -126,6 +126,45 @@ def test_unknown_owner_is_deferred_not_claimed_or_dropped(world):
     assert world["calls"] == []
 
 
+def test_unknown_owner_deferral_is_logged_at_a_bounded_rate(world, monkeypatch, caplog):
+    _ledger(world["root"], "d-1")
+    _ledger(world["named"], "d-1")
+    clock = [1000.0]
+    monkeypatch.setattr(peu, "_monotonic", lambda: clock[0])
+    caplog.set_level("INFO", logger=peu.logger.name)
+
+    def deferrals():
+        return [r for r in caplog.records if "owner unknown" in r.getMessage()]
+
+    for _ in range(5):
+        assert peu.claim_async_delegation_delivery(_event(), "test") is None
+        assert peu.schedule_async_delegation_claim_retry(_event(), queue.Queue(), delay=60)
+    assert len(deferrals()) == 1
+    assert deferrals()[0].levelname == "INFO" and "d-1" in deferrals()[0].getMessage()
+    clock[0] += peu._THROTTLED_LOG_INTERVAL_SECONDS
+    assert peu.claim_async_delegation_delivery(_event(), "test") is None
+    assert len(deferrals()) == 2
+
+
+def test_enumeration_failure_warning_is_rate_limited(world, monkeypatch, caplog):
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 3600)
+    clock = [1000.0]
+    monkeypatch.setattr(peu, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(world["profiles"], "_profiles_root", lambda: (_ for _ in ()).throw(PermissionError("x")))
+    caplog.set_level("INFO", logger=peu.logger.name)
+    registry = types.SimpleNamespace(restore_completions=lambda: None, completion_queue=queue.Queue())
+
+    def warnings():
+        return [r for r in caplog.records if "enumerate delegation ledgers" in r.getMessage()]
+
+    for _ in range(10):
+        peu.restore_durable_process_completions(registry)
+    assert len(warnings()) == 1
+    clock[0] += peu._THROTTLED_LOG_INTERVAL_SECONDS
+    peu.restore_durable_process_completions(registry)
+    assert len(warnings()) == 2
+
+
 def test_failed_home_binding_never_runs_against_the_ambient_ledger(world, monkeypatch):
     _ledger(world["named"], "d-1")
 
@@ -199,6 +238,9 @@ def test_failed_startup_enumeration_keeps_a_single_retry_timer(world, monkeypatc
 
     def failing():
         attempts.append(time.monotonic())
+        if len(attempts) > 10:
+            # The timer's own retry: park its successor so the count below cannot race a re-arm.
+            peu.ASYNC_DELIVERY_ROUTING_RETRY_SECONDS = 3600
         raise PermissionError("enumeration still failing")
 
     monkeypatch.setattr(peu.threading, "Timer", recording_timer)
