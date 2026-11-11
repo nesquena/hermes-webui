@@ -313,13 +313,19 @@ def _kind(directory, home, kind):
     from api import models
 
     if kind in ("unsafe", "missing"):
-        return "../escape-9007" if kind == "unsafe" else SID
-    path = _sidecar(directory, home, partials=kind in ("duplicate-partials", "names-other"))
+        if kind == "missing":
+            return SID
+        # A real sidecar sits where the traversal id points.
+        _sidecar(directory, home)
+        (directory / f"{SID}.json").rename(directory.parent / "escape-9007.json")
+        return "../escape-9007"
+    partials = kind in ("duplicate-partials", "names-other", "legacy-duplicate-partials")
+    path = _sidecar(directory, home, partials=partials)
     if kind in ("corrupt", "empty"):
         path.write_text("{not json" if kind == "corrupt" else "", encoding="utf-8")
         return SID
     body = json.loads(path.read_text(encoding="utf-8"))
-    if kind == "legacy":
+    if kind in ("legacy", "legacy-duplicate-partials"):
         body.pop("anchor_scene_index")
         body.pop("message_count")
     elif kind == "names-other":
@@ -328,6 +334,10 @@ def _kind(directory, home, kind):
         body.pop("session_id")
     elif kind == "share-fields-after-body":
         body.update(share_token="tok-9007", share_created_at=5.0)
+    elif kind == "checkpoint-fact":
+        # An eager-checkpoint fact the writer vouched for, whose row this transcript lacks.
+        body.update(pending_user_source="delegation_wakeup", pending_user_message="wake",
+                    pending_started_at=7.0, _pending_hidden_wakeup_at=7.0)
     path.write_text(json.dumps(body), encoding="utf-8")
     # A draft under each id, so a draft read under the wrong id shows.
     for draft_id in (SID, OTHER):
@@ -361,8 +371,9 @@ def _outcome(read, sid):
 
 
 @pytest.mark.parametrize("kind", [
-    "ordinary", "duplicate-partials", "legacy", "names-other", "no-session-id",
-    "share-fields-after-body", "corrupt", "empty", "missing", "unsafe",
+    "ordinary", "duplicate-partials", "legacy", "legacy-duplicate-partials", "names-other",
+    "no-session-id", "share-fields-after-body", "checkpoint-fact", "corrupt", "empty", "missing",
+    "unsafe",
 ])
 def test_the_listing_read_is_session_load_without_the_save(store, saves, kind):
     """What the three listing paths get back is what Session.load returned them, on every sidecar
