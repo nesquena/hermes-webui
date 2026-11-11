@@ -11,7 +11,10 @@ restores nothing (#7214).
 
 - **Owner resolution** (`api/delegation_ledger_owner.resolve_ledger_owner`) is
   read-only and never creates a database. It checks the origin WebUI session's
-  recorded profile first, then the authorized existing ledgers.
+  recorded profile first, then the authorized existing ledgers. Authorized
+  ledgers are the root home plus the profile directories read from disk on each
+  call, not the cached profile list the UI shows, so a profile created outside
+  WebUI is never treated as absent.
   - `found`: exactly one ledger has the row.
   - `missing`: every ledger was readable and none has the row — a genuine legacy
     no-row event, handled as before under the ambient home.

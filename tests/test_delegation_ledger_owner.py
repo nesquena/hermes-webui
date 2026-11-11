@@ -6,6 +6,7 @@ import contextvars
 import queue
 import sqlite3
 import sys
+import threading
 import time
 import types
 
@@ -40,7 +41,6 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
     monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda name: homes.get(name or "default", root))
-    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "default", "is_default": True}, {"name": "named"}])
     monkeypatch.setattr(models, "get_session_profile_readonly", lambda sid: sessions[sid])  # KeyError like the real reader
 
     # Agent stand-ins: a context-local home override, and ledger calls that record it.
@@ -75,6 +75,16 @@ def test_resolution_statuses(world):
     assert owner_mod.resolve_ledger_owner(_event()).home == world["named"]  # provenance decides
 
 
+def test_profile_missing_from_the_cached_display_list_is_still_found(world, monkeypatch):
+    # list_profiles_api() is a display list cached for seconds; a profile created
+    # outside WebUI meanwhile must not fall back to a legacy no-row ACK.
+    monkeypatch.setattr(world["profiles"], "list_profiles_api", lambda: [{"name": "default", "is_default": True}])
+    _ledger(world["named"], "d-1")
+    world["sessions"]["s-1"] = "named"
+    assert owner_mod.resolve_ledger_owner(_event()) == owner_mod.LedgerOwner("found", world["named"])
+    assert world["named"] in owner_mod.authorized_ledger_homes()
+
+
 def test_unreadable_or_incomplete_enumeration_is_unknown(world, monkeypatch):
     (world["named"] / "state.db").write_bytes(b"not a database" * 100)
     assert owner_mod.resolve_ledger_owner(_event()).status == "unknown"
@@ -84,10 +94,14 @@ def test_unreadable_or_incomplete_enumeration_is_unknown(world, monkeypatch):
         assert owner_mod.resolve_ledger_owner(_event()).status == "unknown"
     finally:
         world["named"].chmod(0o700)
-    monkeypatch.setattr(world["profiles"], "list_profiles_api", lambda: [{"name": ""}])
-    assert owner_mod.resolve_ledger_owner(_event()).status == "unknown"
-    with pytest.raises(RuntimeError):
-        owner_mod.authorized_ledger_homes()
+    profiles_dir = world["root"] / "profiles"
+    profiles_dir.chmod(0)  # cannot list the profiles: enumeration is incomplete
+    try:
+        assert owner_mod.resolve_ledger_owner(_event()).status == "unknown"
+        with pytest.raises(RuntimeError):
+            owner_mod.authorized_ledger_homes()
+    finally:
+        profiles_dir.chmod(0o700)
 
 
 def test_claim_ack_release_and_retry_use_the_owner_ledger(world):
@@ -142,6 +156,8 @@ def test_drain_startup_recovers_from_one_enumeration_failure_without_another_res
     monkeypatch.setitem(sys.modules, "tools.process_registry", registry_mod)
     monkeypatch.setattr(bp, "recover_processes_for_webui", lambda: 0)
     monkeypatch.setattr(bp, "_DRAIN_THREAD", None)
+    # stop_drain_thread() leaves the stop flag set; keep that out of later tests.
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
     restores = []
     real_restore = peu.restore_durable_process_completions
 
@@ -150,15 +166,15 @@ def test_drain_startup_recovers_from_one_enumeration_failure_without_another_res
         real_restore(reg)
 
     monkeypatch.setattr(bp, "restore_durable_process_completions", counted_restore)
-    listed = world["profiles"].list_profiles_api
+    real_root = world["profiles"]._profiles_root
     failures = iter([True])
 
     def flaky():
         if next(failures, False):
-            raise RuntimeError("transient enumeration failure")
-        return listed()
+            raise PermissionError("transient enumeration failure")
+        return real_root()
 
-    monkeypatch.setattr(world["profiles"], "list_profiles_api", flaky)
+    monkeypatch.setattr(world["profiles"], "_profiles_root", flaky)
     try:
         assert bp.start_drain_thread()
         replayed = sorted([("restore", str(world["root"])), ("restore", str(world["named"]))])
@@ -183,10 +199,10 @@ def test_failed_startup_enumeration_keeps_a_single_retry_timer(world, monkeypatc
 
     def failing():
         attempts.append(time.monotonic())
-        raise RuntimeError("enumeration still failing")
+        raise PermissionError("enumeration still failing")
 
     monkeypatch.setattr(peu.threading, "Timer", recording_timer)
-    monkeypatch.setattr(world["profiles"], "list_profiles_api", failing)
+    monkeypatch.setattr(world["profiles"], "_profiles_root", failing)
     for _ in range(10):
         peu.restore_durable_process_completions(registry)
     assert len(attempts) == 10
@@ -200,15 +216,15 @@ def test_failed_startup_enumeration_keeps_a_single_retry_timer(world, monkeypatc
 def test_startup_replay_retries_by_itself_after_enumeration_failure(world, monkeypatch):
     monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.05)
     registry = types.SimpleNamespace(restore_completions=lambda: None, completion_queue=queue.Queue())
-    listed = world["profiles"].list_profiles_api
+    real_root = world["profiles"]._profiles_root
     failures = iter([True])
 
     def flaky():
         if next(failures, False):
-            raise RuntimeError("enumeration failed")
-        return listed()
+            raise PermissionError("enumeration failed")
+        return real_root()
 
-    monkeypatch.setattr(world["profiles"], "list_profiles_api", flaky)
+    monkeypatch.setattr(world["profiles"], "_profiles_root", flaky)
     # The background drain calls this once; no later turn may be needed to recover.
     peu.restore_durable_process_completions(registry)
     deadline = time.monotonic() + 2

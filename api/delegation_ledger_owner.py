@@ -25,28 +25,28 @@ def _authorized_homes() -> tuple[list[Path], bool]:
         return [Path(profiles.get_hermes_home_for_profile(profiles._isolated_profile_name())).resolve()], True
     homes = [Path(profiles._DEFAULT_HERMES_HOME).resolve()]
     complete = True
+    # Read the profiles directory itself: list_profiles_api() is a display list
+    # cached for seconds and can miss a profile created outside WebUI.
     try:
-        rows = profiles.list_profiles_api()
-    except Exception:
+        entries = sorted(profiles._profiles_root().iterdir())
+    except FileNotFoundError:
+        return homes, True
+    except OSError:
         return homes, False
-    for row in rows if isinstance(rows, list) else []:
-        name = row.get("name") if isinstance(row, dict) else None
-        if not isinstance(name, str) or not name.strip():
-            complete = False
-            continue
-        if name == "default" or row.get("is_default"):
+    for entry in entries:
+        if not profiles._PROFILE_ID_RE.fullmatch(entry.name):
             continue
         try:
-            home = Path(profiles.get_hermes_home_for_profile(name.strip())).resolve()
+            home = Path(profiles.get_hermes_home_for_profile(entry.name)).resolve()
             home.stat()
         except FileNotFoundError:
-            continue  # listed but never created: no ledger to own a row
+            continue  # removed while listing
         except Exception:
             complete = False
             continue
         if home.is_dir() and home not in homes:
             homes.append(home)
-    return homes, complete and isinstance(rows, list)
+    return homes, complete
 
 
 def authorized_ledger_homes() -> list[Path]:
