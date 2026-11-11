@@ -214,6 +214,7 @@ function selectFromDropdown() {}
 
 for (const name of [
   '_normalizeConfiguredModelKey',
+  '_configuredModelIdentity',
   '_getConfiguredModelBadge',
   '_getOptionProviderId',
   '_readModelOverflowData',
@@ -233,15 +234,15 @@ for (const node of walk(dropdown, [])) {
   if (typeof node.onclick !== 'function') continue;
   const nameMatch = html.match(/<span class="model-opt-name">([\s\S]*?)<\/span>/);
   const idMatch = html.match(/<span class="model-opt-id">([\s\S]*?)<\/span>/);
-  const chipMatch = html.match(/<span class="model-opt-badge model-opt-badge--([^"]*)"([^>]*)>([\s\S]*?)<\/span>/);
+  const chipMatch = html.match(/<span([^>]*)class="model-opt-badge model-opt-badge--([^"]*)"([^>]*)>([\s\S]*?)<\/span>/);
+  const chipAttrs = chipMatch ? chipMatch[1] + chipMatch[3] : '';
+  const chipTitleMatch = chipAttrs.match(/title="([^"]*)"/);
   rows.push({
     name: nameMatch ? nameMatch[1] : '',
     subtitle: idMatch ? idMatch[1] : '',
-    chipRole: chipMatch ? chipMatch[1] : '',
-    chipTitle: chipMatch && /title="([^"]*)"/.test(chipMatch[2])
-      ? chipMatch[2].match(/title="([^"]*)"/)[1]
-      : null,
-    chipText: chipMatch ? chipMatch[3] : null,
+    chipRole: chipMatch ? chipMatch[2] : '',
+    chipTitle: chipTitleMatch ? chipTitleMatch[1] : null,
+    chipText: chipMatch ? chipMatch[4] : null,
     html,
   });
 }
@@ -293,10 +294,10 @@ _PAYLOAD = {
 }
 
 _CASES = [
-    # (row name, raw configured key, expected chip text)
-    ("gpt-4o", "gpt-4o", "Primary"),
-    ("gpt-4o-mini", "openai/gpt-4o-mini", "Fallback 1"),
-    ("codex/gpt-6.1-sol", "@custom:magpie:codex/gpt-6.1-sol", "Fallback 2"),
+    # (row name, raw configured key, expected chip text, option id in the subtitle)
+    ("gpt-4o", "gpt-4o", "Primary", "gpt-4o"),
+    ("gpt-4o-mini", "openai/gpt-4o-mini", "Fallback 1", "gpt-4o-mini"),
+    ("codex/gpt-6.1-sol", "@custom:magpie:codex/gpt-6.1-sol", "Fallback 2", "codex/gpt-6.1-sol"),
 ]
 
 
@@ -309,7 +310,7 @@ def _row(rows, name):
 def test_configured_chip_shows_role_label_never_the_routing_key(tmp_path):
     rows = _render_dropdown(tmp_path, _PAYLOAD)
 
-    for name, raw_key, expected_chip in _CASES:
+    for name, raw_key, expected_chip, _subtitle in _CASES:
         row = _row(rows, name)
         assert row["chipText"] == expected_chip, (
             f"Configured chip for {name} should show the readable role "
@@ -321,17 +322,22 @@ def test_configured_chip_shows_role_label_never_the_routing_key(tmp_path):
         )
 
 
-def test_configured_chip_keeps_raw_key_in_title_and_subtitle(tmp_path):
+def test_configured_chip_keeps_raw_key_in_title_and_leaves_the_subtitle_alone(tmp_path):
+    """#8733 takes the routing key out of the chip, so the chip's title carries the
+    matched config key and nothing is lost. The row subtitle stays the option id
+    the select holds: master's Configured rows are identified by that id (#8756),
+    so rewriting the subtitle would make the rendered row disagree with the option.
+    """
     rows = _render_dropdown(tmp_path, _PAYLOAD)
 
-    for name, raw_key, _expected_chip in _CASES:
+    for name, raw_key, _expected_chip, expected_subtitle in _CASES:
         row = _row(rows, name)
         assert row["chipTitle"] == raw_key, (
             f"the chip's title must preserve the matched config key {raw_key!r} "
             f"so removing it from the label loses nothing (got {row['chipTitle']!r})"
         )
-        assert raw_key in row["subtitle"], (
-            f"the row subtitle must keep the config key {raw_key!r} visible "
+        assert row["subtitle"] == expected_subtitle, (
+            f"the row subtitle must stay the option id {expected_subtitle!r} "
             f"(got {row['subtitle']!r})"
         )
 

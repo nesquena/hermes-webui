@@ -984,7 +984,7 @@ def test_configured_picker_keeps_friendly_title_and_exact_selection_routing(tmp_
         "configured catalog title was not escaped exactly once"
     )
     assert '&amp;amp;' not in catalog_row
-    assert '<span class="model-opt-badge model-opt-badge--primary">gpt-6-sol (openai)</span>' in catalog_row
+    assert '<span title="gpt-6-sol" class="model-opt-badge model-opt-badge--primary">Primary</span>' in catalog_row
     assert actual["catalogPicked"] == {
         "model": "gpt-6-sol",
         "model_provider": "openai",
@@ -995,8 +995,8 @@ def test_configured_picker_keeps_friendly_title_and_exact_selection_routing(tmp_
     )
     assert '<span class="model-opt-name">model-a</span>' in fallback_row
     assert (
-        '<span class="model-opt-badge model-opt-badge--fallback">'
-        '@custom:backup:model-a (backup)</span>' in fallback_row
+        '<span title="@custom:backup:model-a" '
+        'class="model-opt-badge model-opt-badge--fallback">Fallback 1</span>' in fallback_row
     )
     assert actual["backupPicked"] == {
         "model": "model-a",

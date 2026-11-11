@@ -7168,11 +7168,11 @@ function renderModelDropdown(){
           badgeTitle = rawId;
         }
         const badgeAttrs = badgeTitle ? ` title="${esc(badgeTitle)}"` : '';
-        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}"${badgeAttrs}>${esc(badgeLabel)}</span>`:'';
-        // Keep the raw key visible in the subtitle when it differs from the row id,
-        // so dropping it from the chip never hides which config entry matched.
-        const rowSubtitle = (badgeTitle && badgeTitle !== m.id) ? badgeTitle : m.id;
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(rowSubtitle)}</span>`;
+        const badgeHtml=m.badge?`<span${badgeAttrs} class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
+        // #8733: the chip no longer carries the routing key, so the matched key
+        // rides on the chip's title. The subtitle stays the option id, which the
+        // Configured section has always shown.
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
