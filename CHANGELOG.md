@@ -121,6 +121,8 @@
 
 ### Fixed
 
+- **A session file swapped mid-turn for a copy of another session's file can no longer make a delayed write land on that other session (#9001, fixes #9000).** The write resolver reloads the worker's session by id; if the file now holds another session's body, it returned that session, so an ephemeral cancel deleted the other session's file and the turn-end cwd mirror wrote the other session's `state.db` row. It now refuses the copy-loaded object on the way out, and all three callers already skip the write when it does. Sessions whose files weren't swapped are unaffected.
+
 - **Gateway-backed sessions refuse the features that would run the agent inside WebUI.** `/btw`, `/background`, `/compress`, the non-streaming `/api/chat` and the one-shot helper calls (update summaries, commit messages) build an in-process agent. On a gateway-backed deployment they failed with a provider-credential error or quietly ran a turn outside the gateway. They now return 409 with `code: "gateway_mode_unsupported"` and the feature name, before any session, stream or compression job is created. Non-gateway setups are unchanged. Thanks @samikrc. (#8860, fixes #8821)
 
 - **`POST /api/session/new` refuses a profile value that is not a profile name.** The route passed the request body's `profile` straight to workspace resolution and session creation, so a forged body could create a session (and, with `worktree: true`, a worktree and a saved file) under a non-profile value and get a 200. It now validates the optional profile at the top of the handler, with the same rule the other routes use, before any read, cache or write. Thanks @webtecnica. (#8886, fixes #8862)
@@ -580,6 +582,8 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **`TestConflictError` no longer fails in focused or partial test runs (#8903).** Its two tests reach the update-conflict branch only after the #7293 active-run fence, and chat-start tests elsewhere can leave runs registered, so in a partial run the fence refused the update and the tests failed. They now start with the run registries emptied in place and restore them afterwards. Tests only.
 
 - **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
 
