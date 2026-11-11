@@ -2616,6 +2616,8 @@ class Session:
                         len(getattr(session, 'messages', None) or []),
                         _anchor_scene_index_from_records(getattr(session, 'anchor_activity_scenes', None)),
                         expected_sig=_pre_read_sig,
+                        # #8857: the owner, for a prefix that lacks 'profile'.
+                        profile=data.get('profile'),
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
@@ -2645,6 +2647,20 @@ class Session:
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
+            # #8857: 'profile' names the owner that metadata-only routes and the
+            # sidebar judge the session by. A prefix without it (an older or
+            # outside writer put it after 'messages', or wrote none) would give
+            # the stub profile=None, the legacy no-profile owner. Take it from
+            # the legacy-facts entry a full load recorded for this exact file
+            # (stat signature), else from the full read. save() writes
+            # 'profile' before 'messages' even when it is None, so sidecars it
+            # writes never get here.
+            _facts = None
+            if 'profile' not in parsed:
+                _facts = _legacy_sidecar_facts_get(sid)
+                if _facts is None or 'profile' not in _facts:
+                    return cls.load(sid)
+                parsed['profile'] = _facts['profile']
             # #8852: mark a stub whose body names another session, as
             # Session.load does, so writers that bypass save() refuse it too.
             _names_other_session = parsed.get('session_id') != sid
@@ -2687,7 +2703,8 @@ class Session:
                 sidecar_message_count is None
                 and 'anchor_scene_index' not in parsed
             ):
-                _facts = _legacy_sidecar_facts_get(sid)
+                if _facts is None:
+                    _facts = _legacy_sidecar_facts_get(sid)
                 if _facts is not None:
                     parsed['anchor_scene_index'] = _facts.get('scene_index') or {}
                     session = cls(**parsed)
@@ -6735,6 +6752,10 @@ def set_session_reasoning_effort(session_id_or_session, value, *, profile=_KEEP_
         return previous
 
 
+# ``_legacy_sidecar_facts_put(profile=...)`` default: no owner recorded (#8857).
+_FACTS_PROFILE_UNSET = object()
+
+
 def _legacy_sidecar_facts_get(sid):
     """Return cached authoritative facts for a LEGACY sidecar, or None (#5854).
 
@@ -6754,7 +6775,7 @@ def _legacy_sidecar_facts_get(sid):
     return None
 
 
-def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig):
+def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig, profile=_FACTS_PROFILE_UNSET):
     """Cache authoritative facts for a legacy sidecar keyed by its stat signature.
 
     #5854 TOCTOU guard: ``expected_sig`` (MANDATORY) is the signature captured
@@ -6764,6 +6785,10 @@ def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig):
     describe the old content; caching them under the new signature would serve
     stale data. Pass ``None`` explicitly only if the caller genuinely has no
     snapshot (then this is a no-op, refusing to cache unverified facts).
+
+    #8857: ``profile`` is the owner the same parse found (``None`` when the
+    file names none). An entry stored without it never vouches for an owner:
+    a metadata read whose prefix lacks ``profile`` then takes the full read.
     """
     if not is_safe_session_id(sid):
         return
@@ -6777,6 +6802,8 @@ def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig):
         return
     entry = {"message_count": message_count,
              "scene_index": dict(scene_index) if isinstance(scene_index, dict) else {}}
+    if profile is not _FACTS_PROFILE_UNSET:
+        entry["profile"] = profile
     with _LEGACY_SIDECAR_FACTS_LOCK:
         _LEGACY_SIDECAR_FACTS[sig] = entry
         _LEGACY_SIDECAR_FACTS.move_to_end(sig)
