@@ -26,6 +26,8 @@ def _run_node(scenario, *, with_metadata=False):
 const result={{renders:0,busy:[],attached:[],bodies:[],thinking:0}};
 let S={{session:{{session_id:'s1',regeneration_revision:'rev-1'}},messages:{messages_json}}};
 const INFLIGHT={{}};
+let _sendInProgress=false;
+let _sendInProgressSid=null;
 function renderMessages(){{result.renders++;}}
 function setBusy(v){{result.busy.push(v);}}
 function ensureLiveWorklogShell(){{result.thinking++;}}

@@ -543,6 +543,15 @@ function invalidateSlashSkillCaches(){
   _skillCommandCache=[];
   _skillCommandCacheReady=false;
   _skillCommandLoadPromise=null;
+  // Slash command metadata is profile-scoped: a profile switch must never
+  // keep profile A's skill/agent/bundle command list authoritative in
+  // profile B (#5896 gate-fail #7).
+  _bundleCommandCache=[];
+  _bundleCommandLoadPromise=null;
+  _bundleCommandCacheReady=false;
+  _agentCommandCache=null;
+  _agentCommandCachePromise=null;
+  _agentCommandCacheReady=false;
 }
 
 function _getSlashSubArgOptions(spec){
@@ -563,9 +572,13 @@ let _agentCommandMetadataRetryAt=0;
 async function loadAgentCommandMetadata(force=false){
   if(_agentCommandCacheReady&&!force)return _agentCommandCache||[];
   if(_agentCommandCachePromise&&!force)return _agentCommandCachePromise;
+  // Capture the profile generation: a reply produced for the outgoing profile
+  // must not commit after invalidateSlashSkillCaches() (#5896 gate-fail #7).
+  const gen=_slashSkillCacheGen;
   _agentCommandCachePromise=(async()=>{
     try{
       const data=await api('/api/commands');
+      if(gen!==_slashSkillCacheGen) return _agentCommandCache||[];
       _agentCommandCache=Array.isArray(data&&data.commands)?data.commands:[];
       _agentCommandCacheAvailable=true;
       _agentCommandCacheReady=true;
@@ -577,11 +590,15 @@ async function loadAgentCommandMetadata(force=false){
       // empty registry: leave ready=false so the next call retries, and record
       // the failure so callers can distinguish an unavailable registry from a
       // genuine unknown command (#7683).
-      _agentCommandCache=null;
-      _agentCommandCacheAvailable=false;
-      _agentCommandCacheReady=false;
+      if(gen===_slashSkillCacheGen){
+        _agentCommandCache=null;
+        _agentCommandCacheAvailable=false;
+        _agentCommandCacheReady=false;
+      }
     }finally{
-      _agentCommandCachePromise=null;
+      // A stale reply must not touch the promise either: the switch already
+      // cleared it and a newer load may own the slot.
+      if(gen===_slashSkillCacheGen)_agentCommandCachePromise=null;
     }
     return _agentCommandCache||[];
   })();
@@ -734,6 +751,17 @@ async function resolveBundleCommand(text,_meta){
   return api('/api/commands/bundles/resolve',{
     method:'POST',
     body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})
+  });
+}
+
+async function resolveSkillCommand(text, sessionId){
+  const command=String(text||'').trim();
+  if(!command) throw new Error('command is required');
+  const body={command};
+  if(sessionId) body.session_id=sessionId;
+  return api('/api/commands/skills/resolve',{
+    method:'POST',
+    body:JSON.stringify(body)
   });
 }
 
@@ -2858,15 +2886,23 @@ async function loadSkillCommands(force=false){
 async function loadBundleCommands(force=false){
   if(_bundleCommandCacheReady&&!force)return _bundleCommandCache;
   if(_bundleCommandLoadPromise&&!force)return _bundleCommandLoadPromise;
+  // Capture the profile generation: a reply produced for the outgoing profile
+  // must not commit after invalidateSlashSkillCaches() (#5896 gate-fail #7).
+  const gen=_slashSkillCacheGen;
   _bundleCommandLoadPromise=(async()=>{
     try{
       await loadAgentCommandMetadata();
       const data=await api('/api/commands/bundles');
       const deduped=new Map();
       for(const bundle of (data&&data.bundles)||[]){const entry=_buildBundleCommandEntry(bundle);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      if(gen!==_slashSkillCacheGen) return _bundleCommandCache;
       _bundleCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
-    }catch(_){_bundleCommandCache=[];}
-    finally{_bundleCommandCacheReady=true;_bundleCommandLoadPromise=null;}
+    }catch(_){if(gen===_slashSkillCacheGen)_bundleCommandCache=[];}
+    finally{
+      // A stale reply must not touch the promise either: the switch already
+      // cleared it and a newer load may own the slot.
+      if(gen===_slashSkillCacheGen){_bundleCommandCacheReady=true;_bundleCommandLoadPromise=null;}
+    }
     return _bundleCommandCache;
   })();
   return _bundleCommandLoadPromise;

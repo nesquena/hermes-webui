@@ -3235,6 +3235,49 @@ def _settle_result_messages(
     return result_messages
 
 
+def _rewrite_context_user_turn(session, expanded_text: str, msg_text: str) -> None:
+    """Keep the model context on the expanded skill payload after a RAW split.
+
+    The RAW/agent-only split (#5896) persists the raw ``/skill …`` command as the
+    visible user row (``persist_user_message``) while feeding the full expansion
+    to the model via ``user_message``. Because the agent persists the RAW text,
+    ``result_messages`` — and therefore ``session.context_messages`` after the
+    settle — carry RAW. Rewrite the CURRENT turn's user row in the context (as a
+    deep copy, so the display rows in ``session.messages`` are untouched) with the
+    expansion, so the skill content survives into the next turn's
+    ``conversation_history`` (gate-fail #5).
+    """
+    if not expanded_text or not msg_text:
+        return
+    context = list(getattr(session, "context_messages", None) or [])
+    idx = None
+    for i in range(len(context) - 1, -1, -1):
+        m = context[i]
+        if (
+            isinstance(m, dict)
+            and m.get("role") == "user"
+            and _looks_like_current_user_turn(m, msg_text)
+        ):
+            idx = i
+            break
+    if idx is None:
+        return
+    rewritten = copy.deepcopy(context[idx])
+    if not isinstance(rewritten, dict):
+        return
+    rewritten["content"] = expanded_text
+    # Model-representation ownership (#5896 re-gate): this context row is the
+    # EXPANSION of the raw user turn `msg_text`. Record the raw text on the row
+    # so the display merge keys it on its DISPLAY representation instead of the
+    # expansion. Without this link `_merge_display_messages_after_agent_result`
+    # treats the expansion as a context-only turn and backfills it into
+    # `session.messages`, which then leaks through cold reload and the
+    # older-message GET.
+    rewritten["_skill_raw_user_text"] = msg_text
+    context[idx] = rewritten
+    session.context_messages = context
+
+
 def _current_turn_already_has_visible_assistant_answer(messages, *, active_turn_identity=None):
     """Return True only when the token-owned current turn already has visible assistant prose."""
     if not isinstance(active_turn_identity, dict) or not active_turn_identity.get('token'):
@@ -10404,6 +10447,25 @@ def _message_identity(msg):
     )
 
 
+def _display_identity_for_context_row(msg):
+    """Identity of a MODEL-context row as its DISPLAY counterpart is keyed.
+
+    ``_rewrite_context_user_turn()`` replaces a user row's visible text with the
+    resolved skill expansion and records the original raw text in
+    ``_skill_raw_user_text``. That row is a model-only representation of the
+    same turn the display still carries as ``/skill …``. The display backfill
+    (which decides whether a context row is already present in the transcript)
+    must key such a row on the raw text, or the expansion looks like a
+    context-only turn and is backfilled into ``session.messages`` (#5896
+    re-gate).
+    """
+    if isinstance(msg, dict):
+        raw = msg.get('_skill_raw_user_text')
+        if isinstance(raw, str) and raw and msg.get('role') == 'user':
+            return _message_identity({'role': 'user', 'content': raw})
+    return _message_identity(msg)
+
+
 # Fields that participate in the model-facing row comparison for an EXACT prefix
 # proof. These are the keys the Agent actually sent to the provider; comparing
 # them verbatim (no whitespace normalization, no 500-char truncation) is the
@@ -12123,7 +12185,7 @@ def _merge_display_messages_after_agent_result(
             return _display_identity_by_durable_tool_row.get(_durable)
 
         _context_id_set = {
-            _message_identity(m)
+            _display_identity_for_context_row(m)
             for m in previous_context
             if not _is_displayed_native_image_context_row(m)
             if _displayed_durable_tool_twin_identity(m) is None
@@ -12139,7 +12201,8 @@ def _merge_display_messages_after_agent_result(
                     continue
                 _twin_identity = _displayed_durable_tool_twin_identity(m)
                 context_keys.append(
-                    _twin_identity if _twin_identity is not None else _message_identity(m)
+                    _twin_identity if _twin_identity is not None
+                    else _display_identity_for_context_row(m)
                 )
             # Precompute display keys once; avoids repeated json.dumps calls inside
             # the inner any() loop (was O(D²·C) — see perf fix below).
@@ -14383,6 +14446,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    agent_message=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -16775,9 +16839,10 @@ def _run_agent_streaming(
                 session_id,
                 pending_async_acceptances=_pending_async_acceptances,
             )
-            _agent_msg_text = msg_text
+            _model_msg_text = agent_message or msg_text
+            _agent_msg_text = _model_msg_text
             if _process_notifications:
-                _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
+                _agent_msg_text = "\n\n".join([*_process_notifications, _model_msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=(getattr(s, "profile", None) or Path(_profile_home)))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             with _agent_lock:
@@ -16833,10 +16898,10 @@ def _run_agent_streaming(
                         _process_notifications.remove(_notification)
                     except ValueError:
                         pass
-                _agent_msg_text = msg_text
+                _agent_msg_text = _model_msg_text
                 if _process_notifications:
                     _agent_msg_text = "\n\n".join(
-                        [*_process_notifications, msg_text]
+                        [*_process_notifications, _model_msg_text]
                     ).strip()
                 user_message = _build_native_multimodal_message(
                     workspace_ctx,
@@ -17070,6 +17135,11 @@ def _run_agent_streaming(
                         _run_conversation_projected_history,
                         compression_authorized=_compressed_this_turn,
                     )
+                    if agent_message:
+                        # RAW/agent-only split: display/persisted rows already
+                        # carry the RAW command; keep the model context on the
+                        # expansion so skill content survives across turns.
+                        _rewrite_context_user_turn(s, agent_message, msg_text)
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -17575,6 +17645,8 @@ def _run_agent_streaming(
                                         agent, session_id
                                     ),
                                 )
+                                if agent_message:
+                                    _rewrite_context_user_turn(s, agent_message, msg_text)
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
@@ -19103,6 +19175,8 @@ def _run_agent_streaming(
                                             _heal_agent, session_id
                                         ),
                                     )
+                                    if agent_message:
+                                        _rewrite_context_user_turn(s, agent_message, msg_text)
                                     # Terminal self-heal success must finalize the
                                     # turn exactly once: clear the pending markers
                                     # so the last-resort recovery sync in the outer

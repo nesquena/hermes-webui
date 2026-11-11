@@ -204,6 +204,44 @@ def test_bundle_records_loaded_skills_and_preserves_response(monkeypatch):
     assert response["missing_skills"] == ["missing"]
 
 
+def test_skill_resolve_records_loaded_skills_and_preserves_response(monkeypatch):
+    session = Session(session_id="issue6593-skill", profile="default")
+    saved = []
+    session.save = lambda **kwargs: saved.append(kwargs)
+    body = {
+        "command": "/llm-wiki list pages",
+        "session_id": session.session_id,
+    }
+    result = {
+        "name": "llm-wiki",
+        "source": "skill",
+        "message": "resolved",
+        "loaded_skills": ["llm-wiki"],
+    }
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+    monkeypatch.setattr(
+        "api.commands.resolve_skill_command",
+        lambda _command, session_id=None: result,
+    )
+
+    response = routes.handle_post(
+        _Handler("POST"),
+        SimpleNamespace(path="/api/commands/skills/resolve", query=""),
+    )
+
+    assert response is result
+    assert session.skill_provenance == {"llm-wiki": 1}
+    assert saved == [{"touch_updated_at": False, "skip_index": True}]
+    assert response["loaded_skills"] == ["llm-wiki"]
+
+
 def test_bundle_started_before_clear_does_not_restore_usage(monkeypatch):
     session = Session(
         session_id="issue6593-bundle-clear-race",

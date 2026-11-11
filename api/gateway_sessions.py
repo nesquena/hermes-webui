@@ -48,6 +48,25 @@ def display_history(snapshot):
     return rows
 
 
+def restore_raw_display_turn(messages, agent_message, raw_text):
+    """Rewrite THIS turn's display user row back to the raw slash command.
+
+    The Gateway stores ``prompt.submit.text``, which is the model-facing skill
+    expansion. Its canonical display history therefore shows the expansion as
+    the user's message; the WebUI transcript must keep the raw ``/skill ...``
+    command it persisted (#5896 re-gate).
+    """
+    if not agent_message or not raw_text:
+        return messages
+    needle = str(agent_message).strip()
+    for row in reversed(messages):
+        if isinstance(row, dict) and row.get("role") == "user":
+            if str(row.get("content") or "").strip() == needle:
+                row["content"] = str(raw_text)
+            break
+    return messages
+
+
 def config_for_session(session):
     """Use the owning profile on workers without request-local profile context.
 
@@ -467,7 +486,7 @@ class SessionRelay:
             await asyncio.sleep(min(failures * 0.5, 5))
 
 
-def run_session(session, stream_id, text, *, emit, cancel, record, saved=None):
+def run_session(session, stream_id, text, *, emit, cancel, record, saved=None, model_text=None):
     from api.profiles import get_hermes_home_for_profile, _is_root_profile
     home = str(Path(get_hermes_home_for_profile(session.profile)).resolve())
     if saved and saved.get("profile_home") != home:
@@ -488,8 +507,12 @@ def run_session(session, stream_id, text, *, emit, cancel, record, saved=None):
         raise SessionTransportError("Gateway session transport is not configured.")
     if saved and saved.get("session_connection", {"mode": "local"}) != binding:
         raise SessionTransportError("Gateway connection changed; refusing to replay this turn.")
+    # #5896 re-gate: the Gateway session RPC must receive the same model-facing
+    # text as the runs API (the resolved skill expansion when present), not the
+    # raw `/skill …` command; the raw stays the display/persisted turn.
     request = (saved or {}).get("session_request") or {
-        "session_id": session.session_id, "input_id": "webui:" + stream_id, "text": text,
+        "session_id": session.session_id, "input_id": "webui:" + stream_id,
+        "text": str(model_text or text),
     }
     def persist(run_id, request):
         record(run_id, request, transport="session", session_request=request, profile_home=home,

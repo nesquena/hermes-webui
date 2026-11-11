@@ -1881,8 +1881,22 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                   intact — it means the marker that keeps the id from coming
                                   back as a recoverable foreign session is missing; retrying
                                   the same delete records the marker and answers {"ok": true}.
-    /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
+    /api/commands/skills/resolve
+                               {"command": "/skill-name [args]", "session_id"?}
+                               -> {"name", "source", "message", ...}. Resolves a
+                                  `<skill>` command server-side into the invocation
+                                  payload the model receives; `session_id` (when it
+                                  is visible to the request profile) templates
+                                  ${HERMES_SESSION_ID}. Unknown skill -> 404.
+    /api/chat/start            {"session_id", "message", "model"?, "workspace"?,
+                                "agent_message"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
+                               `message` is the user-visible/persisted turn;
+                               `agent_message`, when present, is the model-facing
+                               text for that same turn (the resolved `/skill`
+                               expansion). The model context receives
+                               `agent_message`; the transcript, title and reload
+                               keep `message`.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
                                -> blocks until agent finishes. Returns full result.
     /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link.
