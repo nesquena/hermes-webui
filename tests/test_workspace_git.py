@@ -2766,4 +2766,5 @@ def test_host_git_isolation_skips_instead_of_running_on_git_without_config_redir
         with pytest.raises(pytest.skip.Exception, match="older than 2.32"):
             isolation.require_config_redirects(str(fake))
     else:
+        assert isolation.git_supports_config_redirects(str(fake)) is True
         isolation.require_config_redirects(str(fake))
