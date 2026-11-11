@@ -1359,3 +1359,268 @@ def test_kanban_unassigned_lane_in_sidebar_meta():
     meta_body = meta_match.group(1)
     # Must emit unassigned label when task.assignee is falsy.
     assert "t('kanban_unassigned')" in meta_body
+
+
+# ── #7900 / PR #7906: Scheduled must be reachable from touch surfaces ────────
+# Cards on the board are HTML5-draggable only, so a phone/tablet user can see
+# the Scheduled column but (before this PR) could never move a task into it:
+# neither the detail-view status buttons nor the sidebar bulk select offered
+# it.  The three tests below execute the real renderer / modal helpers in a
+# Node vm and assert on the produced DOM, not on the source text.
+
+def _vm_run_panels(driver_js, *, element_ids=(), t_map=None):
+    """Run ``driver_js`` inside a Node ``vm`` context that has the whole of
+    ``static/panels.js`` loaded, and return the JSON value it produced.
+
+    ``element_ids`` pre-creates fake ``document.getElementById`` targets so
+    DOM-writing helpers (the status hint) can be observed; ``t_map`` supplies
+    the i18n lookups the driver needs (fed from the real ``en`` bundle by the
+    callers so a label assertion can never be vacuous).
+    """
+    import json
+    import subprocess
+
+    elements = [{"id": el_id} for el_id in element_ids]
+    script = (
+        "const __elementSpecs = " + json.dumps(elements) + ";\n"
+        "const __tMap = " + json.dumps(t_map or {}) + ";\n"
+        r"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync('static/panels.js', 'utf8');
+function esc(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function jsArg(value) { return esc(JSON.stringify(String(value == null ? '' : value))); }
+const __els = {};
+for (const spec of __elementSpecs) {
+  __els[spec.id] = { hidden: true, textContent: '', value: '', dataset: {} };
+}
+const context = {
+  console,
+  setInterval(){ return 1; },
+  clearInterval(){},
+  document: {
+    querySelectorAll(){ return []; },
+    getElementById(id){ return __els[id] || null; },
+    addEventListener(){}
+  },
+  window: { addEventListener(){} },
+  t(key){ return __tMap[key] !== undefined ? __tMap[key] : key; },
+  esc, jsArg, $(){ return null; }, api(){}, showToast(){}, li(){ return ''; }, S: {}
+};
+vm.createContext(context);
+vm.runInContext(src, context);
+"""
+        + "const __out = vm.runInContext(`(() => { " + driver_js + " })()`, context);\n"
+        + "console.log(JSON.stringify(__out));\n"
+    )
+    result = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
+    return json.loads(result.stdout)
+
+
+def _en_i18n_values(*keys):
+    """Read the ``en`` bundle's literal values for ``keys`` from i18n.js."""
+    en_block = dict(_locale_blocks_with_body(I18N))["en"]
+    values = {}
+    for key in keys:
+        match = re.search(rf"\b{re.escape(key)}\s*:\s*'([^']*)'", en_block)
+        assert match, f"key '{key}' missing from the en locale bundle"
+        values[key] = match.group(1)
+    return values
+
+
+def _status_action_buttons(html):
+    """Collect ``<button>`` elements nested in ``.kanban-status-actions``."""
+    from html.parser import HTMLParser
+
+    class Parser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_target = False
+            self.depth = 0
+            self.buttons = []
+            self.current = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "div":
+                if self.in_target:
+                    self.depth += 1
+                elif "kanban-status-actions" in (attrs.get("class") or "").split():
+                    self.in_target = True
+                    self.depth = 0
+            if self.in_target and tag == "button":
+                self.current = {"onclick": attrs.get("onclick") or "", "text": ""}
+                self.buttons.append(self.current)
+
+        def handle_endtag(self, tag):
+            if not self.in_target:
+                return
+            if tag == "button":
+                self.current = None
+            elif tag == "div":
+                if self.depth == 0:
+                    self.in_target = False
+                else:
+                    self.depth -= 1
+
+        def handle_data(self, data):
+            if self.current is not None:
+                self.current["text"] += data
+
+    parser = Parser()
+    parser.feed(html)
+    return parser.buttons
+
+
+def _detail_status_buttons(task_status="todo"):
+    driver = (
+        "const html = _kanbanRenderTaskDetail({"
+        f"task:{{id:'t_1', title:'Demo', status:'{task_status}', body:'Body'}},"
+        "comments:[], events:[], links:{parents:[], children:[]}, runs:[],"
+        "log:{content:''}});"
+        "return {html};"
+    )
+    out = _vm_run_panels(driver, t_map=_en_i18n_values(
+        "kanban_status_triage", "kanban_status_todo", "kanban_status_scheduled",
+        "kanban_status_ready", "kanban_status_running", "kanban_status_blocked",
+        "kanban_status_done", "kanban_status_archived",
+    ))
+    assert "ReferenceError" not in out["html"]
+    return _status_action_buttons(out["html"])
+
+
+def test_kanban_detail_status_buttons_offer_scheduled():
+    """Touch users enter Scheduled from the detail-view status buttons (the
+    board's cards have no touch drag), so the button array must offer it right
+    after ``todo`` — mirroring the board's column order — and the label must be
+    the real ``en`` bundle value for ``kanban_status_scheduled``.
+    """
+    buttons = _detail_status_buttons()
+    statuses = []
+    for button in buttons:
+        match = re.search(r"status:'(\w+)'", button["onclick"])
+        if match:
+            statuses.append((match.group(1), button["text"]))
+
+    assert statuses, "detail view rendered no status buttons at all"
+    names = [name for name, _ in statuses]
+    assert "scheduled" in names, (
+        "the detail view is the only way a touch user can enter Scheduled — "
+        f"status buttons were {names}"
+    )
+    # 'running' stays out (dispatcher-owned); 'scheduled' sits between todo and ready.
+    assert names.index("scheduled") == names.index("todo") + 1, (
+        f"Scheduled must follow Todo to mirror column order, got {names}"
+    )
+    assert "running" not in names
+    assert dict(statuses)["scheduled"] == _en_i18n_values(
+        "kanban_status_scheduled"
+    )["kanban_status_scheduled"], "button label must come from kanban_status_scheduled"
+    # Block/Unblock keep their dedicated verbs after the status buttons.
+    assert "blockKanbanTask" in buttons[-2]["onclick"]
+    assert "unblockKanbanTask" in buttons[-1]["onclick"]
+
+
+def _bulk_status_options():
+    from html.parser import HTMLParser
+
+    class Parser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_select = False
+            self.options = []
+            self.current = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "select" and attrs.get("id") == "kanbanBulkStatus":
+                self.in_select = True
+            elif tag == "option" and self.in_select:
+                self.current = {
+                    "value": attrs.get("value"),
+                    "i18n": attrs.get("data-i18n"),
+                    "text": "",
+                }
+                self.options.append(self.current)
+
+        def handle_endtag(self, tag):
+            if tag == "select" and self.in_select:
+                self.in_select = False
+            elif tag == "option":
+                self.current = None
+
+        def handle_data(self, data):
+            if self.current is not None:
+                self.current["text"] += data
+
+    parser = Parser()
+    parser.feed(INDEX)
+    return parser.options
+
+
+def test_kanban_bulk_status_select_offers_scheduled():
+    """The sidebar bulk bar is the second touch surface: it must offer
+    Scheduled exactly the way it offers Blocked — ``value="scheduled"`` plus
+    the ``kanban_status_scheduled`` i18n hook, and the same English label the
+    locale bundle resolves to.
+    """
+    options = _bulk_status_options()
+    by_value = {option["value"]: option for option in options}
+    assert "scheduled" in by_value, (
+        "bulk status select has no Scheduled option; a touch user can neither "
+        f"enter Scheduled from a multi-select, options were {[o['value'] for o in options]}"
+    )
+    scheduled = by_value["scheduled"]
+    assert scheduled["i18n"] == "kanban_status_scheduled", (
+        "the Scheduled option must be wired to kanban_status_scheduled"
+    )
+    # Parallel to Blocked: same value/data-i18n/text shape.
+    blocked = by_value.get("blocked")
+    assert blocked is not None and blocked["i18n"] == "kanban_status_blocked"
+    labels = _en_i18n_values("kanban_status_scheduled", "kanban_status_blocked")
+    assert scheduled["text"].strip() == labels["kanban_status_scheduled"]
+    assert blocked["text"].strip() == labels["kanban_status_blocked"]
+
+
+def test_kanban_editor_handles_scheduled_like_blocked():
+    """Greptile P1 (#7906): the task editor must accept a Scheduled card on
+    the same precedent as Blocked — display the dropdown as ``triage`` and
+    surface ``Actual status: Scheduled`` instead of silently demoting the
+    task on save.
+    """
+    labels = _en_i18n_values(
+        "kanban_status_original_hint", "kanban_status_scheduled", "kanban_status_blocked"
+    )
+    driver = (
+        "const shown = _kanbanEditableStatusFor('scheduled');"
+        "const blockedShown = _kanbanEditableStatusFor('blocked');"
+        "_kanbanSetTaskModalStatusHint('scheduled', shown);"
+        "const el = document.getElementById('kanbanTaskModalStatusOriginalHint');"
+        "const hintHidden = el.hidden;"
+        "const hintText = el.textContent;"
+        "_kanbanSetTaskModalStatusHint('blocked', blockedShown);"
+        "return {shown, blockedShown, hintHidden, hintText,"
+        " blockedHint: el.textContent};"
+    )
+    out = _vm_run_panels(
+        driver,
+        element_ids=["kanbanTaskModalStatusOriginalHint"],
+        t_map=dict(labels, kanban_status_todo="Todo"),
+    )
+    assert out["shown"] == out["blockedShown"] == "triage", (
+        "a Scheduled card must map to the modal's default display exactly like "
+        f"Blocked does (got {out['shown']!r} / {out['blockedShown']!r})"
+    )
+    assert out["hintHidden"] is False, "the Actual status hint must be visible"
+    expected = labels["kanban_status_original_hint"].replace(
+        "{0}", labels["kanban_status_scheduled"]
+    )
+    assert out["hintText"] == expected, (
+        f"hint must read {expected!r}, got {out['hintText']!r}"
+    )
+    # Blocked keeps behaving the same way — the precedent Scheduled follows.
+    assert labels["kanban_status_blocked"] in out["blockedHint"]

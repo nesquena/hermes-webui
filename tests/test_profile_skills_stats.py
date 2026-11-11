@@ -128,23 +128,29 @@ def test_platform_disabled_webui(tmp_path):
     assert compat == 1 and enabled == 0
 
 @requires_agent_modules
-def test_skills_stats_cache(tmp_path):
-    """Caching avoids re-parsing SKILL.md, but the per-call mtime probe catches
-    a real skill add/remove immediately (the #4783 fix — adding a skill bumps
-    the skills-dir mtime, so the next call recomputes rather than serving stale
-    counts for the whole TTL)."""
+def test_skills_stats_cache(tmp_path, monkeypatch):
+    """Caching avoids re-parsing SKILL.md; a real skill add/remove is caught by
+    the mtime probe on the background revalidate, not the request path (the
+    #7940 SWR contract — a fresh-window hit serves zero-I/O, so an out-of-band
+    change is noticed when the entry goes stale and the worker republishes the
+    corrected counts)."""
     profiles._SKILLS_STATS_CACHE.clear()
+    # Drive the worker inline via the spawn seam so the recount is deterministic.
+    monkeypatch.setattr(
+        profiles, "_start_skills_stats_revalidate_thread",
+        lambda pd: profiles._revalidate_skills_stats_worker(pd),
+    )
 
     _write_skill(tmp_path, "alpha")
     enabled, compat = profiles._get_profile_skills_stats(tmp_path)
     assert enabled == 1 and compat == 1
 
-    # A second call with NO change serves the cache (no recompute) — same value.
+    # A second call inside the fresh window serves the cache with zero I/O.
     enabled, compat = profiles._get_profile_skills_stats(tmp_path)
     assert enabled == 1 and compat == 1
 
-    # Adding a skill bumps the skills-dir mtime; the cheap probe detects it on
-    # the very next call and the counts update immediately (no stale TTL window).
+    # Adding a skill bumps the skills-dir mtime; the probe detects it on the
+    # revalidate worker (visibility bounded by _SKILLS_STATS_REVALIDATE_AFTER).
     _write_skill(tmp_path, "beta")
     # Guarantee the skills-dir mtime is STRICTLY newer than the cached probe value.
     # A real FS-backed skill-add always advances the dir mtime, but two writes inside
@@ -157,8 +163,18 @@ def test_skills_stats_cache(tmp_path):
     _skills_dir = tmp_path / "skills"
     _future = _time.time() + 5
     _os.utime(_skills_dir, (_future, _future))
+
+    # Age the entry past the revalidate window: the next hit answers with the
+    # stale counts AND spawns the worker, which republishes the recount.
+    resolved = tmp_path.resolve()
+    e, c, m, x, o, _v = profiles._SKILLS_STATS_CACHE[resolved]
+    profiles._SKILLS_STATS_CACHE[resolved] = (
+        e, c, m, x, o, _time.time() - profiles._SKILLS_STATS_REVALIDATE_AFTER - 1.0,
+    )
     enabled, compat = profiles._get_profile_skills_stats(tmp_path)
-    assert enabled == 2 and compat == 2
+    assert enabled == 1 and compat == 1  # stale hit answers immediately
+    enabled, compat = profiles._get_profile_skills_stats(tmp_path)
+    assert enabled == 2 and compat == 2  # worker republished the recount
 
     # .clear() still forces a fresh recompute regardless of mtime/TTL.
     profiles._SKILLS_STATS_CACHE.clear()

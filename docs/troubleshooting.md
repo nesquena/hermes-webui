@@ -242,6 +242,12 @@ bootstrap probe accepts either backend.
 
 ---
 
+## Browser becomes unresponsive while switching running conversations
+
+If `/health` is healthy and `active_runs` still contains the tasks, a frozen browser does not mean the backend workers have crashed. Reconnecting to a long reasoning stream can replay many chunks at once; repainting the activity scene for every chunk can block the browser main thread.
+
+Reasoning deltas remain in each conversation's `INFLIGHT` state. Display updates share the answer's coalesced render scheduler, with synchronous tail flushes at interim-answer, tool, and terminal boundaries. Queued renders check the current conversation and stream ownership before updating the pane. Transport recovery paints pending assistant prose before cancelling the queued frame, so already received text stays visible while reconnecting. Reloading the page reconnects to existing tasks; the backend does not need to restart just because the browser froze.
+
 ## "Response interrupted." marker keeps saying "no agent output was recovered"
 
 **Symptom.** After a live response stream stops before a turn completes (manual restart, OOM, crash, browser/SSE disconnect, lost worker bookkeeping, …), the affected chat shows an `**Response interrupted.**` marker. If the run-journal for that turn is already visible on disk, the marker says the partial output was recovered; if not, it preserves the user turn and says no agent output was recovered yet.
@@ -274,6 +280,50 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 **Caps.** The lazy retry path gives up after 12 failed attempts or 24h of wall-clock age, at which point the marker is demoted to a neutral *"Partial output may have been lost."* wording so the "reload to retry" prompt doesn't linger forever for genuinely lost journals.
 
 **When to file a bug.** If, after the fix, you see the lazy-retry wording (*"Recovering the partial output from the run journal — reload this session to retry."*) but reloading the session never promotes it to the recovered wording even though the `.jsonl` clearly contains `token` events, capture the marker JSON and the run-journal file and file a bug.
+
+---
+
+## Run journal is large / disk keeps filling (#7613)
+
+**Symptom.** `sessions/_run_journal/` grows without bound — hundreds of MB to several GB on installs with long-lived sessions or many long runs. Every run appends one `{run_id}.jsonl` and nothing removes them, so the directory only ever grows.
+
+**What runs now.** An hourly sweep (on the existing maintenance tick, never on a request path) **archives** runs past the retention caps — it does *not* delete them:
+
+```bash
+du -sh ~/.hermes/webui/sessions/_run_journal          # live run files
+du -sh ~/.hermes/webui/sessions/_run_journal_archive  # compressed archives
+```
+
+Archived runs live at `_run_journal_archive/<session_id>/<run_id>.jsonl.gz` and every read path (run status, session reload, replay after reconnect) falls back to them transparently, so recovery still works for archived runs.
+
+**Caps** (env var > `settings.json` > default; `0` disables an individual cap):
+
+| Cap | Default | Meaning |
+| --- | --- | --- |
+| `run_journal_retention_ttl_days` | `14` | Archive runs older than N days |
+| `run_journal_retention_max_runs_per_session` | `40` | Keep at most N newest runs live per session |
+| `run_journal_retention_max_bytes_per_session` | `256 MiB` | Per-session budget for live run-journal bytes |
+| `run_journal_archive_ttl_days` | `0` (never) | **Only destructive knob** — delete archives older than N days (an archive a session still needs to recover an interrupted answer is kept until the session no longer references it or is deleted) |
+
+An explicitly supplied but invalid or out-of-range value **disables** that cap
+instead of falling back to `settings.json` or the default, so a typo can never
+silently re-enable the operation you were trying to change.
+
+**Notes.**
+
+- Runs without a complete terminal row (including a journal truncated mid-write) are **never** archived — a crashed run stays in place, readable, exactly as before.
+- A run the session still needs to recover an interrupted answer (its active stream, or the run an interrupted-turn marker names) stays live, so rolling back to a release that predates the archive format (such as v0.52.492) can still recover it.
+- An archived run's compressed copy is verified byte-exact before the live file is dropped; a failure at any step leaves the live file untouched (a missed archive is always safe).
+- Deleting a session deletes its archives too.
+- Set `HERMES_WEBUI_RUN_JOURNAL_SWEEP=0` to turn the sweep off entirely.
+- On Windows (no `dir_fd` support) the sweep disables itself; retention is POSIX-only until the move can be made race-safe there.
+- To manually reclaim live journal bytes immediately, run a sweep in-process (the hourly schedule otherwise applies):
+
+  ```bash
+  python3 -c "from api.run_journal import sweep_run_journal; print(sweep_run_journal())"
+  ```
+
+  (Run from the repo root with the same Python/venv the server uses.)
 
 ---
 
@@ -419,6 +469,24 @@ python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confir
 
 ---
 
+## Update fetch cannot create a remote-tracking ref
+
+**Symptom.** After a remote branch rename, Git reports that
+`refs/remotes/origin/onboarding` exists and it cannot create
+`refs/remotes/origin/onboarding/next` (Git older than 2.51), or only
+`some local refs could not be updated; try running 'git remote prune origin'`
+(Git 2.51 and newer, which batches fetch ref updates).
+
+**Recovery.** For the updater's `fetch origin` commands and the default clone
+mapping (`+refs/heads/*:refs/remotes/origin/*`), the runner retries this collision
+once with `--prune --no-prune-tags` and an explicit remote-tracking-only
+mapping, so config changes during recovery cannot widen the prune destinations.
+Git removes stale remote-tracking refs before fetching their replacements;
+local branches, local-only tags, and
+working-tree edits remain intact. Custom mappings (including mappings into
+local tags or branches), explicit refspecs, and other failures retain their
+normal diagnostics and require manual inspection instead of automatic pruning.
+
 ## Update check reports a Git authentication or fetch failure
 
 **Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
@@ -536,6 +604,66 @@ python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_proces
 **Fix.** `unavailable` while a turn is running is expected: refresh once the turn finishes. If it persists with no turn running, the Agent predates the process-home pin; upgrade Hermes Agent. `legacy_process` means the Agent has no profile-scoped MCP ledger at all; its `/reload-mcp` stays process-wide by design. After changing a profile's `mcp_servers`, run `/reload-mcp` **from that profile**: it only resets that profile's own connections and retries its failed servers.
 
 **When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and a server is still reported *Active* with tools you cannot see in the inventory, or if `/reload-mcp` from one profile changes another profile's `tool_count`.
+
+---
+
+## Memory is off, or a memory provider is disabled for a profile (#8517)
+
+**Symptom.** Agents stop recalling or saving memory (the built-in MEMORY.md/USER.md, an external provider such as Hindsight or Mnemosyne, or both), on some profiles or once more than one profile is in use. The WebUI server log has a `[webui] #8517:` warning.
+
+**Why.** WebUI holds every agent to the memory of its own session's profile and fails closed (#8517): when it cannot prove that, the profile runs without that memory instead of reading or writing another profile's. Each is logged once per WebUI process (the shared-instance one once per pair of profiles):
+
+| Log text | Cause | Effect |
+|---|---|---|
+| `has no context-local home override (older than v0.18.0)` | Hermes Agent older than v0.18.0 | All memory (external and built-in) is off for every agent. |
+| `no claim_instance; older than 2026-10-17` | Agent without `claim_instance`, and this WebUI serves several profiles (a named profile directory exists, or two profile homes were used) | External providers are off for every agent; built-in memory still works. A single-profile install keeps them. |
+| `returned the same shared provider instance that already serves profile home` | The provider plugin hands every agent one shared instance | The first profile that used it keeps it until the WebUI restarts; the others run without it. |
+
+Session boundaries (cache eviction, a new chat, shutdown) commit memory as the session's owner. A commit that cannot run as the owner is logged as `not run` (`The work stays pending`); one the Agent refuses logs `It is NOT counted as committed; the work stays pending`. Both are retried at the next boundary. WebUI notices the Agent's refusal at the Agent's own refusal function (`agent.memory_caller_scope._refuse`), before anything is logged, so the refusal is detected whatever the logging configuration (levels above WARNING, disabled loggers, `logging.disable`) and that configuration is never changed (#8613). An Agent without that function has no caller-scope check and never refuses. An evicted agent whose owner cannot be resolved (its session file was removed outside the WebUI) gets no session end — an unknown owner never commits — but its provider is no longer left running for that alone (#8613): the WebUI releases it without a session end, and only once it can prove the evicted agent is the LAST holder of every provider instance it serves. A provider instance shared with a live agent of the same profile therefore keeps running for that agent, and a construction or a queued save that is still using the instance holds the release back until it is done. While it waits, the log says the provider `was NOT released` and names the reason. A release that only queued memory work holds back is kept, and runs on its own once that work has drained, without another session boundary.
+**Diagnostic commands.** Run the Python lines with the Agent's interpreter (the one the WebUI uses).
+
+```bash
+grep -E '\[webui\] #(8517|8613|8804)' <webui-server-log>
+python3 -c "import hermes_constants as h; print('v0.18.0 home override:', callable(getattr(h, 'set_hermes_home_override', None)))"
+python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(getattr(m, 'claim_instance', None)))"
+```
+
+**Fix.** Upgrade Hermes Agent and restart the WebUI. For the shared-instance warning, the provider plugin must return a new instance per agent (the documented provider contract); until it does, only the first profile keeps it.
+
+**When to file a bug.** File a WebUI bug if memory is off while every diagnostic prints `True` and there is no shared-instance warning, or if one profile's memory shows another profile's entries.
+
+---
+
+## Memoryless turns on an older Hermes Agent, or a background summary left running after an eviction (#8804)
+
+**Symptom.** On a Hermes Agent from before 2026-10-19 (for example v0.22.2), a turn sometimes runs without memory right after another session of the same profile was evicted, and the WebUI server log has a `[webui] #8804:` warning. Or, with `compression.prepare_ahead` turned on, the log says a background summary pass `runs to completion unused`.
+
+**Why.** Two cleanups run when the WebUI evicts an agent. Both fail closed.
+
+- **Old-Agent memory release (#8806).** An Agent whose memory manager has neither `release_soft` nor `claim_teardown` (before 2026-10-19) is released with its own `shutdown_all`. The evicted agent is then marked shut down, so a later close can't commit memory or close the provider a second time. On an Agent without `claim_instance` (before 2026-10-17), the WebUI can't keep a new agent off a provider instance that is being closed. So a construction for the same profile waits up to 30 seconds for that teardown to settle. If it is still running after that, the agent is built without memory for that turn and is not cached, and the next turn constructs it again.
+- **Background summary of an evicted agent (#8808).** When the session's owner can't be resolved (#8613), the WebUI refuses the evicted agent's shutdown, and with it the context engine's session end: a plugin engine's `on_session_end` may write session data. The one part that still runs is the Agent's own cancel of a pending background summary pass (`compression.prepare_ahead`, off by default, Agent v0.22.6 or later), with the reason `agent_released`, the same call the Agent makes when it releases an agent itself. It runs only when the engine is exactly the Agent's built-in compressor holding the Agent's own prepared-summary state, and only inside the profile home the agent was built under. In every other case the pass is left running and completes unused: one model call whose result nobody reads.
+
+| Log text | Level | Cause | Effect |
+|---|---|---|---|
+| `a teardown of the memory provider of profile home ... is still running` | WARNING | Agent without `claim_instance`; a same-profile teardown outlasted the 30 s wait | That session's agent runs without memory for this turn and is rebuilt on the next. |
+| `context engine is not the Agent's built-in compressor, so it is left alone` | WARNING, once per process | A plugin context engine on an evicted agent whose owner is unresolved | Its session end doesn't run (fail closed); a summary pass it started runs on. |
+| `was not cancelled (...); it runs to completion unused` | WARNING, once per process | The profile home the agent was built under couldn't be entered (the reason is in the parentheses) | The background summary pass completes, and its result is discarded. |
+| `holds prepared-summary state that is not the Agent's own` | DEBUG | The built-in compressor carries prepared-summary state that isn't the Agent's own object | Left alone; the pass runs on. |
+| `cancelling the prepared summary failed` | DEBUG | The Agent's cancel raised (the traceback follows) | The agent is still marked shut down. |
+
+The other `#8804` DEBUG lines (`could not record the build home`, `could not mark ... shut down`) mean a write to an attribute of the agent failed; they are diagnostic only. DEBUG lines appear only when the WebUI logs at DEBUG.
+
+**Diagnostic commands.** Run the Python lines with the Agent's interpreter (the one the WebUI uses).
+
+```bash
+grep -E '\[webui\] #8804' <webui-server-log>
+python3 -c "import agent.memory_manager as m; print('release_soft:', callable(getattr(m.MemoryManager, 'release_soft', None)))"
+python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(getattr(m, 'claim_instance', None)))"
+```
+
+**Fix.** Upgrade Hermes Agent and restart the WebUI. From 2026-10-19 on, the Agent's own soft release takes over and no construction waits. Leave `compression.prepare_ahead` off unless you use it; with it on, an eviction whose owner can't be resolved can cost one unused background model call.
+
+**When to file a bug.** File a WebUI bug if the memoryless-turn warning repeats for the same profile on turn after turn (a teardown that never settles), or if memory is off on an Agent that prints `True` for both diagnostics and there is no `#8804` or `#8517` warning.
 
 ---
 

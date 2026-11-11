@@ -79,6 +79,29 @@ not raw debug detail. Compact Activity may collapse tool arguments, long tool
 results, and low-level reasoning detail, but it must not make concise
 user-visible progress text available only inside a collapsed disclosure.
 
+A live Thinking card follows its own tail while reasoning streams: new text
+scrolls into view when the card is open at its bottom, exactly like the message
+pane. Scrolling up inside the card holds the reader's place (follow resumes on
+returning to the bottom), and collapsing the card mid-stream pauses the inner
+follow — expanding again restores it. Settled history cards never auto-scroll;
+they open at the top like any other persisted content, and opening one must not
+give it follow state: a persisted card that acquired a latch would chase its own
+tail on any later re-render, such as a 1280px-to-390px reflow.
+
+Opening a card is a transition, not an instant: the body animates from zero
+height, so its position only becomes meaningful once `max-height` finishes
+(`opacity` ends earlier and means nothing here). While that animation runs the
+card is "settling" — no follow state is seeded and no streaming delta may move
+it, so a reader who opens a long card and scrolls up is never yanked to the
+bottom by text arriving mid-animation. A card closed again before the animation
+ends stays unbound and re-measures on the next open.
+
+Follow intent survives rebuilds in both directions: a collapsed following card
+carries its latch across a scene-update rebuild and resumes follow when reopened
+(never re-measured at its top and put on hold), and a rebuild that interrupts a
+card's very first open lets the replacement body finish the open — it seeds
+follow state from its real position instead of staying follow-less.
+
 Automatic compression is a live-only context barrier, not a special branded
 tool card. Render it as a centered, non-interactive divider with quiet horizontal
 rules: `Compressing context` while the compression barrier is active and

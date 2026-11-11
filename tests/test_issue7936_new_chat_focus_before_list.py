@@ -38,5 +38,6 @@ def test_new_session_still_owns_the_sidebar_refresh():
     # newSession() owns the sole sidebar refresh, and it must force the paint
     # (deferWhileInteracting:false) so the new row/active highlight is not parked
     # while the pointer hovers #sessionList after the handlers dropped their
-    # own awaited render (#7936).
-    assert "refreshSessionList('new-session',{force:true})" in body
+    # own awaited render (#7936). It also carries the keep-picker intent so a
+    # picker opened while the create is in flight cannot park the row.
+    assert "refreshSessionList('new-session',{force:true,keepProjectPicker:true})" in body

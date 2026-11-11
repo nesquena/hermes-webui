@@ -207,8 +207,15 @@ def test_context_reconciliation_call_sites_keep_current_turn_and_history(entry):
         incoming = copy.deepcopy(old[:-1]) + [current] + copy.deepcopy(block) + [fresh]
         expected = old + [current, fresh]
     before = copy.deepcopy((old, incoming))
-    assert (
-        streaming._dedupe_replayed_context_messages(old, incoming, "current question")
-        == expected
+    # #7237 round 3: this helper returns ``(settled_context, protected_rows)``
+    # since the call-scoped protection landed (nesquena-hermes 2026-09-28) — a
+    # settle that proves current-turn rows returns them so the caller can
+    # consume them in the SAME settle instead of reading module state. This
+    # assertion still compared the bare list, so it failed on every entry the
+    # moment the tuple return shipped. Compare the settled context, which is
+    # what this test is actually about.
+    settled, _protected_rows = streaming._dedupe_replayed_context_messages(
+        old, incoming, "current question"
     )
+    assert settled == expected
     assert (old, incoming) == before

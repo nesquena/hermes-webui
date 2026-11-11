@@ -131,8 +131,9 @@ console.log(JSON.stringify(_allSessions.map(s => ({id: s.session_id, project_id:
 
 def test_new_project_branch_still_uses_authoritative_refetch():
     """The '+ New project' path was already correct: it calls
-    `await renderSessionList()` (a full /api/sessions refetch) after
-    creating the project. The minimal fix must not change that.
+    `await renderSessionList(...)` (a full /api/sessions refetch) after
+    creating the project. The completion must also paint immediately without
+    dismissing a newer picker opened while the request was in flight.
 
     #3746 wrapped the move call in try/catch (so a 503 from a streaming
     session shows a toast instead of an unhandled rejection); the refetch is
@@ -148,8 +149,11 @@ def test_new_project_branch_still_uses_authoritative_refetch():
     # that follows the createItem.onclick), falling back to a generous slice.
     end_idx = PICKER_BODY.find("picker.appendChild(createItem)", create_idx)
     window = PICKER_BODY[create_idx: end_idx if end_idx != -1 else create_idx + 1600]
-    assert "await renderSessionList()" in window, (
-        "'+ New project' branch must keep its authoritative refetch — the "
-        "new project_id is only known to the server until /api/sessions is "
-        "re-fetched."
+    refresh = (
+        "await renderSessionList({deferWhileInteracting:false,"
+        "keepProjectPicker:true})"
+    )
+    assert window.count(refresh) == 2, (
+        "Both success and failed-move paths must keep their authoritative "
+        "refetch and publish it immediately without closing a newer picker."
     )

@@ -1,0 +1,138 @@
+[
+  {
+    "version": "save-before",
+    "width": 1440,
+    "editing": false,
+    "visible": {
+      "id": "saved",
+      "mode": "read",
+      "run": "",
+      "edit": "",
+      "ids": [
+        "other"
+      ]
+    },
+    "deleted_task_reopened": true,
+    "page_errors": [],
+    "screenshot": "save-before-1440-create.png"
+  },
+  {
+    "version": "save-before",
+    "width": 1440,
+    "editing": true,
+    "visible": {
+      "id": "saved",
+      "mode": "read",
+      "run": "",
+      "edit": "",
+      "ids": [
+        "other"
+      ]
+    },
+    "deleted_task_reopened": true,
+    "page_errors": [],
+    "screenshot": "save-before-1440-edit.png"
+  },
+  {
+    "version": "save-before",
+    "width": 390,
+    "editing": false,
+    "visible": {
+      "id": "saved",
+      "mode": "read",
+      "run": "",
+      "edit": "",
+      "ids": [
+        "other"
+      ]
+    },
+    "deleted_task_reopened": true,
+    "page_errors": [],
+    "screenshot": "save-before-390-create.png"
+  },
+  {
+    "version": "save-before",
+    "width": 390,
+    "editing": true,
+    "visible": {
+      "id": "saved",
+      "mode": "read",
+      "run": "",
+      "edit": "",
+      "ids": [
+        "other"
+      ]
+    },
+    "deleted_task_reopened": true,
+    "page_errors": [],
+    "screenshot": "save-before-390-edit.png"
+  },
+  {
+    "version": "save-fixed",
+    "width": 1440,
+    "editing": false,
+    "visible": {
+      "id": null,
+      "mode": "empty",
+      "run": "none",
+      "edit": "none",
+      "ids": [
+        "other"
+      ]
+    },
+    "deleted_task_reopened": false,
+    "page_errors": [],
+    "screenshot": "save-fixed-1440-create.png"
+  },
+  {
+    "version": "save-fixed",
+    "width": 1440,
+    "editing": true,
+    "visible": {
+      "id": null,
+      "mode": "empty",
+      "run": "none",
+      "edit": "none",
+      "ids": [
+        "other"
+      ]
+    },
+    "deleted_task_reopened": false,
+    "page_errors": [],
+    "screenshot": "save-fixed-1440-edit.png"
+  },
+  {
+    "version": "save-fixed",
+    "width": 390,
+    "editing": false,
+    "visible": {
+      "id": null,
+      "mode": "empty",
+      "run": "none",
+      "edit": "none",
+      "ids": [
+        "other"
+      ]
+    },
+    "deleted_task_reopened": false,
+    "page_errors": [],
+    "screenshot": "save-fixed-390-create.png"
+  },
+  {
+    "version": "save-fixed",
+    "width": 390,
+    "editing": true,
+    "visible": {
+      "id": null,
+      "mode": "empty",
+      "run": "none",
+      "edit": "none",
+      "ids": [
+        "other"
+      ]
+    },
+    "deleted_task_reopened": false,
+    "page_errors": [],
+    "screenshot": "save-fixed-390-edit.png"
+  }
+]

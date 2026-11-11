@@ -201,7 +201,10 @@ def test_edge_picker_appends_french_voices_after_existing_entries():
     # The stub <select> resets on innerHTML, so the blank "Default (Xiaoxiao)"
     # placeholder is not in this list; only the edgeVoices options are.
     values = [o["value"] for o in _render_edge_picker_options("")]
-    assert values == PRE_EXISTING_EDGE_VOICES + VOICES
+    # Order among the pre-existing and French voices; later additions to other
+    # language groups (e.g. English multilingual voices) do not change it.
+    covered = PRE_EXISTING_EDGE_VOICES + VOICES
+    assert [v for v in values if v in covered] == covered
 
 
 def test_edge_voice_picker_groups_by_language_and_labels_child_voice():
@@ -213,8 +216,8 @@ def test_edge_voice_picker_groups_by_language_and_labels_child_voice():
     rows = _render_edge_picker_options("")
     by_value = {r["value"]: r["label"] for r in rows}
     assert by_value["fr-FR-EloiseNeural"] == "Eloise (French, Female, Child)"
-    # existing voices keep their relative order and stay first
-    assert [r["value"] for r in rows][:8] == [
+    # existing voices keep their relative order
+    assert [r["value"] for r in rows if r["value"] in PRE_EXISTING_EDGE_VOICES] == [
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural", "zh-CN-YunjianNeural",
         "zh-CN-YunyangNeural", "en-US-AriaNeural", "en-US-GuyNeural", "id-ID-GadisNeural",
     ]

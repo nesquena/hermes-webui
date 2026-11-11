@@ -56,7 +56,7 @@ def _function_block(name: str, next_marker: str) -> str:
 # ── Structural anchors ──────────────────────────────────────────────────────
 
 def test_visit_ack_helpers_exist():
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, backgroundRepaint = false)" in SESSIONS_JS
     assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt)" in SESSIONS_JS
     assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
 
@@ -83,6 +83,31 @@ def test_load_session_acknowledges_visit_before_and_after_message_load():
         "loadSession must re-acknowledge after the async message-load gap so a "
         "deferred sidebar poll cannot leave a sticky unread dot"
     )
+
+
+def test_external_refresh_acknowledgements_preserve_picker_as_background_churn():
+    block = _load_session_block()
+    assert block.count("Boolean(opts.externalRefreshReason)") >= 2, (
+        "both metadata-arrival and post-message-load acknowledgements must carry "
+        "the external-refresh intent into the sidebar repaint"
+    )
+
+
+def test_acknowledge_visit_uses_background_repaint_when_requested():
+    ack = _extract("_acknowledgeSessionVisit")
+    script = f"""
+let direct = 0;
+let background = 0;
+function _setSessionViewedCount() {{}}
+function _syncSessionListSnapshotOnVisit() {{}}
+function renderSessionListFromCache() {{ direct += 1; }}
+function _repaintSidebarForBackgroundChurn() {{ background += 1; }}
+{ack}
+_acknowledgeSessionVisit('external', 1, 2, true);
+_acknowledgeSessionVisit('explicit', 1, 2, false);
+console.log(JSON.stringify({{direct, background}}));
+"""
+    assert _run_node(script) == {"direct": 1, "background": 1}
 
 
 def test_post_load_reack_is_guarded_by_active_view():

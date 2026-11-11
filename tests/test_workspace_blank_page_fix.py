@@ -236,8 +236,9 @@ class TestNewChatOnWorkspaceSwitchOptIn:
         assert 'S.messages.length>0' in fn, (
             "the new-chat branch must only fire when the current conversation has messages"
         )
-        assert 'newSession(false)' in fn, (
-            "the new-chat branch must call newSession() to start the fresh chat"
+        assert 'newSession(false,{workspace:path})' in fn, (
+            "the new-chat branch must call newSession() with the explicit target "
+            "workspace so the explicit choice wins over a project's binding"
         )
         # The branch must run BEFORE the in-place /api/session/update mutation.
         newchat_idx = fn.index('window._newChatOnWorkspaceSwitch===true')

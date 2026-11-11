@@ -85,7 +85,17 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
         raise ValueError("invalid dashboard URL path")
     path = parsed.path or ""
     path_lower = path.lower()
-    if "\\" in path or "%5c" in path_lower or "%2f" in path_lower or "%2e" in path_lower:
+    # Reject "\\\\", encoded separators/dot segments, and double slashes. A leading "//"
+    # is authority-like: proxies collapse it or resolve it as an open redirect, and
+    # posixpath.normpath() preserves exactly two leading slashes, so the canonical-path
+    # guard below would not catch it on its own.
+    if (
+        "\\" in path
+        or "%5c" in path_lower
+        or "%2f" in path_lower
+        or "%2e" in path_lower
+        or "//" in path
+    ):
         raise ValueError("invalid dashboard URL path")
     import posixpath as _posixpath
 
@@ -198,23 +208,39 @@ def save_dashboard_config(payload: dict) -> dict:
     from api import config as webui_config
 
     config_path = webui_config._get_config_path()
-    config_data = webui_config._load_yaml_config_file(config_path)
-    webui_section = config_data.get("webui")
-    if not isinstance(webui_section, dict):
-        webui_section = {}
-        config_data["webui"] = webui_section
-    dashboard_section = webui_section.get("dashboard")
-    if not isinstance(dashboard_section, dict):
-        dashboard_section = {}
-        webui_section["dashboard"] = dashboard_section
-    dashboard_section["enabled"] = enabled
-    if normalized_url:
-        dashboard_section["url"] = normalized_url
-    else:
-        dashboard_section.pop("url", None)
-    webui_config._save_yaml_config_file(config_path, config_data)
+    # Write transaction on the RAW document under the config lock (#8032): an
+    # env-expanded load would save every ${VAR} reference in the file as its
+    # resolved value.
+    with webui_config._cfg_lock:
+        config_data = webui_config._load_yaml_config_file_raw(config_path)
+        webui_section = config_data.get("webui")
+        if not isinstance(webui_section, dict):
+            webui_section = {}
+            config_data["webui"] = webui_section
+        dashboard_section = webui_section.get("dashboard")
+        if not isinstance(dashboard_section, dict):
+            dashboard_section = {}
+            webui_section["dashboard"] = dashboard_section
+        dashboard_section["enabled"] = enabled
+        # Re-saving the URL the panel displayed from a ``url: ${VAR}`` keeps the
+        # reference; a URL the user changed (or cleared) is written as given.
+        stored_url = webui_config._preserve_env_ref(
+            dashboard_section.get("url"), normalized_url, normalize=_normalize_url_for_compare
+        )
+        if stored_url:
+            dashboard_section["url"] = stored_url
+        else:
+            dashboard_section.pop("url", None)
+        webui_config._save_yaml_config_file(config_path, config_data)
     webui_config.reload_config()
     return {"enabled": enabled, "url": normalized_url}
+
+
+def _normalize_url_for_compare(value: str) -> str:
+    try:
+        return normalize_dashboard_browser_url(value)
+    except ValueError:
+        return str(value or "").strip()
 
 
 def _webui_bind_host_allows_auto_probe() -> bool:

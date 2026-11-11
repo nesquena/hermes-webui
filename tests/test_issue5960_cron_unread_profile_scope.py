@@ -48,8 +48,10 @@ def test_recent_handler_reuses_dispatcher_cron_context_without_nesting():
     handler_end = ROUTES_PY.index("\ndef ", handler_start + 1)
     handler = ROUTES_PY[handler_start:handler_end]
 
-    assert "with cron_profile_context():" in dispatch
+    # #7295: the dispatcher owns the (lock-free) per-thread cron store scope.
+    assert "with cron_store_scope():" in dispatch
     assert "cron_profile_context_for_home" not in handler
+    assert "cron_store_scope" not in handler
 
 
 def test_successful_profile_switch_resets_unread_cron_state():
@@ -726,6 +728,7 @@ const _sessionListSnapshotById=new Map([['old-cron', {{message_count:1, last_mes
 const _sessionListSourceById=new Map();
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
 global.renderSessionListFromCache=()=>{{}};
+global._repaintSidebarForBackgroundChurn=()=>{{ renderSessionListFromCache(); }};
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
 function _setSessionViewedCount(){{}}
@@ -853,6 +856,7 @@ const _sessionListSnapshotById=new Map([['new-cron', {{message_count:1, last_mes
 const _sessionListSourceById=new Map();
 global.S={{activeProfile:'profile-b',activeProfileIsDefault:false}};
 global.renderSessionListFromCache=()=>{{}};
+global._repaintSidebarForBackgroundChurn=()=>{{ renderSessionListFromCache(); }};
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
 function _setSessionViewedCount(){{}}
 function _getSessionObservedStreaming(){{ return {{}}; }}

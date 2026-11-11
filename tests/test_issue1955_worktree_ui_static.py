@@ -27,7 +27,11 @@ def test_workspace_dropdown_exposes_new_worktree_conversation_action():
     src = read("static/panels.js")
     assert "workspace_new_worktree_conversation" in src
     assert "workspace_new_worktree_conversation_meta" in src
-    assert "newSession(false,{worktree:true})" in src
+    # The action must pass the DISPLAYED workspace explicitly: with a project
+    # bound to a different workspace, newSession()'s active-project merge would
+    # otherwise swap in the project's default and the worktree would land
+    # elsewhere (maintainer re-gate 2026-10-10T16:43:57Z, CORE).
+    assert "newSession(false,{worktree:true,workspace:currentWs})" in src
     assert "li('git-branch',12)" in src
 
 

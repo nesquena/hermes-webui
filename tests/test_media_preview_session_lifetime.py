@@ -9,7 +9,7 @@ import pytest
 
 UI = (Path(__file__).resolve().parents[1] / "static/ui.js").read_text(encoding="utf-8")
 SOURCE = (
-    UI[UI.index("const CSV_MAX_SIZE="):UI.index("let _excalidrawScriptLoaded=")]
+    UI[UI.index("function _mediaPreviewErrorKey"):UI.index("let _excalidrawScriptLoaded=")]
     + UI[UI.index("let _pdfjsReady="):UI.index("function renderMermaidBlocks(")]
 )
 NODE = shutil.which("node")
