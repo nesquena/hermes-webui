@@ -257,6 +257,8 @@ def test_real_agent_refusal_under_a_raised_root_level_stays_pending(hc, homes, l
     ``caller_scope`` reaches the wrapped ``_refuse`` through the module globals."""
     mm_mod, MemoryProvider = _real_memory_manager()
     mcs = sys.modules[SCOPE_LOGGER]
+    if not callable(getattr(mcs, "caller_scope", None)):  # the autouse stand-in: an Agent before 2026-10-17
+        pytest.skip("installed Agent predates agent.memory_caller_scope.caller_scope")
     assert mcs.caller_scope.__globals__ is vars(mcs), "caller_scope must resolve _refuse at call time"
 
     events: list = []
@@ -707,6 +709,8 @@ def test_unowned_eviction_keeps_a_shared_provider_working_for_the_survivor(hc, h
     profile share a provider instance (the #8517 guard allows that). Evicting the one
     whose owner is unknown must not shut the provider down under the survivor."""
     mm_mod, MemoryProvider = _real_memory_manager()
+    if not callable(getattr(mm_mod.MemoryManager, "release_soft", None)):
+        pytest.skip("installed Agent predates MemoryManager.release_soft")
 
     class SharedProvider(MemoryProvider):
         name = "i8613-shared"

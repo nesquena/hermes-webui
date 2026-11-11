@@ -16,7 +16,6 @@ from __future__ import annotations
 import sys
 import threading
 import time
-import types
 import weakref
 
 import pytest
@@ -24,7 +23,7 @@ import pytest
 import api.memory_profile_scope as scope
 import api.profiles as profiles_api
 import api.streaming as streaming
-from tests.test_issue8517_profile_scoped_memory import hc, homes  # noqa: F401 (fixtures)
+from tests.test_issue8517_profile_scoped_memory import _memory_manager_twin, hc, homes  # noqa: F401 (fixtures)
 
 
 class _Client:
@@ -135,7 +134,7 @@ def old_agent_root(hc, homes, monkeypatch):  # noqa: F811
     """A single-profile install (the root profile only) on an Agent without
     ``claim_instance``: the one shape in which such an Agent keeps an external
     provider. Fresh WebUI holder and ownership tables."""
-    monkeypatch.setitem(sys.modules, "agent.memory_manager", types.ModuleType("agent.memory_manager"))
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", _memory_manager_twin())
     for name in ("alpha", "beta"):
         homes[name].rmdir()
     (homes["default"] / "profiles").rmdir()
