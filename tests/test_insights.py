@@ -2541,7 +2541,7 @@ def test_dst_tests_save_and_restore_the_ambient_tz():
         if isinstance(node, ast.FunctionDef)
     }
     dst = {name: body for name, body in bodies.items() if write in body}
-    assert len(dst) == 4, f"expected the four DST tests, found {sorted(dst)}"
+    assert len(dst) == 5, f"expected the five DST tests, found {sorted(dst)}"
     for name, body in dst.items():
         assert save in body, f"{name} must snapshot the ambient TZ"
         assert guarded in body, (
@@ -2955,6 +2955,84 @@ def test_insights_traffic_rejects_malformed_days():
         routes._handle_insights_traffic(handler, parsed)
         assert handler.status == 400, query
         assert "error" in handler.json_body(), query
+
+
+def test_insights_traffic_whole_end_day_spans_dst_transitions(monkeypatch, tmp_path):
+    """A date-valued `end` must cover the WHOLE local day, across DST.
+
+    The old bound was ``end_midnight + 86400 - 0.001``. A spring-forward day
+    is 23 hours long, so that stops one hour short of the next local
+    midnight and silently drops the final hour of the selected day; a
+    fall-back day is 25 hours, so it would admit an hour of the following
+    date. The bound must come from ``mktime()`` on the next calendar day,
+    the same way /api/insights derives its whole-day end.
+
+    Greptile P1 (2026-11-11): "Traffic counts the wrong dates".
+    """
+    import os
+    import pathlib
+    import socket as _socket
+
+    import api.models as models
+    import api.routes as routes
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for DST test (not available on Windows)")
+
+    _saved_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        def _log_line(epoch):
+            return (
+                "192.168.1.1 - - "
+                f"[{time.strftime('%d/%b/%Y:%H:%M:%S %z', time.localtime(epoch))}] "
+                '"GET / HTTP/1.1" 200 10 "-" "t"\n'
+            )
+
+        # (end day, last local hour of that day, first local hour of the next)
+        cases = (
+            ((2026, 3, 8), (2026, 3, 8, 23, 30), (2026, 3, 9, 0, 30)),    # 23h day
+            ((2026, 11, 1), (2026, 11, 1, 23, 30), (2026, 11, 2, 0, 30)),  # 25h day
+        )
+        for end_day, last_hour, next_hour in cases:
+            end_day_end = time.mktime(end_day + (0, 0, 0, 0, 0, -1))
+            last_hour_ts = time.mktime(last_hour + (0, 0, 0, -1))
+            next_hour_ts = time.mktime(next_hour + (0, 0, 0, -1))
+            assert last_hour_ts > end_day_end  # probe really is inside the day
+            assert next_hour_ts > last_hour_ts
+
+            log_file = tmp_path / "access.log"
+            log_file.write_text(_log_line(last_hour_ts) + _log_line(next_hour_ts))
+            monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+            monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+            monkeypatch.setattr(
+                models, "_active_state_db_path",
+                lambda: pathlib.Path("/nonexistent/state.db"),
+            )
+            # A clock safely after the selected end day.
+            clock_ts = time.mktime(
+                (end_day[0], end_day[1], end_day[2] + 3, 12, 0, 0, 0, 0, -1)
+            )
+            monkeypatch.setattr(routes.time, "time", lambda _ts=clock_ts: _ts)
+
+            handler = _FakeHandler()
+            routes._handle_insights_traffic(
+                handler, SimpleNamespace(query=f"start=2026-01-01&end={end_day[0]:04d}-{end_day[1]:02d}-{end_day[2]:02d}")
+            )
+
+            assert handler.status == 200
+            rows = handler.json_body()["inbound_ips_month"]
+            # The last hour of the selected day counts once; the next day's
+            # first hour must NOT leak into a whole-day selection.
+            assert rows[0]["count"] == 1, (end_day, rows)
+    finally:
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
 
 
 def test_parse_nginx_date_honours_logged_offset():

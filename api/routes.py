@@ -16714,12 +16714,26 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     if start_meta is not None or end_meta is not None:
         start_ts = start_meta[1] if start_meta else None
         end_ts = end_meta[1] if end_meta else None
-        # A calendar-DATE end selects the WHOLE end day (next local
-        # midnight, capped at now below) — matching /api/insights.
-        # Without this, selecting today for both dates excludes today's
-        # traffic.
+        # A calendar-DATE end selects the WHOLE end day — matching
+        # /api/insights. Without this, selecting today for both dates
+        # excludes today's traffic.
+        #
+        # The bound must be the NEXT LOCAL MIDNIGHT, not `end + 86400`:
+        # a DST fall-back day is 25 hours long, so a fixed 86400 stops one
+        # hour short and silently drops the tail of that day (and a
+        # spring-forward day is 23 hours, so it would admit an extra hour
+        # of the next day). mktime() on the next calendar day resolves the
+        # offset the same way /api/insights does. The `- 0.001` keeps the
+        # bound just inside the day, since the window comparisons below
+        # are inclusive.
         if end_meta is not None and end_meta[0] == "date":
-            end_ts = end_ts + 86400 - 0.001
+            try:
+                _end_day = _datetime.fromtimestamp(end_ts).date()
+                end_ts = time.mktime(
+                    (_end_day + _timedelta(days=1)).timetuple()
+                ) - 0.001
+            except (OverflowError, ValueError, OSError):
+                pass
         if end_meta is None:
             end_ts = now
         if end_ts > now:
