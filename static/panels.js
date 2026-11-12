@@ -88,7 +88,7 @@ function syncAppTitlebar() {
       if (sourceLabel) {
         const badge = document.createElement('span');
         badge.className = 'topbar-source-badge';
-        badge.textContent = sourceLabel + (S.session && S.session.read_only ? ' · read-only' : '');
+        badge.textContent = sourceLabel + (S.session && (S.session.read_only || S.session.chat_read_only_reason) ? ' · read-only' : '');
         subEl.appendChild(document.createTextNode(' '));
         subEl.appendChild(badge);
       }

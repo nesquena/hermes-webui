@@ -291,7 +291,9 @@ def test_session_reload_preserves_large_persisted_window_when_recompute_hits_256
     body = captured["data"]["session"]
     assert captured["status"] == 200
     assert rec["base_url"] == "https://runtime-base.invalid/v1"
-    assert rec["api_key"] == "reload-key"
+    # #8822: the model block's key belongs to its own URL (config-base), not to the runtime URL the
+    # lookup is asked about, so the metadata request carries no key there.
+    assert rec["api_key"] == ""
     assert body["context_length"] == 1_000_000, (
         "reload must keep the persisted 1M window instead of clobbering it "
         "with the anonymous 256k fallback"

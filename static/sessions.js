@@ -2814,6 +2814,11 @@ async function loadSession(sid){
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
+  // #8701: the INFLIGHT entry (and its stream) before this load's first await.
+  // A send during the awaits replaces or re-points it; the other-stream prompt
+  // skip below then must not apply to the new turn's prompt.
+  const _inflightAtLoadStart=INFLIGHT[sid];
+  const _inflightStreamAtLoadStart=String((_inflightAtLoadStart&&_inflightAtLoadStart.streamId)||'').trim();
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
@@ -3316,7 +3321,11 @@ async function loadSession(sid){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
-      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId));
+      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId),
+      INFLIGHT[sid]===_inflightAtLoadStart
+        &&String(INFLIGHT[sid].streamId||'').trim()===_inflightStreamAtLoadStart
+        &&_inflightNamesOtherStream(INFLIGHT[sid],activeStreamId)
+        &&!!String((S.session&&S.session.pending_user_message)||'').trim());
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -5146,13 +5155,28 @@ function _inflightTurnOwnerStart(session,inflight,activeStreamId){
   return Number.isFinite(start)&&start>0?start:0;
 }
 
+// True when the INFLIGHT snapshot names a stream other than the active one: a
+// stale in-memory entry (missed `done`) whose prompt belongs to another turn.
+function _inflightNamesOtherStream(inflight,activeStreamId){
+  const active=String(activeStreamId||'').trim();
+  const own=String((inflight&&inflight.streamId)||'').trim();
+  return !!(active&&own&&own!==active);
+}
+
 // `turnOwnerStart` (optional): the server start of the turn this INFLIGHT tail
 // belongs to (_inflightTurnOwnerStart). When known it places the recovered
 // prompt instead of the prompt's client-clock `_ts`, which can trail the
 // server start by latency or skew and so claim a previous turn's rows, and it
 // stamps the copy so the pending merge reuses it rather than adding a second
-// one (`_recoveredPromptCopyForTurn`).
-function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart){
+// one (`_recoveredPromptCopyForTurn`). `promptFromOtherStream` (optional;
+// loadSession sets it when _inflightNamesOtherStream AND the server sends a
+// non-blank pending_user_message, the field getPendingSessionMessage reads, AND
+// the entry and its stream id are the ones the load started with):
+// the snapshot's prompt is not this turn's, so it is not placed; the pending
+// merge supplies the running turn's prompt, and placing both showed it twice
+// (#8701). Without a server prompt the snapshot's row stays, or the turn
+// would show none.
+function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart, promptFromOtherStream){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
   const ownerStart=Number.isFinite(Number(turnOwnerStart))&&Number(turnOwnerStart)>0?Number(turnOwnerStart):0;
@@ -5180,6 +5204,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerSta
     const candidate=tail[tailIdx];
     if(!candidate) continue;
     const isUser=String(candidate.role||'')==='user';
+    if(isUser&&tailIdx===promptTailIdx&&promptFromOtherStream) continue;
     if(isUser&&windowed&&tailIdx===promptTailIdx){
       // A windowed first page (msg_limit paging) can start INSIDE the running
       // turn: `base` then holds the turn's activity rows but not its `user`
@@ -8096,6 +8121,19 @@ let _deferredActiveSessionExternalRefreshReason = '';
 let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
+// Coalescing for SSE-driven sidebar refreshes. Every `sessions_changed` publish
+// clears the server's session-list cache, so an event-driven refresh always
+// rebuilds: this client-side cap is its only rate limit. It used to be a 300 ms
+// trailing debounce, so a streaming session's burst of events re-fetched
+// `/api/sessions` several times a second. Measured 2026-10-30: 65 `/api/sessions`
+// per minute from one client, gaps of 0-2 s, sidebar p99 1.8 s. The cap holds a
+// continuously-streaming session to 12 event-driven refreshes/min instead of 200;
+// an isolated event still paints after the 300 ms burst window (see
+// `_scheduleSessionEventsRefresh`). (#8694)
+const _SESSION_EVENTS_REFRESH_COALESCE_MS = 5000;
+const _SESSION_EVENTS_REFRESH_BURST_MS = 300;
+let _sessionEventsLastRefreshAt = 0;
+let _sessionEventsRefreshDueAt = 0;
 let _sessionEventsRefreshPendingRequest = null;
 let _sessionEventsReconnectTimer = 0;
 let _sessionEventsNeedsRefreshOnOpen = false;
@@ -8407,22 +8445,52 @@ async function refreshSessionList(reason='manual', opts={}){
     _sessionListRefreshInFlight = false;
     const pendingRequest = _sessionListRefreshPendingRequest;
     _sessionListRefreshPendingRequest = null;
-    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts);
+    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts, {prompt:true});
   }
 }
 
-function _scheduleSessionEventsRefresh(reason, opts={}){
+function _scheduleSessionEventsRefresh(reason, opts={}, schedule={}){
   _sessionEventsRefreshPendingRequest = {
     reason: reason || (_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.reason) || 'event',
     opts:_mergeSessionListRefreshOptions(_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.opts, opts),
   };
-  if(_sessionEventsRefreshTimer) return;
+  // Throttle, not a trailing-only debounce (#8694 senior review): an isolated
+  // event — a rename or delete from another tab, a cron finishing — paints after
+  // the short burst window, and only events arriving within
+  // `_SESSION_EVENTS_REFRESH_COALESCE_MS` of the last refresh this timer fired
+  // (an event-driven one or a parked re-send) wait for that cap. A PARKED request (`schedule.prompt`) arrived
+  // while another refresh was in flight: usually a new chat, a pull or a resume
+  // the user or the UI asked for, but this timer's own event refresh is parked
+  // the same way when it fires mid-flight. It re-sends after the burst window and
+  // is never held behind the cap (at most one extra refresh per in-flight one);
+  // it also pulls an already-pending capped timer forward.
+  // The cap is clamped to its own length: `Date.now()` follows the wall clock,
+  // and after a backward clock step `_sessionEventsLastRefreshAt` lies in the
+  // future, which would otherwise freeze every event refresh for the size of the
+  // step (#8694 senior review r2).
+  const now = Date.now();
+  const delay = (schedule && schedule.prompt)
+    ? _SESSION_EVENTS_REFRESH_BURST_MS
+    : Math.min(
+        _SESSION_EVENTS_REFRESH_COALESCE_MS,
+        Math.max(
+          _SESSION_EVENTS_REFRESH_BURST_MS,
+          _sessionEventsLastRefreshAt + _SESSION_EVENTS_REFRESH_COALESCE_MS - now,
+        ),
+      );
+  if(_sessionEventsRefreshTimer){
+    if(now + delay >= _sessionEventsRefreshDueAt) return;
+    clearTimeout(_sessionEventsRefreshTimer);
+  }
+  _sessionEventsRefreshDueAt = now + delay;
   _sessionEventsRefreshTimer = setTimeout(() => {
     _sessionEventsRefreshTimer = 0;
+    _sessionEventsRefreshDueAt = 0;
+    _sessionEventsLastRefreshAt = Date.now();
     const request = _sessionEventsRefreshPendingRequest || {reason:'event', opts:{}};
     _sessionEventsRefreshPendingRequest = null;
     void refreshSessionList(request.reason||'event', request.opts);
-  }, 300);
+  }, delay);
 }
 
 function _sessionEventTargetsActiveSession(payload){
