@@ -3145,18 +3145,91 @@ def test_insights_traffic_whole_end_day_spans_dst_transitions(monkeypatch, tmp_p
             time.tzset()
 
 
+def test_insights_traffic_rolling_day_window_spans_spring_forward(monkeypatch, tmp_path):
+    """The rolling `Past Day` window must be 24 EPOCH hours, not 24 clock hours.
+
+    On a spring-forward day the clock-face "1 day ago" is only 23 epoch hours
+    back, so deriving the bound by subtracting ``timedelta(days=1)`` from the
+    local wall-clock silently drops the first hour of the window. Both rolling
+    cards are affected.
+
+    Greptile P2 (2026-11-12): "Daily traffic misses an hour".
+    """
+    import os
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.models as models
+    import api.routes as routes
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for the DST test")
+
+    _saved_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        def _log_line(ip, local_dt):
+            ts = time.strftime(
+                "%d/%b/%Y:%H:%M:%S %z",
+                time.localtime(time.mktime(local_dt)),
+            )
+            return f"{ip} - - [{ts}] " '"GET / HTTP/1.1" 200 1 "-" "t"\n'
+
+        log_file = tmp_path / "access.log"
+        log_file.write_text(
+            # 11:30 EST is inside the true last-24h window, which starts at
+            # 11:00 EST; 10:30 is outside it.
+            _log_line("10.0.0.1", (2026, 3, 7, 11, 30, 0, 0, 0, -1))
+            + _log_line("10.0.0.2", (2026, 3, 7, 10, 30, 0, 0, 0, -1))
+        )
+        monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+        monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+        monkeypatch.setattr(
+            models, "_active_state_db_path",
+            lambda: pathlib.Path("/nonexistent/state.db"),
+        )
+        # Noon Mar 8 2026 (EDT) — the spring-forward day.
+        clock_ts = time.mktime((2026, 3, 8, 12, 0, 0, 0, 0, -1))
+        monkeypatch.setattr(routes.time, "time", lambda _ts=clock_ts: _ts)
+
+        handler = _FakeHandler()
+        routes._handle_insights_traffic(handler, types.SimpleNamespace(query=""))
+        assert handler.status == 200, handler.json_body()
+        body = handler.json_body()
+        day = {r["ip"] for r in body["inbound_ips_day"]}
+        month = {r["ip"] for r in body["inbound_ips_month"]}
+        # The hour the old wall-clock bound dropped must count in BOTH cards.
+        assert "10.0.0.1" in day
+        assert "10.0.0.1" in month
+        assert "10.0.0.2" not in day
+    finally:
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
 def test_parse_nginx_date_honours_logged_offset():
     """A logged +0700 instant must compare correctly against local windows."""
     import api.routes as routes
     from datetime import timedelta
 
     dt = routes._parse_nginx_date("28/Oct/2026:15:09:36 +0000")
-    assert dt is not None and dt.tzinfo is None
+    # tzinfo is RETAINED so callers compare absolute instants, not clock
+    # faces (a naive local value reorders entries across a DST transition).
+    assert dt is not None and dt.tzinfo is not None
     # Same instant written in +0700 is 7h earlier on the clock face.
     dt2 = routes._parse_nginx_date("28/Oct/2026:22:09:36 +0700")
     assert dt2 == dt
     # One hour after the +0000 instant exceeds a 30-minute window check.
     assert dt + timedelta(minutes=30) < dt2 + timedelta(hours=1)
+    # An offset-less string is read as server-local time, still aware.
+    dt3 = routes._parse_nginx_date("28/Oct/2026:15:09:36")
+    assert dt3 is not None and dt3.tzinfo is not None
 
 
 def test_get_outbound_domains_aggregates_by_domain_on_real_sqlite(tmp_path, monkeypatch):

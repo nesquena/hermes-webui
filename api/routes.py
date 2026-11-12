@@ -16523,20 +16523,24 @@ def _handle_insights(handler, parsed) -> bool:
 def _parse_nginx_date(dt_str):
     """Parse nginx log date string like '28/Oct/2026:15:09:36 +0700'.
 
-    Returns a naive datetime in server-local time. The logged offset is
-    honoured (nginx may log in a different timezone than the server):
-    the parsed instant is converted to local time before comparison, so
-    window checks are timezone-safe. Falls back to the naive form when
-    the string carries no offset.
+    Returns an AWARE datetime in server-local time. The logged offset is
+    honoured (nginx may log in a different timezone than the server): the
+    parsed instant is converted to local time but keeps its tzinfo, so
+    callers compare ABSOLUTE INSTANTS rather than clock faces. Returning a
+    naive local value instead would make a wall-clock comparison reorder
+    entries across a DST transition. A string carrying no offset is read as
+    server-local time.
     """
     import datetime as _dt_mod
     try:
         dt = _dt_mod.datetime.strptime(dt_str, "%d/%b/%Y:%H:%M:%S %z")
-        return dt.astimezone().replace(tzinfo=None)
+        return dt.astimezone()
     except (ValueError, OverflowError):
         pass
     try:
-        return _dt_mod.datetime.strptime(dt_str.split()[0], "%d/%b/%Y:%H:%M:%S")
+        return _dt_mod.datetime.strptime(
+            dt_str.split()[0], "%d/%b/%Y:%H:%M:%S"
+        ).astimezone()
     except (ValueError, OverflowError):
         return None
 
@@ -16829,21 +16833,25 @@ def _handle_insights_traffic(handler, parsed) -> bool:
 
     # Derive every window from `now` (time.time()), not _datetime.now(), so
     # an injected clock (tests) drives the day/month windows consistently.
-    now_dt = _datetime.fromtimestamp(now)
-    if start_ts is None:
-        req_start_dt = now_dt - _timedelta(days=30)
-        req_end_dt = now_dt
+    # Every bound is an EPOCH SECOND: subtracting timedelta(days=1) from the
+    # local wall-clock is wrong across a DST spring-forward, where the
+    # clock-face "1 day ago" is only 23 epoch hours back, so the window
+    # silently drops its first hour (and a fall-back day would over-count
+    # by one).
+    if start_ts is None or end_ts is None:
+        req_start_ts = now - 30 * 86400
+        req_end_ts = now
     else:
-        req_start_dt = _datetime.fromtimestamp(start_ts)
-        req_end_dt = _datetime.fromtimestamp(end_ts)
+        req_start_ts = start_ts
+        req_end_ts = end_ts
 
     # Rolling windows (Past Day = last 24h, Past Month = last 30d),
     # intersected with the requested interval when one was supplied, so
     # a custom range bounds what the traffic cards count.
-    day_start = max(now_dt - _timedelta(days=1), req_start_dt)
-    day_end = min(now_dt, req_end_dt)
-    month_start = max(now_dt - _timedelta(days=30), req_start_dt)
-    month_end = min(now_dt, req_end_dt)
+    day_start_ts = max(now - 86400, req_start_ts)
+    day_end_ts = min(now, req_end_ts)
+    month_start_ts = max(now - 30 * 86400, req_start_ts)
+    month_end_ts = min(now, req_end_ts)
     
     ip_counts_day = _collections.Counter()
     ip_counts_month = _collections.Counter()
@@ -16928,16 +16936,30 @@ def _handle_insights_traffic(handler, parsed) -> bool:
                         ip = m.group(1)
                         dt = _parse_nginx_date(m.group(2))
                         if dt:
-                            if day_start <= dt <= day_end:
+                            # Compare ABSOLUTE INSTANTS. `_parse_nginx_date`
+                            # keeps tzinfo so the log's own offset survives
+                            # the conversion to local; a wall-clock comparison
+                            # would reorder entries across a DST transition.
+                            dt_ts = dt.timestamp()
+                            if day_start_ts <= dt_ts <= day_end_ts:
                                 ip_counts_day[ip] += 1
-                            if month_start <= dt <= month_end:
+                            if month_start_ts <= dt_ts <= month_end_ts:
                                 ip_counts_month[ip] += 1
             except Exception:
                 continue
 
     # Outbound domains from Hermes state.db
-    out_day = _get_outbound_domains(day_start, day_end)
-    out_month = _get_outbound_domains(month_start, month_end)
+    # `_get_outbound_domains` works in datetimes (its state.db rows are epoch
+    # seconds); `fromtimestamp(...).astimezone()` round-trips the epoch
+    # exactly, including inside a DST-ambiguous local hour.
+    out_day = _get_outbound_domains(
+        _datetime.fromtimestamp(day_start_ts).astimezone(),
+        _datetime.fromtimestamp(day_end_ts).astimezone(),
+    )
+    out_month = _get_outbound_domains(
+        _datetime.fromtimestamp(month_start_ts).astimezone(),
+        _datetime.fromtimestamp(month_end_ts).astimezone(),
+    )
 
     def _format_ips(counter, names):
         return [{"ip": ip, "count": count, "domain": names.get(ip, ip)}
