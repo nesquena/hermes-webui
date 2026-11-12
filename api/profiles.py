@@ -1172,13 +1172,14 @@ def expand_profile_config(home, raw, *, env: Optional[dict] = None):
             _thread_ctx.env = previous_env
 
 
-def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
+def load_profile_config(home, *, env: Optional[dict] = None, config_path=None) -> dict:
     """Return the profile's config.yaml with every ``${VAR}`` expanded under that
     profile's env binding (see ``expand_profile_config``); ``{}`` when the file
     is missing or unparsable. Parsed fresh on every call, like the readers it
-    replaced, so an out-of-band edit is never served stale.
+    replaced, so an out-of-band edit is never served stale. *config_path*
+    names the exact file when it is not ``<home>/config.yaml`` (HERMES_CONFIG_PATH).
     """
-    config_path = Path(home).expanduser() / 'config.yaml'
+    config_path = Path(config_path or Path(home) / 'config.yaml').expanduser()
     try:
         raw = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
     except Exception:

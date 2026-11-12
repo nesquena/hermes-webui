@@ -2342,7 +2342,8 @@ def _shared_gateway_url_config(process_env: dict[str, str]) -> dict:
     cfg = get_config()
     value = cfg.get("webui_gateway_base_url") if isinstance(cfg, dict) else None
     if isinstance(value, str) and value:
-        clean = load_profile_config(Path(_get_config_path()).parent, env=process_env).get("webui_gateway_base_url")
+        path = Path(_get_config_path())  # the exact file get_config() read, even a custom HERMES_CONFIG_PATH name
+        clean = load_profile_config(path.parent, env=process_env, config_path=path).get("webui_gateway_base_url")
         if isinstance(clean, str) and clean and not _has_env_ref(clean):
             value = clean
     return {"webui_gateway_base_url": value} if value else {}

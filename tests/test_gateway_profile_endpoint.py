@@ -376,3 +376,24 @@ def test_runs_api_routing_refusal_is_not_classified_as_a_provider_error(work_pro
 
     assert events and events[0]["type"] == err_type
     assert events[0]["hint"] == gateway_chat._gateway_profile_route_hint(f"{SHARED}/p/work", code)
+
+
+def test_a_custom_named_hermes_config_path_supplies_the_shared_url_not_its_sibling_config_yaml(
+        work_profile, tmp_path, monkeypatch):
+    """Greptile 4491869237: the shared URL comes from the exact HERMES_CONFIG_PATH file get_config() reads."""
+    from api import config
+
+    operator_dir = tmp_path / "etc-hermes"
+    operator_dir.mkdir()
+    (operator_dir / "operator.yaml").write_text("webui_gateway_base_url: http://${OP_HOST}\n")
+    (operator_dir / "config.yaml").write_text("webui_gateway_base_url: http://other-gw:9999\n")
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(operator_dir / "operator.yaml"))
+    monkeypatch.setenv("OP_HOST", "operator-gw:8642")
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
+    try:
+        config.reload_config()
+        assert config.get_config()["webui_gateway_base_url"] == "http://operator-gw:8642"
+        assert gateway_chat._gateway_endpoint_for_profile("work") == ("http://operator-gw:8642/p/work", WORK_KEY)
+    finally:
+        monkeypatch.undo()
+        config.reload_config()
