@@ -7083,6 +7083,8 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
                 # WebUI-owned turns.
                 s.messages = list(latest_messages)
         return s
+    except SessionFileNamesOtherSession:
+        raise  # #9019: sid's file exists; never materialize over it
     except KeyError:
         pass
 
@@ -7355,6 +7357,8 @@ def _resolve_share_session_pair(sid: str, handler):
             cli_meta=cli_meta,
         )
         return snapshot_session, stored_session, cli_meta or {}
+    except SessionFileNamesOtherSession:
+        raise  # #9019: never synthesize over sid's file
     except KeyError:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
@@ -11962,6 +11966,9 @@ def _load_branch_source_or_refuse(handler, sid: str):
         return None
     try:
         source = get_session(sid)
+    except SessionFileNamesOtherSession:
+        bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
+        return None
     except KeyError:
         _foreign_session, _reason = _claim_or_synthesize_cli_session(sid)
         _source_kind = str((getattr(_foreign_session, "source_tag", None) or getattr(_foreign_session, "raw_source", None) or getattr(_foreign_session, "source", None) or "")).strip().lower() if _foreign_session is not None else ""
@@ -14236,6 +14243,7 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    SessionFileNamesOtherSession,
     get_cli_session_by_id,
     get_session,
     get_session_profile_readonly,
@@ -20804,6 +20812,7 @@ def handle_post(handler, parsed) -> bool:
         # continues to work (routes.py imported it at module level).
         import api.routes as _routes
         _routes.get_session = _models.get_session
+        _routes.SessionFileNamesOtherSession = _models.SessionFileNamesOtherSession
         _routes.Session = _models.Session
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
@@ -22812,6 +22821,8 @@ def handle_post(handler, parsed) -> bool:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: never import over sid's file
         except KeyError:
             # #7776: reuse the CLI identity captured before the lock — the
             # lock-held reload can drop it. #7549/#7731: cross-profile archive
@@ -32014,6 +32025,8 @@ def _handle_chat_start(handler, body, diag=None):
                 # write of the turn would land there. Refuse before anything
                 # is mutated, with the generic ownership guard's answer.
                 return bad(handler, "Session not found", 404)
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -32497,7 +32510,10 @@ def _handle_chat_sync(handler, body):
         return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
-    s = get_session(body["session_id"])
+    try:
+        s = get_session(body["session_id"])
+    except SessionFileNamesOtherSession:
+        return bad(handler, "Session not found", 404)  # #9019 (an unknown id still raises as before)
     if getattr(s, "_sidecar_names_other_session", None):
         # #9000: the file holds a copy of another session's file, so the loaded
         # object carries that session's id; the turn would run under it.

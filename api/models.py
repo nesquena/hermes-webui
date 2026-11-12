@@ -7313,7 +7313,7 @@ def get_session_for_scan(sid):
     insertion, and therefore no scan-triggered eviction.
     """
     try:
-        return _resolve_session(sid, promote_cache=False, cache_on_miss=False)
+        return _refuse_session_from_other_file(sid, _resolve_session(sid, promote_cache=False, cache_on_miss=False))
     except Exception:
         logger.debug("scan load failed for session %s", sid, exc_info=True)
         return None
@@ -7611,9 +7611,32 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             _finish_full_session_resolve(session_id, event)
 
 
-def get_session(sid, metadata_only=False):
-    """Load a session, optionally with metadata only (skipping messages)."""
-    return _resolve_session(sid, metadata_only=metadata_only)
+class SessionFileNamesOtherSession(KeyError):
+    """#9019: ``sid``'s file holds another session's body (the #8852 mark), so ``sid`` is not found."""
+
+
+def _refuse_session_from_other_file(sid, session):
+    if getattr(session, '_sidecar_names_other_session', None):
+        with LOCK:
+            # The resolver drops an entry cached under the wrong id on its next read;
+            # drop it now so direct cache readers never act on it either.
+            if SESSIONS.get(sid) is session:
+                SESSIONS.pop(sid, None)
+        raise SessionFileNamesOtherSession(sid)
+    return session
+
+
+def get_session(sid, metadata_only=False, *, allow_foreign_body=False):
+    """Load a session, optionally with metadata only (skipping messages).
+
+    #9019: an object loaded from a file whose body names another session carries
+    that session's id, profile and path, so it is not found (``KeyError``). Only a
+    caller that must see it to refuse or repair it passes ``allow_foreign_body``.
+    A fallback that treats ``KeyError`` as "no sidecar" and then creates or
+    imports one must re-raise ``SessionFileNamesOtherSession`` first.
+    """
+    session = _resolve_session(sid, metadata_only=metadata_only)
+    return session if allow_foreign_body else _refuse_session_from_other_file(sid, session)
 
 
 def get_session_profile_readonly(sid):
@@ -7887,6 +7910,8 @@ def find_compression_recovery_session(
             continue
         try:
             matches.append(get_session(sid))
+        except SessionFileNamesOtherSession:
+            continue  # #9019: this file holds another session's body
         except Exception:
             matches.append(meta)
 
@@ -8873,6 +8898,8 @@ def get_session_for_file_ops(sid: str):
     """
     try:
         session = get_session(sid, metadata_only=True)
+    except SessionFileNamesOtherSession:
+        raise  # #9019: a file exists for sid; never serve the state.db view instead
     except KeyError:
         if state_db_has_session(sid):
             return _ExternalSessionView(str(sid), str(get_last_workspace()))
