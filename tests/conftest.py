@@ -13,6 +13,7 @@ PATH DISCOVERY:
     3. Common install paths (~/.hermes/hermes-agent)
     4. System python3 as a last resort
 """
+import copy
 import json
 import inspect
 import multiprocessing
@@ -1414,6 +1415,40 @@ def _invalidate_models_cache_after_test():
         invalidate_models_cache()
     except Exception:
         pass
+
+
+# ── Per-test config disk-load state restore ──────────────────────────────────
+# About a hundred tests point config._get_config_path at a temp file and call
+# get_config(). The path-change branch then reloads _cfg_cache from that file
+# and records it in _cfg_path. monkeypatch puts _get_config_path back, but
+# _cfg_path, _cfg_mtime, _cfg_fingerprint and the cache contents are the
+# reload's, so the NEXT test's get_config() sees another path change and
+# reloads from disk over that test's in-memory cfg override (the path-change
+# branch skips the override guard). test_issue1807_codex_provider_card_live_models
+# -> test_issue2513_custom_provider_remote_models fails that way as a pair
+# (`assert 'custom:alpha-proxy' in {}`) and passes in the full run only because
+# the tests between them happen to reset the state.
+
+def _config_load_state_guard():
+    """Snapshot config's disk-load state; when resumed, put it back."""
+    from api import config
+    with config._cfg_lock:
+        saved = (
+            config._cfg_path,
+            config._cfg_mtime,
+            config._cfg_fingerprint,
+            copy.deepcopy(config._cfg_cache),
+        )
+    yield
+    with config._cfg_lock:
+        config._cfg_path, config._cfg_mtime, config._cfg_fingerprint, cache = saved
+        config._cfg_cache.clear()
+        config._cfg_cache.update(cache)
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_load_state():
+    yield from _config_load_state_guard()
 
 
 # ── Per-test hermes_cli module integrity guard ───────────────────────────────
