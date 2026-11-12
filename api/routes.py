@@ -4372,9 +4372,15 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
                              # patch the caller's in-memory copy after a
                              # successful clear, avoiding one ghost SSE
                              # reconnect on the very next /api/session GET.
+    reload_marker = None
     if getattr(session, "_loaded_metadata_only", False):
         try:
+            from api.models import _sidecar_change_marker
             from api.models import get_session as _get_session
+            # #9017: the reload stays outside the lock so its own self-heals
+            # (the state.db sync, the pending repair) can take it; the marker
+            # lets the locked section below see a writer that saved meanwhile.
+            reload_marker = _sidecar_change_marker(session.session_id)
             session = _get_session(session.session_id, metadata_only=False)
         except Exception:
             # If we cannot upgrade to a full load (file gone, decode error,
@@ -4417,6 +4423,13 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
     if not session_lock.acquire(blocking=wait_for_writer):
         return False
     try:
+        if reload_marker is not None:
+            from api.models import _sidecar_unchanged_since
+            if not _sidecar_unchanged_since(original_stub.session_id, reload_marker):
+                # Another writer saved after the reload: its turn is newer than
+                # this copy, so clearing and saving it would drop that turn.
+                # Skip this time; the next read retries on the current file.
+                return False
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
         if getattr(session, "pending_user_message", None):
