@@ -611,14 +611,31 @@ def test_delete_never_removes_a_swapped_subagent_file_or_its_transcript(store, t
     assert own_rows() == 1
 
 
+def test_view_only_guard_leaves_no_foreign_object_in_the_cache(store, monkeypatch):  # noqa: F811
+    from api import models
+    import api.routes as routes
+
+    _swapped(store, subagent=True)
+    routes._session_is_subagent_view_only(OWN)
+    assert OWN not in models.SESSIONS, "the guard's opt-in left the foreign object cached under this id"
+
+
 def test_delete_of_a_swapped_ordinary_file_never_touches_the_other_session(store, tmp_path, monkeypatch):  # noqa: F811
+    import sqlite3
+
     _swapped(store, subagent=False)
     _own_state_db(tmp_path, monkeypatch, store)
+    with sqlite3.connect(tmp_path / "state.db") as db:
+        db.execute("INSERT INTO sessions VALUES (?,NULL,?,?,1)", (VICTIM, "webui", "Victim"))
+        db.execute("INSERT INTO messages VALUES (2,?,?,?,1)", (VICTIM, "user", "victim transcript"))
     before = _files(store)
 
-    _post(monkeypatch, "/api/session/delete", {"session_id": OWN})
+    replies = _post(monkeypatch, "/api/session/delete", {"session_id": OWN})
 
+    assert replies and replies[0][1] == 200, replies  # not view-only: delete proceeds, as on master
     _unchanged_victim(store, before)
+    with sqlite3.connect(tmp_path / "state.db") as db:
+        assert db.execute("SELECT COUNT(*) FROM messages WHERE session_id=?", (VICTIM,)).fetchone()[0] == 1
 
 
 def test_handoff_summary_never_writes_into_a_swapped_session(store, tmp_path, monkeypatch):  # noqa: F811

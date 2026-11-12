@@ -11641,6 +11641,12 @@ def _session_is_subagent_view_only(sid: str) -> bool:
         str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
             or getattr(s, "session_source", "") or "").strip().lower()
     )
+    if getattr(s, "_sidecar_names_other_session", None):
+        # The opt-in cached the foreign object under ``sid``; drop it again, as
+        # get_session does, so direct cache readers never act on it.
+        with LOCK:
+            if SESSIONS.get(sid) is s:
+                SESSIONS.pop(sid, None)
     return src == "subagent"
 
 
