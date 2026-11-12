@@ -200,12 +200,15 @@ def test_write_share_snapshot_mints_a_fresh_token_over_a_revoked_one(isolated_st
     already carries a tombstone, leaving that tombstone untouched."""
     import api.shares as shares
 
+    # The owner has to be a real conversation: a snapshot whose session does not
+    # exist is never served (#8837), which would make the last check vacuous.
+    sid = _make_session()
     snapshot = {"title": "t", "messages": [], "message_count": 0}
-    shares.write_share_snapshot(snapshot, token="tok-dead", source_session_id="s1")
+    shares.write_share_snapshot(snapshot, token="tok-dead", source_session_id=sid)
     assert shares.revoke_share(SimpleNamespace(share_token="tok-dead")) is True
     assert shares.load_share("tok-dead") is None
 
-    meta = shares.write_share_snapshot(snapshot, token="tok-dead", source_session_id="s1")
+    meta = shares.write_share_snapshot(snapshot, token="tok-dead", source_session_id=sid)
     assert meta["share_token"] != "tok-dead"
     assert shares.load_share("tok-dead") is None, "the tombstone was overwritten"
     assert shares.load_share(meta["share_token"]) is not None

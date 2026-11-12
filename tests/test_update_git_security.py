@@ -17,8 +17,17 @@ from pathlib import Path
 import pytest
 
 from api import updates
-from api.subprocess_utils import is_safe_diagnostic_remote
+from api.subprocess_utils import clean_git_env, is_safe_diagnostic_remote
 from api.workspace_git import GitWorkspaceError, git_fetch
+from tests._git_host_config_isolation import (
+    EMULATED_HOST_WITH_SENTINEL_HELPERS,
+    credential_helpers_seen,
+)
+
+# Git children here must never read the host's system/global git config: on a
+# Mac that runs osxkeychain against the test servers (#8931). See
+# tests/_git_host_config_isolation.py.
+pytestmark = pytest.mark.usefixtures("isolated_host_git_config")
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -177,6 +186,77 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
     assert trusted_marker.exists()
     assert not repo_marker.exists()
     assert _git(repo, "rev-parse", "refs/remotes/origin/master").strip()
+
+
+@pytest.mark.parametrize("host_git", [EMULATED_HOST_WITH_SENTINEL_HELPERS], indirect=True)
+@pytest.mark.parametrize("caller", ["updates", "workspace", "diagnostic"])
+def test_authenticated_fetch_never_runs_host_credential_helpers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_git,
+    caller: str,
+) -> None:
+    """#8931 guard: the host's system/global credential helpers never run here.
+
+    ``host_git`` emulates a developer machine whose system and global git config
+    name a sentinel helper, the role Homebrew's osxkeychain plays on a Mac.
+    Without this module's ``isolated_host_git_config`` the fetch below runs the
+    system sentinel (``get``, then ``store``: the keychain write).
+    """
+    if os.name == "nt":
+        pytest.skip("executable credential helper setup is POSIX-only")
+
+    # The emulation is live: a scrubbed git child of the bare host sees both helpers.
+    assert credential_helpers_seen(host_git.executable, tmp_path, clean_git_env()) == [
+        f"system\t{host_git.sentinel_helpers[0]}",
+        f"global\t{host_git.sentinel_helpers[1]}",
+    ]
+
+    _, origin = _make_bare_origin(tmp_path)
+    username, password = "trusted-user", "trusted-password"
+    authorization = base64.b64encode(f"{username}:{password}".encode()).decode()
+    _AuthenticatedGitHandler.expected_authorization = f"Basic {authorization}"
+    handler = functools.partial(_AuthenticatedGitHandler, directory=str(origin.parent))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        home = tmp_path / "home"
+        home.mkdir()
+        trusted_marker = tmp_path / "trusted-helper-ran"
+        helper = tmp_path / "credential_helper.py"
+        helper.write_text(
+            "import pathlib, sys\n"
+            "sys.stdin.read()\n"
+            f"pathlib.Path({str(trusted_marker)!r}).touch()\n"
+            f"print('username={username}\\npassword={password}\\n')\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(home))
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        _git(repo, "remote", "add", "origin", f"http://127.0.0.1:{server.server_port}/origin.git")
+        _git(repo, "config", "--global", "credential.helper",
+             f"!{shlex.quote(sys.executable)} {shlex.quote(str(helper))}")
+        if caller == "updates":
+            output, ok = updates._run_git(["fetch", "origin"], repo, timeout=30)
+            assert ok, output
+        elif caller == "workspace":
+            assert git_fetch(repo)["ok"] is True
+        else:
+            result = subprocess.run(
+                [sys.executable, str(DIAGNOSTIC), str(repo)],
+                cwd=ROOT, capture_output=True, text=True, timeout=30,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert trusted_marker.exists(), "the test's own trusted helper must still answer"
+    assert host_git.sentinel_calls() == []
 
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])

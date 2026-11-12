@@ -2356,6 +2356,8 @@ async function cmdRetry(){
 async function cmdUndo(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
+  // #8523: a session another client owns is read-only here; undo must not cut its WebUI transcript.
+  if(S.session.chat_read_only_reason){showToast(S.session.chat_read_only_reason);return;}
   const activeSid=S.session.session_id;
   try{
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
