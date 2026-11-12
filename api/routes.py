@@ -13266,11 +13266,11 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             def _identified(msg):
                 return bool(msg.get("id") or msg.get("message_id"))
 
-            def _row_id(msg):
-                row_id, valid = _state_db_row_identity_details(msg)
-                return int(row_id) if valid and row_id is not None else None
-
-            agent_row_ids = [_row_id(msg) for msg in requested_cli_messages]
+            # Read aside before the default projection drops them.
+            agent_uids = [
+                msg.get(STATE_DB_MESSAGE_UID_KEY) if isinstance(msg, dict) else None
+                for msg in requested_cli_messages
+            ]
             # (row, from_sidecar, index in its own store), chronological.
             ordered = sorted(
                 [(msg, False, index) for index, msg in enumerate(cli_messages)]
@@ -13287,17 +13287,19 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             # gateway's display prompt has none; only its context copy does).
             # Two identified rows stay distinct messages.
             survivor_for = {}
-            # Exact lane, the only pairing: the same state.db row id, and the
-            # same text, on one row per store. A rewrite (/retry, /undo,
-            # /compress) reinserts rows under new ids, and a gateway stamp
-            # also pins the row's own state.db timestamp, so an id handed out
-            # again by a restored or recreated state.db is no twin either.
-            by_row_id = {}
+            # Exact lane, the only pairing: the Agent's own message_uid,
+            # stamped on the sidecar row at the gateway writeback, and the
+            # same text, on one row per store. The Agent mints that uid per
+            # occurrence and keeps it when a rewrite copies the message, so a
+            # restored or recreated state.db never hands it to another
+            # message, as it does row ids. A row without the stamp -- a bare
+            # row id, an older Agent without the column -- pairs with nothing.
+            by_uid = {}
             for position, (msg, from_sidecar, index) in enumerate(ordered):
-                row_id = _row_id(msg) if from_sidecar else agent_row_ids[index]
-                if row_id is not None:
-                    by_row_id.setdefault(row_id, ([], []))[from_sidecar].append(position)
-            for agent_side, sidecar_side in by_row_id.values():
+                uid = msg.get(STATE_DB_MESSAGE_UID_KEY) if from_sidecar else agent_uids[index]
+                if isinstance(uid, str) and uid.strip():
+                    by_uid.setdefault(uid, ([], []))[from_sidecar].append(position)
+            for agent_side, sidecar_side in by_uid.values():
                 if len(agent_side) != 1 or len(sidecar_side) != 1:
                     continue
                 agent_row, sidecar_row = ordered[agent_side[0]][0], ordered[sidecar_side[0]][0]
@@ -13306,12 +13308,6 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     or _cross_store_pairing_key(agent_row, from_sidecar=False)
                     != _cross_store_pairing_key(sidecar_row, from_sidecar=True)
                     or not _cross_store_pairable(sidecar_row, agent_row)
-                    # A row id alone is no proof: a restored or recreated
-                    # state.db hands the same ids out again. The stamp must
-                    # also pin the Agent row's own timestamp; a bare legacy
-                    # id renders both rows.
-                    or STATE_DB_ROW_TIMESTAMP_KEY not in sidecar_row
-                    or sidecar_row[STATE_DB_ROW_TIMESTAMP_KEY] != agent_row.get("timestamp")
                 ):
                     continue
                 if _identified(agent_row):
@@ -14289,7 +14285,7 @@ from api.models import (
     _message_private_identity_compatible,
     _state_db_row_identity_details,
     without_requested_row_identity,
-    STATE_DB_ROW_TIMESTAMP_KEY,
+    STATE_DB_MESSAGE_UID_KEY,
     _session_message_merge_key,
     _session_message_dedup_key,
     _session_messages_have_prefix,

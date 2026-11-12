@@ -178,24 +178,22 @@ two processes' clocks has counterexamples: a repeated prompt ("continue")
 re-created the cross-turn pairing, missing or cross-clock timestamps blocked
 or forced pairs, and the dynamic programme cost ~800 ms on 2000 turns.
 
-Exact row identity
-------------------
+Exact identity: the Agent's message uid
+---------------------------------------
 The two copies now share an identity. Before a Gateway run the worker
 records the session's highest state.db row id; after it, the rows above that
-floor are the run's own, and the sidecar user/assistant rows are stamped with
-the row id of the single run row that matches each (the in-process path
-already stamps its rows the same way). The display merge reads Agent rows
-with their row ids and pairs one row id on one row per store. A row with an
-ambiguous or missing match stays unstamped.
+floor are the run's own, and while they hold a single turn the sidecar
+user/assistant rows are stamped with the ``message_uid`` of the single run
+row that matches each. The display merge reads Agent rows with their uids
+and pairs one uid on one row per store, with the same text.
 
-A row id pairs only together with the same text, and nothing else pairs.
-A text fallback for unstamped rows ("pair inside twin turns") was tried and
-broke in review the same way: when the Agent copy of an old turn was gone,
-a later Telegram turn with the same prompt became its unique "twin" and was
-hidden. Rows without proof -- written before stamping, renumbered by a
-transcript rewrite (/retry, /undo, /compress), or never stamped -- render as
-on master. Stamping proves a twin only while the run's rows hold one turn,
-and drops any id it cannot prove.
+A row id is not used as proof: a restored or recreated state.db reissues
+ids, and other merge paths trust ``_state_db_row_id`` on sight, so the
+gateway writes none. A text fallback for unstamped rows ("pair inside twin
+turns") was tried and broke in review: when the Agent copy of an old turn was
+gone, a later Telegram turn with the same prompt became its unique "twin" and
+was hidden. Rows without proof render as on master, and stamping drops any
+uid it cannot prove.
 """
 
 from __future__ import annotations
@@ -212,34 +210,40 @@ import api.routes as routes
 
 
 def _pin_stamps(session, cli_messages):
-    """Give stamped sidecar rows the Agent row's own timestamp, as the gateway
-    writeback does. A bare row id proves nothing on its own (a restored or
-    recreated state.db reissues ids), so fixtures of proven twins carry both."""
+    """Stamp proven twins as the gateway writeback does: the sidecar row gets
+    the Agent row's own ``message_uid``, which the reader returns with row
+    identity. Fixtures name the twin by its row id; the uid is derived from it.
+    A bare row id proves nothing on its own (a restored or recreated state.db
+    reissues ids), so fixtures without this call do not pair."""
     by_id = {}
     for row in cli_messages:
         row_id, valid = models._state_db_row_identity_details(row)
         if valid and row_id is not None:
+            row["_state_db_message_uid"] = f"uid-{row_id}"
             by_id[row_id] = row
     for row in session.messages:
         row_id, valid = models._state_db_row_identity_details(row)
-        if valid and row_id in by_id and "timestamp" in by_id[row_id]:
-            row["_state_db_row_timestamp"] = by_id[row_id]["timestamp"]
+        if valid and row_id in by_id:
+            row["_state_db_message_uid"] = f"uid-{row_id}"
     return session
 
 def _gateway_turn_session():
     """Sidecar rows exactly as the gateway chat worker writes them."""
-    return _pin_stamps(SimpleNamespace(
+    return SimpleNamespace(
         messages=[
-            {"id": 7, "role": "user", "content": "show tomorrow's weather", "timestamp": 100.5, "_state_db_row_id": 1},
-            {"id": 8, "role": "assistant", "content": "Tomorrow: sunny, 35C.", "timestamp": 130.542, "_state_db_row_id": 4},
+            {"id": 7, "role": "user", "content": "show tomorrow's weather", "timestamp": 100.5,
+             "_state_db_message_uid": "uid-1"},
+            {"id": 8, "role": "assistant", "content": "Tomorrow: sunny, 35C.", "timestamp": 130.542,
+             "_state_db_message_uid": "uid-4"},
         ]
-    ), _gateway_agent_rows())
+    )
 
 
 def _gateway_agent_rows():
     """Agent-store rows for the same turn: no stable id, earlier timestamps."""
     return [
-        {"role": "user", "content": "show tomorrow's weather", "timestamp": 100.4, "_state_db_row_id": 1},
+        {"role": "user", "content": "show tomorrow's weather", "timestamp": 100.4, "_state_db_row_id": 1,
+         "_state_db_message_uid": "uid-1"},
         {"role": "assistant", "content": "", "timestamp": 110.0, "tool_calls": [{"id": "c1"}], "_state_db_row_id": 2},
         {"role": "tool", "content": "{\"temp\": 35}", "timestamp": 120.0, "tool_call_id": "c1", "_state_db_row_id": 3},
         {
@@ -247,6 +251,7 @@ def _gateway_agent_rows():
             "content": "Tomorrow: sunny, 35C.",
             "timestamp": 130.424,
             "_state_db_row_id": 4,
+            "_state_db_message_uid": "uid-4",
             "reasoning": "**Composing a concise weather summary**",
             "codex_message_items": [{"type": "message"}],
         },
@@ -379,6 +384,8 @@ def test_conflicting_api_content_rows_are_not_paired_at_all():
             "reasoning": "AGENT REASONING",
         },
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -672,6 +679,8 @@ def test_conflicting_semantic_payload_keeps_survivors_own_value():
             "reasoning": "agent-store reasoning",
         },
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -1240,6 +1249,8 @@ def test_tool_identity_vetoes_a_row_id_match():
         {"role": "tool", "content": "OK", "timestamp": 3.0, "tool_call_id": "c2", "_state_db_row_id": 3},
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     tools = [m for m in merged if m.get("role") == "tool"]
@@ -1344,6 +1355,8 @@ def test_a_row_id_with_different_text_is_not_a_twin():
         {"role": "assistant", "content": "something else", "timestamp": 2.0, "_state_db_row_id": 7},
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     assert [m["content"] for m in merged if m["role"] == "assistant"] == ["something else", "hello"]
@@ -1414,11 +1427,11 @@ def test_reader_row_identity_stays_private_to_the_union_branch():
     agent_only = {"role": "assistant", "content": "agent only", "timestamp": 9.0, "_state_db_row_id": 9}
     session = SimpleNamespace(
         messages=[{"id": "u1", "role": "user", "content": "q", "timestamp": 1.1,
-                   "_state_db_row_id": 1, "_state_db_row_timestamp": 1.0}]
+                   "_state_db_row_id": 1, "_state_db_message_uid": "uid-1"}]
     )
     union = routes._merged_session_messages_for_display(
         session,
-        [{"role": "user", "content": "q", "timestamp": 1.0, "_state_db_row_id": 1}, agent_only],
+        [{"role": "user", "content": "q", "timestamp": 1.0, "_state_db_row_id": 1, "_state_db_message_uid": "uid-1"}, agent_only],
     )
     assert [m.get("_state_db_row_id") for m in union] == [1, None]
 
@@ -1436,45 +1449,53 @@ def test_reader_row_identity_stays_private_to_the_union_branch():
 
 def test_stamping_takes_only_an_unambiguous_run_row():
     run_rows = [
-        {"role": "user", "content": "[Workspace: /w]\nfix it", "timestamp": 41.5, "_state_db_row_id": 41},
-        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}], "timestamp": 42.5, "_state_db_row_id": 42},
-        {"role": "tool", "content": "Done.", "tool_call_id": "c1", "timestamp": 43.5, "_state_db_row_id": 43},
-        {"role": "assistant", "content": "Done.", "timestamp": 44.5, "_state_db_row_id": 44},
+        {"role": "user", "content": "[Workspace: /w]\nfix it", "_state_db_row_id": 41, "_state_db_message_uid": "u41"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}], "_state_db_row_id": 42,
+         "_state_db_message_uid": "u42"},
+        {"role": "tool", "content": "Done.", "tool_call_id": "c1", "_state_db_row_id": 43, "_state_db_message_uid": "u43"},
+        {"role": "assistant", "content": "Done.", "_state_db_row_id": 44, "_state_db_message_uid": "u44"},
     ]
     user = {"id": "u", "role": "user", "content": "fix it"}
     assistant = {"id": "a", "role": "assistant", "content": "Done."}
 
-    models.stamp_gateway_turn_row_ids(run_rows, (user, assistant))
+    models.stamp_gateway_turn_message_uids(run_rows, (user, assistant))
 
-    assert user["_state_db_row_id"] == 41, "the workspace prefix does not hide the prompt"
-    assert user["_state_db_row_timestamp"] == 41.5, "the stamp pins the row's own state.db timestamp"
-    assert assistant["_state_db_row_id"] == 44, "the tool row with the same text is not a candidate"
+    assert user["_state_db_message_uid"] == "u41", "the workspace prefix does not hide the prompt"
+    assert assistant["_state_db_message_uid"] == "u44", "the tool row with the same text is not a candidate"
+    assert "_state_db_row_id" not in user, "the row ids other merge paths trust are not written"
 
     steered = {"id": "u", "role": "user", "content": "go"}
-    models.stamp_gateway_turn_row_ids(
+    models.stamp_gateway_turn_message_uids(
         [
-            {"role": "user", "content": "go", "_state_db_row_id": 1},
-            {"role": "user", "content": "also X", "_state_db_row_id": 2},
-            {"role": "assistant", "content": "Done.", "_state_db_row_id": 3},
+            {"role": "user", "content": "go", "_state_db_message_uid": "a"},
+            {"role": "user", "content": "also X", "_state_db_message_uid": "b"},
+            {"role": "assistant", "content": "Done.", "_state_db_message_uid": "c"},
         ],
         (steered,),
     )
-    assert "_state_db_row_id" not in steered, "a window with two prompts (steer, concurrent turn, rewrite) stamps nothing"
+    assert "_state_db_message_uid" not in steered, "a window with two prompts (steer, concurrent turn, rewrite) stamps nothing"
 
     joined = {"id": "a", "role": "assistant", "content": "part one part two"}
-    models.stamp_gateway_turn_row_ids(
+    models.stamp_gateway_turn_message_uids(
         [
-            {"role": "user", "content": "q", "_state_db_row_id": 0},
-            {"role": "assistant", "content": "part one", "_state_db_row_id": 1},
-            {"role": "assistant", "content": "part two", "_state_db_row_id": 2},
+            {"role": "user", "content": "q", "_state_db_message_uid": "q"},
+            {"role": "assistant", "content": "part one", "_state_db_message_uid": "p1"},
+            {"role": "assistant", "content": "part two", "_state_db_message_uid": "p2"},
         ],
         (joined,),
     )
-    assert "_state_db_row_id" not in joined, "a reply the stream joined matches no single row"
+    assert "_state_db_message_uid" not in joined, "a reply the stream joined matches no single row"
 
-    regenerated = {"id": "a", "role": "assistant", "content": "Done.", "_state_db_row_id": 7}
-    models.stamp_gateway_turn_row_ids(run_rows, (regenerated,))
-    assert regenerated["_state_db_row_id"] == 44, "the superseded run's id gives way to this run's"
+    no_uid = {"id": "a", "role": "assistant", "content": "Done."}
+    models.stamp_gateway_turn_message_uids(
+        [{"role": "user", "content": "q", "_state_db_row_id": 1}, {"role": "assistant", "content": "Done.", "_state_db_row_id": 2}],
+        (no_uid,),
+    )
+    assert "_state_db_message_uid" not in no_uid, "an Agent without message_uid stamps nothing"
+
+    regenerated = {"id": "a", "role": "assistant", "content": "Done.", "_state_db_message_uid": "old"}
+    models.stamp_gateway_turn_message_uids(run_rows, (regenerated,))
+    assert regenerated["_state_db_message_uid"] == "u44", "the superseded run's uid gives way to this run's"
 
 
 def test_state_db_floor_and_run_rows_read_only_this_sessions_new_rows(tmp_path, monkeypatch):
@@ -1483,7 +1504,7 @@ def test_state_db_floor_and_run_rows_read_only_this_sessions_new_rows(tmp_path, 
         conn.execute(
             "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "
             "role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, "
-            "tool_name TEXT, api_content TEXT, active INTEGER DEFAULT 1)"
+            "tool_name TEXT, api_content TEXT, active INTEGER DEFAULT 1, message_uid TEXT)"
         )
         conn.executemany(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
@@ -1497,12 +1518,12 @@ def test_state_db_floor_and_run_rows_read_only_this_sessions_new_rows(tmp_path, 
 
     with sqlite3.connect(db_path) as conn:
         conn.executemany(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, timestamp, message_uid) VALUES (?, ?, ?, ?, ?)",
             [
-                ("s", "user", "new", 4.0),
-                ("other", "user", "y", 5.0),
-                ("s", "tool", "big tool output", 5.5),
-                ("s", "assistant", "reply", 6.0),
+                ("s", "user", "new", 4.0, "uid-new"),
+                ("other", "user", "y", 5.0, "uid-y"),
+                ("s", "tool", "big tool output", 5.5, "uid-tool"),
+                ("s", "assistant", "reply", 6.0, "uid-reply"),
             ],
         )
         conn.execute(
@@ -1510,7 +1531,10 @@ def test_state_db_floor_and_run_rows_read_only_this_sessions_new_rows(tmp_path, 
         )
 
     rows = models.state_db_session_rows_after("s", floor)
-    assert [(m["content"], m["_state_db_row_id"]) for m in rows] == [("new", 4), ("reply", 7)]
+    assert [(m["content"], m["_state_db_row_id"], m["_state_db_message_uid"]) for m in rows] == [
+        ("new", 4, "uid-new"),
+        ("reply", 7, "uid-reply"),
+    ]
 
     monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "missing.db")
     assert models.state_db_message_id_floor("s") == 0
@@ -1588,34 +1612,30 @@ def _run_gateway_turn(
     return models.get_session(s.session_id)
 
 
-def test_gateway_writeback_stamps_the_turn_with_its_state_db_row_ids(tmp_path, monkeypatch):
+def test_gateway_writeback_stamps_the_turn_with_its_message_uids(tmp_path, monkeypatch):
     """The worker reads the floor before the run and stamps both rows after it."""
     reads = []
 
     def rows_after(sid, floor, profile=None):
         reads.append((sid, floor))
-        return [
-            {"role": "user", "content": "continue", "timestamp": 41.5, "_state_db_row_id": 41},
-            {"role": "assistant", "content": "Done.", "timestamp": 42.5, "_state_db_row_id": 42},
-        ]
+        return _stamped_run_rows(sid, floor, profile)
 
     saved = _run_gateway_turn(tmp_path, monkeypatch, rows_after=rows_after)
 
     assert reads == [(saved.session_id, 40)]
-    assert [(m["content"], m.get("_state_db_row_id")) for m in saved.messages] == [
-        ("continue", 41),
-        ("Done.", 42),
+    assert [(m["content"], m.get("_state_db_message_uid"), m.get("_state_db_row_id")) for m in saved.messages] == [
+        ("continue", "uid-41", None),
+        ("Done.", "uid-42", None),
     ]
-    assert [m.get("_state_db_row_id") for m in saved.context_messages[-2:]] == [41, 42]
+    assert [m.get("_state_db_message_uid") for m in saved.context_messages[-2:]] == ["uid-41", "uid-42"]
 
 
 # ---------------------------------------------------------------------------
-# Proof-only pairing. A row id plus the same text is the only evidence that
-# two rows are one message; without it both rows render, as on master. Each
+# Proof-only pairing. A stamped message uid plus the same text is the only
+# evidence that two rows are one message; without it both rows render, as on
+# master. Each
 # test below is a shape that broke a text-based fallback in review.
 # ---------------------------------------------------------------------------
-
-
 def _replies(merged, text="Done."):
     return [(m.get("id"), m.get("reasoning")) for m in merged if m.get("content") == text]
 
@@ -1633,7 +1653,7 @@ def test_old_sidecar_turn_is_not_paired_with_a_later_agent_only_turn():
         )
         cli_messages = [
             {"role": "user", "content": "status", "timestamp": 9.0, "_state_db_row_id": 9},
-            {"role": "tool", "content": "ok", "timestamp": 9.2, "tool_call_id": "c9", "_state_db_row_id": 10},
+            {"role": "tool", "content": "ok", "timestamp": 9.2, "tool_call_id": "c9", "_state_db_row_id": 10, "_state_db_message_uid": "uid-10"},
             {"role": "assistant", "content": "Done.", "timestamp": 9.5, "reasoning": "telegram", "_state_db_row_id": 11},
         ]
 
@@ -1775,32 +1795,23 @@ def test_requested_row_ids_do_not_change_the_legacy_same_second_collapse():
     assert [m["content"] for m in merged] == ["q", "t", "A"]
 
 
-def test_stamping_drops_an_id_it_cannot_prove():
-    """A regenerated row inherits the superseded run's id; when this run has
-    no single matching row, the stale id goes rather than pairing the row
-    with the old run's copy."""
+def test_stamping_drops_a_uid_it_cannot_prove():
+    """A regenerated row inherits the superseded run's uid; when this run has
+    no single matching row, the stale uid goes rather than pairing the row
+    with the old run's copy. Row ids are not the gateway's to manage."""
     run_rows = [
-        {"role": "user", "content": "continue", "timestamp": 43.5, "_state_db_row_id": 43},
-        {"role": "assistant", "content": "Done.", "timestamp": 44.5, "_state_db_row_id": 44},
+        {"role": "user", "content": "continue", "_state_db_message_uid": "u43"},
+        {"role": "assistant", "content": "Done.", "_state_db_message_uid": "u44"},
     ]
 
-    inherited = {"id": "a", "role": "assistant", "content": "unmatched", "_state_db_row_id": 7}
-    models.stamp_gateway_turn_row_ids(run_rows, (inherited,))
-    assert "_state_db_row_id" not in inherited
+    inherited = {"id": "a", "role": "assistant", "content": "unmatched", "_state_db_message_uid": "old", "_row_id": 7}
+    models.stamp_gateway_turn_message_uids(run_rows, (inherited,))
+    assert "_state_db_message_uid" not in inherited
+    assert inherited["_row_id"] == 7, "row ids are left as they were"
 
-    unread = {"id": "a", "role": "assistant", "content": "Done.", "_state_db_row_id": 7}
-    models.stamp_gateway_turn_row_ids((), (unread,))
-    assert "_state_db_row_id" not in unread, "no run rows to check against proves nothing either"
-
-    aliased = {
-        "id": "a", "role": "assistant", "content": "Done.", "_row_id": 5, "state_db_row_id": 6,
-        "_state_db_row_timestamp": 1.0,
-    }
-    models.stamp_gateway_turn_row_ids(run_rows, (aliased,))
-    assert {k: v for k, v in aliased.items() if k.startswith(("_row", "_state", "state"))} == {
-        "_state_db_row_id": 44,
-        "_state_db_row_timestamp": 44.5,
-    }
+    unread = {"id": "a", "role": "assistant", "content": "Done.", "_state_db_message_uid": "old"}
+    models.stamp_gateway_turn_message_uids(None, (unread,))
+    assert "_state_db_message_uid" not in unread, "no run rows to check against proves nothing either"
 
 
 def test_state_db_run_rows_keep_rows_whose_active_flag_is_null(tmp_path, monkeypatch):
@@ -1828,7 +1839,7 @@ def test_failed_stamping_does_not_lose_the_reply(tmp_path, monkeypatch):
     def broken(*_args, **_kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(gateway_chat, "stamp_gateway_turn_row_ids", broken)
+    monkeypatch.setattr(gateway_chat, "stamp_gateway_turn_message_uids", broken)
 
     saved = _run_gateway_turn(
         tmp_path,
@@ -1857,19 +1868,18 @@ def test_superseded_stream_does_not_read_the_run_rows(tmp_path, monkeypatch):
 
 def test_a_reissued_row_id_is_not_a_twin():
     """A state.db restored from a backup, or recreated, hands row ids out
-    again. The stamp pins the row's own state.db timestamp, which a later row
-    with the same id and text does not share."""
+    again, but not message uids: the Agent mints one per occurrence. Only the
+    stamped uid pairs, so a later row with the same id and text is no twin."""
     session = SimpleNamespace(
         messages=[
-            {"id": "u1", "role": "user", "content": "go", "timestamp": 100.1,
-             "_state_db_row_id": 499, "_state_db_row_timestamp": 100.0},
-            {"id": "a1", "role": "assistant", "content": "Done.", "timestamp": 130.1,
-             "_state_db_row_id": 500, "_state_db_row_timestamp": 130.0},
+            {"id": "u1", "role": "user", "content": "go", "timestamp": 100.1, "_state_db_message_uid": "uid-old-u"},
+            {"id": "a1", "role": "assistant", "content": "Done.", "timestamp": 130.1, "_state_db_message_uid": "uid-old-a"},
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "go", "timestamp": 900.0, "_state_db_row_id": 499},
-        {"role": "assistant", "content": "Done.", "timestamp": 930.0, "reasoning": "telegram", "_state_db_row_id": 500},
+        {"role": "user", "content": "go", "timestamp": 900.0, "_state_db_row_id": 499, "_state_db_message_uid": "uid-new-u"},
+        {"role": "assistant", "content": "Done.", "timestamp": 930.0, "reasoning": "telegram",
+         "_state_db_row_id": 500, "_state_db_message_uid": "uid-new-a"},
         {"role": "tool", "content": "ok", "timestamp": 940.0, "tool_call_id": "c1", "_state_db_row_id": 501},
     ]
 
@@ -1877,7 +1887,7 @@ def test_a_reissued_row_id_is_not_a_twin():
 
     assert _replies(merged) == [("a1", None), (None, "telegram")]
 
-    cli_messages[0]["timestamp"], cli_messages[1]["timestamp"] = 100.0, 130.0
+    cli_messages[0]["_state_db_message_uid"], cli_messages[1]["_state_db_message_uid"] = "uid-old-u", "uid-old-a"
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     assert [m.get("id") for m in merged if m["role"] != "tool"] == ["u1", "a1"]
@@ -1904,29 +1914,26 @@ def test_one_row_id_on_two_sidecar_rows_pairs_neither():
 
 def _stamped_run_rows(sid, floor, profile=None):
     return [
-        {"role": "user", "content": "continue", "timestamp": 41.5, "_state_db_row_id": 41},
-        {"role": "assistant", "content": "Done.", "timestamp": 42.5, "_state_db_row_id": 42},
+        {"role": "user", "content": "continue", "_state_db_row_id": 41, "_state_db_message_uid": "uid-41"},
+        {"role": "assistant", "content": "Done.", "_state_db_row_id": 42, "_state_db_message_uid": "uid-42"},
     ]
 
 
 def test_the_eager_display_row_takes_the_prompts_stamp(tmp_path, monkeypatch):
     """The prompt saved at send time is the display row; it gets this run's
-    stamp, and loses the one it inherited."""
+    stamp and loses the one it inherited. Its row ids are left alone."""
     for broken in (False, True):
         saved = _run_gateway_turn(
             tmp_path / str(broken),
             monkeypatch,
             rows_after=_stamped_run_rows,
-            checkpoint={"_state_db_row_id": 7, "_row_id": 7},
+            checkpoint={"_state_db_message_uid": "inherited", "_row_id": 7},
             break_display_merge=broken,
         )
 
-        stamps = [
-            (m["content"], m.get("_state_db_row_id"), m.get("_state_db_row_timestamp"), m.get("_row_id"))
-            for m in saved.messages
-        ]
-        assert stamps == [("continue", 41, 41.5, None), ("Done.", 42, 42.5, None)], broken
-        assert [m.get("_state_db_row_id") for m in saved.context_messages[-2:]] == [41, 42]
+        stamps = [(m["content"], m.get("_state_db_message_uid")) for m in saved.messages]
+        assert stamps == [("continue", "uid-41"), ("Done.", "uid-42")], broken
+        assert [m.get("_state_db_message_uid") for m in saved.context_messages[-2:]] == ["uid-41", "uid-42"]
 
 
 def test_a_display_row_without_a_proven_stamp_loses_its_inherited_one(tmp_path, monkeypatch):
@@ -1934,11 +1941,10 @@ def test_a_display_row_without_a_proven_stamp_loses_its_inherited_one(tmp_path, 
         tmp_path,
         monkeypatch,
         rows_after=lambda sid, floor, profile=None: [],
-        checkpoint={"_state_db_row_id": 7},
+        checkpoint={"_state_db_message_uid": "inherited"},
     )
 
-    assert [m.get("_state_db_row_id") for m in saved.messages] == [None, None]
-
+    assert [m.get("_state_db_message_uid") for m in saved.messages] == [None, None]
 
 
 # ---------------------------------------------------------------------------
@@ -1949,21 +1955,25 @@ def test_a_display_row_without_a_proven_stamp_loses_its_inherited_one(tmp_path, 
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "ts_user, ts_reply",
-    [(1794298528.8887627, 1794298530.1234567), (1762790000, 1762790001)],
-)
-def test_real_gateway_turn_renders_once_after_a_reload(tmp_path, monkeypatch, ts_user, ts_reply):
-    """End to end, in the shape production writes: a real state.db, the real
-    reader and worker, an eagerly saved prompt with no stable id, and the
-    session reloaded from disk before the merge."""
+def _run_real_gateway_turn(tmp_path, monkeypatch, *, with_message_uid, ts_user=1794298528.8887627, ts_reply=1794298530.1234567):
+    """End to end, in the shape production writes: a real state.db (with the
+    Agent's own message_uid trigger, or an older Agent without the column),
+    the real reader and worker, an eagerly saved prompt with no stable id, and
+    the session reloaded from disk before the merge."""
     db_path = tmp_path / "state.db"
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "
             "role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, "
-            "tool_name TEXT, api_content TEXT, reasoning TEXT, active INTEGER DEFAULT 1)"
+            "tool_name TEXT, api_content TEXT, reasoning TEXT, active INTEGER DEFAULT 1"
+            + (", message_uid TEXT)" if with_message_uid else ")")
         )
+        if with_message_uid:
+            conn.execute(
+                "CREATE TRIGGER messages_message_uid_insert AFTER INSERT ON messages "
+                "WHEN new.message_uid IS NULL BEGIN "
+                "UPDATE messages SET message_uid = lower(hex(randomblob(16))) WHERE id = new.id; END"
+            )
     monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
     monkeypatch.setattr(models, "_get_profile_home", lambda profile: tmp_path)
     read_run_rows = models.state_db_session_rows_after
@@ -1988,22 +1998,43 @@ def test_real_gateway_turn_renders_once_after_a_reload(tmp_path, monkeypatch, ts
     models.SESSIONS.clear()
     session = models.get_session(saved.session_id)
     cli_messages = models.get_cli_session_messages(session.session_id, include_row_identity=True)
-    merged = routes._merged_session_messages_for_display(session, cli_messages)
+    return session, routes._merged_session_messages_for_display(session, cli_messages)
+
+
+@pytest.mark.parametrize(
+    "ts_user, ts_reply",
+    [(1794298528.8887627, 1794298530.1234567), (1762790000, 1762790001)],
+)
+def test_real_gateway_turn_renders_once_after_a_reload(tmp_path, monkeypatch, ts_user, ts_reply):
+    session, merged = _run_real_gateway_turn(
+        tmp_path, monkeypatch, with_message_uid=True, ts_user=ts_user, ts_reply=ts_reply,
+    )
 
     assert [m["content"] for m in merged if m["role"] == "user"] == ["continue"]
     assert [m.get("reasoning") for m in merged if m["content"] == "Done."] == ["thinking"]
-    assert all("_state_db_row_id" not in m for m in merged if m["role"] == "tool")
+    assert all("_state_db_row_id" not in m for m in session.messages), "the gateway writes no row ids"
+    assert all("_state_db_message_uid" not in m for m in merged if m["role"] == "tool")
+
+
+def test_an_agent_without_message_uid_renders_as_on_master(tmp_path, monkeypatch):
+    """An older Agent has no message_uid column: nothing is stamped, nothing
+    is guessed, and both copies render as they always did."""
+    session, merged = _run_real_gateway_turn(tmp_path, monkeypatch, with_message_uid=False)
+
+    assert all("_state_db_message_uid" not in m for m in session.messages)
+    assert [m["content"] for m in merged if m["role"] == "user"] == ["continue", "continue"]
+    assert len([m for m in merged if m["content"] == "Done."]) == 2
 
 
 def test_proven_pair_without_stable_ids_folds_into_the_sidecar_row():
     session = SimpleNamespace(
         messages=[
             {"role": "user", "content": "go", "timestamp": 100.2, "attachments": ["a.png"],
-             "_state_db_row_id": 10, "_state_db_row_timestamp": 99.0},
+             "_state_db_message_uid": "uid-10"},
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "go", "timestamp": 99.0, "api_content": "go[bytes]", "_state_db_row_id": 10},
+        {"role": "user", "content": "go", "timestamp": 99.0, "api_content": "go[bytes]", "_state_db_row_id": 10, "_state_db_message_uid": "uid-10"},
         {"role": "tool", "content": "ok", "timestamp": 99.5, "tool_call_id": "c1", "_state_db_row_id": 11},
     ]
 
@@ -2022,11 +2053,11 @@ def test_a_proven_survivor_does_not_absorb_another_same_second_agent_row():
     session = SimpleNamespace(
         messages=[
             {"role": "user", "content": "continue", "timestamp": 100.2,
-             "_state_db_row_id": 10, "_state_db_row_timestamp": 99.0},
+             "_state_db_message_uid": "uid-10"},
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "continue", "timestamp": 99.0, "_state_db_row_id": 10},
+        {"role": "user", "content": "continue", "timestamp": 99.0, "_state_db_row_id": 10, "_state_db_message_uid": "uid-10"},
         {"role": "user", "content": "continue", "timestamp": 100.5, "reasoning": "telegram", "_state_db_row_id": 12},
         {"role": "assistant", "content": "x", "timestamp": 101.0, "_state_db_row_id": 13},
     ]
@@ -2043,12 +2074,12 @@ def test_a_proven_survivor_is_not_absorbed_by_another_turns_agent_row():
     session = SimpleNamespace(
         messages=[
             {"role": "user", "content": "continue", "timestamp": 100.2, "attachments": ["a.png"],
-             "_state_db_row_id": 10, "_state_db_row_timestamp": 103.0},
+             "_state_db_message_uid": "uid-10"},
         ]
     )
     cli_messages = [
         {"role": "user", "content": "continue", "timestamp": 100.1, "_state_db_row_id": 5},
-        {"role": "user", "content": "continue", "timestamp": 103.0, "_state_db_row_id": 10},
+        {"role": "user", "content": "continue", "timestamp": 103.0, "_state_db_row_id": 10, "_state_db_message_uid": "uid-10"},
         {"role": "assistant", "content": "x", "timestamp": 104.0, "_state_db_row_id": 13},
     ]
 
@@ -2078,7 +2109,7 @@ def test_a_row_id_without_a_stamped_timestamp_proves_nothing():
     assert [m["timestamp"] for m in merged if m["role"] == "user"] == [5.0, 900.0]
 
 
-def test_two_identified_rows_with_one_row_id_stay_distinct():
+def test_two_identified_rows_with_one_stamp_stay_distinct():
     session = SimpleNamespace(
         messages=[{"id": "u1", "role": "user", "content": "go", "timestamp": 1.1, "_state_db_row_id": 1}]
     )
@@ -2086,6 +2117,8 @@ def test_two_identified_rows_with_one_row_id_stay_distinct():
         {"id": "agent-u1", "role": "user", "content": "go", "timestamp": 1.0, "_state_db_row_id": 1},
         {"role": "tool", "content": "ok", "timestamp": 2.0, "tool_call_id": "c1", "_state_db_row_id": 2},
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -2099,11 +2132,11 @@ def test_a_distinct_agent_row_beside_a_folded_twin_survives():
     session = SimpleNamespace(
         messages=[
             {"role": "user", "content": "continue", "timestamp": 99.3,
-             "_state_db_row_id": 10, "_state_db_row_timestamp": 99.0},
+             "_state_db_message_uid": "uid-10"},
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "continue", "timestamp": 99.0, "reasoning": "first", "_state_db_row_id": 10},
+        {"role": "user", "content": "continue", "timestamp": 99.0, "reasoning": "first", "_state_db_row_id": 10, "_state_db_message_uid": "uid-10"},
         {"role": "user", "content": "continue", "timestamp": 99.0, "reasoning": "second", "_state_db_row_id": 11},
         {"role": "assistant", "content": "x", "timestamp": 101.0, "_state_db_row_id": 12},
     ]
@@ -2114,3 +2147,50 @@ def test_a_distinct_agent_row_beside_a_folded_twin_survives():
         (99.0, "second"),
         (99.3, "first"),
     ]
+
+
+def test_reissued_row_ids_do_not_pair_in_the_append_only_branch():
+    """The maintainer's repro where the sidecar is not shorter than the Agent
+    store, so the append-only merge runs. Gateway rows carry only the private
+    message uid, never a row id that branch would trust, so a reissued id and
+    the later exchange's payload stay where they belong, as on master."""
+    session = SimpleNamespace(
+        messages=[
+            {"id": "u1", "role": "user", "content": "continue", "timestamp": 100.1, "_state_db_message_uid": "uid-old-u"},
+            {"id": "a1", "role": "assistant", "content": "Done.", "timestamp": 130.1, "_state_db_message_uid": "uid-old-a"},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "continue", "timestamp": 900.0, "_state_db_row_id": 41,
+         "_state_db_message_uid": "uid-new-u"},
+        {"role": "assistant", "content": "Done.", "timestamp": 930.0, "reasoning": "later independent turn",
+         "api_content": "LATER BYTES", "_state_db_row_id": 42, "_state_db_message_uid": "uid-new-a"},
+    ]
+    before = copy.deepcopy((session.messages, cli_messages))
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    old = next(m for m in merged if m.get("id") == "a1")
+    assert "api_content" not in old and "reasoning" not in old, "the old row takes nothing from the later turn"
+    assert [m.get("api_content") for m in merged if m["content"] == "Done." and not m.get("id")] == ["LATER BYTES"]
+    assert (session.messages, cli_messages) == before, "the cached session rows are not touched"
+
+
+def test_a_row_id_without_the_stamped_uid_is_never_promoted_to_proof():
+    """An identified sidecar row with a bare row id (in-process, or copied
+    from state.db) and an Agent row with the same id, text and timestamp: the
+    coarse lane never folds identified rows, so only an exact-lane pair could
+    hide the Agent copy, and a missing uid stamp must not be filled from the
+    candidate's row id or timestamp."""
+    session = SimpleNamespace(
+        messages=[{"id": "u1", "role": "user", "content": "go", "timestamp": 5.0, "_state_db_row_id": 7}]
+    )
+    cli_messages = [
+        {"role": "user", "content": "go", "timestamp": 5.0, "_state_db_row_id": 7, "_state_db_message_uid": "uid-7"},
+        {"role": "tool", "content": "ok", "timestamp": 6.0, "tool_call_id": "c1", "_state_db_row_id": 8},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m.get("id") for m in merged if m["role"] == "user"] == [None, "u1"]
+

@@ -147,7 +147,7 @@ contributor guidance; it does not change runtime behavior or CI gates.
 - [`docs/architecture/gateway-dual-store-display-merge.md`](architecture/gateway-dual-store-display-merge.md):
   current contract for the chronological-union branch of
   `_merged_session_messages_for_display()`: why a gateway-backed turn exists in
-  both the Agent store and the WebUI sidecar, the state.db row id the gateway
+  both the Agent store and the WebUI sidecar, the Agent message uid the gateway
   writeback stamps so the two copies pair exactly, which copy survives, the
   identity checks that must hold before two rows are treated as one turn, and
   the asymmetric lanes that decide whether display metadata, semantic payload,

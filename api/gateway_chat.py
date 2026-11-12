@@ -41,12 +41,11 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import (
-    STATE_DB_ROW_ID_ALIASES,
-    STATE_DB_ROW_TIMESTAMP_KEY,
+    STATE_DB_MESSAGE_UID_KEY,
     clear_process_wakeup_pause,
     get_session,
     merge_session_messages_append_only,
-    stamp_gateway_turn_row_ids,
+    stamp_gateway_turn_message_uids,
     state_db_message_id_floor,
     state_db_session_rows_after,
 )
@@ -3302,7 +3301,7 @@ def _run_gateway_chat_streaming(
         _use_session_rpc = (reattach_run or {}).get("transport") == "session" or configured(vars(s), cfg)
         _use_runs_api = _use_session_rpc or bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         # The Agent writes this run's rows to state.db above this floor; the
-        # success writeback stamps the sidecar rows with their row ids from
+        # success writeback stamps the sidecar rows with their message uids from
         # there. A reattached run keeps the floor its first worker recorded.
         # The session transport replaces the transcript with the Gateway's own
         # canonical rows, so there is no WebUI-written row to stamp.
@@ -3693,12 +3692,11 @@ def _run_gateway_chat_streaming(
                         if type(state_db_floor) is int
                         else None
                     )
-                    stamp_gateway_turn_row_ids(run_rows, (user_msg, assistant_msg))
+                    stamp_gateway_turn_message_uids(run_rows, (user_msg, assistant_msg))
                 except Exception:
-                    logger.debug("Failed to stamp state.db row ids on gateway turn rows", exc_info=True)
+                    logger.debug("Failed to stamp state.db message uids on gateway turn rows", exc_info=True)
                     for row in (user_msg, assistant_msg):
-                        for alias in (*STATE_DB_ROW_ID_ALIASES, STATE_DB_ROW_TIMESTAMP_KEY):
-                            row.pop(alias, None)
+                        row.pop(STATE_DB_MESSAGE_UID_KEY, None)
             s.context_messages = previous_context + [user_msg, assistant_msg]
             try:
                 from api.streaming import _is_context_compression_marker
@@ -3749,10 +3747,9 @@ def _run_gateway_chat_streaming(
                     current_display_rows[0]["timestamp"] = user_msg["timestamp"]
                     display_row = current_display_rows[0]
                     if canonical_snapshot is None and display_row is not user_msg:
-                        stamp_keys = (*STATE_DB_ROW_ID_ALIASES, STATE_DB_ROW_TIMESTAMP_KEY)
-                        for key in stamp_keys:
-                            display_row.pop(key, None)
-                        display_row.update({key: user_msg[key] for key in stamp_keys if key in user_msg})
+                        display_row.pop(STATE_DB_MESSAGE_UID_KEY, None)
+                        if STATE_DB_MESSAGE_UID_KEY in user_msg:
+                            display_row[STATE_DB_MESSAGE_UID_KEY] = user_msg[STATE_DB_MESSAGE_UID_KEY]
             if canonical_snapshot is not None:
                 # Gateway history remains authoritative across surfaces. In particular,
                 # a messaging sidecar may start empty; never replace its older turns

@@ -12787,13 +12787,14 @@ def _state_db_projection_keeps_row_identity(msg) -> bool:
 
 def without_requested_row_identity(msg):
     """Return *msg* as the default projection shapes it, from an ``include_row_identity`` read."""
-    if (
-        isinstance(msg, dict)
-        and '_state_db_row_id' in msg
-        and not _state_db_projection_keeps_row_identity(msg)
-    ):
+    if not isinstance(msg, dict):
+        return msg
+    drop_row_id = '_state_db_row_id' in msg and not _state_db_projection_keeps_row_identity(msg)
+    if drop_row_id or STATE_DB_MESSAGE_UID_KEY in msg:
         msg = dict(msg)
-        del msg['_state_db_row_id']
+        if drop_row_id:
+            del msg['_state_db_row_id']
+        msg.pop(STATE_DB_MESSAGE_UID_KEY, None)
     return msg
 
 
@@ -12826,6 +12827,8 @@ def _project_state_db_message(row, available, id_col, optional, *, include_row_i
         and (include_row_identity or _state_db_projection_keeps_row_identity(msg))
     ):
         msg['_state_db_row_id'] = row['id']
+    if include_row_identity and 'message_uid' in row.keys() and _valid_message_uid(row['message_uid']):
+        msg[STATE_DB_MESSAGE_UID_KEY] = row['message_uid']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
         msg['name'] = msg['tool_name']
     return msg
@@ -12958,6 +12961,7 @@ def get_state_db_session_messages(
                 + ['role', 'content', 'timestamp']
                 + revision_cols
                 + [c for c in optional if c in available]
+                + (['message_uid'] if include_row_identity and 'message_uid' in available else [])
             )
 
             session_chain = [str(sid)]
@@ -14381,7 +14385,7 @@ def state_db_message_id_floor(sid, *, profile=None) -> int | None:
 
 
 def state_db_session_rows_after(sid, floor, *, profile=None) -> list | None:
-    """Return *sid*'s active user/assistant state.db rows above *floor*, with private row ids.
+    """Return *sid*'s active user/assistant state.db rows above *floor*, with private identity.
 
     Only the rows the sidecar turn can mirror are read, so a tool-heavy run
     does not decode its tool outputs here.
@@ -14399,10 +14403,11 @@ def state_db_session_rows_after(sid, floor, *, profile=None) -> list | None:
                 col for col in ('tool_call_id', 'tool_calls', 'tool_name', 'api_content')
                 if col in available
             ]
+            uid_col = ['message_uid'] if 'message_uid' in available else []
             # The same archived-row filter as the display reader.
             active_clause = " AND (active IS NULL OR active != 0)" if 'active' in available else ""
             rows = conn.execute(
-                f"SELECT {', '.join(['id', 'role', 'content', 'timestamp', *optional])} "
+                f"SELECT {', '.join(['id', 'role', 'content', 'timestamp', *optional, *uid_col])} "
                 "FROM messages WHERE session_id = ? AND id > ? AND role IN ('user', 'assistant')"
                 f"{active_clause} ORDER BY id ASC",
                 (str(sid), int(floor)),
@@ -14415,19 +14420,24 @@ def state_db_session_rows_after(sid, floor, *, profile=None) -> list | None:
         return None
 
 
-def stamp_gateway_turn_row_ids(run_rows, turn_messages) -> None:
-    """Give a Gateway turn's sidecar rows the row ids of their state.db twins.
+def stamp_gateway_turn_message_uids(run_rows, turn_messages) -> None:
+    """Give a Gateway turn's sidecar rows the ``message_uid`` of their state.db twins.
 
     *run_rows* are the state.db rows the Agent wrote for this run (above the
     pre-run floor). They prove a twin only while they hold exactly one turn:
     a single user row. A concurrent Telegram turn, a steer, or a transcript
-    rewrite (which reinserts the whole history under new ids) adds prompts,
-    and then nothing is stamped. Within one turn, a sidecar row takes the id
-    of the single row that matches it on the cross-store pairing key; a reply
-    the stream joined across tool calls matches none. The stamp carries the
-    row's own state.db timestamp too (``STATE_DB_ROW_TIMESTAMP_KEY``). Any id
-    the row carried before -- inherited from the run a regeneration
-    superseded -- is dropped either way, so an unproven row is never paired.
+    rewrite (which reinserts the history above the floor) adds prompts, and
+    then nothing is stamped. Within one turn, a sidecar row takes the
+    ``message_uid`` of the single row that matches it on the cross-store
+    pairing key; a reply the stream joined across tool calls matches none.
+
+    The Agent mints that uid per occurrence (128 random bits) and keeps it
+    when a rewrite copies the message, so unlike a row id it is never handed
+    out again by a restored or recreated state.db. The stamp is a private key
+    only the display merge reads (``STATE_DB_MESSAGE_UID_KEY``); the row ids
+    other merge paths trust are left as they were. A uid the row carried
+    before -- inherited from the run a regeneration superseded -- is dropped
+    either way, so an unproven row is never paired.
     """
     rows = [row for row in run_rows or () if isinstance(row, dict)]
     one_turn = sum(1 for row in rows if row.get('role') == 'user') == 1
@@ -14435,26 +14445,23 @@ def stamp_gateway_turn_row_ids(run_rows, turn_messages) -> None:
     for msg in turn_messages:
         if not isinstance(msg, dict):
             continue
-        for alias in (*STATE_DB_ROW_ID_ALIASES, STATE_DB_ROW_TIMESTAMP_KEY):
-            msg.pop(alias, None)
+        msg.pop(STATE_DB_MESSAGE_UID_KEY, None)
         key = _cross_store_pairing_key(msg, from_sidecar=True)
         matches = [row for row_key, row in run_keys if row_key == key]
-        if (
-            len(matches) == 1
-            and type(matches[0].get('_state_db_row_id')) is int
-            and isinstance(matches[0].get('timestamp'), (int, float))
-        ):
-            msg['_state_db_row_id'] = matches[0]['_state_db_row_id']
-            msg[STATE_DB_ROW_TIMESTAMP_KEY] = matches[0]['timestamp']
+        if len(matches) == 1 and _valid_message_uid(matches[0].get(STATE_DB_MESSAGE_UID_KEY)):
+            msg[STATE_DB_MESSAGE_UID_KEY] = matches[0][STATE_DB_MESSAGE_UID_KEY]
 
 
 # Every key a message's private state.db row id has been stored under.
 STATE_DB_ROW_ID_ALIASES = ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id")
-# The stamped row's own state.db timestamp. A row id alone outlives the file
-# that issued it (a state.db restored from a backup or recreated hands the same
-# ids out again); the Agent's own timestamp for that row does not repeat, and a
-# rewrite (/retry, /undo, /compress) gives reinserted rows fresh ones.
-STATE_DB_ROW_TIMESTAMP_KEY = "_state_db_row_timestamp"
+# The Agent's own per-occurrence ``message_uid`` for a state.db row, read only
+# with ``include_row_identity`` and stamped on gateway sidecar rows. It is the
+# display merge's proof that two rows are one message.
+STATE_DB_MESSAGE_UID_KEY = "_state_db_message_uid"
+
+
+def _valid_message_uid(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:
