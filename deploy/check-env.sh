@@ -30,15 +30,33 @@ value_of() {
           -e "s/^'//" -e "s/'\$//"
 }
 
+# Report whether a key is ASSIGNED at all, separately from its value.
+# `HERMES_WEBUI_HOST=` is present but empty: it still reaches the app
+# (`bootstrap.py` reads os.getenv(..., "127.0.0.1"), whose default applies
+# only when the variable is UNSET), and ThreadingHTTPServer binds an empty
+# host as 0.0.0.0 — a wildcard. With the built-in auth gate off (the
+# intended config here), that exposes the backend past nginx and PAM.
+# So an empty assignment must be rejected, not skipped.
+assigned() {
+  grep -qE "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ENV_FILE" 2>/dev/null
+}
+
 for pair in "HERMES_WEBUI_PORT:8788" "HERMES_WEBUI_HOST:127.0.0.1"; do
   key="${pair%%:*}"
   want="${pair#*:}"
-  got="$(value_of "$key")"
-  if [ -n "$got" ] && [ "$got" != "$want" ]; then
-    echo "[hermes-webui] ${key}=${got} in ${ENV_FILE} overrides this unit's required ${want}." >&2
-    echo "[hermes-webui] nginx proxies to 127.0.0.1:8788, so the backend would not be reachable." >&2
-    echo "[hermes-webui] Remove or correct that line in ${ENV_FILE}, then restart the unit." >&2
-    exit 1
+  if assigned "$key"; then
+    got="$(value_of "$key")"
+    if [ "$got" != "$want" ]; then
+      if [ -z "$got" ]; then
+        echo "[hermes-webui] ${key}= (empty) in ${ENV_FILE} overrides this unit's required ${want}." >&2
+        echo "[hermes-webui] An empty value still reaches the app and makes the backend bind every interface." >&2
+      else
+        echo "[hermes-webui] ${key}=${got} in ${ENV_FILE} overrides this unit's required ${want}." >&2
+        echo "[hermes-webui] nginx proxies to 127.0.0.1:8788, so the backend would not be reachable." >&2
+      fi
+      echo "[hermes-webui] Remove that line from ${ENV_FILE} (the unit provides the value) or set it to ${want}, then restart the unit." >&2
+      exit 1
+    fi
   fi
 done
 

@@ -111,6 +111,14 @@ Browser  -->  nginx (port 8787, TLS, PAM auth)  -->  hermes-webui.service (port 
   `ExecStartPre` (`deploy/check-env.sh`) refuses to start when those disagree
   with `127.0.0.1:8788` rather than serving a 502 — check `journalctl` if the
   unit will not start.
+- **An empty value is not the same as an absent one.** `HERMES_WEBUI_HOST=`
+  (nothing after the `=`) still reaches the app: `bootstrap.py` reads
+  `os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")`, whose default applies only
+  when the variable is *unset*, and the HTTP server binds an empty host as
+  `0.0.0.0` — every interface. With the built-in auth gate off (the intended
+  config here), that exposes the backend past nginx and PAM. `check-env.sh`
+  therefore rejects an empty assignment, not just a mismatched one. Write
+  `HERMES_WEBUI_HOST=127.0.0.1` or remove the line entirely.
 - PAM requires nginx workers to run as root (`user root;` in `nginx.conf`,
   Installation step 3b): `pam_unix` checks passwords against `/etc/shadow`,
   which only root can read, and its `unix_chkpwd` helper verifies only the
