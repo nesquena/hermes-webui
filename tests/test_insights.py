@@ -2509,22 +2509,23 @@ def test_insights_absolute_range_end_only_dst_calendar_arithmetic(monkeypatch, t
 # ---------------------------------------------------------------------------
 
 
-def test_dst_tests_save_and_restore_the_ambient_tz():
-    """P2: the DST tests overwrote TZ and then DELETED it, so a developer who
+def test_tz_pinning_tests_save_and_restore_the_ambient_tz():
+    """Every test that pins TZ must restore the ambient value.
+
+    P2: the DST tests overwrote TZ and then DELETED it, so a developer who
     started the suite with TZ set had it clobbered for the rest of the process
     and later results depended on test order.
 
-    Greptile P2 (2026-10-09T22:21:55Z): the first version of this check searched
-    the whole file for the cleanup call — including the call it was asserting
-    on, since that literal lives in this very test — so deleting every real
-    cleanup would still have passed. It now inspects the four DST test bodies
-    only, and the searched strings are assembled at runtime so this test's own
-    text cannot satisfy them.
+    The first version of this check searched the whole file for the cleanup
+    call — including the call it was asserting on, since that literal lives in
+    this very test — so deleting every real cleanup would still have passed.
+    It now finds the test bodies that ASSIGN to os.environ["TZ"] structurally
+    (excluding the restore assignments), and the searched strings are assembled
+    at runtime so this test's own text cannot satisfy them.
     """
     import ast
 
     src = pathlib.Path(__file__).read_text(encoding="utf-8")
-    write = 'os.environ[' + '"TZ"' + '] = "America/New_York"'
     save = "_saved_tz = os.environ." + 'get("TZ")'
     restore = 'os.environ[' + '"TZ"' + '] = _saved_tz'
     pop = "os.environ." + 'pop("TZ", None)'
@@ -2535,14 +2536,50 @@ def test_dst_tests_save_and_restore_the_ambient_tz():
         "            " + restore + "\n"
     )
 
+    tree = ast.parse(src)
+
+    def _pins_env_tz(node):
+        # An assignment to os.environ["TZ"] whose value is NOT the saved
+        # ambient value is a pin; `= _saved_tz` is the restore.
+        if not isinstance(node, ast.Assign):
+            return False
+        tgt = node.targets[0]
+        if not (
+            isinstance(tgt, ast.Subscript)
+            and isinstance(tgt.value, ast.Attribute)
+            and tgt.value.attr == "environ"
+            and isinstance(tgt.value.value, ast.Name)
+            and tgt.value.value.id == "os"
+        ):
+            return False
+        return not (isinstance(node.value, ast.Name) and node.value.id == "_saved_tz")
+
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
     bodies = {
         node.name: ast.get_source_segment(src, node) or ""
-        for node in ast.walk(ast.parse(src))
+        for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef)
     }
-    dst = {name: body for name, body in bodies.items() if write in body}
-    assert len(dst) == 5, f"expected the five DST tests, found {sorted(dst)}"
-    for name, body in dst.items():
+
+    checked = set()
+    for node in ast.walk(tree):
+        if not _pins_env_tz(node):
+            continue
+        fn = node
+        while fn in parents and not isinstance(fn, ast.FunctionDef):
+            fn = parents[fn]
+        assert isinstance(fn, ast.FunctionDef), "a TZ pin must live in a test"
+        checked.add(fn.name)
+
+    assert len(checked) >= 5, (
+        f"expected the DST and reversed-range tests, found {sorted(checked)}"
+    )
+    for name in sorted(checked):
+        body = bodies[name]
         assert save in body, f"{name} must snapshot the ambient TZ"
         assert guarded in body, (
             f"{name} must unset TZ only when it was unset before, and otherwise "
@@ -2968,6 +3005,7 @@ def test_insights_traffic_swaps_reversed_range_like_insights(monkeypatch, tmp_pa
     Maintainer review (2026-11-12): "silently showing unrelated dates is not a
     repair". Distinct in-range/out-of-range rows prove the swap.
     """
+    import os
     import pathlib
     import socket as _socket
     import types
@@ -2975,35 +3013,58 @@ def test_insights_traffic_swaps_reversed_range_like_insights(monkeypatch, tmp_pa
     import api.models as models
     import api.routes as routes
 
-    # Two distinct clients: one inside 08..10 Nov, one outside (11 Nov).
-    log_file = tmp_path / "access.log"
-    log_file.write_text(
-        "10.0.0.1 - - [09/Nov/2026:10:00:00 +0000] "
-        '"GET / HTTP/1.1" 200 1 "-" "t"\n'
-        "10.0.0.2 - - [11/Nov/2026:10:00:00 +0000] "
-        '"GET / HTTP/1.1" 200 1 "-" "t"\n'
-    )
-    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
-    monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
-    monkeypatch.setattr(
-        models, "_active_state_db_path",
-        lambda: pathlib.Path("/nonexistent/state.db"),
-    )
-    # A clock safely after both endpoints.
-    clock_ts = 1794500000  # 2026-11-12 ~06:13 UTC
-    monkeypatch.setattr(routes.time, "time", lambda _ts=clock_ts: _ts)
+    # The handler derives its day bounds in LOCAL time, while the log carries
+    # an explicit offset. Pin the zone and render the log lines in that zone so
+    # the in/out-of-range split is deterministic on any host.
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for the timezone-pinned test")
 
-    def _ips(query):
-        handler = _FakeHandler()
-        routes._handle_insights_traffic(handler, types.SimpleNamespace(query=query))
-        assert handler.status == 200, handler.json_body()
-        return [r["ip"] for r in handler.json_body()["inbound_ips_month"]]
+    _saved_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        def _log_line(ip, local_dt):
+            ts = time.strftime(
+                "%d/%b/%Y:%H:%M:%S %z",
+                time.localtime(time.mktime(local_dt)),
+            )
+            return f"{ip} - - [{ts}] " '"GET / HTTP/1.1" 200 1 "-" "t"\n'
 
-    # The ordered selection: only the in-range client.
-    assert _ips("start=2026-11-08&end=2026-11-10") == ["10.0.0.1"]
-    # The SAME selection reversed must serve the SAME interval, not the
-    # trailing month (which would include 10.0.0.2).
-    assert _ips("start=2026-11-10&end=2026-11-08") == ["10.0.0.1"]
+        log_file = tmp_path / "access.log"
+        log_file.write_text(
+            # In range: midday Nov 9. Out of range: midday Nov 11.
+            _log_line("10.0.0.1", (2026, 11, 9, 12, 0, 0, 0, 0, -1))
+            + _log_line("10.0.0.2", (2026, 11, 11, 12, 0, 0, 0, 0, -1))
+        )
+        monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+        monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+        monkeypatch.setattr(
+            models, "_active_state_db_path",
+            lambda: pathlib.Path("/nonexistent/state.db"),
+        )
+        # A clock safely after both endpoints, in the pinned zone.
+        clock_ts = time.mktime((2026, 11, 12, 12, 0, 0, 0, 0, -1))
+        monkeypatch.setattr(routes.time, "time", lambda _ts=clock_ts: _ts)
+
+        def _ips(query):
+            handler = _FakeHandler()
+            routes._handle_insights_traffic(
+                handler, types.SimpleNamespace(query=query))
+            assert handler.status == 200, handler.json_body()
+            return [r["ip"] for r in handler.json_body()["inbound_ips_month"]]
+
+        # The ordered selection: only the in-range client.
+        assert _ips("start=2026-11-08&end=2026-11-10") == ["10.0.0.1"]
+        # The SAME selection reversed must serve the SAME interval, not the
+        # trailing month (which would include 10.0.0.2).
+        assert _ips("start=2026-11-10&end=2026-11-08") == ["10.0.0.1"]
+    finally:
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
 
 
 def test_insights_traffic_whole_end_day_spans_dst_transitions(monkeypatch, tmp_path):
