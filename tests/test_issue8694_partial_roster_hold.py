@@ -1,17 +1,21 @@
-"""#8694 maintainer finish: a PARTIAL profile roster must never authorize a hold.
+"""#8694 maintainer finish: a PARTIAL profile roster must never certify a sidebar.
 
 ``_all_profiles_cli_contexts`` is best-effort: when the named-profile directory
 enumeration fails, or one profile's home fails to resolve, it returns the
 contexts it managed to collect. The all-profiles cache stamp is built from those
 contexts, so a profile the roster could not see can commit (a Desktop row
 deleted from its state.db) without moving anything the stamp compares. The
-rebuild-rate floor must therefore treat a partial roster as unknown evidence and
-decline the hold, exactly as it already does for an unreadable fingerprint.
+roster producer therefore marks an incomplete roster in its cache key and in
+the all-profiles stamp.
 
 The first test is the Gate's production-composed schedule (real SQLite files,
 the real roster producer, the strict owning-profile query, the Desktop orphan
-pruner and the cache consumer). It fails on #8694's head `63d3b5e5bbbe`
-(the deleted row survives three reads, one build) and passes here.
+pruner and the cache consumer). It failed on #8694's head `63d3b5e5bbbe`
+(the deleted row survived three reads, one build).
+
+#8986 simplify: the server-side rebuild-rate floor ("hold") is gone, so every
+source-stamp move rebuilds on the next request as on master; the tests that only
+pinned the hold's gates were removed and the rest assert the rebuild.
 """
 
 import json
@@ -192,21 +196,17 @@ def _metadata_only_churn_builds(store, two_profiles, monkeypatch, *, roster_fail
     r._get_cached_session_list_payload(key=key, builder=build)
     assert len(builds) == 1
     store.gateway.write_text(json.dumps({"external_metadata_tick": 2}))
-    probe_payload, status = r._session_list_cache_probe(key)
+    probe_payload, status = r._session_list_cache_probe(key, allow_stale=True)
     r._get_cached_session_list_payload(key=key, builder=build)
     return status, len(builds)
 
 
-def test_complete_roster_still_holds_metadata_only_churn(store, two_profiles, monkeypatch):
-    status, builds = _metadata_only_churn_builds(store, two_profiles, monkeypatch, roster_failure=None)
-    assert status == store.r._SESSION_LIST_CACHE_HELD
-    assert builds == 1, "the complete-roster optimization must survive: metadata churn is coalesced"
-
-
-def test_partial_roster_declines_the_hold_on_metadata_only_churn(store, two_profiles, monkeypatch):
-    status, builds = _metadata_only_churn_builds(store, two_profiles, monkeypatch, roster_failure="enumeration")
-    assert status != store.r._SESSION_LIST_CACHE_HELD
-    assert builds == 2, "a partial roster is unknown evidence: revalidate like master"
+@pytest.mark.parametrize("roster_failure", [None, "enumeration"])
+def test_metadata_only_churn_rebuilds_on_the_next_read(store, two_profiles, monkeypatch, roster_failure):
+    """Gateway-metadata churn alone moves the stamp, so the next read rebuilds (master's behaviour)."""
+    status, builds = _metadata_only_churn_builds(store, two_profiles, monkeypatch, roster_failure=roster_failure)
+    assert status == store.r._SESSION_LIST_CACHE_STALE_SOURCE
+    assert builds == 2
 
 
 def test_explicit_invalidation_still_clears_an_all_profiles_entry(store, two_profiles):
@@ -308,12 +308,11 @@ def test_partial_and_complete_roster_keys_differ_for_the_cli_cache(store, two_pr
     )
 
 
-def test_a_partial_roster_read_by_the_builder_declines_the_hold(store, two_profiles, monkeypatch):
+def test_a_partial_roster_read_by_the_builder_is_rebuilt_on_the_next_source_move(store, two_profiles, monkeypatch):
     """The stamp's roster read was complete, but the BUILDER's own read was not.
 
     Senior review finding 2: the payload then misses bravo's rows while the stamp
-    says every profile was seen, so the floor held the incomplete payload. The
-    partial-roster epoch moves during the build and the stored stamp is marked.
+    says every profile was seen. The next source move must rebuild it.
     """
     r = store.r
     key = r._session_list_cache_key(active_profile="default", all_profiles=True,
@@ -341,24 +340,11 @@ def test_a_partial_roster_read_by_the_builder_declines_the_hold(store, two_profi
     first = r._get_cached_session_list_payload(key=key, builder=build)
     assert [row["session_id"] for row in first["sessions"]] == ["default"], "the builder's read was partial"
     store.gateway.write_text(json.dumps({"external_metadata_tick": 3}))
-    _payload, status = r._session_list_cache_probe(key)
-    assert status != r._SESSION_LIST_CACHE_HELD
+    _payload, status = r._session_list_cache_probe(key, allow_stale=True)
+    assert status == r._SESSION_LIST_CACHE_STALE_SOURCE
     second = r._get_cached_session_list_payload(key=key, builder=build)
     assert sorted(row["session_id"] for row in second["sessions"]) == ["bravo", "default"]
     assert len(builds) == 2
-
-
-def test_a_profile_without_a_state_db_keeps_the_complete_roster_hold(store, two_profiles, monkeypatch):
-    """Senior review finding 3: a created-but-never-used profile has no state.db.
-
-    That is a readable observation (its creation moves the file stat the stamp
-    also carries), not an unreadable fingerprint, so it must not switch the
-    all-profiles hold off for good.
-    """
-    two_profiles.foreign.unlink()
-    status, builds = _metadata_only_churn_builds(store, two_profiles, monkeypatch, roster_failure=None)
-    assert status == store.r._SESSION_LIST_CACHE_HELD
-    assert builds == 1
 
 
 def test_creating_a_profiles_state_db_revalidates(store, two_profiles):
@@ -376,34 +362,34 @@ def test_creating_a_profiles_state_db_revalidates(store, two_profiles):
     r._get_cached_session_list_payload(key=key, builder=build)
     shutil.copyfile(store.db, two_profiles.foreign)
     store.gateway.write_text(json.dumps({"external_metadata_tick": 4}))
-    _payload, status = r._session_list_cache_probe(key)
-    assert status != r._SESSION_LIST_CACHE_HELD
+    _payload, status = r._session_list_cache_probe(key, allow_stale=True)
+    assert status == r._SESSION_LIST_CACHE_STALE_SOURCE
 
 
-def test_stamp_readability_rejects_the_incomplete_marker():
-    from api import route_session_list_cache as cache
+def test_a_partial_roster_stamp_never_equals_the_complete_one(store, two_profiles, monkeypatch):
+    """A failed active-profile lookup leaves the context list unchanged; only the marker moves the stamp."""
+    r = store.r
+    key = r._session_list_cache_key(active_profile="default", all_profiles=True,
+        show_cli_sessions=True, show_previous_messaging_sessions=False, show_cron_sessions=False)
+    complete = r._session_list_cache_source_stamp(key)
 
-    entry = ((1, 1), (1, 1), (5, 5))
-    stamp = (None, None, None, None, None, (5, 5), (entry,), 0)
-    assert cache._session_list_cache_stamp_fingerprints_readable(stamp, True) is True
-    partial = (None, None, None, None, None, (5, 5), (entry, cache._ALL_PROFILES_STAMP_ROSTER_INCOMPLETE), 0)
-    assert cache._session_list_cache_stamp_fingerprints_readable(partial, True) is False
-    assert cache._session_list_cache_stamp_hold_evidence(partial, True) is None
-    # A single-profile key never reads the all-profiles collection.
-    assert cache._session_list_cache_stamp_fingerprints_readable(partial, False) is True
+    def boom():
+        raise RuntimeError("controlled active-profile lookup failure")
+
+    monkeypatch.setattr(two_profiles.profiles, "get_active_profile_name", boom)
+    partial = r._session_list_cache_source_stamp(key)
+    assert partial[6][-1] == models.ALL_PROFILES_ROSTER_INCOMPLETE
+    assert partial[6][:-1] == complete[6], "the same profiles were seen"
+    assert partial != complete
 
 
-
-def test_a_failed_row_load_inside_the_builder_declines_the_hold(store, monkeypatch):
+def test_a_failed_row_load_inside_the_builder_is_rebuilt_on_the_next_source_move(store, monkeypatch):
     """Senior review r2 finding 2: the same problem as the builder's roster read, for ROWS.
 
     The stamp's fingerprint read is fine; then the builder's own state.db read
     fails ("database is locked") and ``get_cli_sessions`` serves last-known-good
-    rows that predate a Desktop commit. The payload is stored under the newer
-    stamp, so without a mark the floor held it through gateway-metadata churn and
-    the committed row stayed hidden. The partial-load epoch moves during that
-    build, the stored single-profile stamp is marked unreadable, and the next
-    request rebuilds (master's behaviour).
+    rows that predate a Desktop commit. The next source move (gateway-metadata
+    churn) must rebuild and show the committed row (master's behaviour).
     """
     r = store.r
     key = r._session_list_cache_key(active_profile="default", all_profiles=False,
@@ -447,43 +433,6 @@ def test_a_failed_row_load_inside_the_builder_declines_the_hold(store, monkeypat
     stale = r._get_cached_session_list_payload(key=key, builder=build)
     assert ids(stale) == ["a", "z"], "the builder served last-known-good rows"
     store.gateway.write_text(json.dumps({"external_metadata_tick": 51}))
-    _payload, status = r._session_list_cache_probe(key)
-    assert status != r._SESSION_LIST_CACHE_HELD
+    _payload, status = r._session_list_cache_probe(key, allow_stale=True)
+    assert status == r._SESSION_LIST_CACHE_STALE_SOURCE
     assert ids(r._get_cached_session_list_payload(key=key, builder=build)) == ["a", "n", "z"]
-
-
-def test_mark_partial_build_withdraws_the_hold_but_not_freshness(monkeypatch):
-    import api.route_session_list_cache as cache
-
-    stamp = (1, 2, 3, 4, 5, ("fp",), None, 8)
-    monkeypatch.setattr(cache, "_session_list_cache_roster_epoch", lambda: (0, 1))
-    marked = cache._session_list_cache_mark_partial_build(stamp, (0, 0))
-    assert cache._session_list_cache_stamp_hold_evidence(marked) is None
-    assert cache._session_list_cache_comparable_stamp(marked) == stamp
-    assert cache._session_list_cache_mark_partial_build(stamp, (0, 1)) == stamp
-
-
-def test_a_load_that_is_partial_on_every_build_still_serves_the_ttl_cache(store, monkeypatch):
-    """Senior review r3: the partial-build mark withdraws the HOLD only.
-
-    A source that is partial on every load (an unreadable profile, a corrupt
-    optional pass) moves the epoch during every build. If the mark made the
-    stored stamp unequal to an unchanged source, every request would become a
-    blocking rebuild, where master serves the TTL cache.
-    """
-    r = store.r
-    key = r._session_list_cache_key(active_profile="default", all_profiles=False,
-        show_cli_sessions=True, show_previous_messaging_sessions=False, show_cron_sessions=False)
-    builds = []
-
-    def build():
-        builds.append(1)
-        models._note_partial_cli_sessions_load()  # this build's row load was partial
-        return {"sessions": [], "cli_count": 0, "active_profile": "default",
-                "all_profiles": False, "other_profile_count": 0}
-
-    r._get_cached_session_list_payload(key=key, builder=build)
-    _payload, status = r._session_list_cache_probe(key)
-    assert status == r._SESSION_LIST_CACHE_FRESH
-    r._get_cached_session_list_payload(key=key, builder=build)
-    assert len(builds) == 1

@@ -612,12 +612,11 @@ def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monke
 def test_api_sessions_reconciles_a_committed_append_under_transient_fingerprint_locks(monkeypatch, tmp_path):
     """Lock -> real producer -> committed append -> immediate handler/consumer.
 
-    The reviewed defect: two UNREADABLE content fingerprints compare equal, so the
-    ten-second rebuild-rate floor held a cached sidebar across an append that had
-    really been committed (a Desktop/CLI continuation). The unit coverage in
-    ``tests/test_session_sidebar_cache.py`` proves the real locked producer and the
-    cache consumer separately; this test joins them end to end, because only the
-    join shows the floor suppressing the file-stat reconciliation.
+    Two UNREADABLE content fingerprints compare equal, so the file-stat movement
+    of an append that was really committed (a Desktop/CLI continuation) is what
+    must reconcile the cached sidebar. ``tests/test_session_sidebar_cache.py``
+    proves the real locked producer on its own; this test joins it to the
+    handler and the cache consumer end to end.
 
     A real rollback-journal EXCLUSIVE lock is held around the real
     ``_sqlite_content_fingerprint`` read and released before the rebuild runs. Two
@@ -709,10 +708,8 @@ def test_api_sessions_reconciles_a_committed_append_under_transient_fingerprint_
     )
 
     # Immediate next request: the same transient-lock schedule repeats on its
-    # fingerprint read. The append also moved the state.db stat pair (asserted
-    # above), so the hold evidence differs either way: this pins the end-to-end
-    # reconciliation, while the unreadable-fingerprint guard on its own is pinned
-    # by test_session_list_cache_rate_floor_never_holds_an_unreadable_fingerprint.
+    # fingerprint read, so only the state.db stat movement (asserted above) can
+    # reconcile it.
     second = _GetHandler("/api/sessions?sidebar_source=webui")
     routes.handle_get(second, urlparse(second.path))
     assert second.status == 200
@@ -729,7 +726,7 @@ def test_api_sessions_reconciles_a_committed_append_under_transient_fingerprint_
     assert row["message_count"] == direct_count == 4
     assert row["last_message_at"] == direct_tail == 1003.0
     assert row["updated_at"] == 1003.0
-    assert len(builder_saw_open_lock) >= 2, "the append must have been rebuilt, not held"
+    assert len(builder_saw_open_lock) >= 2, "the append must have been rebuilt, not served from the cache"
     assert not any(builder_saw_open_lock), "rebuilds must run with the writer lock released"
 
 

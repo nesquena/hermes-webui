@@ -2817,7 +2817,6 @@ _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION = (
     _route_session_list_cache._SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION
 )
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = _route_session_list_cache._SESSIONS_CACHE_STALE_WAIT_SECONDS
-_SESSIONS_CACHE_MIN_REFRESH_SECONDS = _route_session_list_cache._SESSIONS_CACHE_MIN_REFRESH_SECONDS
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = (
     _route_session_list_cache._SESSIONS_CACHE_STREAMING_TTL_SECONDS
 )
@@ -2830,7 +2829,6 @@ _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
 _SESSION_LIST_CACHE_MISSING = _route_session_list_cache._SESSION_LIST_CACHE_MISSING
 _SESSION_LIST_CACHE_FRESH = _route_session_list_cache._SESSION_LIST_CACHE_FRESH
-_SESSION_LIST_CACHE_HELD = _route_session_list_cache._SESSION_LIST_CACHE_HELD
 _SESSION_LIST_CACHE_STALE_SOURCE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_SOURCE
 _SESSION_LIST_CACHE_STALE_AGE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_AGE
 _session_list_cache_probe = _route_session_list_cache._session_list_cache_probe
@@ -3882,21 +3880,6 @@ def _get_cached_session_list_payload(
                 pass
         return cached
 
-    if cache_status == _SESSION_LIST_CACHE_HELD:
-        # Explicit consumer contract for the rebuild-rate floor: the entry is
-        # inside `_SESSIONS_CACHE_MIN_REFRESH_SECONDS`, so serve it and return
-        # WITHOUT claiming an owner. Treating a held hit as "stale, rebuild in the
-        # background" is what made the floor a no-op here: singleflight caps
-        # concurrent rebuilds, not consecutive ones, so every poll still started a
-        # full rebuild. Explicit invalidation (rename/delete/settings) clears the
-        # entry outright, so those never take this branch.
-        if diag is not None:
-            try:
-                diag.stage("session_list_cache_rate_floor_hold")
-            except Exception:
-                pass
-        return cached
-
     stale = cached  # a stale payload when one exists, else None
     stale_reason = (
         cache_status
@@ -3928,7 +3911,6 @@ def _get_cached_session_list_payload(
                             # revalidates. Retrying cannot produce a snapshot the
                             # producer just failed to read.
                             return
-                        roster_epoch = _route_session_list_cache._session_list_cache_roster_epoch()
                         try:
                             payload = builder()
                         except Exception:
@@ -3936,9 +3918,6 @@ def _get_cached_session_list_payload(
                                 "session list stale-cache background rebuild failed"
                             )
                             return
-                        source_stamp = _route_session_list_cache._session_list_cache_mark_partial_build(
-                            source_stamp, roster_epoch
-                        )
                         if (
                             _session_list_cache_invalidation_stamp(key) == invalidation_stamp
                             and _session_list_cache_set(
@@ -3983,11 +3962,7 @@ def _get_cached_session_list_payload(
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
                 source_stamp = _session_list_cache_source_stamp_snapshot(key)
-                roster_epoch = _route_session_list_cache._session_list_cache_roster_epoch()
                 payload = builder()
-                source_stamp = _route_session_list_cache._session_list_cache_mark_partial_build(
-                    source_stamp, roster_epoch
-                )
                 if source_stamp is None:
                     # Unknown pre-build evidence: correct for this request, never
                     # certified. Retrying cannot produce a snapshot the producer
@@ -4059,11 +4034,7 @@ def _get_cached_session_list_payload(
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
     source_stamp = _session_list_cache_source_stamp_snapshot(key)
-    roster_epoch = _route_session_list_cache._session_list_cache_roster_epoch()
     payload = builder()
-    source_stamp = _route_session_list_cache._session_list_cache_mark_partial_build(
-        source_stamp, roster_epoch
-    )
     if (
         source_stamp is not None
         and _session_list_cache_invalidation_stamp(key) == invalidation_stamp

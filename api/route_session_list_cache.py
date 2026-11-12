@@ -13,7 +13,6 @@ from api.models import (
     ALL_PROFILES_ROSTER_INCOMPLETE,
     _active_state_db_path,
     _active_stream_ids,
-    _content_fingerprint_readable,
 )
 from api.profiles import _profiles_match
 
@@ -38,37 +37,10 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # still invalidate immediately. Keep this strictly greater than
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
-# Rebuild-rate floor (2026-10-28). The stamp above changes whenever ANY writer
-# touches state.db, the session index or the gateway metadata, and each change
-# forces a FULL all_sessions() rebuild (it re-parses every transcript in the
-# store). Measured with three concurrent agent sessions: 50 rebuilds in 12 min,
-# 847 s of total stall, worst single /api/sessions request 60.6 s while the
-# machine sat at load 14 (a warm rebuild costs ~1.2 s of parsing and multiples
-# of that under contention).
-#
-# What the floor actually coalesces is narrower than that measurement: only
-# movement a state.db commit cannot produce, i.e. the session index and gateway
-# metadata being rewritten while state.db's stat pair and content fingerprint
-# (and, for an all-profiles key, every profile's, from a complete roster) stay
-# identical. A committed message, rename or delete in state.db always rebuilds
-# on the next request (the reconciliation contract; see
-# `_session_list_cache_stamp_hold_evidence`), so a busy writer that commits to
-# state.db on every message is NOT rate-capped by this floor. Inside the floor a
-# held payload is at most this many seconds old. (#8694)
-# The runtime overlay (active stream, pending flags, sort order) is applied on
-# every response regardless of the cache, so only structural row data (title,
-# counts, membership) can be this stale. Settings are not hold evidence either:
-# every setting that shapes the payload is part of the cache KEY, and the
-# sidebar-visibility toggles clear the cache outright, so other settings churn
-# is coalesced like index churn.
-_SESSIONS_CACHE_MIN_REFRESH_SECONDS = 10.0
-# Consumer-facing statuses for `_session_list_cache_probe`. `held` is the explicit
-# "inside the rebuild-rate floor, serve this and do NOT start a rebuild" contract:
-# callers that treat every non-fresh hit as a rebuild trigger defeat the floor,
-# because singleflight only caps CONCURRENT rebuilds, never consecutive ones.
+# Statuses `_session_list_cache_probe` reports, so the consumer reads the stale
+# reason from the same stamp read that classified the entry.
 _SESSION_LIST_CACHE_MISSING = "missing"
 _SESSION_LIST_CACHE_FRESH = "fresh"
-_SESSION_LIST_CACHE_HELD = "held"
 _SESSION_LIST_CACHE_STALE_SOURCE = "source"
 _SESSION_LIST_CACHE_STALE_AGE = "age"
 _SESSIONS_CACHE_MAX_ENTRIES = 64
@@ -412,161 +384,12 @@ def _session_list_cache_key(
     )
 
 
-# Positions in the idle source stamp (an 8-tuple, see
-# `_session_list_cache_source_stamp`) the rebuild-rate floor compares before it
-# holds an entry: the state.db and state.db-WAL stat pair, the content
-# fingerprint, and the all-profiles stamp.
-#
-# The stat pair is NOT an optimisation detail here. `_sqlite_content_fingerprint`
-# is `MAX(rowid)` of `sessions`/`messages`, i.e. an APPEND POSITION: it does not
-# move for an UPDATE (a title or message_count written by `state_sync`/the
-# Desktop App) and it does not move for the DELETE of any row that is not the
-# current maximum. Every commit of any kind, however, touches the database file
-# (rollback journal) or appends frames to the WAL, so the stat pair is the only
-# cheap witness that "a commit happened at all". Comparing the fingerprint alone
-# is what let a committed rename/delete stay hidden for the whole floor: master
-# was always saved by this same stat movement, and the floor suppressed it.
-# (#8694)
-#
-# Residual (#8987): the pair has 1 ms mtime resolution and a reused WAL keeps
-# its size, so a commit landing in the same millisecond tick as the write before
-# the pre-build snapshot can leave the pair equal. Such a commit can be held for
-# the rest of the floor (at most 10 s from insertion); a non-colliding witness
-# (the -shm WAL-index header) is the follow-up.
-_STAMP_HOLD_EVIDENCE_INDEXES = (0, 1, 5, 6)
-
 # Appended to an all-profiles state stamp built from a PARTIAL roster: the same
-# marker ``_all_profiles_cli_contexts`` puts in its cache key. Not a 3-tuple, so
-# it can never be read as a profile's (stat, wal-stat, fingerprint) entry. (#8694)
+# marker ``_all_profiles_cli_contexts`` puts in its cache key, so a stamp from a
+# roster that skipped a profile never equals one from the complete roster. Not a
+# 3-tuple, so it can never be read as a profile's (stat, wal-stat, fingerprint)
+# entry. (#8694)
 _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE = ALL_PROFILES_ROSTER_INCOMPLETE
-
-# A profile's state.db that does not exist: readable evidence (see
-# `_session_list_cache_state_db_fingerprint_impl`). (#8694)
-_STATE_DB_ABSENT_FINGERPRINT = ('<state-db-absent>',)
-
-# Appended (as a 9th element) to a stamp whose build saw a partial read; a
-# 9-tuple is never hold evidence. (#8694 senior review r3)
-_SESSION_LIST_CACHE_PARTIAL_BUILD = ('<partial-build>',)
-
-
-def _session_list_cache_roster_epoch():
-    """The (partial-roster, partial-row-load) epochs before a build, or ``None`` when unknowable."""
-    try:
-        from api.models import all_profiles_partial_roster_epoch, cli_sessions_partial_load_epoch
-
-        return (all_profiles_partial_roster_epoch(), cli_sessions_partial_load_epoch())
-    except Exception:
-        return None
-
-
-def _session_list_cache_mark_partial_build(source_stamp, roster_epoch_before):
-    """Withdraw a stored stamp's hold evidence when a read DURING the build was partial.
-
-    The stamp's reads happened before the build; the builder reads again. If its
-    roster read skipped a profile, or its row load failed or was incomplete and
-    served stale / last-known-good rows, the payload can miss rows the stamp's
-    evidence already covers, and the rate floor would hold that payload. The mark
-    is a 9th element (``_SESSION_LIST_CACHE_PARTIAL_BUILD``): a 9-tuple is never
-    hold evidence, so the floor won't hold this entry, while
-    ``_session_list_cache_comparable_stamp`` strips the mark so FRESH and
-    stale-while-revalidate reuse work exactly as on master. An unknowable epoch
-    marks too (the safe direction). Another thread's partial read during the
-    build marks it as well, which only costs the hold for that entry.
-    (#8694 senior review r1 + r2 + r3)
-    """
-    if not isinstance(source_stamp, tuple) or len(source_stamp) != 8:
-        return source_stamp
-    epoch_after = _session_list_cache_roster_epoch()
-    if (
-        roster_epoch_before is not None
-        and epoch_after is not None
-        and epoch_after == roster_epoch_before
-    ):
-        return source_stamp
-    return source_stamp + (_SESSION_LIST_CACHE_PARTIAL_BUILD,)
-
-
-def _session_list_cache_comparable_stamp(stamp):
-    """The stamp a stored entry is compared with for FRESH/age, partial-build mark removed.
-
-    The mark only withdraws the entry's right to be HELD by the rate floor; it
-    must not make the entry unequal to an unchanged source, or a source that is
-    partial on every load (an unreadable profile, a corrupt optional pass) turns
-    every request into a blocking rebuild where master served the TTL cache.
-    """
-    if (
-        isinstance(stamp, tuple)
-        and len(stamp) == 9
-        and stamp[8] is _SESSION_LIST_CACHE_PARTIAL_BUILD
-    ):
-        return stamp[:8]
-    return stamp
-
-
-def _session_list_cache_stamp_hold_evidence(stamp, all_profiles: bool = False):
-    """Return the evidence a floor hold may rely on, or ``None`` when unknown.
-
-    The rebuild-rate floor may only hold an entry whose committed ROW CONTENT is
-    provably unchanged: a settled message landing in state.db — the official
-    Desktop App continuing a WebUI-origin session, a CLI turn — and equally a
-    rename or a delete has to be visible on the very next request. That is the
-    reconciliation contract pinned by
-    ``tests/test_webui_state_db_reconciliation.py``, not an optional freshness
-    window. ``None`` (the streaming freeze marker's shorter tuple, a stubbed
-    stamp, or an UNREADABLE fingerprint) is unknown, and unknown never holds.
-
-    "Unreadable" is the first degeneracy: ``_sqlite_content_fingerprint``
-    degrades to ``None`` (total failure) or the ``_CONTENT_FINGERPRINT_UNREADABLE``
-    sentinel (per-table lock/timeout) instead of blocking the hot path. Two such
-    stamps compare EQUAL, so without this check an unknown state.db would hold
-    for the whole floor and suppress the file-stat fallback that used to force
-    reconciliation.
-
-    "Append-only" is the second: an unchanged ``MAX(rowid)`` is not an unchanged
-    table (see ``_STAMP_HOLD_EVIDENCE_INDEXES``), so the stat pair is part of the
-    evidence and any commit inside the floor revalidates instead of holding.
-    Only movement a state.db commit cannot produce — the session index and the
-    gateway metadata being rewritten — is coalesced, which is what the floor is
-    for. (#8694)
-    """
-    if not isinstance(stamp, tuple) or len(stamp) != 8:
-        return None
-    if not _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles):
-        return None
-    return tuple(stamp[index] for index in _STAMP_HOLD_EVIDENCE_INDEXES)
-
-
-def _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles: bool) -> bool:
-    """True only when every fingerprint the hold depends on was actually read.
-
-    For an all-profiles key that also means the roster itself was complete: a
-    readable fingerprint for every profile the roster SAW says nothing about a
-    profile it could not enumerate or resolve. (#8694)
-    """
-    if not _content_fingerprint_readable(stamp[5]):
-        return False
-    all_profiles_stamp = stamp[6]
-    if not all_profiles:
-        # The all-profiles collection is only read for an all-profiles key, so a
-        # ``None`` here is "not applicable", not a failed read.
-        return True
-    if not isinstance(all_profiles_stamp, (tuple, list)):
-        return False
-    if not all_profiles_stamp:
-        # An empty stamp carries NO per-profile fingerprint — unknown evidence,
-        # not proof that nothing committed — and two of them compare equal.
-        # (#8694)
-        return False
-    if _ALL_PROFILES_STAMP_ROSTER_INCOMPLETE in all_profiles_stamp:
-        # ``_all_profiles_cli_contexts`` skipped a profile (directory
-        # enumeration or home resolution failed), so the roster is a subset.
-        return False
-    for profile_stamp in all_profiles_stamp:
-        if not isinstance(profile_stamp, tuple) or len(profile_stamp) != 3:
-            return False
-        if not _content_fingerprint_readable(profile_stamp[2]):
-            return False
-    return True
 
 
 def _session_list_cache_probe(
@@ -578,14 +401,7 @@ def _session_list_cache_probe(
     Statuses:
       ``missing`` — nothing cached (or the entry was dropped as unusable)
       ``fresh``   — usable as-is, no rebuild needed
-      ``held``    — the rebuild-rate floor holds the entry: the caller serves the
-                    payload and returns WITHOUT claiming or starting a rebuild.
-                    ``_get_cached_session_list_payload`` needs this distinction —
-                    without it a held hit falls through to the generic
-                    stale-background branch, which claims an owner and starts the
-                    builder, so singleflight caps concurrent rebuilds while
-                    consecutive ones still run on every poll.
-      ``source``  — the source stamp moved past the floor
+      ``source``  — the source stamp moved: rebuild now
       ``age``     — stale by TTL only
     """
     now = time.monotonic()
@@ -595,23 +411,7 @@ def _session_list_cache_probe(
         if not entry:
             return None, _SESSION_LIST_CACHE_MISSING
         ts, stamp, payload = entry
-        if _session_list_cache_comparable_stamp(stamp) != current_stamp:
-            # Rebuild-rate floor: while a writer keeps touching state.db/index the
-            # stamp differs on almost every poll. Inside the floor, serve what we
-            # have instead of paying another full rebuild — but only when the
-            # committed row content AND the stat pair are provably unchanged. A
-            # committed message, rename or delete (Desktop app, CLI turn) breaks
-            # the reconciliation contract if it waits for the floor, so any
-            # movement a state.db commit can produce always rebuilds now.
-            hold_evidence = _session_list_cache_stamp_hold_evidence(stamp, bool(key[1]))
-            if (
-                hold_evidence is not None
-                and hold_evidence
-                == _session_list_cache_stamp_hold_evidence(current_stamp, bool(key[1]))
-                and (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS
-            ):
-                _SESSIONS_CACHE.move_to_end(key)
-                return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_HELD
+        if stamp != current_stamp:
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
                 return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_SOURCE
@@ -643,10 +443,7 @@ def _session_list_cache_get(
 def _session_list_cache_stale_reason(key: tuple) -> str | None:
     """Return why an existing cache entry is stale, if a rebuild is warranted."""
     payload, status = _session_list_cache_probe(key, allow_stale=True)
-    if payload is None or status in (
-        _SESSION_LIST_CACHE_FRESH,
-        _SESSION_LIST_CACHE_HELD,
-    ):
+    if payload is None or status == _SESSION_LIST_CACHE_FRESH:
         return None
     return status
 
@@ -805,17 +602,6 @@ def _session_list_cache_state_db_fingerprint_impl(state_db_path: Path | None):
     if state_db_path is None:
         return None
     try:
-        os.stat(state_db_path)
-    except FileNotFoundError:
-        # No state.db yet (a profile created but never used): a real, readable
-        # observation, unlike an unreadable read. Its creation moves the file
-        # stat this stamp also carries, so it can never certify a commit away;
-        # treating it as unknown instead would switch the all-profiles hold off
-        # for good on every install with one unused profile. (#8694 senior review)
-        return _STATE_DB_ABSENT_FINGERPRINT
-    except OSError:
-        return None
-    try:
         from api.models import _sqlite_content_fingerprint
 
         return _sqlite_content_fingerprint(state_db_path)
@@ -885,8 +671,8 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
             )
             if all_profiles_roster_incomplete(roster_key):
                 # A profile the roster could not see can commit without moving
-                # any entry above. Carry the marker so this stamp is never
-                # evidence that "every profile is unchanged". (#8694)
+                # any entry above. Carry the marker so a partial roster's stamp
+                # never equals the complete roster's. (#8694)
                 all_profiles_state_stamp = all_profiles_state_stamp + (_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE,)
         except Exception:
             all_profiles_state_stamp = None

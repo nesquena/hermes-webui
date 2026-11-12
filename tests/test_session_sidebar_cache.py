@@ -211,8 +211,6 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
     routes._session_list_cache_set(key, _session_cache_payload("stale"))
     with routes._SESSIONS_CACHE_LOCK:
         ts, stamp, payload = routes._SESSIONS_CACHE[key]
-        # The "changed" stamp below has no recognisable row content, so the
-        # rebuild-rate floor never holds it: the entry only has to be past the TTL.
         routes._SESSIONS_CACHE[key] = (
             ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
             stamp,
@@ -273,92 +271,12 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
     assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
 
 
-def test_session_list_cache_rate_floor_holds_rebuilds(monkeypatch):
-    """The 10 s floor must cap REBUILDS through the real consumer, not just cost.
-
-    `_session_list_cache_get` reports a floor-held payload as "not fresh", and the
-    consumer used to treat every non-fresh hit whose reason was not "source" as
-    "return stale, start a background rebuild". Singleflight caps CONCURRENT
-    rebuilds only, so with a writer rewriting the session index on every poll the
-    floor still allowed one full all_sessions() per poll. This pins the consumer
-    contract: no builder inside the floor, a real refresh once it expires, and no
-    delay after an explicit rename/delete invalidation.
-    """
-    key = routes._session_list_cache_key(
-        active_profile="default",
-        all_profiles=False,
-        show_cli_sessions=False,
-        show_previous_messaging_sessions=False,
-        show_cron_sessions=False,
-    )
-    # A live session rewrites the session index / gateway metadata on every
-    # poll, so the stamp differs while no state.db commit happened. Only this
-    # shape — the db/WAL stat pair and the fingerprint all stable — may be
-    # held; see `_session_list_cache_stamp_hold_evidence`.
-    stat = {"generation": 0}
-    stable_row_content = ("fp-unchanged", None)
-
-    def _changing_stat_stamp(_key):
-        stat["generation"] += 1
-        return (
-            (1, 1),
-            (1, 2),
-            (stat["generation"], 3),
-            (stat["generation"], 4),
-            (stat["generation"], 5),
-            stable_row_content[0],
-            stable_row_content[1],
-            stat["generation"],
-        )
-
-    monkeypatch.setattr(
-        routes, "_session_list_cache_source_stamp", _changing_stat_stamp
-    )
-    routes._session_list_cache_set(key, _session_cache_payload("initial"))
-
-    built = []
-
-    def builder():
-        built.append(1)
-        return _session_cache_payload(f"fresh-{len(built)}")
-
-    diag = _StageRecorder()
-    for _ in range(3):
-        payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
-        assert payload == _session_cache_payload("initial")
-
-    assert built == [], "no rebuild may start inside the rebuild-rate floor"
-    assert "session_list_cache_rate_floor_hold" in diag.stages
-    assert "session_list_cache_stale_background_rebuild" not in diag.stages
-
-    # Past the floor the same hit becomes an ordinary revalidation.
-    with routes._SESSIONS_CACHE_LOCK:
-        ts, stamp, cached_payload = routes._SESSIONS_CACHE[key]
-        routes._SESSIONS_CACHE[key] = (
-            ts - routes._SESSIONS_CACHE_MIN_REFRESH_SECONDS - 1.0,
-            stamp,
-            cached_payload,
-        )
-    refreshed = routes._get_cached_session_list_payload(key=key, builder=builder)
-    assert refreshed == _session_cache_payload("fresh-1")
-    assert len(built) == 1
-
-    # An explicit rename/delete invalidation clears the entry, so the next request
-    # rebuilds immediately even though the floor would otherwise hold it.
-    session_events.publish_session_list_changed("session_rename", profile="default")
-    assert routes._session_list_cache_get(key, allow_stale=True)[0] is None
-    renamed = routes._get_cached_session_list_payload(key=key, builder=builder)
-    assert renamed == _session_cache_payload("fresh-2")
-    assert len(built) == 2
-
-
-def test_session_list_cache_rate_floor_never_holds_a_committed_message(monkeypatch):
-    """A settled row must reconcile on the next request, not after the floor.
+def test_session_list_cache_rebuilds_on_a_committed_message(monkeypatch):
+    """A settled row must reconcile on the next request.
 
     The reconciliation contract (`test_webui_state_db_reconciliation.py`) says an
     external writer — the official Desktop App continuing a WebUI-origin session,
-    a CLI turn — is visible immediately. The floor only ever applies while the
-    committed row content is unchanged, so a fingerprint move rebuilds at once.
+    a CLI turn — is visible immediately, so a fingerprint move rebuilds at once.
     """
     key = routes._session_list_cache_key(
         active_profile="default",
@@ -384,8 +302,7 @@ def test_session_list_cache_rate_floor_never_holds_a_committed_message(monkeypat
     monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _stamp)
     routes._session_list_cache_set(key, _session_cache_payload("two"))
 
-    # Two messages settle in state.db a millisecond later; the entry is far inside
-    # the floor, so only the row-content check can let it through.
+    # Two messages settle in state.db a millisecond later, well inside the TTL.
     rows["fingerprint"] = "rows-4"
     built = []
 
@@ -396,8 +313,8 @@ def test_session_list_cache_rate_floor_never_holds_a_committed_message(monkeypat
     diag = _StageRecorder()
     payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
     assert payload == _session_cache_payload("four")
-    assert built == [1], "committed rows must not wait for the rebuild-rate floor"
-    assert "session_list_cache_rate_floor_hold" not in diag.stages
+    assert built == [1], "committed rows must not wait for the TTL"
+    assert "session_list_cache_rebuild_owner" in diag.stages
 
 
 def test_content_fingerprint_marks_a_failed_read_as_unreadable(tmp_path):
@@ -435,322 +352,6 @@ def test_content_fingerprint_marks_a_failed_read_as_unreadable(tmp_path):
 
     assert locked is not None, "a per-table lock must not collapse into the total-failure None"
     assert models._content_fingerprint_readable(locked) is False
-
-
-def test_session_list_cache_rate_floor_never_holds_an_unreadable_fingerprint(monkeypatch):
-    """An unknown state.db may not license the ten-second hold. (#8694)
-
-    With a writer touching state.db the stat components move on every poll, so
-    the floor is the only thing between a poll and a full rebuild. The hold must
-    therefore be authorized by a fingerprint that was actually READ: two
-    unreadable stamps compare equal, and before this guard they held the entry
-    while suppressing the file-stat reconciliation.
-    """
-    from api import models
-
-    key = routes._session_list_cache_key(
-        active_profile="default",
-        all_profiles=False,
-        show_cli_sessions=False,
-        show_previous_messaging_sessions=False,
-        show_cron_sessions=False,
-    )
-    stat = {"generation": 0}
-    fingerprint = {"value": models._CONTENT_FINGERPRINT_UNREADABLE}
-
-    def _changing_stat_stamp(_key):
-        # Only the holdable movement changes (gateway metadata [2], session index
-        # [3]); the state.db stat pair [0]/[1] and the settings stat stay put. The
-        # stat pair alone would refuse the hold, so a moving pair would make this
-        # test pass without ever reaching the unreadable-fingerprint guard it pins.
-        # (#8986 independent review R2)
-        stat["generation"] += 1
-        generation = stat["generation"]
-        return (
-            (1, 1),
-            (1, 2),
-            (generation, 3),
-            (generation, 4),
-            (1, 5),
-            fingerprint["value"],
-            None,
-            0,
-        )
-
-    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _changing_stat_stamp)
-
-    # Cached while the fingerprint read times out (a writer holds the lock) — the
-    # exact state the review replayed.
-    routes._session_list_cache_set(key, _session_cache_payload("two"))
-
-    built = []
-
-    def builder():
-        built.append(1)
-        return _session_cache_payload("four")
-
-    diag = _StageRecorder()
-    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
-    assert payload == _session_cache_payload("four")
-    assert built == [1], "an unreadable fingerprint must never authorize the hold"
-    assert "session_list_cache_rate_floor_hold" not in diag.stages
-
-
-def test_session_list_cache_rate_floor_holds_through_an_all_profiles_fingerprint(monkeypatch):
-    """All-profiles keys hold on a fully readable stack, and never on a partial one.
-
-    The all-profiles stamp is a per-profile tuple of (db stat, wal stat, content
-    fingerprint). One unreadable profile fingerprint in that set makes the whole
-    stamp unusable as proof of "unchanged". (#8694)
-    """
-    from api import models
-
-    key = routes._session_list_cache_key(
-        active_profile="default",
-        all_profiles=True,
-        show_cli_sessions=False,
-        show_previous_messaging_sessions=False,
-        show_cron_sessions=False,
-    )
-    stat = {"generation": 0}
-    profile_fingerprint: dict[str, object] = {"value": (7, 12)}
-
-    def _changing_stat_stamp(_key):
-        stat["generation"] += 1
-        generation = stat["generation"]
-        profile_stamp = (
-            (1, 1),
-            (1, 2),
-            profile_fingerprint["value"],
-        )
-        return (
-            (1, 1),
-            (1, 2),
-            (generation, 3),
-            (generation, 4),
-            (generation, 5),
-            (40, 91),
-            (profile_stamp,),
-            generation,
-        )
-
-    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _changing_stat_stamp)
-    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
-
-    built = []
-
-    def builder():
-        built.append(1)
-        return _session_cache_payload(f"fresh-{len(built)}", all_profiles=True)
-
-    # Readable stack: the floor still holds (the feature is not disabled).
-    diag = _StageRecorder()
-    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
-    assert payload == _session_cache_payload("a_all", all_profiles=True)
-    assert built == []
-    assert "session_list_cache_rate_floor_hold" in diag.stages
-
-    # One profile's fingerprint becomes unreadable: the hold is not authorized.
-    profile_fingerprint["value"] = models._CONTENT_FINGERPRINT_UNREADABLE
-    rebuilt = routes._get_cached_session_list_payload(key=key, builder=builder)
-    assert rebuilt == _session_cache_payload("fresh-1", all_profiles=True)
-    assert built == [1]
-
-
-def test_session_list_cache_rate_floor_declines_an_empty_profile_set(monkeypatch):
-    """An all-profiles key with NO profile fingerprint evidence may not hold.
-
-    ``_all_profiles_cli_contexts`` degrades to an empty context list when it
-    cannot resolve a single profile home (its ``api.profiles`` import fails) —
-    the same "degrade instead of raise" shape as the fingerprint reader. The
-    resulting empty all-profiles stamp carries zero per-profile fingerprints, so
-    it is UNKNOWN evidence, not proof that no participating profile committed
-    rows. Accepting it would let the floor suppress the file-stat reconciliation
-    of an external writer for the whole hold, which is the #8694 failure mode
-    reached through a different degradation path.
-    """
-    key = routes._session_list_cache_key(
-        active_profile="default",
-        all_profiles=True,
-        show_cli_sessions=False,
-        show_previous_messaging_sessions=False,
-        show_cron_sessions=False,
-    )
-    stat = {"generation": 0}
-    profiles: dict[str, tuple] = {"value": (((1, 1), (1, 2), (7, 12)),)}
-
-    def _changing_stat_stamp(_key):
-        stat["generation"] += 1
-        generation = stat["generation"]
-        return (
-            (1, 1),
-            (1, 2),
-            (generation, 3),
-            (generation, 4),
-            (generation, 5),
-            (40, 91),
-            profiles["value"],
-            generation,
-        )
-
-    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _changing_stat_stamp)
-    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
-
-    built = []
-
-    def builder():
-        built.append(1)
-        return _session_cache_payload(f"fresh-{len(built)}", all_profiles=True)
-
-    # Control: one participating profile with a READ fingerprint still holds.
-    diag = _StageRecorder()
-    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
-    assert payload == _session_cache_payload("a_all", all_profiles=True)
-    assert built == []
-    assert "session_list_cache_rate_floor_hold" in diag.stages
-
-    # Both stamps are written and read inside the enumeration-failure window, so
-    # only the unrelated stat components move: an empty profile set on BOTH
-    # sides still compares equal as row content.
-    profiles["value"] = ()
-    routes._session_list_cache_clear()
-    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
-    rebuilt = routes._get_cached_session_list_payload(key=key, builder=builder)
-    assert rebuilt == _session_cache_payload("fresh-1", all_profiles=True)
-    assert built == [1], "an unenumerated profile set must never authorize the hold"
-
-
-def _make_fingerprint_db(path, rows: int) -> None:
-    import sqlite3
-
-    conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, title TEXT)")
-    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)")
-    for index in range(rows):
-        conn.execute("INSERT INTO sessions (title) VALUES (?)", (f"s{index}",))
-        conn.execute("INSERT INTO messages (body) VALUES (?)", (f"m{index}",))
-    conn.commit()
-    conn.close()
-
-
-def test_session_list_cache_rate_floor_declines_a_locked_participating_profile(
-    monkeypatch, tmp_path
-):
-    """An unreadable PARTICIPATING PROFILE fingerprint must not authorize the hold.
-
-    The all-profiles stamp carries one content fingerprint per participating
-    profile, read through the real ``_sqlite_content_fingerprint``. A real
-    rollback-journal ``EXCLUSIVE`` lock on a profile's state.db makes that read
-    degrade to the unreadable sentinel while the active profile's db stays
-    readable, so two stamps can differ only by an unrelated index component while
-    the profile fingerprint is UNKNOWN on both sides: without the readability
-    guard the hold evidence tuples compare equal and the ten-second floor holds
-    the entry. (#8694)
-    """
-    import sqlite3
-    from pathlib import Path
-
-    import api.route_session_list_cache as cache_module
-    from api import models
-
-    active_db = tmp_path / "active" / "state.db"
-    profile_db = tmp_path / "bravo" / "state.db"
-    active_db.parent.mkdir()
-    profile_db.parent.mkdir()
-    _make_fingerprint_db(active_db, 3)
-    _make_fingerprint_db(profile_db, 3)
-
-    monkeypatch.setattr(routes, "_active_state_db_path", lambda: str(active_db))
-    # A stream leaked by an earlier test file would turn the stamp into the
-    # streaming 7-tuple; pin "no active streams" as this file's other tests do.
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    monkeypatch.setattr(
-        models, "_all_profiles_cli_contexts", lambda: ([("home", profile_db, "bravo")], None)
-    )
-
-    real_fingerprint = models._sqlite_content_fingerprint
-    schedule = {"locked": False}
-    produced_under_lock = []
-
-    def _fingerprint(path):
-        """Real producer; a real writer lock is held around the PROFILE read only.
-
-        The lock is a scheduling device — the production value is returned
-        unchanged, so readability is judged on what production returned.
-        """
-        if path is not None and Path(path) == profile_db and schedule["locked"]:
-            writer = sqlite3.connect(profile_db, isolation_level=None)
-            try:
-                writer.execute("PRAGMA journal_mode=DELETE")
-                writer.execute("BEGIN EXCLUSIVE")
-                value = real_fingerprint(path)
-            finally:
-                writer.execute("ROLLBACK")
-                writer.close()
-            produced_under_lock.append(value)
-            return value
-        return real_fingerprint(path)
-
-    monkeypatch.setattr(models, "_sqlite_content_fingerprint", _fingerprint)
-
-    # The poll churn is a rewritten session index — movement a state.db commit
-    # cannot produce — so the db/WAL stat pair and the fingerprint stay put and
-    # the ONLY thing that can decide the hold is the participating profiles.
-    real_stamp = cache_module._session_list_cache_source_stamp
-    churn = {"generation": 0}
-
-    def _churning_stamp(key):
-        churn["generation"] += 1
-        parts = list(real_stamp(key))
-        parts[3] = (churn["generation"], 7)
-        return tuple(parts)
-
-    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _churning_stamp)
-
-    key = routes._session_list_cache_key(
-        active_profile="default",
-        all_profiles=True,
-        show_cli_sessions=False,
-        show_previous_messaging_sessions=False,
-        show_cron_sessions=False,
-    )
-    built = []
-
-    def builder():
-        built.append(1)
-        return _session_cache_payload(f"fresh-{len(built)}", all_profiles=True)
-
-    # Control: with every participating fingerprint READ, index churn alone still
-    # holds the entry — the floor is active, not disabled.
-    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
-    diag = _StageRecorder()
-    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
-    assert payload == _session_cache_payload("a_all", all_profiles=True)
-    assert built == []
-    assert "session_list_cache_rate_floor_hold" in diag.stages
-
-    # Same shape, but the participating profile's fingerprint is UNKNOWN on both
-    # the cached and the current stamp, and the only stamp movement is the
-    # unrelated index churn.
-    routes._session_list_cache_clear()
-    schedule["locked"] = True
-    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
-    assert produced_under_lock, "the profile fingerprint read must have run under the lock"
-    assert all(
-        models._content_fingerprint_readable(value) is False
-        for value in produced_under_lock
-    ), f"a locked profile read must be unreadable, got {produced_under_lock!r}"
-
-    current_stamp = cache_module._session_list_cache_resolved_source_stamp(key)
-    assert models._content_fingerprint_readable(current_stamp[5]) is True, (
-        "the active profile's fingerprint must stay readable, otherwise this "
-        "test would pass for the wrong reason"
-    )
-    assert models._content_fingerprint_readable(current_stamp[6][0][2]) is False
-
-    rebuilt = routes._get_cached_session_list_payload(key=key, builder=builder)
-    assert rebuilt == _session_cache_payload("fresh-1", all_profiles=True)
-    assert built == [1], "an unreadable participating profile must never authorize the hold"
 
 
 def _real_state_db_cache_env(tmp_path, monkeypatch):
@@ -814,18 +415,16 @@ def _real_state_db_cache_env(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("mutation", ["update", "non_max_delete"])
-def test_session_list_cache_rate_floor_never_holds_a_committed_rename_or_delete(
+def test_session_list_cache_serves_a_committed_rename_or_delete_on_the_next_read(
     tmp_path, monkeypatch, mutation
 ):
-    """A committed rename/delete inside the floor must be served, not held.
+    """A committed rename/delete is visible on the next request.
 
     ``_sqlite_content_fingerprint`` is ``MAX(rowid)``: an append POSITION. It does
     not move when an external writer renames a session (an UPDATE of a visible
-    column) or deletes a row that is not the current maximum, so comparing the
-    fingerprint alone let a committed structural change sit behind the floor for
-    its full ten seconds — master never did, because the file-stat movement it
-    relies on was suppressed by the hold. The stamp producer and the cache
-    consumer are the real ones; only the file locations are simulated. (#8694)
+    column) or deletes a row that is not the current maximum; the state.db
+    file-stat movement is what makes the stamp move. The stamp producer and the
+    cache consumer are the real ones; only the file locations are simulated. (#8694)
     """
     import sqlite3
 
@@ -853,7 +452,7 @@ def test_session_list_cache_rate_floor_never_holds_a_committed_rename_or_delete(
 
     served = routes._get_cached_session_list_payload(key=key, builder=read)
     assert served == expected, (
-        f"{mutation}: the rebuild-rate floor served stale committed contents"
+        f"{mutation}: the cache served stale committed contents"
     )
 
 
