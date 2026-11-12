@@ -9601,15 +9601,29 @@ const _SETTINGS_SPEECH_STORAGE_KEYS={
   voice_silence_ms:'hermes-voice-silence-ms',
   raw_audio_mode:'hermes-raw-audio-mode',
 };
+const _SETTINGS_SPEECH_CONTROL_IDS={
+  raw_audio_mode:'settingsRawAudio',
+  tts_enabled:'settingsTtsEnabled',
+  tts_auto_read:'settingsTtsAutoRead',
+  voice_mode_button:'settingsVoiceModeEnabled',
+  tts_engine:'settingsTtsEngine',
+  tts_voice:'settingsTtsVoice',
+  tts_rate:'settingsTtsRate',
+  tts_pitch:'settingsTtsPitch',
+};
 let _settingsSpeechPersistedKeys=new Set();
 let _settingsSpeechLocalStorageKeys=new Set();
 let _settingsSpeechChangedKeys=new Set();
+let _settingsSpeechDesiredValues={};
+let _settingsSpeechRefusedKeys=new Set();
 let _unappliedSpeechServerValues={};
 
 function _captureSpeechPreferenceOwnership(settings){
   _settingsSpeechPersistedKeys=new Set(Array.isArray(settings&&settings.persisted_speech_keys)?settings.persisted_speech_keys:[]);
   _settingsSpeechLocalStorageKeys=new Set();
   _settingsSpeechChangedKeys=new Set();
+  _settingsSpeechDesiredValues={};
+  _settingsSpeechRefusedKeys=new Set();
   Object.entries(_SETTINGS_SPEECH_STORAGE_KEYS).forEach(([settingKey,storageKey])=>{
     try{if(localStorage.getItem(storageKey)!==null) _settingsSpeechLocalStorageKeys.add(settingKey);}catch(_){}
   });
@@ -9619,8 +9633,27 @@ function _speechPreferenceIsOwned(settingKey){
   return _settingsSpeechPersistedKeys.has(settingKey)||_settingsSpeechLocalStorageKeys.has(settingKey)||_settingsSpeechChangedKeys.has(settingKey);
 }
 
-function _markSpeechPreferenceChanged(settingKey){
+function _markSpeechPreferenceChanged(settingKey,desiredValue,writeRefused){
   _settingsSpeechChangedKeys.add(settingKey);
+  if(desiredValue!==undefined){
+    _settingsSpeechDesiredValues[settingKey]=desiredValue;
+  }else{
+    try{
+      const controlId=_SETTINGS_SPEECH_CONTROL_IDS[settingKey];
+      const el=(typeof $==='function'&&controlId)?$(controlId):null;
+      if(el){
+        if(settingKey==='raw_audio_mode'||settingKey==='tts_enabled'||settingKey==='tts_auto_read'||settingKey==='voice_mode_button'||settingKey==='voice_continuous') _settingsSpeechDesiredValues[settingKey]=!!el.checked;
+        else if(el.value!==undefined) _settingsSpeechDesiredValues[settingKey]=(settingKey==='tts_rate'||settingKey==='tts_pitch')?parseFloat(el.value):el.value;
+      }
+    }catch(_){}
+  }
+  if(writeRefused!==undefined){
+    if(writeRefused) _settingsSpeechRefusedKeys.add(settingKey);
+    else _settingsSpeechRefusedKeys.delete(settingKey);
+  }else{
+    if(_settingsLastStorageWriteRefused) _settingsSpeechRefusedKeys.add(settingKey);
+    else _settingsSpeechRefusedKeys.delete(settingKey);
+  }
 }
 
 // #8708: every Settings localStorage write is a best-effort mirror of the
@@ -9632,11 +9665,14 @@ function _markSpeechPreferenceChanged(settingKey){
 // outcome to decide between the server value and the cache value the runtime
 // consumers in boot.js actually read.
 let _settingsStorageWriteRefusedWarned=false;
+let _settingsLastStorageWriteRefused=false;
 function _writeSettingsStorageMirror(storageKey,value){
   try{
     localStorage.setItem(storageKey,String(value));
+    _settingsLastStorageWriteRefused=false;
     return true;
   }catch(e){
+    _settingsLastStorageWriteRefused=true;
     if(!_settingsStorageWriteRefusedWarned){
       _settingsStorageWriteRefusedWarned=true;
       console.warn('[settings] localStorage write refused; server value not applied to this browser cache',storageKey,e);
@@ -9669,7 +9705,7 @@ function _findUnappliedSpeechNote(controlEl){
 
 function _setControlUnappliedNote(controlEl,isUnapplied){
   if(!controlEl || typeof controlEl !== 'object') return;
-  const noteText='não aplicado neste navegador';
+  const noteText=typeof t==='function'?t('settings_unapplied_note'):'settings_unapplied_note';
   if(isUnapplied){
     controlEl.title=noteText;
     if(controlEl.dataset) controlEl.dataset.unapplied='true';
@@ -10662,6 +10698,16 @@ async function loadSettingsPanel(){
     const _speechSetting=function(key,storageKey,fallback,controlEl){
       const el=(controlEl&&typeof controlEl==='object')?controlEl:(typeof $==='function'&&_SETTINGS_SPEECH_CONTROL_IDS[key]?$(_SETTINGS_SPEECH_CONTROL_IDS[key]):null);
       const stored=localStorage.getItem(storageKey);
+      if(_settingsSpeechChangedKeys.has(key)){
+        // A later re-population (for example `voiceschanged` re-running
+        // `_populateTtsVoices`) must not resurrect the unapplied state or
+        // overwrite the user's explicit choice with the stale server value.
+        const hasDesired=Object.prototype.hasOwnProperty.call(_settingsSpeechDesiredValues,key);
+        const desired=hasDesired?_settingsSpeechDesiredValues[key]:(stored===null?fallback:stored);
+        const isRefused=_settingsSpeechRefusedKeys.has(key);
+        if(el) _setControlUnappliedNote(el,isRefused);
+        return desired;
+      }
       if(settings&&persistedSpeechKeys.has(key)){
         // #5435 contract: if(settings&&persistedSpeechKeys.has(key)) return settings[key];
         // #8749 extends it: that return is now gated on whether the mirror
@@ -10670,13 +10716,6 @@ async function loadSettingsPanel(){
         // control must show that effective value (and carry a note) instead of
         // pretending the server value applied. The server value is kept out of
         // unrelated saves until the user edits the control.
-        if(_settingsSpeechChangedKeys.has(key)){
-          // A later re-population (for example `voiceschanged` re-running
-          // `_populateTtsVoices`) must not resurrect the unapplied state or
-          // overwrite the user's explicit choice with the stale server value.
-          if(el) _setControlUnappliedNote(el,false);
-          return stored===null?fallback:stored;
-        }
         const serverVal=settings[key];
         const mirrorOk=_writeSettingsStorageMirror(storageKey,serverVal);
         if(mirrorOk){
@@ -10741,10 +10780,10 @@ async function loadSettingsPanel(){
     if(ttsAutoReadCb){
       ttsAutoReadCb.checked=_speechBool('tts_auto_read','hermes-tts-auto-read',false);
       ttsAutoReadCb.onchange=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-auto-read',this.checked?'true':'false');
         _markSpeechPreferenceChanged('tts_auto_read');
         delete _unappliedSpeechServerValues['tts_auto_read'];
-        _setControlUnappliedNote(this,false);
-        _writeSettingsStorageMirror('hermes-tts-auto-read',this.checked?'true':'false');
+        _setControlUnappliedNote(this,!mirrorOk);
         _schedulePreferencesAutosave();
       };
     }
@@ -10758,10 +10797,10 @@ async function loadSettingsPanel(){
     if(voiceModeCb){
       voiceModeCb.checked=_speechBool('voice_mode_button','hermes-voice-mode-button',false);
       voiceModeCb.onchange=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-voice-mode-button',this.checked?'true':'false');
         _markSpeechPreferenceChanged('voice_mode_button');
         delete _unappliedSpeechServerValues['voice_mode_button'];
-        _setControlUnappliedNote(this,false);
-        _writeSettingsStorageMirror('hermes-voice-mode-button',this.checked?'true':'false');
+        _setControlUnappliedNote(this,!mirrorOk);
         if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
         if(typeof window._applyComposerFooterVisibilitySettings==='function') window._applyComposerFooterVisibilitySettings();
         _schedulePreferencesAutosave();
@@ -10791,10 +10830,10 @@ async function loadSettingsPanel(){
       ttsEngineSel.value=saved;
       _syncSpeechPreferenceCache('tts_engine',saved);
       ttsEngineSel.onchange=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-engine',this.value);
         _markSpeechPreferenceChanged('tts_engine');
         delete _unappliedSpeechServerValues['tts_engine'];
-        _setControlUnappliedNote(this,false);
-        _writeSettingsStorageMirror('hermes-tts-engine',this.value);
+        _setControlUnappliedNote(this,!mirrorOk);
         window._populateTtsVoices();
         _schedulePreferencesAutosave();
       };
@@ -10871,6 +10910,7 @@ async function loadSettingsPanel(){
           ttsVoiceSel.appendChild(opt);
         });
       }
+      ttsVoiceSel.value=current;
     };
     if(ttsVoiceSel&&'speechSynthesis' in window){
       window._populateTtsVoices();
@@ -10878,7 +10918,13 @@ async function loadSettingsPanel(){
         const engine=localStorage.getItem('hermes-tts-engine')||'browser';
         if(engine==='browser') window._populateTtsVoices();
       },{once:false});
-      ttsVoiceSel.onchange=function(){_markSpeechPreferenceChanged('tts_voice');delete _unappliedSpeechServerValues['tts_voice'];_setControlUnappliedNote(this,false);_writeSettingsStorageMirror('hermes-tts-voice',this.value);_schedulePreferencesAutosave();};
+      ttsVoiceSel.onchange=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-voice',this.value);
+        _markSpeechPreferenceChanged('tts_voice');
+        delete _unappliedSpeechServerValues['tts_voice'];
+        _setControlUnappliedNote(this,!mirrorOk);
+        _schedulePreferencesAutosave();
+      };
     }
     // TTS rate/pitch sliders
     const ttsRateSlider=$('settingsTtsRate');
@@ -10888,7 +10934,14 @@ async function loadSettingsPanel(){
       ttsRateSlider.value=(savedRate===null||savedRate===undefined)?'1':String(savedRate);
       if(ttsRateValue) ttsRateValue.textContent=parseFloat(ttsRateSlider.value).toFixed(1)+'x';
       _syncSpeechPreferenceCache('tts_rate',ttsRateSlider.value);
-      ttsRateSlider.oninput=function(){_markSpeechPreferenceChanged('tts_rate');delete _unappliedSpeechServerValues['tts_rate'];_setControlUnappliedNote(this,false);if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';_writeSettingsStorageMirror('hermes-tts-rate',this.value);_schedulePreferencesAutosave();};
+      ttsRateSlider.oninput=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-rate',this.value);
+        _markSpeechPreferenceChanged('tts_rate');
+        delete _unappliedSpeechServerValues['tts_rate'];
+        _setControlUnappliedNote(this,!mirrorOk);
+        if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';
+        _schedulePreferencesAutosave();
+      };
     }
     const ttsPitchSlider=$('settingsTtsPitch');
     const ttsPitchValue=$('settingsTtsPitchValue');
@@ -10897,7 +10950,14 @@ async function loadSettingsPanel(){
       ttsPitchSlider.value=(savedPitch===null||savedPitch===undefined)?'1':String(savedPitch);
       if(ttsPitchValue) ttsPitchValue.textContent=parseFloat(ttsPitchSlider.value).toFixed(1);
       _syncSpeechPreferenceCache('tts_pitch',ttsPitchSlider.value);
-      ttsPitchSlider.oninput=function(){_markSpeechPreferenceChanged('tts_pitch');delete _unappliedSpeechServerValues['tts_pitch'];_setControlUnappliedNote(this,false);if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);_writeSettingsStorageMirror('hermes-tts-pitch',this.value);_schedulePreferencesAutosave();};
+      ttsPitchSlider.oninput=function(){
+        const mirrorOk=_writeSettingsStorageMirror('hermes-tts-pitch',this.value);
+        _markSpeechPreferenceChanged('tts_pitch');
+        delete _unappliedSpeechServerValues['tts_pitch'];
+        _setControlUnappliedNote(this,!mirrorOk);
+        if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);
+        _schedulePreferencesAutosave();
+      };
     }
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}

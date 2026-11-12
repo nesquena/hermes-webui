@@ -21,7 +21,6 @@ Note: `window._mirrorSpeechSettingsFromServer` (boot.js) is intentionally left
 undefined here so the test measures the panels.js hydration path only.
 """
 
-import json
 import pathlib
 import subprocess
 
@@ -242,9 +241,9 @@ _REFUSE_ASSERTS = r"""
 // server value.
 const hasNote = (el) => {
   if(!el) return false;
-  if(el.title && el.title.includes('não aplicado neste navegador')) return true;
+  if(el.title && el.title.includes('settings_unapplied_note')) return true;
   if(el.dataset && el.dataset.unapplied === 'true') return true;
-  if(el.unappliedNote && (el.unappliedNote.textContent || '').includes('não aplicado neste navegador')) return true;
+  if(el.unappliedNote && (el.unappliedNote.textContent || '').includes('settings_unapplied_note')) return true;
   if(el.children && el.children.some(c => c && c.className === 'settings-unapplied-note')) return true;
   return false;
 };
@@ -491,7 +490,7 @@ def test_speech_handler_writes_go_through_the_guard():
 _REGRESSION_HARNESS = r"""
 const assert = require('assert');
 
-const REFUSE = true;
+let REFUSE = true;
 const store = new Map();
 class Storage {
   getItem(key){ return store.has(key) ? store.get(key) : null; }
@@ -516,7 +515,7 @@ class FakeEl {
     this.value = '';
     this.checked = false;
     this.textContent = '';
-    this.innerHTML = '';
+    this._innerHTML = '';
     this.children = [];
     this.listeners = [];
     this.hidden = false;
@@ -527,7 +526,13 @@ class FakeEl {
     this.onchange = null;
     this.oninput = null;
     this.title = '';
+    this.parentElement = null;
   }
+  set innerHTML(val){
+    this._innerHTML = val;
+    this.children = [];
+  }
+  get innerHTML(){ return this._innerHTML || ''; }
   querySelector(sel){
     if(sel === '.settings-unapplied-note'){
       return this.children.find(c => c && c.className === 'settings-unapplied-note') || null;
@@ -538,6 +543,7 @@ class FakeEl {
   appendChild(node){
     if(node) node.parentElement = this;
     this.children.push(node);
+    if(node && node.selected) this.value = node.value;
     return node;
   }
   addEventListener(type, fn, opts){ this.listeners.push({ type: type, fn: fn }); }
@@ -554,6 +560,16 @@ class FakeEl {
     }
   }
 }
+Object.defineProperty(FakeEl.prototype, 'selected', {
+  set(val){
+    this._selected = val;
+    if(val && this.parentElement && this.parentElement.tagName === 'select'){
+      this.parentElement.value = this.value;
+    }
+  },
+  get(){ return this._selected; },
+  configurable: true,
+});
 const els = {};
 function $(id){
   if(!(id in els)) els[id] = new FakeEl('div');
@@ -566,10 +582,11 @@ const document = {
   querySelector(){ return null; },
   documentElement: { classList: { toggle(){} }, dataset: {} },
 };
+const voiceschangedListeners = [];
 const window = {
   speechSynthesis: {
-    getVoices(){ return [{ name: 'Test Voice', lang: 'en-US' }]; },
-    addEventListener(){},
+    getVoices(){ return window._voices || [{ name: 'Test Voice', lang: 'en-US' }]; },
+    addEventListener(type, fn){ if(type === 'voiceschanged') voiceschangedListeners.push(fn); },
   },
 };
 const speechSynthesis = window.speechSynthesis;
@@ -695,13 +712,13 @@ assert.strictEqual(modeBtn.style.display, 'none', 'button display must agree wit
 // 2. Note communicating unapplied server value must be present
 const hasNote = (el) => {
   if(!el) return false;
-  if(el.title && el.title.includes('não aplicado neste navegador')) return true;
+  if(el.title && el.title.includes('settings_unapplied_note')) return true;
   if(el.dataset && el.dataset.unapplied === 'true') return true;
-  if(el.unappliedNote && (el.unappliedNote.textContent || '').includes('não aplicado neste navegador')) return true;
+  if(el.unappliedNote && (el.unappliedNote.textContent || '').includes('settings_unapplied_note')) return true;
   if(el.children && el.children.some(c => c && c.className === 'settings-unapplied-note')) return true;
   return false;
 };
-assert.ok(hasNote(els.settingsVoiceModeEnabled), 'unapplied note ("não aplicado neste navegador") must be present on voiceModeCb');
+assert.ok(hasNote(els.settingsVoiceModeEnabled), 'unapplied note ("settings_unapplied_note") must be present on voiceModeCb');
 
 // 3. Exactly 1 warning logged for refused mirror write
 assert.strictEqual(warnings.length, 1, 'refusal must be reported exactly once: ' + JSON.stringify(warnings));
@@ -777,16 +794,135 @@ pendingTimers.shift()().then(() => {
   assert.deepStrictEqual(errors, []);
   assert.deepStrictEqual(toasts, []);
 }).catch((e) => {
-  console.error(e);
+  process.stderr.write(String(e.stack || e));
   process.exit(1);
 });
 
-// 7. Explicit user change clears note and persists the user's choice.
+// 7. Explicit user change: with refusing storage, note stays visible and boot consumer reads old cache;
+// with writable storage, note clears and cache holds the choice.
 els.settingsVoiceModeEnabled.checked = true;
 els.settingsVoiceModeEnabled.onchange.call(els.settingsVoiceModeEnabled);
-assert.strictEqual(hasNote(els.settingsVoiceModeEnabled), false, 'user change must clear unapplied note');
+assert.strictEqual(hasNote(els.settingsVoiceModeEnabled), true, 'refused edit must keep unapplied note visible');
+assert.strictEqual(_voiceModePrefEnabled(), false, 'boot consumer must still read old cache after refused edit');
+assert.strictEqual(modeBtn.style.display, 'none', 'button display must agree with runtime value (none)');
+assert.strictEqual(store.get('hermes-voice-mode-button'), 'false', 'refused edit must not mutate cache');
 const userSavePayload = _preferencesPayloadFromUi();
-assert.strictEqual(userSavePayload.voice_mode_button, true, 'explicit user change must persist chosen value');
+assert.strictEqual(userSavePayload.voice_mode_button, true, 'explicit user change must persist chosen value even when refused');
+
+// Writable storage: note must clear and cache must hold the choice
+REFUSE = false;
+els.settingsVoiceModeEnabled.checked = true;
+els.settingsVoiceModeEnabled.onchange.call(els.settingsVoiceModeEnabled);
+assert.strictEqual(hasNote(els.settingsVoiceModeEnabled), false, 'writable edit must clear unapplied note');
+assert.strictEqual(store.get('hermes-voice-mode-button'), 'true', 'cache must hold choice when writable');
+assert.strictEqual(_voiceModePrefEnabled(), true, 'boot consumer must agree with writable choice');
+assert.strictEqual(modeBtn.style.display, '', 'button display must agree with runtime value (visible)');
+const writableSavePayload = _preferencesPayloadFromUi();
+assert.strictEqual(writableSavePayload.voice_mode_button, true, 'persisted payload carries choice');
+"""
+
+
+_VOICE_LIFECYCLE_SCENARIO = r"""
+(async () => {
+  // Setup voices in synthesis
+  window._voices = [
+    { name: 'Old Voice', lang: 'en-US' },
+    { name: 'New Voice', lang: 'en-US' },
+    { name: 'Third Voice', lang: 'en-US' },
+  ];
+
+  // 1. Hydrate Old Voice with writable storage
+  REFUSE = false;
+  store.set('hermes-tts-engine', 'browser');
+  store.set('hermes-tts-voice', 'Old Voice');
+
+  const voicePayload = {
+    tts_enabled: true,
+    tts_auto_read: true,
+    tts_engine: 'browser',
+    tts_voice: 'Old Voice',
+    tts_rate: 1,
+    tts_pitch: 1,
+    voice_mode_button: false,
+    voice_continuous: false,
+    voice_silence_ms: 1800,
+    raw_audio_mode: false,
+    notifications_enabled: false,
+    sidebar_density: 'compact',
+    font_size: 'normal',
+    persisted_speech_keys: [
+      'tts_enabled', 'tts_auto_read', 'tts_engine', 'tts_voice', 'tts_rate',
+      'tts_pitch', 'voice_mode_button', 'voice_continuous', 'voice_silence_ms',
+      'raw_audio_mode',
+    ],
+  };
+
+  __hydrateHead(voicePayload);
+  __hydrate(voicePayload);
+
+  const hasNote = (el) => {
+    if(!el) return false;
+    if(el.title && el.title.includes('settings_unapplied_note')) return true;
+    if(el.dataset && el.dataset.unapplied === 'true') return true;
+    if(el.unappliedNote && (el.unappliedNote.textContent || '').includes('settings_unapplied_note')) return true;
+    if(el.children && el.children.some(c => c && c.className === 'settings-unapplied-note')) return true;
+    return false;
+  };
+
+  assert.strictEqual(els.settingsTtsVoice.value, 'Old Voice', 'voice selector must hydrate with Old Voice');
+  assert.strictEqual(hasNote(els.settingsTtsVoice), false, 'writable hydration must have no unapplied note');
+
+  // 2. Choose New Voice and complete the save
+  els.settingsTtsVoice.value = 'New Voice';
+  els.settingsTtsVoice.onchange.call(els.settingsTtsVoice);
+  assert.strictEqual(store.get('hermes-tts-voice'), 'New Voice', 'writable save must mirror to localStorage');
+  assert.strictEqual(hasNote(els.settingsTtsVoice), false, 'writable edit must have no unapplied note');
+  assert.strictEqual(pendingTimers.length, 1, 'autosave timer armed');
+  await pendingTimers.shift()();
+  assert.strictEqual(JSON.parse(posts[posts.length - 1].body).tts_voice, 'New Voice', 'autosave body carries New Voice');
+
+  // 3. Start refusing writes
+  REFUSE = true;
+
+  // 4. Choose Third Voice and complete that save
+  els.settingsTtsVoice.value = 'Third Voice';
+  els.settingsTtsVoice.onchange.call(els.settingsTtsVoice);
+  assert.strictEqual(store.get('hermes-tts-voice'), 'New Voice', 'refused write must leave old cache in place');
+  assert.strictEqual(pendingTimers.length, 1, 'autosave timer armed');
+  await pendingTimers.shift()();
+  assert.strictEqual(JSON.parse(posts[posts.length - 1].body).tts_voice, 'Third Voice', 'autosave body carries Third Voice');
+
+  // 5. Fire the registered voiceschanged callback
+  assert.ok(voiceschangedListeners.length > 0, 'voiceschanged listener must have been registered');
+  voiceschangedListeners.forEach((fn) => fn());
+
+  // 6. Assert the selector still shows Third Voice and keeps the unapplied note
+  assert.strictEqual(els.settingsTtsVoice.value, 'Third Voice', 'selector must still show Third Voice after voiceschanged rebuild');
+  assert.strictEqual(hasNote(els.settingsTtsVoice), true, 'unapplied note must stay visible after voiceschanged rebuild');
+
+  // 7. Change an unrelated control
+  els.settingsNotificationsEnabled.checked = true;
+  const notifListener = els.settingsNotificationsEnabled.listeners.find((l) => l.type === 'change');
+  assert.ok(notifListener, 'notification toggle listener exists');
+  notifListener.fn();
+  assert.strictEqual(pendingTimers.length, 1, 'unrelated autosave armed');
+  await pendingTimers.shift()();
+
+  // 8. Assert the autosave body carries Third Voice, never New Voice
+  const lastPost = JSON.parse(posts[posts.length - 1].body);
+  assert.strictEqual(lastPost.notifications_enabled, true, 'unrelated save carries notification change');
+  assert.strictEqual(lastPost.tts_voice, 'Third Voice', 'unrelated save must carry Third Voice, never New Voice');
+  assert.notStrictEqual(lastPost.tts_voice, 'New Voice', 'unrelated save must never revert to New Voice');
+
+  // 9. The refused voice edit must also keep its unapplied indication visible,
+  // because the runtime still reads the stale cache for this key.
+  assert.strictEqual(hasNote(els.settingsTtsVoice), true, 'refused voice edit must show unapplied note');
+
+  assert.deepStrictEqual(errors, []);
+})().catch((e) => {
+  process.stderr.write(String(e.stack || e));
+  process.exit(1);
+});
 """
 
 
@@ -812,5 +948,82 @@ def test_conflicting_cache_refused_write_reflects_runtime_and_shows_unapplied_no
     if result.returncode != 0:
         raise AssertionError(
             "node harness failed\n--- stdout ---\n%s\n--- stderr ---\n%s"
+            % (result.stdout, result.stderr)
+        )
+
+
+def test_voice_lifecycle_refused_rebuild_preserves_desired_voice():
+    """#8749: Maintainer's voice lifecycle regression:
+    hydrate 'Old Voice' with writable storage ->
+    choose 'New Voice' and complete save ->
+    start refusing writes ->
+    choose 'Third Voice' and complete that save ->
+    fire the registered voiceschanged callback ->
+    assert the selector still shows 'Third Voice' ->
+    change an unrelated control ->
+    assert the autosave body carries 'Third Voice', never 'New Voice'.
+    """
+    marker = "// 1. Conflicting obsolete cache in store"
+    harness_base = _REGRESSION_HARNESS[: _REGRESSION_HARNESS.index(marker)]
+    full_script = harness_base + _VOICE_LIFECYCLE_SCENARIO
+    script = (
+        full_script.replace("/*__HELPERS__*/", _speech_helpers())
+        .replace("/*__PAYLOAD_HELPERS__*/", _payload_helpers())
+        .replace("/*__BOOT_RAW_AUDIO__*/", _boot_raw_audio_consumer())
+        .replace("/*__BOOT_SPEECH_MIRROR__*/", _boot_speech_mirror())
+        .replace("/*__BOOT_VOICE_MODE__*/", _boot_voice_mode_consumer())
+        .replace("/*__HYDRATION__*/", _speech_hydration())
+        .replace("/*__HEAD__*/", _font_size_hydration())
+    )
+    result = subprocess.run(
+        ["node", "-"],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "voice lifecycle harness failed\n--- stdout ---\n%s\n--- stderr ---\n%s"
+            % (result.stdout, result.stderr)
+        )
+
+
+def test_settings_unapplied_note_locale_parity():
+    """#8749: settings_unapplied_note must be present in all 14 locale bundles in static/i18n.js."""
+    script = """
+const fs = require('fs');
+const vm = require('vm');
+const code = fs.readFileSync('static/i18n.js', 'utf8');
+const sandbox = {
+  document: { documentElement: {} },
+  localStorage: { getItem: () => null, setItem: () => {} },
+  window: {},
+};
+vm.runInNewContext(code + '; globalThis.LOCALES = LOCALES;', sandbox);
+const locales = sandbox.LOCALES;
+const targetLocales = ['en', 'it', 'ja', 'ru', 'es', 'de', 'zh', 'pt', 'ko', 'fr', 'cs', 'tr', 'pl', 'vi'];
+const missing = [];
+for (const loc of targetLocales) {
+  if (!locales[loc] || typeof locales[loc].settings_unapplied_note !== 'string' || !locales[loc].settings_unapplied_note.trim()) {
+    missing.push(loc);
+  }
+}
+if (missing.length > 0) {
+  console.error('Missing settings_unapplied_note in locales:', missing);
+  process.exit(1);
+}
+console.log('OK');
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "locale parity check failed\n--- stdout ---\n%s\n--- stderr ---\n%s"
             % (result.stdout, result.stderr)
         )
