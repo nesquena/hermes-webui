@@ -48,6 +48,8 @@ const context={
   console,performance:{now:()=>now},setTimeout:addTimer,requestAnimationFrame:fn=>addTimer(fn,0),
   document:{getElementById:id=>id==='msg'?composer:null},window:{},S:{activeStreamId:'stream-1'},
   listeners,flushDue,
+  // Tolerate sibling pacing changes to _scheduleRender (cost-based interval).
+  LIVE_RENDER_BUSY_FACTOR:4,_lastRenderCostMs:0,
   get now(){return now;},set now(value){now=value;},
   get timers(){return timers;},set timers(value){timers=value;},
   get renders(){return renders;},set renders(value){renders=value;},
