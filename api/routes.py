@@ -14616,6 +14616,7 @@ from api.streaming import (
 from api.gateway_chat import (
     GatewayExternalSessionReadOnly,
     _run_gateway_chat_streaming,
+    chat_backend_config_for_profile,
     chat_backend_config_for_session,
     gateway_session_chat_read_only_reason,
     refuse_on_gateway_backend,
@@ -29011,15 +29012,19 @@ def _session_chat_backend_config(sid) -> dict:
     """Chat-backend refusal config for a request targeting an existing session.
 
     #8971 item 1: the session's owning profile decides whether the backend is
-    the gateway, not the request thread's active profile. A missing session
-    has no owning profile — keep the request profile's rule there so the
-    response for a bogus session_id is unchanged.
+    the gateway, not the request thread's active profile. The owner is read
+    with ``get_session_profile_readonly()`` (#9024 review): the full
+    ``get_session()`` loader can collapse duplicate partials and save the
+    sidecar (with a ``.bak``) before the 409 leaves, so a refused request would
+    rewrite the conversation it just refused. A missing (KeyError) or
+    unverifiable (ValueError) session has no owning profile — keep the request
+    profile's rule there so the response for a bogus session_id is unchanged.
     """
     try:
-        s = get_session(str(sid))
-    except Exception:
+        profile = get_session_profile_readonly(str(sid))
+    except (KeyError, ValueError):
         return get_config_snapshot()
-    return chat_backend_config_for_session(vars(s), get_config_snapshot())
+    return chat_backend_config_for_profile(profile, get_config_snapshot())
 
 
 def _handle_btw(handler, body):

@@ -48,8 +48,8 @@ def display_history(snapshot):
     return rows
 
 
-def config_for_session(session):
-    """Use the owning profile on workers without request-local profile context.
+def config_for_profile(profile):
+    """Resolve a profile's config without a session object (#9024 review).
 
     The root profile resolves with ``isolate_config_override=True``. An external
     ``HERMES_CONFIG_PATH`` then stays root's config while a named profile is
@@ -59,9 +59,14 @@ def config_for_session(session):
     """
     from api.config import get_config_for_profile_home
     from api.profiles import get_hermes_home_for_profile
-    home = get_hermes_home_for_profile(session.get("profile"))
+    home = get_hermes_home_for_profile(profile)
     is_root = Path(home).resolve() == Path(get_hermes_home_for_profile("default")).resolve()
     return get_config_for_profile_home(home, isolate_config_override=is_root)
+
+
+def config_for_session(session):
+    """Use the owning profile on workers without request-local profile context."""
+    return config_for_profile(session.get("profile"))
 
 
 def configured(session, config=None):

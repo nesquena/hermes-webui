@@ -399,6 +399,39 @@ def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None 
     return webui_chat_backend_mode(config_data, environ) == "gateway"
 
 
+def _owning_profile_config(resolver, config_data) -> dict:
+    """Resolve the owning profile's config, falling back to the request rule.
+
+    An empty dict is a valid, fully-local owning-profile answer — only a
+    resolution failure (exception / None / non-dict) falls back to the
+    request rule (``config_data``).
+    """
+    try:
+        resolved = resolver()
+    except Exception:
+        logger.exception(
+            "owning-profile config resolution failed; using the request profile's rule"
+        )
+        resolved = None
+    if isinstance(resolved, dict):
+        return resolved
+    return config_data if isinstance(config_data, dict) else {}
+
+
+def chat_backend_config_for_profile(profile, config_data=None) -> dict:
+    """Chat-backend eligibility for a bare owning profile (#9024 review).
+
+    Same rule as :func:`chat_backend_config_for_session` for callers that read
+    the owner through ``get_session_profile_readonly()`` and must not run the
+    full session loader: ``Session.load`` can collapse duplicate partials and
+    save the sidecar (with a ``.bak``), so a request that will be refused must
+    not load to learn its owner.
+    """
+    from api.gateway_sessions import config_for_profile
+
+    return _owning_profile_config(lambda: config_for_profile(profile), config_data)
+
+
 def chat_backend_config_for_session(session, config_data=None) -> dict:
     """Chat-backend eligibility comes from the session's owning profile (#8971).
 
@@ -415,18 +448,7 @@ def chat_backend_config_for_session(session, config_data=None) -> dict:
     """
     from api.gateway_sessions import config_for_session
 
-    try:
-        resolved = config_for_session(session)
-    except Exception:
-        logger.exception(
-            "owning-profile config resolution failed; using the request profile's rule"
-        )
-        resolved = None
-    # An empty dict is a valid, fully-local owning-profile answer — only a
-    # resolution failure (None / non-dict) falls back to the request rule.
-    if isinstance(resolved, dict):
-        return resolved
-    return config_data if isinstance(config_data, dict) else {}
+    return _owning_profile_config(lambda: config_for_session(session), config_data)
 
 
 class GatewayExternalSessionReadOnly(PermissionError):
