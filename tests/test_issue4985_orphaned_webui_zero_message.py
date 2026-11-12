@@ -866,10 +866,13 @@ def _write_webui_sidecar(
         "session_source": "webui",
         "source_label": "WebUI",
         "read_only": False,
-        "message_count": message_count,
-        "messages": messages_array,
-        "tool_calls": [],
     }
+    # Same layout as Session.save(): every metadata field precedes the
+    # top-level "messages" array. Session.load_metadata_only() parses only
+    # that prefix, and the index path of all_sessions() refreshes rows from
+    # it. With these keys after "messages", the refresh read
+    # has_pending_user_message=False and the row was pruned, so the result
+    # depended on whether the index-rebuild thread won its race.
     if active_stream_id:
         sidecar["active_stream_id"] = active_stream_id
     if pending_user_message:
@@ -877,6 +880,9 @@ def _write_webui_sidecar(
         sidecar["has_pending_user_message"] = True
     if worktree_path:
         sidecar["worktree_path"] = worktree_path
+    sidecar["message_count"] = message_count
+    sidecar["messages"] = messages_array
+    sidecar["tool_calls"] = []
     (session_dir / f"{session_id}.json").write_text(
         json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -1282,6 +1288,84 @@ def test_real_all_sessions_post1171_streaming_titled_row_is_retained(
         "must be RETAINED — active_stream_id safety must spare it from the "
         "prune (this is the inflight-first-turn contract)."
     )
+    assert pruned == []
+
+
+def _pin_session_index_rebuild_race(monkeypatch, outcome: str) -> None:
+    """Decide the race between all_sessions() and its index-rebuild thread.
+
+    With no ``_index.json``, all_sessions() starts a background rebuild and
+    then checks ``SESSION_INDEX_FILE.exists()`` again. If the thread has
+    already written the index, the index path runs; if not, the full scan
+    runs. ``"wins"`` runs the thread's body inline before that check,
+    ``"loses"`` never starts it.
+    """
+    import api.models as models
+
+    if outcome == "loses":
+        monkeypatch.setattr(models, "_start_session_index_rebuild_thread", lambda: None)
+        return
+
+    def _rebuild_finishes_first():
+        models._rebuild_session_index_background(
+            models.SESSION_DIR, models.SESSION_INDEX_FILE
+        )
+
+    monkeypatch.setattr(
+        models, "_start_session_index_rebuild_thread", _rebuild_finishes_first
+    )
+
+
+# 18b. The safety-retained rows above stay in the sidebar whichever way the
+#      index-rebuild race goes. The pending row used to be pruned on the index
+#      path: its fixture sidecar carried the pending keys after "messages",
+#      where the metadata-prefix reader never looks.
+@pytest.mark.parametrize("rebuild_thread", ["wins", "loses"])
+@pytest.mark.parametrize(
+    "sid, sidecar_kwargs",
+    [
+        ("webui-pending-titled", {"pending_user_message": "Hello"}),
+        ("webui-streaming-titled", {"active_stream_id": "stream-abc-123"}),
+        ("webui-worktree-titled", {"worktree_path": "some/path"}),
+    ],
+    ids=["pending", "streaming", "worktree"],
+)
+def test_real_all_sessions_post1171_safety_rows_retained_either_side_of_index_race(
+    _real_pipeline, monkeypatch, sid, sidecar_kwargs, rebuild_thread,
+):
+    import api.models as models
+    import api.routes as routes
+
+    tmp_path = _real_pipeline
+    _write_webui_sidecar(
+        tmp_path / "sessions",
+        session_id=sid,
+        title="Native WebUI",
+        message_count=0,
+        **sidecar_kwargs,
+    )
+    _write_state_db(
+        tmp_path / "hermes_home",
+        sessions={sid: {"source": "webui", "title": "Native WebUI", "messages": 0}},
+    )
+    pruned: list[str] = []
+    monkeypatch.setattr(
+        routes, "prune_session_from_index", lambda s: pruned.append(s)
+    )
+    monkeypatch.setattr(
+        routes,
+        "_reconcile_stale_stream_state_for_session_rows",
+        lambda _rows: False,
+    )
+    _pin_session_index_rebuild_race(monkeypatch, rebuild_thread)
+
+    payload = _run_payload(pruned)
+
+    assert models.SESSION_INDEX_FILE.exists() == (rebuild_thread == "wins"), (
+        "the race pin did not select the intended all_sessions() path"
+    )
+    sid_list = [s["session_id"] for s in payload["sessions"]]
+    assert sid in sid_list
     assert pruned == []
 
 

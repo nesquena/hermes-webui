@@ -1,7 +1,9 @@
-"""Clarify and inline edit follow the same Enter decision as the composer.
+"""Inline edit follows the same Enter decision as the composer; clarify does not.
 
 The composer keydown branches stay where they are, including ``_mobileDefault``.
-The shared helper is only for the clarify card and the message-edit textarea.
+The shared helper is only for the message-edit textarea. The clarify answer is a
+single-line input with no newline to insert, so every non-IME Enter submits it
+whatever the send key is (#8769).
 """
 
 from pathlib import Path
@@ -43,12 +45,14 @@ def test_helper_includes_mobile_default_and_not_the_touch_swallow():
     assert "lesolcoSwallowClick" not in BOOT_JS
 
 
-def test_clarify_and_edit_call_helper_composer_branches_stay():
+def test_edit_calls_helper_clarify_does_not_composer_branches_stay():
     clarify = MESSAGES_JS[
         MESSAGES_JS.index("function showClarifyCard") :
         MESSAGES_JS.index("\nfunction ", MESSAGES_JS.index("function showClarifyCard") + 1)
     ]
-    assert "window._composerShouldSendOnKey" in clarify
+    # #8769: the send key must not hold Enter in the single-line clarify input.
+    assert "_composerShouldSendOnKey" not in clarify
+    assert "window._isImeEnter" in clarify
     edit_at = UI_JS.index("bar.querySelector('.msg-edit-send').click()")
     edit = UI_JS[max(0, edit_at - 280) : edit_at + 40]
     assert "window._composerShouldSendOnKey" in edit
