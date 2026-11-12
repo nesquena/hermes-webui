@@ -61,6 +61,11 @@ def world(tmp_path, monkeypatch):
     pkg.async_delegation = agent
     monkeypatch.setitem(sys.modules, "tools", pkg)
     monkeypatch.setitem(sys.modules, "tools.async_delegation", agent)
+    # The launch profile is root: only its ledger gets the Agent's restore, the
+    # others the read-only replay (recorded here; its real reads are covered in
+    # test_delegation_cross_profile_replay.py).
+    monkeypatch.setattr(profiles, "get_process_profile_home", lambda: root)
+    monkeypatch.setattr(peu, "pending_webui_completions", lambda home: calls.append(("replay", str(home))) or [])
     peu._reset_legacy_async_delivery_dedupe_for_tests()
     yield {"root": root, "named": named, "sessions": sessions, "calls": calls, "profiles": profiles}
     peu._reset_legacy_async_delivery_dedupe_for_tests()
@@ -130,7 +135,7 @@ def test_persistent_restore_failure_warning_is_rate_limited(world, monkeypatch, 
         raise RuntimeError("ledger refused")
 
     sys.modules["tools.async_delegation"].restore_undelivered_completions = failing
-    assert peu._arm_async_delegation_restore_sweep(queue.Queue(), 0.0, ledger_home=world["named"])
+    assert peu._arm_async_delegation_restore_sweep(queue.Queue(), 0.0, ledger_home=world["root"])
     assert _wait_for(lambda: len(attempts) >= 4)
     warnings = [r for r in caplog.records if "Failed to restore pending async delegations" in r.getMessage()]
     assert len(warnings) == 1
@@ -268,7 +273,7 @@ def test_drain_startup_recovers_from_one_enumeration_failure_without_another_res
     monkeypatch.setattr(world["profiles"], "_profiles_root", flaky)
     try:
         assert bp.start_drain_thread()
-        replayed = sorted([("restore", str(world["root"])), ("restore", str(world["named"]))])
+        replayed = sorted([("restore", str(world["root"])), ("replay", str(world["named"]))])
         assert _wait_for(lambda: sorted(world["calls"]) == replayed)
     finally:
         bp.stop_drain_thread()
@@ -324,7 +329,7 @@ def test_startup_replay_retries_by_itself_after_enumeration_failure(world, monke
     deadline = time.monotonic() + 2
     while len(world["calls"]) < 2 and time.monotonic() < deadline:
         time.sleep(0.01)
-    replayed = sorted([("restore", str(world["root"])), ("restore", str(world["named"]))])
+    replayed = sorted([("restore", str(world["root"])), ("replay", str(world["named"]))])
     assert sorted(world["calls"]) == replayed
     peu.restore_durable_process_completions(registry)
     time.sleep(0.2)

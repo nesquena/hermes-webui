@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -138,6 +140,105 @@ def resolve_ledger_owner(evt: Mapping[str, Any]) -> LedgerOwner:
     if len(matches) > 1 or not complete or any(found is None for _home, found in results):
         return LedgerOwner("unknown")
     return LedgerOwner("found", matches[0]) if matches else LedgerOwner("missing")
+
+
+_REPLAY_COLUMNS = frozenset(
+    {"delegation_id", "state", "delivery_state", "event_json", "completed_at", "dispatched_at", "origin_ui_session_id"}
+)
+_DEFAULT_REPLAY_AGE_CAP_S = 48 * 3600.0
+
+
+def _replay_age_cap() -> float:
+    try:
+        from tools.async_delegation import _MAX_COMPLETION_REPLAY_AGE_S
+
+        return float(_MAX_COMPLETION_REPLAY_AGE_S)
+    except Exception:
+        return _DEFAULT_REPLAY_AGE_CAP_S
+
+
+def _session_runs_in_process(session_id: str) -> bool:
+    """True only for a WebUI session whose turns run in this process.
+
+    Gateway-backend sessions are left to the Gateway that ran the delegation
+    (it delivers through ``gateway_delegation_wakeup``) and runner-owned turns to
+    the runner. Anything that cannot be determined is False.
+    """
+    try:
+        from api import profiles
+        from api.gateway_delegation_wakeup import _profile_uses_gateway
+        from api.models import get_session_profile_readonly
+        from api.runtime_adapter import runtime_adapter_runner_enabled
+
+        name = get_session_profile_readonly(session_id) or "default"
+        if name != "default" and not (isinstance(name, str) and profiles._PROFILE_ID_RE.fullmatch(name)):
+            return False
+        if runtime_adapter_runner_enabled():
+            return False
+        return not _profile_uses_gateway(name)
+    except Exception:
+        return False
+
+
+def pending_webui_completions(home: Path, *, now: float | None = None) -> list[dict]:
+    """Read *home*'s pending completions that an in-process WebUI session should get.
+
+    The read-only counterpart of the Agent's startup replay, for ledgers WebUI
+    does not own. It selects rows the same way (``state != 'running'``, pending,
+    with an event) and leaves out rows past the replay age cap, which belong to
+    their owner's cleanup. Nothing is written. Raises when an existing ledger
+    cannot be read, so the caller retries.
+    """
+    db_path = Path(home) / "state.db"
+    try:
+        db_path.stat()
+    except FileNotFoundError:
+        return []
+    from api.agent_sessions import state_db_readonly_uri
+
+    conn = sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True, timeout=2.0)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(async_delegations)")}
+        if not _REPLAY_COLUMNS <= columns:
+            return []  # no ledger table, or a core without session provenance
+        rows = conn.execute(
+            """SELECT delegation_id, event_json, completed_at, dispatched_at, origin_ui_session_id
+               FROM async_delegations
+               WHERE state != 'running' AND delivery_state = 'pending' AND event_json IS NOT NULL
+               ORDER BY completed_at, delegation_id"""
+        ).fetchall()
+    finally:
+        conn.close()
+    try:
+        from tools.async_delegation import redact_completion_event
+    except Exception:
+        redact_completion_event = None
+    now = time.time() if now is None else now
+    cap = _replay_age_cap()
+    in_process: dict[str, bool] = {}
+    events = []
+    for delegation_id, payload, completed_at, dispatched_at, session_id in rows:
+        age_basis = completed_at or dispatched_at
+        if age_basis and now - age_basis > cap:
+            continue
+        session_id = str(session_id or "")
+        if not session_id:
+            continue
+        if session_id not in in_process:
+            in_process[session_id] = _session_runs_in_process(session_id)
+        if not in_process[session_id]:
+            continue
+        try:
+            evt = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(evt, dict) or evt.get("delegation_id", delegation_id) != delegation_id:
+            continue
+        if callable(redact_completion_event):
+            evt = redact_completion_event(evt)
+        evt["restored"] = True
+        events.append(evt)
+    return events
 
 
 @contextmanager

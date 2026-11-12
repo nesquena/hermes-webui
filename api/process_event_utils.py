@@ -15,6 +15,7 @@ from typing import Any
 from api.delegation_ledger_owner import (
     authorized_ledger_homes,
     ledger_home_scope,
+    pending_webui_completions,
     resolve_ledger_owner,
 )
 
@@ -44,6 +45,56 @@ _THROTTLED_LOG_INTERVAL_SECONDS = 300.0
 _THROTTLED_LOG_LOCK = threading.Lock()
 _THROTTLED_LOG_AT: dict[str, float] = {}
 _monotonic = time.monotonic
+# (ledger home, delegation id) copies the read-only replay has put on the queue.
+# Like the Agent's own offer set, a row is offered once until its copy is handed
+# back (release or claim retry) or settled.
+_REPLAY_OFFERED_LOCK = threading.Lock()
+_REPLAY_OFFERED: set[tuple[str, str]] = set()
+
+
+def _forget_replay_offer(delegation_id: str) -> None:
+    if not delegation_id:
+        return
+    with _REPLAY_OFFERED_LOCK:
+        _REPLAY_OFFERED.difference_update({key for key in _REPLAY_OFFERED if key[1] == delegation_id})
+
+
+def _is_launch_ledger(home: Path) -> bool:
+    """Whether *home* is this process's own profile, whose ledger the Agent restores."""
+    try:
+        from api import profiles
+
+        return Path(home).resolve() == Path(profiles.get_process_profile_home()).resolve()
+    except Exception:
+        return False  # unknown: treat as another profile's ledger, which is only read
+
+
+def _restore_ledger(home: Path | None, target_queue: Any) -> None:
+    """Restore one ledger into *target_queue*.
+
+    The launch profile's ledger (and the ambient one for legacy events) gets the
+    Agent's restore, with its recovery and 48 h drop, as on master. Every other
+    ledger is only read: pending rows from in-process WebUI sessions are queued,
+    and the claim stays the only cross-process gate.
+    """
+    if home is None or _is_launch_ledger(home):
+        from tools.async_delegation import restore_undelivered_completions
+
+        with ledger_home_scope(home):
+            restore_undelivered_completions(target_queue)
+        return
+    for evt in pending_webui_completions(home):
+        key = (str(home), completion_delivery_id(evt))
+        with _REPLAY_OFFERED_LOCK:
+            if key in _REPLAY_OFFERED:
+                continue
+            _REPLAY_OFFERED.add(key)
+        try:
+            target_queue.put(evt)
+        except Exception:
+            with _REPLAY_OFFERED_LOCK:
+                _REPLAY_OFFERED.discard(key)
+            raise
 
 
 def _log_throttled(key: str, level: int, message: str, *args: Any, exc_info: bool = False) -> None:
@@ -366,10 +417,7 @@ def _arm_async_delegation_restore_sweep(
                 _ASYNC_DELIVERY_RETRY_EVENTS.clear()
             for home in homes:
                 try:
-                    from tools.async_delegation import restore_undelivered_completions
-
-                    with ledger_home_scope(home):
-                        restore_undelivered_completions(target_queue)
+                    _restore_ledger(home, target_queue)
                 except Exception:
                     _log_throttled(
                         f"restore:{home}",
@@ -455,6 +503,7 @@ def schedule_async_delegation_claim_retry(
             return_completion_offer(evt)
         except Exception:
             logger.debug("Failed to return async delegation offer %s", delegation_id, exc_info=True)
+    _forget_replay_offer(delegation_id)
 
     return _arm_async_delegation_restore_sweep(
         completion_queue, retry_delay, ledger_home=ledger_home
@@ -615,6 +664,7 @@ def complete_async_delegation_delivery(
     claim: AsyncDelegationDeliveryClaim,
 ) -> None:
     """Complete a claim after WebUI has accepted the event for delivery."""
+    _forget_replay_offer(claim.delegation_id)
     with ledger_home_scope(claim.ledger_home):
         if claim.durable:
             from tools.async_delegation import complete_event_delivery
@@ -686,6 +736,7 @@ def release_async_delegation_delivery(
         )
     finally:
         _release_bounded_local(claim.delegation_id)
+        _forget_replay_offer(claim.delegation_id)
 
 
 def legacy_async_delivery_dedupe_size() -> int:
@@ -705,6 +756,8 @@ def _reset_legacy_async_delivery_dedupe_for_tests() -> None:
     _NON_LAUNCH_REPLAY_DONE = False
     with _THROTTLED_LOG_LOCK:
         _THROTTLED_LOG_AT.clear()
+    with _REPLAY_OFFERED_LOCK:
+        _REPLAY_OFFERED.clear()
     with _LEGACY_ASYNC_DELIVERY_LOCK:
         _LEGACY_ASYNC_DELIVERY_IDS.clear()
     with _ASYNC_DELIVERY_RETRY_LOCK:

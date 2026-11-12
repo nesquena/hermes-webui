@@ -47,14 +47,29 @@ restores nothing (#7214).
   authorized ledger. If enumeration is incomplete, a single delayed timer
   retries the replay, because the background drain calls the restore only once
   at startup. Atomic claims make a repeated launch-ledger restore harmless.
-  Each restore is the Agent's `restore_undelivered_completions()`, which is not
-  read-only: under each profile's home it also runs the Agent's abandoned-run
+  A failing restore retries on the 5 s routing interval and logs at most once
+  per 300 s per ledger.
+- **Writes stay on the launch ledger (replay-only across profiles).** Restores
+  of the launch profile's ledger (`get_process_profile_home()`), and of the
+  ambient ledger for legacy events, call the Agent's
+  `restore_undelivered_completions()` as on master, including its abandoned-run
   recovery (`running` rows whose owner PID is not alive become `unknown`) and
-  marks pending rows older than the 48 h replay cap `dropped`. The same writes
-  happen when that profile's own process next starts; whether WebUI should make
-  them for other profiles is an open scope question on the PR. A failing
-  restore retries on the 5 s routing interval and logs at most once per 300 s
-  per ledger.
+  the 48 h `dropped` cap. Every other ledger is only read
+  (`pending_webui_completions`): one read-only `SELECT` of
+  `state != 'running' AND delivery_state = 'pending' AND event_json IS NOT NULL`
+  rows, through the same read-only URI as the owner lookup. No Agent restore
+  runs there and no row is rewritten; rows past the 48 h cap are skipped, not
+  dropped, and are left to their owning process.
+  - Only rows whose `origin_ui_session_id` is a WebUI session whose turns run
+    in this process are replayed. Rows without a WebUI session, rows from
+    sessions on the Gateway backend (they are delivered through
+    `gateway_delegation_wakeup`), rows from runner-owned turns, and rows whose
+    session or backend cannot be determined are skipped. A skipped row only
+    waits for its owning process.
+  - Each replayed row is queued once, marked `restored`, until its copy is
+    handed back (release or claim retry) or settled.
+    `claim_completion_delivery` remains the only cross-process gate, so a row
+    another consumer also offers is delivered once.
 
 ## Out of scope
 
