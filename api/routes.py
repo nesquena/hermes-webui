@@ -2831,6 +2831,14 @@ _session_list_cache_clear = _route_session_list_cache._session_list_cache_clear
 _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cache_claim_rebuild
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
+_SESSION_LIST_CACHE_MISSING = _route_session_list_cache._SESSION_LIST_CACHE_MISSING
+_SESSION_LIST_CACHE_FRESH = _route_session_list_cache._SESSION_LIST_CACHE_FRESH
+_SESSION_LIST_CACHE_STALE_SOURCE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_SOURCE
+_SESSION_LIST_CACHE_STALE_AGE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_AGE
+_session_list_cache_probe = _route_session_list_cache._session_list_cache_probe
+_session_list_cache_resolved_source_stamp = (
+    _route_session_list_cache._session_list_cache_resolved_source_stamp
+)
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
 _route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
@@ -3837,6 +3845,55 @@ def _hidden_archived_sidebar_reference_sessions(
     return references
 
 
+def _session_list_cache_source_stamp_snapshot(key: tuple):
+    """Stamp read BEFORE a build, so the payload is certified by what it saw.
+
+    A cache entry is a (stamp, payload) pair, and the pair is only meaningful if
+    the stamp was taken no later than the rows the payload was built from. With
+    the stamp taken after the builder returns, a commit that lands mid-build is
+    folded into the stored stamp: the old payload is then certified against a
+    NEWER snapshot, served as FRESH for a full TTL, and stays wrong even once
+    the source moves again. Taking the snapshot first makes that commit visible
+    on the next request instead. ``None`` means the producer itself failed —
+    unknown evidence, so the payload is returned to this caller uncached rather
+    than certified with a later stamp. (#8694)
+    """
+    try:
+        return _session_list_cache_resolved_source_stamp(key)
+    except Exception:
+        logger.debug("session list source stamp snapshot failed", exc_info=True)
+        return None
+
+
+# Source-stamp slots the session-list BUILDER itself can move: the session index
+# (slot 3). all_sessions() re-adds on-disk sidecars missing from the index and the
+# Desktop/CLI orphan passes prune them again, so certifying that slot with its
+# pre-build value would leave every entry source-stale at birth and turn every
+# GET into a blocking rebuild. Master read the whole stamp after the build; the
+# state.db/WAL/fingerprint/all-profiles slots stay pre-build (#8694), the index
+# slot is read after the build, as on master. (#8986)
+_SESSION_LIST_STAMP_BUILDER_WRITTEN_SLOTS = frozenset({3})
+
+
+def _session_list_cache_certified_stamp(key: tuple, pre_build_stamp):
+    """The stamp to store with a payload built after ``pre_build_stamp`` was read."""
+    if pre_build_stamp is None:
+        return None
+    post = _session_list_cache_source_stamp_snapshot(key)
+    if (
+        post is None
+        or not isinstance(pre_build_stamp, tuple)
+        or not isinstance(post, tuple)
+        or len(pre_build_stamp) != 8
+        or len(post) != 8
+    ):
+        return pre_build_stamp
+    return tuple(
+        post[i] if i in _SESSION_LIST_STAMP_BUILDER_WRITTEN_SLOTS else pre_build_stamp[i]
+        for i in range(8)
+    )
+
+
 def _get_cached_session_list_payload(
     *,
     key: tuple,
@@ -3849,8 +3906,8 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
 
-    cached, is_fresh = _session_list_cache_get(key, allow_stale=True)
-    if cached is not None and is_fresh:
+    cached, cache_status = _session_list_cache_probe(key, allow_stale=True)
+    if cache_status == _SESSION_LIST_CACHE_FRESH:
         if diag is not None:
             try:
                 diag.stage("session_list_cache_hit")
@@ -3858,8 +3915,15 @@ def _get_cached_session_list_payload(
                 pass
         return cached
 
-    stale = cached  # now actually a stale payload when one exists, else None
-    stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
+    stale = cached  # a stale payload when one exists, else None
+    stale_reason = (
+        cache_status
+        if cache_status in (
+            _SESSION_LIST_CACHE_STALE_AGE,
+            _SESSION_LIST_CACHE_STALE_SOURCE,
+        )
+        else None
+    )
     if stale is not None and stale_reason != "source":
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
@@ -3874,8 +3938,17 @@ def _get_cached_session_list_payload(
                     rebuild_attempts = 0
                     while True:
                         invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                        source_stamp = _session_list_cache_source_stamp_snapshot(key)
+                        if source_stamp is None:
+                            # Unknown pre-build evidence: build and certify nothing.
+                            # The request that started this background rebuild was
+                            # already served the stale payload, and the next request
+                            # revalidates. Retrying cannot produce a snapshot the
+                            # producer just failed to read.
+                            return
                         try:
                             payload = builder()
+                            source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
                         except Exception:
                             logger.exception(
                                 "session list stale-cache background rebuild failed"
@@ -3887,6 +3960,7 @@ def _get_cached_session_list_payload(
                                 key,
                                 payload,
                                 expected_invalidation_stamp=invalidation_stamp,
+                                source_stamp=source_stamp,
                             )
                         ):
                             return
@@ -3923,13 +3997,21 @@ def _get_cached_session_list_payload(
             rebuild_attempts = 0
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                source_stamp = _session_list_cache_source_stamp_snapshot(key)
                 payload = builder()
+                source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
+                if source_stamp is None:
+                    # Unknown pre-build evidence: correct for this request, never
+                    # certified. Retrying cannot produce a snapshot the producer
+                    # just failed to read.
+                    return payload
                 if (
                     _session_list_cache_invalidation_stamp(key) == invalidation_stamp
                     and _session_list_cache_set(
                         key,
                         payload,
                         expected_invalidation_stamp=invalidation_stamp,
+                        source_stamp=source_stamp,
                     )
                 ):
                     if diag is not None:
@@ -3988,12 +4070,18 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+    source_stamp = _session_list_cache_source_stamp_snapshot(key)
     payload = builder()
-    if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
+    source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
+    if (
+        source_stamp is not None
+        and _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+    ):
         _session_list_cache_set(
             key,
             payload,
             expected_invalidation_stamp=invalidation_stamp,
+            source_stamp=source_stamp,
         )
     return payload
 
