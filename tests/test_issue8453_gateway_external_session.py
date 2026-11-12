@@ -195,18 +195,22 @@ const t=key=>key;
 """ + function + f"\nconst sync={name};\n" + r"""
 const meta=elements.topbarMeta;
 const title=elements.appTitlebarSub;
-for(const state of [
-  {source_label:'Desktop',chat_read_only_reason:'Read-only in WebUI.'},
-  {source_label:'Desktop'},
-  {source_label:'Desktop',read_only:true},
-  {source_label:'WebUI',chat_read_only_reason:'Read-only in WebUI.'},
-  {source_label:'Desktop'},
+for(const [state,expected] of [
+  [{source_label:'Desktop',chat_read_only_reason:'Read-only in WebUI.'},'Desktop · read-only'],
+  [{source_label:'Desktop'},'Desktop'],
+  [{source_label:'Desktop',read_only:true},'Desktop · read-only'],
+  [{source_label:'Email',read_only:true,chat_via_gateway_session:true,
+    chat_delivery_notice:'WebUI replies may also be emailed to the original sender.'},'Email · email delivery'],
+  [{source_label:'Email',read_only:true,chat_via_gateway_session:true,
+    chat_read_only_reason:'This conversation is unavailable.'},'Email · read-only'],
+  [{source_label:'Email',read_only:true,chat_via_gateway_session:false},'Email · read-only'],
+  [{source_label:'WebUI',chat_read_only_reason:'Read-only in WebUI.'},null],
+  [{source_label:'Desktop'},'Desktop'],
 ]){
   S.session={model:'example',title:'Example conversation',...state};sync();
   const badges=[...meta.children,...title.children].filter(child=>child.className==='topbar-source-badge');
-  const expected=state.source_label==='WebUI' ? [] :
-    ['Desktop'+(state.read_only||state.chat_read_only_reason ? ' · read-only' : '')];
-  assert.deepEqual(badges.map(badge=>badge.textContent),expected);
+  assert.deepEqual(badges.map(badge=>badge.textContent),expected===null?[]:[expected]);
+  if(state.chat_delivery_notice) assert.equal(badges[0].title,state.chat_delivery_notice);
 }
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20)

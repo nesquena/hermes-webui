@@ -8,6 +8,8 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_viewer_followup_delivers_to_original_email_sender(tmp_path, monkeypatch):
+    pytest.importorskip("gateway.config", reason="Hermes Agent is not installed")
+    pytest.importorskip("plugins.platforms.email.adapter", reason="Hermes Agent email adapter is not installed")
     from gateway.config import GatewayConfig, Platform, PlatformConfig
     from gateway.session import SessionSource, SessionStore
     from gateway.session_authority import LiveSession, initialize_session_authority
