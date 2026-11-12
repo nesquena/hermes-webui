@@ -7709,13 +7709,21 @@ let _composerFitResizeObserver=null;
 let _composerFitMutationObserver=null;
 let _composerFitObservedFooter=null;
 let _composerFitResizeListenerBound=false;
+let _composerFitLastFooter=null;
+let _composerFitLastKey='';
 
-function _fitComposerFooter(){
+function _fitComposerFooter(force){
   const footer=document.querySelector('.composer-footer');
   if(!footer) return;
   const left=footer.querySelector('.composer-left');
   if(!left) return;
-  if(!left.clientWidth) return;
+  const leftWidth=left.clientWidth;
+  if(!leftWidth) return;
+  const visibleCount=left.children ? Array.from(left.children).filter(function(el){
+    return !el.hidden && getComputedStyle(el).display!=='none';
+  }).length : 0;
+  const key=footer.clientWidth+':'+leftWidth+':'+visibleCount;
+  if(arguments[0]===false && footer===_composerFitLastFooter && key===_composerFitLastKey) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
   // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
   // boundary crossing (this fit path measures real overflow at any width,
@@ -7780,6 +7788,8 @@ function _fitComposerFooter(){
   if(isBurger!==wasBurger && typeof _onPhoneBoundaryChange==='function'){
     try{ _onPhoneBoundaryChange(); }catch(_){ }
   }
+  _composerFitLastFooter=footer;
+  _composerFitLastKey=key;
 }
 window._fitComposerFooter=_fitComposerFooter;
 
@@ -7788,7 +7798,7 @@ function _scheduleComposerFit(){
   _composerFitScheduled=true;
   requestAnimationFrame(function(){
     _composerFitScheduled=false;
-    try{_fitComposerFooter();}catch(_){ }
+    try{_fitComposerFooter(false);}catch(_){ }
   });
 }
 window._scheduleComposerFit=_scheduleComposerFit;
@@ -7818,7 +7828,7 @@ function _initComposerFooterFit(){
   if(window.MutationObserver){
     try{
       _composerFitMutationObserver=new MutationObserver(_scheduleComposerFit);
-      _composerFitMutationObserver.observe(left,{
+      _composerFitMutationObserver.observe(footer,{
         childList:true,subtree:true,characterData:true,
         attributes:true,attributeFilter:['class','style','hidden']
       });
