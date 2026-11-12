@@ -169,6 +169,8 @@ def _run_reentrant_guard_in_node(composer_value: str):
         // token (there is no shared in-flight slot), so the harness supplies the
         // binding send() would have snapshotted from its own argument.
         let _goalContinuationId = '';
+        // The guard also reads this invocation's options (literalSlash).
+        const _sendOptions = {};
         const S = { session: { session_id: 'sid-1' }, pendingFiles: [], activeProfile: 'default' };
 
         // Stubs the guard branch touches.
