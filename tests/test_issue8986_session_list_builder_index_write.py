@@ -175,3 +175,61 @@ def test_the_state_db_slots_stay_pre_build():
         assert routes._session_list_cache_certified_stamp(("k",), pre) == pre
     finally:
         routes._session_list_cache_source_stamp_snapshot = original
+
+
+# --- the background and owner-died fallback build paths (senior review r2) -------------------------
+# Each build path stores the post-build index slot. A builder that rewrites the session index itself
+# (as the orphan passes do) must leave a FRESH entry behind on every path, not one that is
+# source-stale at birth and forces a blocking rebuild on the next read.
+
+
+def _index_rewriting_builder(env):
+    sessions_dir = routes.SESSION_DIR
+    count = {"n": 0}
+
+    def build():
+        count["n"] += 1
+        payload = env.read()
+        (sessions_dir / "_index.json").write_text(json.dumps({"rewritten_by_build": count["n"]}))
+        return payload
+
+    return build
+
+
+def _must_not_rebuild():
+    raise AssertionError("the entry stored by the previous build was source-stale at birth")
+
+
+def test_a_background_rebuild_that_rewrites_the_index_leaves_a_fresh_entry(tmp_path, monkeypatch):
+    from tests.test_issue8986_session_list_no_hold import _join_background_rebuilds, _real_state_db_env
+
+    env = _real_state_db_env(tmp_path, monkeypatch)
+    build = _index_rewriting_builder(env)
+    try:
+        routes._get_cached_session_list_payload(key=env.key, builder=build)  # owner build
+        with routes._SESSIONS_CACHE_LOCK:
+            ts, stamp, payload = routes._SESSIONS_CACHE[env.key]
+            routes._SESSIONS_CACHE[env.key] = (ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0, stamp, payload)
+        routes._get_cached_session_list_payload(key=env.key, builder=build)  # stale by age: background
+        _join_background_rebuilds()
+        assert routes._get_cached_session_list_payload(key=env.key, builder=_must_not_rebuild) == env.read()
+    finally:
+        _join_background_rebuilds()
+        routes._session_list_cache_clear()
+
+
+def test_the_fallback_rebuild_that_rewrites_the_index_leaves_a_fresh_entry(tmp_path, monkeypatch):
+    from tests.test_issue8986_session_list_no_hold import _real_state_db_env
+
+    env = _real_state_db_env(tmp_path, monkeypatch)
+    build = _index_rewriting_builder(env)
+    event, is_owner = routes._session_list_cache_claim_rebuild(env.key)
+    assert is_owner  # an owner that never stores: the waiter falls back to its own build
+    try:
+        routes._get_cached_session_list_payload(key=env.key, builder=build)
+    finally:
+        routes._session_list_cache_done(env.key, event)
+    try:
+        assert routes._get_cached_session_list_payload(key=env.key, builder=_must_not_rebuild) == env.read()
+    finally:
+        routes._session_list_cache_clear()
