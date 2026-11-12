@@ -90,6 +90,10 @@ _loaded_profile_env_keys: set[str] = set()
 # so a reader that must not see another profile's values (the private config read's
 # Agent-global names) reads this, not os.environ.
 _process_env_baseline = MappingProxyType(dict(STARTUP_ENV))
+# The keys the last published reload put into the baseline, tracked apart from
+# _loaded_profile_env_keys (which a reload for another profile replaces): the next
+# reload of the process profile's home clears exactly these from the baseline.
+_baseline_loaded_keys: set[str] = set()
 # Serializes _reload_dotenv's copy, apply and publish (#8981 gate r2): two concurrent
 # reloads (two provider saves, onboarding and a switch) would each publish their own
 # copy, and the older one could drop what the newer one applied. A dedicated leaf lock:
@@ -1957,21 +1961,26 @@ def _reload_dotenv(home: Path):
     applying the current profile's .env. This prevents API keys and other
     profile-scoped secrets from leaking across profile switches.
     """
-    global _loaded_profile_env_keys, _process_env_baseline
+    global _loaded_profile_env_keys, _process_env_baseline, _baseline_loaded_keys
 
-    # Every change below is mirrored into a copy of the process baseline, published
-    # when this returns, so readers never see a worker's mirror (#8981). Only a reload
-    # of the process profile's own home is published: a save routed to another profile
-    # still reloads that profile's .env into os.environ (unchanged), but its values must
-    # not become what every profile's private config read takes as the server's env.
+    # The process baseline (#8981) follows only reloads of the process profile's own
+    # home: such a reload clears what the previous one put there and adds what it
+    # applies, published as one new mapping, so readers never see a worker's mirror. A
+    # save routed to another profile still reloads that profile's .env into os.environ
+    # (unchanged), but neither its values nor its key bookkeeping reach the baseline.
     with _dotenv_reload_lock:
         owned = _is_process_profile_home(home)
-        baseline = dict(_process_env_baseline)
+        applied: dict[str, str] = {}
         try:
-            _apply_profile_dotenv(home, baseline)
+            _apply_profile_dotenv(home, applied)
         finally:
             if owned:
+                baseline = dict(_process_env_baseline)
+                for key in _baseline_loaded_keys:
+                    baseline.pop(key, None)
+                baseline.update(applied)
                 _process_env_baseline = MappingProxyType(baseline)
+                _baseline_loaded_keys = set(applied)
 
 
 def _is_process_profile_home(home) -> bool:
@@ -1988,14 +1997,14 @@ def _is_process_profile_home(home) -> bool:
         return False
 
 
-def _apply_profile_dotenv(home: Path, baseline: dict) -> None:
-    """The body of :func:`_reload_dotenv`; each ``os.environ`` change also goes to *baseline*."""
+def _apply_profile_dotenv(home: Path, applied: dict) -> None:
+    """The body of :func:`_reload_dotenv`; every value it sets in ``os.environ`` is also
+    recorded in *applied*."""
     global _loaded_profile_env_keys
 
     # Remove keys loaded from the previous profile first.
     for key in list(_loaded_profile_env_keys):
         os.environ.pop(key, None)
-        baseline.pop(key, None)
     _loaded_profile_env_keys = set()
 
     env_path = home / '.env'
@@ -2021,7 +2030,7 @@ def _apply_profile_dotenv(home: Path, baseline: dict) -> None:
                         )
                         continue
                     os.environ[k] = v
-                    baseline[k] = v
+                    applied[k] = v
                     loaded_keys.add(k)
         _loaded_profile_env_keys = loaded_keys
     except Exception:

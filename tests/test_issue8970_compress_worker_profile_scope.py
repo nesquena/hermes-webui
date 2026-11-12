@@ -954,6 +954,7 @@ def test_a_global_a_process_wide_switch_cleared_never_comes_back(homes, monkeypa
     _launch_env(monkeypatch, API_SERVER_PORT="18080")
     monkeypatch.setenv("API_SERVER_PORT", "18080")  # restored at teardown
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_PORT"})
+    monkeypatch.setattr(profiles, "_baseline_loaded_keys", {"API_SERVER_PORT"})  # startup's load
     assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "18080"
 
     _reload_as_process_profile(monkeypatch, homes.root)  # the switch to default; root's .env lacks the key
@@ -1108,6 +1109,44 @@ def test_a_reload_for_another_profile_never_reaches_the_baseline(homes, monkeypa
     os.environ["API_SERVER_PORT"] = "37081"  # other's chat restores its pre-run snapshot
     assert profiles.process_env_baseline()["API_SERVER_PORT"] == "37081"
     assert config._private_config_env_binding(homes.work)["API_SERVER_PORT"] == "37081"
+
+
+def test_a_reload_for_another_profile_cannot_strand_a_retired_process_profiles_value(
+    homes, monkeypatch, real_reload_env
+):
+    """Codex r14 (#8981): the process profile ``old`` loaded ``API_SERVER_PORT``; a save
+    routed to ``other`` (whose ``.env`` lacks it) reloads that file into the process env,
+    which replaces ``_loaded_profile_env_keys``. The baseline ignores that reload, but it
+    still has to know which keys ``old``'s reload put there: otherwise the process-wide
+    switch to ``default`` can't clear ``old``'s port, and work's compression keeps sending
+    work's key and transcript to the retired profile's endpoint."""
+    from api import config, profiles
+
+    _global_port_rule(monkeypatch)
+    _launch_env(monkeypatch, API_SERVER_PORT=None)
+    monkeypatch.delenv("API_SERVER_PORT", raising=False)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(profiles, "_baseline_loaded_keys", set())
+    old = homes.root / "profiles" / "old"
+    other = homes.root / "profiles" / "other"
+    for home in (old, other):
+        home.mkdir(parents=True, exist_ok=True)
+    (old / ".env").write_text("API_SERVER_PORT=37999\n", encoding="utf-8")
+    (other / ".env").write_text("LAB_FOREIGN_ONLY=1\n", encoding="utf-8")
+    (homes.root / ".env").write_text("LAB_ROOT_ONLY=1\n", encoding="utf-8")  # no port
+
+    _reload_as_process_profile(monkeypatch, old)  # the process-wide switch to old
+    assert profiles.process_env_baseline()["API_SERVER_PORT"] == "37999"
+
+    profiles._reload_dotenv(other)  # a save routed to other; old still serves the process
+    assert profiles.process_env_baseline()["API_SERVER_PORT"] == "37999"
+    assert "LAB_FOREIGN_ONLY" not in profiles.process_env_baseline()
+
+    _reload_as_process_profile(monkeypatch, homes.root)  # the switch to default
+    baseline = profiles.process_env_baseline()
+    assert "API_SERVER_PORT" not in baseline
+    assert baseline["LAB_ROOT_ONLY"] == "1"
+    assert "API_SERVER_PORT" not in config._private_config_env_binding(homes.work)
 
 
 def test_a_process_home_that_cannot_be_resolved_publishes_nothing(homes, monkeypatch, real_reload_env):
