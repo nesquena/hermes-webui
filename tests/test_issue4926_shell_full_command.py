@@ -47,6 +47,7 @@ eval(grab('_toolCommandIsPreviewOnly'));
 eval(grab('_toolDetailLeadLabel'));
 eval(grab('_toolDetailLeadText'));
 let buf = '';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => {
   const payload = JSON.parse(buf || '{}');
