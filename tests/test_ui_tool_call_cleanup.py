@@ -832,7 +832,15 @@ class TestToolCardDesignTokens:
         assert ".tool-worklog-tool-group-body .tool-card-icon," in CSS
         assert ".tool-group-body .tool-card-icon{display:none;}" in CSS
         assert ".tool-worklog-tool-group-body .tool-card-header," in CSS
-        assert ".tool-group-body .tool-card-header{margin-left:0;padding-left:0;}" in CSS
+        # #7495 UX gate: 5px (not 0) — the running-dot ring scales to 2.4x of
+        # the 7px dot (~4.9px left overflow), so a zero left padding let the
+        # card's overflow:hidden clip the ring straight in Compact Worklog.
+        # The reserve covers EVERY compact worklog card header (the standalone
+        # live running card included), so running and completed rows share one
+        # left inset and the completed→grouped move does not shift the row.
+        assert (".tool-worklog-list .tool-card-header,\n"
+                ".tool-worklog-tool-group-body .tool-card-header,\n"
+                ".tool-group-body .tool-card-header{margin-left:0;padding-left:5px;}") in CSS
         assert ".tool-worklog-tool-group-body .tool-card-detail," in CSS
         assert ".tool-group-body .tool-card-detail{width:100%;max-width:100%;box-sizing:border-box;}" in CSS
 

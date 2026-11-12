@@ -219,6 +219,25 @@ function _isTouchKeyboardViewport(){
   try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
 }
 
+// Validated visualViewport read (#8531): iOS 27 standalone PWAs on foldables
+// (iPhone Duo) can report garbage geometry after fold/unfold — observed
+// height -33554432 (= -2^25) — with no corrective resize event until the
+// device rotates. Returns null when the reading is implausible so callers
+// fall back to window dimensions instead of poisoning layout math.
+function _plausibleVisualViewport(){
+  const vv=window.visualViewport;
+  if(!vv) return null;
+  const h=Number(vv.height), w=Number(vv.width);
+  const ih=window.innerHeight, iw=window.innerWidth;
+  if(!Number.isFinite(h)||h<=0||h>ih*1.5) return null;
+  if(!Number.isFinite(w)||w<=0||w>iw*1.5) return null;
+  return {
+    width:w, height:h,
+    offsetTop:Math.max(0,Number(vv.offsetTop)||0),
+    offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)
+  };
+}
+
 function _syncKeyboardBottomInset(){
   const root=document.documentElement;
   if(!root) return;
@@ -235,7 +254,16 @@ function _syncKeyboardBottomInset(){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
-  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
+  // Compute from one validated snapshot (#8531): a garbage reading clears the
+  // inset entirely — a cleared inset at worst lets the keyboard overlap the
+  // composer for one frame until the next sane viewport event, while any
+  // bogus-but-capped inset buries the transcript.
+  const vvOk=_plausibleVisualViewport();
+  if(!vvOk){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  const inset=Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)));
   if(inset>0){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
   }else{
@@ -656,7 +684,11 @@ function _isPwaStandalone(){
 }
 
 function _isInteractiveSwipeTarget(target){
-  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox'));}
+  // .model-dropdown: the model menu is a floating panel, not part of the page
+  // behind it. Without it a PWA sidebar swipe starting inside the open menu
+  // drags the whole layout, and the printable-key/shortcut guards below treat
+  // keys typed in the menu as page-level shortcuts.
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox,.model-dropdown'));}
   catch(_){return false;}
 }
 
@@ -686,6 +718,12 @@ function _openMobileSidebarFromGesture(){
   _setPanelInert(sidebar, true);
 }
 
+function _swipeHitsRect(point,id){
+  const el=document.getElementById(id);
+  if(!el||!point) return false;
+  const r=el.getBoundingClientRect();
+  return point.clientX>=r.left&&point.clientX<=r.right&&point.clientY>=r.top&&point.clientY<=r.bottom;
+}
 function _onPwaSidebarSwipeStart(e){
   if(_isDesktopWidth())return;
   if(_isTouchPointerEvent(e))return;
@@ -695,6 +733,9 @@ function _onPwaSidebarSwipeStart(e){
   if(!point)return;
   if(point.clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
   if(_isInteractiveSwipeTarget(e.target))return;
+  // hwc: sidebar-typing-lock — composer and the message field. A real keyboard
+  // inset grows .composer-wrap padding, so this rect already covers that band.
+  if(_swipeHitsRect(point,'composerWrap')||_swipeHitsRect(point,'msg'))return;
   _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
 }
 
@@ -3059,6 +3100,19 @@ function _isNumpadEnter(e){
 // falls through to the `else { send() }` branch — sending the message instead
 // of inserting a newline (issue: mobile Enter sends on fresh page load).
 try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
+// hwc: send-key — clarify and inline edit share this Enter decision.
+// The composer listener below keeps its own branches, including _mobileDefault.
+function _composerShouldSendOnKey(e){
+  if(!e||e.key!=='Enter') return false;
+  if(typeof _isImeEnter==='function'?_isImeEnter(e):(e.isComposing||e.keyCode===229)) return false;
+  const isNumpadEnter=typeof _isNumpadEnter==='function'&&_isNumpadEnter(e);
+  const _mobileDefault=_isTouchOnlyDevice()
+    &&(window._sendKey==='enter'||typeof window._sendKey==='undefined');
+  if(window._sendKey==='shift+enter') return !!e.shiftKey;
+  if(window._sendKey==='ctrl+enter'||_mobileDefault) return !!(isNumpadEnter||e.ctrlKey||e.metaKey);
+  return !e.shiftKey;
+}
+window._composerShouldSendOnKey=_composerShouldSendOnKey;
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -3126,7 +3180,10 @@ document.addEventListener('keydown',async e=>{
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
   if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')){
     const t=e.target;
-    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    const active=document.activeElement;
+    const _isTextEl=el=>!!(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable));
+    // hwc: sidebar-typing-lock — also the focused element, not only the event target.
+    const isText=_isTextEl(t)||_isTextEl(active);
     if(!isText&&typeof toggleSidebar==='function'&&_isDesktopWidth()){
       e.preventDefault();
       toggleSidebar();
@@ -3300,6 +3357,10 @@ function applyEmptyStatePanelPref(){
 }
 
 window.addEventListener('resize',()=>{
+  // Resync the keyboard inset on every window resize even when visualViewport
+  // exists (#8531): fold transitions can change window geometry without a
+  // trustworthy visualViewport event, so the inset must be re-validated here.
+  _syncKeyboardBottomInset();
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
   // Re-apply the sidebar state on viewport change (e.g. foldable unfold:
@@ -4063,6 +4124,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
     window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
+    if(typeof setScreenReaderMode==='function') setScreenReaderMode(s.screen_reader_mode);
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')

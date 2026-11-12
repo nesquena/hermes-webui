@@ -1,13 +1,27 @@
-const _AGENT_COMMAND_ALIASES = {
-  'reload_mcp': 'reload-mcp',
-  'reload_skills': 'reload-skills',
-  'codex_runtime': 'codex-runtime',
-  'credits': 'credits'
-};
+// _AGENT_COMMANDS_RUN_ON_WEBUI gates the send() intercept. The set holds
+// both the canonical registry names AND the underscore alias forms so
+// typing `/reload_mcp` (an alias) still matches when the agent metadata
+// cache is empty and getAgentCommandMetadata() can't canonicalize the
+// input. Canonical names also let the success path match metadata-loaded
+// commands. Mirrors _WEBUI_DISPATCHABLE_AGENT_COMMANDS in commands.js for
+// the backend-exec family (moa/sessions/resume/pet are WebUI-native and
+// dispatched elsewhere in send()). The formerly dead underscore-alias
+// map at the top of this file was removed; its alias membership now
+// lives in the set below (#7675 follow-up #4).
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
   'reload-mcp','reload-skills','codex-runtime','credits',
   'reload_mcp','reload_skills','codex_runtime','credits'
 ]);
+function _fallbackNonDispatchableAgentCommandCheck(_agentCmd){
+  // Degraded-mode fallback used only when the real dispatchability helper
+  // (_isWebuiDispatchableAgentCommand from commands.js) is absent. Mirrors the
+  // former inline predicate: block anything that is neither a Plugin-category
+  // command nor a member of the backend-exec dispatch set. The caller
+  // guarantees _agentCmd is non-null, so the dereferences are safe (#7683).
+  return _agentCmd.category!=='Plugin'
+    && !_AGENT_COMMANDS_RUN_ON_WEBUI.has(String(_agentCmd.name||'').toLowerCase());
+}
+
 function _markSessionViewed(sid, messageCount) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -1520,7 +1534,50 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// After a CLI-only explainer, set the composer text AND persist it as the
+// session's draft. Assigning .value alone fires no input event, so the draft
+// saved while typing ("/plan X") survived and a reload restored the slash
+// command, which only repeats the explainer (#7683 fold check). An empty value
+// clears the saved draft; _saveComposerDraftNow also cancels a pending autosave.
+//
+// `owner` is the {sid,text} that issued the command, captured by send() before
+// it awaited command metadata. The user can switch chats or edit the composer
+// during that wait, so only the issuing session, with its composer still
+// holding the command text, may be rewritten and persisted. A send that began
+// with no open session owns only the session it creates itself (send() sets
+// owner.sid after its own newSession()); with no owner session, nothing is
+// written. Reading the
+// session at write time instead wrote chat A's reworded prompt into chat B's
+// composer and replaced B's saved draft (#8717).
+function _setComposerAfterCliOnlyExplainer(value,owner){
+  const el=$('msg');
+  if(owner){
+    const currentSid=S.session&&S.session.session_id||null;
+    if(!owner.sid||currentSid!==owner.sid) return;
+    if(el&&String(el.value||'').trim()!==String(owner.text||'').trim()) return;
+  }
+  if(el){
+    el.value=value;
+    if(typeof autoResize==='function')autoResize();
+  }
+  const sid=S.session&&S.session.session_id;
+  if(!sid||typeof _saveComposerDraftNow!=='function') return;
+  const files=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const onFail=(error)=>{
+    if(typeof _handleComposerDraftPostFailure==='function') _handleComposerDraftPostFailure(error,sid,value,files);
+  };
+  try{
+    const result=_saveComposerDraftNow(sid,value,files);
+    if(result&&typeof result.catch==='function') result.catch(onFail);
+  }catch(error){
+    onFail(error);
+  }
+}
+
 async function send(){
+  if(S.session&&S.session.chat_read_only_reason){
+    return;
+  }
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1700,12 +1757,17 @@ async function send(){
     }
     return;
   }
-  if(S.session&&(S.session.read_only||S.session.is_read_only)){
+  if(S.session&&(S.session.read_only||S.session.is_read_only)&&!S.session.chat_via_gateway_session){
     if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
+  // #8717: the session and composer text that issued a slash command,
+  // captured before the metadata awaits in the intercept below. Composer
+  // writes after those awaits go through
+  // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
+  const _slashOwner={sid:S.session&&S.session.session_id||null,text};
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1761,15 +1823,73 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
-      const _agentCmd=typeof getAgentCommandMetadata==='function'
+      const _agentCmdMeta=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
+      const _agentCmd=_agentCmdMeta&&_agentCmdMeta.command||null;
+      // Metadata availability is preserved separately from the lookup result:
+      // when the registry fetch failed (available:false) we cannot tell a
+      // genuinely unknown command from a known CLI-only one, so the
+      // availability flag is carried forward and the fail-closed block runs
+      // AFTER bundle resolution below (#7683) — not here. Running it here
+      // blocked commands that master dispatches without registry metadata:
+      // native /moa, the _AGENT_COMMANDS_RUN_ON_WEBUI backend-exec family and
+      // plugin commands all resolve through their own branches, and a bundle
+      // command may still be waiting.
+      const _registryUnavailable=!!(_agentCmdMeta&&_agentCmdMeta.available===false);
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});_slashOwner.sid=S.session&&S.session.session_id||null;}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
+        S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args),_ts:Date.now()/1000});
         renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
+        // Prompt-style commands (plan/review/learn) tell the user their
+        // request is already in the composer, so leave it there, reworded to
+        // keep the command's intent, instead of clearing it (#7683 review
+        // round 3 + UX gate). Clearing it forced a full retype of the prompt.
+        if(typeof isPromptStyleCliOnlyCommand==='function'
+           && isPromptStyleCliOnlyCommand(_agentCmd.name||_parsedCmd.name)){
+          _setComposerAfterCliOnlyExplainer(typeof promptStyleComposerText==='function'
+            ? promptStyleComposerText(_agentCmd.name||_parsedCmd.name,text)
+            : text.replace(/^\s*\/\S+\s*/,''),_slashOwner);
+          hideCmdDropdown();
+          return;
+        }
+        _setComposerAfterCliOnlyExplainer('',_slashOwner);hideCmdDropdown();return;
+      }
+      // Non-dispatchable registry commands (e.g. /agents) must not leak as
+      // plain text to the model. Route them through the CLI-only explainer
+      // so the boundary is self-explaining (#7675 follow-up #3).
+      //
+      // The predicate must be the dispatchability check itself, NOT "absent
+      // from _AGENT_COMMANDS_RUN_ON_WEBUI": that set holds only the
+      // backend-exec family, so WebUI-native commands (moa/sessions/
+      // resume/pet) are intentionally absent and would be swallowed here
+      // before their own native handlers below (e.g. /moa at the native
+      // MoA branch). _isWebuiDispatchableAgentCommand() answers the real
+      // question: does send() dispatch this command (backend exec, plugin
+      // transport, or a native branch)? Any remaining command is CLI-only
+      // and gets the explainer (#7683).
+      if(_agentCmd && (
+        typeof _isWebuiDispatchableAgentCommand==='function'
+          ? !_isWebuiDispatchableAgentCommand(_agentCmd)
+          : _fallbackNonDispatchableAgentCommandCheck(_agentCmd)
+      )){
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});_slashOwner.sid=S.session&&S.session.session_id||null;}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args),_ts:Date.now()/1000});
+        renderMessages();
+        // Prompt-style commands (plan/review/learn) keep the request in the
+        // composer, reworded to keep the command's intent, so the user sends
+        // it instead of retyping (#7683 review round 3 + UX gate).
+        if(typeof isPromptStyleCliOnlyCommand==='function'
+           && isPromptStyleCliOnlyCommand(_agentCmd.name||_parsedCmd.name)){
+          _setComposerAfterCliOnlyExplainer(typeof promptStyleComposerText==='function'
+            ? promptStyleComposerText(_agentCmd.name||_parsedCmd.name,text)
+            : text.replace(/^\s*\/\S+\s*/,''),_slashOwner);
+          hideCmdDropdown();
+          return;
+        }
+        _setComposerAfterCliOnlyExplainer('',_slashOwner);hideCmdDropdown();return;
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
@@ -1842,6 +1962,51 @@ async function send(){
           renderMessages();
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
+      }
+      // #7683 [CORE]: the fail-closed guard runs LAST, after every dispatch
+      // branch above has had its chance. `_agentCmdName` is only meaningful
+      // once those branches have run, and a bundle command that resolved must
+      // not be blocked by a registry that happened to be unavailable — the
+      // bundle metadata does not come from that registry at all.
+      //
+      // `/moa` is exempt because it is a native WebUI branch that never
+      // consults the registry: master reaches its own resolver with
+      // `/api/commands` returning 503, so blocking it here would be a
+      // regression.
+      //
+      // A plain skill is exempt for the same reason: its metadata comes from
+      // /api/skills, not from the command registry, so a 503 there says
+      // nothing about whether the skill is enabled. Resolve it before the
+      // guard and let a positively matched skill through. The match honours
+      // the `_` ≡ `-` equivalence #8203 gave every other slash lookup, so
+      // `/deep_research` still finds the `deep-research` skill.
+      const _skillVariants =
+        typeof _slashCommandSlugVariants === 'function'
+          ? _slashCommandSlugVariants(_parsedCmd.name)
+          : [_parsedCmd.name];
+      //
+      // Only a command-shaped first token is guarded. Built-in, skill and
+      // bundle names match [a-z0-9][a-z0-9_-]*, as does every plugin command
+      // seen on a current install (the Agent does not validate plugin names).
+      // Any other first token, such as the path in `/tmp/example.js explain`,
+      // is ordinary text and is sent as it was before this guard existed (#8717).
+      const _commandShapedSlashName=/^[a-z0-9][a-z0-9_-]*$/.test(String(_parsedCmd.name||''));
+      const _skillCmd =
+        _registryUnavailable && _commandShapedSlashName && !_bundleCmd && _agentCmdName !== 'moa'
+        && typeof loadSkillCommands === 'function'
+          ? (await loadSkillCommands()).find(skill => _skillVariants.includes(skill.name))
+          : null;
+      if(_commandShapedSlashName&&!_bundleCmd&&!_skillCmd&&_registryUnavailable&&_agentCmdName!=='moa'){
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        S.messages.push({role:'assistant',content:'Command metadata is temporarily unavailable — please try again.',_ts:Date.now()/1000});
+        renderMessages();
+        // Keep the text in the composer so "try again" is one keypress
+        // instead of a retype (#8717). Mark it dismissed: a slash-command
+        // loader that lands late must not reopen the list on that same text,
+        // or the next Enter picks a match instead of retrying.
+        if(typeof markSlashDropdownDismissed==='function') markSlashDropdownDismissed();
+        hideCmdDropdown();return;
       }
     }
   }
@@ -4368,7 +4533,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         status:options.sealed?'completed':'running',
         payload:{text,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
-      _renderAnchorLiveScene();
+      if(options.render!==false) _renderAnchorLiveScene();
       return replaced;
     }
     _applyToAnchor('token',{
@@ -4378,7 +4543,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       status:options.sealed?'completed':'running',
       activitySegmentSeq:segmentSeq,
       activityBurstId:_currentActivityBurstId,
-    },null);
+    },null,null,options);
     return _findAnchorActivityEventByLocalId(localId,'token');
   }
   // Persistent incremental renderer for anchor-scene live prose rows. The compact
@@ -6481,8 +6646,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const pendingDisplayTextBeforeTool=segmentStart===0
         ? (_parseStreamState().displayText||'')
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
-      if(String(pendingDisplayTextBeforeTool||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeTool,{sealed:true});
-      _applyToAnchor('tool',{...d,...tc},e);
+      if(String(pendingDisplayTextBeforeTool||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeTool,{sealed:true,render:false});
+      _applyToAnchor('tool',{...d,...tc},e,null,{render:false});
 
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6497,8 +6662,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if((assistantRow&&assistantBody)||String(pendingDisplayText||'').trim()){
         ensureAssistantRow(true);
       }
-      _flushPendingSegmentRender({force:true});
-      appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+      // Prose and tool state are already in the registry. Paint their combined
+      // result once, synchronously, before snapshotting; no deferred timer.
+      _flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});
+      if(!_renderAnchorLiveScene()) appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       snapshotLiveTurn();
       _freshSegment=true;
       _smdEndParser();
@@ -6518,8 +6685,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const pendingDisplayTextBeforeComplete=segmentStart===0
         ? (_parseStreamState().displayText||'')
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
-      if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true});
-      _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e);
+      if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true,render:false});
+      _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e,null,{render:false});
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6531,14 +6698,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           : _stripXmlToolCalls(assistantText.slice(segmentStart));
         if((assistantRow&&assistantBody)||String(pendingDisplayText||'').trim()){
           ensureAssistantRow(true);
-          _flushPendingSegmentRender({force:true});
+          _flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});
         }
-        appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+        if(!_renderAnchorLiveScene()) appendLiveToolCard(tc,{sessionId:activeSid,streamId});
         _freshSegment=true;
         _smdEndParser();
         _resetAssistantSegment();
       } else {
-        appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+        if(!_renderAnchorLiveScene()) appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
       snapshotLiveTurn();
       scrollIfPinned();
@@ -6845,6 +7012,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // the server copy was never touched — which is the whole #6112 symptom.
           let _doneFinalAnswer='';
           try{ if(typeof _streamDisplay==='function') _doneFinalAnswer=_streamDisplay()||''; }catch(_){}
+          const _preSettleSession=S.session;
+          const _preSettleOldestIdx=(typeof _oldestIdx!=='undefined')?_oldestIdx:null;
+          const _preSettleMessagesTruncated=(typeof _messagesTruncated!=='undefined')&&!!_messagesTruncated;
           const _preSettle=Array.isArray(S.messages)?S.messages:[];
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(_pendingTitleUpdates.has(completedSid)){
@@ -6852,10 +7022,32 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _pendingTitleUpdates.delete(completedSid);
             _pendingTitleExpectedCurrent.delete(completedSid);
           }
-          // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
-          if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
-          // #6112 settle guard.
-          S.messages=_adoptDoneSnapshotMessages(_preSettle, S.messages, _doneFinalAnswer).messages;
+          const _doneMergeOptions=(typeof _doneResidentMergeOptions==='function')
+            ? _doneResidentMergeOptions(_preSettleSession,_preSettleOldestIdx,d.session)
+            : null;
+          // #6112 settle guard. The options helper is optional in older isolated
+          // harnesses; when absent, the adoption stub keeps its legacy contract.
+          const _doneAdoption=(typeof _doneResidentMergeOptions==='function')
+            ? _adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer,_doneMergeOptions)
+            : _adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer);
+          const _doneOffsetIsValid=!_doneMergeOptions||_doneMergeOptions.offsetIsValid;
+          const _doneOffset=_doneMergeOptions?_doneMergeOptions.offset:d.session._messages_offset;
+          S.messages=_doneAdoption.messages;
+          if(_doneAdoption.mergedResidentPrefix){
+            // #4720: the merged array still starts at the resident origin, not
+            // the settled tail's offset. Preserve that coordinate before hydrate.
+            if(typeof _oldestIdx!=='undefined')_oldestIdx=_preSettleOldestIdx==null?0:_preSettleOldestIdx;
+            // Completeness belongs to the selected merged window, not to either
+            // input independently. An origin-zero merge is already the full
+            // transcript even when the settled input was a bounded tail; a
+            // positive-origin merge still needs Load earlier / load-all.
+            if(typeof _messagesTruncated!=='undefined')_messagesTruncated=_preSettleOldestIdx>0;
+          }else if(typeof _oldestIdx!=='undefined'){
+            _oldestIdx=!_doneAdoption.snapshotAdopted
+              ? (_preSettleOldestIdx==null?0:_preSettleOldestIdx)
+              : (_doneOffsetIsValid?(_doneOffset||0):0);
+            if(!_doneAdoption.snapshotAdopted&&typeof _messagesTruncated!=='undefined') _messagesTruncated=_preSettleMessagesTruncated;
+          }
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -7360,8 +7552,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       });
     });
 
+    source.addEventListener('memory_status',e=>{
+      // #8517: memory is on for the agent now serving this stream's session.
+      try{
+        const _memoryStatus=JSON.parse(e.data);
+        if(_memoryStatus&&_memoryStatus.state==='ok'&&typeof noteSessionMemoryStatus==='function') noteSessionMemoryStatus(_memoryStatus.session_id,{state:'ok'});
+      }catch(_){}
+    });
+
     source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
+      // #8517: memory is off for the agent serving this stream's session. It updates
+      // the session on screen only (its quiet notice, never a composer status).
+      try{
+        const _memoryOff=JSON.parse(e.data);
+        if(_memoryOff&&_memoryOff.type==='memory_off'){
+          if(typeof noteSessionMemoryStatus==='function') noteSessionMemoryStatus(_memoryOff.session_id,{state:'off',reason:String(_memoryOff.reason||''),scope:String(_memoryOff.scope||'')});
+          return;
+        }
+      }catch(_){}
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
         const d=JSON.parse(e.data);
@@ -7588,7 +7797,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
                 : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
             clearLiveToolCards();if(!assistantText)removeThinking();
             const cancelAgentName=(assistantDisplayName()+'').trim()||'Hermes';
-            S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});
+            // #7293: a run the WebUI server stopped (shutdown drain / forced
+            // update) must not be shown as cancelled by the user.
+            const _cancelByServer=_cancelData&&_cancelData.cancel_initiator==='server';
+            const _cancelDetail=_cancelByServer?(String(_cancelData.message||'').trim()||'The WebUI server stopped this run'):'Task cancelled.';
+            const _cancelDetailText=_cancelDetail.endsWith('.')?_cancelDetail:`${_cancelDetail}.`;
+            const _cancelHint=_cancelByServer
+              ?`The WebUI server stopped this run before ${cancelAgentName} finished; you did not cancel it. No provider failure occurred.`
+              :`The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.`;
+            S.messages.push({role:'assistant',content:`**Task cancelled:** ${_cancelDetailText}\n\n*${_cancelHint}*`,provider_details:_cancelDetail,provider_details_label:'Cancellation details',_error:true});
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
             renderMessages({preserveScroll:true});
             if(_wasFollowingAtCancelFb && typeof scrollToBottom==='function') scrollToBottom();
@@ -7603,7 +7820,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
@@ -7733,21 +7950,97 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
-  function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer){
+  // Merge anchors need finite timestamped identity on both sides. An unkeyed
+  // or duplicate occurrence is ambiguous and must fall back to server-wins.
+  function _residentMergeIdentityKey(m){
+    if(!m||!m.role) return '';
+    const ts=m._ts!=null?m._ts:m.timestamp;
+    if(ts==null||ts===''||!Number.isFinite(Number(ts))) return '';
+    return _messageIdentityKey(m);
+  }
+  function _mergeResidentPrefix(pre,settled,window){
+    if(!Array.isArray(pre)||!Array.isArray(settled)||!pre.length||!settled.length) return null;
+    const firstKey=_residentMergeIdentityKey(settled[0]);
+    if(!firstKey) return null;
+    let anchor=-1,matches=0;
+    for(let i=0;i<pre.length;i++){
+      if(_residentMergeIdentityKey(pre[i])===firstKey){anchor=i;matches++;}
+    }
+    if(matches!==1||anchor<=0) return null;
+    if(settled.some((m,i)=>i>0&&_residentMergeIdentityKey(m)===firstKey)) return null;
+    // Only a contiguous suffix match proves this is the same history window.
+    // Older repeated rows are retained by occurrence, never dropped by text.
+    const comparable=Math.min(settled.length,pre.length-anchor);
+    for(let i=0;i<comparable;i++){
+      const key=_residentMergeIdentityKey(pre[anchor+i]);
+      if(!key||key!==_residentMergeIdentityKey(settled[i])) return null;
+    }
+    if(window){
+      // Identity alone is not enough: the same row also has to occupy the
+      // authoritative absolute coordinate. Otherwise fall back to server-wins.
+      if(!Number.isSafeInteger(window.residentOrigin)||!Number.isSafeInteger(window.settledOffset)) return null;
+      if(window.residentOrigin+anchor!==window.settledOffset) return null;
+      if(window.residentOrigin<0||window.settledOffset<0) return null;
+      if(window.messageCount!=null){
+        const candidate=pre.slice(0,anchor).concat(settled);
+        if(!Number.isSafeInteger(window.messageCount)||window.messageCount<0||window.residentOrigin+candidate.length!==window.messageCount) return null;
+      }
+    }
+    return pre.slice(0,anchor).concat(settled);
+  }
+  function _doneResidentMergeOptions(preSettleSession,preSettleOldestIdx,dSession){
+    const preGeneration=preSettleSession&&preSettleSession.transcript_generation;
+    const doneGeneration=dSession&&dSession.transcript_generation;
+    const offsetRaw=dSession&&dSession._messages_offset;
+    const count=Number(dSession&&dSession.message_count);
+    const length=Array.isArray(dSession&&dSession.messages)?dSession.messages.length:0;
+    const countPresent=dSession&&dSession.message_count!=null;
+    const offset=offsetRaw!=null?Number(offsetRaw):((typeof dSession.message_count==='number'&&Number.isSafeInteger(dSession.message_count)&&length>0)?count-length:NaN);
+    const offsetIsValid=offset>=0&&Number.isSafeInteger(offset)&&(offsetRaw==null||typeof offsetRaw==='number');
+    const countIsValid=!countPresent||(
+      typeof dSession.message_count==='number'&&Number.isSafeInteger(dSession.message_count)&&dSession.message_count>=0&&
+      offset+length===count
+    );
+    const bounded=countPresent&&!!(
+      (dSession&&dSession._messages_truncated===true)||(Number.isFinite(offset)&&offset>0)
+    )&&offsetIsValid&&countIsValid;
+    const generationMatches=Number.isSafeInteger(preGeneration)&&Number.isSafeInteger(doneGeneration)&&preGeneration===doneGeneration;
+    return {
+      allowResidentPrefixMerge:bounded&&generationMatches,
+      residentMergeWindow:{
+        residentOrigin:preSettleOldestIdx,
+        settledOffset:offset,
+        messageCount:countPresent?count:null,
+      },
+      offsetIsValid:offsetIsValid,
+      offset:offsetIsValid?(offset||0):0,
+    };
+  }
+  function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer, options){
     const pre=Array.isArray(preSettleMessages)?preSettleMessages:[];
     const settled=Array.isArray(settledMessages)?settledMessages:[];
     const adopted=settled.length>0;
-    const messages=(adopted||!pre.length)?settled:pre;
+    let messages=(adopted||!pre.length)?settled:pre;
+    let mergedResidentPrefix=false;
+    if(options&&options.allowResidentPrefixMerge===true){
+      const merged=_mergeResidentPrefix(pre,settled,options.residentMergeWindow||null);
+      if(merged){messages=merged;mergedResidentPrefix=true;}
+    }
     const answer=String(finalAnswer||'').trim();
-    if(!answer) return {adopted:adopted,messages:messages};
-    if(_finalAnswerIsInTranscript(messages,answer)) return {adopted:adopted,messages:messages};
+    if(!answer) return {adopted:adopted,snapshotAdopted:adopted,messages:messages,mergedResidentPrefix};
+    // Once a prefix is retained, an older repeat must not satisfy the current
+    // turn. Restrict these checks to the suffix after the latest user boundary.
+    let currentTurnStart=0;
+    for(let i=0;i<messages.length;i++) if(messages[i]&&messages[i].role==='user') currentTurnStart=i;
+    const currentTurnMessages=messages.slice(currentTurnStart);
+    if(_finalAnswerIsInTranscript(currentTurnMessages,answer)) return {adopted:adopted,snapshotAdopted:adopted,messages:messages,mergedResidentPrefix};
     // #6112: if the snapshot already ends this turn in a usable final assistant
     // row (e.g. the Agent rewrote the answer before persisting), keep the
     // snapshot and do not append the streamed copy — re-attach only when that
     // row is absent.
-    if(_snapshotHasUsableFinalAssistantRow(messages)) return {adopted:adopted,messages:messages};
-    if(!messages.length) return {adopted:adopted,messages:messages};
-    return {adopted:true,messages:messages.concat([{role:'assistant',content:String(finalAnswer)}])};
+    if(_snapshotHasUsableFinalAssistantRow(currentTurnMessages)) return {adopted:adopted,snapshotAdopted:adopted,messages:messages,mergedResidentPrefix};
+    if(!messages.length) return {adopted:adopted,snapshotAdopted:adopted,messages:messages,mergedResidentPrefix};
+    return {adopted:true,snapshotAdopted:adopted,messages:messages.concat([{role:'assistant',content:String(finalAnswer)}]),mergedResidentPrefix};
   }
   if(typeof window!=='undefined'){
     window._adoptDoneSnapshotMessages=_adoptDoneSnapshotMessages;
@@ -8655,7 +8948,9 @@ function _syncApprovalTranscriptSpace(card, opts) {
   opts = opts || {};
   const messages = $("messages");
   if (!messages) return;
-  const wasNearBottom = _approvalMessagesNearBottom(messages);
+  // Never yank a reader who scrolled away (sticky-unpin model): a viewport change as the card
+  // opens (e.g. the memory-off notice collapsing) can bring them under the near-bottom threshold.
+  const wasNearBottom = !(typeof _messageUserUnpinned !== 'undefined' && _messageUserUnpinned) && _approvalMessagesNearBottom(messages);
   if (!card || !card.classList.contains("visible")) {
     messages.classList.remove("approval-open");
     messages.classList.remove("approval-collapsed");
@@ -9781,7 +10076,9 @@ function _syncClarifyTranscriptSpace(card, opts) {
   opts = opts || {};
   const messages = $("messages");
   if (!messages) return;
-  const wasNearBottom = _clarifyMessagesNearBottom(messages);
+  // Never yank a reader who scrolled away (sticky-unpin model): a viewport change as the card
+  // opens (e.g. the memory-off notice collapsing) can bring them under the near-bottom threshold.
+  const wasNearBottom = !(typeof _messageUserUnpinned !== 'undefined' && _messageUserUnpinned) && _clarifyMessagesNearBottom(messages);
   if (!card || !card.classList.contains("visible")) {
     messages.classList.remove("clarify-open");
     messages.classList.remove("clarify-collapsed");
@@ -10056,10 +10353,16 @@ function showClarifyCard(pending) {
     input.disabled = false;
     input.removeAttribute('readonly');
     input.onkeydown = (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        respondClarify();
-      }
+      // A single-line answer has no newline to insert, so every Enter submits it,
+      // whatever the composer's send key is. Routing it through the composer's
+      // decision left Enter doing nothing on phones and with a Shift/Ctrl+Enter
+      // send key (#8769). An IME Enter that commits a composition never submits.
+      if (e.key !== 'Enter') return;
+      if (typeof window._isImeEnter === 'function'
+          ? window._isImeEnter(e)
+          : (e.isComposing || e.keyCode === 229)) return;
+      e.preventDefault();
+      respondClarify();
     };
   }
   if (typeof lockComposerForClarify === "function") {

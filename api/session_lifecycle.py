@@ -10,6 +10,8 @@ sessions can be reopened and continued many times, so the lifecycle must guarant
 3. A failed commit preserves the uncommitted generation and owning agent handle.
 4. Replacement/reopened agents cannot steal older dirty generations.
 5. Overlapping commits are serialised via a per-session in-flight guard.
+6. A commit runs as the session's OWNER profile (#8517), whichever turn or thread
+   reached the boundary; one the Agent refused is not counted as committed.
 
 CLI-parity semantics — post-turn marking, boundary extraction/commit:
 
@@ -37,6 +39,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+
+from api.memory_profile_scope import call_as_session_owner
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +107,9 @@ def _new_entry() -> dict:
         "agent": None,
         "in_flight": False,
         "segments": [],
+        # Profile home of the session's owner (#8517): boundary commits run as
+        # this profile, never as whichever turn or thread reached the boundary.
+        "profile_home": "",
     }
 
 
@@ -175,11 +182,13 @@ def discard_session(session_id: str) -> bool:
         return True
 
 
-def mark_turn_completed(session_id: str, *, agent=None) -> int:
+def mark_turn_completed(session_id: str, *, agent=None, profile_home: str | None = None) -> int:
     if not session_id:
         return 0
     with _condition:
         entry = _sessions.setdefault(session_id, _new_entry())
+        if profile_home:
+            entry["profile_home"] = str(profile_home)  # see record_owner_profile_home
         if agent is not None:
             entry["agent"] = agent
         owner = agent if agent is not None else entry.get("agent")
@@ -192,6 +201,26 @@ def mark_turn_completed(session_id: str, *, agent=None) -> int:
             segments.append({"start": generation, "end": generation, "agent": owner})
         _condition.notify_all()
         return generation
+
+
+def record_owner_profile_home(session_id: str, profile_home: str | None) -> None:
+    """Record the profile home of the session's owner (#8517); a session's profile
+    never changes, so the latest non-empty value wins."""
+    if not session_id or not profile_home:
+        return
+    with _condition:
+        entry = _sessions.setdefault(session_id, _new_entry())
+        entry["profile_home"] = str(profile_home)
+        _condition.notify_all()
+
+
+def recorded_owner_profile_home(session_id: str) -> str:
+    """Owner profile home recorded by ``mark_turn_completed`` (``""`` if none)."""
+    if not session_id:
+        return ""
+    with _lock:
+        entry = _sessions.get(session_id)
+        return str((entry or {}).get("profile_home") or "")
 
 
 def has_uncommitted_work(session_id: str) -> bool:
@@ -246,12 +275,23 @@ def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, ti
         if effective_agent is None:
             return False
         captured_generation = segment["end"]
+        owner_home = entry.get("profile_home") or ""
         entry["in_flight"] = True
 
     try:
-        effective_agent.commit_memory_session()
+        # #8517: run as the session's owner (boundaries fire from other profiles'
+        # turns and from fresh threads); a commit the Agent refused, or one that
+        # could not be scoped, is NOT counted: the generation stays pending.
+        committed = call_as_session_owner(
+            effective_agent,
+            effective_agent.commit_memory_session,
+            session_id=session_id,
+            owner_home=owner_home,
+        )
     except Exception:
         logger.exception("commit_memory_session() failed for session %s", session_id)
+        committed = False
+    if not committed:
         with _condition:
             re_entry = _sessions.get(session_id)
             if re_entry is not None:

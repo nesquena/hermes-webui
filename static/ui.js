@@ -1017,6 +1017,28 @@ function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
   _resetMessageVirtualMeasurementBurst();
 }
+// Identity-only height reuse — the #8228 re-review (2026-10-15) found the
+// fingerprint/digest reuse machinery structurally broken on tool transcripts
+// and costly on every append, and explicitly accepted restoring identity-only
+// matching:
+//   - The tool digest was sealed inside _syncMessageVirtualHeightCache, which
+//     renderMessages calls BEFORE it derives the settled S.toolCalls list. The
+//     first seal hashed settled:null; every later seal hashed the derived item
+//     (carrying assistant_msg_idx / done), so the two never matched — one
+//     mismatching row defeated the all-or-nothing reuse: on a virtualized tool
+//     transcript 0 of 189 heights were kept, and 0 via loadSession(force).
+//   - Sealing ran on every length-change sync even with virtualization off: a
+//     3.6 MB tool-output session paid ~63 ms median per appended message.
+//   - The cached _rfp inverted matching after an in-place mutation: a fresh
+//     object equal to the pre-mutation content was refused, while one equal to
+//     the current (mutated) content reused the height measured for the old
+//     content.
+// Identity-only matching is the pre-PR baseline and is safe in both directions:
+// in-session appends keep the same message objects, so their measured heights
+// carry over; loadSession(force) replaces S.messages with fresh objects, so
+// those rows are re-measured instead of reusing a possibly-stale height (the
+// conservative direction — this is what the review's [SILENT] width/font-size
+// point refers to: identity-only discards rather than risk a wrong height).
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
     previousEntry&&nextEntry&&
@@ -1031,14 +1053,26 @@ function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
-  const nextEntries=Array.isArray(visWithIdx)
-    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
-    : [];
+  const _entryCount=Array.isArray(visWithIdx)?visWithIdx.length:0;
   if(
     _messageVirtualHeightCacheLen===S.messages.length &&
     _messageVirtualHeightCacheSrc===S.messages &&
-    _messageVirtualHeightCacheEntries.length===nextEntries.length
+    _messageVirtualHeightCacheEntries.length===_entryCount
   ) return;
+  // Build the next-entry view only AFTER the early-return above: this function
+  // runs on every render / scroll window recompute, so the no-op check keeps a
+  // steady-state scroll from paying the O(messages) entry build. (nextEntries
+  // length equals visWithIdx length for both arrays and non-arrays, so the
+  // check above is equivalent to the former nextEntries.length test.)
+  // Entries carry the identity only: the #8228 re-review accepted dropping the
+  // sealed tool digest — it was computed before renderMessages derived
+  // S.toolCalls, so the settled state never matched across passes (0/189
+  // heights kept on a virtualized tool transcript) and the per-append walk
+  // cost ~63 ms on large tool sessions. Reuse is decided by message-object
+  // identity alone (see _messageVirtualHeightEntryMatches).
+  const nextEntries=Array.isArray(visWithIdx)
+    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
+    : [];
   const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
   const previousHeights=Array.isArray(_messageVirtualHeightCache)?_messageVirtualHeightCache.slice():[];
   let nextHeights=null;
@@ -1325,10 +1359,85 @@ function _captureMessageViewportAnchor(){
   const container=$('messages');
   if(!container) return null;
   const containerRect=container.getBoundingClientRect();
-  const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
+  // The fallback scan below reads getBoundingClientRect() once per row just to
+  // find the first row whose bottom edge crosses the container's top edge. On
+  // long transcripts that per-row scan was the hot spot (#7695 measured 18,682
+  // forced synchronous layouts / 21.8s cumulative). Rendered rows stack
+  // vertically in document order, so their bottom edges are monotonic — a
+  // binary search over the RENDERED rows finds the same row in O(log n) rect
+  // reads, with no dependency on the height cache (works identically in
+  // virtualized and full-render modes). An earlier cache-accumulation attempt
+  // was inert as written: estimated heights for rows above the render window
+  // always drifted, the search landed off-anchor, and the correctness gate
+  // then always fell back — a real-browser proof now lives in
+  // tests/browser_virtual_transcript_anchor.py (review finding on #8228).
+  // The per-row scan below stays as the safety net for an empty row set or a
+  // thrown error.
+  // Opt-out: window.__vmFastAnchor=false disables the fast path.
+  try{
+    const _fast=(typeof window==='undefined')||window.__vmFastAnchor!==false;
+    if(_fast){
+      // #8228 CORE: search ONLY the rows that actually lay out. In the default
+      // compact_worklog mode every tool-call assistant message also renders a
+      // hidden `assistant-segment-worklog-source` row (display:none!important —
+      // style.css) that still carries data-msg-idx, and `assistant-segment-anchor`
+      // rows are display:none too. A hidden row's rect is all zeros, so bottom
+      // edges across the FULL [data-msg-idx] set are no longer monotonic and
+      // the binary search lands arbitrarily far from the true anchor
+      // (reproduced in real Chromium: row 539 / 88,424 px below the container
+      // top instead of row 15; mobile virtualization anchored row 127 instead
+      // of visible row 75). Excluding the two hidden classes restores
+      // monotonicity; the fallback scan below uses the SAME predicate so fast
+      // and slow can never disagree about which rows are candidates.
+      const rows=container.querySelectorAll('[data-msg-idx]:not(.assistant-segment-worklog-source):not(.assistant-segment-anchor)');
+      const rowCount=rows?rows.length:0;
+      if(rowCount){
+        // First row with bottom > containerRect.top + 1 — the exact predicate
+        // of the per-row fallback scan below, located in log2(rowCount) reads.
+        let lo=0, hi=rowCount-1, hit=-1;
+        while(lo<=hi){
+          const mid=(lo+hi)>>1;
+          const probeRect=rows[mid].getBoundingClientRect();
+          if(probeRect.bottom>containerRect.top+1){ hit=mid; hi=mid-1; }
+          else { lo=mid+1; }
+        }
+        if(hit>=0){
+          // The binary search assumes laid-out row bottoms are monotonic; the
+          // :not() query restores that for the two display:none classes. As a
+          // defense in depth, if the nearest laid-out previous row ALSO crosses
+          // the container's top edge the hit is not provably the first covering
+          // row, so fall back to the per-row scan below.
+          const predOk=(hit===0)||!(rows[hit-1].getBoundingClientRect().bottom>containerRect.top+1);
+          if(predOk){
+            const row=rows[hit];
+            const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
+            if(Number.isFinite(rawIdx)){
+              // Re-read the HIT row's rect: the search probed midpoints, and
+              // topOffset must describe the returned row itself.
+              const rect=row.getBoundingClientRect();
+              const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
+              const spacer=container.querySelector('[data-virtual-spacer="before"]');
+              const topPadBefore=spacer?parseFloat(spacer.style.height||'0')||0:0;
+              return {
+                rawIdx,
+                sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx),
+                key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):'',
+                topOffset:rect.top-containerRect.top,
+                topPadBefore,
+                scrollHeightAtCapture:container.scrollHeight,
+                inputGeneration:typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : 0,
+              };
+            }
+          }
+        }
+      }
+    }
+  }catch(_e){ /* fast path failed: fall back silently to the original per-row path */ }
+  const rows=Array.from(container.querySelectorAll('[data-msg-idx]:not(.assistant-segment-worklog-source):not(.assistant-segment-anchor)'));
   for(const row of rows){
     const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
     if(!Number.isFinite(rawIdx)) continue;
+    if(typeof window!=='undefined'){window.__vmAnchorFallbackRowReads=(window.__vmAnchorFallbackRowReads||0)+1;}
     const rect=row.getBoundingClientRect();
     if(rect.bottom>containerRect.top+1){
       const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
@@ -2138,17 +2247,51 @@ function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx){
   return `<button class="msg-question-jump-btn session-jump-btn session-jump-btn--inline" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx},${aIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
 }
 
+// Pick the scroll behavior for a jump to `el` inside `container`. A smooth scroll across a long transcript runs
+// for seconds (86k px took ~1.5 s for a search hit at message 0 of 240) and the highlight, which starts with the
+// scroll, has faded before the row arrives. Far targets (more than two screens away) and reduced-motion users jump
+// instantly so the highlight plays where the user can see it; near targets keep the smooth scroll.
+function _messageJumpScrollBehavior(container, el){
+  try{
+    if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'auto';
+    if(!container||!el) return 'smooth';
+    const distance=Math.abs(el.getBoundingClientRect().top-container.getBoundingClientRect().top);
+    return distance>Math.max(1,container.clientHeight)*2?'auto':'smooth';
+  }catch(_){ return 'smooth'; }
+}
+// Start the pulse on the next frame. A far jump renders and lays out the whole transcript in the same task as the
+// scroll, and an animation started inside that task takes its clock from the frame that began before it: on a
+// 240-message session the first painted frame was already 0.4-0.6 s into the 1.6 s pulse, so the ring appeared at
+// full strength and faded early. One frame later the pulse starts from zero where the user can see it.
 function _highlightQuestionRow(row){
-  if(!row) return;
+  // Cosmetic: never let the landing cue throw inside a jump that owns the scroll.
+  if(!row||!row.classList) return;
   row.classList.remove('msg-question-highlight');
-  void row.offsetWidth;
-  row.classList.add('msg-question-highlight');
-  window.setTimeout(()=>row.classList.remove('msg-question-highlight'),1800);
+  if(row._questionHighlightTimer) window.clearTimeout(row._questionHighlightTimer);
+  const start=()=>{
+    void row.offsetWidth;
+    row.classList.add('msg-question-highlight');
+    row._questionHighlightTimer=window.setTimeout(()=>{
+      row._questionHighlightTimer=0;
+      row.classList.remove('msg-question-highlight');
+    },1800);
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(start);
+  else start();
 }
 
-async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
+async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx, opts){
   const container=$('messages');
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  // The frames scheduled below run after this call returns. A session switch in between, or a caller that
+  // cancelled the jump (opts.isValid, e.g. a superseded search hit), must not scroll, re-render or flash the
+  // transcript that is on screen by then (#5106).
+  const currentJumpSid=()=>(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+  const jumpSid=currentJumpSid();
+  const stillValid=()=>{
+    if(currentJumpSid()!==jumpSid) return false;
+    return !(opts&&typeof opts.isValid==='function')||!!opts.isValid();
+  };
   const clampTargetScrollTop=(scrollTop)=>{
     const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
     const n=Number(scrollTop);
@@ -2165,14 +2308,17 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
       const segs=container.querySelectorAll('[data-msg-idx="'+assistantRawIdx+'"]');
       for(const seg of segs){
         if(seg.getClientRects().length>0){
-          seg.scrollIntoView({block:'start',behavior:'smooth'});
+          seg.scrollIntoView({block:'start',behavior:_messageJumpScrollBehavior(container,seg)});
+          // Assistant targets (search hits in a reply, jump to the start of a response) get the same landing
+          // cue as question rows; without it half of all content hits landed silently (#5106 Fable r3).
+          _highlightQuestionRow(seg);
           return true;
         }
       }
     }
     const row=document.getElementById(_userMessageDomId(questionRawIdx));
     if(!row) return false;
-    row.scrollIntoView({block:'center',behavior:'smooth'});
+    row.scrollIntoView({block:'center',behavior:_messageJumpScrollBehavior(container,row)});
     _highlightQuestionRow(row);
     return true;
   };
@@ -2191,11 +2337,11 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(()=>{
-      if(!scrollToTarget()&&_messageHiddenBeforeCount()>0){
+      if(stillValid()&&!scrollToTarget()&&_messageHiddenBeforeCount()>0){
         _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
         _messageVirtualWindowKey='';
         renderMessages({ preserveScroll:true });
-        requestAnimationFrame(scrollToTarget);
+        requestAnimationFrame(()=>{ if(stillValid()) scrollToTarget(); });
       }
       _deferClearProgrammaticScroll();
     });
@@ -2205,7 +2351,7 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
-    requestAnimationFrame(scrollToTarget);
+    requestAnimationFrame(()=>{ if(stillValid()) scrollToTarget(); });
   }
 }
 
@@ -5365,9 +5511,9 @@ function _refreshOpenModelDropdown(){
   const sdd=$('settingsModelDropdown');
   if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
     // Re-rendering the OPEN settings picker (e.g. when a late live-model fetch
-    // resolves) must not re-grab search focus on touch — same coarse-pointer rule
-    // as openSettingsModelDropdown, or the mobile keyboard pops after opening.
-    const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+    // resolves) must not re-grab search focus. Autofocus is off inside
+    // renderModelDropdown for every caller, so this path inherits the rule and
+    // the old per-call coarse-pointer gate is gone.
     renderModelDropdown({
       dropdownId:'settingsModelDropdown',
       selectId:'settingsModel',
@@ -5375,7 +5521,6 @@ function _refreshOpenModelDropdown(){
       closeDropdown:closeSettingsModelDropdown,
       selectModel:selectSettingsModelFromDropdown,
       scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-      autoFocusSearch:!_coarsePointer,
     });
   }
 }
@@ -5915,6 +6060,25 @@ function _normalizeConfiguredModelKey(modelId){
   return s.replace(/-/g,'.');
 }
 
+// The one identity the configured badge lookup, the configured-row dedup and
+// the Configured section key share, so they cannot disagree (#8756).
+function _configuredModelIdentity(modelId,providerId){
+  const provider=String(providerId||'').trim().toLowerCase();
+  // Callers pass the provider owning the row or badge. With none, nothing
+  // marks a leading segment as routing syntax: keep the legacy key.
+  if(!provider) return _normalizeConfiguredModelKey(modelId);
+  let s=String(modelId||'').trim().toLowerCase();
+  // Strip only this provider's routing wrappers. Live enrichment composes
+  // them (`@openai:` + `openai/gpt-x`), so peel `@provider:` and then
+  // `provider/`. Any other leading segment is a vendor namespace and stays
+  // part of the identity (#8725).
+  const atPrefix=`@${provider}:`;
+  const slashPrefix=`${provider}/`;
+  if(s.startsWith(atPrefix)) s=s.slice(atPrefix.length)||s;
+  if(s.startsWith(slashPrefix)) s=s.slice(slashPrefix.length)||s;
+  return s.replace(/-/g,'.');
+}
+
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
@@ -5976,10 +6140,15 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   const provider=String(providerId||'').toLowerCase();
   const exact=map[modelId];
   if(exact && (!provider || !exact.provider || String(exact.provider).toLowerCase()===provider)) return exact;
-  const targetNorm=_normalizeConfiguredModelKey(modelId);
   const matches=[];
   for(const [candidate,badge] of Object.entries(map)){
-    if(_normalizeConfiguredModelKey(candidate)===targetNorm) matches.push(badge);
+    const badgeProvider=String(badge&&badge.provider||'').toLowerCase();
+    if(provider&&badgeProvider&&badgeProvider!==provider) continue;
+    // Strip the same provider wrapper from both sides. A typed custom id such
+    // as 'openai/gpt-4o' reaches here with no row provider, so the badge's
+    // provider decides which wrapper is routing syntax.
+    const identityProvider=provider||badgeProvider;
+    if(_configuredModelIdentity(candidate,identityProvider)===_configuredModelIdentity(modelId,identityProvider)) matches.push(badge);
   }
   if(!matches.length) return null;
   if(provider){
@@ -6128,7 +6297,15 @@ function _positionModelDropdown(){
     if(dd.parentNode!==document.body) document.body.appendChild(dd);
     dd.classList.add('model-dropdown--floating');
     const anchorRect=anchor.getBoundingClientRect();
-    const visualViewport=window.visualViewport;
+    // Validated read (#8531): garbage fold-transition viewport geometry must
+    // fall back to window dimensions. Inlined + self-contained for the
+    // extracted-function Node harness (no boot.js in that scope).
+    const vvRaw=window.visualViewport;
+    const visualViewport=vvRaw
+      &&Number.isFinite(Number(vvRaw.height))&&Number(vvRaw.height)>0&&Number(vvRaw.height)<=window.innerHeight*1.5
+      &&Number.isFinite(Number(vvRaw.width))&&Number(vvRaw.width)>0&&Number(vvRaw.width)<=window.innerWidth*1.5
+      ?{height:Number(vvRaw.height),width:Number(vvRaw.width),offsetTop:Math.max(0,Number(vvRaw.offsetTop)||0),offsetLeft:Math.max(0,Number(vvRaw.offsetLeft)||0)}
+      :null;
     const viewportWidth=Math.max(1,Number(visualViewport&&visualViewport.width)||window.innerWidth||1);
     const viewportHeight=Math.max(1,Number(visualViewport&&visualViewport.height)||window.innerHeight||1);
     const viewportTop=Math.max(0,Number(visualViewport&&visualViewport.offsetTop)||0);
@@ -6344,16 +6521,74 @@ function _mountSearchableModelSelect(opts={}){
   return {searchInput,selectEl,customInput,customButton};
 }
 
+// Which node owns keyboard focus when a model picker opens. ONE rule for both
+// pickers: on a device with a keyboard in play (desktop, or a tablet with a real
+// keyboard) focus the search input so the first character — and IME composition —
+// lands there; on a touch-only device focus the container instead, so no software
+// keyboard covers the list. boot.js owns the device detection (#3076); the typeof
+// guard keeps this file self-contained for the node harness and any load order.
+function _modelPickerPrefersSearchFocus(){
+  try{
+    if(typeof _isTouchOnlyDevice==='function') return !_isTouchOnlyDevice();
+  }catch(_e){}
+  return true;
+}
+function _modelPickerFocusTarget(dd){
+  if(!dd) return null;
+  if(_modelPickerPrefersSearchFocus()){
+    const si=dd.querySelector('.model-search-input');
+    if(si) return si;
+  }
+  return (typeof dd.focus==='function')?dd:null;
+}
+// Focus AFTER the dropdown is open and positioned: the phone path reparents the
+// menu onto <body>, and a reparent detaches the focused node, while a
+// display:none node ignores focus() outright. preventScroll keeps the scroll
+// position the active-row logic just set.
+function _focusModelPicker(dd){
+  const target=_modelPickerFocusTarget(dd);
+  if(!target) return;
+  try{ target.focus({preventScroll:true}); }
+  catch(_e){ try{ target.focus(); }catch(_e2){} }
+}
+
 function renderModelDropdown(){
   const opts=arguments[0]||{};
   const dd=$(opts.dropdownId||'composerModelDropdown');
   const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  // Focusability + announced name for the focus target. A plain <div> is not
+  // focusable, so focus() would silently do nothing and arrow-key navigation
+  // would be dead — tabindex="-1" makes it programmatically focusable without
+  // adding it to the tab order. `role="group"` + the picker's label give a screen
+  // reader something to announce when the container takes focus (touch-only
+  // devices, see _modelPickerFocusTarget); the search input announces itself.
+  if(!dd.hasAttribute('tabindex')) dd.setAttribute('tabindex','-1');
+  if(!dd.hasAttribute('role')) dd.setAttribute('role','group');
+  const _pickerLabel=opts.label||'Model picker';
+  if(!dd.hasAttribute('aria-label')) dd.setAttribute('aria-label',_pickerLabel);
+  // Capture who held focus BEFORE this render tears the children down
+  // (dd.innerHTML='' below). Without autofocus, a re-render triggered by a late
+  // live-model fetch or a preferences refresh would silently drop a user who is
+  // mid-word in the search box — the input node is replaced, so
+  // document.activeElement is already <body> by the time _filterModels runs.
+  const _focusBeforeRender=(typeof document!=='undefined')?document.activeElement:null;
+  const _searchHadFocusBefore=!!(_focusBeforeRender
+    &&_focusBeforeRender.classList
+    &&_focusBeforeRender.classList.contains('model-search-input')
+    &&typeof dd.contains==='function'&&dd.contains(_focusBeforeRender));
+  const _ddHadFocusBefore=!!(_focusBeforeRender&&_focusBeforeRender===dd);
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  // Whether the search input should auto-grab focus on (re-)render. Default true
-  // preserves the composer picker's behavior exactly; the settings picker passes
-  // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.
-  const _autoFocusSearch=opts.autoFocusSearch!==false;
+  // This picker is a CHOOSER, so opening it must never pop the software keyboard
+  // on a touch-only device — the list would sit behind the IME. But a desktop
+  // user (or a tablet with a real keyboard) SHOULD be able to type straight away,
+  // IME included (#8530), so the OPEN paths focus the search box there, after the
+  // dropdown is visible and positioned. That ordering is the fix for #8530: a
+  // display:none node ignores focus(), which is why the old early `_si.focus()`
+  // looked like a no-op. The decision lives in _modelPickerFocusTarget(); the
+  // renderer itself never auto-focuses, it only preserves an existing focus
+  // across re-renders (see _searchHadFocusBefore / _ddHadFocusBefore).
+  const _autoFocusSearch=false;
   const selectFromDropdown=typeof opts.selectModel==='function'
     ? opts.selectModel
     : (value,provider)=>selectModelFromDropdown(value,provider);
@@ -6828,8 +7063,17 @@ function renderModelDropdown(){
     const configuredCandidates=_modelData
       .filter(m=>m.badge&&matches(m));
     const configuredBySemanticKey=new Map();
+    const semanticKeyByEntry=new Map();
     const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
-    const _configuredModelKey=(m)=>_normalizeConfiguredModelKey(m&&m.value||'');
+    const _configuredModelKey=(m)=>_configuredModelIdentity(m&&m.value||'',_configuredProviderKey(m));
+    const _sendsProviderAlias=(m)=>{
+      const p=_configuredProviderKey(m);
+      if(!p) return false;
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      const w=(s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');
+      return w.startsWith(`${p.replace(/-/g,'.')}/`);
+    };
     const _configuredDisplayPriority=(m)=>{
       // Prefer plain IDs over provider-qualified aliases for readability.
       const v=String((m&&m.value)||'');
@@ -6838,15 +7082,36 @@ function renderModelDropdown(){
       return 2;
     };
     for(const candidate of configuredCandidates){
-      const semanticKey=`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      // One configured entry (Primary, Fallback N) is one Configured row. The
+      // backend also badges spellings it linked across a vendor namespace
+      // (`qwen3` and `Qwen/qwen3`, via _norm_model_id), which the identity
+      // keeps apart, so a later row showing an entry already placed joins
+      // that row's key (#8756). The badge names the entry, so its own provider
+      // (none for a providerless badge) keys it, not the row's routing prefix.
+      const entryKey=candidate.badge.label?`${String(candidate.badge.provider||'').toLowerCase()}::${candidate.badge.role||''}::${candidate.badge.label}`:'';
+      const semanticKey=(entryKey&&semanticKeyByEntry.get(entryKey))||`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      if(entryKey&&!semanticKeyByEntry.has(entryKey)) semanticKeyByEntry.set(entryKey,semanticKey);
       const existing=configuredBySemanticKey.get(semanticKey);
       if(!existing){
         configuredBySemanticKey.set(semanticKey,candidate);
         continue;
       }
+      // A row that sends `<provider>/<model>` is an alias of the configured id;
+      // a row that sends the configured id itself always wins the Configured slot.
+      const candidateAlias=_sendsProviderAlias(candidate);
+      const existingAlias=_sendsProviderAlias(existing);
+      if(candidateAlias!==existingAlias){
+        if(!candidateAlias) configuredBySemanticKey.set(semanticKey,candidate);
+        continue;
+      }
       const candidatePriority=_configuredDisplayPriority(candidate);
       const existingPriority=_configuredDisplayPriority(existing);
-      if(candidatePriority>existingPriority){
+      // Same model, same priority: the shorter spelling carries fewer routing
+      // wrappers, so it is the native configured id rather than a typed alias.
+      const sameIdentityShorter=candidatePriority===existingPriority
+        &&_configuredModelKey(candidate)===_configuredModelKey(existing)
+        &&String(candidate.value||'').length<String(existing.value||'').length;
+      if(candidatePriority>existingPriority||sameIdentityShorter){
         configuredBySemanticKey.set(semanticKey,candidate);
       }
     }
@@ -6858,11 +7123,21 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    // A hidden row stays out of the Show-more count only when a Configured row
+    // already sends its wire id (provider plus value less `@provider:`,
+    // dash-folded); a row that sends `<provider>/<model>`, or the same bare id
+    // to another provider, is a different route and stays reachable.
+    const _configuredWireKey=(m)=>{
+      const p=_configuredProviderKey(m);
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      return `${p}::${(p&&s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.')}`;
+    };
+    const configuredWireKeys=new Set(configuredModels.map(_configuredWireKey));
     const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
       m.groupKey===groupKey
       && m.hiddenByDefault
-      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+      && !configuredWireKeys.has(_configuredWireKey(m))
     ).length;
     dd.innerHTML='';
     dd.appendChild(_scopeNote);
@@ -7053,7 +7328,18 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
-    if(_autoFocusSearch||_hadFocus) _si.focus();
+    // Rebuilding replaced every child, so focus must be handed to the nodes that
+    // exist NOW: `_si` is the pre-render input, and focusing a detached node is a
+    // no-op in a browser. Restore the search input for a user who was typing in
+    // it (`_hadFocus`) or whose input a top-level re-render replaced
+    // (`_searchHadFocusBefore`); otherwise hand the container back so arrow-key
+    // navigation survives a background refresh.
+    const _siNow=dd.querySelector('.model-search-input');
+    if(_autoFocusSearch||_hadFocus||_searchHadFocusBefore){
+      if(_siNow){ try{ _siNow.focus(); }catch(_e){} }
+    }else if(_ddHadFocusBefore){
+      try{ dd.focus({preventScroll:true}); }catch(_e){ try{ dd.focus(); }catch(_e2){} }
+    }
   };
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
@@ -7074,8 +7360,36 @@ function renderModelDropdown(){
     if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
     if(typeof _nudgeModelRowBelowStickyStack==='function') _nudgeModelRowBelowStickyStack(dd,row);
   };
-  _si.addEventListener('keydown',e=>{
-    if(e.key==='Escape'){closeDropdown();return;}
+  // Keyboard contract for the picker, shared so it works whether focus sits on
+  // the search input (desktop open, or a user who tapped it) or on the dropdown
+  // container (touch-only open). Escape closes, arrows move the highlight, Enter
+  // picks it, and a printable character starts a search.
+  const _modelPickerKey=(e)=>{
+    // Innermost layer first: stop the key here so the document-level Escape handler
+    // (boot.js) does not also close the Settings panel, clear the session search or
+    // cancel a message edit behind the picker. A second Escape reaches those.
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();return;}
+    // Printable character while the CONTAINER holds focus (touch-only device with
+    // a hardware keyboard, or a container focused by assistive tech). Hand it to
+    // the search box. Without preventDefault+stopPropagation the key ALSO reaches
+    // the global j/k session switcher in sessions.js and changes the chat behind
+    // the open menu, while the filter stays empty.
+    if(e.target===dd&&typeof e.key==='string'&&e.key.length===1
+       &&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+      e.preventDefault();
+      if(typeof e.stopPropagation==='function') e.stopPropagation();
+      const si=dd.querySelector('.model-search-input');
+      if(si){
+        si.focus();
+        si.value=(typeof si.value==='string'?si.value:'')+e.key;
+        // Programmatic value changes don't fire `input`; dispatch it so the real
+        // filtering listener runs (the minimal-DOM harness feeds the same event
+        // through its listener list). Fall back to the filter directly.
+        try{ si.dispatchEvent(new Event('input',{bubbles:true})); }
+        catch(_e){ try{ _filterModels(si.value); }catch(_e2){} }
+      }
+      return;
+    }
     if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Enter'){
       const rows=_visibleModelRows();
       if(!rows.length){if(e.key==='Enter') e.preventDefault();return;}
@@ -7088,13 +7402,28 @@ function renderModelDropdown(){
         if(pick) pick.click();
       }
     }
-  });
+  };
+  _si.addEventListener('keydown',e=>{_modelPickerKey(e);});
+  // The container only handles keys when IT holds focus (`e.target!==dd` returns
+  // early), so events bubbling up from the search/custom inputs are never handled
+  // twice. Bind ONCE and dispatch through a slot the current render refreshes:
+  // `dd` survives every re-render (only its children are replaced), so
+  // re-binding would stack duplicate listeners, while a closure captured at first
+  // render would keep pointing at the detached search input.
+  dd._modelPickerKey=_modelPickerKey;
+  if(!dd._modelPickerKeyBound){
+    dd._modelPickerKeyBound=true;
+    dd.addEventListener('keydown',e=>{
+      if(e.target!==dd) return;
+      if(typeof dd._modelPickerKey==='function') dd._modelPickerKey(e);
+    });
+  }
   _si.addEventListener('click',e=>e.stopPropagation());
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectFromDropdown(v,null);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeDropdown();}});
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
@@ -7170,7 +7499,7 @@ async function toggleModelDropdown(){
     if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
   }
   if(dd.classList.contains('open')) return;
-  renderModelDropdown();
+  renderModelDropdown({label:'Conversation model'});
   dd.classList.add('open');
   _positionModelDropdown();
   _syncModelDropdownStickyInsets(dd);
@@ -7178,17 +7507,55 @@ async function toggleModelDropdown(){
   if(activeRow&&typeof activeRow.scrollIntoView==='function') activeRow.scrollIntoView({block:'center'});
   _nudgeModelRowBelowStickyStack(dd,activeRow);
   chip.classList.add('active');
+  chip.setAttribute('aria-expanded','true');
   const mobileAction=$('composerMobileModelAction');
-  if(mobileAction) mobileAction.classList.add('active');
+  if(mobileAction){
+    mobileAction.classList.add('active');
+    mobileAction.setAttribute('aria-expanded','true');
+  }
+  // Hand keyboard focus to the target this device expects: the search box when a
+  // keyboard is in play (type immediately, IME works), the container on a
+  // touch-only device (no software keyboard over the list). Runs AFTER
+  // _positionModelDropdown because the phone path reparents the menu onto <body>
+  // and a reparent detaches the focused node.
+  _focusModelPicker(dd);
+}
+
+// Closing a picker that still holds keyboard focus hands focus back to the button
+// that opened it (the menu-button pattern). Otherwise the focused node is hidden,
+// focus falls to <body>, Tab restarts at the page edge, and the next `k` switches
+// the conversation through the global J/K binding (which ignores keys on buttons).
+// Only when focus is still inside the picker: a close caused by a click elsewhere,
+// or by another panel that already moved focus, keeps that target. Must run before
+// the phone path's reparent in closeModelDropdown, which detaches the focused node.
+function _returnModelPickerFocus(dd, anchors){
+  if(!dd||typeof document==='undefined') return;
+  const active=document.activeElement;
+  if(!active||!(active===dd||(typeof dd.contains==='function'&&dd.contains(active)))) return;
+  for(const el of anchors||[]){
+    if(!el||el.disabled||typeof el.focus!=='function') continue;
+    // A display:none anchor (the desktop chip on a phone, the phone action on a
+    // desktop) has no layout box, and focusing it would be a silent no-op.
+    if(typeof el.getClientRects==='function'&&!el.getClientRects().length) continue;
+    try{el.focus({preventScroll:true});}catch(_){continue;}
+    if(document.activeElement===el) return;
+  }
 }
 
 function closeModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const mobileAction=$('composerMobileModelAction');
+  if(dd&&dd.classList.contains('open')&&typeof _returnModelPickerFocus==='function') _returnModelPickerFocus(dd,[mobileAction,chip]);
   if(dd) dd.classList.remove('open');
-  if(chip) chip.classList.remove('active');
-  if(mobileAction) mobileAction.classList.remove('active');
+  if(chip){
+    chip.classList.remove('active');
+    chip.setAttribute('aria-expanded','false');
+  }
+  if(mobileAction){
+    mobileAction.classList.remove('active');
+    mobileAction.setAttribute('aria-expanded','false');
+  }
   // If the phone path reparented the menu onto <body>, put it back in the
   // footer and clear the fixed-position inline styles so the DOM returns to its
   // baseline shape and the next desktop open anchors correctly (#6080).
@@ -7198,6 +7565,7 @@ function closeModelDropdown(){
 function closeSettingsModelDropdown(){
   const dd=$('settingsModelDropdown');
   const chip=$('settingsModelChip');
+  if(dd&&dd.classList.contains('open')&&typeof _returnModelPickerFocus==='function') _returnModelPickerFocus(dd,[chip]);
   if(dd) dd.classList.remove('open');
   if(chip){
     chip.classList.remove('active');
@@ -7237,11 +7605,10 @@ function openSettingsModelDropdown(){
   const sel=$('settingsModel');
   const chip=$('settingsModelChip');
   if(!dd||!sel) return;
-  // Auto-focus the search on desktop only. On touch (coarse pointer) grabbing focus
-  // pops the on-screen keyboard the instant the chip is tapped — the composer picker
-  // doesn't do it either, so match that behavior on touch. Computed before render so
-  // renderModelDropdown's own initial focus is suppressed too (not just the outer one).
-  const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+  // Same single rule as the composer picker (see _modelPickerFocusTarget): a
+  // device with a keyboard focuses the search box after the dropdown is visible,
+  // a touch-only device focuses the container so no IME covers the list. The
+  // setTimeout keeps the async ordering upstream already needed for this panel.
   renderModelDropdown({
     dropdownId:'settingsModelDropdown',
     selectId:'settingsModel',
@@ -7249,19 +7616,14 @@ function openSettingsModelDropdown(){
     closeDropdown:closeSettingsModelDropdown,
     selectModel:selectSettingsModelFromDropdown,
     scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-    autoFocusSearch:!_coarsePointer,
+    label:t('settings_label_model')||'Default Model',
   });
   dd.classList.add('open');
   if(chip){
     chip.classList.add('active');
     chip.setAttribute('aria-expanded','true');
   }
-  if(!_coarsePointer){
-    setTimeout(()=>{
-      const input=dd.querySelector('.model-search-input');
-      if(input) input.focus();
-    },0);
-  }
+  setTimeout(()=>{ _focusModelPicker(dd); },0);
 }
 
 function toggleSettingsModelDropdown(){
@@ -7384,6 +7746,11 @@ function _fitComposerFooter(){
     footer.style.visibility='hidden';
   }
   let next='';
+  // Buttons carry `transition:all`; measured mid-transition they still report
+  // their icon-stage width, so a footer that collapsed to icons could never
+  // re-expand once its labels fit again (#8253 Fable r1). Freeze transitions
+  // for the synchronous strip-and-measure.
+  footer.classList.add('cf-measuring');
   try{
     footer.classList.remove('cf-icons','cf-burger');
     if(overflows()){
@@ -7403,6 +7770,12 @@ function _fitComposerFooter(){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
     }
+    // Commit the restored, visible style while transitions are still frozen,
+    // then unfreeze: otherwise every `transition:all` descendant animates its
+    // inherited visibility from the hidden measuring state and blinks out for a
+    // frame on each fit pass (#8253 Fable r2).
+    void footer.offsetWidth;
+    footer.classList.remove('cf-measuring');
   }
   // Post-restore transition check: fire the same composer menu cleanup used
   // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
@@ -7512,6 +7885,10 @@ function _reasoningEffortContext(){
   const ctx={};
   if(model) ctx.model=model;
   if(provider) ctx.provider=provider;
+  // Reasoning effort is session-owned just like the model selection. Including
+  // the session identity also makes the request-cache key change when two
+  // sessions happen to use the same model/provider pair.
+  if(session&&session.session_id) ctx.session_id=session.session_id;
   return ctx;
 }
 
@@ -7519,6 +7896,103 @@ function _reasoningEffortQuery(){
   const params=new URLSearchParams(_reasoningEffortContext());
   const qs=params.toString();
   return qs?('?'+qs):'';
+}
+
+// Monotonic save counter plus the newest save per profile/session: only the
+// newest save for a chat may update that chat's chip, so an older save resolving
+// late cannot undo a newer pick, and another chat's pick cannot hide this one's.
+let _reasoningSaveSeq=0;
+const _reasoningLatestSaveByOwner=new Map();
+// Effort saves are sent one at a time in pick order, so the threaded server
+// stores the latest pick rather than whichever request it handled last.
+let _reasoningSaveChain=Promise.resolve();
+// Every request carries the profile cookie at send time. A profile switch
+// freezes new picks and drains queued saves before it changes the cookie, so a
+// save queued behind a slow one still lands in the profile it was picked in.
+let _reasoningSavesFrozen=0;
+
+function _reasoningSaveOwner(profile, context){
+  return profile+'\n'+((context&&context.session_id)||'');
+}
+
+// While frozen the effort controls are disabled, so a pick is never accepted
+// by the UI and then dropped; /reasoning still reports the refusal in a toast.
+function _setReasoningControlsFrozen(frozen){
+  ['composerReasoningChip','composerMobileReasoningAction'].forEach(function(id){
+    const btn=$(id);
+    if(btn) btn.disabled=frozen;
+  });
+  if(frozen) closeReasoningDropdown();
+}
+
+async function _beginReasoningProfileSwitch(){
+  ++_reasoningSavesFrozen;
+  _setReasoningControlsFrozen(true);
+  await _reasoningSaveChain;
+}
+
+function _endReasoningProfileSwitch(){
+  if(_reasoningSavesFrozen>0) --_reasoningSavesFrozen;
+  if(!_reasoningSavesFrozen) _setReasoningControlsFrozen(false);
+}
+
+function _saveReasoningEffort(effort){
+  if(_reasoningSavesFrozen){
+    const frozen=new Error('profile switch in progress');
+    frozen.code='profile_switch_in_progress';
+    return Promise.reject(frozen);
+  }
+  const context=_reasoningEffortContext();
+  const profile=(S&&S.activeProfile)||'default';
+  const owner=_reasoningSaveOwner(profile, context);
+  const saveSeq=++_reasoningSaveSeq;
+  _reasoningLatestSaveByOwner.set(owner, saveSeq);
+  const payload=Object.assign({effort:effort},context);
+  const post=function(){
+    return api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)});
+  };
+  const request=_reasoningSaveChain.then(post,post);
+  _reasoningSaveChain=request.catch(function(){});
+  return request.then(function(st){
+    _applyReasoningSaveResult(saveSeq, owner, context, profile, (st&&st.reasoning_effort)||effort, st||{});
+    return st;
+  },function(e){
+    _failReasoningSave(saveSeq, owner);
+    throw e;
+  });
+}
+
+function _isLatestReasoningSave(saveSeq, owner){
+  return _reasoningLatestSaveByOwner.get(owner)===saveSeq;
+}
+
+function _failReasoningSave(saveSeq, owner){
+  // This chat's newest save failed, so an older save (whose result was
+  // suppressed) may be what the server stored. Re-read it now if it is visible.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(owner===_reasoningSaveOwner((S&&S.activeProfile)||'default', _reasoningEffortContext())) fetchReasoningChip();
+}
+
+function _applyReasoningSaveResult(saveSeq, owner, context, profile, effort, status){
+  // The server saved the originating session. This single-entry UI cache
+  // belongs only to the visible context; revisiting another session refetches.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(profile!==((S&&S.activeProfile)||'default')) return;
+  const params=new URLSearchParams(context).toString();
+  const key=params?('?'+params):'';
+  if(key!==_reasoningEffortQuery()){
+    // Same chat, different model/provider: a GET for the new key may have
+    // read the pre-save value, so re-read it rather than keep a stale cache.
+    const current=_reasoningEffortContext();
+    if(context.session_id&&current.session_id===context.session_id) fetchReasoningChip();
+    return;
+  }
+  // A GET dispatched before this save must not restore the old effort later.
+  ++_reasoningFetchSeq;
+  _lastReasoningFetchKey=key;
+  _applyReasoningChip(effort, status);
 }
 
 function _applyReasoningOptions(supportedEfforts){
@@ -7594,7 +8068,7 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort: '+text;
+    const labelText='Reasoning effort for this chat: '+text;
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -7602,9 +8076,9 @@ function _applyReasoningChip(eff){
   _highlightReasoningOption(effort);
 }
 
-// Tracks the model/provider identity of the last reasoning fetch so routine
-// topbar syncs can serve the cached chip state instead of re-hitting the
-// network. null = never fetched.
+// Tracks the session/model/provider identity of the last reasoning fetch so
+// routine topbar syncs can serve the cached chip state instead of re-hitting
+// the network. null = never fetched.
 let _lastReasoningFetchKey=null;
 // Monotonic dispatch counter. Each fetchReasoningChip() increments it and the
 // async handlers capture their own value; a response (success OR failure) only
@@ -7661,12 +8135,12 @@ function syncReasoningChip(){
   // refetch unconditionally to refresh supported-efforts after a model switch,
   // which turned ordinary syncs into a GET /api/reasoning storm (one per token).
   // Restore the cache short-circuit but keep a9ce2889's intent: only hit the
-  // network when nothing is cached yet OR the model/provider identity changed
-  // since the last fetch (the only inputs that change /api/reasoning's answer).
+  // network when nothing is cached yet OR the session/model/provider identity
+  // changed since the last fetch (the inputs that change /api/reasoning's answer).
   // The user-pick and model-switch paths still update the cache directly.
   const key=_reasoningEffortQuery();
-  // Short-circuit on the KEY alone: if a fetch for this exact model/provider has
-  // already been dispatched (in-flight) or completed, do not dispatch another —
+  // Short-circuit on the KEY alone: if a fetch for this exact session/model/provider
+  // has already been dispatched (in-flight) or completed, do not dispatch another —
   // this is what stops the #4650 storm, including the COLD-cache window where
   // _currentReasoningEffort is still null between the first dispatch and its
   // response (10 syncs before the first GET resolves must produce ONE request,
@@ -7692,6 +8166,7 @@ function toggleReasoningDropdown(){
   if(!dd||!chip) return;
   const open=dd.classList.contains('open');
   if(open){closeReasoningDropdown();return;}
+  if(_reasoningSavesFrozen) return;
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
@@ -7743,14 +8218,12 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      _saveReasoningEffort(effort)
         .then(function(st){
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
           // — display 'Default' rather than an empty toast.
-          const display=(st&&st.reasoning_effort)||effort||'Default';
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+display);
+          const display=_formatReasoningEffortLabel((st&&st.reasoning_effort)||effort||'');
+          showToast('🧠 Reasoning effort set to '+display+' for this chat and new chats (applies to next turn)');
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
@@ -9186,6 +9659,15 @@ function _transparentEventTimestampSeconds(row, opts){
   }
   if(opts.live===true) return _activityNowSeconds();
   return null;
+}
+function _syncTransparentEventTimestampVisibility(row){
+  const header=row&&row.querySelector('.tool-card-header,.thinking-card-header');
+  if(!header) return;
+  const enabled=!(typeof window!=='undefined'&&window._transparentEventTimestamps===false);
+  // A cache hit with unchanged preferences must remain free of DOM writes.
+  if(!!header.querySelector('.transparent-event-time')!==enabled){
+    _syncTransparentEventTimestamp(row,header,{});
+  }
 }
 function _syncTransparentEventTimestamp(row, header, opts){
   if(!row||!header) return null;
@@ -11082,6 +11564,9 @@ function _getExplicitBusyCommandAction(text){
 }
 
 function getComposerPrimaryAction(){
+  if(S.session&&S.session.chat_read_only_reason){
+    return S.busy&&S.activeStreamId?'stop':'disabled';
+  }
   const msg=$('msg');
   const hasContent=_composerHasContent();
   const locked=!!(msg&&msg.disabled);
@@ -11111,6 +11596,15 @@ function getComposerPrimaryAction(){
 function _applyBusyComposerPlaceholder(){
   const input=$('msg');
   if(!input) return;
+  if(S.session&&S.session.chat_read_only_reason){
+    input.placeholder=typeof t==='function' ? t('composer_placeholder_read_only') : 'Read-only in WebUI';
+    input.dataset.readOnlyPlaceholder='true';
+    return;
+  }
+  if(input.dataset.readOnlyPlaceholder){
+    input.placeholder='Message '+assistantDisplayName()+'\u2026';
+    delete input.dataset.readOnlyPlaceholder;
+  }
   if(_compressionPlaceholderSaved!==null) return;
   if(input.disabled) return;
   if(_composerHasContent()) return;
@@ -11151,6 +11645,28 @@ function _setComposerPrimaryButtonIcon(btn,action){
 }
 
 function updateSendBtn(){
+  const chatReadOnlyReason=(S.session&&S.session.chat_read_only_reason)||'';
+  const chatReadOnlyNoticeText=chatReadOnlyReason.replace(/^Read-only in WebUI\.\s*/, '');
+  const showChatReadOnlyHelp=!!(chatReadOnlyReason&&S.session.chat_read_only_can_connect);
+  const chatReadOnlyNotice=$('composerChatReadOnlyNotice');
+  const chatReadOnlyText=$('composerChatReadOnlyReason');
+  const chatReadOnlyHelp=$('composerChatReadOnlyHelp');
+  if(chatReadOnlyText&&chatReadOnlyText.textContent!==chatReadOnlyNoticeText){
+    chatReadOnlyText.textContent=chatReadOnlyNoticeText;
+  }
+  if(chatReadOnlyHelp) chatReadOnlyHelp.hidden=!showChatReadOnlyHelp;
+  if(chatReadOnlyNotice){
+    chatReadOnlyNotice.hidden=!(chatReadOnlyNoticeText||showChatReadOnlyHelp);
+  }
+  const chatInput=$('msg');
+  if(chatInput){
+    chatInput.readOnly=!!chatReadOnlyReason;
+    const descriptionIds=new Set((chatInput.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
+    if(chatReadOnlyNoticeText) descriptionIds.add('composerChatReadOnlyReason');
+    else descriptionIds.delete('composerChatReadOnlyReason');
+    if(descriptionIds.size) chatInput.setAttribute('aria-describedby',[...descriptionIds].join(' '));
+    else chatInput.removeAttribute('aria-describedby');
+  }
   const btn=$('btnSend');
   if(!btn){
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
@@ -11166,7 +11682,8 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(chatReadOnlyReason) _btnTitle=chatReadOnlyReason;
+    else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
@@ -11880,8 +12397,42 @@ let _ttsGeneration=0;
 // replacement — and stopTTS() — invalidates all prior tokens, and every
 // asynchronous callback must verify ownership before mutating shared state.
 // `_ttsSpeaking` alone cannot distinguish playback A from playback B.
-function _beginTtsPlayback(){ _ttsSpeaking=true; return ++_ttsGeneration; }
+// A generation bump also aborts the requests the dead generation still has in
+// flight: the token only keeps stale responses out of the AudioContext, while
+// the AbortController below stops the browser downloading and decoding the
+// abandoned response. The server still finishes that provider call.
+function _beginTtsPlayback(){
+  _ttsSpeaking=true;
+  // Bump BEFORE aborting: the abort handlers are microtasks, but the token must
+  // already be dead when they run so none of them can claim the new playback.
+  const gen=++_ttsGeneration;
+  _abortPendingTtsRequests();
+  return gen;
+}
 function _ownsTtsPlayback(gen){ return gen===_ttsGeneration; }
+// In-flight /api/tts requests, one AbortController per request. Cancelling on
+// stop/replacement matters even though every callback is generation-guarded:
+// the server keeps synthesizing, the response is downloaded and thrown away,
+// and the request still occupies the per-client TTS rate window that the next
+// playback has to wait out.
+let _ttsPendingAborts=null;
+function _newTtsAbortController(){
+  if(typeof AbortController!=='function') return null;
+  try{ return new AbortController(); }catch(_){ return null; }
+}
+function _trackTtsAbort(ctl){
+  if(!ctl) return null;
+  if(!_ttsPendingAborts) _ttsPendingAborts=new Set();
+  _ttsPendingAborts.add(ctl);
+  return ctl;
+}
+function _releaseTtsAbort(ctl){ if(ctl&&_ttsPendingAborts) _ttsPendingAborts.delete(ctl); }
+function _abortPendingTtsRequests(){
+  if(!_ttsPendingAborts||!_ttsPendingAborts.size) return;
+  const pending=Array.from(_ttsPendingAborts);
+  _ttsPendingAborts.clear();
+  pending.forEach(function(ctl){ try{ ctl.abort(); }catch(_){} });
+}
 // Minimum gap between consecutive /api/tts synthesis requests, matching the
 // server-side per-client window in api/routes.py (_TtsRateLimiter, 2 s).
 // Shared by every engine and generation — the server limiter is per-client
@@ -11926,11 +12477,18 @@ function _sendTtsRequest(init, owner){
   let attempt=0;
   function _dispatch(){
     return _acquireTtsRequestSlot(owner).then(function(reserved){
-      if(!reserved) return {ok:false, err:new Error('aborted')};
-      return fetch(new URL('api/tts', document.baseURI || location.href).href, init)
+      if(!reserved) return {ok:false, err:new Error('aborted'), aborted:true};
+      // One AbortController per request: stopTTS()/a replacement aborts it, so
+      // the browser drops an abandoned response at once instead of downloading
+      // it into a generation-guarded no-op. The server-side synthesis and the
+      // request-rate window are not refunded.
+      const ctl=_trackTtsAbort(_newTtsAbortController());
+      const opts=ctl?Object.assign({}, init, {signal:ctl.signal}):init;
+      return fetch(new URL('api/tts', document.baseURI || location.href).href, opts)
       .then(function(r){
         if(r.status===429&&attempt<3){
           attempt++;
+          _releaseTtsAbort(ctl);
           return _dispatch();
         }
         if(!r.ok){
@@ -11955,8 +12513,15 @@ function _sendTtsRequest(init, owner){
           if(res&&typeof res==='object'&&('ok' in res)) return res;
           return {ok:true, buf:res};
         },
-        function(err){ return {ok:false, err:err}; }
-      );
+        function(err){
+          // A cancellation is not a failure: report it as such so no caller
+          // turns the user's own stop into an error toast.
+          return {ok:false, err:err, aborted:!!(ctl&&ctl.signal.aborted)};
+        }
+      )
+      // The request is settled (or abandoned): drop the controller so a later
+      // stop cannot abort a request that already delivered its audio.
+      .then(function(res){ _releaseTtsAbort(ctl); return res; });
     });
   }
   return _dispatch();
@@ -12069,7 +12634,7 @@ function _playEdgeTtsChunked(text, btn){
     }, _owns)
     .then(function(res){
       if(!_owns()) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
       const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
@@ -12192,7 +12757,7 @@ function _playElevenLabsTts(text, btn){
   }, _owns)
   .then(function(res){
     if(!_owns()) return;
-    if(!res.ok){ _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
+    if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
     return _playAudioBuf(res.buf, btn, 'ElevenLabs TTS', gen);
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
@@ -12217,9 +12782,11 @@ function _playOpenaiTts(text, btn){
   const _fail=function(msg){
     // Terminal failure: invalidate every scheduled/pending callback of this
     // playback (paced prefetch timers, in-flight fetch then-chains) so no
-    // follow-on request can fire after a terminal error, and stop/disconnect
-    // any partially constructed source before dropping the handle.
+    // follow-on request can fire after a terminal error, stop/disconnect
+    // any partially constructed source before dropping the handle, and cancel
+    // whatever this playback still has in flight.
     _ttsGeneration++;
+    _abortPendingTtsRequests();
     _ttsSpeaking=false;
     _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
@@ -12268,7 +12835,7 @@ function _playOpenaiTts(text, btn){
     bufPromise
     .then(function(res){
       if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
       var ctx=_getTtsAudioCtx();
       if(!ctx){ _fail('Web Audio API not available'); return; }
       var buf;
@@ -12445,8 +13012,11 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
 function stopTTS(){
   // Invalidate every in-flight generation (all engines, all chains) before
   // clearing state, so a late fetch/onended/decode callback can neither
-  // resume a stopped chain nor clobber a later playback.
+  // resume a stopped chain nor clobber a later playback. Then cancel the
+  // requests those generations still have on the wire, so stopping releases
+  // the browser's side of each request instead of only ignoring its response.
   _ttsGeneration++;
+  _abortPendingTtsRequests();
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
@@ -13554,6 +14124,132 @@ function dismissReconnect() {
   clearInflight();
 }
 
+// ── #8517 memory-off notice ──
+// The server reports the memory status of the agent actually serving a session as
+// `memory_status` ({state:'ok'} or {state:'off',reason,scope}; codes only) in every
+// session payload it knows it for (GET /api/session, the `session` of stream `done`
+// and `apperror`, a compression continuation's own payload), and per turn as a stream
+// event for that session. The notice renders ONLY from the session on screen
+// (S.session.memory_status): there is no per-session client state and nothing to hand
+// over between sessions, so session switch, reload, continuation, redirect and
+// clearing the selected session all follow from the assignment of S.session below.
+// A dismissal is remembered per profile and reason (it applies to every conversation
+// of that profile); an explicit `ok` for the profile forgets its dismissals, so a
+// later recurrence is shown and announced again. No status (healthy sessions, older
+// servers): the element stays `hidden`, so normal sessions never see a layout change.
+const MEMORY_OFF_NOTICE_KEYS={
+  agent_outdated:'memory_off_agent_outdated',
+  agent_no_instance_claim:'memory_off_agent_no_instance_claim',
+  provider_shared_instance:'memory_off_provider_shared_instance',
+};
+const MEMORY_OFF_DISMISS_PREFIX='hermes-webui-memory-off-dismissed:';
+const _memoryOffAnnounced=new Set(); // `${profile}:${reason}` announced on this page
+function _memoryNoticeProfile(session){return String((session&&session.profile)||'default');}
+function _memoryOffDismissKey(profile,reason){return MEMORY_OFF_DISMISS_PREFIX+profile+':'+reason;}
+function _memoryOffDismissed(profile,reason){
+  try{return localStorage.getItem(_memoryOffDismissKey(profile,reason))==='1';}catch(_){return false;}
+}
+function _memoryOffReason(session){
+  const status=session&&session.memory_status;
+  if(!status||typeof status!=='object'||status.state!=='off') return '';
+  const reason=String(status.reason||'');
+  return Object.prototype.hasOwnProperty.call(MEMORY_OFF_NOTICE_KEYS,reason)?reason:'';
+}
+// The server says memory is on for this profile's agent: what was dismissed for the
+// profile is news again when it recurs.
+function _forgetMemoryOffDismissals(profile){
+  for(const reason of Object.keys(MEMORY_OFF_NOTICE_KEYS)){
+    try{localStorage.removeItem(_memoryOffDismissKey(profile,reason));}catch(_){}
+    _memoryOffAnnounced.delete(profile+':'+reason);
+  }
+}
+function syncMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const text=$('memoryOffNoticeText');
+  if(!notice||!text) return;
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const profile=_memoryNoticeProfile(session);
+  if(session&&session.memory_status&&session.memory_status.state==='ok') _forgetMemoryOffDismissals(profile);
+  const reason=_memoryOffReason(session);
+  if(!reason||_memoryOffDismissed(profile,reason)){
+    notice.hidden=true;
+    notice.dataset.reason='';
+    return;
+  }
+  const copy=t(MEMORY_OFF_NOTICE_KEYS[reason]);
+  if(text.textContent!==copy) text.textContent=copy;
+  notice.dataset.reason=reason;
+  const wasHidden=notice.hidden;
+  notice.hidden=false;
+  // Appearing (often mid-turn) shrinks the transcript viewport by the notice's height; keep a
+  // reader pinned to the tail pinned, gated like the chat-todos tray (the helper itself no-ops
+  // for a reader who scrolled away).
+  if(wasHidden&&!(typeof window!=='undefined'&&window._autoScrollFollow===false)&&typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+  // A live region that was `hidden` is not reliably announced when it appears, so
+  // say it once per profile and reason through the shared polite announcer as well.
+  const announceKey=profile+':'+reason;
+  if(!_memoryOffAnnounced.has(announceKey)){
+    _memoryOffAnnounced.add(announceKey);
+    const announcer=$('a11yAnnouncer');
+    if(announcer) announcer.textContent=copy;
+  }
+}
+// A stream event about session `sid` (warning memory_off / memory_status ok). Only the
+// session on screen is updated; any other session gets its status from its own
+// payload when it is opened. Returns true when the session on screen was updated.
+function noteSessionMemoryStatus(sid,status){
+  if(typeof S==='undefined'||!S||!S.session||!sid||String(S.session.session_id||'')!==String(sid)) return false;
+  if(!status||typeof status!=='object') return false;
+  S.session.memory_status=status;
+  syncMemoryOffNotice();
+  return true;
+}
+function dismissMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const reason=_memoryOffReason(session);
+  if(reason){try{localStorage.setItem(_memoryOffDismissKey(_memoryNoticeProfile(session),reason),'1');}catch(_){}}
+  if(notice){notice.hidden=true;notice.dataset.reason='';}
+  // The dismiss button disappears with the notice; keep focus somewhere useful.
+  const composer=$('msg');
+  if(composer&&typeof composer.focus==='function') composer.focus();
+}
+// Render from the session on screen: every assignment of S.session (load, switch,
+// reload, continuation, redirect, new chat, delete -> null) repaints the notice once,
+// after the assigning code has finished. A payload for the SAME session from an
+// endpoint that does not report memory (rename, toolsets, ...) keeps what the server
+// last said about that session; another session never inherits it.
+(function _renderMemoryOffNoticeFromSessionOnScreen(){
+  if(typeof S==='undefined'||!S) return;
+  const desc=Object.getOwnPropertyDescriptor(S,'session');
+  if(!desc||!desc.configurable||!('value' in desc)) return;
+  let current=desc.value;
+  let queued=false;
+  const later=typeof queueMicrotask==='function'?queueMicrotask:(fn=>Promise.resolve().then(fn));
+  Object.defineProperty(S,'session',{
+    configurable:true,
+    enumerable:true,
+    get(){return current;},
+    set(next){
+      if(next&&current&&next!==current&&typeof next==='object'&&!('memory_status' in next)
+        &&current.memory_status&&String(next.session_id||'')===String(current.session_id||'')){
+        next.memory_status=current.memory_status;
+      }
+      current=next;
+      if(queued) return;
+      queued=true;
+      later(()=>{queued=false;syncMemoryOffNotice();});
+    },
+  });
+})();
+if(typeof window!=='undefined'&&typeof window.addEventListener==='function'){
+  // Another tab dismissed (or an ok forgot) a notice: repaint now, not at the next sync.
+  window.addEventListener('storage',e=>{
+    if(e&&typeof e.key==='string'&&e.key.startsWith(MEMORY_OFF_DISMISS_PREFIX)) syncMemoryOffNotice();
+  });
+}
+// ── end #8517 memory-off notice ──
+
 // ── Live host resource health panel (#693) ──
 const SYSTEM_HEALTH_INTERVAL_MS=5000;
 let _systemHealthTimer=null;
@@ -13679,6 +14375,15 @@ function _showAgentHealthAlert(payload){
   if(title) title.textContent='Hermes agent is not responding';
   const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
   if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
+  const restartBtn=$('btnRestartGateway');
+  if(restartBtn){
+    // The restart drives the LOCAL gateway CLI; hide it unless the server
+    // proved WebUI controls the monitored Gateway (#8391). Fails closed.
+    const lifecycle=payload&&payload.gateway_lifecycle;
+    const managed=!!(lifecycle&&lifecycle.managed===true);
+    restartBtn.hidden=!managed;
+    restartBtn.style.display=managed?'':'none';
+  }
   banner.hidden=false;
   banner.classList.add('visible');
 }
@@ -13777,6 +14482,9 @@ async function refreshSession() {
     _mergePendingSessionMessage(data.session, S.messages);
     S.activeStreamId = data.session.active_stream_id || null;
 
+    // #8523: the refreshed session can have turned read-only (or writable); redraw the composer's lock, notice
+    // and placeholder from it before the same-frame scroll-snapshot render (#3479).
+    if(typeof updateSendBtn==='function') updateSendBtn();
     syncTopbar(); _renderMessagesWithScrollSnapshot();
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
@@ -14172,9 +14880,12 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
-async function applyUpdates(){
+async function applyUpdates(opts){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
+  // #7293: true only on the re-send after the user explicitly confirmed
+  // interrupting the WebUI agent runs that made the server refuse the update.
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
@@ -14214,9 +14925,13 @@ async function applyUpdates(){
       const _applyBody={target};
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
+      if(forceActiveRuns) _applyBody.force_active_runs=true;
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
       if(!res.ok){
         _showUpdateError(target,res);
+        if(res.restart_blocked&&res.force_available){
+          _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
+        }
         resetApplyButton(0);
         return;
       }
@@ -14270,16 +14985,83 @@ function _showUpdateError(target,res){
     clearLockBtn.style.display='inline-block';
   }
 }
-async function applyClearUpdateLock(btn){
+function _activeRunsUpdateText(key,count,fallback){
+  if(typeof t==='function'){
+    const val=t(key,count);
+    if(val&&val!==key) return val;
+  }
+  return fallback;
+}
+// #7293: the server refuses a WebUI-initiated update/restart while WebUI agent
+// runs are active (restart_blocked + force_available). Offer one explicit,
+// confirmed override that re-sends the same request with
+// force_active_runs:true; the server then saves those runs as interrupted
+// before it restarts. For a WebUI update, Gateway runs that a restart can
+// reattach are not counted and keep running in the Gateway. An Agent update
+// cycles the Gateway, so it counts them too (#8660).
+function _renderActiveRunsForceOffer(target,res,resend){
+  const errEl=$('updateError');
+  if(!errEl||typeof resend!=='function') return;
+  const prior=$('btnForceUpdateActiveRuns');
+  if(prior&&prior.parentNode) prior.parentNode.remove();
+  // Never show two red force buttons: while this offer is up it is the one
+  // way forward (on the conflict path its re-send also carries the hard reset).
+  const legacyForceBtn=$('btnForceUpdate');
+  if(legacyForceBtn) legacyForceBtn.style.display='none';
+  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const count=Math.max(1,Math.floor(rawCount));
+  const plural=count===1?'':'s';
+  const label=_activeRunsUpdateText('update_force_active_runs',count,'Update anyway (interrupts '+count+' run'+plural+')');
+  const actions=document.createElement('div');
+  actions.style.marginTop='6px';
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.id='btnForceUpdateActiveRuns';
+  btn.className='update-btn';
+  btn.style.background='var(--error,#e05)';
+  btn.style.color='#fff';
+  btn.style.borderColor='var(--error,#e05)';
+  btn.dataset.target=target;
+  btn.textContent=label;
+  btn.onclick=async()=>{
+    if(btn.disabled) return;
+    const confirmed=await showConfirmDialog({
+      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
+      message:_activeRunsUpdateText(
+        'update_force_active_runs_message',
+        count,
+        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
+      ),
+      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed) return;
+    btn.disabled=true;
+    btn.textContent=_i18nUpdateText('update_updating','Updating\u2026');
+    try{
+      await resend();
+    }finally{
+      if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
+    }
+  };
+  actions.appendChild(btn);
+  errEl.appendChild(actions);
+  errEl.style.display='block';
+}
+async function applyClearUpdateLock(btn,opts){
   if(window._clearLockInFlight) return;
   const target=btn.dataset.target;
   if(!target) return;
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);  // #7293
   window._clearLockInFlight=true;
   btn.disabled=true;
   const originalLabel=btn.textContent;
   btn.textContent='Checking lock…';
   try{
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
+    const _clearBody={target};
+    if(forceActiveRuns) _clearBody.force_active_runs=true;
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:60000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
@@ -14297,6 +15079,9 @@ async function applyClearUpdateLock(btn){
       const errEl=$('updateError');
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
+      if(res.restart_blocked&&res.force_available){
+        _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
+      }
     }
   }catch(e){
     const msg='Lock-check request failed: '+((e&&e.message)||String(e));
@@ -14405,26 +15190,38 @@ async function _readHealthServerIdentity() {
     return null;
   }
 }
-async function forceUpdate(btn){
+async function forceUpdate(btn,opts){
   const target=btn&&btn.dataset.target;
   if(!target) return;
-  const confirmed=await showConfirmDialog({
-    title:'Force update '+target+'?',
-    message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
-    confirmLabel:'Force update',
-    danger:true,
-    focusCancel:true,
-  });
-  if(!confirmed) return;
+  // #7293: the active-runs override re-sends this request after its own
+  // confirmation; the discard-local-changes confirmation was already given.
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  if(!forceActiveRuns){
+    const confirmed=await showConfirmDialog({
+      title:'Force update '+target+'?',
+      message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
+      confirmLabel:'Force update',
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed) return;
+  }
   btn.disabled=true;btn.textContent='Force updating\u2026';
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    const _forceBody={target};
+    const _ch=window._updateData?.[target]?.channel;
+    if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
+    if(forceActiveRuns) _forceBody.force_active_runs=true;
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
-      btn.disabled=false;btn.textContent='Force update';
+      btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
+      if(res.restart_blocked&&res.force_available){
+        _renderActiveRunsForceOffer(target,res,()=>forceUpdate(btn,{forceActiveRuns:true}));
+      }
       return;
     }
     showToast('Force update applied — restarting…');
@@ -14826,7 +15623,7 @@ function syncTopbar(){
     if(sourceLabel){
       const badge=document.createElement('span');
       badge.className='topbar-source-badge';
-      badge.textContent=sourceLabel+(S.session.read_only?' · read-only':'');
+      badge.textContent=sourceLabel+((S.session.read_only||S.session.chat_read_only_reason)?' · read-only':'');
       _topbarMeta.appendChild(document.createTextNode(' '));
       _topbarMeta.appendChild(badge);
     }
@@ -15237,6 +16034,27 @@ function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visi
   const thinkingText=_assistantReasoningPayloadText(m);
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
   return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+}
+// A delegated subagent's whole task is one turn; split its worklog at each interim text.
+function _isDelegatedSubagentTranscript(){
+  return !S.busy&&!!S.session&&_isDelegatedSubagentRow(S.session);
+}
+function _worklogGroupKey(anchorRow, anchorTurn, placedAfterAnchor){
+  if(!_isDelegatedSubagentTranscript()) return anchorTurn;
+  if(placedAfterAnchor) return anchorRow;
+  for(let el=anchorRow.previousElementSibling;el;el=el.previousElementSibling){
+    if(el.classList&&el.classList.contains('assistant-segment')&&!el.classList.contains('assistant-segment-worklog-source')) return el;
+  }
+  return anchorTurn;
+}
+// Only the subagent's last turn opens: while it runs, or after it ended with no answer.
+function _subagentOpenWorklogTurn(inner){
+  if(!_isDelegatedSubagentTranscript()) return null;
+  const turns=inner.querySelectorAll('.assistant-turn'), lastTurn=turns[turns.length-1]||null;
+  if(!lastTurn||S.session.active===true) return lastTurn;
+  const last=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role!=='tool').pop();
+  const answered=!!last&&last.role==='assistant'&&!(Array.isArray(last.tool_calls)&&last.tool_calls.length)&&!!String(msgContent(last)||'').trim();
+  return answered?null:lastTurn;
 }
 function _worklogDetailsExpandedDefault(){
   return window._worklogDetailsExpandedByDefault===true;
@@ -16678,6 +17496,8 @@ function _toggleActivityGroup(summary){
   // #5839: materialize deferred settled rows on first expand (lazy render).
   if(!collapsed) _materializeDeferredWorklogRows(group);
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
+  // The cached transcript HTML predates this click; drop it so a switch-back rebuilds.
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id&&typeof _sessionHtmlCache!=='undefined') _sessionHtmlCache.delete(S.session.session_id);
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
 function _toggleToolWorklogGroup(summary){
@@ -17343,33 +18163,78 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   return group;
 }
+// Tool DOM is expensive and usually immutable while prose streams. Keep the
+// signature on the node, not in a global cache: removing a turn drops its cache,
+// and HTML-restored nodes take the normal build/rehydration path once. Include
+// the full row so in-place result/argument corrections cannot reuse stale HTML.
+function _anchorSceneToolRenderSignature(row, opts){
+  if(!row||row.role!=='tool') return null;
+  return JSON.stringify([row,opts||{},document.documentElement.lang,
+    typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
+}
+function _anchorSceneDataRowKey(row, streamId){
+  const id=String(row.row_id||row.local_id||'').trim();
+  if(!id) return '';
+  return `${String(streamId||'').trim()}\u0000${id}\u0000${String(row.role||'activity').trim()}\u0000${String(row.source_event_type||'').trim()}`;
+}
+function _anchorScenePlaceChildren(parent, nodes){
+  let next=null;
+  for(let i=nodes.length-1;i>=0;i--){
+    const node=nodes[i];
+    if(node.parentNode!==parent||node.nextSibling!==next) parent.insertBefore(node,next);
+    next=node;
+  }
+  const keep=new Set(nodes);
+  Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
+}
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
-  list.innerHTML='';
-  let wrote=false;
+  const existing=new Map();
+  list.querySelectorAll('[data-anchor-scene-row="1"]').forEach(node=>{
+    const key=_transparentLiveRowKey(node,'');
+    if(key) existing.set(key,node);
+  });
+  const children=[];
   let currentTools=null;
+  let toolNodes=[];
+  const flushTools=()=>{
+    if(currentTools){
+      const mounted=Array.from(currentTools.querySelectorAll('[data-anchor-row-role="tool"]'));
+      const unchanged=mounted.length===toolNodes.length&&mounted.every((node,i)=>node===toolNodes[i]);
+      if(!unchanged) _anchorScenePlaceChildren(currentTools,toolNodes);
+      currentTools._anchorSceneToolsStable=unchanged;
+    }
+    currentTools=null;
+    toolNodes=[];
+  };
   for(const row of rows){
-    const node=_anchorSceneNodeForRow(row,opts);
+    const key=_anchorSceneDataRowKey(row,'');
+    const previous=key?existing.get(key):null;
+    const signature=_anchorSceneToolRenderSignature(row,opts);
+    const node=signature&&previous&&previous._anchorToolRenderSignature===signature
+      ? previous : _anchorSceneNodeForRow(row,opts);
     if(!node) continue;
+    if(signature) node._anchorToolRenderSignature=signature;
     if(row.role==='tool'){
       if(!currentTools){
-        currentTools=document.createElement('div');
+        const parent=previous&&previous.closest('.wl-step-tools[data-worklog-tools="1"]');
+        currentTools=parent&&parent.parentElement===list&&!children.includes(parent)
+          ? parent : document.createElement('div');
         currentTools.className='wl-step-tools tool-worklog-tools';
         currentTools.setAttribute('data-worklog-tools','1');
-        list.appendChild(currentTools);
+        children.push(currentTools);
       }
-      currentTools.appendChild(node);
+      toolNodes.push(node);
     }else{
-      currentTools=null;
-      list.appendChild(node);
+      flushTools();
+      children.push(node);
     }
-    wrote=true;
   }
-  if(wrote){
-    _syncToolCallGroupSummary(group);
-  }
-  return wrote;
+  flushTools();
+  _anchorScenePlaceChildren(list,children);
+  if(children.length) _syncToolCallGroupSummary(group);
+  return !!children.length;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
   if(!group) return -1;
@@ -17609,8 +18474,22 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
-  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
-  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
+  const activityKey=`live:${streamId||S.activeStreamId||'anchor'}`;
+  // The retained group must still be LIVE: an interim_assistant boundary
+  // finalizes the group in place (closeCurrentLiveActivityGroup ->
+  // _finalizeLiveActivityDisclosureGroup strips data-live-tool-call-group and
+  // collapses it) while leaving data-anchor-scene-owner="1". Reusing that
+  // finalized group kept re-rendering into a collapsed, static frame — tools
+  // and later live prose after the boundary never appeared while the turn was
+  // still busy. Requiring the live flag makes the sweep remove the finalized
+  // group so _anchorSceneWorklogGroup builds a fresh live one (#7495 re-gate).
+  const retainedGroup=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-live-tool-call-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+  });
+  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+  });
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
     el.classList.add('assistant-segment-worklog-source');
     el.setAttribute('aria-hidden','true');
@@ -17702,12 +18581,24 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const renderedRows=[];
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
-    const node=_anchorSceneTransparentNodeForRow(row,{
+    const rowOpts={
       live:true,
       settled:false,
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
-    });
+    };
+    const signature=_anchorSceneToolRenderSignature(row,rowOpts);
+    const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
+    const cached=dataKey?preserveByKey.get(dataKey):null;
+    if(signature&&cached&&cached._anchorToolRenderSignature===signature){
+      // Timestamp visibility is presentation state, independent of tool content.
+      // Reconcile it in place so toggles preserve disclosure and text selection.
+      _syncTransparentEventTimestampVisibility(cached);
+      preserveByKey.delete(dataKey);
+      renderedRows.push(cached);
+      continue;
+    }
+    const node=_anchorSceneTransparentNodeForRow(row,rowOpts);
     if(!node) continue;
     const key = _transparentLiveRowKey(node, activeStreamId);
     const existing = key ? preserveByKey.get(key) : null;
@@ -17718,13 +18609,18 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
+    if(signature) renderedNode._anchorToolRenderSignature=signature;
     renderedRows.push(renderedNode);
   }
-  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>!!(
-    node &&
-    node.parentElement===blocks &&
-    node.nextSibling===expectedNextSibling
-  );
+  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>{
+    if(!node||node.parentElement!==blocks) return false;
+    let next=node.nextSibling;
+    // Streaming may insert a hidden legacy prose anchor between visible rows.
+    // It owns stream metadata, not scene order; moving an unchanged tool past
+    // it needlessly clears selection in Safari/Chromium.
+    while(next&&next.nodeType===1&&next.hidden&&next.getAttribute('data-live-assistant')==='1') next=next.nextSibling;
+    return next===expectedNextSibling;
+  };
   let expectedNextSibling=(liveFooter&&liveFooter.parentElement===blocks) ? liveFooter : null;
   for(let i=renderedRows.length-1;i>=0;i--){
     const renderedNode=renderedRows[i];
@@ -18859,6 +19755,7 @@ function ensureActivityGroup(inner, opts){
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(live && savedState==='open') collapsed=false;
     else if(live && savedState==='closed') collapsed=true;
+    else if(opts.honourSavedDisclosure===true && savedState) collapsed=savedState==='closed';
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
@@ -19921,7 +20818,17 @@ window._bindHermesExtensionMessageActions=function(){
 function _addBoundedHash(add, value, depth){
   if(value==null){ add('null'); return; }
   const t=typeof value;
-  if(t==='string'){ add(value.length); add(value); return; }
+  if(t==='string'){
+    add(value.length);
+    // #8228 re-gate (2026-10-20): hash the WHOLE string. An earlier round
+    // sampled only length + head/tail for long `data:` payloads, which made
+    // equal-length strings with an unchanged head/tail and a different MIDDLE
+    // collide — e.g. rendered `data:text/plain,...` message text and tool
+    // payloads, where _sessionHtmlCache then serves stale HTML. The unrendered
+    // native image parts are excluded where they belong, on the message
+    // projection in _addMessageRenderHash, so this shared helper stays exact.
+    add(value); return;
+  }
   if(t==='number'||t==='boolean'){ add(t); add(value); return; }
   if(t==='object'){ _hashObjectInto(add, value, (depth||0)+1); return; }
   add(t); add(String(value));
@@ -19953,6 +20860,40 @@ function _hashObjectInto(add, value, depth){
   for(let i=0;i<keys.length;i++){ add(keys[i]); add(i); _addBoundedHash(add, value[keys[i]], depth); }
 }
 
+// One definition for every render-affecting message property, feeding the
+// session-HTML cache signature (_messageRenderCacheSignature).
+//
+// The former implementation hand-listed fields, and the #8228 review found the
+// list had drifted: `reasoning_content` (the field the row renderer reads
+// FIRST — see _assistantReasoningPayloadText) was never hashed, `_statusCard`
+// stringified to "[object Object]", `_anchor_activity_scene` and the
+// partial-tool argument payloads were missing, and joined tool results were
+// invisible entirely (they live on other messages). A hand list can always
+// drift again the moment the row renderer learns a new field, so this now
+// deep-hashes the ENTIRE message object: every key, array element and nested
+// object, insertion-ordered, through the same bounded, cycle-safe walk
+// (_hashObjectInto) the signature already used for structured payloads.
+// Over-coverage only costs a redundant re-render; under-coverage serves stale
+// HTML from the session cache, so the conservative direction is deliberate.
+function _addMessageRenderHash(add, m){
+  if(!m||typeof m!=='object'){ add('missing'); return; }
+  // #8228 re-gate (2026-10-20): exclude ONLY the native image parts msgContent()
+  // never draws (`image` / `image_url` / `input_image`) — a pasted screenshot
+  // rides on the user message as an `image_url` data URI (api/helpers.py:1593
+  // exempts it from redaction), so hashing it whole cost ~13x per render on a
+  // vision-heavy session (35 ms -> 450 ms on 320 messages with 8 x 1.44 MB
+  // images). The exclusion is a message PROJECTION: a shallow copy with a
+  // filtered content array, never a mutation of the caller's object. Every
+  // other field — including rendered text that happens to start with `data:` —
+  // is hashed in full, so a middle-only edit still changes the signature.
+  const unrendered=p=>!!p&&(p.type==='image'||p.type==='image_url'||p.type==='input_image');
+  if(Array.isArray(m.content)&&m.content.some(unrendered)){
+    _addBoundedHash(add, Object.assign({}, m, {content:m.content.filter(p=>!unrendered(p))}));
+    return;
+  }
+  _addBoundedHash(add, m);
+}
+
 function _messageRenderCacheSignature(){
   let hash=2166136261;
   function add(value){
@@ -19966,32 +20907,17 @@ function _messageRenderCacheSignature(){
   }
   const messages=Array.isArray(S.messages)?S.messages:[];
   add(messages.length);
+  /* The per-message render surface is hashed by _addMessageRenderHash, which
+     deep-hashes the ENTIRE message object — msgContent(m), m.tool_calls,
+     m._partial_tool_calls, reasoning (including reasoning_content), the
+     activity scene, status cards, attachments and content-array parts are all
+     covered, with no hand-maintained field list that can drift (review
+     finding on #8228). One hash per message: the earlier explicit
+     msgContent/tool_calls extractions re-hashed content the object walk
+     already covers, doubling the cost on large tool sessions (371 ms vs
+     135 ms measured on a 3.6 MB transcript — #8228 re-review). */
   for(const m of messages){
-    if(!m||typeof m!=='object'){ add('missing'); continue; }
-    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
-    add(msgContent(m));
-    if(Array.isArray(m.content)){
-      add('content-array');
-      m.content.forEach(part=>{
-        if(!part||typeof part!=='object'){ add(part); return; }
-        add(part.type);add(part.id);add(part.name);add(part.text);add(part.content);
-      });
-    }
-    if(Array.isArray(m.tool_calls)){
-      add('message-tool-calls');add(m.tool_calls.length);
-      m.tool_calls.forEach(tc=>{
-        add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);
-        add(tc&&tc.function&&tc.function.name);
-        // function.arguments is already a string — streamed in full, no copy.
-        _addBoundedHash(add, tc&&tc.function&&tc.function.arguments);
-      });
-    }
-    if(Array.isArray(m._partial_tool_calls)){
-      add('partial-tool-calls');add(m._partial_tool_calls.length);
-      m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
-    }
-    if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
-    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>_addBoundedHash(add, a));
+    _addMessageRenderHash(add, m);
   }
   const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
   add('settled-tool-calls');add(toolCalls.length);
@@ -20002,7 +20928,7 @@ function _messageRenderCacheSignature(){
     _addBoundedHash(add, tc.args||{});
   });
   if(S.session){
-    add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
+    add(S.session.message_count);add(S.session.updated_at);add(S.session.active);add(S.session.compression_anchor_visible_idx);
     _addBoundedHash(add, S.session.compression_anchor_message_key||null);
     add(S.session.compression_anchor_summary||'');
   }
@@ -20122,6 +21048,7 @@ function _assistantToolAnchorIdxForMessage(messages, rawIdx){
   if(_assistantMessageHasVisibleContent(current)) return rawIdx;
   if(_assistantReasoningPayloadText(current)) return rawIdx;
   for(let idx=rawIdx-1;idx>=0;idx--){
+    if(list[idx]&&list[idx].role==='user') break;
     if(_assistantMessageHasVisibleContent(list[idx])) return idx;
   }
   return rawIdx;
@@ -21262,6 +22189,15 @@ function _insertSegmentBlock(seg, html){
     }catch(_){ /* fall through to the string path below */ }
   }
   seg.insertAdjacentHTML('beforeend', html);
+}
+function _assistantSegmentIsTurnFinal(row, mi){
+  // True for the row's last assistant segment — the turn's final answer, the one
+  // that owns turn-level footer labels (switch/failover warnings). A turn
+  // without discoverable segments counts as final so its labels still render.
+  if(!row) return true;
+  const segs=row.querySelectorAll('.assistant-segment[data-msg-idx]');
+  const last=segs.length?segs[segs.length-1]:null;
+  return !last||String(last.dataset.msgIdx)===String(mi);
 }
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
@@ -22503,6 +23439,7 @@ function renderMessages(options){
     };
     const durationAssignedTurns = new Set();
     const activityByTurn = new Map();
+    let subagentOpenTurn;
     const activityOrder = [];
     const ensureActivityBucket=(key,aIdx,segmentSeq,burstId)=>{
       if(!byActivity.has(key)){
@@ -22584,13 +23521,16 @@ function renderMessages(options){
         // value) so the append path can use the ownership fact the group
         // construction already uses.
         const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
-        let state=activityByTurn.get(anchorTurn);
+        const groupKey=_worklogGroupKey(anchorRow,anchorTurn,!anchorIsWorklogSource&&!thinkingText);
+        let state=activityByTurn.get(groupKey);
+        if(subagentOpenTurn===undefined) subagentOpenTurn=_subagentOpenWorklogTurn(inner);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
           const group=ensureActivityGroup(anchorParent,{
-            collapsed:true,
+            collapsed:!subagentOpenTurn||anchorTurn!==subagentOpenTurn,
+            honourSavedDisclosure:_isDelegatedSubagentTranscript(),
             anchor:anchorRow,
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
             syncAnchorReason:anchorIsWorklogSource,
@@ -22603,7 +23543,7 @@ function renderMessages(options){
           if(!list) continue;
           list.innerHTML='';
           state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
-          activityByTurn.set(anchorTurn,state);
+          activityByTurn.set(groupKey,state);
         }
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
@@ -22622,7 +23562,13 @@ function renderMessages(options){
           seenTools:state.seenTools,
         });
       }
+      // The running subagent's newest worklog is live work: label it Running, not Processed.
+      let runningGroup=null;
+      if(subagentOpenTurn&&S.session.active===true)
+        activityByTurn.forEach(s=>{ if(s.group.closest('.assistant-turn')===subagentOpenTurn) runningGroup=s.group; });
       activityByTurn.forEach(state=>{
+        if(state.group===runningGroup) state.group.setAttribute('data-subagent-running','1');
+        else state.group.removeAttribute('data-subagent-running');
         _syncToolCallGroupSummary(state.group);
       });
     }else{
@@ -22727,8 +23673,17 @@ function renderMessages(options){
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
-      const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const seg=assistantSegments.get(mi);
+      const row=seg?seg.closest('.assistant-turn'):null;
+      // Switch/failover warnings describe the whole turn, not one segment; the
+      // model label below is per-segment. Render the warnings on the turn's
+      // final assistant segment only, so a routed turn with interim answers
+      // shows each label once instead of once per segment.
+      // typeof guard: node harnesses extract renderMessages() without its
+      // helpers (#6717); without the helper every segment counts as final.
+      const isTurnFinal=typeof _assistantSegmentIsTurnFinal==='function' ? _assistantSegmentIsTurnFinal(row, mi) : true;
+      const failoverText=isTurnFinal?_gatewayRoutingFailoverText(routing):'';
+      const modelWarningText=isTurnFinal?_gatewayModelWarningText(routing):'';
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
@@ -22737,9 +23692,11 @@ function renderMessages(options){
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
-      const seg=assistantSegments.get(mi);
-      const row=seg?seg.closest('.assistant-turn'):null;
-      const footerRows=row?row.querySelectorAll('.msg-foot'):[];
+      // Scope the footer lookup to this message's own segments. The turn's
+      // last .msg-foot belongs to the turn's final answer, and the duplicate
+      // guard below would then make the final message skip its own labels
+      // after an interim answer wrote into that foot (issue #8287).
+      const footerRows=row?row.querySelectorAll(`.assistant-segment[data-msg-idx="${mi}"] .msg-foot`):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
       if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
       const fragments=[];
@@ -23037,6 +23994,9 @@ function renderMessages(options){
           _materializeDeferredWorklogRows(group);
         }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
+        // A delegated transcript's collapsed chip stays collapsed (it keeps the turn non-blank).
+        if(typeof _isDelegatedSubagentTranscript==='function'&&_isDelegatedSubagentTranscript()&&
+           typeof _readActivityDisclosureState==='function'&&_readActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'))==='closed'){revealed=true;continue;}
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
           group.classList.add('open');
@@ -23279,8 +24239,20 @@ function _toolTargetLabel(tc){
   else if(kind==='memory') raw=a.target||a.name||a.action||'';
   else if(kind==='read'||kind==='write') raw=a.path||a.file_path||a.file||a.target||a.name||'';
   else if(kind==='search'||kind==='web') raw=a.query||a.pattern||a.url||a.uri||'';
+  else if(kind==='delegate') raw=_toolDelegateTargetLabel(tc,a);
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+}
+// delegate_task names its work in goal or a tasks batch; saved args may be a truncated string, so the result's count wins.
+function _toolDelegateTargetLabel(tc,a){
+  if(a.action&&a.action!=='spawn') return `subagents (${a.action})`;
+  const counted=String(tc&&tc.snippet||'').match(/"count"\s*:\s*(\d+)/);
+  let tasks=a.tasks;
+  const n=counted?+counted[1]:Array.isArray(tasks)?tasks.length:(String(tasks||'').match(/['"]goal['"]\s*:/g)||[]).length;
+  if(n>1) return `${n} subagents`;
+  if(Array.isArray(tasks)) tasks=tasks[0]&&tasks[0].goal;
+  else if(typeof tasks==='string') tasks=(tasks.match(/['"]goal['"]\s*:\s*['"]([^'"]+)/)||[])[1];
+  return tasks||a.goal||a.task||'';
 }
 function _toolReadRangeLabel(tc){
   const name=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
@@ -23503,6 +24475,9 @@ function _toolGroupIcon(rows){
 }
 function _syncToolRowsContainer(tools, isLiveWorklog){
   if(!tools) return;
+  // Scene reconciliation already proved these exact card nodes unchanged.
+  // Do not detach them just to recreate an identical disclosure wrapper.
+  if(tools._anchorSceneToolsStable) return;
   const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
   const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);
@@ -23868,6 +24843,8 @@ function _syncToolCallGroupSummary(group){
         ? _activityProcessedElapsedLabel(group)
         : _activitySettledProcessedLabel(group);
       label.textContent=processedLabel||t('processed_elapsed','');
+      // A running subagent's open worklog is live work, not processed work.
+      if(group.getAttribute('data-subagent-running')==='1') label.textContent=t('gateway_running_label');
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
@@ -24288,7 +25265,7 @@ function editMessage(btn) {
   bar.querySelector('.msg-edit-cancel').onclick = () => cancelEdit(row, originalText, body);
 
   ta.addEventListener('keydown', e => {
-    if(e.key==='Enter' && !e.shiftKey) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
+    if(window._composerShouldSendOnKey?window._composerShouldSendOnKey(e):(e.key==='Enter'&&!e.shiftKey)) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
     if(e.key==='Escape') { e.preventDefault(); cancelEdit(row, originalText, body); }
   });
 }
@@ -24330,6 +25307,9 @@ function autoResizeTextarea(ta) {
 let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy || _submitEditInFlight) return;
+  // #8523: a session another client owns is read-only here. send() refuses it, so stop before the
+  // truncate: the edit must not cut the transcript and then end with no message.
+  if(S.session.chat_read_only_reason){ setStatus(S.session.chat_read_only_reason); return; }
   _submitEditInFlight = true;
   try {
     const initialSid = S.session.session_id;
@@ -24369,6 +25349,8 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
+  // #8523: a read-only session refuses the turn server-side; say why before touching the transcript.
+  if(S.session.chat_read_only_reason){ setStatus(S.session.chat_read_only_reason); return; }
   const row=btn&&btn.closest&&btn.closest('[data-msg-idx]');
   if(!row)return;
   const clickedRowIdx=parseInt(row.dataset.msgIdx,10);
@@ -25917,7 +26899,7 @@ if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
 if(!S._dirCache) S._dirCache={};
 
-function renderFileTree(){
+function renderFileTree(opts={}){
   const box=$('fileTree');
   // #5657: capture the scroll position before wiping the container. box.innerHTML=''
   // detaches every row, collapsing scrollHeight so the browser clamps scrollTop to 0;
@@ -25929,7 +26911,24 @@ function renderFileTree(){
   // BELOW the clicked disclosure, so the clicked row keeps its offset from the top (no
   // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
   const prevScrollTop=box?box.scrollTop:0;
+  // Same class of loss as the scroll position above, one layer up: innerHTML=''
+  // detaches every row, so the roving tab stop would be rebuilt onto the FIRST
+  // row and the keyboard user thrown back to the top of the tree by the very
+  // act of expanding a directory. Remembered by entry path (the index shifts
+  // when rows appear), restored after the render tail. A root load passes
+  // opts.scope naming the tree, and a root refresh its refill object as
+  // opts.partial on its first render and opts.completesRefill on the second
+  // (see loadDir).
+  const prevTreeFocus=(typeof a11yTreeRememberFocus==='function')
+    ? a11yTreeRememberFocus(box, {completesRefill: (opts&&opts.completesRefill)||null}) : null;
   box.innerHTML='';
+  // No rows will be rendered: the container is not a tree any more, and focus
+  // that was on a row goes to the Files tab instead of dropping to <body>.
+  const treeEmptied=()=>{
+    if(typeof a11yTreeReset==='function') a11yTreeReset(box,{
+      hadFocus: !!(prevTreeFocus&&prevTreeFocus.hadFocus), focusTo: $('workspaceFilesTab'),
+    });
+  };
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
@@ -25938,6 +26937,8 @@ function renderFileTree(){
   if(!hasWorkspace){
     _syncWorkspaceBirthtimeSupportScope('');
     if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
+    // Before hiding the box: a hidden element may already have lost focus.
+    treeEmptied();
     box.style.display='none';
     return;
   }
@@ -25947,11 +26948,26 @@ function renderFileTree(){
   const visibleEntries=_workspaceEntriesForRender(S.entries);
   if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+    treeEmptied();
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+  // The container must be a TREE, not a set of loose divs: without role=tree a
+  // screen reader neither announces it nor offers its own navigation, and
+  // without a name the user does not know what they entered. Called after EVERY
+  // render because innerHTML='' above destroys the rows; the helper is
+  // idempotent and binds its keyboard listener only once.
+  if(typeof a11yTree==='function'){
+    a11yTree(box, {label: t('workspace_tree_aria')});
+  }
   // #5657: restore the pre-wipe scroll position now that the tree is tall again.
   if(box) box.scrollTop=prevScrollTop;
+  // Restore the keyboard position last, after every row carries its contract.
+  // Falls back to a neighbouring or the first row when the remembered entry is
+  // gone, so the tree always keeps exactly one tab stop. A partial render (a
+  // root refresh before the expanded folders' listings are back) carries the
+  // missed position to the render that completes it.
+  if(typeof a11yTreeRestoreFocus==='function') a11yTreeRestoreFocus(box, prevTreeFocus, {carry: (opts&&opts.partial)||null, scope: (opts&&opts.scope)||null});
 }
 
 let _wsActiveDragPath=null;
@@ -26108,6 +27124,28 @@ function elideMiddle(str, maxLen = 60) {
   return str.slice(0, half) + '...' + str.slice(str.length - half);
 }
 
+// Delete buttons stay for pointer users but leave the tab order: a tree has a
+// single tab stop, and a hidden "×" stop on every row would defeat it. The
+// Delete key on the focused row runs the same button instead.
+function _treeDeleteButtonA11y(row, del, name){
+  del.type='button';
+  del.tabIndex=-1;
+  del.setAttribute('aria-label', t('delete_entry_aria', name));
+  row.addEventListener('keydown',(e)=>{
+    if(e.key!=='Delete'||e.target!==row||e.altKey||e.ctrlKey||e.metaKey||e.shiftKey) return;
+    e.preventDefault();
+    del.click();
+  });
+}
+
+// Point the renamed row at its new path before the re-render, so the keyboard
+// position follows the entry instead of falling to a neighbour.
+function _treeRowRenamed(oldPath, newName){
+  const box=$('fileTree');
+  const row=box&&box.querySelector(`[data-a11y-tree-path="${CSS.escape(oldPath)}"]`);
+  if(row) row.dataset.a11yTreePath=_workspaceJoinTargetPath(_workspaceParentDir(oldPath), newName);
+}
+
 function _renderTreeItems(container, entries, depth){
   for(const item of entries){
     const el=document.createElement('div');el.className='file-item';
@@ -26142,6 +27180,9 @@ function _renderTreeItems(container, entries, depth){
       arrow.className='file-tree-toggle';
       const isExpanded=S._expandedDirs.has(item.path);
       arrow.textContent=isExpanded?'\u25BE':'\u25B8';
+      // The glyph says nothing to a screen reader; the row's aria-expanded
+      // carries the state.
+      arrow.setAttribute('aria-hidden','true');
       el.appendChild(arrow);
     }else{
       // Keep file icons aligned with sibling directories that occupy this
@@ -26155,6 +27196,8 @@ function _renderTreeItems(container, entries, depth){
     // Icon
     const iconEl=document.createElement('span');
     iconEl.className='file-icon';
+    // The entry kind is in the row's accessible name (".cache folder").
+    iconEl.setAttribute('aria-hidden','true');
     iconEl.innerHTML = isExternalLink
       ? li('external-link', 14)
       : isDirLike
@@ -26225,6 +27268,7 @@ function _renderTreeItems(container, entries, depth){
                 session_id:S.session.session_id,path:item.path,new_name:newName
               })});
               showToast(t('renamed_to')+newName);
+              _treeRowRenamed(item.path,newName);
               // Update expanded dirs cache key if renaming a directory
               if(isDirLike&&S._expandedDirs){
                 S._expandedDirs.delete(item.path);
@@ -26257,10 +27301,12 @@ function _renderTreeItems(container, entries, depth){
     el.appendChild(nameEl);
 
     // Size -- for real files and symlinks that resolve to files
+    let sizeText='';
     if(isFileLike&&item.size){
+      sizeText=`${(item.size/1024).toFixed(1)}k`;
       const sizeEl=document.createElement('span');
       sizeEl.className='file-size';
-      sizeEl.textContent=`${(item.size/1024).toFixed(1)}k`;
+      sizeEl.textContent=sizeText;
       el.appendChild(sizeEl);
     }
 
@@ -26269,12 +27315,14 @@ function _renderTreeItems(container, entries, depth){
       if(!isReadOnlyEscape){
         const del=document.createElement('button');
         del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+        _treeDeleteButtonA11y(el,del,item.name);
         del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
         el.appendChild(del);
       }
     }else if(isDirLike&& !isReadOnlyEscape){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+      _treeDeleteButtonA11y(el,del,item.name);
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceDir(item.path,item.name);};
       el.appendChild(del);
     }
@@ -26330,6 +27378,34 @@ function _renderTreeItems(container, entries, depth){
       el.onclick=async()=>openFile(item.path);
     }
 
+    // Tree contract: only here is everything about the row known - whether it
+    // is a directory, whether it is expanded, and which level it is on.
+    if(typeof a11yTreeRow==='function'){
+      // The icon is aria-hidden, so the kind carries what it showed,
+      // including the link icon of an internal symlink.
+      const kind=isExternalLink
+        ? t('tree_external_link_aria')
+        : isLk ? t('tree_symlink_aria')
+        : isDirLike ? t('tree_folder_aria') : t('tree_file_aria');
+      // The single tab stop is placed by a11yTreeRestoreFocus() after the render.
+      a11yTreeRow(el, {
+        level: depth+1,
+        expandable: isDirLike,
+        expanded: isDirLike && S._expandedDirs.has(item.path),
+        // Name first, then the kind and the size column's text, so a screen
+        // reader says what matters most first (word order is up to each
+        // locale).
+        label: t('tree_row_aria', item.name, kind, sizeText),
+        // What the name's tooltip tells pointer users (symlink target, read
+        // only), with the full target rather than the elided one. The rename
+        // hint is mouse-only.
+        description: isLk&&item.target&&!isExternalLink
+          ? t('symlink_link_to').replace('{target}', () => item.target)
+          : (nameEl.title&&nameEl.title!==t('double_click_rename') ? nameEl.title : ''),
+        path: item.path,
+      });
+    }
+
     container.appendChild(el);
 
     // Render children if directory is expanded
@@ -26342,6 +27418,10 @@ function _renderTreeItems(container, entries, depth){
         empty.className='file-item file-empty';
         empty.style.paddingLeft=(8+(depth+1)*16)+'px';
         empty.textContent=t('empty_dir');
+        // A tree may only contain tree items; announce the placeholder as an
+        // inert one so arrowing into an empty folder says so.
+        // Its path (the folder's, plus "/") lets focus survive a re-render.
+        if(typeof a11yTreeRow==='function') a11yTreeRow(empty,{level:depth+2,disabled:true,path:item.path+'/'});
         container.appendChild(empty);
       }
     }
@@ -26530,6 +27610,7 @@ async function _inlineRenameFileItem(item){
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
     showToast(t('renamed_to')+newName);
+    _treeRowRenamed(item.path,newName);
     // Update expanded dirs cache key if renaming a directory
     if(isDirLike&&S._expandedDirs){
       S._expandedDirs.delete(item.path);
@@ -26804,4 +27885,11 @@ async function uploadPendingFiles(options={}){
   const extracted=names.filter(n=>n.extracted);
   if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
   return names;
+}
+
+// Screen reader mode is a general opt-in preference. This setter owns the
+// runtime flag and pushes it to every consumer (currently the terminal).
+function setScreenReaderMode(enabled){
+  window._screenReaderMode=!!enabled;
+  if(typeof applyTerminalScreenReaderMode==='function') applyTerminalScreenReaderMode();
 }

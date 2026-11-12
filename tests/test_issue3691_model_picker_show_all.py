@@ -298,6 +298,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -435,6 +436,7 @@ function getModelLabel(v) {
   return value;
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -645,6 +647,7 @@ function makeNode(tag) {
       return querySelectorAllImpl(this, selector);
     },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -842,6 +845,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -981,6 +985,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -1067,6 +1072,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -1231,6 +1237,7 @@ function makeNode(tag) {
       return querySelectorAllImpl(this, selector);
     },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -1439,6 +1446,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -1628,6 +1636,7 @@ function makeNode(tag) {
       return querySelectorAllImpl(this, selector);
     },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -1798,6 +1807,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -2822,6 +2832,7 @@ function makeNode(tag) {
       return querySelectorAllImpl(this, selector);
     },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -2990,6 +3001,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}

@@ -405,7 +405,11 @@ function switchWorkspacePanelTab(tab){
   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
   const todosPanel = $('workspaceTodosPanel');
   if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
-  if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+  if(_workspacePanelActiveTab === 'artifacts'){
+    const ownerSessionId=S&&S.session&&S.session.session_id;
+    renderSessionArtifacts();
+    if(ownerSessionId) void _refreshSessionSkillUsageForOwner(ownerSessionId);
+  }
   if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
 }
 
@@ -431,6 +435,15 @@ function _loadWorkspacePanelTodos(){
 
 function _escHtml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _sessionSkillUsage(){
+  const raw=S&&S.session&&S.session.skill_provenance;
+  if(!raw||typeof raw!=='object'||Array.isArray(raw)) return [];
+  return Object.keys(raw)
+    .filter(name=>name&&Number.isInteger(raw[name])&&raw[name]>0)
+    .map(name=>({name,count:raw[name]}))
+    .sort((a,b)=>a.name.localeCompare(b.name));
 }
 
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
@@ -581,17 +594,42 @@ function collectSessionArtifacts(){
   return items.slice(0, 50);
 }
 
+const _sessionSkillUsageRefreshes = new WeakMap();
+
+async function _refreshSessionSkillUsageForOwner(sessionId){
+  const ownerId=String(sessionId||'').trim();
+  const ownerSession=S.session;
+  if(!ownerId||!ownerSession||ownerSession.session_id!==ownerId) return;
+  const generation=(_sessionSkillUsageRefreshes.get(ownerSession)||0)+1;
+  _sessionSkillUsageRefreshes.set(ownerSession,generation);
+  try{
+    const data=await api(`/api/session?session_id=${encodeURIComponent(ownerId)}&messages=0&resolve_model=0`);
+    if(S.session!==ownerSession||_sessionSkillUsageRefreshes.get(ownerSession)!==generation) return;
+    if(typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(ownerId)) return;
+    const usage=data&&data.session&&data.session.skill_provenance;
+    if(!usage||typeof usage!=='object'||Array.isArray(usage)) return;
+    S.session.skill_provenance=usage;
+    renderSessionArtifacts();
+  }catch(_){ }
+}
+
 function renderSessionArtifacts(){
   const root = $('workspaceArtifacts');
   const count = $('workspaceArtifactsCount');
   if(!root) return;
   const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
+  const skills = typeof _sessionSkillUsage==='function' ? _sessionSkillUsage() : [];
+  const ownerId=String(S.session&&S.session.session_id||'');
+  const currentFilesDisclosure=root.querySelector&&root.querySelector('details.workspace-artifact-files');
+  const currentDisclosure=root.querySelector&&root.querySelector('details.workspace-artifact-skills');
+  const filesOpen=!currentFilesDisclosure||currentFilesDisclosure.dataset.sessionId!==ownerId||currentFilesDisclosure.open;
+  const skillsOpen=!currentDisclosure||currentDisclosure.dataset.sessionId!==ownerId||currentDisclosure.open;
+  if(count) count.textContent = String(items.length + skills.length);
   if(!S.session){
     root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
     return;
   }
-  if(!items.length){
+  if(!items.length&&!skills.length){
     root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
     return;
   }
@@ -613,7 +651,7 @@ function renderSessionArtifacts(){
       tail: directory.slice(parentSlash + 1),
     };
   };
-  root.innerHTML = items.map(item => {
+  const fileMarkup = items.map(item => {
     const path = displayPath(item.path);
     const parts = splitArtifactDisplayPath(path);
     const directory = (parts.head || parts.tail)
@@ -623,6 +661,13 @@ function renderSessionArtifacts(){
     const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
     return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
   }).join('');
+  const filesSectionMarkup = items.length
+    ? `<details class="workspace-artifact-files" data-session-id="${esc(ownerId)}"${filesOpen?' open':''}><summary>${esc(t('workspace_artifact_files_changed') || 'Files changed')}<span class="workspace-artifact-file-count">${items.length}</span></summary><div class="workspace-artifact-file-list">${fileMarkup}</div></details>`
+    : '';
+  const skillMarkup = skills.length
+    ? `<details class="workspace-artifact-skills${items.length?'':' workspace-artifact-skills-only'}" data-session-id="${esc(ownerId)}"${skillsOpen?' open':''}><summary>${esc(t('insights_skill_usage_skills_used') || 'Skills Used')}<span class="workspace-artifact-skill-count">${skills.length}</span></summary><div class="workspace-artifact-skill-list">${skills.map(skill => `<div class="workspace-artifact-skill-row"><span class="workspace-artifact-skill-name">${esc(skill.name)}</span><span class="workspace-artifact-skill-uses">${esc(t('insights_skill_usage_col_uses') || 'Uses')}: ${skill.count}</span></div>`).join('')}</div></details>`
+    : '';
+  root.innerHTML = filesSectionMarkup + skillMarkup;
 }
 
 function projectSessionArtifactsForOwner(sessionId){
@@ -968,6 +1013,7 @@ function showWorkspaceTreeSkeleton(){
     }
     wrap.appendChild(row);
   }
+  if(typeof a11yTreeReset==='function') a11yTreeReset(tree, {focusTo: $('workspaceFilesTab')});
   tree.innerHTML = '';
   tree.appendChild(wrap);
   tree.style.display = '';
@@ -995,6 +1041,9 @@ async function loadDir(path, opts={}){
                              // from the previous workspace — which would pass the session_id
                              // guard because an empty-session switch reuses the same id — is
                              // rejected here instead of painting the wrong profile's files.
+  // A root refresh renders twice (partial, then complete). This object owns
+  // the keyboard position carried between the two; every exit drops it.
+  let refill=null;
   try{
     if(!path||path==='.'||refreshExpanded){
       if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
@@ -1015,7 +1064,15 @@ async function loadDir(path, opts={}){
       if(typeof syncTerminalButton==='function')syncTerminalButton();
       showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
     }
-    S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
+    // A root refresh cleared the expanded folders' listings; this first render
+    // is partial when the block below will render again once they load.
+    const refillsExpanded=(!path||path==='.'||refreshExpanded)&&!!(S._expandedDirs&&S._expandedDirs.size);
+    // The scope names this tree (session, generation, workspace): a keyboard
+    // position is only ever carried within one tree (a11y-helpers.js). Row
+    // paths are workspace-relative, so the folder shown does not matter.
+    const treeScope=[sessionId,treeGen,(S.session&&S.session.workspace)||''].join('\n');
+    if(refillsExpanded) refill={};
+    S.entries=data.entries||[];renderBreadcrumb();renderFileTree({partial:refill,scope:treeScope});
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
@@ -1032,7 +1089,7 @@ async function loadDir(path, opts={}){
         if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
-      if(expanded.size>0)renderFileTree();
+      if(expanded.size>0)renderFileTree({completesRefill:refill,scope:treeScope});
     }
     if(!preservePreview&&typeof clearPreview==='function'){
       const hiddenEdits=typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits();
@@ -1062,6 +1119,10 @@ async function loadDir(path, opts={}){
       return;
     }
     console.warn('loadDir',e);
+  }finally{
+    // Aborted (session/workspace changed), failed, or nothing left to refill:
+    // a carried position must not reach a later, unrelated refill.
+    if(refill&&typeof a11yTreeDropCarry==='function') a11yTreeDropCarry($('fileTree'), refill);
   }
 }
 

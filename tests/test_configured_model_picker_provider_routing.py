@@ -448,6 +448,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
   };
   node.classList = makeClassList();
@@ -545,6 +546,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function syncModelChip() {}
@@ -772,6 +774,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
   };
   node.classList = makeClassList();
@@ -886,6 +889,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function syncModelChip() {}
@@ -1031,6 +1035,7 @@ function extractFunction(source, name) {
 
 eval([
   '_normalizeConfiguredModelKey',
+  '_configuredModelIdentity',
   '_getOptionProviderId',
   '_isEquivalentConfiguredModelEntry',
 ].map(name => extractFunction(ui, name)).join('\n'));
@@ -1141,6 +1146,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(sel) { return this._qs ? this._qs[sel] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() {},
   };
   const set = new Set();
@@ -1216,6 +1222,7 @@ function t(key,...args) { if(key==='model_show_all_models') return `Show all ${a
 function li() { return 'x'; }
 function getModelLabel(v) { return String(v || ''); }
 function _normalizeConfiguredModelKey(v) { return String(v||'').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return (badgeMap||{})[value] || null; }
 function closeModelDropdown() {}
 function syncModelChip() {}
