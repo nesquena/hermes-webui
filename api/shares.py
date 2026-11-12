@@ -1116,8 +1116,67 @@ def _snapshot_owner(payload: dict | None) -> str:
     return str(payload.get("source_session_id") or "").strip()
 
 
+_MAX_COMPRESSION_CHAIN_HOPS = 64
+_LINEAGE_KEYS = (
+    "parent_session_id",
+    "pre_compression_snapshot",
+    "pre_compression_continuation_session_id",
+)
+
+
+def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
+    """Return (parent_session_id, is_pre_compression_snapshot, continuation_session_id).
+
+    Reads from the cheap metadata prefix first; when the prefix is unavailable
+    (None) or does not carry the lineage keys (e.g. pushed past the prefix budget
+    by an oversized field such as compression_anchor_summary), recovers authoritative
+    metadata through Session.load_metadata_only (#8950).
+    Returns None if the session file is missing, unsafe, or unparseable.
+    """
+    if not sid:
+        return None
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(sid):
+            return None
+        session_path = models.SESSION_DIR / f"{sid}.json"
+        if not session_path.is_file():
+            return None
+
+        prefix = models._persisted_session_meta_prefix(sid)
+        if isinstance(prefix, dict) and all(k in prefix for k in _LINEAGE_KEYS):
+            return (
+                str(prefix.get("parent_session_id") or "").strip(),
+                bool(prefix.get("pre_compression_snapshot")),
+                str(prefix.get("pre_compression_continuation_session_id") or "").strip(),
+            )
+
+        # Incomplete observation: prefix is None or missing lineage keys.
+        # Recover authoritative metadata through Session.load_metadata_only (#8950).
+        session = models.Session.load_metadata_only(sid)
+        if session is None:
+            return None
+        return (
+            str(getattr(session, "parent_session_id", None) or "").strip(),
+            bool(getattr(session, "pre_compression_snapshot", False)),
+            str(getattr(session, "pre_compression_continuation_session_id", None) or "").strip(),
+        )
+    except Exception:
+        logger.debug("Failed to read session lineage for %s", sid, exc_info=True)
+        return None
+
+
 def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
-    """True if *child_sid* is the compression continuation of *parent_sid*."""
+    """True if *child_sid* is a compression continuation of *parent_sid*.
+
+    Walks the durable reciprocal compression chain backward from *child_sid*
+    to *parent_sid* up to a fixed depth bound. Each hop is verified on both
+    sides: the child must name the parent as its ``parent_session_id``, and the
+    parent must be a ``pre_compression_snapshot`` naming that exact child as its
+    ``pre_compression_continuation_session_id``. Missing, malformed, unsafe, or
+    cyclic lineage anywhere in the chain fails closed (#8950).
+    """
     if not child_sid or not parent_sid or child_sid == parent_sid:
         return False
     try:
@@ -1125,21 +1184,43 @@ def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
 
         if not models.is_safe_session_id(child_sid) or not models.is_safe_session_id(parent_sid):
             return False
-        child_path = models.SESSION_DIR / f"{child_sid}.json"
-        if not child_path.is_file():
-            return False
-        prefix = models._persisted_session_meta_prefix(child_sid)
-        if isinstance(prefix, dict):
-            parent_id = str(prefix.get("parent_session_id") or "").strip()
+
+        visited: set[str] = {child_sid}
+        curr = child_sid
+
+        for _ in range(_MAX_COMPRESSION_CHAIN_HOPS):
+            curr_lineage = _read_session_lineage(curr)
+            if curr_lineage is None:
+                return False
+            parent_id, _, _ = curr_lineage
+            if not parent_id or not models.is_safe_session_id(parent_id):
+                return False
+            if parent_id in visited:
+                # Cyclic lineage detected — fail closed.
+                return False
+
+            parent_lineage = _read_session_lineage(parent_id)
+            if parent_lineage is None:
+                return False
+            _, is_snapshot, continuation_id = parent_lineage
+            if not is_snapshot or continuation_id != curr:
+                # Reciprocal link broken — fail closed.
+                return False
+
             if parent_id == parent_sid:
-                parent_prefix = models._persisted_session_meta_prefix(parent_sid)
-                if isinstance(parent_prefix, dict) and parent_prefix.get("pre_compression_snapshot"):
-                    continuation_id = str(parent_prefix.get("pre_compression_continuation_session_id") or "").strip()
-                    if continuation_id == child_sid:
-                        return True
+                return True
+
+            visited.add(parent_id)
+            curr = parent_id
+
+        # Exceeded max chain depth bound.
+        return False
     except Exception:
-        pass
-    return False
+        logger.debug(
+            "Compression continuation check failed between %s and %s",
+            child_sid, parent_sid, exc_info=True,
+        )
+        return False
 
 
 def _read_share_snapshot(
