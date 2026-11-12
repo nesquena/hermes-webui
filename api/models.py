@@ -1474,6 +1474,45 @@ def _load_session_from_path(path: Path) -> "Session | None":
     return Session(**data)
 
 
+def _load_session_for_listing(sid) -> "Session | None":
+    """``Session.load(sid)`` without its repair save, for read-only listing paths (#9007).
+
+    ``Session.load`` saves a sidecar whose duplicate partials it collapsed. The
+    session list reads sessions the requesting profile may not own, without
+    their lock, so that save could overwrite a turn the owner wrote meanwhile.
+    This keeps the collapse in memory, as ``_load_session_from_path`` does, and
+    is otherwise ``Session.load``: same id and path checks, a corrupt file still
+    raises, the draft overlay and the #8852/#8830 marks are keyed by ``sid``,
+    and an uncollapsed legacy file fills the facts cache.
+    """
+    if not is_safe_session_id(sid):
+        return None
+    p = SESSION_DIR / f'{sid}.json'
+    if not p.exists():
+        return None
+    pre_read_sig = _sidecar_stat_signature(p)
+    data = json.loads(p.read_text(encoding='utf-8'))
+    share_fields_misplaced = isinstance(data, dict) and bool(_sidecar_keys_after_body(data, _SHARE_FIELD_KEYS))
+    data['_pending_hidden_wakeup_from_writer'] = True
+    data['messages'], collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    names_other_session = data.get('session_id') != sid
+    session = Session(**_apply_session_draft_overlay(data, sid))
+    session._share_fields_misplaced = share_fields_misplaced
+    if names_other_session:
+        session._sidecar_names_other_session = sid
+    if not collapsed_partials and 'anchor_scene_index' not in data:
+        try:
+            _legacy_sidecar_facts_put(
+                sid,
+                len(session.messages or []),
+                _anchor_scene_index_from_records(getattr(session, 'anchor_activity_scenes', None)),
+                expected_sig=pre_read_sig,
+            )
+        except Exception:
+            logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+    return session
+
+
 def _lookup_index_message_count(session_id):
     """Return the indexed message count without loading the full session file."""
     return _index_message_count_map().get(str(session_id))
@@ -9828,7 +9867,7 @@ def all_sessions(
             for i, s in enumerate(index):
                 if 'last_message_at' not in s:
                     _diag_stage(diag, "all_sessions.backfill_load")
-                    full = Session.load(s.get('session_id'))
+                    full = _load_session_for_listing(s.get('session_id'))  # never saves (#9007)
                     if full:
                         index[i] = full.compact(sidebar_metadata_only=sidebar_metadata_only)
                         backfilled.append(full)
@@ -9964,7 +10003,7 @@ def all_sessions(
     for p in SESSION_DIR.glob('*.json'):
         if p.name.startswith('_'): continue
         try:
-            s = Session.load(p.stem)
+            s = _load_session_for_listing(p.stem)  # never saves (#9007)
             if s: out.append(s)
         except Exception:
             logger.debug("Failed to load session from %s", p)
@@ -13588,9 +13627,10 @@ def _reconciled_visible_count_for_sidebar(
         session = None
     if session is None or getattr(session, '_loaded_metadata_only', False):
         # Metadata-only stubs carry messages=[] by contract; the sidecar
-        # transcript needs a full load (bounded to this one session).
+        # transcript needs a full load (bounded to this one session). A sidebar
+        # poll holds no session lock, so the read must not save (#9007).
         try:
-            session = Session.load(str(sid))
+            session = _load_session_for_listing(str(sid))
         except Exception:
             return None
     if session is None:

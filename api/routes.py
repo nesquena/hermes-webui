@@ -3102,8 +3102,10 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                 # pays nothing because it skips the load via the
                 # ``else`` branch below.
                 try:
-                    from api.models import Session as _Session
-                    _loaded = _Session.load(sid)
+                    # Never a repairing Session.load: this row may be another
+                    # profile's, read without its lock (#9007).
+                    from api.models import _load_session_for_listing
+                    _loaded = _load_session_for_listing(sid)
                     sidecar_has_messages = bool(
                         _loaded is not None and len(_loaded.messages or []) > 0
                     )
