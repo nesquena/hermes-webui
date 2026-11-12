@@ -51,7 +51,12 @@ class TestOpenInVsCodeBackendWiring:
         assert "def _handle_file_open_vscode(handler, body):" in src
 
     def test_handler_uses_safe_resolve(self):
-        """Handler must use safe_resolve to prevent path traversal."""
+        """Handler must use safe_resolve to prevent path traversal.
+
+        The resolve root is the #7217 translation tier's WebUI-local
+        workspace root (_file_ops_ws_root), not the raw agent-visible
+        session.workspace.
+        """
         src = ROUTES.read_text(encoding="utf-8")
         m = re.search(
             r"def _handle_file_open_vscode\(handler, body\):.*?(?=\ndef )",
@@ -60,7 +65,7 @@ class TestOpenInVsCodeBackendWiring:
         )
         assert m, "_handle_file_open_vscode body not found"
         body = m.group(0)
-        assert "safe_resolve(Path(s.workspace)" in body
+        assert "safe_resolve(_file_ops_ws_root(s)" in body
 
     def test_handler_checks_existence(self):
         """Handler must require the target to exist (unlike copy-path)."""

@@ -78,7 +78,10 @@ class TestCopyFilePathMenuItem:
         src = ROUTES.read_text(encoding="utf-8")
         assert 'parsed.path == "/api/file/path"' in src
         assert "def _handle_file_path(handler, body):" in src
-        # Must use safe_resolve to prevent path traversal.
+        # Must use safe_resolve to prevent path traversal. The resolve root is
+        # the #7217 translation tier's WebUI-local workspace root, not the raw
+        # agent-visible session.workspace (identical in single-container
+        # deployments, translated in multi-container ones).
         # Find the handler body and check.
         m = re.search(
             r"def _handle_file_path\(handler, body\):\s*(?:\"\"\".*?\"\"\")?\s*(.*?)(?=\ndef )",
@@ -87,7 +90,7 @@ class TestCopyFilePathMenuItem:
         )
         assert m, "_handle_file_path body not found"
         body = m.group(1)
-        assert "safe_resolve(Path(s.workspace)" in body
+        assert "safe_resolve(_file_ops_ws_root(s)" in body
         assert "session_id" in body  # require() check
         # Returns the absolute path as a string.
         assert 'j(handler, {"ok": True, "path": str(target)})' in body
