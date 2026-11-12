@@ -707,7 +707,16 @@ def test_the_repair_writes_only_the_sidecar_the_request_was_allowed(isolated_sta
     assert row_before == [("work", "Legacy history")]
     handler = _FakeHandler()
     handle_get(handler, urllib.parse.urlparse("/api/session?session_id=s_8830_copy&messages=1"))
-    assert handler.status == 200
+    # #8834: the route now refuses a sidecar whose body names another session before it loads
+    # it (ownership can't be verified, the #8094 rule), so it never reaches the repair.
+    assert handler.status == 404
+    assert (other.read_bytes(), other.stat().st_mtime_ns) == before
+    assert not other.with_suffix(".json.bak").exists()
+    # The repair's own refusal still guards any other caller: load the copy and repair it
+    # directly under the id the request named.
+    session = models.Session.load("s_8830_copy")
+    assert session is not None and session._share_fields_misplaced is True
+    assert models.repair_session_share_field_order(session, "s_8830_copy") is False
     assert (other.read_bytes(), other.stat().st_mtime_ns) == before
     assert not other.with_suffix(".json.bak").exists()
     # The index row is rebuilt from the body, keyed by the body's id: without the refusal the
@@ -759,7 +768,13 @@ def test_the_repair_never_writes_outside_the_session_dir(isolated_state, active_
     before = evil.read_bytes()
     handler = _FakeHandler()
     handle_get(handler, urllib.parse.urlparse("/api/session?session_id=s_8830_traversal&messages=1"))
-    assert handler.status == 200
+    # #8834: refused before the load (the body doesn't name this file), so nothing is written.
+    assert handler.status == 404
+    assert evil.read_bytes() == before
+    # The repair itself, called directly with the request's id, still writes nothing outside.
+    session = models.Session.load("s_8830_traversal")
+    assert session is not None and session._share_fields_misplaced is True
+    assert models.repair_session_share_field_order(session, "s_8830_traversal") is False
     assert evil.read_bytes() == before
     assert sorted(p.name for p in models.SESSION_DIR.parent.iterdir() if p.name.startswith("evil")) == ["evil.json"]
 
