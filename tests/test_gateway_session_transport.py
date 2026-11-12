@@ -85,7 +85,7 @@ def test_compressed_email_continuation_checks_owning_source(tmp_path, monkeypatc
     # The lineage decision belongs to WebUI; a fake read-only store keeps this
     # security check active even in CI without an Agent checkout.
     hermes_state = ModuleType("hermes_state")
-    setattr(hermes_state, "SessionDB", Store)
+    hermes_state.__dict__["SessionDB"] = Store
     monkeypatch.setitem(sys.modules, "hermes_state", hermes_state)
     assert sessions._verified_messaging_owner(home, "tip", "owner") is expected
 
