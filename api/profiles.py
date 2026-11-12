@@ -990,14 +990,17 @@ _CHAT_BACKEND_ENV_CACHE: dict = {}
 def chat_backend_environ_for_profile(profile) -> dict:
     """The env slice deciding a profile's browser chat backend (#9024 review).
 
-    A launcher/deployment export captured at process start wins — a genuine
-    operator override (``_INITIAL_PROCESS_ENV``, taken before any profile
-    ``.env`` was applied). A profile's own ``.env`` applies only when the
-    launcher did not set the key. Live ``os.environ`` is never read: after a
-    profile switch it holds the ACTIVE profile's ``.env`` (#8432), which would
-    let the requesting profile decide another profile's backend.
+    A live ``os.environ`` value counts as a launcher/operator export only when
+    ``_reload_dotenv`` did NOT load it — provenance is tracked in
+    ``_loaded_profile_env_keys`` (#8432). A key loaded from the ACTIVE
+    profile's ``.env`` must not decide another profile's session, so only the
+    owner's own ``.env`` applies then (mtime-cached: the read runs on every
+    session payload projection).
     """
-    value = _INITIAL_PROCESS_ENV.get(CHAT_BACKEND_ENV_KEY)
+    value = os.environ.get(CHAT_BACKEND_ENV_KEY)
+    if value and CHAT_BACKEND_ENV_KEY in _loaded_profile_env_keys:
+        # The active profile's .env value — not this profile's rule.
+        value = None
     if not value:
         try:
             home = get_hermes_home_for_profile(profile)

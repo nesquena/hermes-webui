@@ -444,10 +444,10 @@ def chat_backend_rule_for_session(session, config_data=None) -> tuple:
     ``get_config_snapshot()`` answers for the request thread's active profile,
     so with mixed backends across profiles a session could be refused — or
     admitted to an in-process agent — by another profile's setting. The owning
-    profile's ENV decides alongside its config (#9024 review round 2): the
-    launcher export captured at process start wins, then the owner's own
-    ``.env``, then its config.yaml — the live ``os.environ`` (the active
-    profile's ``.env`` after a switch) never decides another profile's session.
+    profile's ENV decides alongside its config (#9024 review round 2): a live
+    launcher export wins, then the owner's own ``.env``, then its config.yaml —
+    but a value the ACTIVE profile's ``.env`` loaded into ``os.environ``
+    (#8432 provenance) never decides another profile's session.
     ``config_data`` is the fallback for callers with no session context (the
     request snapshot) and for resolution failures; fail-open here only picks
     the pre-#8860 rule, never a local in-process turn the owning profile did

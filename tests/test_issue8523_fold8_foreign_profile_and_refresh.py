@@ -71,6 +71,7 @@ def chat_start(tmp_path, monkeypatch):
         monkeypatch.setattr(routes, "_get_active_profile_name", lambda: active)
         # Native session transport on or off (a configured transport exempts a listed session from read-only).
         monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *a, **k: transport)
+        monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *a, **k: transport)
         monkeypatch.setattr(gateway_sessions, "configured", lambda *a, **k: transport)
         refreshed.clear()
         body = {"session_id": sid, "message": "hello", **(extra or {})}

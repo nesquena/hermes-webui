@@ -254,15 +254,15 @@ def test_refusal_does_not_load_or_rewrite_the_session(tmp_path, monkeypatch, no_
     assert sid not in cache, "the refused request loaded (and cached) the session"
 
 
-def _owner_env_from(monkeypatch, tmp_path, *, launcher=None, dotenv=None):
+def _owner_env_from(monkeypatch, tmp_path, *, dotenv=None):
     """Point the real owner-env resolver at controlled inputs.
 
-    ``launcher`` seeds the process-start snapshot; ``dotenv`` seeds a REAL
+    ``dotenv`` seeds a REAL
     ``.env`` in the owner profile's home (the resolver stats the file, so it
-    must exist). The live ``os.environ`` is set separately per test to prove it
-    is never consulted for the owner's decision.
+    must exist). The live ``os.environ`` / provenance set is configured
+    separately per test: a launcher export is a live value NOT in
+    ``_loaded_profile_env_keys``; the active profile's .env value IS.
     """
-    monkeypatch.setattr(profiles, "_INITIAL_PROCESS_ENV", dict(launcher or {}))
     home = tmp_path / "owner-home"
     home.mkdir()
     if dotenv:
@@ -277,20 +277,22 @@ def _owner_env_from(monkeypatch, tmp_path, *, launcher=None, dotenv=None):
     profiles._CHAT_BACKEND_ENV_CACHE.clear()
 
 
-def test_live_process_env_cannot_unlock_a_gateway_owner(monkeypatch, tmp_path, captured):
+def test_active_profile_env_cannot_unlock_a_gateway_owner(monkeypatch, tmp_path, captured):
     """#9024 review round 2: the active profile's env must not decide the owner.
 
-    The owning profile's config selects gateway, but the live process env —
-    which after a profile switch carries the REQUESTING profile's .env — says
-    legacy. The refusal must stand: only the owner's launcher export, its own
-    .env, or its config can change the answer.
+    The owning profile's config selects gateway, but the live process env says
+    legacy AND the provenance set (#8432) says that value came from the ACTIVE
+    profile's .env — exactly what a profile switch leaves in os.environ. The
+    refusal must stand: only a launcher export, the owner's own .env, or the
+    owner's config can change the answer.
     """
     monkeypatch.setattr(
         routes, "get_session_profile_readonly", lambda _sid: "owner"
     )
     monkeypatch.setattr(gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG))
-    _owner_env_from(monkeypatch, tmp_path, launcher={}, dotenv={})
+    _owner_env_from(monkeypatch, tmp_path, dotenv={})
     monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "legacy")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {_ENV_KEY})
 
     routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
 
@@ -304,7 +306,7 @@ def test_owner_env_file_selects_gateway(monkeypatch, tmp_path, captured):
         routes, "get_session_profile_readonly", lambda _sid: "owner"
     )
     monkeypatch.setattr(gateway_sessions, "config_for_profile", lambda _profile=None: {})
-    _owner_env_from(monkeypatch, tmp_path, launcher={}, dotenv={"HERMES_WEBUI_CHAT_BACKEND": "gateway"})
+    _owner_env_from(monkeypatch, tmp_path, dotenv={"HERMES_WEBUI_CHAT_BACKEND": "gateway"})
     monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
 
     routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
@@ -314,11 +316,12 @@ def test_owner_env_file_selects_gateway(monkeypatch, tmp_path, captured):
 
 
 def test_launcher_export_overrides_owner_env_file(monkeypatch, tmp_path, captured_route_j):
-    """A genuine launcher export (process-start env) wins over the owner's .env.
+    """A genuine launcher export (live, not profile-loaded) wins over the owner's .env.
 
-    The operator started the process with legacy; the owner profile's .env
-    says gateway. The launcher posture decides, so the local owner config
-    admits the feature and the next admission gate (#7293) answers.
+    The operator exported legacy; the owner profile's .env says gateway. The
+    launcher value is not in the #8432 provenance set, so it is a genuine
+    operator override and the local owner config admits the feature — the
+    next admission gate (#7293) answers.
     """
     monkeypatch.setattr(
         routes, "get_session_profile_readonly", lambda _sid: "owner"
@@ -330,10 +333,10 @@ def test_launcher_export_overrides_owner_env_file(monkeypatch, tmp_path, capture
     _owner_env_from(
         monkeypatch,
         tmp_path,
-        launcher={"HERMES_WEBUI_CHAT_BACKEND": "legacy"},
         dotenv={"HERMES_WEBUI_CHAT_BACKEND": "gateway"},
     )
-    monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "legacy")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
     drain = {"error": "server draining", "code": "server_draining", "_status": 503}
     monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
 
