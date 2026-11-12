@@ -43,6 +43,7 @@ from tests.test_issue8517_profile_scoped_memory import (  # noqa: F401  (fixture
     FakeMemoryManager,
     SharedInstanceMemoryProvider,
     _cached_agent,
+    _memory_manager_twin,
     _profile_identity,
     hc,
     homes,
@@ -90,7 +91,7 @@ def root_is(monkeypatch, homes):
 
 
 def _agent_without_claim_seam(monkeypatch):
-    monkeypatch.setitem(sys.modules, "agent.memory_manager", types.ModuleType("agent.memory_manager"))
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", _memory_manager_twin())
 
 
 def make_claiming_agent_cls(provider_for_build):
