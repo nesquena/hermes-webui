@@ -438,7 +438,7 @@ def test_profile_switch_accepts_bound_profile(monkeypatch):
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "devops"})
     monkeypatch.setattr("api.profiles.switch_profile", lambda name, process_wide=False: {"ok": True, "profile": name})
-    monkeypatch.setattr("api.config.invalidate_models_cache", lambda: None)
+    monkeypatch.setattr("api.config.invalidate_models_cache", lambda *_a, **_kw: None)
     monkeypatch.setattr("api.gateway_watcher.restart_watcher_for_profile", lambda _name: None)
 
     routes.handle_post(handler, SimpleNamespace(path="/api/profile/switch", query=""))
@@ -851,7 +851,7 @@ def test_consumers_route_through_auth_owner(monkeypatch):
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "devops"})
     monkeypatch.setattr("api.profiles.switch_profile", lambda name, process_wide=False: {"ok": True, "profile": name})
-    monkeypatch.setattr("api.config.invalidate_models_cache", lambda: None)
+    monkeypatch.setattr("api.config.invalidate_models_cache", lambda *_a, **_kw: None)
     monkeypatch.setattr("api.gateway_watcher.restart_watcher_for_profile", lambda _name: None)
 
     routes.handle_get(handler, SimpleNamespace(path="/api/auth/status", query=""))

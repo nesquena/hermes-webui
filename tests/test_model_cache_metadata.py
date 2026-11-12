@@ -112,6 +112,9 @@ def test_load_models_cache_from_disk_rejects_partial_metadata_cache(
 
 
 def test_get_available_models_ignores_invalid_ttl_memory_cache(monkeypatch):
+    # Pin the budget so a slow/loaded host cannot blow the global 4s limit and
+    # serve the over-budget stale payload instead of the rebuilt catalog.
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
     _reset_memory_cache()
 
     stale_cache = {
@@ -152,6 +155,9 @@ def test_get_available_models_does_not_use_disk_cache_after_config_mtime_change(
 ):
     cache_path = tmp_path / "models_cache.json"
     monkeypatch.setattr(config, "_models_cache_path", cache_path)
+    # Pin the budget so the rebuild cannot exceed the global 4s limit and
+    # serve the over-budget stale payload instead of the rebuilt catalog.
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
     cache_path.write_text(
         json.dumps(
             {
@@ -194,6 +200,9 @@ def test_get_available_models_ignores_legacy_disk_cache_and_rebuilds(
 ):
     cache_path = tmp_path / "models_cache.json"
     monkeypatch.setattr(config, "_models_cache_path", cache_path)
+    # Pin the budget so the rebuild cannot exceed the global 4s limit and
+    # serve the legacy stale disk groups instead of the rebuilt catalog.
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
     cache_path.write_text(
         json.dumps(
             {

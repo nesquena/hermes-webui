@@ -12,7 +12,15 @@ on:
       - 'api/**.py'
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
+      - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_virtual_transcript_anchor.py'
+      - 'tests/browser_reconnect_scene_redraw.py'
+      - 'tests/browser_settle_visibility_7676.py'
+      - 'tests/browser_approval_first_click.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_running_ring_inset.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -23,16 +31,41 @@ on:
       - 'api/**.py'
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
+      - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_virtual_transcript_anchor.py'
+      - 'tests/browser_reconnect_scene_redraw.py'
+      - 'tests/browser_settle_visibility_7676.py'
+      - 'tests/browser_approval_first_click.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_running_ring_inset.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
 
+# One run per pull request per workflow: a new push to a PR cancels this workflow's run for
+# the superseded head, queued or in progress, so a burst of PR updates does not hold every
+# later run in the shared runner queue. Only a PR run's FIRST attempt joins the PR group: a
+# re-run keeps its original (possibly superseded) head and must never cancel or replace the
+# latest head's run. Re-runs, pushes to master, tag pushes and manual dispatches get a unique
+# group (the run id), so they are never cancelled or held back.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 jobs:
   live-to-final:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    continue-on-error: true
+    # Same slow-mirror budget as browser-smoke.yml: `playwright install --with-deps`
+    # runs apt-get on every job, and on a slow Ubuntu mirror (~25-65 kB/s) the install
+    # step alone can run past 10 minutes. On 2026-10-22 the old 10-minute limit cut
+    # about 4% of this workflow's jobs, most inside the install step; the two blocking
+    # matrix rows below were each cut 14-16 times (census in PR #8494).
+    timeout-minutes: 30
+    # Keep existing proof rows informational; reconnect + #7676 settle and the
+    # #7091 approval first-click regressions fail CI.
+    continue-on-error: ${{ matrix.name != 'reconnect-scene-redraw' && matrix.name != 'settle-visibility-7676' && matrix.name != 'approval-first-click' }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +78,34 @@ jobs:
             scenario: terminal-error
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
+          - name: virtual-transcript-anchor
+            script: tests/browser_virtual_transcript_anchor.py
+          - name: reconnect-scene-redraw
+            script: tests/browser_reconnect_scene_redraw.py
+            browsers: chromium
+          # #7676: the settled reply must stay visible in Transparent Stream —
+          # real browser, no network interruption, virtualization on/off and
+          # both idle-reconcile outcomes. Strict: this is the regression guard
+          # for the blank-settled-reply report.
+          - name: settle-visibility-7676
+            script: tests/browser_settle_visibility_7676.py
+            browsers: chromium
+          # #7091: the approval card must answer on the FIRST click; a stale
+          # transport id is reconciled against the /api/approval/pending head and
+          # a click captured on A is never transferred to a queued successor B.
+          # Strict: a swallowed failure here would let a cross-approval
+          # regression land green.
+          - name: approval-first-click
+            script: tests/browser_approval_first_click.py
+          - name: live-scene-energy
+            script: tests/browser_live_scene_energy.py
+            browsers: chromium
+          - name: progress-animation
+            script: tests/browser_progress_animation.py
+            browsers: chromium
+          - name: running-ring-inset
+            script: tests/browser_running_ring_inset.py
+            browsers: chromium
     steps:
       - uses: actions/checkout@v4
 
@@ -58,6 +119,15 @@ jobs:
             **/pyproject.toml
             .github/workflows/conversation-lifecycle.yml
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Key on the lockfiles + this workflow: a dependency bump that moves
+          # the Playwright version rebuilds the cache instead of replaying a
+          # browser tree the installed driver can't launch.
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements*.txt', '.github/workflows/conversation-lifecycle.yml') }}
+
       - name: Install browser gate dependencies
         run: |
           python -m pip install --upgrade pip
@@ -68,7 +138,13 @@ jobs:
         env:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           HISTORICAL_HYDRATION_ARTIFACT_DIR: lifecycle-artifacts
+          # #8228 greptile P2: the virtual-transcript-anchor gate wrote its
+          # screenshot/snapshot/server log to a private temp dir, so a red
+          # matrix entry uploaded no evidence. Point it at the one directory
+          # the upload step below collects.
+          VIRTUAL_ANCHOR_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
+          BROWSERS: ${{ matrix.browsers }}
         run: python ${{ matrix.script }}
 
       - name: Run settlement frame proof
@@ -77,6 +153,14 @@ jobs:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: normal
           LIFECYCLE_TEST_BITE: settle-worklog-frame-proof
+        run: python tests/browser_conversation_lifecycle.py
+
+      - name: Recover a missing terminal frame
+        if: matrix.scenario == 'normal'
+        env:
+          LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts/missing-terminal
+          LIFECYCLE_SCENARIO: normal
+          LIFECYCLE_TEST_BITE: sidebar-idle-missing-terminal
         run: python tests/browser_conversation_lifecycle.py
 
       - name: Upload failure artifacts

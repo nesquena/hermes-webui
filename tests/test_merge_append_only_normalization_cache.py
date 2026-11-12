@@ -23,6 +23,33 @@ class _ExplodingList(list):
         raise RuntimeError("content __str__ must not run")
 
 
+def _count_content_normalizations(monkeypatch):
+    """Count how often structured content is actually normalized.
+
+    These tests originally counted ``__str__`` on the content list, because the
+    key builders stringified content with ``str()``. Structured content is now
+    serialized canonically (type-namespaced) instead, so ``str()`` never runs on
+    a list and the old counter reads zero.
+
+    The property under test is unchanged -- expensive normalization of the same
+    content must happen a bounded number of times, not once per key -- so the
+    counter now observes the normalization helper itself and ignores the cheap
+    passthrough calls where content has already been reduced to a string.
+    """
+    counts = {"count": 0}
+    original = models._canonical_structured_content
+
+    def _wrapped(content):
+        counts["count"] += 1
+        return original(content)
+
+    # Observe the serialisation itself, not the identity lookups: every key
+    # derivation asks for the identity, but a list must be serialised only once
+    # per merge call.
+    monkeypatch.setattr(models, "_canonical_structured_content", _wrapped)
+    return counts
+
+
 def _install_key_wrappers(monkeypatch):
     call_counts: dict[str, dict[int, int]] = {
         "merge": defaultdict(int),
@@ -66,6 +93,7 @@ def test_merge_append_only_caches_canonical_keys_and_preserves_identity(monkeypa
     sidecar_messages = [repeated_user, repeated_user, repeated_user, repeated_assistant]
     state_messages = [repeated_assistant, repeated_user]
 
+    normalizations = _count_content_normalizations(monkeypatch)
     call_counts = _install_key_wrappers(monkeypatch)
     merged = models.merge_session_messages_append_only(sidecar_messages, state_messages)
 
@@ -77,7 +105,8 @@ def test_merge_append_only_caches_canonical_keys_and_preserves_identity(monkeypa
     ]
     assert merged == [repeated_user, repeated_user, repeated_user, repeated_assistant]
 
-    assert str_calls["count"] == 2
+    assert normalizations["count"] == 2
+    assert str_calls["count"] == 0
     assert dict(call_counts["merge"]) == {
         id(repeated_user): 1,
         id(repeated_assistant): 1,
@@ -203,6 +232,7 @@ def test_merge_append_only_recomputes_after_mutation(monkeypatch):
         "timestamp": 3000,
     }
 
+    normalizations = _count_content_normalizations(monkeypatch)
     call_counts = _install_key_wrappers(monkeypatch)
     first = models.merge_session_messages_append_only([], [state_message])
     state_message["content"].append("second")
@@ -211,7 +241,8 @@ def test_merge_append_only_recomputes_after_mutation(monkeypatch):
     assert first == [state_message]
     assert second == [state_message]
     assert first is not second
-    assert str_calls["count"] == 2
+    assert normalizations["count"] == 2
+    assert str_calls["count"] == 0
     assert dict(call_counts["dedup"]) == {
         id(state_message): 2,
     }

@@ -163,13 +163,20 @@ def test_parity_cache_not_forced_reload_when_prefix_read_fails(session_store):
     Simulate an oversized metadata prefix by giving the session a large
     `compression_anchor_summary` so `_read_metadata_json_prefix` overflows and
     the slow path (Session.load_metadata_only) is taken.
+
+    Sized off `_METADATA_PREFIX_MAX_BYTES` rather than a literal: this test needs
+    the prefix read to FAIL, so hardcoding a number that happens to exceed
+    today's budget makes it silently stop exercising the slow path the next time
+    the budget moves. (It did: the budget went 64 KB -> 1 MiB and the old
+    `"Z" * 80000` no longer overflowed.)
     """
+    oversized = "Z" * (M._METADATA_PREFIX_MAX_BYTES + 100_000)
     scenes = {"scene0": {"updated_at": 1000.0, "scene": {}}}
     s = M.Session(session_id="p1", title="T", workspace=str(session_store.parent),
                   model="glm", messages=[{"role": "user", "content": "hi"},
                                          {"role": "assistant", "content": "yo"}])
     s.anchor_activity_scenes = scenes
-    s.compression_anchor_summary = "Z" * 80000  # push metadata prefix > 64KB
+    s.compression_anchor_summary = oversized
     s.save()
     # Sanity: the cheap prefix genuinely fails for this file (slow path taken).
     assert M._read_metadata_json_prefix(session_store / "p1.json") is None
@@ -180,7 +187,7 @@ def test_parity_cache_not_forced_reload_when_prefix_read_fails(session_store):
                                                      {"role": "assistant", "content": "yo"}])
     cached_parity.anchor_activity_scenes = {"scene0": {"updated_at": 1000.0, "scene": {}}}
     cached_parity._anchor_scene_index = {}  # stale/empty load-time fingerprint
-    cached_parity.compression_anchor_summary = "Z" * 80000
+    cached_parity.compression_anchor_summary = oversized
     assert M._cached_session_lags_disk(cached_parity) is False
     # But a genuinely-behind cache (disk has a newer scene) still reloads.
     cached_behind = M.Session(session_id="p1", title="T", workspace=str(session_store.parent),

@@ -423,6 +423,72 @@ def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
     assert not any(msg.get("_error") for msg in saved.messages)
 
 
+def test_auth_retry_success_observes_replacement_agent_runtime(tmp_path, monkeypatch):
+    from api import run_journal
+
+    session = _prepare_session("auth_runtime", "stream_auth_runtime", pending_user_message="Please retry")
+    Base = _build_auth_failure_agent(token_text="")
+
+    class ReplacementAgent(Base):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.model = "original" if self.__class__.runs == 0 else "healed-model"
+            self.provider = "old-provider" if self.__class__.runs == 0 else "healed-provider"
+
+    monkeypatch.setattr(run_journal, "_default_session_dir", lambda: tmp_path / "sessions")
+    q = queue.Queue()
+    streaming.STREAMS["stream_auth_runtime"] = q
+    config.STREAM_PARTIAL_TEXT["stream_auth_runtime"] = ""
+    heal_rt = {"provider": "test-provider", "api_key": "fresh-key", "base_url": None}
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=ReplacementAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
+        streaming._run_agent_streaming(session.session_id, "Please retry", "test-model", str(tmp_path), "stream_auth_runtime")
+
+    events = _queue_events(q)
+    assert any(name == "done" for name, _ in events)
+    assert [(item["model"], item["provider"]) for name, item in events if name == "runtime_model"] == [
+        ("healed-model", "healed-provider")]
+    summary = run_journal.latest_run_summary("auth_runtime", "stream_auth_runtime", session_dir=tmp_path / "sessions")
+    assert summary["runtime_model"]["model"] == "healed-model"
+
+
+def test_auth_exception_retry_observes_replacement_agent(tmp_path, monkeypatch):
+    session = _prepare_session("auth_exception_runtime", "stream_auth_exception_runtime", pending_user_message="Retry")
+
+    class RetryAgent(MockAgent):
+        runs = 0
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.model = "original" if type(self).runs == 0 else "retry-model"
+            self.provider = "original-provider" if type(self).runs == 0 else "retry-provider"
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            if type(self).runs == 1:
+                raise RuntimeError("401 unauthorized")
+            return {"messages": list(kwargs.get("conversation_history") or []) + [
+                {"role": "assistant", "content": "Recovered answer"}]}
+
+    q = queue.Queue()
+    streaming.STREAMS["stream_auth_exception_runtime"] = q
+    config.STREAM_PARTIAL_TEXT["stream_auth_exception_runtime"] = ""
+    heal_rt = {"provider": "test-provider", "api_key": "fresh-key", "base_url": None}
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=RetryAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
+        streaming._run_agent_streaming(session.session_id, "Retry", "test-model", str(tmp_path), "stream_auth_exception_runtime")
+    events = _queue_events(q)
+    assert any(name == "done" for name, _ in events)
+    assert [(item["model"], item["provider"]) for name, item in events if name == "runtime_model"] == [
+        ("retry-model", "retry-provider")]
+
+
 def test_auth_exception_retry_structured_failure_still_emits_error(
     tmp_path,
     monkeypatch,

@@ -473,7 +473,7 @@ def test_streaming_finalize_preserves_new_turns_after_edit(monkeypatch, tmp_path
 
     # Run the finalize chain
     _next = _restore_reasoning_metadata(_previous_context, _result_messages_turn1)
-    _next = _dedupe_replayed_context_messages(_previous_context, _next)
+    _next, _protected = _dedupe_replayed_context_messages(_previous_context, _next)
     session.context_messages = _deduplicate_context_messages(_next)
 
     # Turn 1: context must contain the new turn
@@ -496,7 +496,7 @@ def test_streaming_finalize_preserves_new_turns_after_edit(monkeypatch, tmp_path
 
     # Run the finalize chain again
     _next = _restore_reasoning_metadata(_previous_context, _result_messages_turn2)
-    _next = _dedupe_replayed_context_messages(_previous_context, _next)
+    _next, _protected = _dedupe_replayed_context_messages(_previous_context, _next)
     session.context_messages = _deduplicate_context_messages(_next)
 
     # Turn 2: context must contain BOTH Turn 1 and Turn 2
@@ -565,7 +565,7 @@ def test_streaming_finalize_does_not_leak_original_after_edit(monkeypatch, tmp_p
 
     # Run the finalize chain
     _next = _restore_reasoning_metadata(_previous_context, _result_messages_turn1)
-    _next = _dedupe_replayed_context_messages(_previous_context, _next)
+    _next, _protected = _dedupe_replayed_context_messages(_previous_context, _next)
     session.context_messages = _deduplicate_context_messages(_next)
 
     # Turn 1: context must contain the new turn
@@ -588,7 +588,7 @@ def test_streaming_finalize_does_not_leak_original_after_edit(monkeypatch, tmp_p
 
     # Run the finalize chain again
     _next = _restore_reasoning_metadata(_previous_context, _result_messages_turn2)
-    _next = _dedupe_replayed_context_messages(_previous_context, _next)
+    _next, _protected = _dedupe_replayed_context_messages(_previous_context, _next)
     session.context_messages = _deduplicate_context_messages(_next)
 
     # Turn 2: context must contain BOTH Turn 1 and Turn 2

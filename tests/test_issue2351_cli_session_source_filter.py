@@ -11,9 +11,25 @@ def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
     assert "let _sessionSourceFilter = 'webui'" in src
     assert "hermes-session-source-filter" in src
     assert "session-source-tabs" in src
-    assert "WebUI sessions" in src
-    assert "CLI sessions" in src
+    assert "t('sessions_source_webui', n)" in src
+    assert "t('sessions_source_cli', n)" in src
     assert "_sessionSourceFilter==='cli'" in src
+
+
+def test_session_source_labels_are_locale_keys_with_number_placeholder():
+    """Issue #7580: source tab labels must come from t() with {0}-interpolated
+    counts, not hardcoded English template literals."""
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    assert "sessions_source_webui: 'WebUI sessions ({0})'" in i18n  # en bundle
+    assert "sessions_source_cli: 'CLI sessions ({0})'" in i18n  # en bundle
+    assert "sessions_source_webui: 'Сеансы WebUI ({0})'" in i18n  # ru bundle
+    assert "sessions_source_cli: 'Сеансы CLI ({0})'" in i18n  # ru bundle
+    sessions_src = SESSIONS_JS.read_text(encoding="utf-8")
+    assert "t('sessions_source_cli', n)" in sessions_src
+    assert "t('sessions_source_webui', n)" in sessions_src
+    # The template-literal fallback must be gone: labels now come from the locale.
+    assert "`CLI sessions (${n})`" not in sessions_src
+    assert "`WebUI sessions (${n})`" not in sessions_src
 
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():

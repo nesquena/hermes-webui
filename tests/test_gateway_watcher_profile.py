@@ -316,7 +316,7 @@ def test_profile_switch_restarts_watcher_best_effort(monkeypatch):
     monkeypatch.setattr(routes, "read_body", lambda handler: {"name": "demo"})
     monkeypatch.setattr(profiles, "_validate_profile_name", lambda name: None)
     monkeypatch.setattr(profiles, "switch_profile", lambda name, process_wide=False: {"ok": True, "name": name})
-    monkeypatch.setattr(config, "invalidate_models_cache", lambda: calls.append("cache"))
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda **kw: calls.append(("cache", kw)))
     monkeypatch.setattr(gateway_watcher, "restart_watcher_for_profile", lambda name: calls.append(("watcher", name)))
 
     handler = _FakeHandler()
@@ -324,7 +324,7 @@ def test_profile_switch_restarts_watcher_best_effort(monkeypatch):
 
     assert handler.status == 200
     assert handler.get_json() == {"ok": True, "name": "demo"}
-    assert calls == ["cache", ("watcher", "demo")]
+    assert calls == [("cache", {"delete_disk": False}), ("watcher", "demo")]
     assert any(k == "Set-Cookie" for k, _v in handler.sent_headers)
 
 
@@ -335,7 +335,7 @@ def test_profile_switch_response_survives_watcher_restart_failure(monkeypatch):
     monkeypatch.setattr(routes, "read_body", lambda handler: {"name": "demo"})
     monkeypatch.setattr(profiles, "_validate_profile_name", lambda name: None)
     monkeypatch.setattr(profiles, "switch_profile", lambda name, process_wide=False: {"ok": True, "name": name})
-    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda *_a, **_kw: None)
     monkeypatch.setattr(
         gateway_watcher,
         "restart_watcher_for_profile",

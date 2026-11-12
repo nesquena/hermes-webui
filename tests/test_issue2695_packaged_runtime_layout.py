@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -29,28 +30,91 @@ def _copy_repo_without_heavy_dirs(dst: Path) -> Path:
     return repo_copy
 
 
+# pip's isolated PEP 517 build installs the build backend (setuptools,
+# setuptools-scm) from an index first. Without network access (a sandboxed
+# suite run has no network namespace egress) that step fails before the
+# project is ever built, which says nothing about the packaged layout.
+_BUILD_DEPS_STEP_FAILED = "installing build dependencies did not run successfully"
+_NO_INDEX_MARKERS = (
+    "Temporary failure in name resolution",
+    "Name or service not known",
+    "NameResolutionError",
+    "Network is unreachable",
+    "Failed to establish a new connection",
+    "No matching distribution found for setuptools",
+)
+
+
+def _index_reachable(timeout: float = 5.0) -> bool:
+    """Can a child process reach the package index at all (proxies honoured)?
+
+    The skip is for a run with NO index, never for a pin the index cannot
+    satisfy: pip ends both with "No matching distribution found for setuptools".
+    Probed in a subprocess, like pip itself, so in-process test guards on
+    sockets do not answer for it. Any HTTP status proves the index is reachable.
+    """
+    url = os.environ.get("PIP_INDEX_URL") or "https://pypi.org/simple/"
+    probe = (
+        "import sys, urllib.error, urllib.request\n"
+        "try:\n"
+        f"    urllib.request.urlopen({url!r}, timeout={timeout!r}).close()\n"
+        "except urllib.error.HTTPError:\n"
+        "    pass\n"
+        "except Exception:\n"
+        "    sys.exit(1)\n"
+    )
+    try:
+        return subprocess.run([sys.executable, "-c", probe], timeout=timeout + 5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _build_backend_importable() -> bool:
+    return all(importlib.util.find_spec(name) is not None for name in ("setuptools", "setuptools_scm"))
+
+
 def _build_wheel(repo_copy: Path) -> Path:
     dist_dir = repo_copy / "dist"
     env = os.environ.copy()
     env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_HERMES_WEBUI"] = "0.52.2695"
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            ".",
-            "--no-deps",
-            "--wheel-dir",
-            str(dist_dir),
-        ],
-        cwd=repo_copy,
-        env=env,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "wheel",
+        ".",
+        "--no-deps",
+        "--wheel-dir",
+        str(dist_dir),
+    ]
+
+    def _pip_wheel(*extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [*command, *extra],
+            cwd=repo_copy,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    result = _pip_wheel()
+    output = result.stdout + result.stderr
+    if (
+        result.returncode != 0
+        and _BUILD_DEPS_STEP_FAILED in output
+        and any(marker in output for marker in _NO_INDEX_MARKERS)
+        and not _index_reachable()
+    ):
+        if not _build_backend_importable():
+            pytest.skip(
+                "pip cannot provision the PEP 517 build backend (setuptools, "
+                "setuptools-scm) without a reachable package index; the packaged "
+                "layout is checked wherever one is (CI)"
+            )
+        result = _pip_wheel("--no-build-isolation")
+        output = result.stdout + result.stderr
+    assert result.returncode == 0, f"pip wheel failed ({result.returncode}):\n{output}"
     wheels = sorted(dist_dir.glob("hermes_webui-*.whl"))
     assert wheels, "wheel build must produce a hermes_webui wheel"
     return wheels[0]

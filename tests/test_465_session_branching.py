@@ -559,6 +559,47 @@ def test_branch_route_uses_get_display_backstop_for_large_state_db(monkeypatch):
     routes.SESSIONS.pop(cap["ok"]["session_id"], None)
 
 
+@pytest.mark.parametrize(
+    ("keep_count", "expected_provenance"),
+    [(None, {"review-skill": 3}), (1, {}), (0, {})],
+)
+def test_branch_only_copies_skill_provenance_when_full_history_is_kept(
+    monkeypatch, keep_count, expected_provenance
+):
+    source = routes.Session(
+        session_id="src-skill-provenance",
+        workspace=".",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ],
+        skill_provenance={"review-skill": 3},
+    )
+    body = {"session_id": source.session_id}
+    if keep_count is not None:
+        body["keep_count"] = keep_count
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: False)
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _s: source.messages)
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_a, **_k: [])
+    monkeypatch.setattr(routes, "merge_session_messages_append_only", lambda side, _state, **_k: side)
+    monkeypatch.setattr(routes, "_merged_webui_lineage_messages_for_display", lambda _s, messages: messages)
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes.Session, "save", lambda self: None)
+
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+
+    assert cap["status"] == 200
+    forked = routes.SESSIONS[cap["ok"]["session_id"]]
+    assert forked.skill_provenance == expected_provenance
+    routes.SESSIONS.pop(forked.session_id, None)
+
+
 def test_branch_route_messaging_empty_cli_does_not_copy_hidden_state_db(monkeypatch):
     """Messaging-empty forks must not include state.db rows GET never displayed."""
     conclusion = {"role": "assistant", "content": "displayed conclusion"}
@@ -599,18 +640,12 @@ def test_session_model_parent_session_id():
 
 
 def test_session_compact_includes_parent():
-    """Verify compact() includes parent_session_id."""
-    src = _read('api/models.py')
-    # Find the compact method and scan its full body for parent_session_id.
-    # PR #1591 (May 2026) added a has_pending_user_message recompute block at
-    # the top of compact() which pushed the parent_session_id field beyond a
-    # 1500-char window — widen the scan to 3000 chars to cover the full
-    # return-dict body without re-tightening every time compact() grows.
-    compact_def_match = re.search(r"def compact\(self", src)
-    assert compact_def_match, "Could not find compact() method"
-    snippet = src[compact_def_match.start():compact_def_match.start() + 3000]
-    assert "'parent_session_id'" in snippet, \
-        "compact() should include parent_session_id"
+    """Verify compact() exposes a fork's parent and omits it for root sessions."""
+    fork = routes.Session(session_id="fork-1", parent_session_id="parent-1")
+    assert fork.compact()["parent_session_id"] == "parent-1"
+
+    root = routes.Session(session_id="root-1")
+    assert "parent_session_id" not in root.compact()
 
 
 def test_session_metadata_fields_includes_parent():

@@ -141,6 +141,12 @@ def test_repair_discoverability_apply_backs_up_and_repairs_safe_findings(tmp_pat
     assert recovered["title"] == "Recovered From State"
     assert recovered["message_count"] == 2
     assert len(recovered["messages"]) == 2
+    # #7673 gate: the materialized count is vouched by the writer marker and
+    # placed before `messages`, so the bounded prefix reader (per-subscribe SSE
+    # catch-up, #1558 shrink check) can trust it.
+    import api.models as _models
+
+    assert _models._prefix_message_count(tmp_path / f"{missing}.json") == 2
     backed_up = {p.name for p in (tmp_path / "backup").iterdir()}
     assert f"{stale}.json" in backed_up
     assert "_index.json" in backed_up

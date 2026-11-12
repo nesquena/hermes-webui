@@ -323,7 +323,10 @@ def test_live_sse_uses_each_queue_items_own_event_id():
 
 def test_replay_emits_event_ids_and_stale_restart_diagnostic():
     replay_pos = ROUTES_SRC.index("def _replay_run_journal")
-    block = ROUTES_SRC[replay_pos : replay_pos + 1200]
+    # Window widened from 1200 to 2600 chars: the settled-prompt guard
+    # (prescan + per-entry filter) lengthened _replay_run_journal, pushing
+    # the emit call past the old fixed window. Assertions unchanged.
+    block = ROUTES_SRC[replay_pos : replay_pos + 2600]
 
     assert "read_run_events" in block
     assert "_sse_with_id" in block
@@ -759,6 +762,97 @@ def test_replay_run_journal_honors_after_seq_cursor(monkeypatch):
     body = handler.wfile.getvalue().decode("utf-8")
     assert "id: run_1:4\n" in body
     assert "event: done\n" in body
+
+
+def test_replay_run_journal_skips_metering_rows(monkeypatch):
+    import api.routes as routes
+
+    handler = SimpleNamespace(wfile=io.BytesIO())
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": True,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id, after_seq=None, max_seq=None: {
+            "events": [
+                {"event": "token", "payload": {"text": "hello"}, "event_id": f"{run_id}:1"},
+                {"event": "metering", "payload": {"tps": 47.3}, "event_id": f"{run_id}:2"},
+                {"event": "done", "payload": {"session": {}}, "event_id": f"{run_id}:3"},
+            ]
+        },
+    )
+
+    assert routes._replay_run_journal(handler, "run_1", 0) is True
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "id: run_1:1\n" in body
+    assert "event: token\n" in body
+    assert "id: run_1:3\n" in body
+    assert "event: done\n" in body
+    # The metering row is filtered from the replay burst.
+    assert "event: metering\n" not in body
+    assert "id: run_1:2\n" not in body
+
+
+def test_live_unjournaled_metering_does_not_inherit_latest_event_id(monkeypatch):
+    import api.routes as routes
+
+    class FakeStream:
+        def __init__(self):
+            self.q = queue.Queue()
+            self.q.put_nowait(("metering", {"tps": 47.3}, None))
+            self.q.put_nowait(("token", {"text": "visible"}, "run_1:1"))
+            self.q.put_nowait(("stream_end", {}, "run_1:2"))
+            self.unsubscribed = False
+
+        def subscribe_with_snapshot(self):
+            return self.q, {"last_event_id": "run_1:1", "offline_buffered_events": 3}
+
+        def unsubscribe(self, q):
+            self.unsubscribed = q is self.q
+
+    class Handler:
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.headers = {}
+
+        def send_response(self, _code):
+            pass
+
+        def send_header(self, _name, _value):
+            pass
+
+        def end_headers(self):
+            pass
+
+    handler = Handler()
+    stream = FakeStream()
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "terminal": False,
+        },
+    )
+    monkeypatch.setattr(routes, "read_run_events", lambda *_args, **_kwargs: {"events": []})
+    monkeypatch.setitem(routes.STREAM_LAST_EVENT_ID, "run_1", "run_1:1")
+    monkeypatch.setitem(routes.STREAMS, "run_1", stream)
+
+    routes._handle_sse_stream(handler, urlparse("/api/chat/stream?stream_id=run_1"))
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    frames = [frame for frame in body.split("\n\n") if frame.strip()]
+    assert frames[0] == "event: metering\ndata: {\"tps\": 47.3}"
+    assert "id: run_1:1\nevent: token\ndata: {\"text\": \"visible\"}" in frames
+    assert stream.unsubscribed is True
 
 
 def test_active_stream_replay_keeps_items_for_new_run_with_same_seq_range(monkeypatch):

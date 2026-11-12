@@ -1,0 +1,66 @@
+[
+  {
+    "mode": "before",
+    "viewport": [
+      1440,
+      900
+    ],
+    "exit": 1,
+    "observation": {
+      "serverIdle": true,
+      "paneRetained": false,
+      "inflightRetained": false,
+      "sourceRetained": true,
+      "registryRetained": true,
+      "liveRows": 0
+    }
+  },
+  {
+    "mode": "before",
+    "viewport": [
+      390,
+      844
+    ],
+    "exit": 1,
+    "observation": {
+      "serverIdle": true,
+      "paneRetained": false,
+      "inflightRetained": false,
+      "sourceRetained": true,
+      "registryRetained": true,
+      "liveRows": 0
+    }
+  },
+  {
+    "mode": "after",
+    "viewport": [
+      1440,
+      900
+    ],
+    "exit": 0,
+    "observation": {
+      "serverIdle": true,
+      "paneRetained": true,
+      "inflightRetained": true,
+      "sourceRetained": true,
+      "registryRetained": true,
+      "liveRows": 3
+    }
+  },
+  {
+    "mode": "after",
+    "viewport": [
+      390,
+      844
+    ],
+    "exit": 0,
+    "observation": {
+      "serverIdle": true,
+      "paneRetained": true,
+      "inflightRetained": true,
+      "sourceRetained": true,
+      "registryRetained": true,
+      "liveRows": 3
+    }
+  }
+]

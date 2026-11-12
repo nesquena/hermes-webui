@@ -185,7 +185,7 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
     assert_contains_all(
         render_block,
         [
-            "_streamFadeNextText(displayText)",
+            "_streamFadeNextText(displayText, revealAll)",
             "if(!next.changed) return next.caughtUp",
             "if(!_shouldUseTransparentStreamFade())",
             "_smdNewParser(assistantBody,true)",
@@ -199,6 +199,16 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
     assert render_block.index("_smdWrite(next.text,true)") < render_block.index(
         "assistantBody.appendChild(document.createTextNode(delta))"
     )
+    # #8171: revealAll defaults to false, so ordinary fade frames keep the
+    # word-paced playout. Only the transport-recovery flush (the non-force
+    # branch of _flushPendingSegmentRender) reveals the whole backlog at once.
+    assert "function _renderStreamingFadeMarkdown(displayText, revealAll=false)" in MESSAGES_JS
+    assert "function _streamFadeNextText(targetText, revealAll=false)" in MESSAGES_JS
+    assert MESSAGES_JS.count("_renderStreamingFadeMarkdown(displayText,true)") == 1
+    flush_start = MESSAGES_JS.index("function _flushPendingSegmentRender(")
+    flush_end = MESSAGES_JS.index("if(_smdParser){", flush_start)
+    assert "if(!force&&_shouldUseLiveProseFade()){" in MESSAGES_JS[flush_start:flush_end]
+    assert "_renderStreamingFadeMarkdown(displayText,true)" in MESSAGES_JS[flush_start:flush_end]
     assert "_streamFadeAppendText(assistantBody,delta)" not in render_block
     assert "_streamFadeBindCleanup(assistantBody)" not in render_block
     append_block = function_block(MESSAGES_JS, "_streamFadeAppendText")

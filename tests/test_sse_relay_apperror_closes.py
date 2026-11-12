@@ -97,6 +97,12 @@ def test_chat_sse_stream_unsubscribes_on_apperror(monkeypatch):
     stream = _FakeStream()
     monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_a, **_k: True)
     monkeypatch.setattr(routes, "STREAMS", {"run1": stream})
+    import api.config as config
+    monkeypatch.setattr(
+        config,
+        "STREAMS",
+        {"run1": stream},
+    )
     monkeypatch.setattr(
         routes,
         "_sse_replay_run_journal_gap_checked",

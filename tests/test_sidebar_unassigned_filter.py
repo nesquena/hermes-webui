@@ -61,7 +61,7 @@ def test_unassigned_chip_filter_logic():
     assert "if(_activeProject===NO_PROJECT_FILTER){" in js, (
         "The Unassigned filter must select sessions without a project_id"
     )
-    assert "if(s.project_id) continue;" in js, (
+    assert "if(projectId) continue;" in js, (
         "The Unassigned filter must skip sessions with a project_id"
     )
 
@@ -76,7 +76,7 @@ def test_unassigned_chip_only_shown_when_relevant():
     — though that's vanishingly rare).
     """
     js = _js()
-    assert "const hasUnprojected=profileFiltered.some(s=>!s.project_id);" in js, (
+    assert "const hasUnprojected=_sidebarHasUnprojectedRows(profileFiltered, projectIdFor);" in js, (
         "The render function must compute whether unassigned sessions exist"
     )
     assert "if(_allProjects.length>0||hasUnprojected){" in js, (
@@ -89,10 +89,19 @@ def test_unassigned_chip_only_shown_when_relevant():
 
 
 def test_unassigned_chip_label_and_handler():
-    """The chip label should be 'Unassigned' and clicking it should set the sentinel."""
+    """The chip label is localized and clicking it should set the sentinel.
+
+    The label used to be the hardcoded literal 'Unassigned'; #7579 routed it
+    through the `project_chip_unassigned` key (en value stays 'Unassigned'), so
+    the pin moves from the literal to the t() call plus the key's English text.
+    """
     js = _js()
-    assert "noneChip.textContent='Unassigned';" in js, (
-        "The Unassigned chip must display the label 'Unassigned'"
+    assert "noneChip.textContent=t('project_chip_unassigned');" in js, (
+        "The Unassigned chip must display the localized project_chip_unassigned label"
+    )
+    i18n = (JS.parent / "i18n.js").read_text(encoding="utf-8")
+    assert "project_chip_unassigned: 'Unassigned'," in i18n, (
+        "The en locale must keep 'Unassigned' as the project_chip_unassigned value"
     )
     assert "_setActiveProjectFilter(NO_PROJECT_FILTER)" in js, (
         "Clicking the Unassigned chip must route through the helper that sets "

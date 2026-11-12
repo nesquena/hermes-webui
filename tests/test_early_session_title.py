@@ -93,7 +93,7 @@ def test_start_chat_stream_response_includes_provisional_title(tmp_path, monkeyp
     import api.routes as routes
 
     monkeypatch.setattr(Session, "save", lambda self, *a, **k: None)
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     monkeypatch.setattr(routes, "_run_agent_streaming", lambda *a, **k: None)
 

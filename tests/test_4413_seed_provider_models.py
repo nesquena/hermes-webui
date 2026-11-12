@@ -42,9 +42,11 @@ def _deepcopy_providers():
 def restore_providers():
     """Restore _PROVIDER_MODELS to its pre-test state."""
     snapshot = _deepcopy_providers()
-    yield
-    _PROVIDER_MODELS.clear()
-    _PROVIDER_MODELS.update(snapshot)
+    try:
+        yield
+    finally:
+        _PROVIDER_MODELS.clear()
+        _PROVIDER_MODELS.update(snapshot)
 
 
 def _patch_core_pm(fake_pm: dict):
@@ -100,6 +102,23 @@ class TestSeederAddsMissingModels:
         assert zai_ids.count("glm-5.2") == 1, (
             f"glm-5.2 appears {zai_ids.count('glm-5.2')} times — should be 1"
         )
+
+    def test_codex_is_not_seeded_but_other_providers_are(self, restore_providers):
+        """The generic seeder must leave the account-aware Codex catalog alone."""
+        fake_pm = {
+            "openai-codex": ["codex-core-only-test"],
+            "zai": ["glm-9.99-experimental"],
+        }
+
+        with _patch_core_pm(fake_pm):
+            _seed_provider_models_from_core()
+
+        assert "codex-core-only-test" not in {
+            model["id"] for model in _PROVIDER_MODELS["openai-codex"]
+        }
+        assert "glm-9.99-experimental" in {
+            model["id"] for model in _PROVIDER_MODELS["zai"]
+        }
 
     def test_no_op_without_hermes_cli(self, restore_providers):
         """Seeder must be a no-op (not raise) when hermes_cli is unavailable."""

@@ -293,13 +293,11 @@ class TestIndexHtmlIntegration:
         are present on first paint.
         """
         src = INDEX.read_text(encoding="utf-8")
-        preload_pos = src.find('href="static/pwa-startup.js?v=__WEBUI_VERSION__"')
         script_pos = src.find('src="static/pwa-startup.js?v=__WEBUI_VERSION__"')
         ui_pos = src.find('static/ui.js?v=__WEBUI_VERSION__')
-        assert preload_pos != -1, "index.html must preload the PWA startup helper"
         assert script_pos != -1, "index.html must load the PWA startup helper"
         assert ui_pos != -1, "index.html must load the main UI bundle"
-        assert preload_pos < ui_pos and script_pos < ui_pos, (
+        assert script_pos < ui_pos, (
             "pwa-startup.js must run before ui.js so standalone/offline classes "
             "are available before the app shell paints"
         )

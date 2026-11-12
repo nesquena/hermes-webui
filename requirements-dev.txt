@@ -7,6 +7,8 @@ pytest
 pytest-timeout
 pytest-asyncio
 pytest-shard
+# Native Gateway transport integration tests use the Agent's WebSocket API.
+websockets>=15,<16
 ruff
 mcp>=1.28,<2
 # Optional Office parsers — runtime-optional (commented in requirements.txt), but
@@ -16,3 +18,6 @@ mcp>=1.28,<2
 python-docx
 openpyxl
 python-pptx
+# ruamel.yaml: the YAML fallback used when WebUI runs inside a Hermes Agent managed
+# environment that has no PyYAML (api/yaml_compat.py). Installed here so its tests run.
+ruamel.yaml>=0.18

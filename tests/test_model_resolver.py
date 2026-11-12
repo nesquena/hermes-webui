@@ -1043,7 +1043,7 @@ def test_custom_slug_cold_stale_not_picked_still_strips_5979():
     assert model == bare, f"unmarked stale cold custom:slug id must strip (legacy), got {model!r}"
 
 
-def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979():
+def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979(monkeypatch):
     """The send-path warm helper publishes provenance from a valid disk cache
     when memory is cold — restoring the endpoint-advertised signal so #433
     strips and #5979 preserves — WITHOUT a live rebuild.
@@ -1068,6 +1068,12 @@ def test_warm_models_catalog_provenance_if_cold_publishes_from_disk_5979():
         config._sync_models_cache_provenance()
         assert config._models_cache_provenance is None, "precondition: memory cold"
         # The warm helper should republish provenance from disk (network-free).
+        assert config._get_models_cache_path().is_file()
+
+        def unexpected_rebuild(*args, **kwargs):
+            pytest.fail('disk provenance warming must not rebuild the catalog')
+
+        monkeypatch.setattr(config, '_invoke_models_rebuild', unexpected_rebuild)
         config.warm_models_catalog_provenance_if_cold()
         assert config._models_cache_provenance is not None, (
             "warm helper must publish provenance from the disk cache"
@@ -1378,7 +1384,7 @@ def test_default_model_shadowed_with_xiaomi_provider():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_models_cache():
+def _isolate_models_cache(monkeypatch):
     """Invalidate the models TTL cache before and after every test in this file.
 
     Several helpers here mutate ``config.cfg`` in-memory and call
@@ -1389,15 +1395,42 @@ def _isolate_models_cache():
     ``test_custom_endpoint_uses_model_config_api_key_for_model_discovery``
     ``KeyError: 'auth'`` on CI where ``urlopen`` is never reached).
     """
+    import socket
+    import threading
+    import urllib.error
+    import urllib.request
+
+    # Routing tests own their catalogs; neither DNS nor the Agent's live model
+    # discovery may turn their warm-cache preconditions into budget fallbacks.
+    # Individual discovery tests override these transport seams explicitly.
+    def offline_dns(*args, **kwargs):
+        raise socket.gaierror('resolver test: no DNS')
+
+    def offline_probe(*args, **kwargs):
+        raise urllib.error.URLError('resolver test: no live endpoint')
+
+    monkeypatch.setattr(socket, 'getaddrinfo', offline_dns)
+    monkeypatch.setattr(urllib.request, 'urlopen', offline_probe)
+    monkeypatch.setattr(config, '_read_live_provider_model_ids', lambda pid: [])
+    workers = []
+    original_start = threading.Thread.start
+
+    def start(thread, *args, **kwargs):
+        if thread.name == 'models-catalog-rebuild':
+            workers.append(thread)
+        return original_start(thread, *args, **kwargs)
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    config.invalidate_models_cache()
     try:
+        yield
+    finally:
+        # Invalidation revokes publication, but does not stop a detached worker.
+        # Join before monkeypatch teardown, including when an assertion fails.
+        for thread in workers:
+            thread.join(timeout=5)
+            assert not thread.is_alive(), 'catalog worker outlived resolver test'
         config.invalidate_models_cache()
-    except Exception:
-        pass
-    yield
-    try:
-        config.invalidate_models_cache()
-    except Exception:
-        pass
 
 
 def _available_models_with_provider(provider):
@@ -1475,6 +1508,8 @@ def test_provider_config_object_list_catalog_uses_picker_supported_keys_6121(mon
                 {'model': 'by-model-key', 'label': 'By Model Key'},
                 {'name': 'by-name-key'},
                 {'id': 'by-id-key', 'label': 'By Id Key'},
+                {'id': 'verbatim', 'label': 'verbatim'},
+                'plain-entry',
             ],
         },
     }
@@ -1484,20 +1519,33 @@ def test_provider_config_object_list_catalog_uses_picker_supported_keys_6121(mon
         _cfg._cfg_mtime = 0.0
     monkeypatch.setattr(_cfg, "_read_live_provider_model_ids", lambda pid: [])
     try:
-        result = _cfg.get_available_models()
+        results = [
+            _cfg._static_models_catalog_without_live_probes(),
+            _cfg.get_available_models(force_refresh=True),
+        ]
     finally:
         _cfg.cfg.clear()
         _cfg.cfg.update(old_cfg)
 
-    groups = {group['provider_id']: group['models'] for group in result['groups']}
-    model_rows = groups.get('myprov') or []
-    model_ids = [row['id'] for row in model_rows]
-    assert 'by-model-key' in model_ids
-    assert 'by-name-key' in model_ids
-    assert 'by-id-key' in model_ids
-    labels = {row['id']: row['label'] for row in model_rows}
-    assert labels['by-model-key'] == 'By Model Key'
-    assert labels['by-id-key'] == 'By Id Key'
+    for result in results:
+        groups = {group['provider_id']: group['models'] for group in result['groups']}
+        # Native custom entries publish canonical identities even when the active
+        # config still uses the historical bare mapping key. Both cold and forced
+        # catalogs must retain all object-list IDs and their configured labels.
+        model_rows = groups['custom:myprov']
+        model_ids = [row['id'] for row in model_rows]
+        assert 'by-model-key' in model_ids
+        assert 'by-name-key' in model_ids
+        assert 'by-id-key' in model_ids
+        assert 'verbatim' in model_ids
+        assert 'plain-entry' in model_ids
+        labels = {row['id']: row['label'] for row in model_rows}
+        assert labels['by-model-key'] == 'By Model Key'
+        assert labels['by-id-key'] == 'By Id Key'
+        assert labels['verbatim'] == 'verbatim'
+        # Do not change the existing humanized fallback for unlabelled rows.
+        assert labels['by-name-key'] == _cfg._get_label_for_model('by-name-key', [])
+        assert labels['plain-entry'] == _cfg._get_label_for_model('plain-entry', [])
 
 
 # ── get_available_models(): phantom "Custom" group regression ─────────────
@@ -1611,6 +1659,39 @@ def test_default_model_lands_under_active_provider_group(monkeypatch):
     assert 'gpt-5.4' not in {norm(mid) for mid in groups.get('Anthropic', [])}, (
         f"gpt-5.4 leaked into Anthropic group via fallback: {groups.get('Anthropic')}"
     )
+
+
+@pytest.mark.parametrize('default_model', ['gpt-5.4', 'openai/gpt-5.4'])
+def test_default_model_is_not_suppressed_by_another_provider_catalog(monkeypatch, default_model):
+    """An OpenAI API catalog must not hide the configured Codex default.
+
+    The full-suite predecessor in test_issue603_provider_categories leaves an
+    OpenAI API credential behind. Reproduce that extra provider deterministically
+    through config, without relying on test order or leaking credentials.
+    """
+    monkeypatch.setitem(config.cfg, 'providers', {
+        'openai-api': {'api': 'openai-completions'},
+    })
+    import sys, types
+    fake_mod = types.ModuleType('hermes_cli.models')
+    fake_mod.list_available_providers = lambda: [
+        {'id': 'anthropic', 'authenticated': True},
+        {'id': 'openai-codex', 'authenticated': True},
+    ]
+    fake_auth = types.ModuleType('hermes_cli.auth')
+    fake_auth.get_auth_status = lambda pid: {'key_source': 'env'}
+    monkeypatch.setitem(sys.modules, 'hermes_cli.models', fake_mod)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.auth', fake_auth)
+    monkeypatch.setattr(config, '_read_live_provider_model_ids', lambda pid: [])
+    monkeypatch.setattr(config, '_read_visible_codex_cache_model_ids', lambda: [])
+    result = _available_models_with_full_cfg('openai-codex', default_model, '')
+    groups = {g['provider_id']: g['models'] for g in result['groups']}
+    norm = lambda mid: mid.split(':', 1)[-1].split('/', 1)[-1]
+    for pid in ('openai-codex', 'openai-api'):
+        assert sum(norm(m['id']) == 'gpt-5.4' for m in groups[pid]) == 1
+    assert all(norm(m['id']) != 'gpt-5.4' for m in groups['anthropic'])
+    ids = [m['id'] for g in result['groups'] for m in g['models']]
+    assert len(ids) == len(set(ids))
 
 
 def test_unknown_providers_do_not_inherit_default_model(monkeypatch):
@@ -1839,6 +1920,26 @@ def _resolve_with_providers(model_id, providers_cfg, *, provider=None, default=N
         config.cfg.update(old_cfg)
 
 
+@pytest.mark.parametrize('session_provider', ['myprov', 'custom:myprov'])
+@pytest.mark.parametrize('model_id', ['plainmodel', 'qwen3.8:27b'])
+def test_native_provider_persisted_bare_and_canonical_session_inputs(monkeypatch, session_provider, model_id):
+    """Old bare session hints remain readable; new catalog identities are canonical.
+
+    The explicit legacy hint may preserve its spelling in the resolved triple.
+    Compatibility requires the same exact model and endpoint, not a disk rewrite.
+    """
+    data = {
+        'model': {'provider': 'openai', 'default': 'gpt-5'},
+        'providers': {'myprov': {'base_url': 'https://my.example/v1', 'models': ['plainmodel', 'qwen3.8:27b']}},
+    }
+    monkeypatch.setattr(config, 'cfg', data)
+    hint = config.model_with_provider_context(model_id, session_provider)
+    assert hint == f'@{session_provider}:{model_id}'
+    assert config.resolve_model_provider(hint) == (model_id, session_provider, 'https://my.example/v1')
+    assert set(data['providers']) == {'myprov'}
+    assert 'custom_providers' not in data
+
+
 def test_providers_scan_routes_user_defined_allowlist_5511():
     """A user-defined providers.<slug>.models allowlist routes a bare model id
     to that provider (the feature #5511 adds)."""
@@ -1848,7 +1949,7 @@ def test_providers_scan_routes_user_defined_allowlist_5511():
         provider='openai',
         default='gpt-5',
     )
-    assert provider == 'myprov', f"user-defined provider allowlist must route; got {provider!r}"
+    assert provider == 'custom:myprov', f"user-defined provider allowlist must route; got {provider!r}"
     assert model == 'my-model-1'
     assert base_url == 'https://my.example/v1'
 
@@ -1906,14 +2007,15 @@ def test_providers_scan_honors_active_provider_ownership_5511():
 def test_providers_scan_active_provider_own_entry_still_matches_5511():
     """The ownership guard still lets the ACTIVE provider's own providers: entry
     match (e.g. active myprov + a model in providers.myprov.models resolves to
-    myprov with its base_url)."""
+    custom:myprov with its base_url)."""
     model, provider, base_url = _resolve_with_providers(
         'gpt-5',
         {'myprov': {'base_url': 'https://my.example/v1', 'models': ['gpt-5']}},
         provider='myprov',
         default='gpt-5',
     )
-    assert provider == 'myprov', f"active provider's own entry must match; got {provider!r}"
+    assert provider == 'custom:myprov', f"active provider's own entry must match; got {provider!r}"
+    assert model == 'gpt-5'
     assert base_url == 'https://my.example/v1'
 
 
@@ -1984,10 +2086,11 @@ def test_providers_scan_active_own_providers_entry_owns_over_other_slug_5511():
         },
         provider='myprov',
     )
-    assert provider == 'myprov', (
+    assert provider == 'custom:myprov', (
         "active provider's own providers: allowlist must own its model over "
         f"another slug's overlapping entry; got {provider!r}"
     )
+    assert model == 'gpt-x'
     assert base_url == 'https://my.example/v1'
 
 

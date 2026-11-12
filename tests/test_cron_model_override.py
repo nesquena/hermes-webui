@@ -8,6 +8,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 
@@ -170,3 +172,89 @@ def test_cron_model_picker_marks_loaded_only_after_successful_population():
     catch_block = body.split("} catch (e)", 1)[1]
     assert "sel.dataset.loaded = '1'" in try_block
     assert "sel.dataset.loaded = '1'" not in catch_block
+
+
+def test_cron_update_preserves_provider_only_pin_when_model_cleared():
+    """Clearing the picker to "Default" must not wipe a provider-only pin.
+
+    #4030 intentionally made "clearing the picker = no overrides", which is
+    correct for model+provider pins but silently destroyed provider-only
+    pins (jobs that pin a provider with no model, e.g. self-hosted LLM
+    endpoints). The combined picker cannot represent that state, so
+    saveCronForm must preserve prev.provider when the job carried no model
+    AND the user never changed the picker; a deliberate return to Default
+    must clear it.
+    """
+    save_body = _function_body("saveCronForm")
+    helper_body = _function_body("_cronProviderForClear")
+
+    # The clear branch delegates to the helper and records picker changes.
+    assert "_cronProviderForClear(_cronPreFormDetail, _cronModelPickerTouched)" in save_body
+    assert "preserveProvider" not in save_body
+
+    # The helper distinguishes an explicit clear (pickerTouched) from an
+    # untouched provider-only pin.
+    assert "if (pickerTouched) return null" in helper_body
+    assert "prev.model == null" in helper_body
+
+    # The form entry points reset the touched flag.
+    for fn in ("openCronCreate", "openCronEdit", "duplicateCurrentCron"):
+        assert "_cronModelPickerTouched = false" in _function_body(fn)
+    # The picker records deliberate changes.
+    pop_body = _function_body("_populateCronFormModelSelect")
+    assert "_cronModelPickerTouched = true" in pop_body
+
+
+def test_cron_provider_for_clear_behavior():
+    """Exercise _cronProviderForClear through node for both pin shapes."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not on PATH")
+
+    # Locate the full declaration (signature + body) of the helper.
+    src = PANELS_JS
+    start = src.find("function _cronProviderForClear(")
+    assert start != -1, "helper declaration not found"
+    brace = src.find("{", start)
+    depth = 0
+    end = None
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    decl = src[start:end]
+
+    driver = f"""
+{decl}
+const cases = [
+  ['provider_only_untouched', {{model: null, provider: 'custom:llama-swap'}}, false],
+  ['provider_only_touched',   {{model: null, provider: 'custom:llama-swap'}}, true],
+  ['model_pin_touched',       {{model: 'gpt-5', provider: 'openai'}}, true],
+  ['no_override_untouched',   {{model: null, provider: null}}, false],
+  ['no_prev',                 null, false],
+];
+const out = {{}};
+for (const [name, detail, touched] of cases) out[name] = _cronProviderForClear(detail, touched) ?? null;
+process.stdout.write(JSON.stringify(out));
+"""
+    proc = subprocess.run([node, "-e", driver], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node driver failed: {proc.stderr}"
+    r = json.loads(proc.stdout)
+
+    # Untouched picker on a provider-only job: the pin survives.
+    assert r["provider_only_untouched"] == "custom:llama-swap"
+    # Deliberate return to Default: "Default = no overrides" wins.
+    assert r["provider_only_touched"] is None
+    # Model-pinned job, explicit clear: provider removed too.
+    assert r["model_pin_touched"] is None
+    # No overrides stored, untouched picker: nothing to preserve.
+    assert r["no_override_untouched"] is None
+    # No pre-form snapshot (create form): no provider.
+    assert r["no_prev"] is None

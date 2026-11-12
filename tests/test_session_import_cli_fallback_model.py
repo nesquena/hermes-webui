@@ -388,7 +388,7 @@ def test_sessions_endpoint_suppresses_duplicate_webui_state_projection(monkeypat
 
 def test_messaging_session_loader_prefers_longer_sidecar_transcript():
     """Pin the /api/session invariant that repaired sidecars can be longer than state.db segments."""
-    handler = _extract_handler("handle_get")
+    handler = _extract_handler("_handle_session_get")
     old = "if is_messaging_session and cli_messages:\n                    _all_msgs = cli_messages"
     assert old not in handler
     assert "_all_msgs = _merged_session_messages_for_display(s, cli_messages)" in handler
