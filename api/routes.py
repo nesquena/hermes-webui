@@ -20443,8 +20443,9 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Subagent sessions are view-only and cannot be duplicated from WebUI", 400)
 
             session = Session.load(sid)
-            if not session:
+            if not session or getattr(session, "_sidecar_names_other_session", None):
                 # 404, not 400 — missing resource, not a malformed request.
+                # #9019: a file that names another session is not this session.
                 return bad(handler, "Session not found", status=404)
 
             copy_messages = session.messages

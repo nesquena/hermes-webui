@@ -287,6 +287,27 @@ def test_title_regenerate_never_reads_the_other_sessions_transcript(store, monke
 
 
 @pytest.mark.parametrize("swap", [False, True])
+def test_duplicate_never_copies_the_other_sessions_transcript(store, monkeypatch, swap):  # noqa: F811 -- pytest fixture parameter
+    # /api/session/duplicate loads with Session.load directly, not get_session (review r1).
+    _victim(store)
+    _own(store)
+    if swap:
+        _swap_while_open(store)
+    before = _files(store)
+
+    replies = _post(monkeypatch, "/api/session/duplicate", {"session_id": OWN})
+
+    created = set(_files(store)) - set(before)
+    if swap:
+        assert replies == NOT_FOUND, replies
+        assert created == set()
+        _unchanged_victim(store, before)
+    else:
+        assert replies and replies[0][:2] == ("j", 200), replies
+        assert len(created) == 1
+
+
+@pytest.mark.parametrize("swap", [False, True])
 def test_rename_never_materializes_over_the_replaced_file(store, monkeypatch, swap):  # noqa: F811 -- pytest fixture parameter
     _victim(store)
     _own(store)
