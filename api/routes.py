@@ -4420,8 +4420,14 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
+    persist_lock = _session_persist_lock(original_stub.session_id)
     if not session_lock.acquire(blocking=wait_for_writer):
         return False
+    # #9017: hold the persist lock from the changed-since check through the
+    # save. A save made without the session lock (journal recovery on another
+    # thread's cache hit) takes only the persist lock, so it can't land between
+    # the check and this save. Order: session -> persist, as save() nests it.
+    persist_lock.acquire()
     try:
         if reload_marker is not None:
             from api.models import _sidecar_unchanged_since
@@ -4488,6 +4494,7 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
                 getattr(session, "session_id", "?"),
             )
     finally:
+        persist_lock.release()
         session_lock.release()
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.

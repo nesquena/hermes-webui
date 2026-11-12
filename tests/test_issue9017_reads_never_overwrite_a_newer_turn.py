@@ -483,3 +483,107 @@ def test_save_without_the_session_lock_cannot_land_between_check_and_repair_save
     assert not writer.is_alive() and len(session.messages) == 2
     on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert any(m.get("content") == "newer turn" for m in on_disk["messages"])
+
+
+def test_save_without_the_session_lock_cannot_land_between_cleanup_check_and_save(store, monkeypatch):
+    """A save that skips the session lock (journal recovery on another thread's cache hit takes
+    only the persist lock) inside the cleanup's check-to-save stretch waits and lands after it."""
+    import api.models as models
+    import api.routes as routes
+
+    path = _write(store, "webui", partials=False)
+    stub = models.Session.load_metadata_only(SID)
+    real = routes._materialize_pending_user_turn_before_error
+    writer = threading.Thread(target=lambda: _newer_session(path).save(touch_updated_at=False))
+
+    def _write_then_materialize(session):
+        if writer.ident is None:
+            writer.start()
+            writer.join(1)
+        return real(session)
+
+    monkeypatch.setattr(routes, "_materialize_pending_user_turn_before_error", _write_then_materialize)
+    assert routes._clear_stale_stream_state(stub) is True
+    writer.join(10)
+    assert not writer.is_alive()
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert [m.get("content") for m in on_disk["messages"]] == ["hello", "hi", "newer turn"]
+
+
+class _WatchedLock:
+    """Delegates to the real session lock and records how each acquire was asked to wait."""
+
+    def __init__(self, lock, calls, on_acquire=None):
+        self._lock, self._calls, self._on_acquire = lock, calls, on_acquire
+
+    def acquire(self, blocking=True, timeout=-1):
+        self._calls.append((blocking, timeout))
+        if self._on_acquire:
+            self._on_acquire()
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self):
+        self._lock.release()
+
+    def locked(self):
+        return self._lock.locked()
+
+
+def test_cleanup_checks_for_a_newer_save_after_taking_the_lock(store, monkeypatch):
+    """With wait_for_writer the cleanup queues behind the lock holder: a turn the holder saves while
+    the cleanup waits must stop the clear, so the check has to run after the acquire."""
+    import api.config as config
+    import api.models as models
+    import api.routes as routes
+
+    path = _write(store, "webui", partials=False)
+    stub = models.Session.load_metadata_only(SID)
+    lock = config._get_session_agent_lock(SID)
+    waiting, calls = threading.Event(), []
+    real_lookup = routes._get_session_agent_lock
+    monkeypatch.setattr(routes, "_get_session_agent_lock",
+                        lambda sid: _WatchedLock(lock, calls, waiting.set) if sid == SID else real_lookup(sid))
+    result = {}
+    with lock:
+        worker = threading.Thread(target=lambda: result.setdefault(
+            "cleared", routes._clear_stale_stream_state(stub, wait_for_writer=True)))
+        worker.start()
+        assert waiting.wait(10)
+        _newer_session(path).save(touch_updated_at=False)
+    worker.join(10)
+    assert not worker.is_alive() and result["cleared"] is False
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert any(m.get("content") == "newer turn" for m in on_disk["messages"])
+
+
+def test_load_never_waits_for_the_session_lock(store, monkeypatch):
+    """A read must not queue behind a writer: with the lock held elsewhere, the load asks for it
+    without waiting and keeps the collapse in memory."""
+    import api.config as config
+    import api.models as models
+
+    path = _write_partials_only(store)
+    before = path.read_bytes()
+    lock = config._get_session_agent_lock(SID)
+    calls = []
+    real_lookup = models._get_session_agent_lock
+    monkeypatch.setattr(models, "_get_session_agent_lock",
+                        lambda sid: _WatchedLock(lock, calls) if sid == SID else real_lookup(sid))
+    held, done = threading.Event(), threading.Event()
+
+    def _hold():
+        with lock:
+            held.set()
+            done.wait(10)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert held.wait(10)
+    try:
+        session = models.Session.load(SID)
+    finally:
+        done.set()
+        holder.join(10)
+    assert len(session.messages) == 2
+    assert path.read_bytes() == before
+    assert calls and all(blocking is False for blocking, _timeout in calls), calls
