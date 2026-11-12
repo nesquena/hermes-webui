@@ -7579,8 +7579,11 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
        f. Residue: dict against dict with identical key sets where at least one ``${...}``
           leaf the raw row holds expands to the submitted value at the same path (#8740 CR r4),
           adopted only when corroborated: either the raw candidate is the sole row in
-          *raw_list* with that key set, or an additional leaf or reference corresponds
-          (#8740 CR r5). Multiple candidates reject as ambiguous before writing.
+          *raw_list* with that key set, or an additional reference corresponds
+          (#8740 CR r5, r6). Plain literals, booleans, and numbers do not corroborate
+          ownership. When corroboration fails, score non-reference leaves against other
+          stored rows to decide whether to adopt or write verbatim (#8740 CR r6).
+          Multiple candidates reject as ambiguous before writing.
     3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
     4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
        rows disputing the same raw row, or non-unique match in a list with references) raises
@@ -7760,12 +7763,13 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             yield path, obj
 
     def _corroborated_residue_match(raw_item, new_item) -> bool:
-        """True if *raw_item* has ownership evidence beyond a single ${...} leaf (#8740 CR r5).
+        """True if *raw_item* has ownership evidence beyond a single ${...} leaf (#8740 CR r6).
 
         Adoption requires either that *raw_item* is the sole row in *raw_list*
         with this key set (no other row could own or dispute the bindings), or
-        that at least one additional leaf or reference corresponds (>= 2 matching
-        leaves total).
+        that at least one additional reference corresponds (>= 2 matching
+        reference leaves total). Equal plain literals, booleans, and numbers
+        must not corroborate anything.
         """
         if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
             return False
@@ -7776,16 +7780,31 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
         )
         if same_keys_count == 1:
             return True
-        matching_leaves = 0
-        for path, raw_val in _iter_all_leaves(raw_item):
+        matching_refs = 0
+        for path, raw_val in _iter_env_ref_leaves(raw_item):
             exists, new_val = _get_at_path(new_item, path)
             if exists and (
                 _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
             ):
-                matching_leaves += 1
-                if matching_leaves >= 2:
+                matching_refs += 1
+                if matching_refs >= 2:
                     return True
         return False
+
+    def _non_ref_score(raw_item, new_item) -> int:
+        """Count non-reference leaves whose expanded value equals the submitted value at the same path."""
+        if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
+            return 0
+        score = 0
+        for path, raw_val in _iter_all_leaves(raw_item):
+            if _has_env_ref(raw_val):
+                continue
+            exists, new_val = _get_at_path(new_item, path)
+            if exists and (
+                _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+            ):
+                score += 1
+        return score
 
     matches: dict[int, int | None] = {}
     for new_idx, new_item in enumerate(new_list):
@@ -7834,14 +7853,25 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
         # 2.f: Residue: dict against dict with identical key sets where at least
         # one ${...} leaf the raw row holds expands to the submitted value at the
         # same path (#8740 CR r4).
-        # A single candidate is adopted only when corroborated (#8740 CR r5):
+        # A single candidate is adopted only when corroborated (#8740 CR r5, r6):
         # one matching reference expansion does not establish ownership of a row.
+        # When corroboration fails, score non-reference leaves against other stored
+        # rows to decide whether to adopt or write verbatim (#8740 CR r6).
         cands_2f = _residue_candidates(new_item)
         if len(cands_2f) > 1:
             raise ValueError(ambiguous_err)
         if len(cands_2f) == 1:
             raw_idx = cands_2f[0]
             if _corroborated_residue_match(raw_list[raw_idx], new_item):
+                matches[new_idx] = raw_idx
+                continue
+            cand_score = _non_ref_score(raw_list[raw_idx], new_item)
+            other_scores = [
+                _non_ref_score(other_item, new_item)
+                for other_idx, other_item in enumerate(raw_list)
+                if other_idx != raw_idx
+            ]
+            if not any(s > cand_score for s in other_scores):
                 matches[new_idx] = raw_idx
                 continue
 
