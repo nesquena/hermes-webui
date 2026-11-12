@@ -6794,13 +6794,21 @@ def _aux_title_main_model_config() -> dict:
     return model_config if isinstance(model_config, dict) else {}
 
 
-def _effective_aux_title_route(provider: str, model: str, base_url: str, *, resolved_credentials: Optional[dict] = None) -> tuple[str, str, str]:
+def _effective_aux_title_route(
+    provider: str, model: str, base_url: str, *,
+    resolved_credentials: Optional[dict] = None,
+    task_api_key: str = '', task_api_mode: str = '',
+) -> tuple[str, str, str]:
     """Resolve the one auxiliary title route used for requests and compatibility.
 
     Only implicit, auto/local, and picker routes inherit resolver output.  A
     configured explicit route is itself the request contract: it must never be
     filled with the main route's model or endpoint.  In particular, a base URL
     is sufficient to make a route explicit even if its model is blank.
+
+    ``task_api_key`` and ``task_api_mode`` are the title task's own overrides
+    for its primary route.  An implicit route carries them in the main runtime
+    that the Agent's automatic resolver reads; a fallback never receives them.
     """
     supplied_provider = str(provider or '').strip()
     supplied_model = str(model or '').strip()
@@ -6872,6 +6880,14 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
                     'api_key': model_cfg.get('api_key') or '',
                     'api_mode': str(model_cfg.get('api_mode') or '').strip(),
                 }
+                # The Agent's automatic route ignores call_llm()'s api_key and
+                # api_mode and builds the main client from this runtime, so the
+                # title task's own key and transport belong here. Preflight and
+                # the request both read this one runtime.
+                if task_api_key:
+                    runtime['api_key'] = task_api_key
+                if task_api_mode:
+                    runtime['api_mode'] = task_api_mode
                 from agent.auxiliary_client import _main_route_target
                 (
                     resolved_provider,
@@ -7237,9 +7253,10 @@ def generate_title_raw_via_aux(
     route_credentials = {}
     provider, model, base_url = _effective_aux_title_route(
         provider, model, base_url, resolved_credentials=route_credentials,
+        task_api_key=api_key,
+        task_api_mode=str(configured.get('api_mode') or '').strip(),
     )
     fallback_selected = bool(route_credentials.get('fallback_selected'))
-    automatic_main = bool(route_credentials.get('automatic_main'))
     if fallback_selected:
         # Primary title-task credentials/transport must not override those of
         # the actual fallback selected by the Agent.
@@ -7251,6 +7268,25 @@ def generate_title_raw_via_aux(
         api_mode = str(
             configured.get('api_mode') or route_credentials.get('api_mode') or ''
         ).strip()
+    if route_credentials.get('automatic_main'):
+        # Keep the Agent's automatic route and its HTTP-failure fallback. The
+        # main runtime already carries the title task's key and transport.
+        request_route = {
+            'provider': 'auto',
+            'model': route_credentials.get('title_model_override') or None,
+            'base_url': None,
+            'api_key': None,
+            'api_mode': None,
+            'main_runtime': route_credentials['main_runtime'],
+        }
+    else:
+        request_route = {
+            'provider': provider or None,
+            'model': model or None,
+            'base_url': base_url or None,
+            'api_key': api_key or None,
+            'api_mode': api_mode or None,
+        }
     reasoning_extra = {}
     if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
@@ -7273,21 +7309,12 @@ def generate_title_raw_via_aux(
                 for budget_idx, max_tokens in enumerate(budgets):
                     resp = call_llm(
                         task='title_generation',
-                        provider='auto' if automatic_main else (provider or None),
-                        model=(
-                            route_credentials.get('title_model_override') or None
-                            if automatic_main else (model or None)
-                        ),
-                        base_url=None if automatic_main else (base_url or None),
-                        api_key=None if automatic_main else (api_key or None),
-                        api_mode=None if automatic_main else (api_mode or None),
+                        **request_route,
                         messages=messages,
                         max_tokens=max_tokens,
                         temperature=0.2,
                         timeout=_timeout,
                         extra_body=reasoning_extra or None,
-                        **({'main_runtime': route_credentials['main_runtime']}
-                           if automatic_main else {}),
                     )
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:

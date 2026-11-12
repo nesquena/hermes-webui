@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -438,52 +441,83 @@ class TestAuxReasoningExtraRouteContract:
 
         assert captured[-1]['extra_body'] is None
 
-    def test_main_resolved_key_is_sent_with_implicit_title_route(self):
-        captured = []
+    @staticmethod
+    def _agent_auto_title_request(title_config, main_config):
+        """Run an automatic title and resolve it the way the Agent's auto branch does.
+
+        call_llm(provider='auto') reaches _resolve_auto_route(main_runtime,
+        task), whose main target comes from _main_route_target(): the
+        prefer_fast_model choice and the runtime's own key. The auto branch
+        keeps an explicit model override over the model it selects. Patching
+        the resolver keeps this hermetic with or without an installed Agent.
+        Returns the call_llm() request and the (model, key) the Agent selects.
+        """
+        aux = importlib.import_module('agent.auxiliary_client')
+        requests, selected = [], []
+
+        def main_route_target(runtime, task):
+            assert task == 'title_generation'
+            return (
+                runtime['provider'], 'fast-model', runtime.get('base_url', ''),
+                runtime.get('api_key', ''), runtime.get('api_mode', ''),
+            )
+
+        def resolve_auto_route(main_runtime, task):
+            provider, model, base_url, api_key, _mode = aux._main_route_target(main_runtime, task)
+            return SimpleNamespace(base_url=base_url, api_key=api_key), model, provider
 
         def call_llm(**kwargs):
-            captured.append(kwargs)
+            requests.append(kwargs)
+            client, model, _provider = aux._resolve_auto_route(
+                main_runtime=kwargs['main_runtime'], task=kwargs['task'],
+            )
+            selected.append((kwargs['model'] or model, client.api_key))
             return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
 
-        with patch('api.streaming._get_aux_title_config', return_value={
-            'provider': 'auto', 'model': '', 'base_url': '',
-            'prefer_fast_model': True,
-        }), patch('api.config.cfg', {
-            'model': {'provider': 'opencode-zen', 'default': 'main-model', 'api_key': 'main-key'},
-        }), patch(
-            'agent.auxiliary_client._main_route_target',
-            return_value=('opencode-zen', 'fast-model', '', 'resolved-key', ''),
-            create=True,
+        with patch('api.streaming._get_aux_title_config', return_value=title_config), patch(
+            'api.config.cfg', {'model': main_config},
         ), patch(
-            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
-        ):
-            generate_title_raw_via_aux('question', 'answer')
+            'agent.auxiliary_client._main_route_target',
+            side_effect=main_route_target, create=True,
+        ), patch(
+            'agent.auxiliary_client._resolve_auto_route',
+            side_effect=resolve_auto_route, create=True,
+        ), patch(
+            'agent.auxiliary_client._effective_provider_for_client',
+            side_effect=lambda client, provider: provider, create=True,
+        ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            assert generate_title_raw_via_aux('question', 'answer') == ('Title', 'llm_aux')
 
-        assert captured[-1]['model'] == 'fast-model'
-        assert captured[-1]['api_key'] == 'resolved-key'
+        request = requests[-1]
+        # The Agent resolves the request; WebUI pins no provider, model or key.
+        assert (request['provider'], request['model'], request['base_url'], request['api_key']) == (
+            'auto', None, None, None,
+        )
+        return request, selected[-1]
+
+    def test_main_resolved_key_is_sent_with_implicit_title_route(self):
+        request, agent_selection = self._agent_auto_title_request(
+            {'provider': 'auto', 'model': '', 'base_url': '', 'prefer_fast_model': True},
+            {'provider': 'opencode-zen', 'default': 'main-model', 'api_key': 'main-key'},
+        )
+
+        assert request['main_runtime']['model'] == 'main-model'
+        assert request['main_runtime']['api_key'] == 'main-key'
+        assert agent_selection == ('fast-model', 'main-key')
 
     def test_explicit_title_key_takes_precedence_over_main_resolved_key(self):
-        captured = []
+        request, agent_selection = self._agent_auto_title_request(
+            {
+                'provider': 'auto', 'model': '', 'base_url': '',
+                'prefer_fast_model': True, 'api_key': 'title-key',
+            },
+            {'provider': 'opencode-zen', 'default': 'main-model', 'api_key': 'main-key'},
+        )
 
-        def call_llm(**kwargs):
-            captured.append(kwargs)
-            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
-
-        with patch('api.streaming._get_aux_title_config', return_value={
-            'provider': 'auto', 'model': '', 'base_url': '',
-            'prefer_fast_model': True, 'api_key': 'title-key',
-        }), patch('api.config.cfg', {
-            'model': {'provider': 'opencode-zen', 'default': 'main-model'},
-        }), patch(
-            'agent.auxiliary_client._main_route_target',
-            return_value=('opencode-zen', 'fast-model', '', 'resolved-key', ''),
-            create=True,
-        ), patch(
-            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
-        ):
-            generate_title_raw_via_aux('question', 'answer')
-
-        assert captured[-1]['api_key'] == 'title-key'
+        # The automatic route reads the key only from the runtime it resolves.
+        assert request['main_runtime']['api_key'] == 'title-key'
+        assert agent_selection == ('fast-model', 'title-key')
+        assert 'main-key' not in repr(request)
 
     def test_auto_route_honors_agent_title_fast_model_resolution(self):
         captured = []
@@ -745,11 +779,11 @@ class TestResolvedAutoTitleTransportAndFallback:
             title, status = generate_title_raw_via_aux("question", "answer")
 
         assert (title, status) == ("Working title", "llm_aux")
-        # The Agent owns transport selection for this auto request. Its task
-        # config (including an explicit task api_mode) remains authoritative.
+        # The Agent's automatic route takes its transport only from the main
+        # runtime, so an explicit title-task api_mode must be carried there.
         assert captured[-1]["provider"] == "auto"
         assert captured[-1]["api_mode"] is None
-        assert captured[-1]["main_runtime"]["api_mode"] == "anthropic_messages"
+        assert captured[-1]["main_runtime"]["api_mode"] == expected_mode
         assert captured[-1]["model"] == (title_model or None)
         assert captured[-1]["base_url"] is None
 
@@ -1053,3 +1087,307 @@ def test_real_agent_auto_resolver_selects_configured_fallback():
         )
     assert client is fallback_client
     assert (model, provider) == ("fallback-model", "custom")
+
+
+class _LoopbackProvider:
+    """An HTTP provider on 127.0.0.1 that records every request.
+
+    Chat Completions and Anthropic Messages paths both answer with a title. A
+    path prefix in ``fail`` answers that HTTP status instead, the way a
+    provider rejects a bad key (401) or an empty balance (402).
+    """
+
+    def __init__(self, fail=None):
+        self.requests = []
+        self.fail = dict(fail or {})
+        provider = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length') or 0)
+                body = json.loads(self.rfile.read(length) or b'{}')
+                path = self.path.split('?', 1)[0]
+                provider.requests.append({
+                    'path': path,
+                    'authorization': self.headers.get('Authorization', ''),
+                    'x_api_key': self.headers.get('x-api-key', ''),
+                    'model': body.get('model'),
+                })
+                status = next(
+                    (code for prefix, code in provider.fail.items() if path.startswith(prefix)),
+                    200,
+                )
+                model = body.get('model')
+                if status != 200:
+                    self._send(status, 'application/json', {'error': {
+                        'message': f'loopback refused with {status}',
+                        'type': 'loopback_error',
+                    }})
+                elif path.endswith('/messages'):
+                    message = {
+                        'id': 'msg_title', 'type': 'message', 'role': 'assistant',
+                        'model': model, 'content': [], 'stop_reason': None,
+                        'stop_sequence': None, 'usage': {'input_tokens': 3, 'output_tokens': 0},
+                    }
+                    if body.get('stream'):
+                        self._send(200, 'text/event-stream', [
+                            ('message_start', {'type': 'message_start', 'message': message}),
+                            ('content_block_start', {
+                                'type': 'content_block_start', 'index': 0,
+                                'content_block': {'type': 'text', 'text': ''},
+                            }),
+                            ('content_block_delta', {
+                                'type': 'content_block_delta', 'index': 0,
+                                'delta': {'type': 'text_delta', 'text': 'Wire Title'},
+                            }),
+                            ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
+                            ('message_delta', {
+                                'type': 'message_delta',
+                                'delta': {'stop_reason': 'end_turn', 'stop_sequence': None},
+                                'usage': {'output_tokens': 2},
+                            }),
+                            ('message_stop', {'type': 'message_stop'}),
+                        ])
+                    else:
+                        message.update(
+                            content=[{'type': 'text', 'text': 'Wire Title'}],
+                            stop_reason='end_turn',
+                        )
+                        self._send(200, 'application/json', message)
+                else:
+                    chunk = {'id': 'chat_title', 'created': 0, 'model': model}
+                    if body.get('stream'):
+                        self._send(200, 'text/event-stream', [
+                            (None, {**chunk, 'object': 'chat.completion.chunk', 'choices': [{
+                                'index': 0, 'finish_reason': None,
+                                'delta': {'role': 'assistant', 'content': 'Wire Title'},
+                            }]}),
+                            (None, {**chunk, 'object': 'chat.completion.chunk', 'choices': [{
+                                'index': 0, 'finish_reason': 'stop', 'delta': {},
+                            }]}),
+                            (None, '[DONE]'),
+                        ])
+                    else:
+                        self._send(200, 'application/json', {
+                            **chunk, 'object': 'chat.completion',
+                            'choices': [{
+                                'index': 0, 'finish_reason': 'stop',
+                                'message': {'role': 'assistant', 'content': 'Wire Title'},
+                            }],
+                            'usage': {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5},
+                        })
+
+            def _send(self, status, content_type, payload):
+                if content_type == 'text/event-stream':
+                    data = b''.join(
+                        (f'event: {event}\n' if event else '').encode()
+                        + b'data: ' + (item if isinstance(item, str) else json.dumps(item)).encode()
+                        + b'\n\n'
+                        for event, item in payload
+                    )
+                else:
+                    data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self):
+        return 'http://127.0.0.1:%d' % self.server.server_address[1]
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def real_agent_wire(monkeypatch, tmp_path):
+    """The installed Agent, a loopback provider and an isolated Hermes home.
+
+    Nothing in the Agent's resolver or call_llm() is patched. CI installs no
+    Agent, so these tests skip there.
+    """
+    try:
+        aux = importlib.import_module('agent.auxiliary_client')
+        importlib.import_module('anthropic')
+    except Exception as exc:
+        pytest.skip(f'Hermes Agent runtime is unavailable: {exc}')
+    if not getattr(aux, '__file__', None) or not all(
+        hasattr(aux, name)
+        for name in (
+            'call_llm', '_resolve_auto_route', '_reset_aux_unhealthy_cache',
+            'shutdown_cached_clients',
+        )
+    ):
+        pytest.skip('The installed Agent has no automatic title resolver')
+
+    for name in (
+        'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY',
+        'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy',
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('NO_PROXY', '127.0.0.1,localhost')
+    home = tmp_path / 'hermes'
+    home.mkdir()
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setenv('HERMES_BASE_HOME', str(home))
+    monkeypatch.setenv('HERMES_CONFIG_PATH', str(home / 'config.yaml'))
+    import api.profiles as profiles_api
+    monkeypatch.setattr(profiles_api, '_DEFAULT_HERMES_HOME', home)
+
+    def reset_agent_state():
+        aux._reset_aux_unhealthy_cache()
+        aux.shutdown_cached_clients()
+
+    reset_agent_state()
+    wire = _LoopbackProvider()
+
+    def write_config(config, at=home):
+        import yaml
+
+        at.mkdir(parents=True, exist_ok=True)
+        (at / 'config.yaml').write_text(yaml.safe_dump(config), encoding='utf-8')
+
+    try:
+        yield SimpleNamespace(aux=aux, wire=wire, home=home, write_config=write_config)
+    finally:
+        wire.close()
+        reset_agent_state()
+
+
+def _sent_key(request):
+    """The credential a recorded request carried, whichever header its wire uses."""
+    return request['x_api_key'] or request['authorization'].removeprefix('Bearer ')
+
+
+class TestRealAgentTitleRouteOverHttp:
+    """The 2026-10-31 re-gate, through the installed Agent and real HTTP."""
+
+    @staticmethod
+    def _main_route(url, api_key='main-key'):
+        return {
+            'provider': 'custom', 'default': 'main-model', 'base_url': url,
+            'api_key': api_key, 'api_mode': 'chat_completions',
+        }
+
+    @pytest.mark.parametrize(('task_overrides', 'expected_path', 'expected_key'), (
+        ({}, '/route/v1/chat/completions', 'main-key'),
+        ({'api_key': 'task-key'}, '/route/v1/chat/completions', 'task-key'),
+        ({'api_mode': 'anthropic_messages'}, '/route/v1/messages', 'main-key'),
+        (
+            {'api_key': 'task-key', 'api_mode': 'anthropic_messages'},
+            '/route/v1/messages', 'task-key',
+        ),
+    ))
+    def test_automatic_main_route_carries_title_task_key_and_transport(
+        self, real_agent_wire, task_overrides, expected_path, expected_key,
+    ):
+        wire = real_agent_wire.wire
+        real_agent_wire.write_config({
+            'model': self._main_route(wire.url + '/route/v1'),
+            'auxiliary': {'title_generation': {
+                'provider': 'auto', 'model': 'title-model', **task_overrides,
+            }},
+        })
+
+        assert generate_title_raw_via_aux('question', 'answer') == ('Wire Title', 'llm_aux')
+
+        assert [(r['path'], _sent_key(r), r['model']) for r in wire.requests] == [
+            (expected_path, expected_key, 'title-model'),
+        ]
+
+    def test_agent_selected_fast_title_model_reaches_the_wire(self, real_agent_wire):
+        """Automatic routing leaves the model to the Agent's prefer_fast_model choice."""
+        aux = real_agent_wire.aux
+        wire = real_agent_wire.wire
+        real_agent_wire.write_config({
+            'model': self._main_route(wire.url + '/route/v1'),
+            'auxiliary': {'title_generation': {
+                'provider': 'auto', 'model': '', 'prefer_fast_model': True,
+            }},
+        })
+        catalog = aux._get_aux_model_for_provider
+
+        def provider_catalog(provider, *, prefer_fast=False):
+            # Only the provider's model catalog is stubbed: a custom endpoint
+            # has none, and the real one would need the network.
+            return 'fast-model' if prefer_fast and provider == 'custom' else catalog(provider)
+
+        with patch.object(aux, '_get_aux_model_for_provider', side_effect=provider_catalog):
+            assert generate_title_raw_via_aux('question', 'answer') == ('Wire Title', 'llm_aux')
+
+        assert [(r['path'], _sent_key(r), r['model']) for r in wire.requests] == [
+            ('/route/v1/chat/completions', 'main-key', 'fast-model'),
+        ]
+
+    @pytest.mark.parametrize('status', (401, 402))
+    @pytest.mark.parametrize(('task_overrides', 'primary_path', 'primary_key'), (
+        ({}, '/primary/v1/chat/completions', 'main-key'),
+        (
+            {'api_key': 'task-key', 'api_mode': 'anthropic_messages'},
+            '/primary/v1/messages', 'task-key',
+        ),
+    ))
+    def test_primary_http_failure_reaches_fallback_on_its_own_route(
+        self, real_agent_wire, status, task_overrides, primary_path, primary_key,
+    ):
+        wire = real_agent_wire.wire
+        wire.fail['/primary/'] = status
+        real_agent_wire.write_config({
+            'model': self._main_route(wire.url + '/primary/v1'),
+            'fallback_providers': [{
+                'provider': 'custom', 'model': 'fallback-model',
+                'base_url': wire.url + '/fallback/v1', 'api_key': 'fallback-key',
+            }],
+            'auxiliary': {'title_generation': {'provider': 'auto', **task_overrides}},
+        })
+
+        assert generate_title_raw_via_aux('question', 'answer') == ('Wire Title', 'llm_aux')
+
+        sent = [(r['path'], _sent_key(r), r['model']) for r in wire.requests]
+        primary = [r for r in sent if r[0].startswith('/primary/')]
+        assert sent[0] == (primary_path, primary_key, 'main-model')
+        assert set(primary) == {sent[0]}
+        # The fallback answers on its own endpoint, key and transport, even
+        # with the primary's title-task overrides present.
+        assert [r for r in sent if r not in primary] == [
+            ('/fallback/v1/chat/completions', 'fallback-key', 'fallback-model'),
+        ]
+
+    @pytest.mark.parametrize(('task_overrides', 'expected_path', 'expected_key'), (
+        ({}, '/profile/v1/chat/completions', 'profile-key'),
+        (
+            {'api_key': 'profile-task-key', 'api_mode': 'anthropic_messages'},
+            '/profile/v1/messages', 'profile-task-key',
+        ),
+    ))
+    def test_named_profile_background_title_keeps_its_own_route(
+        self, real_agent_wire, task_overrides, expected_path, expected_key,
+    ):
+        from api.profiles import profile_env_for_background_worker
+
+        wire = real_agent_wire.wire
+        real_agent_wire.write_config({
+            'model': self._main_route(wire.url + '/root/v1', api_key='root-key'),
+            'auxiliary': {'title_generation': {'provider': 'auto', 'api_key': 'root-task-key'}},
+        })
+        real_agent_wire.write_config({
+            'model': self._main_route(wire.url + '/profile/v1', api_key='profile-key'),
+            'auxiliary': {'title_generation': {'provider': 'auto', **task_overrides}},
+        }, at=real_agent_wire.home / 'profiles' / 'named')
+
+        with profile_env_for_background_worker('named', 'background title'):
+            assert generate_title_raw_via_aux('question', 'answer') == ('Wire Title', 'llm_aux')
+
+        assert [(r['path'], _sent_key(r), r['model']) for r in wire.requests] == [
+            (expected_path, expected_key, 'main-model'),
+        ]

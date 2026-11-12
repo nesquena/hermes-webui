@@ -247,14 +247,21 @@ must consume that same resolved route.
   `title_generation` availability and fallback policy before WebUI injects
   request controls. The Agent-selected provider/model/endpoint must be used
   for the request rather than freezing an unavailable main route. This also
-  includes `auxiliary.title_generation.prefer_fast_model`.
+  includes `auxiliary.title_generation.prefer_fast_model`. A selected main
+  route stays `provider: auto` with the profile's main runtime, so the Agent
+  keeps its HTTP-failure fallback.
 - An inherited main route retains the main model's resolved transport
   (`api_mode`, including `anthropic_messages`), even when title_generation
-  specifies only a model override. An explicit title-task `api_mode` may
-  override the inherited main route.
+  specifies only a model override. An explicit title-task `api_key` or
+  `api_mode` overrides the inherited main route. Both travel in the main
+  runtime, the only input the Agent's automatic route reads; a registered
+  named custom main provider still takes its key from its own entry.
 - A fallback provider retains its own selected endpoint, API key and transport
   (including named-custom fallback overrides). Title-task `api_key` and
   `api_mode` belong to the primary route; they cannot override the fallback.
+  A fallback with no key of its own on the primary's origin borrows the
+  primary's key by the Agent's same-origin rule, which for a title with a task
+  key is that task key.
 - Reasoning suppression is injected only for a known compatible effective
   route. Unknown/custom routes, rejected provider routes, and routes with no
   resolved model omit it (fail closed). MiniMax `reasoning_split` remains a
