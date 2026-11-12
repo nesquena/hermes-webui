@@ -6965,15 +6965,17 @@ def _effective_aux_title_route(
                             # not the endpoint, key, or wire protocol.
                             return auto_provider, str(supplied_model or auto_model), auto_url
                     except ImportError:
-                        # Older Agent installations do not expose full auto
-                        # resolution. Retain the legacy candidate fallback.
+                        # The Agent's full auto resolution is unavailable: it
+                        # is not exposed, or an import inside it failed.
+                        # Retain the main-route candidate.
                         pass
                     if resolved_credentials is not None:
                         resolved_credentials['api_key'] = _resolved_api_key or ''
                         resolved_credentials['api_mode'] = str(_resolved_api_mode or '')
+                    # As above, a title-model override changes only the model.
                     return (
                         str(resolved_provider or supplied_provider),
-                        str(resolved_model or ''),
+                        str(supplied_model or resolved_model or ''),
                         str(resolved_base_url or ''),
                     )
         except Exception:

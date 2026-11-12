@@ -608,6 +608,54 @@ class TestAuxReasoningExtraRouteContract:
         assert 'main_runtime' not in request
         assert request['extra_body'] == expected_extra
 
+    @pytest.mark.parametrize('agent_shape', ('candidate_only', 'resolver_import_error'))
+    @pytest.mark.parametrize(
+        ('title_model', 'expected_model'),
+        (('', 'candidate-model'), ('title-model', 'title-model')),
+    )
+    def test_title_model_override_survives_the_main_route_candidate(
+        self, monkeypatch, agent_shape, title_model, expected_model,
+    ):
+        """Without the Agent's full resolver, the request uses its main-route candidate.
+
+        Covers an Agent that exposes only _main_route_target() and one whose
+        resolver raises ImportError. A title-model override still changes only
+        the model; the candidate keeps its provider, endpoint, key and transport.
+        """
+        requests = []
+        agent_aux = ModuleType('agent.auxiliary_client')
+        agent_aux._main_route_target = lambda runtime, task: (
+            'custom', 'candidate-model', 'https://candidate.example/v1',
+            'candidate-key', 'anthropic_messages',
+        )
+        if agent_shape == 'resolver_import_error':
+            def resolve_auto_route(**_kwargs):
+                raise ModuleNotFoundError("No module named 'provider_sdk'")
+
+            agent_aux._resolve_auto_route = resolve_auto_route
+            agent_aux._effective_provider_for_client = lambda client, provider: provider
+        agent_aux.call_llm = lambda **kwargs: requests.append(kwargs) or {
+            'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}],
+        }
+        monkeypatch.setitem(sys.modules, 'agent.auxiliary_client', agent_aux)
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto', 'model': title_model, 'base_url': '',
+        }), patch('api.streaming._aux_title_main_model_config', return_value={
+            'provider': 'custom', 'default': 'main-model',
+            'base_url': 'https://candidate.example/v1',
+        }):
+            assert generate_title_raw_via_aux('question', 'answer') == ('Title', 'llm_aux')
+
+        request = requests[-1]
+        assert (
+            request['provider'], request['model'], request['base_url'],
+            request['api_key'], request['api_mode'],
+        ) == (
+            'custom', expected_model, 'https://candidate.example/v1',
+            'candidate-key', 'anthropic_messages',
+        )
+        assert 'main_runtime' not in request
+
     def test_blank_provider_minimax_global_endpoint_preserves_route_and_extras(self):
         """The canonical global MiniMax endpoint must not inherit the main route."""
         captured = []
