@@ -1953,7 +1953,7 @@ def _named_custom_provider_slug_for_provider(
     # selector; WebUI selector resolution never hands it the bare built-in
     # route (#8685). The Agent's own runtime resolution is order-dependent
     # downstream of this (#8690).
-    legacy_only = not raw.startswith("custom:") and not _is_native_custom_provider_key(raw)
+    legacy_only = _is_bare_builtin_provider_id(raw)
     legacy_names = _legacy_custom_provider_names(config_obj) if legacy_only else set()
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
@@ -1978,6 +1978,119 @@ def _legacy_custom_provider_names(config_obj: dict | None = None) -> set[str]:
         for entry in raw_entries
         if isinstance(entry, dict) and str(entry.get("name") or "").strip()
     }
+
+
+def _is_bare_builtin_provider_id(provider: object) -> bool:
+    """Whether a bare (non-``custom:``) id names a built-in or plugin provider.
+
+    Such an id is claimed only by a legacy ``custom_providers`` entry of that
+    name, never by a native ``providers['custom:<id>']`` record (#8685, #8816).
+
+    ``_is_native_custom_provider_key`` alone decides plugin-backed built-ins from
+    the plugin registry, so with plugin discovery unavailable the Agent's
+    canonical ``xai`` (WebUI's tables say ``x-ai``) read as a native custom key,
+    and a bare xAI session took the ``custom:xai`` record's endpoint and key
+    (#8816). A static-table built-in is therefore also matched through the
+    provider alias table, independent of plugin discovery.
+    """
+    raw = str(provider or "").strip().lower()
+    if not raw or raw.startswith("custom:"):
+        return False
+    if not _is_native_custom_provider_key(raw):
+        return True
+
+    targets = _provider_id_forms(raw)
+    # A registered plugin reached through an alias (``fw`` -> ``fireworks``).
+    if any(_is_plugin_model_provider(t) for t in targets):
+        return True
+    # A built-in from WebUI's tables or the Agent's own provider catalog, so the
+    # answer doesn't depend on WebUI's plugin discovery (``fireworks`` is in the
+    # Agent catalog but not in WebUI's tables).
+    return bool(targets & _known_builtin_provider_forms())
+
+
+def _provider_id_forms(value: object) -> set[str]:
+    """A provider id's spellings: itself, ``_`` as ``-``, and each one's alias target."""
+    value = str(value or "").strip().lower()
+    forms = {value, value.replace("_", "-")}
+    forms |= {str(_resolve_provider_alias(f) or f).strip().lower() for f in tuple(forms)}
+    # The generic ``custom`` target (Agent aliases ollama/local/vllm -> custom;
+    # catalog slug ``custom``) is a placeholder, not a provider identity: a
+    # bare ``vllm`` with its own ``custom:vllm`` record keeps that route, as on
+    # .630. A raw ``custom`` id never reaches here (the caller returns first).
+    return {f for f in forms if f and f != "custom"}
+
+
+# (key, forms) for _known_builtin_provider_forms; replaced whole, never mutated.
+_KNOWN_BUILTIN_FORMS_CACHE: tuple[tuple, frozenset[str]] | None = None
+
+
+def _known_builtin_provider_forms() -> frozenset[str]:
+    """Every spelling of every built-in id WebUI knows: its tables plus the Agent catalog.
+
+    Rebuilding this for each unknown bare custom name made ``resolve_model_provider``
+    up to ~6x slower (#8816, round 7). The cache key is everything the result
+    depends on: the Agent's and WebUI's alias tables (by content), WebUI's provider
+    tables (by key) and the Agent catalog's entries. Any change rebuilds it, so a
+    stale answer is never served.
+    """
+    global _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+
+        agent_aliases = tuple(_agent_aliases.items()) if isinstance(_agent_aliases, dict) else ()
+    except Exception:
+        agent_aliases = ()
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS as _catalog
+
+        # The entries (NamedTuples in every Agent so far) themselves, not their slugs:
+        # plugin admission inserts entries at runtime, which changes this tuple, and
+        # comparing it short-circuits on identity, so the slug walk below runs only
+        # when the catalog changed.
+        catalog_key = tuple(_catalog or ())
+    except Exception:
+        catalog_key = ()
+    key = (
+        agent_aliases,
+        tuple(_PROVIDER_ALIASES.items()),
+        tuple(_PROVIDER_DISPLAY),
+        tuple(_PROVIDER_MODELS),
+        catalog_key,
+    )
+    cached = _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        if cached is not None and cached[0] == key:
+            return cached[1]
+    except Exception:
+        pass  # an entry type whose comparison raises: rebuild
+    known = [k for k in (*_PROVIDER_DISPLAY, *_PROVIDER_MODELS) if isinstance(k, str)]
+    known.extend(_agent_builtin_provider_ids())
+    forms = frozenset(form for k in known for form in _provider_id_forms(k))
+    _KNOWN_BUILTIN_FORMS_CACHE = (key, forms)
+    return forms
+
+
+def _agent_builtin_provider_ids() -> tuple[str, ...]:
+    """Provider slugs in the Agent's canonical catalog, or ``()`` when the Agent
+    (or an older Agent without the catalog) isn't importable, or the catalog has
+    a shape this WebUI doesn't know. Never raises into routing."""
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS
+
+        slugs = []
+        for entry in CANONICAL_PROVIDERS or ():
+            if isinstance(entry, str):
+                slug = entry
+            else:
+                slug = getattr(entry, "slug", None)
+                if slug is None and isinstance(entry, (tuple, list)) and entry:
+                    slug = entry[0]
+            if isinstance(slug, str) and slug.strip():
+                slugs.append(slug.strip().lower())
+        return tuple(slugs)
+    except Exception:
+        return ()
 
 
 def _resolve_configured_provider_id(
@@ -3631,8 +3744,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
                 continue
-            if _is_native_custom_provider_key(slug):
-                continue  # handled by the read view, including enabled/legacy precedence
+            if target not in _configured_model_ids(pdef.get('models')):
+                continue
+            if _is_native_custom_provider_key(slug) and not _is_bare_builtin_provider_id(slug):
+                # Handled by the read view, including enabled/legacy precedence.
+                # A built-in's own record (``providers.fireworks`` when plugin
+                # discovery is unavailable) stays its URL override, as on .630
+                # and v0.52.544 (#8816 senior round 4).
+                continue
             # Copilot is the documented exception: `providers.copilot.models` is
             # a per-model SETTINGS map (reasoning_effort, limits, etc.), NOT a
             # routable allowlist (see the exception at the catalog-build site).
@@ -4481,12 +4600,13 @@ def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit
     }
 
 
-def _refuse_ambiguous_provider_name(bundle: dict, *providers: object) -> dict | None:
+def _refuse_ambiguous_provider_name(bundle: dict, *providers: object, log=None) -> dict | None:
     """Make ``bundle`` terminal when any of ``providers`` is ambiguous (#8690).
 
     The verdict is what stops the turn (:data:`CUSTOM_ROUTE_ERROR_FIELD`); the
     connection and every side field are cleared too, so a consumer that reads
-    the fields without checking it still has nothing to send.
+    the fields without checking it still has nothing to send. ``log`` replaces
+    the warning for a read path that builds no agent (``lookup_only``).
     """
     for provider in dict.fromkeys(providers):
         verdict = provider_name_ambiguity_verdict(provider)
@@ -4496,7 +4616,7 @@ def _refuse_ambiguous_provider_name(bundle: dict, *providers: object) -> dict | 
             for field in CUSTOM_CONNECTION_SIDE_FIELDS:
                 bundle[field] = None
             bundle[CUSTOM_ROUTE_ERROR_FIELD] = verdict
-            logger.warning("refusing provider route: %s", verdict["message"])
+            (log or logger.warning)("refusing provider route: %s", verdict["message"])
             return verdict
     return None
 
@@ -5071,6 +5191,7 @@ def resolve_custom_provider_bundle(
     provider_id: str,
     *,
     connection_resolver=None,
+    lookup_only: bool = False,
 ) -> dict | None:
     """Return the COMPLETE connection bundle a named ``custom:*`` record owns.
 
@@ -5119,6 +5240,20 @@ def resolve_custom_provider_bundle(
     the caller's namespace still takes effect. An injected resolver can only
     report a URL/key pair — there is no record behind it — so the bundle it
     yields owns no side fields and the caller keeps the runtime's.
+
+    ``lookup_only`` is for a read path that only asks which endpoint and key the
+    chat would use (GET /api/session's context-length lookup, #8928). Record
+    selection and endpoint ownership are unchanged, but the credential comes only
+    from what the record declares in config (literal / ``${ENV}`` / ``key_env`` /
+    ``CUSTOM_<SLUG>_API_KEY``). The credential pool (whose selection can rotate or
+    refresh entries) and the ``key_cmd`` token provider (which runs a command when
+    used) are skipped, and a host-gated env key is never taken as the credential.
+    The keyless declaration still READS that env key, as a plain environment
+    lookup (a record the chat could serve from it is not keyless). It differs from
+    the chat's in one case: a pool the record doesn't declare in config (an
+    auth.json ``custom:<name>`` pool) is never consulted, so a record whose only
+    credential is such a pool reads as keyless here and the read path looks up
+    without a key, where the chat would use the pool's.
     """
     pid = str(provider_id or "").strip().lower()
     if not pid.startswith("custom:"):
@@ -5179,7 +5314,7 @@ def resolve_custom_provider_bundle(
     # Pool first, exactly like the runtime's named-custom path: a pooled
     # endpoint's credential AND its pool object come from the same lookup.
     api_key = None
-    pool_runtime = _custom_record_pool_runtime(base_url, record)
+    pool_runtime = None if lookup_only else _custom_record_pool_runtime(base_url, record)
     if pool_runtime:
         api_key = pool_runtime.get("api_key") or None
         if pool_runtime.get("credential_pool") is not None:
@@ -5187,13 +5322,13 @@ def resolve_custom_provider_bundle(
 
     if not api_key:
         api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
-    if not api_key:
+    if not api_key and not lookup_only:
         api_key = _host_gated_env_key(base_url)
 
     # ``key_cmd`` beats a static api_key / key_env (short-lived bearers go stale
     # mid-session), but never displaces a pooled credential, which the pool
     # itself already rotates.
-    if not pool_runtime:
+    if not pool_runtime and not lookup_only:
         token_provider = _custom_record_key_cmd_provider(base_url, record, pid)
         if token_provider is not None:
             api_key = token_provider
@@ -5406,6 +5541,7 @@ def _custom_provider_runtime_bundle_with_provenance(
     *,
     lookup_provider: str | None = None,
     connection_resolver=None,
+    lookup_only: bool = False,
 ) -> tuple[dict, dict | None]:
     """:func:`merge_custom_provider_runtime_bundle` plus the record it selected.
 
@@ -5415,8 +5551,15 @@ def _custom_provider_runtime_bundle_with_provenance(
     Callers that also need the provenance take it from here rather than
     re-resolving: a second resolution re-reads the config and can mint a second
     ``key_cmd`` token provider or select a different pool entry.
+
+    ``lookup_only`` (see :func:`resolve_custom_provider_bundle`) answers the same
+    question for a read path that builds no agent (GET /api/session's
+    context-length lookup, #8928): config-declared credentials only, and a
+    refused route is logged at debug rather than as a warning.
     """
     _rt = runtime_provider if isinstance(runtime_provider, dict) else {}
+    # A lookup builds no agent, so a refused route is not news worth a warning.
+    _route_log = logger.debug if lookup_only else logger.warning
     bundle = {
         "provider": resolved_provider,
         "base_url": resolved_base_url,
@@ -5435,12 +5578,14 @@ def _custom_provider_runtime_bundle_with_provenance(
     lookup = lookup_provider or resolved_provider
     # A name two records claim (#8690) is refused before any record is chosen:
     # the runtime dict may already pair one record's endpoint with another's key.
-    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider) is not None:
+    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider, log=_route_log) is not None:
         return bundle, None
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
         return bundle, None
 
-    custom = resolve_custom_provider_bundle(lookup, connection_resolver=connection_resolver)
+    custom = resolve_custom_provider_bundle(
+        lookup, connection_resolver=connection_resolver, lookup_only=lookup_only
+    )
     if custom is None:
         return bundle, None
 
@@ -5466,7 +5611,7 @@ def _custom_provider_runtime_bundle_with_provenance(
         # unresolvable route as a resolved one; and no KEYLESS_CUSTOM_API_KEY —
         # ``keyless`` is False on an unowned bundle precisely so the placeholder
         # cannot claim that an endpoint we never found is unauthenticated.
-        logger.warning(
+        _route_log(
             "custom provider %s matches no custom_providers[] row, keyed "
             "providers[] record or model: authority, and the resolved connection "
             "belongs to %s; refusing to route it through that provider's "
@@ -5525,7 +5670,7 @@ def _custom_provider_runtime_bundle_with_provenance(
         bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
             CUSTOM_ROUTE_NO_ENDPOINT, custom["provider_id"]
         )
-        logger.warning(
+        _route_log(
             "custom provider %s resolved no endpoint of its own; refusing to pair "
             "its credential with the connection resolved for %s",
             custom["provider_id"],
@@ -5651,7 +5796,7 @@ def _custom_provider_runtime_bundle_with_provenance(
                 # built). Substituting the placeholder would turn that into a
                 # silent 401 against an endpoint that does require auth; leave the
                 # credential unset so the failure names its real cause.
-                logger.warning(
+                _route_log(
                     "custom provider %s declares a credential source that produced "
                     "no key; sending without one rather than the keyless placeholder",
                     custom["provider_id"],
@@ -5668,7 +5813,7 @@ def _custom_provider_runtime_bundle_with_provenance(
             CUSTOM_ROUTE_NO_CREDENTIAL if bundle["base_url"] else CUSTOM_ROUTE_NO_ENDPOINT,
             custom["provider_id"],
         )
-        logger.warning(
+        _route_log(
             "custom provider %s resolved no routable connection (%s); refusing to "
             "build an agent that would re-enter provider routing",
             custom["provider_id"],

@@ -36,7 +36,7 @@ function extractNewSession(src) {
   return src.slice(start, end);
 }
 
-const src = fs.readFileSync(process.argv[2], 'utf8');
+const src = fs.readFileSync(process.argv[2], 'utf8').replace(/\r\n/g, '\n');
 const contextStart = src.indexOf('let _contextTransitionGeneration=0;');
 const contextEnd = src.indexOf('\nconst _newSessionPendingText', contextStart);
 if (contextStart < 0 || contextEnd < 0) throw new Error('context transition helpers not found');

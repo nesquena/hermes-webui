@@ -46,8 +46,9 @@ def test_streaming_persists_context_fields_on_session_before_save():
     # (it must be bumped whenever a legitimate pre-save mutation block is added) — a
     # structural check (presence of s.save() shortly after the post-merge marker)
     # would be more durable; left as a follow-up. Earlier limits: 9000 (cancellation
-    # guards) → 13000 (#3263 v1) → 15000 (#3256/#3263 dual-gate).
-    assert save_call - block_start < 20000, (
+    # guards) → 13000 (#3263 v1) → 15000 (#3256/#3263 dual-gate). Later: 20000 (#8258),
+    # 22000 (#8822, the Agent-credential fallback in the context-length lookup).
+    assert save_call - block_start < 22000, (
         "s.save() should be close to the post-merge marker — block expanded unexpectedly. "
         "If you've added a new pre-save mutation block here, bump this limit."
     )

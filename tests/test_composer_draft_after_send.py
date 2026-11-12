@@ -331,7 +331,7 @@ def test_busy_send_paths_clear_persisted_composer_draft():
     assert "_clearComposerAfterQueuedSelectionSend();" in in_progress_body
     assert "_clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[])" in in_progress_body
 
-    busy_body = _block(MESSAGES_JS, "if(S.busy||compressionRunning){", "  if(S.session&&(S.session.read_only||S.session.is_read_only))")
+    busy_body = _block(MESSAGES_JS, "if(S.busy||compressionRunning){", "  if(S.session&&(S.session.read_only||S.session.is_read_only)")
     assert "_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);" in busy_body
     assert busy_body.count("_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);") >= 2
     assert "_clearComposerDraft(S.session.session_id,text" not in busy_body
