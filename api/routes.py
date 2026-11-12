@@ -58,6 +58,7 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import (
+    is_proven_pure_synthetic_carrier,
     project_compaction_carriers_for_display,
     visible_messages_for_anchor,
 )
@@ -12309,6 +12310,52 @@ def _tool_calls_for_message_window(tool_calls, start_idx: int, message_count: in
     return filtered
 
 
+def _message_has_renderable_anchor(message: dict) -> bool:
+    """Return True if message has active anchors (tool calls, attachments, reasoning, or non-text blocks)."""
+    if not isinstance(message, dict):
+        return False
+    if message.get("tool_calls") or message.get("_partial_tool_calls"):
+        return True
+    if message.get("attachments") or message.get("_statusCard"):
+        return True
+    if message.get("reasoning") or message.get("thinking"):
+        return True
+    content = message.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type in {"thinking", "reasoning", "tool_use"}:
+                    return True
+                if part_type not in {"text", "input_text", "output_text"} and (
+                    part_type is not None or ("text" not in part and "content" not in part)
+                ):
+                    return True
+            elif not isinstance(part, str):
+                return True
+    return False
+
+
+def _message_has_text_content(message: dict) -> bool:
+    """Return True if message has non-empty text content."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type in {"text", "input_text", "output_text"} or (
+                    part_type is None and ("text" in part or "content" in part)
+                ):
+                    if str(part.get("text") or part.get("content") or "").strip():
+                        return True
+            elif isinstance(part, str):
+                if part.strip():
+                    return True
+    return False
+
+
 def _message_counts_as_renderable_for_window(message) -> bool:
     """Return true when a paginated window should include this transcript row.
 
@@ -12321,6 +12368,9 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     model/recovery state but are never renderable, so they cannot consume the
     visible-row budget — otherwise the 30-row restore window can be all-hidden
     and the transcript opens blank (#quiet-delegation gate review).
+    A proven pure synthetic carrier that projects to empty content does not consume
+    the visible-row budget, but a projected row that still carries tool_calls,
+    attachments, reasoning, or non-text content blocks must keep counting (#8748).
     """
     if not isinstance(message, dict):
         return False
@@ -12329,7 +12379,32 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     if _is_empty_partial_activity_message(message):
         return False
     role = str(message.get("role") or "").strip().lower()
-    return bool(role and role != "tool")
+    if not role or role == "tool":
+        return False
+    if _message_has_renderable_anchor(message):
+        return True
+    if is_proven_pure_synthetic_carrier(message) or not _message_has_text_content(message):
+        return False
+    return True
+
+
+def _is_trailing_window_filler(message) -> bool:
+    """Return true for a non-renderable tail row kept for raw coordinates.
+
+    A paginated window stops after the newest renderable row, but a row that
+    renders nothing (an emptied compaction carrier, an external-source row the
+    transcript skips) still has to ride along so the client's absolute indices
+    keep matching the server's message array. Hidden internal rows and empty
+    partial-activity rows stay out, as before.
+    """
+    if not isinstance(message, dict):
+        return False
+    if is_hidden_transcript_row(message):
+        return False
+    if _is_empty_partial_activity_message(message):
+        return False
+    role = str(message.get("role") or "").strip().lower()
+    return bool(role) and role != "tool"
 
 
 def _tool_call_ids_in_messages(messages) -> set:
@@ -12412,7 +12487,9 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     while end_idx < len(source) and not _message_counts_as_renderable_for_window(
         source[end_idx]
     ):
-        if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
+        if _tool_result_matches_call_ids(
+            source[end_idx], window_tool_call_ids
+        ) or _is_trailing_window_filler(source[end_idx]):
             end_idx += 1
         else:
             break
@@ -18100,6 +18177,7 @@ def _handle_session_get(handler, parsed) -> bool:
         # the wire shape stays byte-equivalent to the previous inline
         # synthesis (the frontend has been reading these exact keys).
         msgs = list(synth.messages or [])
+        display_msgs = project_compaction_carriers_for_display(msgs)
         sess = {
             "session_id": synth.session_id,
             "title": synth.title,
@@ -18139,13 +18217,13 @@ def _handle_session_get(handler, parsed) -> bool:
             # sessions and the user only discovers the block at
             # POST time with a confusing 403.
             "read_only": bool(getattr(synth, "read_only", False)),
-            "messages": msgs,
+            "messages": display_msgs,
             "tool_calls": [],
         }
         for _key in ("parent_session_id", "relationship_type", "active"):
             if getattr(synth, _key, None) is not None:
                 sess[_key] = getattr(synth, _key)
-        attach_todo_state(sess, msgs)
+        attach_todo_state(sess, display_msgs)
         sess = _merge_cli_sidebar_metadata(sess, cli_meta)
         return j(handler, {"session": public_session_projection(sess)})
 

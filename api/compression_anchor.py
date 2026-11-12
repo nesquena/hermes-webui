@@ -89,13 +89,25 @@ def is_context_compression_marker(message):
         return False
     text = _marker_text(message)
     synthetic_unbracketed_marker = bool(message.get("_compressed_summary"))
-    return (
+    if (
         text.startswith(COMPACTION_PROMPT_CARD_PREFIX)
         or (synthetic_unbracketed_marker and text.startswith("context compaction"))
-        or text.startswith(COMPACTION_HANDOFF_HEADER_PREFIX)
         or text.startswith("[your active task list was preserved across context compression]")
         or text.startswith("[session arc summary")
-    )
+    ):
+        return True
+    if text.startswith(COMPACTION_HANDOFF_HEADER_PREFIX):
+        close = text.find("]")
+        if close >= 0:
+            after_close = text[close + 1:].lstrip()
+            if (
+                COMPACTION_HANDOFF_DELIMITER_PREFIX in text
+                or after_close.startswith(COMPACTION_PROMPT_CARD_PREFIX)
+                or after_close.startswith("context compaction")
+                or synthetic_unbracketed_marker
+            ):
+                return True
+    return False
 
 
 def is_prompt_compaction_marker(message):
@@ -171,6 +183,12 @@ _CARRIER_NOT_A_CARRIER = "not_carrier"
 _CARRIER_PROVEN_SYNTHETIC = "proven_synthetic"
 _CARRIER_AUTHENTIC_REMAINDER = "authentic_remainder"
 
+# Display-only marker set by ``project_compaction_carrier_for_display`` when a
+# row projected to nothing but a proven synthetic handoff. The paginated window
+# reads it so an emptied carrier cannot consume the visible-row budget (#8748);
+# it never reaches storage.
+PURE_CARRIER_DISPLAY_FLAG = "_pure_compaction_carrier"
+
 
 def _compaction_carrier_envelope_decision(content_text: str) -> tuple[str, str]:
     """Three-outcome decision on compaction carrier envelope evidence.
@@ -241,10 +259,13 @@ def project_compaction_carrier_for_display(message):
         # The flag describes the handoff we just removed; keeping it would let a
         # downstream mirror treat the authentic remainder as a synthetic card.
         projected.pop("_compressed_summary", None)
+        if decision == _CARRIER_PROVEN_SYNTHETIC:
+            projected[PURE_CARRIER_DISPLAY_FLAG] = True
         return projected
 
     if isinstance(content, list):
         has_carrier_block = False
+        proven_synthetic_only = True
         new_content = []
         for part in content:
             if isinstance(part, dict):
@@ -261,6 +282,8 @@ def project_compaction_carrier_for_display(message):
                             _CARRIER_AUTHENTIC_REMAINDER,
                         ):
                             has_carrier_block = True
+                            if decision == _CARRIER_AUTHENTIC_REMAINDER:
+                                proven_synthetic_only = False
                             new_part = dict(part)
                             new_part[text_key] = remainder
                             new_content.append(new_part)
@@ -269,6 +292,8 @@ def project_compaction_carrier_for_display(message):
                 decision, remainder = _compaction_carrier_envelope_decision(part)
                 if decision in (_CARRIER_PROVEN_SYNTHETIC, _CARRIER_AUTHENTIC_REMAINDER):
                     has_carrier_block = True
+                    if decision == _CARRIER_AUTHENTIC_REMAINDER:
+                        proven_synthetic_only = False
                     new_content.append(remainder)
                     continue
             new_content.append(part)
@@ -278,6 +303,10 @@ def project_compaction_carrier_for_display(message):
         projected = dict(message)
         projected["content"] = new_content
         projected.pop("_compressed_summary", None)
+        if proven_synthetic_only and not _content_text(
+            new_content, part_types={"text", "input_text", "output_text"}
+        ):
+            projected[PURE_CARRIER_DISPLAY_FLAG] = True
         return projected
 
     return message
@@ -288,6 +317,29 @@ def project_compaction_carriers_for_display(messages):
     if not isinstance(messages, list):
         return messages
     return [project_compaction_carrier_for_display(message) for message in messages]
+
+
+def is_proven_pure_synthetic_carrier(message):
+    """Return true when *message* renders nothing but a proven synthetic handoff.
+
+    Two sources count as proof: the display marker the projector sets on an
+    emptied carrier, and a raw row whose content the canonical-envelope ladder
+    classifies as proven synthetic. Authored text that merely starts with the
+    header prefix is not proof (#8748), so callers can use this to keep such a
+    row out of the visible-row budget without deleting it from the transcript.
+    """
+    if not isinstance(message, dict):
+        return False
+    if message.get(PURE_CARRIER_DISPLAY_FLAG):
+        return True
+    role = message.get("role")
+    if role not in ("user", "assistant"):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        decision, _ = _compaction_carrier_envelope_decision(content)
+        return decision == _CARRIER_PROVEN_SYNTHETIC
+    return False
 
 
 def _is_context_compression_marker(message):
