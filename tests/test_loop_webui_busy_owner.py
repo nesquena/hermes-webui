@@ -105,7 +105,8 @@ const t={console,setTimeout,clearTimeout,Promise,JSON,Date,Array,String,Object,R
 };
 t.$=id=>id==='msg'?t.__msg:el(); t.window=t;
 Object.assign(t,{posts,queued,stops,toasts});
-const STUBBED=[];const ctx=new Proxy(t,{has:(o,k)=>k in o,get:(o,k)=>(k in o?o[k]:(STUBBED.push(k),o[k]=()=>{}))});
+__SEAMS__
+const STUBBED=[];const ctx=__STRICT__?t:new Proxy(t,{has:(o,k)=>k in o,get:(o,k)=>(k in o?o[k]:(STUBBED.push(k),o[k]=()=>{}))});
 vm.createContext(ctx);
 vm.runInContext(__SRC__+"\nCOMMANDS=[{name:'stop',fn:()=>stops.push(S.session.session_id)}];var _AGENT_COMMANDS_RUN_ON_WEBUI=new Set(['loop']);",ctx);
 const flush=()=>new Promise(r=>setTimeout(r,0));
@@ -115,13 +116,27 @@ out.posts=posts;out.queued=queued;out.stops=stops;out.toasts=toasts;console.log(
 """
 
 
-def _run_send(scenario, busy):
+# Explicit UI seams for the strict harness: an unknown global is a ReferenceError, not a silent no-op.
+_STRICT_SEAMS = r"""
+let newSessions=0;
+Object.assign(t,{autoResize(){},renderMessages(){},hideCmdDropdown(){},renderTray(){},updateQueueBadge(){},
+  _clearComposerAfterQueuedSelectionSend(){},_flushSelectionBlocksToComposer(){},_normalizeGoalContinuationId:v=>v||null,
+  _takeRestoredDraftGoalContinuationId:()=>null,_clearStaleBusyStateBeforeSend(){},_saveComposerDraftNow(){},
+  newSession:async()=>{newSessions++;t.S.session={session_id:'created'};t.S.messages=[];}});
+"""
+
+
+def _run_send(scenario, busy, strict=False, src_js=None):
+    msgs_js = MESSAGES_JS if src_js is None else src_js
     src = "\n".join([_fn(COMMANDS_JS, n) for n in (
         "parseCommand", "_slashCommandSlugVariants", "loadAgentCommandMetadata", "getAgentCommandMetadata",
         "_canonicalizeSlashCommandToken", "_runAgentCommandTransport", "executeAgentCommand")]
-        + [MESSAGES_JS[MESSAGES_JS.index("const _NATIVE_BUSY_CONTROLS="):MESSAGES_JS.index("async function send(){")]
-           if "const _NATIVE_BUSY_CONTROLS=" in MESSAGES_JS else "", _fn(MESSAGES_JS, "send")])
-    script = (_SEND_HARNESS.replace("__SRC__", json.dumps(src)).replace("__BUSY__", busy)
+        + [msgs_js[msgs_js.index("const _NATIVE_BUSY_CONTROLS="):msgs_js.index("async function send(){")]
+           if "const _NATIVE_BUSY_CONTROLS=" in msgs_js else "", _fn(msgs_js, "send"),
+           _fn(msgs_js, "_setComposerAfterCliOnlyExplainer")])
+    script = (_SEND_HARNESS.replace("__SEAMS__", _STRICT_SEAMS if strict else "")
+              .replace("__STRICT__", "true" if strict else "false")
+              .replace("__SRC__", json.dumps(src)).replace("__BUSY__", busy)
               .replace("__SCENARIO__", scenario))
     if not NODE:
         pytest.skip("node is required")
@@ -178,3 +193,58 @@ def test_commands_exec_loop_args_split_on_any_whitespace(monkeypatch, command):
                              "path": "/api/commands/exec", "client_address": ("127.0.0.1", 1)})()
     routes.handle_post(handler, urlparse("/api/commands/exec"))
     assert seen == [("s1", command.split(maxsplit=1)[1])] and out == {"output": "ok"}
+
+
+def _hold_exec_harness():
+    # Hold /api/commands/exec until the scenario calls releaseExec().
+    return """
+  let releaseExec; const held=new Promise(r=>{releaseExec=r;});
+  const realApi=ctx.api; ctx.api=async(path,opts)=>{const r=realApi(path,opts); if(path==='/api/commands/exec'){await held;} return r;};
+  release();"""
+
+
+def test_full_send_idle_loop_reply_stays_in_the_originating_chat(old=None):
+    """Hold A's /loop status response, switch to B and type a draft, then release it."""
+    out = _run_send(_hold_exec_harness() + """
+  const aMsgs=ctx.S.messages; ctx.__msg.value='/loop status'; const p=ctx.send(); await flush(); await flush();
+  const bMsgs=[{role:'user',content:'b'}]; ctx.S.session={session_id:'B'}; ctx.S.messages=bMsgs; ctx.__msg.value='B draft';
+  releaseExec(); await p;
+  Object.assign(out,{a:aMsgs.map(m=>m.role+':'+m.content),b:bMsgs.map(m=>m.content),composer:ctx.__msg.value});""",
+        "false", strict=True, src_js=old)
+    assert out["posts"] == [["/api/commands/exec", {"command": "/loop status", "session_id": "A"}]]
+    assert out["a"] == ["user:/loop status", "assistant:ok"]
+    assert out["b"] == ["b"] and out["composer"] == "B draft"
+
+
+def test_full_send_ownerless_loop_never_adopts_a_chat_selected_during_the_metadata_wait(old=None):
+    """`/loop stop` from New Chat; B is selected while metadata is pending."""
+    out = _run_send("""
+  ctx.S.session=null; ctx.__msg.value='/loop stop'; const p=ctx.send(); await flush();
+  const bMsgs=[]; ctx.S.session={session_id:'B'}; ctx.S.messages=bMsgs; ctx.__msg.value='B draft';
+  release(); await p; Object.assign(out,{b:bMsgs.length,composer:ctx.__msg.value,newSessions});""",
+        "false", strict=True, src_js=old)
+    assert out["posts"] == [] and out["b"] == 0 and out["composer"] == "B draft" and out["toasts"]
+
+
+def test_full_send_ownerless_loop_owns_the_session_it_creates():
+    out = _run_send("""
+  ctx.S.session=null; ctx.__msg.value='/loop stop'; const p=ctx.send(); await flush(); release(); await p;
+  Object.assign(out,{msgs:ctx.S.messages.map(m=>m.role),composer:ctx.__msg.value,newSessions});""",
+        "false", strict=True)
+    assert out["posts"] == [["/api/commands/exec", {"command": "/loop stop", "session_id": "created"}]]
+    assert out["msgs"] == ["user", "assistant"] and out["composer"] == "" and out["newSessions"] == 1
+
+
+def test_full_send_literal_slash_second_send_is_not_dispatched_as_a_control(old=None):
+    """A second send({literalSlash:true}) of `/stop` while alias metadata is pending stays literal text."""
+    out = _run_send("""
+  ctx.__msg.value='/proactive pause'; const first=ctx.send(); await flush();
+  ctx.__msg.value='/stop'; await ctx.send({literalSlash:true}); out.stopsBeforeRelease=[...stops];
+  release(); await first;""", "true", strict=True, src_js=old)
+    assert out["stopsBeforeRelease"] == [] and out["stops"] == []
+    assert out["queued"] == [["A", "/stop"]]
+
+
+_NEW_FULL_SEND = [test_full_send_idle_loop_reply_stays_in_the_originating_chat,
+                  test_full_send_ownerless_loop_never_adopts_a_chat_selected_during_the_metadata_wait,
+                  test_full_send_literal_slash_second_send_is_not_dispatched_as_a_control]

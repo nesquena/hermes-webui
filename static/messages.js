@@ -1616,7 +1616,7 @@ async function send(){
     const _text=_composerTextWithPendingSelections().trim();
     // A native busy control (/stop, /steer, /loop …) typed while an earlier send() is parked on a
     // metadata await runs now; queueing it would act only after the turn it is meant to control.
-    if(typeof _dispatchReentrantBusyControl==='function'&&_dispatchReentrantBusyControl(_text)) return;
+    if(!_sendOptions.literalSlash&&typeof _dispatchReentrantBusyControl==='function'&&_dispatchReentrantBusyControl(_text)) return;
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
@@ -1810,7 +1810,7 @@ async function send(){
   // captured before the metadata awaits in the intercept below. Composer
   // writes after those awaits go through
   // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
-  const _slashOwner={sid:S.session&&S.session.session_id||null,text};
+  const _slashOwner={sid:S.session&&S.session.session_id||null,text,msgs:S.messages};
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1936,14 +1936,15 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
-        // /loop is chat-scoped and the transport reads S.session synchronously at the call below: the
-        // registry wait above may span a chat switch, so refuse instead of acting on the chat switched to.
-        if(_agentCmdName==='loop'&&_slashOwner.sid&&(S.session&&S.session.session_id)!==_slashOwner.sid){
+        // The registry wait may span a chat switch (also away from an ownerless New Chat): refuse
+        // rather than act on, or write into, the chat that is now selected.
+        if((S.session&&S.session.session_id||null)!==_slashOwner.sid){
           showToast('Chat changed — "'+text.slice(0,40)+'" was not sent',3000);
           return;
         }
-        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});_slashOwner.sid=S.session&&S.session.session_id||null;_slashOwner.msgs=S.messages;}
+        const _ownMsgs=_slashOwner.msgs;
+        _ownMsgs.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
           _agentOutput=typeof executeAgentCommand==='function'
@@ -1952,9 +1953,10 @@ async function send(){
         }catch(e){
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
-        S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
+        _ownMsgs.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
+        if(S.messages!==_ownMsgs) return;
         renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
+        _setComposerAfterCliOnlyExplainer('',_slashOwner);hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
         if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
