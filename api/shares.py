@@ -1148,7 +1148,7 @@ def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
         if isinstance(prefix, dict) and all(k in prefix for k in _LINEAGE_KEYS):
             return (
                 str(prefix.get("parent_session_id") or "").strip(),
-                bool(prefix.get("pre_compression_snapshot")),
+                prefix.get("pre_compression_snapshot") is True,
                 str(prefix.get("pre_compression_continuation_session_id") or "").strip(),
             )
 
@@ -1157,9 +1157,20 @@ def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
         session = models.Session.load_metadata_only(sid)
         if session is None:
             return None
+
+        # Re-validate the raw pre_compression_snapshot type before Session constructor
+        # coercion (#8950 round 3): only raw JSON boolean true qualifies.
+        raw_snapshot = None
+        try:
+            raw_payload = json.loads(session_path.read_text(encoding="utf-8"))
+            if isinstance(raw_payload, dict):
+                raw_snapshot = raw_payload.get("pre_compression_snapshot")
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            raw_snapshot = None
+
         return (
             str(getattr(session, "parent_session_id", None) or "").strip(),
-            bool(getattr(session, "pre_compression_snapshot", False)),
+            raw_snapshot is True,
             str(getattr(session, "pre_compression_continuation_session_id", None) or "").strip(),
         )
     except Exception:

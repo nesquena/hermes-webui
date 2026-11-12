@@ -452,3 +452,146 @@ def test_revoke_share_owned_by_retains_exact_owner_rule(store):
     snapshot_final = json.loads((share_dir / f"{token}.json").read_text(encoding="utf-8"))
     assert snapshot_final["revoked_at"] is not None
     assert shares.load_share(token) is None
+
+
+# ---------------------------------------------------------------------------
+# #8950 round 3: Malformed intermediate snapshot marker matrix
+# ---------------------------------------------------------------------------
+
+
+def _setup_tampered_intermediate_chain(
+    store,
+    prefix_id: str,
+    marker_value,
+    *,
+    oversized: bool = False,
+):
+    session_dir, share_dir = store
+    sid_a = f"sess-{prefix_id}-a"
+    sid_b = f"sess-{prefix_id}-b"
+    sid_c = f"sess-{prefix_id}-c"
+
+    session_a = _make_session(sid_a, f"Session A ({prefix_id})", "Root private content", session_dir)
+    created = shares.create_or_refresh_share(session_a)
+    token = created["share_token"]
+    session_a = _seed_share_token(session_dir, sid_a, token)
+
+    models.SESSIONS[sid_a] = session_a
+    agent_lock = threading.Lock()
+    assert streaming._migrate_compression_session_ownership(
+        session_a, sid_a, sid_b, agent_lock
+    ) is True
+    session_b = session_a
+    session_b.save(touch_updated_at=False)
+
+    models.SESSIONS[sid_b] = session_b
+    assert streaming._migrate_compression_session_ownership(
+        session_b, sid_b, sid_c, agent_lock
+    ) is True
+    session_c = session_b
+    session_c.save(touch_updated_at=False)
+
+    path_b = session_dir / f"{sid_b}.json"
+    payload_b = json.loads(path_b.read_text(encoding="utf-8"))
+    payload_b["pre_compression_snapshot"] = marker_value
+    if oversized:
+        payload_b["compression_anchor_summary"] = "X" * (models._METADATA_PREFIX_MAX_BYTES + 4096)
+        path_b.write_text(json.dumps(payload_b), encoding="utf-8")
+        assert models._persisted_session_meta_prefix(sid_b) is None
+    else:
+        path_b.write_text(json.dumps(payload_b), encoding="utf-8")
+        assert models._persisted_session_meta_prefix(sid_b) is not None
+
+    return session_c, token, sid_a, sid_c, share_dir
+
+
+def _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir):
+    with pytest.raises(shares.ShareTokenOwnershipError) as exc_info:
+        shares.revoke_share(session_c)
+    assert sid_a in str(exc_info.value)
+    assert sid_c in str(exc_info.value)
+
+    snapshot = json.loads((share_dir / f"{token}.json").read_text(encoding="utf-8"))
+    assert snapshot["revoked_at"] is None
+    assert shares.load_share(token) is not None
+
+
+def test_intermediate_snapshot_marker_string_false_refuses_revocation(store):
+    """Cheap-prefix path: string 'false' as intermediate snapshot marker refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "pfx-str-false", "false", oversized=False
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_intermediate_snapshot_marker_int_one_refuses_revocation(store):
+    """Cheap-prefix path: integer 1 as intermediate snapshot marker refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "pfx-int-one", 1, oversized=False
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_intermediate_snapshot_marker_non_empty_object_refuses_revocation(store):
+    """Cheap-prefix path: non-empty object as intermediate snapshot marker refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "pfx-obj", {"corrupted": True}, oversized=False
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_intermediate_snapshot_marker_empty_list_control_refuses_revocation(store):
+    """Cheap-prefix path: control empty list [] as intermediate snapshot marker refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "pfx-ctrl-list", [], oversized=False
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_intermediate_snapshot_marker_boolean_false_control_refuses_revocation(store):
+    """Cheap-prefix path: control boolean False as intermediate snapshot marker refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "pfx-ctrl-false", False, oversized=False
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_oversized_intermediate_snapshot_marker_string_false_refuses_revocation(store):
+    """Full-read fallback: string 'false' with oversized metadata refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "ovsz-str-false", "false", oversized=True
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_oversized_intermediate_snapshot_marker_int_one_refuses_revocation(store):
+    """Full-read fallback: integer 1 with oversized metadata refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "ovsz-int-one", 1, oversized=True
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_oversized_intermediate_snapshot_marker_non_empty_object_refuses_revocation(store):
+    """Full-read fallback: non-empty object with oversized metadata refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "ovsz-obj", {"corrupted": True}, oversized=True
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_oversized_intermediate_snapshot_marker_empty_list_control_refuses_revocation(store):
+    """Full-read fallback: control empty list [] with oversized metadata refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "ovsz-ctrl-list", [], oversized=True
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
+
+def test_oversized_intermediate_snapshot_marker_boolean_false_control_refuses_revocation(store):
+    """Full-read fallback: control boolean False with oversized metadata refuses revocation."""
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, "ovsz-ctrl-false", False, oversized=True
+    )
+    _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
+
