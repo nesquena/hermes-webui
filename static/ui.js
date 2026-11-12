@@ -15618,7 +15618,9 @@ function syncTopbar(){
     if(sourceLabel){
       const badge=document.createElement('span');
       badge.className='topbar-source-badge';
-      badge.textContent=sourceLabel+((S.session.read_only||S.session.chat_read_only_reason)?' · read-only':'');
+      const deliveryNotice=S.session.chat_delivery_notice;
+      badge.textContent=sourceLabel+((S.session.read_only||S.session.chat_read_only_reason)?' · read-only':'')+(deliveryNotice?' · email delivery':'');
+      if(deliveryNotice) badge.title=deliveryNotice;
       _topbarMeta.appendChild(document.createTextNode(' '));
       _topbarMeta.appendChild(badge);
     }

@@ -432,7 +432,7 @@ def gateway_session_chat_read_only_reason(session: dict, config_data=None) -> st
         "acp": "ACP", "local": "the original client", "telegram": "Telegram",
         "discord": "Discord", "slack": "Slack", "whatsapp": "WhatsApp",
         "signal": "Signal", "matrix": "Matrix", "mattermost": "Mattermost",
-        "teams": "Teams", "line": "LINE", "feishu": "Feishu",
+        "teams": "Teams", "line": "LINE", "feishu": "Feishu", "email": "Email",
     }.get(source, "the original client")
     return f"Read-only in WebUI. Continue in {client}."
 
