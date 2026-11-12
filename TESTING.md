@@ -2571,6 +2571,12 @@ theme. HTTP 401/403/404 must show the escaped filename and localized error in
 `diff-inline-error` without a download link. Network/format failures keep their
 format-specific fallback and download link. A 401 directs the user to reload.
 
+### New Chat / direct profile / sidebar intent ordering (#6423)
+
+- Hold New Chat A in destination-draft saving or awaited workspace loading, choose profile B, then choose existing sidebar session C before A settles. After releasing A, C must be final, B must not create a replacement chat, and a waiting Send/local command must not run. Repeat with C in the same and a different profile.
+- Choose profile B while a populated chat is open, then choose sidebar session C during the profile POST, replacement creation, destination-draft saving, or awaited workspace load. C must remain final; no stale profile completion toast, stuck New Chat control, or stranded context/request tail may remain.
+- An older external-session import must not switch profiles after a newer direct profile choice has claimed the pane.
+
 ### MEDIA boundary regression checks (#6923)
 
 - Bare local paths and remote path-only URLs preserve every trailing byte,

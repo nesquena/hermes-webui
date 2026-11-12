@@ -58,7 +58,7 @@ def test_the_debounced_autosave_snapshots_the_restored_binding() -> None:
     assert end > start, "could not delimit the debounced save helper"
     body = SESSIONS_JS[start:end]
 
-    timer_idx = body.find("_draftSaveTimer = setTimeout(")
+    timer_idx = body.find("const timer = setTimeout(")
     assert timer_idx >= 0, "the debounced save no longer schedules a timer"
     snapshot_idx = body.find("_peekRestoredGoalContinuationDraft()")
     assert 0 <= snapshot_idx < timer_idx, (
@@ -76,7 +76,7 @@ def test_the_debounced_autosave_sends_the_token_with_its_own_text() -> None:
     body = SESSIONS_JS[start:end]
     # The comparison must be inside the timer callback, against the text that
     # was scheduled — not a live read of the composer.
-    callback = body[body.find("_draftSaveTimer = setTimeout("):]
+    callback = body[body.find("const timer = setTimeout("):]
     assert "_restoredCont.text" in callback and "normalizedText" in callback, (
         "the autosave does not compare the restored binding's text with the "
         "text being saved, so an edited draft can carry a stale token "

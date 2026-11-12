@@ -368,8 +368,15 @@ def test_reviewer_identified_direct_session_transitions_reach_sync_topbar():
     workspace_prompt = _between(panels, "async function promptWorkspacePath", "async function switchToWorkspace")
     workspace_switch = _between(panels, "async function switchToWorkspace", "// ── Profile panel + dropdown")
     for transition in (new_file, new_folder, workspace_prompt, workspace_switch):
-        assert "S.session=r.session" in transition
-        assert "syncTopbar()" in transition
+        # Every transition now mints or reuses the session through the canonical
+        # ownership path (which syncs the topbar itself) instead of assigning
+        # S.session from a parallel /api/session/new reply.
+        assert (
+            "_ensureBlankPageSession(" in transition
+            or "_ensureSessionForComposerAction(" in transition
+            or "S.session=r.session" in transition
+        ), transition[:200]
+        assert "_runContextTransition(" in transition
 
 
 def test_restored_empty_session_keeps_provider_through_boot_demotion():

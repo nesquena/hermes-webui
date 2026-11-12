@@ -184,7 +184,8 @@ def test_bindings_dialog_provider_falls_back_to_qualified_model_id():
 def test_workspace_switch_new_chat_passes_explicit_workspace():
     """The switch-to-different-workspace new-chat must pass {workspace: path}."""
     src = _read_static("panels.js")
-    assert "await newSession(false,{workspace:path});" in src
+    assert "await newSession(false,{" in src
+    assert "workspace:path," in src
     # The old flag-only call (which let a project binding win) must be gone.
     assert "S._profileSwitchWorkspace=path;\n    if(typeof newSession==='function') await newSession(false);" not in src
 
