@@ -11630,7 +11630,11 @@ def _session_is_subagent_view_only(sid: str) -> bool:
     if _is_subagent_child_session_id(sid):
         return True
     try:
-        s = get_session(sid)
+        # #9019: this guard must read a swapped-in body to refuse it (master read the
+        # OTHER session's source tag here and refused a subagent body). Without the
+        # opt-in the boundary's KeyError fell to ``return False`` below, and routes that
+        # never call get_session themselves (delete, handoff-summary) mutated this id.
+        s = get_session(sid, allow_foreign_body=True)
     except Exception:
         return False
     src = (

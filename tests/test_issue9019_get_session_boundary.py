@@ -531,3 +531,110 @@ def test_archive_never_imports_over_the_replaced_file(store, monkeypatch):  # no
     assert fallbacks == []
     assert replies == NOT_FOUND, replies
     assert _files(store) == before
+
+
+# --- view-only guard reads a swapped-in body (Codex review r2) -------------------------------------
+# ``_session_is_subagent_view_only`` guards routes that never call get_session themselves. Master read
+# the OTHER session's source tag from a swapped file and refused a subagent body. The guard opts in with
+# ``allow_foreign_body`` so it still can; without it, delete/handoff-summary mutated this id.
+
+
+def _swapped(directory, subagent):
+    _victim(directory)
+    if subagent:
+        path = directory / f"{VICTIM}.json"
+        raw = json.loads(path.read_text())
+        raw["source_tag"] = "subagent"
+        path.write_text(json.dumps(raw))
+    _own(directory)
+    _swap_while_open(directory)
+
+
+def _own_state_db(tmp_path, monkeypatch, directory, message_count=None):
+    import sqlite3
+
+    from api import models, profiles
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "SESSION_DIR", directory)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db")
+    db_path = tmp_path / "state.db"
+    if message_count:
+        from tests.test_5307_subagent_child_transcript import _make_state_db
+
+        _make_state_db(db_path, OWN, source="webui", message_count=message_count)
+    else:
+        with sqlite3.connect(db_path) as db:
+            db.executescript(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, source TEXT, title TEXT,"
+                " message_count INTEGER);"
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,"
+                " timestamp REAL);"
+            )
+            db.execute("INSERT INTO sessions VALUES (?,NULL,?,?,1)", (OWN, "webui", "Own"))
+            db.execute("INSERT INTO messages VALUES (1,?,?,?,1)", (OWN, "user", "own transcript"))
+
+    def own_rows():
+        with sqlite3.connect(db_path) as db:
+            return db.execute("SELECT COUNT(*) FROM messages WHERE session_id=?", (OWN,)).fetchone()[0]
+
+    return own_rows
+
+
+@pytest.mark.parametrize("subagent", [True, False], ids=["subagent-body", "ordinary-body"])
+def test_view_only_guard_reads_the_swapped_body_as_master_did(store, monkeypatch, subagent):  # noqa: F811
+    import api.routes as routes
+
+    _swapped(store, subagent)
+    # Subagent body: refused (view-only), as on master. Ordinary body: not view-only, so the route's
+    # own get_session answers 404 for the swapped file.
+    assert routes._session_is_subagent_view_only(OWN) is subagent
+
+
+def test_view_only_guard_still_allows_an_ordinary_session(store):  # noqa: F811 -- pytest fixture parameter
+    import api.routes as routes
+
+    _own(store)
+    assert routes._session_is_subagent_view_only(OWN) is False
+
+
+def test_delete_never_removes_a_swapped_subagent_file_or_its_transcript(store, tmp_path, monkeypatch):  # noqa: F811
+    _swapped(store, subagent=True)
+    own_rows = _own_state_db(tmp_path, monkeypatch, store)
+    before = _files(store)
+
+    replies = _post(monkeypatch, "/api/session/delete", {"session_id": OWN})
+
+    assert replies and replies[0][1] == 400, replies
+    assert _files(store) == before
+    assert own_rows() == 1
+
+
+def test_delete_of_a_swapped_ordinary_file_never_touches_the_other_session(store, tmp_path, monkeypatch):  # noqa: F811
+    _swapped(store, subagent=False)
+    _own_state_db(tmp_path, monkeypatch, store)
+    before = _files(store)
+
+    _post(monkeypatch, "/api/session/delete", {"session_id": OWN})
+
+    _unchanged_victim(store, before)
+
+
+def test_handoff_summary_never_writes_into_a_swapped_session(store, tmp_path, monkeypatch):  # noqa: F811
+    import api.routes as routes
+
+    _swapped(store, subagent=True)
+    own_rows = _own_state_db(tmp_path, monkeypatch, store, message_count=24)
+
+    def no_model():
+        raise RuntimeError("isolated test: model runtime unavailable")
+
+    monkeypatch.setattr(routes, "ensure_agent_runtime_current", no_model)
+    before = _files(store)
+
+    replies = _post(monkeypatch, "/api/session/handoff-summary", {"session_id": OWN})
+
+    assert replies and replies[0][1] == 400, replies
+    assert own_rows() == 24
+    assert _files(store) == before
