@@ -203,6 +203,10 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
         cli_meta = dict(cli_meta or {})
         if not session or cli_meta.get("read_only") or not _looks_like_default_cli_title(cli_meta):
             return
+        if getattr(session, "_sidecar_names_other_session", None):
+            # #8852: the thread below reloads the session the object's id
+            # names; the id came from a file whose body names another session.
+            return
         sid = str(getattr(session, "session_id", "") or "")
         if not sid:
             return
