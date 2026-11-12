@@ -14237,6 +14237,8 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    old_profile_env_owned_before = {}
+    _safe_profile_runtime_env = {}
     result = None
     _result_partial_pre_call_context = []
 
@@ -14877,6 +14879,10 @@ def _run_agent_streaming(
                 get_profile_runtime_env,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
+                note_profile_env_mirror,
+                drop_profile_env_mirror,
+                profile_env_mirror_owned_before,
+                restore_profile_env_snapshot,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -14893,6 +14899,18 @@ def _run_agent_streaming(
             snapshot_skill_home_modules = None
             restore_skill_home_modules = None
             _skill_modules_support_profile_home = None
+
+            def _no_env_mirror_op(*_args, **_kwargs):
+                return {}
+
+            # #8517 + #9024 round 4: the provenance helpers come from the same
+            # failed import; the fallback keeps an EMPTY mirror
+            # (_safe_profile_runtime_env = {}), so their no-op shape leaves
+            # nothing to note, drop, or restore on this path.
+            note_profile_env_mirror = _no_env_mirror_op
+            drop_profile_env_mirror = _no_env_mirror_op
+            profile_env_mirror_owned_before = _no_env_mirror_op
+            restore_profile_env_snapshot = _no_env_mirror_op
             _SKILL_HOME_MODULE_PATCH_LOCK = None
 
         # Profile-aware provider/model enrichment: when the session belongs
@@ -15011,6 +15029,12 @@ def _run_agent_streaming(
                 _streaming_skill_home_snapshot = snapshot_skill_home_modules()
                 patch_skill_home_modules(Path(_profile_home))
             old_profile_env = {key: os.environ.get(key) for key in _safe_profile_runtime_env}
+            # #9024 review round 4: capture which previous values a still-live
+            # profile writer owns BEFORE recording this scope, so restore can
+            # tell a live writer's value from a launcher export.
+            old_profile_env_owned_before = profile_env_mirror_owned_before(
+                old_profile_env
+            )
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
@@ -15019,6 +15043,10 @@ def _run_agent_streaming(
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_safe_profile_runtime_env)
+            # #9024 review rounds 3-4: record the mirror so a live value held
+            # by this stream is never mistaken for a launcher export, and a
+            # later restore never resurrects it once the stream ends.
+            note_profile_env_mirror(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
@@ -18480,9 +18508,25 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
             with _ENV_LOCK:
-                for _key, _old_value in old_profile_env.items():
-                    if _old_value is None: os.environ.pop(_key, None)
-                    else: os.environ[_key] = _old_value
+                # #9024 review round 4: provenance-correct restore — a value
+                # whose writer already exited (FIFO scope ordering) is never
+                # resurrected as a fake launcher export. Mirrors the setup
+                # block's ImportError fallback (#8517): with the empty env the
+                # drop/restore calls are no-ops, and the plain loop preserves
+                # the historical behavior if the import itself is unavailable.
+                try:
+                    from api.profiles import (
+                        drop_profile_env_mirror,
+                        restore_profile_env_snapshot,
+                    )
+                    drop_profile_env_mirror(_safe_profile_runtime_env)
+                    restore_profile_env_snapshot(
+                        old_profile_env, old_profile_env_owned_before
+                    )
+                except ImportError:
+                    for _key, _old_value in old_profile_env.items():
+                        if _old_value is None: os.environ.pop(_key, None)
+                        else: os.environ[_key] = _old_value
                 if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
                 else: os.environ['TERMINAL_CWD'] = old_cwd
                 if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)

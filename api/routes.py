@@ -14735,6 +14735,7 @@ from api.gateway_chat import (
     gateway_session_chat_read_only_reason,
     refuse_on_gateway_backend,
     webui_gateway_chat_enabled,
+    unverifiable_chat_backend_rule,
 )
 from api.run_drain import (  # #7293
     RunAdmissionClosed,
@@ -29133,14 +29134,18 @@ def _session_chat_backend_rule(sid) -> tuple:
     ``get_session_profile_readonly()`` (#9024 review): the full
     ``get_session()`` loader can collapse duplicate partials and save the
     sidecar (with a ``.bak``) before the 409 leaves, so a refused request would
-    rewrite the conversation it just refused. A missing (KeyError) or
-    unverifiable (ValueError) session has no owning profile — keep the request
-    profile's rule there so the response for a bogus session_id is unchanged.
+    rewrite the conversation it just refused. A missing session (KeyError) has
+    no owning profile — keep the request profile's rule there so the response
+    for a bogus session_id is unchanged. An unverifiable sidecar (ValueError)
+    fails closed to the refusal side (#9024 review round 4, #8971): it must
+    not silently authorize an in-process model call.
     """
     try:
         profile = get_session_profile_readonly(str(sid))
-    except (KeyError, ValueError):
+    except KeyError:
         return get_config_snapshot(), None
+    except ValueError:
+        return unverifiable_chat_backend_rule()
     return chat_backend_rule_for_profile(profile, get_config_snapshot())
 
 

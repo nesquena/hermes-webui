@@ -399,24 +399,35 @@ def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None 
     return webui_chat_backend_mode(config_data, environ) == "gateway"
 
 
+def unverifiable_chat_backend_rule() -> tuple:
+    """A (config, environ) pair that always decides "gateway" (#9024 review).
+
+    Used when the owning profile's rule cannot be verified: an unverifiable
+    owner/config-read must not silently authorize an in-process model call
+    (#8971), so the decision fails closed to the refusal side. Deterministic
+    by construction — the environ value is a valid gateway backend, so
+    neither the request profile's env nor the live process env can override it.
+    """
+    return {}, {_WEBUI_CHAT_BACKEND_ENV: "gateway"}
+
+
 def _owning_profile_rule(resolver, profile, config_data) -> tuple:
-    """Resolve the owning profile's (config, environ), or fall back to the request rule.
+    """Resolve the owning profile's (config, environ), or fail closed.
 
     An empty dict is a valid, fully-local owning-profile answer — only a
-    resolution failure (exception / non-dict) falls back to the request rule.
-    On that fallback the environ is ``None`` (live ``os.environ``) so the whole
-    decision is the pre-#8860 request rule, never a mix of one profile's config
-    with another profile's env (#9024 review round 2).
+    resolution failure (exception / non-dict) is unverifiable. That never
+    silently authorizes an in-process turn: the decision fails closed to the
+    gateway/refusal side (#9024 review round 4, #8971).
     """
     try:
         resolved = resolver()
     except Exception:
         logger.exception(
-            "owning-profile config resolution failed; using the request profile's rule"
+            "owning-profile config resolution failed; refusing in-process use"
         )
         resolved = None
     if not isinstance(resolved, dict):
-        return (config_data if isinstance(config_data, dict) else {}), None
+        return unverifiable_chat_backend_rule()
     from api.profiles import chat_backend_environ_for_profile
 
     return resolved, chat_backend_environ_for_profile(profile)
@@ -451,10 +462,9 @@ def chat_backend_rule_for_session(session, config_data=None) -> tuple:
     ``profile_env_for_background_worker`` mirror) never decides another
     profile's session.
     ``config_data`` is the fallback for callers with no session context (the
-    request snapshot) and for resolution failures; fail-open here only picks
-    the pre-#8860 rule, never a local in-process turn the owning profile did
-    not ask for — a session whose profile resolves to gateway mode still
-    refuses through the sites below.
+    request snapshot). A resolution failure is unverifiable ownership and
+    fails closed to the gateway/refusal side (#9024 review round 4, #8971):
+    never a local in-process turn the owning profile did not ask for.
     """
     from api.gateway_sessions import config_for_session
 

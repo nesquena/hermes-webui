@@ -15,7 +15,9 @@ decides alongside its config (#9024 review round 2): launcher export first,
 then the owner's own .env, then its config.yaml — never the live process env,
 which after a profile switch holds the active profile's .env.
 """
+import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -464,3 +466,363 @@ def test_gateway_owned_commit_message_never_reaches_the_model_boundary(
     assert captured["status"] == 409
     assert captured["payload"]["code"] == "gateway_mode_unsupported"
     assert calls["model_boundary"] == 0
+
+
+def _two_writer_homes(monkeypatch, tmp_path, *, first_env, second_env):
+    """Homes for two distinct profile writers with different .env values."""
+    homes = {}
+    for name, env_text in (("first", first_env), ("second", second_env)):
+        home = tmp_path / f"home-{name}"
+        home.mkdir()
+        if env_text:
+            (home / ".env").write_text(env_text, encoding="utf-8")
+        homes[name] = home
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name, _h=homes: _h[str(name)],
+    )
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+    return homes
+
+
+def test_fifo_overlapping_worker_scopes_never_resurrect_the_exited_value(
+    monkeypatch, tmp_path, captured
+):
+    """#9024 review round 4 (FIFO): an exited writer's value must not come back.
+
+    Scope "first" opens, then scope "second" opens over it; they exit in FIFO
+    order. The second scope's snapshot holds the FIRST writer's value, which
+    its exit must never restore as a fake launcher export — after both scopes
+    close the key is absent, and a gateway owner's in-process feature still
+    refuses. Before the pair-level fix the second restore resurrected the
+    first writer's value into the live env, where it read as launcher
+    authority and unlocked the owner's session.
+    """
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(
+        gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG)
+    )
+    _two_writer_homes(
+        monkeypatch,
+        tmp_path,
+        first_env="HERMES_WEBUI_CHAT_BACKEND=legacy\n",
+        second_env="HERMES_WEBUI_CHAT_BACKEND=local\n",
+    )
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("gateway-owned refusal reached the in-process model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+
+    # FIFO scope order needs manual enter/exit: nesting two ``with`` blocks is
+    # always LIFO. The first-opened scope exits while the second is still
+    # open, and the second scope's snapshot holds the FIRST writer's value.
+    cm_first = profiles.profile_env_for_background_worker("first", "fifo test")
+    cm_second = profiles.profile_env_for_background_worker("second", "fifo test")
+    first_open = second_open = False
+    try:
+        cm_first.__enter__()
+        first_open = True
+        assert os.environ.get(_ENV_KEY) == "legacy"
+        cm_second.__enter__()
+        second_open = True
+        assert os.environ.get(_ENV_KEY) == "local"
+        # FIFO: the first-opened scope exits first. Its own snapshot saw no
+        # launcher value, so the key leaves the env while the second scope is
+        # still open — restore always returns what the exiting scope saw.
+        cm_first.__exit__(None, None, None)
+        first_open = False
+        assert os.environ.get(_ENV_KEY) is None
+        assert (_ENV_KEY, "legacy") not in profiles._PROFILE_ENV_VALUES, (
+            "the exited writer's pair is dropped even though the second "
+            "scope still owns the KEY"
+        )
+        cm_second.__exit__(None, None, None)
+        second_open = False
+    finally:
+        for _cm, _opened in ((cm_second, second_open), (cm_first, first_open)):
+            if _opened:
+                try:
+                    _cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+
+    assert os.environ.get(_ENV_KEY) is None, "exited writer's value was resurrected"
+    assert not profiles.profile_env_writer_owns(_ENV_KEY)
+    # The same FIFO resurrection in the worker CM's THREAD-LOCAL channel: the
+    # second scope's snapshot holds the first writer's thread env, so its
+    # unconditional restore used to leave the first writer's binding live (and
+    # the process-env fallback blocked) after both scopes closed — which made
+    # later thread-local env reads in the same thread resolve through an
+    # exited writer's profile.
+    from api.config import _thread_ctx
+
+    assert getattr(_thread_ctx, "env", {}) == {}, "exited writer's thread env was resurrected"
+    assert not getattr(_thread_ctx, "block_process_env_fallback", False)
+    routes._handle_git_commit_message(object(), {"session_id": "s1"})
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+    assert calls["model_boundary"] == 0
+
+
+def test_lifo_overlapping_worker_scopes_restore_the_live_writer_value(
+    monkeypatch, tmp_path, captured_route_j
+):
+    """#9024 review round 4 (LIFO): a still-live writer's value IS restored.
+
+    The same overlap exits in LIFO order: the second scope restores the first
+    writer's value (still owned by a live writer), then the first scope
+    restores the launcher's absence. No value survives as a fake launcher
+    export, and the owner stays refused only through genuine authority.
+    """
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(
+        gateway_sessions, "config_for_profile", lambda _profile=None: {}
+    )
+    _two_writer_homes(
+        monkeypatch,
+        tmp_path,
+        first_env="HERMES_WEBUI_CHAT_BACKEND=local\n",
+        second_env="HERMES_WEBUI_CHAT_BACKEND=gateway\n",
+    )
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+
+    with profiles.profile_env_for_background_worker("first", "lifo test"):
+        assert os.environ.get(_ENV_KEY) == "local"
+        with profiles.profile_env_for_background_worker("second", "lifo test"):
+            assert os.environ.get(_ENV_KEY) == "gateway"
+        # LIFO exit of the second scope restores the FIRST writer's value —
+        # its writer is still open, so the value returns and stays ignored by
+        # the checker rather than counting as launcher authority.
+        assert os.environ.get(_ENV_KEY) == "local"
+        assert profiles.profile_env_writer_owns(_ENV_KEY, "local")
+        # A local owner is never refused through a writer-owned mirror value.
+        routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+        assert captured_route_j["status"] == 503
+        assert captured_route_j["payload"]["code"] == "server_draining"
+    assert os.environ.get(_ENV_KEY) is None
+    assert not profiles.profile_env_writer_owns(_ENV_KEY)
+
+
+def test_streaming_turn_scope_cannot_unlock_a_gateway_owner(
+    monkeypatch, tmp_path, captured
+):
+    """#9024 review round 4: the streaming turn's env mirror is writer-owned too.
+
+    A real ``_run_agent_streaming`` turn for profile "other" (whose .env says
+    HERMES_WEBUI_CHAT_BACKEND=legacy) holds the streaming env mirror open
+    while its agent turn runs. The owner (gateway config) must still refuse
+    the in-process commit-message call with ZERO model-boundary calls, and
+    the stream's restore must return the env to its pre-turn state without
+    resurrecting the mirror as launcher authority.
+    """
+    import queue
+    import threading
+    import types
+    from unittest import mock
+
+    import api.config as config
+    import api.oauth
+    import api.streaming as streaming
+
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(
+        gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG)
+    )
+    _profile_homes(
+        monkeypatch,
+        tmp_path,
+        owner_env=None,
+        other_env="HERMES_WEBUI_CHAT_BACKEND=legacy\n",
+    )
+    monkeypatch.delenv(_ENV_KEY, raising=False)
+
+    with config.SESSION_AGENT_CACHE_LOCK:
+        config.SESSION_AGENT_CACHE.clear()
+
+    session_id = "stream-9024"
+    stream_id = f"stream-{session_id}"
+    turn_done = threading.Event()
+    release = threading.Event()
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = session_id
+            self.title = "Test"
+            self.workspace = str(tmp_path)
+            self.model = "test-model"
+            self.messages = []
+            self.personality = None
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = None
+            self.tool_calls = []
+            self.active_stream_id = stream_id
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.pending_user_source = None
+            self.profile = "other"
+
+        def save(self, touch_updated_at=True, skip_index=False):
+            pass
+
+        def compact(self):
+            return {"session_id": self.session_id, "messages": self.messages}
+
+    class BlockingAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs.get("session_id")
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            release.wait(timeout=30)
+            return {
+                "messages": [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "ok"},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = mock.Mock(return_value={})
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = mock.Mock(return_value=object())
+
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(
+        api.oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, **kwargs: resolver(**kwargs),
+    )
+    monkeypatch.setattr(streaming, "get_session", lambda _session_id: FakeSession())
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: BlockingAgent)
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
+
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("gateway-owned refusal reached the in-process model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+
+    q = queue.Queue()
+    streaming.STREAMS[stream_id] = q
+    worker = threading.Thread(
+        target=streaming._run_agent_streaming,
+        kwargs=dict(
+            session_id=session_id,
+            msg_text="hello",
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        ),
+        daemon=True,
+    )
+    try:
+        monkeypatch.setattr(
+            streaming, "peek_stream", lambda _sid: q, raising=False
+        )
+        worker.start()
+        # Wait until the streaming writer's mirror is live in the process env.
+        for _ in range(600):
+            if profiles.profile_env_writer_owns(_ENV_KEY):
+                break
+            if not worker.is_alive():
+                raise AssertionError("streaming worker exited before holding the mirror")
+            time.sleep(0.05)
+        assert os.environ.get(_ENV_KEY) == "legacy"
+        assert profiles.profile_env_writer_owns(_ENV_KEY, "legacy")
+
+        routes._handle_git_commit_message(object(), {"session_id": "s1"})
+        assert captured["status"] == 409
+        assert captured["payload"]["code"] == "gateway_mode_unsupported"
+        assert calls["model_boundary"] == 0
+    finally:
+        release.set()
+        worker.join(timeout=60)
+        streaming.STREAMS.pop(stream_id, None)
+        streaming.AGENT_INSTANCES.pop(stream_id, None)
+
+    assert not worker.is_alive()
+    assert os.environ.get(_ENV_KEY) is None, "streaming restore resurrected the mirror value"
+    assert not profiles.profile_env_writer_owns(_ENV_KEY)
+
+
+def test_unverifiable_owner_config_fails_closed_to_refusal(monkeypatch, captured):
+    """#9024 review round 4: an unreadable owner config never authorizes in-process.
+
+    When the owning profile's config cannot be resolved (exception / non-dict),
+    the decision must fail closed to the refusal side — never silently run an
+    in-process model call on the request profile's local rule.
+    """
+
+    def _raise(_profile=None):
+        raise RuntimeError("owner config unreadable")
+
+    monkeypatch.setattr(gateway_sessions, "config_for_profile", _raise)
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+
+    routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+
+
+def test_unverifiable_sidecar_fails_closed_but_a_missing_session_does_not(
+    monkeypatch, captured, captured_route_j
+):
+    """#9024 review round 4: distinguish a missing session from an unverifiable one.
+
+    A MISSING session (KeyError) keeps the request profile's rule so a bogus
+    session_id still answers through the later handler path unchanged. An
+    UNVERIFIABLE sidecar (ValueError) fails closed: the in-process feature
+    refuses with 409 instead of silently authorizing a model call.
+    """
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+
+    def _missing(_sid):
+        raise KeyError(_sid)
+
+    monkeypatch.setattr(routes, "get_session_profile_readonly", _missing)
+    routes._handle_btw(object(), {"session_id": "missing", "question": "why?"})
+    assert captured_route_j["status"] == 503, "missing session: request rule must apply"
+    assert captured_route_j["payload"]["code"] == "server_draining"
+
+    def _unverifiable(_sid):
+        raise ValueError("unverifiable sidecar")
+
+    monkeypatch.setattr(routes, "get_session_profile_readonly", _unverifiable)
+    routes._handle_btw(object(), {"session_id": "broken", "question": "why?"})
+    assert captured["status"] == 409, "unverifiable sidecar: must fail closed"
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
