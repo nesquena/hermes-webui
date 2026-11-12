@@ -2957,15 +2957,64 @@ def test_insights_traffic_rejects_malformed_days():
         assert "error" in handler.json_body(), query
 
 
+def test_insights_traffic_swaps_reversed_range_like_insights(monkeypatch, tmp_path):
+    """A reversed range must be SWAPPED, not discarded.
+
+    `/api/insights` normalizes an inverted selection by swapping the endpoints,
+    and the Insights page sends both endpoints the same dates. Clearing the
+    range instead made the traffic cards silently serve the trailing month,
+    outside the selected interval.
+
+    Maintainer review (2026-11-12): "silently showing unrelated dates is not a
+    repair". Distinct in-range/out-of-range rows prove the swap.
+    """
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.models as models
+    import api.routes as routes
+
+    # Two distinct clients: one inside 08..10 Nov, one outside (11 Nov).
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "10.0.0.1 - - [09/Nov/2026:10:00:00 +0000] "
+        '"GET / HTTP/1.1" 200 1 "-" "t"\n'
+        "10.0.0.2 - - [11/Nov/2026:10:00:00 +0000] "
+        '"GET / HTTP/1.1" 200 1 "-" "t"\n'
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+    monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+    monkeypatch.setattr(
+        models, "_active_state_db_path",
+        lambda: pathlib.Path("/nonexistent/state.db"),
+    )
+    # A clock safely after both endpoints.
+    clock_ts = 1794500000  # 2026-11-12 ~06:13 UTC
+    monkeypatch.setattr(routes.time, "time", lambda _ts=clock_ts: _ts)
+
+    def _ips(query):
+        handler = _FakeHandler()
+        routes._handle_insights_traffic(handler, types.SimpleNamespace(query=query))
+        assert handler.status == 200, handler.json_body()
+        return [r["ip"] for r in handler.json_body()["inbound_ips_month"]]
+
+    # The ordered selection: only the in-range client.
+    assert _ips("start=2026-11-08&end=2026-11-10") == ["10.0.0.1"]
+    # The SAME selection reversed must serve the SAME interval, not the
+    # trailing month (which would include 10.0.0.2).
+    assert _ips("start=2026-11-10&end=2026-11-08") == ["10.0.0.1"]
+
+
 def test_insights_traffic_whole_end_day_spans_dst_transitions(monkeypatch, tmp_path):
     """A date-valued `end` must cover the WHOLE local day, across DST.
 
     The old bound was ``end_midnight + 86400 - 0.001``. A spring-forward day
-    is 23 hours long, so that stops one hour short of the next local
-    midnight and silently drops the final hour of the selected day; a
-    fall-back day is 25 hours, so it would admit an hour of the following
-    date. The bound must come from ``mktime()`` on the next calendar day,
-    the same way /api/insights derives its whole-day end.
+    is 23 hours long, so a fixed 86400 lands one hour PAST the next local
+    midnight and admits an extra hour of the following date; a fall-back day
+    is 25 hours, so it stops one hour short and silently drops the final hour
+    of the selected day. The bound must come from ``mktime()`` on the next
+    calendar day, the same way /api/insights derives its whole-day end.
 
     Greptile P1 (2026-11-11): "Traffic counts the wrong dates".
     """

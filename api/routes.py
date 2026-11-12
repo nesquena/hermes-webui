@@ -16711,22 +16711,100 @@ def _handle_insights_traffic(handler, parsed) -> bool:
     start_ts = None
     end_ts = None
 
+    start_kind = start_meta[0] if start_meta else None
+    end_kind = end_meta[0] if end_meta else None
+    start_ts_v = start_meta[1] if start_meta else None
+    end_ts_v = end_meta[1] if end_meta else None
+
     if start_meta is not None or end_meta is not None:
-        start_ts = start_meta[1] if start_meta else None
-        end_ts = end_meta[1] if end_meta else None
-        # A calendar-DATE end selects the WHOLE end day — matching
-        # /api/insights. Without this, selecting today for both dates
-        # excludes today's traffic.
-        #
-        # The bound must be the NEXT LOCAL MIDNIGHT, not `end + 86400`:
-        # a DST fall-back day is 25 hours long, so a fixed 86400 stops one
-        # hour short and silently drops the tail of that day (and a
-        # spring-forward day is 23 hours, so it would admit an extra hour
-        # of the next day). mktime() on the next calendar day resolves the
-        # offset the same way /api/insights does. The `- 0.001` keeps the
-        # bound just inside the day, since the window comparisons below
-        # are inclusive.
-        if end_meta is not None and end_meta[0] == "date":
+        # Mirror /api/insights' normalization contract: clamp the supplied end
+        # to now, default a missing start from the end (30 CALENDAR days for a
+        # date end, 30*86400 for a numeric one), then SWAP inverted endpoints
+        # instead of discarding the selection. Both parts of the Insights page
+        # send the same dates, so a reversed range must serve the interval the
+        # usage cards serve, not silently fall back to the trailing month.
+        if end_ts_v is not None:
+            end_ts = min(end_ts_v, now)
+            if start_ts_v is not None:
+                start_ts = start_ts_v
+            elif end_kind == "date":
+                # End-only date: a fixed 86400 back-step drifts across DST, so
+                # step back 30 calendar days from the end's local midnight.
+                try:
+                    _end_day_tmp = _datetime.fromtimestamp(
+                        min(end_ts_v, 4102444800)).date()
+                    start_ts = time.mktime(
+                        (_end_day_tmp - _timedelta(days=30)).timetuple())
+                    start_kind = "date"
+                except (OverflowError, ValueError, OSError):
+                    start_ts = end_ts - 30 * 86400
+            else:
+                start_ts = end_ts_v - 30 * 86400
+        else:
+            start_ts = start_ts_v
+            end_ts = now
+
+        # Platform-range guard: an absurd-but-finite timestamp must not reach
+        # fromtimestamp(). Fail closed to the trailing window.
+        try:
+            _datetime.fromtimestamp(start_ts)
+            _datetime.fromtimestamp(end_ts)
+        except (OverflowError, ValueError, OSError):
+            start_ts = None
+            end_ts = None
+            start_kind = None
+            end_kind = None
+
+        # Reversal. A DATE end means the WHOLE calendar day and is served as an
+        # exclusive bound at the NEXT local midnight, so the comparison must use
+        # that same resolved bound; equality counts as reversed for a whole-day
+        # end. The kinds travel with the values, so a swapped date end still
+        # expands to its whole day below.
+        if start_ts is not None and end_ts is not None:
+            _cmp_end = end_ts
+            _end_is_whole_day = False
+            if end_kind == "date":
+                try:
+                    _cmp_day = _datetime.fromtimestamp(end_ts).date()
+                    _cmp_end = time.mktime(
+                        (_cmp_day + _timedelta(days=1)).timetuple())
+                    _end_is_whole_day = True
+                except (OverflowError, ValueError, OSError):
+                    _cmp_end = end_ts
+            if start_ts > _cmp_end or (_end_is_whole_day and start_ts == _cmp_end):
+                start_ts, end_ts = end_ts, start_ts
+                start_kind, end_kind = end_kind, start_kind
+
+        # A custom window must never extend into the future; the swap can
+        # re-introduce a future value as the new end.
+        if end_ts is not None and end_ts > now:
+            end_ts = now
+
+        # A strictly-future window is wholly ahead of the clock: fail closed to
+        # the trailing window rather than serving an empty custom interval. The
+        # one exemption is a zero-length window anchored exactly on the clock,
+        # which is what an explicit `start == now` asks for.
+        clock_zero_window = (
+            start_ts is not None and end_ts is not None
+            and start_ts >= now and end_ts >= now
+            and not (start_ts_v is not None and start_ts_v > now)
+            and not (end_ts_v is not None and end_ts_v > now)
+        )
+        if start_ts is not None and start_ts >= now and not clock_zero_window:
+            start_ts = None
+            end_ts = None
+            start_kind = None
+            end_kind = None
+
+        # A calendar-DATE end selects the WHOLE end day: the inclusive bound the
+        # windows below compare against is the NEXT LOCAL MIDNIGHT, not
+        # `end + 86400`. A DST fall-back day is 25 hours long, so a fixed 86400
+        # stops one hour short and silently drops the tail of that day; a
+        # spring-forward day is 23 hours, so it would admit an extra hour of the
+        # next day. mktime() on the next calendar day resolves the offset the
+        # same way /api/insights does. The `- 0.001` keeps the bound just inside
+        # the day, since the window comparisons below are inclusive.
+        if end_kind == "date" and end_ts is not None:
             try:
                 _end_day = _datetime.fromtimestamp(end_ts).date()
                 end_ts = time.mktime(
@@ -16734,23 +16812,6 @@ def _handle_insights_traffic(handler, parsed) -> bool:
                 ) - 0.001
             except (OverflowError, ValueError, OSError):
                 pass
-        if end_meta is None:
-            end_ts = now
-        if end_ts > now:
-            end_ts = now
-        if start_ts is None:
-            start_ts = end_ts - 30 * 86400
-        # Unsupported or inverted numeric ranges fail closed to the
-        # default trailing window instead of raising in fromtimestamp().
-        try:
-            _datetime.fromtimestamp(start_ts)
-            _datetime.fromtimestamp(end_ts)
-        except (OverflowError, ValueError, OSError):
-            start_ts = None
-            end_ts = None
-        if start_ts is not None and start_ts > end_ts:
-            start_ts = None
-            end_ts = None
     else:
         # Trailing mode: last N days. Empty/non-integer `days`
         # (?days=, ?days=abc) is a controlled 400, never an exception.
