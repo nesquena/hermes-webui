@@ -434,6 +434,96 @@ class TestStableDivergedBranchIsNotUpToDate:
 
         return repo
 
+    def _diverged_stable_repo_multi_commit(self, tmp_path):
+        """Graph with multiple commits per release:
+        v1.0.0 → 3 commits → v1.0.1 → 3 commits → v1.0.2, two unpromoted commits
+        on master, local branch stable-local created at v1.0.0 with one local-only
+        commit, upstream origin/master.
+        """
+        upstream = tmp_path / 'upstream'
+        upstream.mkdir(parents=True, exist_ok=True)
+        _git(upstream, 'init', '-q', '-b', 'master')
+        _git(upstream, 'config', 'user.email', 't@t.co')
+        _git(upstream, 'config', 'user.name', 'Test')
+        tracked = upstream / 'APP'
+        tracked.write_text('release 1.0.0\n', encoding='utf-8')
+        _git(upstream, 'add', 'APP')
+        _git(upstream, 'commit', '-q', '-m', 'v1.0.0')
+        _git(upstream, 'tag', 'v1.0.0')
+
+        # 3 commits leading to v1.0.1 (2 intermediate commits + 1 release commit tagged v1.0.1)
+        for i in range(1, 3):
+            tracked.write_text(f'work toward v1.0.1 ({i})\n', encoding='utf-8')
+            _git(upstream, 'commit', '-q', '-am', f'work toward v1.0.1 ({i})')
+        tracked.write_text('release 1.0.1\n', encoding='utf-8')
+        _git(upstream, 'commit', '-q', '-am', 'v1.0.1')
+        _git(upstream, 'tag', 'v1.0.1')
+
+        # 3 commits leading to v1.0.2 (2 intermediate commits + 1 release commit tagged v1.0.2)
+        for i in range(1, 3):
+            tracked.write_text(f'work toward v1.0.2 ({i})\n', encoding='utf-8')
+            _git(upstream, 'commit', '-q', '-am', f'work toward v1.0.2 ({i})')
+        tracked.write_text('release 1.0.2\n', encoding='utf-8')
+        _git(upstream, 'commit', '-q', '-am', 'v1.0.2')
+        _git(upstream, 'tag', 'v1.0.2')
+
+        # Two unpromoted commits on master after v1.0.2
+        for unpromoted in range(1, 3):
+            tracked.write_text(f'unpromoted master commit {unpromoted}\n', encoding='utf-8')
+            _git(upstream, 'commit', '-q', '-am', f'unpromoted experimental work {unpromoted}')
+
+        origin = tmp_path / 'origin.git'
+        subprocess.run(
+            ['git', 'init', '--bare', '-q', '--initial-branch=master', str(origin)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _git(upstream, 'push', '-q', str(origin), '--all')
+        _git(upstream, 'push', '-q', str(origin), '--tags')
+
+        repo = tmp_path / 'local'
+        _git(tmp_path, 'clone', '-q', str(origin), str(repo))
+        _git(repo, 'config', 'user.email', 't@t.co')
+        _git(repo, 'config', 'user.name', 'Test')
+        _git(repo, 'checkout', '-q', '-b', 'stable-local', 'v1.0.0')
+        (repo / 'APP').write_text('local hotfix L\n', encoding='utf-8')
+        _git(repo, 'commit', '-q', '-am', 'local commit L not on stable line')
+        _git(repo, 'branch', '--set-upstream-to=origin/master', 'stable-local')
+
+        return repo
+
+    def test_diverged_stable_reports_release_gap_not_commit_count(self, tmp_path):
+        repo = self._diverged_stable_repo_multi_commit(tmp_path)
+
+        # Raw commit count is 6 (3 commits to v1.0.1 + 3 commits to v1.0.2)
+        raw_rev_count = int(
+            subprocess.run(
+                ['git', 'rev-list', '--count', 'HEAD..v1.0.2'],
+                cwd=str(repo), capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        )
+        assert raw_rev_count == 6
+
+        info = updates._check_repo(repo, 'webui', 'stable')
+        assert info is not None
+        assert info['behind'] == 2
+        assert info['behind'] != 6
+        assert info['latest_tag'] == 'v1.0.2'
+        assert info['release_based'] is True
+        assert info['divergent'] is True
+        assert info['repair_required'] is True
+        assert info['branch'] == 'v1.0.2'
+        assert info['current_version'] == 'v1.0.0'
+        assert 'behind_commits' not in info
+
+    def test_diverged_stable_multi_commit_select_apply_ref_control(self, tmp_path):
+        repo = self._diverged_stable_repo_multi_commit(tmp_path)
+
+        assert updates._select_apply_compare_ref(repo, 'stable', 'webui') == 'v1.0.2'
+
+        info = updates._check_repo(repo, 'webui', 'stable')
+        assert info is not None
+        assert info['behind'] != 0
+
     def test_check_reports_stable_scoped_target_with_unpromoted_master(self, tmp_path):
         repo = self._diverged_stable_repo(tmp_path, upstream_kind='master')
         info = updates._check_repo(repo, 'webui', 'stable')

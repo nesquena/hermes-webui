@@ -1397,12 +1397,13 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     contains the latest stable tag but sits behind master's tip must NOT fall
     through to the branch comparison (that would advance it to ``origin/master``
     — the full experimental firehose, defeating the channel). We return ``None``
-    so the caller reports "no update". Every other case — the experimental
-    channel, the AGENT repo (which is a separate project that legitimately
-    tracks master past its tags), and a stable checkout whose local branch has
-    DIVERGED from the stable line (it neither contains nor can fast-forward to
-    the tag, so "no update" would hide the missing commits, #8556) — keeps the
-    historical branch fallthrough unchanged. This mirrors ``_check_repo_release``.
+    so the caller reports "no update". A divergent stable checkout (HEAD neither
+    contains nor can fast-forward to the latest tag) returns the promoted
+    ``latest_tag``, keeping check, normal apply and force recovery stable-scoped
+    (#8556, #8655), instead of the branch fallthrough. Other cases — the
+    experimental channel and the AGENT repo (which is a separate project that
+    legitimately tracks master past its tags) — keep the historical branch
+    fallthrough unchanged. This mirrors ``_check_repo_release``.
     """
     channel = _normalize_channel(channel)
     suppress_stable_fallthrough = (channel == 'stable' and target == 'webui')
@@ -1586,23 +1587,20 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # However, for WebUI on stable, falling through to branch comparison targets
     # the configured upstream (e.g. origin/master or a feature branch), escaping
     # the stable channel (#8556, #8655). Instead, report a release-based payload
-    # targeting the promoted latest_tag with divergent/repair flags and the real
-    # missing commit count. Experimental and the agent repo keep the branch
-    # fallthrough unchanged.
+    # targeting the promoted latest_tag with divergent/repair flags and the
+    # release-unit gap. The count is a release gap because a divergent checkout
+    # is still on the stable line's tag family; a raw rev-list count cannot be
+    # advertised as the missing-commit count either, since it counts commits
+    # with no ancestry relation when history depth is limited (depth-1 clones)
+    # and mixing two units in one payload is what produced the wrong noun.
+    # Experimental and the agent repo keep the branch fallthrough unchanged.
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
         if suppress_stable_fallthrough:
-            divergent_behind = behind
-            count_out, count_ok = _run_git(['rev-list', '--count', f'HEAD..{latest_tag}'], path)
-            if count_ok and count_out:
-                try:
-                    divergent_behind = int(count_out.strip())
-                except (ValueError, TypeError):
-                    divergent_behind = behind
             remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
             remote_url = _normalize_remote_url(remote_url)
             return {
                 'name': name,
-                'behind': divergent_behind,
+                'behind': behind,
                 'current_sha': current_sha_ref,
                 'latest_sha': latest_tag,
                 'branch': latest_tag,
