@@ -8,6 +8,10 @@ merge, is pinned here:
     ``ollama.com`` host) the inject is ``{"enabled": False, "effort": "none"}``
     unless the task config already carries a meaningful reasoning setting, in
     which case the inject is skipped.
+  * Task-config keys are matched exactly. hermes-agent forwards the task
+    config's keys verbatim, so a key spelled with different case or surrounding
+    whitespace is not a setting the provider understands — it is not an
+    override, and the inject is still sent.
   * Every non-Ollama route keeps master's unconditional bare inject
     ``{"enabled": False}``, even when the task config sets ``reasoning`` /
     ``reasoning_effort``. Those task shapes (e.g. OpenRouter
@@ -24,14 +28,16 @@ carries an ``enabled`` key and promotes it to ``reasoning_config``, which
 (local Ollama: top-level ``reasoning_effort: "none"`` plus ``think: false``;
 Ollama Cloud: ``reasoning_effort: "none"``). The explicit ``effort: "none"``
 member only reaches the wire on builds or direct routes that ship
-``extra_body.reasoning`` as-is. These tests pin what we send and what survives
-the documented merge, not a claim that current Agents burn title tokens because
+``extra_body.reasoning`` as-is. These tests pin the request body produced by
+that documented path, not a claim that current Agents burn title tokens because
 of this inject. Issue references: #2083, #4161, #8149.
 """
 from __future__ import annotations
 
+import json
 import types
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -39,6 +45,25 @@ from tests._aux_client_helpers import auxiliary_client_modules, patch_tg_config
 
 OLLAMA_INJECT = {'enabled': False, 'effort': 'none'}
 GENERIC_INJECT = {'enabled': False}
+
+# The three positively identified Ollama shapes (#8149): provider id, a custom
+# provider on Ollama's default local port, and Ollama Cloud.
+OLLAMA_ROUTE_SHAPES = {
+    'provider-ollama': {'provider': 'ollama', 'model': 'gemma4:26b', 'base_url': ''},
+    'custom-port-11434': {
+        'provider': 'custom',
+        'model': 'gemma4:26b',
+        'base_url': 'http://127.0.0.1:11434/v1',
+    },
+    'ollama-cloud': {
+        'provider': '',
+        'model': 'gemma4:26b',
+        'base_url': 'https://api.ollama.com/v1',
+    },
+}
+OLLAMA_ROUTE_PARAMS = [
+    pytest.param(route, id=name) for name, route in OLLAMA_ROUTE_SHAPES.items()
+]
 
 
 @pytest.fixture(autouse=True)
@@ -95,11 +120,41 @@ def _merged_extra_body(tg_config):
 _ABSENT = object()
 
 
-def _ollama_config(extra_body):
-    config = {'provider': 'ollama', 'model': 'gemma4:26b', 'base_url': ''}
+def _is_ollama_cloud_route(tg_config):
+    host = (urlsplit(str(tg_config.get('base_url') or '').strip()).hostname or '').lower()
+    return host == 'ollama.com' or host.endswith('.ollama.com')
+
+
+def _ollama_wire_body(tg_config):
+    """The JSON body an Ollama provider receives for a reasoning-off title call.
+
+    Reproduces the path documented in the module header: hermes-agent merges the
+    caller's ``extra_body`` over the task body, pops an ``extra_body.reasoning``
+    object carrying an ``enabled`` key into ``reasoning_config``, and the
+    provider profile projects a disabled config onto its own wire — local
+    Ollama: ``reasoning_effort: "none"`` plus ``think: false``; Ollama Cloud:
+    ``reasoning_effort: "none"``. The JSON round-trip mirrors SDK serialisation.
+    """
+    body = _merged_extra_body(tg_config)
+    reasoning = body.pop('reasoning', None)
+    if isinstance(reasoning, dict) and reasoning.get('enabled') is False:
+        body['reasoning_effort'] = 'none'
+        if not _is_ollama_cloud_route(tg_config):
+            body['think'] = False
+    elif reasoning is not None:
+        body['reasoning'] = reasoning
+    return json.loads(json.dumps(body))
+
+
+def _route_config(route, extra_body):
+    config = dict(route)
     if extra_body is not _ABSENT:
         config['extra_body'] = extra_body
     return config
+
+
+def _ollama_config(extra_body):
+    return _route_config(OLLAMA_ROUTE_SHAPES['provider-ollama'], extra_body)
 
 
 def _generic_config(extra_body):
@@ -157,6 +212,7 @@ class TestOllamaRouteGetsHonoredFlag:
 class TestOllamaMeaningfulTaskConfigSkipsInject:
     """A real reasoning setting in the task config wins over the Ollama inject."""
 
+    @pytest.mark.parametrize('route', OLLAMA_ROUTE_PARAMS)
     @pytest.mark.parametrize(
         'extra_body',
         [
@@ -186,10 +242,17 @@ class TestOllamaMeaningfulTaskConfigSkipsInject:
             'thinking-budget',
         ],
     )
-    def test_meaningful_task_reasoning_setting_skips_ollama_inject(self, extra_body):
-        captured = _run_title_call(_ollama_config(extra_body))
+    def test_meaningful_task_reasoning_setting_skips_ollama_inject(
+        self, route, extra_body
+    ):
+        config = _route_config(route, extra_body)
+        captured = _run_title_call(config)
         assert 'reasoning' not in (captured.get('extra_body') or {})
+        merged = _merged_extra_body(config)
+        for key, value in extra_body.items():
+            assert merged.get(key) == value
 
+    @pytest.mark.parametrize('route', OLLAMA_ROUTE_PARAMS)
     @pytest.mark.parametrize(
         'extra_body',
         [
@@ -199,9 +262,16 @@ class TestOllamaMeaningfulTaskConfigSkipsInject:
         ],
         ids=['stripped-case', 'capitalized-reasoning', 'capitalized-think'],
     )
-    def test_key_matching_ignores_case_and_surrounding_space(self, extra_body):
-        captured = _run_title_call(_ollama_config(extra_body))
-        assert 'reasoning' not in (captured.get('extra_body') or {})
+    def test_malformed_key_does_not_suppress_ollama_reasoning_off_inject(
+        self, route, extra_body
+    ):
+        # The malformed key is forwarded verbatim and means nothing to the
+        # provider, so it must not suppress the inject: the request body has to
+        # carry a reasoning-off setting the provider actually understands.
+        body = _ollama_wire_body(_route_config(route, extra_body))
+        assert body.get('reasoning_effort') == 'none'
+        if not _is_ollama_cloud_route(route):
+            assert body.get('think') is False
 
     def test_user_reasoning_effort_none_survives_merge_on_ollama(self):
         tg = _ollama_config({'reasoning_effort': 'none'})

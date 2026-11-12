@@ -6655,8 +6655,11 @@ def _task_config_has_reasoning_override() -> bool:
     the task config already speaks for itself keeps an explicit user setting
     intact (#8149).
 
-    Keys are matched case-insensitively after stripping. Empty, null, and
-    structurally empty values do not count as an override:
+    Keys are matched exactly. ``call_llm`` forwards the task config's keys
+    verbatim, so a key spelled with different case or surrounding whitespace is
+    not understood by the provider and cannot stand in for the setting it
+    resembles; such a key does not suppress the inject. Empty, null, and
+    structurally empty values do not count as an override either:
 
       * ``reasoning_effort`` -- non-empty string.
       * ``reasoning`` -- object with a bool ``enabled``, a non-empty ``effort``
@@ -6668,8 +6671,7 @@ def _task_config_has_reasoning_override() -> bool:
     extra_body = _get_aux_title_config().get('extra_body')
     if not isinstance(extra_body, dict):
         return False
-    for raw_key, value in extra_body.items():
-        key = str(raw_key).strip().lower()
+    for key, value in extra_body.items():
         if key == 'reasoning_effort':
             if isinstance(value, str) and value.strip():
                 return True
