@@ -212,6 +212,52 @@ def test_rows_not_from_an_in_process_webui_session_are_left_alone(world, monkeyp
     assert _sweep(named) == []
 
 
+def test_transient_session_read_error_retries_instead_of_stranding_the_row(world, monkeypatch, caplog):
+    import api.models as models
+
+    named = world["homes"]["named"]
+    world["sessions"].update({"s-web": "named", "s-flaky": "named"})
+    _row(named, "d-web")
+    _row(named, "d-flaky", session="s-flaky")
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.05)
+    caplog.set_level("INFO", logger=peu.logger.name)
+    failures = iter([OSError("session file busy")])
+
+    def flaky_profile(sid):
+        if sid == "s-flaky":
+            error = next(failures, None)
+            if error is not None:
+                raise error  # a transient read error, not a missing session
+        return world["sessions"][sid]
+
+    monkeypatch.setattr(models, "get_session_profile_readonly", flaky_profile)
+    q = queue.Queue()
+    registry = type("Registry", (), {"restore_completions": lambda self: None, "completion_queue": q})()
+
+    peu.restore_durable_process_completions(registry)
+    delivered = {q.get(timeout=10)["delegation_id"], q.get(timeout=10)["delegation_id"]}
+    assert delivered == {"d-web", "d-flaky"}  # the undetermined row came back on the retry
+    time.sleep(0.3)
+    assert q.empty()  # and the determined one was not queued twice
+    assert _rows(named) == {"d-web": ("completed", "pending"), "d-flaky": ("completed", "pending")}
+    assert any("Failed to restore pending async delegations" in r.getMessage() for r in caplog.records)
+
+
+def test_confirmed_exclusions_do_not_retry(world, monkeypatch):
+    named = world["homes"]["named"]
+    world["sessions"]["s-bad"] = "../etc"
+    _row(named, "d-gone", session="s-gone")  # missing session: KeyError
+    _row(named, "d-bad", session="s-bad")  # invalid profile name
+    armed = []
+    real_arm = peu._arm_async_delegation_restore_sweep
+    monkeypatch.setattr(
+        peu, "_arm_async_delegation_restore_sweep",
+        lambda *a, **kw: armed.append(kw.get("ledger_home")) or real_arm(*a, **kw),
+    )
+    assert _sweep(named) == []
+    assert named not in armed[1:]  # nothing re-armed for this ledger after the sweep ran
+
+
 def test_launch_ledger_keeps_the_agents_recovery_and_48h_drop(world):
     root = world["root"]
     _row(root, "d-run", state="running", owner_pid=_dead_pid())

@@ -61,11 +61,17 @@ restores nothing (#7214).
   runs there and no row is rewritten; rows past the 48 h cap are skipped, not
   dropped, and are left to their owning process.
   - Only rows whose `origin_ui_session_id` is a WebUI session whose turns run
-    in this process are replayed. Rows without a WebUI session, rows from
-    sessions on the Gateway backend (they are delivered through
-    `gateway_delegation_wakeup`), rows from runner-owned turns, and rows whose
-    session or backend cannot be determined are skipped. A skipped row only
-    waits for its owning process.
+    in this process are replayed. Rows without a WebUI session (including a
+    session id WebUI does not know), rows with an invalid session profile,
+    rows from sessions on the Gateway backend (they are delivered through
+    `gateway_delegation_wakeup`) and rows from runner-owned turns are
+    confirmed exclusions: they are skipped and wait for their owning process.
+  - A row whose session cannot be classified because of a read error is not
+    treated as excluded. For an in-process session WebUI is the owning
+    process, so skipping it would strand the result. The classified rows are
+    queued, and the ledger then goes through the sweep's failure path: a
+    rate-limited warning and a retry on the 5 s interval, until the row
+    classifies.
   - Each replayed row is queued once, marked `restored`, until its copy is
     handed back (release or claim retry) or settled.
     `claim_completion_delivery` remains the only cross-process gate, so a row

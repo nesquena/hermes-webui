@@ -157,50 +157,58 @@ def _replay_age_cap() -> float:
         return _DEFAULT_REPLAY_AGE_CAP_S
 
 
+class LedgerReplayIncomplete(RuntimeError):
+    """Some rows could not be classified; the caller should retry the ledger."""
+
+
 def _session_runs_in_process(session_id: str) -> bool:
     """True only for a WebUI session whose turns run in this process.
 
     Gateway-backend sessions are left to the Gateway that ran the delegation
     (it delivers through ``gateway_delegation_wakeup``) and runner-owned turns to
-    the runner. Anything that cannot be determined is False.
+    the runner. A missing session or an invalid profile name is a confirmed
+    False. Any other failure propagates: the row is undetermined and must be
+    retried, because for an in-process session WebUI is the owning process and
+    nobody else would deliver it.
     """
+    from api import profiles
+    from api.gateway_delegation_wakeup import _profile_uses_gateway
+    from api.models import get_session_profile_readonly
+    from api.runtime_adapter import runtime_adapter_runner_enabled
+
     try:
-        from api import profiles
-        from api.gateway_delegation_wakeup import _profile_uses_gateway
-        from api.models import get_session_profile_readonly
-        from api.runtime_adapter import runtime_adapter_runner_enabled
-
         name = get_session_profile_readonly(session_id) or "default"
-        if name != "default" and not (isinstance(name, str) and profiles._PROFILE_ID_RE.fullmatch(name)):
-            return False
-        if runtime_adapter_runner_enabled():
-            return False
-        return not _profile_uses_gateway(name)
-    except Exception:
+    except KeyError:
+        return False  # not a WebUI session
+    if name != "default" and not (isinstance(name, str) and profiles._PROFILE_ID_RE.fullmatch(name)):
         return False
+    if runtime_adapter_runner_enabled():
+        return False
+    return not _profile_uses_gateway(name)
 
 
-def pending_webui_completions(home: Path, *, now: float | None = None) -> list[dict]:
+def pending_webui_completions(home: Path, *, now: float | None = None) -> tuple[list[dict], int]:
     """Read *home*'s pending completions that an in-process WebUI session should get.
 
     The read-only counterpart of the Agent's startup replay, for ledgers WebUI
     does not own. It selects rows the same way (``state != 'running'``, pending,
     with an event) and leaves out rows past the replay age cap, which belong to
     their owner's cleanup. Nothing is written. Raises when an existing ledger
-    cannot be read, so the caller retries.
+    cannot be read, so the caller retries. Returns the events and the number of
+    rows whose session could not be classified (the caller retries those).
     """
     db_path = Path(home) / "state.db"
     try:
         db_path.stat()
     except FileNotFoundError:
-        return []
+        return [], 0
     from api.agent_sessions import state_db_readonly_uri
 
     conn = sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True, timeout=2.0)
     try:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(async_delegations)")}
         if not _REPLAY_COLUMNS <= columns:
-            return []  # no ledger table, or a core without session provenance
+            return [], 0  # no ledger table, or a core without session provenance
         rows = conn.execute(
             """SELECT delegation_id, event_json, completed_at, dispatched_at, origin_ui_session_id
                FROM async_delegations
@@ -215,8 +223,9 @@ def pending_webui_completions(home: Path, *, now: float | None = None) -> list[d
         redact_completion_event = None
     now = time.time() if now is None else now
     cap = _replay_age_cap()
-    in_process: dict[str, bool] = {}
+    in_process: dict[str, bool | None] = {}
     events = []
+    undetermined = 0
     for delegation_id, payload, completed_at, dispatched_at, session_id in rows:
         age_basis = completed_at or dispatched_at
         if age_basis and now - age_basis > cap:
@@ -225,7 +234,13 @@ def pending_webui_completions(home: Path, *, now: float | None = None) -> list[d
         if not session_id:
             continue
         if session_id not in in_process:
-            in_process[session_id] = _session_runs_in_process(session_id)
+            try:
+                in_process[session_id] = _session_runs_in_process(session_id)
+            except Exception:
+                in_process[session_id] = None
+        if in_process[session_id] is None:
+            undetermined += 1
+            continue
         if not in_process[session_id]:
             continue
         try:
@@ -238,7 +253,7 @@ def pending_webui_completions(home: Path, *, now: float | None = None) -> list[d
             evt = redact_completion_event(evt)
         evt["restored"] = True
         events.append(evt)
-    return events
+    return events, undetermined
 
 
 @contextmanager

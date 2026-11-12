@@ -65,7 +65,7 @@ def world(tmp_path, monkeypatch):
     # others the read-only replay (recorded here; its real reads are covered in
     # test_delegation_cross_profile_replay.py).
     monkeypatch.setattr(profiles, "get_process_profile_home", lambda: root)
-    monkeypatch.setattr(peu, "pending_webui_completions", lambda home: calls.append(("replay", str(home))) or [])
+    monkeypatch.setattr(peu, "pending_webui_completions", lambda home: calls.append(("replay", str(home))) or ([], 0))
     peu._reset_legacy_async_delivery_dedupe_for_tests()
     yield {"root": root, "named": named, "sessions": sessions, "calls": calls, "profiles": profiles}
     peu._reset_legacy_async_delivery_dedupe_for_tests()

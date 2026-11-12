@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from api.delegation_ledger_owner import (
+    LedgerReplayIncomplete,
     authorized_ledger_homes,
     ledger_home_scope,
     pending_webui_completions,
@@ -83,7 +84,8 @@ def _restore_ledger(home: Path | None, target_queue: Any) -> None:
         with ledger_home_scope(home):
             restore_undelivered_completions(target_queue)
         return
-    for evt in pending_webui_completions(home):
+    events, undetermined = pending_webui_completions(home)
+    for evt in events:
         key = (str(home), completion_delivery_id(evt))
         with _REPLAY_OFFERED_LOCK:
             if key in _REPLAY_OFFERED:
@@ -95,6 +97,12 @@ def _restore_ledger(home: Path | None, target_queue: Any) -> None:
             with _REPLAY_OFFERED_LOCK:
                 _REPLAY_OFFERED.discard(key)
             raise
+    if undetermined:
+        # Classified rows are queued above and stay offered once; the rest go
+        # through the sweep's failure path (rate-limited log, 5 s retry).
+        raise LedgerReplayIncomplete(
+            f"{undetermined} pending row(s) with an unclassifiable session; retrying"
+        )
 
 
 def _log_throttled(key: str, level: int, message: str, *args: Any, exc_info: bool = False) -> None:
