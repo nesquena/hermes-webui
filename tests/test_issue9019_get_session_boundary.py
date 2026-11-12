@@ -81,7 +81,9 @@ def _post(monkeypatch, path, body):
     monkeypatch.setattr(routes, "_check_csrf", lambda _h: True, raising=False)
     monkeypatch.setattr(routes, "read_body", lambda _h: dict(body))
     monkeypatch.setattr(routes, "j", lambda _h, obj, *a, **k: replies.append(("j", _status(a, k, 200), obj)) or True)
-    monkeypatch.setattr(routes, "bad", lambda _h, msg, *a, **k: replies.append(("bad", _status(a, k, 400), msg)) or True)
+    monkeypatch.setattr(
+        routes, "bad", lambda _h, msg, *a, **k: replies.append(("bad", _status(a, k, 400), msg)) or True,
+    )
 
     class _PostHandler:
         headers = {"Content-Type": "application/json"}
@@ -485,7 +487,9 @@ def test_share_never_synthesizes_over_the_replaced_file(store, monkeypatch):  # 
     _victim(store)
     _copy(store, partials=False)
     fallbacks = _foreign_state_rows(monkeypatch)
-    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid, **_k: {"session_id": sid, "profile": "default"})
+    monkeypatch.setattr(
+        routes, "_lookup_cli_session_metadata", lambda sid, **_k: {"session_id": sid, "profile": "default"},
+    )
 
     with pytest.raises(KeyError):
         routes._resolve_share_session_pair(COPY, _Handler())
