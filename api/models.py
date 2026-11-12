@@ -11071,9 +11071,11 @@ class _ContentFingerprintUnreadable:
     """Sentinel: the fingerprint read for one table FAILED (lock/timeout).
 
     Distinct from SQLite's own ``NULL`` for an empty table: an unreadable read
-    says nothing about the contents, and a cache that cannot tell the two apart
-    treats two unreadable stamps as "unchanged". Consumers must gate any
-    equality-based reuse on ``_content_fingerprint_readable``. (#8694)
+    says nothing about the contents, so it must never equal a genuine empty-table
+    read. Two unreadable reads still compare equal, as master's ``None == None``
+    did; the session-list cache keeps its file-stat slots and TTL for that case,
+    so no consumer gates on ``_content_fingerprint_readable`` (it documents the
+    contract for tests and diagnostics). (#8694, #8986)
     """
 
     __slots__ = ()

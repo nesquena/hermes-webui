@@ -3859,6 +3859,35 @@ def _session_list_cache_source_stamp_snapshot(key: tuple):
         return None
 
 
+# Source-stamp slots the session-list BUILDER itself can move: the session index
+# (slot 3). all_sessions() re-adds on-disk sidecars missing from the index and the
+# Desktop/CLI orphan passes prune them again, so certifying that slot with its
+# pre-build value would leave every entry source-stale at birth and turn every
+# GET into a blocking rebuild. Master read the whole stamp after the build; the
+# state.db/WAL/fingerprint/all-profiles slots stay pre-build (#8694), the index
+# slot is read after the build, as on master. (#8986)
+_SESSION_LIST_STAMP_BUILDER_WRITTEN_SLOTS = frozenset({3})
+
+
+def _session_list_cache_certified_stamp(key: tuple, pre_build_stamp):
+    """The stamp to store with a payload built after ``pre_build_stamp`` was read."""
+    if pre_build_stamp is None:
+        return None
+    post = _session_list_cache_source_stamp_snapshot(key)
+    if (
+        post is None
+        or not isinstance(pre_build_stamp, tuple)
+        or not isinstance(post, tuple)
+        or len(pre_build_stamp) != 8
+        or len(post) != 8
+    ):
+        return pre_build_stamp
+    return tuple(
+        post[i] if i in _SESSION_LIST_STAMP_BUILDER_WRITTEN_SLOTS else pre_build_stamp[i]
+        for i in range(8)
+    )
+
+
 def _get_cached_session_list_payload(
     *,
     key: tuple,
@@ -3913,6 +3942,7 @@ def _get_cached_session_list_payload(
                             return
                         try:
                             payload = builder()
+                            source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
                         except Exception:
                             logger.exception(
                                 "session list stale-cache background rebuild failed"
@@ -3963,6 +3993,7 @@ def _get_cached_session_list_payload(
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
                 source_stamp = _session_list_cache_source_stamp_snapshot(key)
                 payload = builder()
+                source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
                 if source_stamp is None:
                     # Unknown pre-build evidence: correct for this request, never
                     # certified. Retrying cannot produce a snapshot the producer
@@ -4035,6 +4066,7 @@ def _get_cached_session_list_payload(
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
     source_stamp = _session_list_cache_source_stamp_snapshot(key)
     payload = builder()
+    source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
     if (
         source_stamp is not None
         and _session_list_cache_invalidation_stamp(key) == invalidation_stamp
