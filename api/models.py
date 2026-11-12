@@ -1474,6 +1474,45 @@ def _load_session_from_path(path: Path) -> "Session | None":
     return Session(**data)
 
 
+def _load_session_for_listing(sid) -> "Session | None":
+    """``Session.load(sid)`` without its repair save, for read-only listing paths (#9007).
+
+    ``Session.load`` saves a sidecar whose duplicate partials it collapsed. The
+    session list reads sessions the requesting profile may not own, without
+    their lock, so that save could overwrite a turn the owner wrote meanwhile.
+    This keeps the collapse in memory, as ``_load_session_from_path`` does, and
+    is otherwise ``Session.load``: same id and path checks, a corrupt file still
+    raises, the draft overlay and the #8852/#8830 marks are keyed by ``sid``,
+    and an uncollapsed legacy file fills the facts cache.
+    """
+    if not is_safe_session_id(sid):
+        return None
+    p = SESSION_DIR / f'{sid}.json'
+    if not p.exists():
+        return None
+    pre_read_sig = _sidecar_stat_signature(p)
+    data = json.loads(p.read_text(encoding='utf-8'))
+    share_fields_misplaced = isinstance(data, dict) and bool(_sidecar_keys_after_body(data, _SHARE_FIELD_KEYS))
+    data['_pending_hidden_wakeup_from_writer'] = True
+    data['messages'], collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    names_other_session = data.get('session_id') != sid
+    session = Session(**_apply_session_draft_overlay(data, sid))
+    session._share_fields_misplaced = share_fields_misplaced
+    if names_other_session:
+        session._sidecar_names_other_session = sid
+    if not collapsed_partials and 'anchor_scene_index' not in data:
+        try:
+            _legacy_sidecar_facts_put(
+                sid,
+                len(session.messages or []),
+                _anchor_scene_index_from_records(getattr(session, 'anchor_activity_scenes', None)),
+                expected_sig=pre_read_sig,
+            )
+        except Exception:
+            logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+    return session
+
+
 def _lookup_index_message_count(session_id):
     """Return the indexed message count without loading the full session file."""
     return _index_message_count_map().get(str(session_id))
@@ -2313,10 +2352,14 @@ class Session:
                 existing = None
                 existing_guarded_messages = None
                 existing_exact_replay_rows_removed = 0
+                existing_bytes = None
                 existing_msg_count = _prefix_message_count(self.path)
                 if existing_msg_count is None:
-                    existing_text = self.path.read_text(encoding='utf-8')
                     try:
+                        # A sidecar cut inside a multi-byte character is
+                        # handled like malformed JSON (#8798), so it cannot
+                        # stop the valid in-memory snapshot from saving.
+                        existing_text = self.path.read_text(encoding='utf-8')
                         existing = json.loads(existing_text)
                         existing_messages = existing.get('messages') or []
                         existing_msg_count = len(existing_messages)
@@ -2325,11 +2368,15 @@ class Session:
                                 existing_guarded_messages,
                                 existing_exact_replay_rows_removed,
                             ) = _deduplicate_exact_stable_messages(existing_messages)
-                    except (json.JSONDecodeError, ValueError, AttributeError):
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, AttributeError):
                         existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(guarded_messages or [])
+                # Preserve when the on-disk count is known-positive *or*
+                # unknown (-1 after UnicodeDecodeError / corrupt JSON). An
+                # unmarked torn sidecar sets -1, and must not lose its raw
+                # bytes to an empty active/pending snapshot (#8807 gate R2).
                 if (
-                    existing_msg_count > 0
+                    existing_msg_count != 0
                     and incoming_msg_count == 0
                     and (self.active_stream_id or self.pending_user_message)
                 ):
@@ -2347,8 +2394,14 @@ class Session:
                     if existing_text is None:
                         # The .bak body is the one thing that needs the full text,
                         # and a shrink is the one time it is needed.
-                        existing_text = self.path.read_text(encoding='utf-8')
-                    if existing is None:
+                        try:
+                            existing_text = self.path.read_text(encoding='utf-8')
+                        except UnicodeDecodeError:
+                            # The prefix count was readable but the body is
+                            # cut mid-character (#8798). Back up the exact
+                            # bytes below instead of aborting the save.
+                            existing_bytes = self.path.read_bytes()
+                    if existing is None and existing_text is not None:
                         try:
                             existing = json.loads(existing_text)
                             existing_messages = existing.get('messages') or []
@@ -2367,10 +2420,13 @@ class Session:
                     # failure mode pre-fix was "backup is lost"; with
                     # this fix the backup either lands cleanly or doesn't
                     # land at all.
+                    bak_tmp = None
+                    salvage_tmp = None
                     try:
                         backup_text = existing_text
                         if (
-                            existing_exact_replay_rows_removed
+                            backup_text is not None
+                            and existing_exact_replay_rows_removed
                             and isinstance(existing, dict)
                             and isinstance(existing_guarded_messages, list)
                         ):
@@ -2390,20 +2446,57 @@ class Session:
                                 existing_exact_replay_rows_removed,
                                 self.session_id,
                             )
-                        bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
-                        )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(backup_text)
-                            bf.flush()
-                            os.fsync(bf.fileno())
-                        _safe_replace(bak_tmp, bak_path)
+                        if backup_text is None:
+                            # Undecodable old sidecar (#8798 / #8807 P1): never
+                            # publish torn bytes onto the recovery ``.json.bak``.
+                            # Keep any readable backup as-is (count vs the
+                            # uncommitted incoming snapshot does not matter —
+                            # primary publication may still fail). Park the raw
+                            # bytes on a non-recovery sibling for manual salvage.
+                            salvage_path = self.path.with_suffix('.json.torn')
+                            salvage_tmp = salvage_path.with_name(
+                                f'{salvage_path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                            )
+                            with open(salvage_tmp, 'wb') as bf:
+                                bf.write(existing_bytes)
+                                bf.flush()
+                                os.fsync(bf.fileno())
+                            _safe_replace(salvage_tmp, salvage_path)
+                            if _readable_recovery_backup(bak_path):
+                                logger.warning(
+                                    "Kept existing backup for session %s; "
+                                    "undecodable old sidecar salvaged at %s",
+                                    self.session_id,
+                                    salvage_path.name,
+                                )
+                            else:
+                                logger.warning(
+                                    "Old sidecar for session %s is not valid UTF-8; "
+                                    "salvaged bytes at %s (not a recovery backup)",
+                                    self.session_id,
+                                    salvage_path.name,
+                                )
+                        else:
+                            bak_tmp = bak_path.with_suffix(
+                                f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                            )
+                            with open(bak_tmp, 'w', encoding='utf-8') as bf:
+                                bf.write(backup_text)
+                                bf.flush()
+                                os.fsync(bf.fileno())
+                            # Only rename a temp this save just wrote; a stale
+                            # one left by an earlier failed save must never
+                            # land on the backup (#8807 gate).
+                            _safe_replace(bak_tmp, bak_path)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.
-                        try:
-                            bak_tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                        for _tmp in (bak_tmp, salvage_tmp):
+                            if _tmp is None:
+                                continue
+                            try:
+                                _tmp.unlink(missing_ok=True)
+                            except Exception:
+                                pass
         except OSError:
             pass
 
@@ -6265,6 +6358,23 @@ def _sidecar_stat_signature(path):
 _MESSAGE_COUNT_MARKER = 1
 
 
+def _readable_recovery_backup(bak_path) -> bool:
+    """True when ``bak_path`` is a readable session recovery can use (#8807).
+
+    Count relative to an uncommitted incoming snapshot is irrelevant: a
+    failed primary publication must not have already swapped this file for
+    undecodable bytes.
+    """
+    try:
+        data = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    messages = data.get('messages')
+    return isinstance(messages, list)
+
+
 def _prefix_message_count(path):
     """The sidecar's own persisted ``message_count``, from a bounded prefix.
 
@@ -9713,7 +9823,7 @@ def all_sessions(
             for i, s in enumerate(index):
                 if 'last_message_at' not in s:
                     _diag_stage(diag, "all_sessions.backfill_load")
-                    full = Session.load(s.get('session_id'))
+                    full = _load_session_for_listing(s.get('session_id'))  # never saves (#9007)
                     if full:
                         index[i] = full.compact(sidebar_metadata_only=sidebar_metadata_only)
                         backfilled.append(full)
@@ -9849,7 +9959,7 @@ def all_sessions(
     for p in SESSION_DIR.glob('*.json'):
         if p.name.startswith('_'): continue
         try:
-            s = Session.load(p.stem)
+            s = _load_session_for_listing(p.stem)  # never saves (#9007)
             if s: out.append(s)
         except Exception:
             logger.debug("Failed to load session from %s", p)
@@ -13473,9 +13583,10 @@ def _reconciled_visible_count_for_sidebar(
         session = None
     if session is None or getattr(session, '_loaded_metadata_only', False):
         # Metadata-only stubs carry messages=[] by contract; the sidecar
-        # transcript needs a full load (bounded to this one session).
+        # transcript needs a full load (bounded to this one session). A sidebar
+        # poll holds no session lock, so the read must not save (#9007).
         try:
-            session = Session.load(str(sid))
+            session = _load_session_for_listing(str(sid))
         except Exception:
             return None
     if session is None:

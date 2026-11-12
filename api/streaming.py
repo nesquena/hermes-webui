@@ -3525,7 +3525,21 @@ def _resolve_current_session_for_write(session):
     if not sid:
         return None
     try:
-        return get_session(sid)
+        current = get_session(sid)
+        # #9000: the file may have been replaced since the turn started with a
+        # copy of another session's file. The reload then carries that other
+        # session's id and path (the #8852 loader marks it), so a write through
+        # it (the cwd mirror, an ephemeral cancel's unlink) would land on the
+        # other conversation. Fail closed instead.
+        if getattr(current, "_sidecar_names_other_session", None):
+            logger.info(
+                "Not resolving session %s for a delayed write: its file now "
+                "holds session %r (#9000)",
+                sid,
+                getattr(current, "session_id", None),
+            )
+            return None
+        return current
     except Exception:
         logger.debug(
             "Failed to resolve current session %s for delayed-cancel write; "
@@ -16709,7 +16723,15 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 try:
                     import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    if getattr(s, '_sidecar_names_other_session', None):
+                        # #9000: loaded from a copy of another session's file, so
+                        # s.path is that other conversation. Never delete it.
+                        logger.info(
+                            "Not removing /btw file for %s: it holds session %r (#9000)",
+                            session_id, s.session_id,
+                        )
+                    else:
+                        pathlib.Path(s.path).unlink(missing_ok=True)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions
