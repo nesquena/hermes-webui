@@ -7,7 +7,7 @@ import json
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -572,6 +572,41 @@ class TestAuxReasoningExtraRouteContract:
             'auto', None, None,
         )
         assert request['main_runtime']['model'] == 'deepseek-v4-flash-free'
+
+    @pytest.mark.parametrize(
+        ('title_config', 'webui_guess', 'expected_request', 'expected_extra'),
+        (
+            ({'provider': 'auto', 'model': ''}, ('qwen3-title', 'qwen', None),
+             (None, None, None), {'reasoning': {'enabled': False}}),
+            ({'provider': 'auto', 'model': 'title-model'}, ('title-model', 'qwen', None),
+             (None, 'title-model', None), {'reasoning': {'enabled': False}}),
+            ({'provider': 'local', 'model': ''}, ('gpt-5', 'openai', None),
+             ('auto', None, None), None),
+        ),
+    )
+    def test_implicit_route_stays_implicit_when_the_agent_cannot_resolve_it(
+        self, monkeypatch, title_config, webui_guess, expected_request, expected_extra,
+    ):
+        """An Agent without the automatic resolver keeps owning the implicit route.
+
+        WebUI's catalog guess classifies the reasoning gate only; pinning it
+        would drop the Agent's transport and fallback for the request.
+        """
+        requests = []
+        agent_without_auto_resolver = ModuleType('agent.auxiliary_client')
+        agent_without_auto_resolver.call_llm = lambda **kwargs: requests.append(kwargs) or {
+            'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}],
+        }
+        monkeypatch.setitem(sys.modules, 'agent.auxiliary_client', agent_without_auto_resolver)
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'base_url': '', **title_config,
+        }), patch('api.streaming.resolve_model_provider', return_value=webui_guess):
+            assert generate_title_raw_via_aux('question', 'answer') == ('Title', 'llm_aux')
+
+        request = requests[-1]
+        assert (request['provider'], request['model'], request['base_url']) == expected_request
+        assert 'main_runtime' not in request
+        assert request['extra_body'] == expected_extra
 
     def test_blank_provider_minimax_global_endpoint_preserves_route_and_extras(self):
         """The canonical global MiniMax endpoint must not inherit the main route."""

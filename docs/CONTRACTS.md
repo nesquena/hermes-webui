@@ -249,7 +249,8 @@ must consume that same resolved route.
   for the request rather than freezing an unavailable main route. This also
   includes `auxiliary.title_generation.prefer_fast_model`. A selected main
   route stays `provider: auto` with the profile's main runtime, so the Agent
-  keeps its HTTP-failure fallback.
+  keeps its HTTP-failure fallback. If the Agent cannot resolve the route, the
+  request stays implicit; WebUI's own guess only classifies request controls.
 - An inherited main route retains the main model's resolved transport
   (`api_mode`, including `anthropic_messages`), even when title_generation
   specifies only a model override. An explicit title-task `api_key` or

@@ -6988,6 +6988,17 @@ def _effective_aux_title_route(
                 effective_model = str(model_cfg.get('default') or model_cfg.get('name') or '').strip()
         except Exception:
             pass
+    if (
+        implicit_route and not supplied_base_url and not picker_route
+        and resolved_credentials is not None
+    ):
+        # The Agent could not resolve this implicit route (an older Agent, or
+        # a failed preflight). WebUI's catalog guess below only classifies the
+        # gate. The request stays implicit, so the Agent keeps its own route,
+        # transport and fallback.
+        resolved_credentials['implicit_request'] = True
+        resolved_credentials['implicit_provider'] = 'auto' if supplied_provider else ''
+        resolved_credentials['title_model_override'] = supplied_model
     try:
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(effective_model)
         return (
@@ -7278,6 +7289,14 @@ def generate_title_raw_via_aux(
             'api_key': None,
             'api_mode': None,
             'main_runtime': route_credentials['main_runtime'],
+        }
+    elif route_credentials.get('implicit_request'):
+        request_route = {
+            'provider': route_credentials.get('implicit_provider') or None,
+            'model': route_credentials.get('title_model_override') or None,
+            'base_url': None,
+            'api_key': api_key or None,
+            'api_mode': api_mode or None,
         }
     else:
         request_route = {

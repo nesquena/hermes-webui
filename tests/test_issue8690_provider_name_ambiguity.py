@@ -889,6 +889,17 @@ def test_title_generation_with_an_unambiguous_route_is_unchanged(monkeypatch, au
     assert aux_calls[0]["provider"] == (aux.get("provider") if aux.get("provider") != "auto" else None)
 
 
+@pytest.mark.parametrize("model, refused", [("@openai:gpt-synthetic", True), ("gpt-synthetic", False)])
+def test_a_picker_title_model_is_judged_by_its_provider_hint(monkeypatch, aux_calls, model, refused):
+    """A ``@provider:model`` title model hands its provider hint to the Agent, so the
+    guard judges that name, not the (unambiguous) main provider an auto route has."""
+    _title_route(monkeypatch, {"provider": "auto", "model": model},
+                 _records("openai", "named-first"), main_provider="anthropic")
+    raw, status = streaming.generate_title_raw_via_aux("hello there", "hi, how can I help")
+    assert (status == TITLE_REFUSED) is refused
+    assert bool(aux_calls) is not refused
+
+
 # ── Codex r4: the title guard reads the profile the Agent's call_llm will load ──
 
 
