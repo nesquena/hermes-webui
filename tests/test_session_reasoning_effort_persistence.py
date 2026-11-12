@@ -185,7 +185,7 @@ def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
         "share_token": "tok", "share_created_at": 1.0, "share_title": "t",
         "share_message_count": 2, "share_updated_at": 1.0,
     })
-    monkeypatch.setattr(routes, "revoke_share", lambda s: None)
+    monkeypatch.setattr(routes, "revoke_share", lambda s: True)
     post = _PerThreadPost(monkeypatch)
 
     paused = threading.Event()

@@ -1109,6 +1109,19 @@ class ShareTokenOwnershipError(Exception):
         )
 
 
+class ShareSnapshotUnreadable(Exception):
+    """A share snapshot exists on disk but could not be read due to an I/O failure.
+
+    Domain error, distinct from an absent or malformed snapshot: callers must
+    not acknowledge revocation or clear durable state when snapshot authority
+    cannot be confirmed.
+    """
+
+    def __init__(self, token: str):
+        self.token = str(token or "")
+        super().__init__(f"Share snapshot '{self.token}' could not be read")
+
+
 def _snapshot_owner(payload: dict | None) -> str:
     """The session that published ``payload``, or empty for legacy snapshots."""
     if not isinstance(payload, dict):
@@ -1243,9 +1256,10 @@ def _read_share_snapshot(
     """Read a snapshot from disk, enforcing ownership when *expected_session_id* is given.
 
     Returns the raw snapshot payload dict, or ``None`` when the file is missing
-    or unparseable. Raises :class:`ShareTokenOwnershipError` when the snapshot
-    exists, carries a non-empty ``source_session_id``, and does not match
-    *expected_session_id* (unless *allow_continuation* is true and the expected
+    or unparseable. Raises :class:`ShareSnapshotUnreadable` when the file exists
+    but cannot be read due to an I/O failure. Raises :class:`ShareTokenOwnershipError`
+    when the snapshot exists, carries a non-empty ``source_session_id``, and does not
+    match *expected_session_id* (unless *allow_continuation* is true and the expected
     session is a verified compression continuation of the owner). Legacy snapshots
     without ``source_session_id`` are accepted for any session (migration compatibility).
     """
@@ -1259,9 +1273,19 @@ def _read_share_snapshot(
     if not path.exists():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("Failed to read share snapshot %s", path, exc_info=True)
+        raw_bytes = path.read_bytes()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        logger.warning("Failed to read share snapshot %s: %s", path, exc, exc_info=True)
+        raise ShareSnapshotUnreadable(token) from exc
+    try:
+        raw = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -1400,7 +1424,10 @@ def load_share(token: str, *, expected_session_id: str | None = None) -> dict | 
     A refused snapshot (revoked, or its conversation no longer exists) gives the
     same ``None`` as an unknown token (#8837).
     """
-    payload = _read_share_snapshot(token, expected_session_id=expected_session_id)
+    try:
+        payload = _read_share_snapshot(token, expected_session_id=expected_session_id)
+    except ShareSnapshotUnreadable:
+        return None
     if not isinstance(payload, dict):
         return None
     if payload.get("revoked_at"):
@@ -1468,11 +1495,14 @@ def revoke_share(session) -> bool:
         # request would take down another session's link while its owner still
         # shows it as shared. Raises ShareTokenOwnershipError (named refusal).
         # #8950: accept a durably verified compression continuation as owner.
-        payload = _read_share_snapshot(
-            token,
-            expected_session_id=session_id,
-            allow_continuation=True,
-        )
+        try:
+            payload = _read_share_snapshot(
+                token,
+                expected_session_id=session_id,
+                allow_continuation=True,
+            )
+        except ShareSnapshotUnreadable:
+            return False
         if not isinstance(payload, dict):
             return True
         try:

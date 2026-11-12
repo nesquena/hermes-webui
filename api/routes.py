@@ -20330,9 +20330,11 @@ def handle_post(handler, parsed) -> bool:
                 # session's token field, so hand it the resolved authority.
                 target_session.share_token = token
                 try:
-                    revoke_share(target_session)
+                    revoked = revoke_share(target_session)
                 except ShareTokenOwnershipError as exc:
                     return bad(handler, str(exc), 409)
+                if not revoked:
+                    return bad(handler, "Share link could not be revoked", 500)
                 if load_share(token) is not None:
                     return bad(handler, "Share link could not be revoked", 500)
             # A writer may have saved while the revoke was reading the snapshot
