@@ -7573,6 +7573,9 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
        d. Edited row: dict against dict with identical key sets differing at exactly one
           leaf, matching exactly one raw row, so a row made only of references still
           keeps the siblings the edit did not touch.
+       e. Preserved references: dict against dict where every ``${...}`` leaf the raw row
+          holds expands to the submitted value at the same path, requiring at least one
+          preserved reference.
     3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
     4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
        rows disputing the same raw row, or non-unique match in a list with references) raises
@@ -7604,8 +7607,8 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             for n in new_list
         )
         if raw_ok and new_ok:
-            raw_vals = [r[cand] for r in raw_list]
-            new_vals = [n[cand] for n in new_list]
+            raw_vals = [_expand_env_vars(r[cand]) for r in raw_list]
+            new_vals = [_expand_env_vars(n[cand]) for n in new_list]
             raw_unique = len(raw_vals) == len({json.dumps(v, sort_keys=True) for v in raw_vals})
             new_unique = len(new_vals) == len({json.dumps(v, sort_keys=True) for v in new_vals})
             if raw_unique and new_unique:
@@ -7615,13 +7618,20 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
     if chosen_key is not None:
         raw_by_key = {}
         for idx, r in enumerate(raw_list):
-            raw_by_key[json.dumps(r[chosen_key], sort_keys=True)] = idx
+            k_json = json.dumps(_expand_env_vars(r[chosen_key]), sort_keys=True)
+            if k_json in raw_by_key:
+                raise ValueError(ambiguous_err)
+            raw_by_key[k_json] = idx
 
+        claimed = set()
         result = []
         for new_item in new_list:
-            k_json = json.dumps(new_item[chosen_key], sort_keys=True)
+            k_json = json.dumps(_expand_env_vars(new_item[chosen_key]), sort_keys=True)
             if k_json in raw_by_key:
                 raw_idx = raw_by_key[k_json]
+                if raw_idx in claimed:
+                    raise ValueError(ambiguous_err)
+                claimed.add(raw_idx)
                 result.append(_preserve_env_refs_in_object(raw_list[raw_idx], new_item))
             else:
                 result.append(new_item)
@@ -7659,6 +7669,58 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 out.append(raw_idx)
         return out
 
+    def _iter_env_ref_leaves(obj, path=()):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                yield from _iter_env_ref_leaves(v, path + (k,))
+        elif isinstance(obj, list):
+            for idx, item in enumerate(obj):
+                yield from _iter_env_ref_leaves(item, path + (idx,))
+        elif _has_env_ref(obj):
+            yield path, obj
+
+    def _get_at_path(obj, path):
+        curr = obj
+        for p in path:
+            if isinstance(curr, dict):
+                if p in curr:
+                    curr = curr[p]
+                elif isinstance(p, int) and str(p) in curr:
+                    curr = curr[str(p)]
+                else:
+                    return False, None
+            elif isinstance(curr, list):
+                if isinstance(p, int) and 0 <= p < len(curr):
+                    curr = curr[p]
+                else:
+                    return False, None
+            else:
+                return False, None
+        return True, curr
+
+    def _ref_preserved_candidates(new_item) -> list[int]:
+        """Raw rows where every ${...} leaf expands to the submitted value at the same path."""
+        if not isinstance(new_item, dict):
+            return []
+        out = []
+        for raw_idx, raw_item in enumerate(raw_list):
+            if not isinstance(raw_item, dict):
+                continue
+            ref_leaves = list(_iter_env_ref_leaves(raw_item))
+            if not ref_leaves:
+                continue
+            all_match = True
+            for path, raw_val in ref_leaves:
+                exists, new_val = _get_at_path(new_item, path)
+                if not exists or not (
+                    _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+                ):
+                    all_match = False
+                    break
+            if all_match:
+                out.append(raw_idx)
+        return out
+
     matches: dict[int, int | None] = {}
     for new_idx, new_item in enumerate(new_list):
         # 2.b: Expanded value
@@ -7692,6 +7754,15 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             raise ValueError(ambiguous_err)
         if len(cands_2d) == 1:
             matches[new_idx] = cands_2d[0]
+            continue
+
+        # 2.e: Preserved references: every ${...} leaf the raw row holds
+        # expands to the submitted value at the same path (#8740 CR r3).
+        cands_2e = _ref_preserved_candidates(new_item)
+        if len(cands_2e) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2e) == 1:
+            matches[new_idx] = cands_2e[0]
             continue
 
         matches[new_idx] = None
