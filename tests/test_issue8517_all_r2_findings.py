@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import re
 import sys
-import types
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +42,7 @@ from tests.test_issue8517_profile_scoped_memory import (  # noqa: F401  (fixture
     HeldWriter,
     SharedInstanceMemoryProvider,
     _cached_agent,
+    _memory_manager_twin,
     assert_cached_memoryless,
     bank_rows,
     hc,
@@ -128,7 +128,7 @@ def test_legacy_root_admission_cannot_race_a_profile_created_before_the_bind(
     worker took the env mirror before the Agent bound, so root bound and wrote
     beta's bank and was cached."""
     _only_root_profile(homes)
-    monkeypatch.setitem(sys.modules, "agent.memory_manager", types.ModuleType("agent.memory_manager"))
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", _memory_manager_twin())
     writer = HeldWriter("beta")
 
     def new_profile_then_writer():
