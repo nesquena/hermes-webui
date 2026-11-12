@@ -177,6 +177,7 @@ def test_readonly_projects_file_serves_new_primary_row_after_warm_cache(
     assert _cli_ids(second_partial) == expected
 
 
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses DAC permission bits")
 def test_all_profiles_readonly_projects_keeps_affected_and_healthy_primary_rows(
     tmp_path, monkeypatch
 ):

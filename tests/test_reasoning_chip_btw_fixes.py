@@ -9,9 +9,9 @@ Four invariants this file locks in place:
 2. The reasoning chip label uses an SVG icon (`stroke="currentColor"`) instead
    of the `🧠` emoji, matching every other composer chip.
 
-3. `cmdReasoning()` calls `_applyReasoningChip(eff)` directly with the
-   server-confirmed effort, not `syncReasoningChip()` which re-applies the
-   stale cached value.
+3. `cmdReasoning()` applies the server-confirmed effort through
+   `_saveReasoningEffort()`, not `syncReasoningChip()` which re-applies
+   the stale cached value.
 
 4. `attachBtwStream()` sets a `_streamDone` flag in `done`/`apperror` and
    gates `onerror`'s row removal on `!_streamDone` — otherwise the browser's
@@ -175,9 +175,9 @@ class TestReasoningCommandUpdatesChip:
     """cmdReasoning must apply the SERVER-CONFIRMED effort, not the cached value."""
 
     def test_cmd_reasoning_calls_apply_not_sync(self):
-        # Locate cmdReasoning and verify the success branch calls
-        # _applyReasoningChip(eff) directly, not syncReasoningChip() which
-        # would read stale _currentReasoningEffort.
+        # Locate cmdReasoning and verify the success branch applies the
+        # server-confirmed effort, not syncReasoningChip() which would read
+        # stale _currentReasoningEffort.
         m = re.search(
             r"function\s+cmdReasoning\b[\s\S]*?(?=^function\s|\Z)",
             COMMANDS_JS,
@@ -185,9 +185,9 @@ class TestReasoningCommandUpdatesChip:
         )
         assert m, "cmdReasoning not found in commands.js"
         fn = m.group(0)
-        assert "_applyReasoningChip(eff," in fn, (
-            "cmdReasoning must call _applyReasoningChip(eff, st) with the "
-            "server-confirmed effort from the /api/reasoning POST response"
+        assert "_saveReasoningEffort(arg)" in fn, (
+            "cmdReasoning must apply the server-confirmed effort from the "
+            "/api/reasoning POST response"
         )
 
 

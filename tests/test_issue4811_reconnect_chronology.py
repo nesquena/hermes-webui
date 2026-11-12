@@ -82,6 +82,7 @@ for (const name of funcNames) {
 }
 code += `
 var buf = '';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', function(c) { buf += c; });
 process.stdin.on('end', function() {
   var payload = JSON.parse(buf || '{}');

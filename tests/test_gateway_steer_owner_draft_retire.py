@@ -64,7 +64,7 @@ async function api(path,opts){
   throw new Error('unexpected '+path);
 }
 const steerReplies=[];let releaseSteer;const steerGate=new Promise(r=>releaseSteer=r);
-let casGate=Promise.resolve();let _loadingSessionId=null;
+let casGate=Promise.resolve();let _loadingSessionId=null;let _loadSessionGeneration=0;
 const noop=()=>{};
 const updateQueueBadge=noop,clearLiveToolCards=noop,updateSendBtn=noop,setStatus=noop,setComposerStatus=noop,syncTopbar=noop,renderMessages=noop,
   _setActiveSessionUrl=noop,_setSessionViewedCount=noop,_steerTextWithPendingFiles=async(x,_s,f)=>x||(f&&f.length?'[files]':''),_steerFailureMessageKey=x=>x,_showSteerRecovery=noop,

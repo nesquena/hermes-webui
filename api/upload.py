@@ -14,7 +14,7 @@ from api.helpers import (
     unreadable_content_length,
     unsupported_transfer_encoding,
 )
-from api.models import get_session
+from api.models import UNVERIFIABLE_SESSION_OWNER, get_session, session_owner_readings_readonly
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
     safe_resolve_ws,
@@ -48,6 +48,11 @@ def _max_extracted_bytes() -> int:
 # Back-compat module constant (some call sites / tests reference it). The
 # authoritative value is _max_extracted_bytes(), read at extraction time.
 _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
+
+# Member-count cap: a tiny archive with millions of (possibly empty) members
+# slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
+# Module-level (read at call time) so tests can lower it.
+_MAX_ARCHIVE_MEMBERS = 10000
 
 
 def _reject_before_read(handler, message, status):
@@ -210,6 +215,30 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
+_SHARE_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
+
+
+def _share_attachment_root() -> Path | None:
+    """The attachment root as trusted by public shares, or None (#8590).
+
+    Resolved once per configured spelling -- at import, i.e. server startup,
+    since STATE_DIR and HERMES_WEBUI_ATTACHMENT_DIR are process-wide -- and
+    never by name again: shares walk it no-follow, so a symlink planted later
+    (e.g. inside a workspace that contains it) cannot move it.  A root that
+    cannot be resolved is None (fail closed).  Uploads keep _attachment_root().
+    """
+    key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
+    if key not in _SHARE_ATTACHMENT_ROOTS:
+        try:
+            _SHARE_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            _SHARE_ATTACHMENT_ROOTS[key] = None
+    return _SHARE_ATTACHMENT_ROOTS[key]
+
+
+_share_attachment_root()
+
+
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
     dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -237,16 +266,53 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
-def _session_visible_to_active_profile(session) -> bool:
-    """Return whether an upload target session belongs to the active profile."""
-    session_profile = getattr(session, 'profile', None)
+def _profile_visible_to_active_profile(session_profile) -> bool:
+    """Return whether a recorded session owner is the active profile."""
     if not isinstance(session_profile, str):
         session_profile = None
     return _profiles_match(session_profile, _get_active_profile_name())
 
 
+def _session_visible_to_active_profile(session) -> bool:
+    """Return whether an upload target session belongs to the active profile."""
+    return _profile_visible_to_active_profile(getattr(session, 'profile', None))
+
+
 def _reject_invisible_session(handler, session) -> bool:
     if _session_visible_to_active_profile(session):
+        return False
+    j(handler, {'error': 'Session not found'}, status=404)
+    return True
+
+
+def _reject_invisible_session_before_load(handler, session_id) -> bool:
+    """#8855: refuse another profile's upload target before ``get_session`` loads it.
+
+    The upload routes take the session id from a multipart field, so the
+    generic request-session guard never sees it, and each handler decided
+    ownership on the loaded session. ``get_session`` runs ``Session.load``,
+    which can collapse duplicate partials and save (a ``.bak`` too), and caches
+    what it loads, so an upload refused with 404 still rewrote and cached
+    another profile's session. A refused request must never write (#8094).
+
+    This reads the owner of every stored copy a full load could serve
+    (``session_owner_readings_readonly``, as #8834 does for the session routes)
+    and answers the same 404 as the check after the load when none of them is
+    visible; ownership it can't verify counts as not visible (fail closed). The
+    refusal never depends on which copy the load would serve, because every
+    invisible copy gets this one answer. Any visible copy, or no stored session
+    at all (an unsafe id included), leaves the decision to the load as before,
+    and the check after it stays as the backstop. True when a refusal was sent.
+    """
+    if not isinstance(session_id, str):
+        return False
+    readings = session_owner_readings_readonly(
+        session_id, full_load=True, visible=_profile_visible_to_active_profile,
+    )
+    if not readings or any(
+        reading is not UNVERIFIABLE_SESSION_OWNER and _profile_visible_to_active_profile(reading)
+        for reading in readings
+    ):
         return False
     j(handler, {'error': 'Session not found'}, status=404)
     return True
@@ -304,6 +370,8 @@ def handle_upload(handler):
         filename, file_bytes = files['file']
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             s = get_session(session_id)
         except KeyError:
@@ -375,17 +443,24 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     # #3398: create the extraction root race-safely under the true workspace root.
     make_anchored_dir(workspace, dest_dir)
 
-    # Member-count cap: a tiny archive with millions of (possibly empty) members
-    # slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
-    _MAX_ARCHIVE_MEMBERS = 10000
-
     extracted_files = []
     total_extracted = 0
 
     try:
         if _mode == 'zip':
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-                for member in zf.infolist():
+                members = zf.infolist()
+                # #8823: the central directory is already fully parsed, so count
+                # the file members the loop below would extract and reject an
+                # over-cap archive BEFORE creating a single member file (the
+                # in-loop check stays as defence in depth). Inside the try, so
+                # the cleanup below still removes the empty dest_dir.
+                if sum(1 for m in members if not m.is_dir()) > _MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                        f'Possible archive bomb.'
+                    )
+                for member in members:
                     # Skip directories
                     if member.is_dir():
                         continue
@@ -428,7 +503,15 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
 
         elif _mode == 'tar':
             with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
-                for member in tf.getmembers():
+                members = tf.getmembers()
+                # #8823: same up-front member-count precheck as the zip branch,
+                # counting exactly what the loop extracts (regular files).
+                if sum(1 for m in members if m.isfile()) > _MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                        f'Possible archive bomb.'
+                    )
+                for member in members:
                     if not member.isfile():
                         continue
                     if len(extracted_files) >= _MAX_ARCHIVE_MEMBERS:
@@ -493,6 +576,8 @@ def handle_upload_extract(handler):
         filename, file_bytes = files['file']
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             s = get_session(session_id)
         except KeyError:
@@ -508,6 +593,30 @@ def handle_upload_extract(handler):
     except Exception:
         print('[webui] upload extract error: ' + _tb.format_exc(), flush=True)
         return j(handler, {'error': 'Archive extraction failed'}, status=500)
+
+
+# The only outcome that means "the provider ran cleanly and returned nothing to
+# transcribe" is the message transcription_tools raises *after* the exit code has
+# been checked:
+#   Command STT provider wrote no output file at <path> and produced no stdout
+# Match that complete message form and nothing else. A crash-shaped error embeds
+# the child's stderr, which can quote the same words ("produced no stdout"), so a
+# substring match would turn real failures into a successful silent clip. This is
+# also not proof the audio was decoded and found silent: it is only proof the
+# provider exited cleanly without producing a transcript.
+_NO_SPEECH_ERROR_RE = _re.compile(
+    r"^command stt provider wrote no output file at \S(?:.*\S)? and produced no stdout\.?$",
+    _re.IGNORECASE,
+)
+
+
+def _is_no_speech_error(message):
+    # A trailing/leading newline in a wrapped diagnostic would turn the form match
+    # into a miss, so compare the stripped single-line message only.
+    text = (message or "").strip()
+    if not text:
+        return False
+    return _NO_SPEECH_ERROR_RE.match(text) is not None
 
 
 def handle_transcribe(handler):
@@ -535,6 +644,12 @@ def handle_transcribe(handler):
         result = transcribe_audio(temp_path)
         if not result.get('success'):
             msg = str(result.get('error') or 'Transcription failed')
+            if _is_no_speech_error(msg):
+                # The provider ran cleanly and produced no transcript — a normal
+                # outcome when the mic opens before the user speaks or auto-stop
+                # fires on an empty room. Answering 400 here made the client report
+                # a failure for a clip that never had anything to transcribe.
+                return j(handler, {'ok': True, 'transcript': '', 'no_speech': True})
             status = 503 if 'unavailable' in msg.lower() or 'not configured' in msg.lower() else 400
             return j(handler, {'error': msg}, status=status)
         transcript = str(result.get('transcript') or '').strip()
@@ -593,7 +708,17 @@ def _stt_provider_capability_from_module(stt):
                 return False
 
         def has_browser_audio_converter():
+            # Older agents define the ffmpeg resolver on transcription_tools itself.
+            # Current agents moved it to tools.transcription_audio (which
+            # transcription_tools imports, so it's already loaded) without
+            # re-exporting it. Ask the Agent's own resolver in either layout, so
+            # the probe agrees with what /api/transcribe will do (#8909).
             helper = getattr(stt, "_find_ffmpeg_binary", None)
+            if not callable(helper):
+                try:
+                    from tools.transcription_audio import _find_ffmpeg_binary as helper
+                except Exception:
+                    helper = None
             try:
                 return bool(helper()) if callable(helper) else False
             except Exception:
@@ -710,7 +835,9 @@ def handle_workspace_upload(handler):
         if not files:
             return j(handler, {'error': 'No file field in request'}, status=400)
 
-        # Validate session
+        # Validate session (#8855: ownership first, so a refusal never loads it)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             session = get_session(session_id)
         except KeyError:

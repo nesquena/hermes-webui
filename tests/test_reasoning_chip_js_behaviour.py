@@ -193,15 +193,15 @@ class TestTitleAttributeAccessibility:
 
     def test_title_has_default_label_for_unset(self, driver_path):
         out = _apply(driver_path, "")
-        assert out["title"] == "Reasoning effort: Default"
+        assert out["title"] == "Reasoning effort for this chat: Default"
 
     def test_title_has_none_label_for_none(self, driver_path):
         out = _apply(driver_path, "none")
-        assert out["title"] == "Reasoning effort: None"
+        assert out["title"] == "Reasoning effort for this chat: None"
 
     def test_title_has_active_label_for_high(self, driver_path):
         out = _apply(driver_path, "high")
-        assert out["title"] == "Reasoning effort: High"
+        assert out["title"] == "Reasoning effort for this chat: High"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
