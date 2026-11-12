@@ -563,6 +563,16 @@ def _check_agent_modules():
     """Verify hermes-agent Python modules are actually importable."""
     if not HERMES_AGENT:
         return False
+    # Check with the checkout on sys.path, the way the code under test sees it:
+    # api.config appends the discovered Agent dir at import (later in this file),
+    # and the server runs with the checkout as its working directory. Without it,
+    # imports fall back to the venv's editable-install finder, which maps only the
+    # top-level modules that existed at install time, so a module the Agent added
+    # later (hermes_yaml, imported by cron.jobs) failed here and every
+    # requires_agent_modules test skipped. Appended, never prepended, so WebUI's
+    # own modules keep precedence; api.config's append is then a no-op.
+    if str(HERMES_AGENT) not in sys.path:
+        sys.path.append(str(HERMES_AGENT))
     try:
         import importlib
         # These are the modules that cause 500 errors when missing
