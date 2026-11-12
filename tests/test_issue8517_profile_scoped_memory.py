@@ -107,25 +107,44 @@ def _key(path) -> str:
     return os.path.normcase(str(Path(str(path)).expanduser().resolve(strict=False)))
 
 
+def _memory_manager_twin(**seam) -> types.ModuleType:
+    """A stand-in ``agent.memory_manager``: every name of the installed module except
+    ``claim_instance``, plus ``seam`` (pass ``claim_instance=...`` to add the seam,
+    nothing to emulate an Agent without it). Only the seam may differ: an old Agent's
+    own modules import other names from this one (v2026.9.24's agent/agent_init.py
+    imports ``StreamingContextScrubber`` from it), so a stand-in holding the seam alone
+    failed there with "cannot import name ... (unknown location)". Without any Agent
+    (the agent-free CI) the twin holds only ``seam``."""
+    try:
+        import agent.memory_manager as real_mm  # noqa: PLC0415
+    except Exception:
+        real_mm = None
+    twin = types.ModuleType("agent.memory_manager")
+    if real_mm is not None:
+        twin.__dict__.update(
+            {k: v for k, v in vars(real_mm).items() if not k.startswith("__") and k != "claim_instance"}
+        )
+    twin.__dict__.update(seam)
+    return twin
+
+
 def _ensure_claim_seam(monkeypatch) -> None:
     """A current Agent (2026-10-17+) has ``agent.memory_manager.claim_instance``, the
-    seam the WebUI shared-instance guard wraps. Without any Agent (the agent-free CI)
-    the guard cannot install and the no-claim policy turns external memory off, so
-    give the ``hc`` tests a twin of that seam. The test agents never call it; only
-    the guard wraps it. Tests of Agents WITHOUT the seam replace it again."""
+    seam the WebUI shared-instance guard wraps. Without it (the agent-free CI, or an
+    older Agent) the guard cannot install and the no-claim policy turns external
+    memory off, so give the ``hc`` tests a twin of that seam. The test agents never
+    call it; only the guard wraps it. Tests of Agents WITHOUT the seam replace it again."""
     try:
         import agent.memory_manager as real_mm  # noqa: PLC0415
     except Exception:
         real_mm = None
     if real_mm is not None and callable(getattr(real_mm, "claim_instance", None)):
         return
-    twin = types.ModuleType("agent.memory_manager")
 
     def claim_instance(provider, home):
         return True
 
-    twin.claim_instance = claim_instance
-    monkeypatch.setitem(sys.modules, "agent.memory_manager", twin)
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", _memory_manager_twin(claim_instance=claim_instance))
 
 
 @pytest.fixture

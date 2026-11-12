@@ -400,6 +400,78 @@ def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None 
     return webui_chat_backend_mode(config_data, environ) == "gateway"
 
 
+class GatewayExternalSessionReadOnly(PermissionError):
+    pass
+
+
+def gateway_session_chat_read_only_reason(session: dict, config_data=None) -> str:
+    """Transport eligibility only; never an Agent authorization grant or saved flag.
+
+    Importing a WebUI sidecar does not change the Agent's source/API binding.
+    Keep in-process continuation and newly created WebUI/fork sessions unchanged.
+    Resolve the owning profile even on workers without request context.
+    """
+    if session.get("session_source") == "fork":
+        return ""
+    source = str(session.get("raw_source") or session.get("source_tag")
+                 or session.get("session_source") or "").strip().lower()
+    if source in {"webui", "api_server", "api", "bot_room", "fork"} or (
+        not source and not session.get("is_cli_session")
+    ):
+        return ""
+    from api.gateway_sessions import configured, config_for_session, external_session
+    if config_data is None:
+        config_data = config_for_session(session)
+    if not webui_gateway_chat_enabled(config_data):
+        return ""
+    if configured(session, config_data):
+        return ""
+    if not external_session(session):
+        return "Read-only in WebUI."
+    client = {
+        "desktop": "Desktop", "cli": "CLI", "tui": "TUI", "gui": "GUI",
+        "acp": "ACP", "local": "the original client", "telegram": "Telegram",
+        "discord": "Discord", "slack": "Slack", "whatsapp": "WhatsApp",
+        "signal": "Signal", "matrix": "Matrix", "mattermost": "Mattermost",
+        "teams": "Teams", "line": "LINE", "feishu": "Feishu",
+    }.get(source, "the original client")
+    return f"Read-only in WebUI. Continue in {client}."
+
+
+GATEWAY_MODE_UNSUPPORTED = "gateway_mode_unsupported"
+
+
+def refuse_on_gateway_backend(handler, route: str, config_data=None) -> bool:
+    """Refuse a feature that still runs the agent in the WebUI process.
+
+    ``/btw``, ``/background``, ``/compress``, the synchronous ``/api/chat`` and
+    the one-shot model calls (update summaries, commit messages) have no gateway
+    transport yet: they build an in-process agent. In gateway mode that either
+    fails with a provider-credential error (the WebUI is often deployed without
+    a model key) or silently runs a turn outside the gateway. Refuse explicitly,
+    with the same status and phrasing as the MoA refusal, until each feature is
+    routed through the gateway.
+
+    Sends the 409 and returns True when the backend is the gateway, else returns
+    False without touching the response. Callers use it before any state
+    mutation: ``if refuse_on_gateway_backend(handler, "/btw", cfg): return``.
+    """
+    if not webui_gateway_chat_enabled(config_data):
+        return False
+    from api.helpers import j
+
+    j(
+        handler,
+        {
+            "error": f"{route} is unavailable on gateway-backed sessions",
+            "code": GATEWAY_MODE_UNSUPPORTED,
+            "feature": route,
+        },
+        status=409,
+    )
+    return True
+
+
 def _gateway_base_url(config_data=None, environ: dict[str, str] | None = None) -> str:
     source = os.environ if environ is None else environ
     cfg = config_data if isinstance(config_data, dict) else {}
@@ -482,14 +554,32 @@ def _settle_gateway_run_approval(
     approval_data: dict,
     base_url: str,
     api_key: str,
+    *,
+    cancel_event=None,
 ) -> tuple[bool, dict | None, int]:
-    """Auto-approve or mirror one run approval at a session-linearized point."""
-    from api.route_approvals import gateway_yolo_handoff, submit_gateway_pending_mirror
+    """Auto-approve or mirror one run approval at a session-linearized point.
+
+    ``cancel_event`` is the run's retained Stop signal, for relays that can still
+    receive an approval after Stop (the native session transport keeps reading
+    its socket until the Gateway confirms the interrupt). A cancelled run gets
+    no auto-approval and no card: the flag is checked before either, and again
+    under the approval registry lock by ``submit_gateway_pending_mirror``, the
+    same lock Stop retires the run's cards under (#8634). A card published in
+    the instant before Stop is retired here as a second line of defence. The
+    return is then ``(False, None, 0)``; the caller must not surface a card.
+    """
+    from api.route_approvals import (
+        gateway_yolo_handoff,
+        settle_gateway_pending_run,
+        submit_gateway_pending_mirror,
+    )
 
     run_id = str(approval_data.get("run_id") or "").strip()
     identity_v1 = bool(approval_data.get("_gateway_agent_identity_v1"))
     execution_generation = approval_data.get("_gateway_execution_generation")
     with gateway_yolo_handoff(session_id):
+        if cancel_event is not None and cancel_event.is_set():
+            return False, None, 0
         if _gateway_session_yolo_enabled(session_id):
             try:
                 _auto_approve_gateway_run(
@@ -512,8 +602,20 @@ def _settle_gateway_run_approval(
                     run_id,
                     exc_info=True,
                 )
-        head, total = submit_gateway_pending_mirror(session_id, approval_data)
-        return False, head, total
+        # Only the cancel-aware relays pass the flag; the existing Runs API caller
+        # keeps its exact call shape.
+        head, total = submit_gateway_pending_mirror(
+            session_id,
+            approval_data,
+            **({"cancel_event": cancel_event} if cancel_event is not None else {}),
+        )
+    if cancel_event is not None and cancel_event.is_set():
+        if run_id:
+            settle_gateway_pending_run(
+                session_id, run_id, reason="Gateway run was cancelled before approval resolution",
+            )
+        return False, None, 0
+    return False, head, total
 
 
 def _auto_approve_gateway_run(
@@ -536,6 +638,10 @@ def _auto_approve_gateway_run(
     """
     from api.runner_client import HttpRunnerClient
 
+    from api.gateway_sessions import PREFIX, control
+    if run_id.startswith(PREFIX):
+        control(run_id, "approval", approval_id=approval_id, choice="once")
+        return
     HttpRunnerClient(base_url=base_url, api_key=api_key).respond_approval(
         run_id,
         approval_id,
@@ -557,9 +663,15 @@ def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None 
 
 
 def _gateway_http_error_event(
-    exc: urllib.error.HTTPError, err_body: str, *, api_key_configured: bool, route_hint: str = "",
+    exc: urllib.error.HTTPError, err_body: str | None = None, *, api_key_configured: bool, route_hint: str = "",
 ) -> dict:
-    safe = _redact_text(err_body or str(exc))[:500]
+    if err_body is None:
+        try:
+            err_body = exc.read(2048).decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+    err_body = (err_body or "")[:2048]
+    safe = _redact_text(err_body or str(exc), _enabled=True)[:500]
     if route_hint:  # the Gateway refused this profile's route: name that fix, not the provider's
         return {**_gateway_route_error_classification(exc.code, route_hint),
                 "message": f"Gateway returned HTTP {exc.code} for this profile."}
@@ -575,12 +687,32 @@ def _gateway_http_error_event(
                 else "Check that HERMES_WEBUI_GATEWAY_API_KEY matches the Hermes Gateway API_SERVER_KEY."
             ),
         }
-    return {
+    event = {
         "label": "Gateway request failed",
         "type": "gateway_http_error",
         "message": f"Gateway returned HTTP {exc.code}.",
         "hint": safe or "Check the configured Gateway API server.",
     }
+    try:
+        error = json.loads(err_body or "").get("error")
+    except (ValueError, AttributeError):
+        error = None
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = error.get("message")
+        if isinstance(code, str) and code:
+            event["code"] = _redact_text(code[:128], _enabled=True)
+        if isinstance(message, str) and message:
+            detail = _redact_text(message[:2048], _enabled=True)[:500]
+            event["message"] = f"Gateway returned HTTP {exc.code}: {detail}"
+        if event.get("code") and event["code"] not in event["message"]:
+            event["message"] += f" ({event['code']})"
+        if code == "permission_denied":
+            event["hint"] = (
+                "The Gateway did not authorize this turn. Reading or importing a conversation "
+                "does not grant permission to continue it through the Gateway API."
+            )
+    return event
 
 
 def _gateway_sse_delta(payload: dict) -> str:
@@ -1669,6 +1801,12 @@ def stop_gateway_run(run_id: str) -> bool:
     run_id = str(run_id or "").strip()
     if not run_id:
         return False
+    from api.gateway_sessions import PREFIX, control
+    if run_id.startswith(PREFIX):
+        try:
+            return bool(control(run_id, "stop"))
+        except ValueError:
+            return False
     base_url, api_key = gateway_run_endpoint(run_id)
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     if api_key:
@@ -1713,6 +1851,13 @@ def steer_gateway_run(run_id: str, text: str, base_url: str, api_key: str) -> st
     """
     run_id = str(run_id or "").strip()
     text = str(text or "").strip()
+    from api.gateway_sessions import PREFIX, control
+    if str(run_id).startswith(PREFIX):
+        try:
+            result = control(run_id, "steer", text=text)
+            return GATEWAY_STEER_ACCEPTED if result.get("status") in {"steered", "queued", "accepted"} else GATEWAY_STEER_REFUSED
+        except ValueError:
+            return GATEWAY_STEER_UNCERTAIN
     if not run_id or not text or not base_url:
         return GATEWAY_STEER_REFUSED
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -2387,6 +2532,10 @@ def _resume_gateway_run_for_session(session) -> bool:
 
     run = (session.gateway_run if session is not None else None) or {}
     stream_id = str(run.get("stream_id") or "")
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: the run would be reattached, and its answer written back,
+        # under the id this file's body names: another session.
+        return False
     # A persisted run is the authority whatever the process default backend is.
     if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
         return False
@@ -2496,12 +2645,16 @@ def _settle_gateway_terminal_error(
         session = get_session(session_id)
         if not _stream_writeback_is_current(session, stream_id):
             return None
-        error_classification = route_classification or _classify_provider_error(terminal_error)
-        error_payload = _provider_error_payload(
-            terminal_error,
-            error_classification["type"],
-            error_classification.get("hint", ""),
-        )
+        if isinstance(terminal_error, dict):
+            error_payload = dict(terminal_error)
+            error_classification = {"label": error_payload.get("label") or "Gateway request failed"}
+        else:
+            error_classification = route_classification or _classify_provider_error(terminal_error)
+            error_payload = _provider_error_payload(
+                terminal_error,
+                error_classification["type"],
+                error_classification.get("hint", ""),
+            )
         turn_duration = _terminal_turn_duration(session)
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
@@ -2543,7 +2696,8 @@ def _settle_gateway_terminal_error(
             terminal_session_persisted = True
         except Exception:
             logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
-        error_payload["session"] = redact_session_data(
+        from api.helpers import public_session_projection
+        error_payload["session"] = public_session_projection(
             _session_payload_with_full_messages(session, tool_calls=[])
         )
         error_payload["session_id"] = session.session_id
@@ -3204,6 +3358,8 @@ def _run_gateway_chat_streaming(
 
     success_writeback_committed = False
     runs_api_pending_marked = True
+    preserve_gateway_pending = False
+    canonical_snapshot = None
 
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
@@ -3238,13 +3394,11 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from api.config import get_config  # imported lazily to avoid config-cycle churn
-
         # Profile-bound like the endpoint below: the worker thread has no request profile TLS.
-        cfg = _gateway_config_for_profile(getattr(s, "profile", None)) or get_config()
+        from api.gateway_sessions import config_for_session
+        cfg = config_for_session(vars(s))
         # A legacy session (no stored effort) inherits agent.reasoning_effort from its
         # own profile's isolated config, as the composer chip and the local worker do:
-        # cfg above still honours an ambient HERMES_CONFIG_PATH for a named profile.
         session_effort = getattr(s, "reasoning_effort", None)
         try:
             from api.config import effective_session_reasoning_effort
@@ -3280,7 +3434,9 @@ def _run_gateway_chat_streaming(
         except Exception:
             _gw_overrides = {}
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
-        _use_runs_api = bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
+        from api.gateway_sessions import configured, run_session, SessionTransportDisconnected
+        _use_session_rpc = (reattach_run or {}).get("transport") == "session" or configured(vars(s), cfg)
+        _use_runs_api = _use_session_rpc or bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
             runs_api_pending_marked = False
@@ -3333,21 +3489,25 @@ def _run_gateway_chat_streaming(
             routing = {} if reattach_run and reattach_run.get("endpoint_routing") != _GATEWAY_ENDPOINT_ROUTING else {
                 "endpoint_routing": _GATEWAY_ENDPOINT_ROUTING, "base_url": base_url}
 
-            def record_run(run_id, request=None):
+            def record_run(run_id, request=None, **extra):
                 _record_gateway_run(
                     session_id, stream_id, run_id, request=request,
-                    regeneration=bool(regeneration), goal_related=bool(goal_related),
-                    **routing,
+                    regeneration=bool(regeneration), goal_related=bool(goal_related), **{**routing, **extra},
                 )
                 if run_id:  # the Gateway accepted the run: its delegation lease is delivered
                     _settle_delegation_reservation(session_id, stream_id, accepted=True)
             try:
-                if reattach_run:
-                    if endpoint_moved:
-                        raise RuntimeError(
-                            "This profile's Gateway URL changed after the run started, so the WebUI cannot "
-                            "authenticate to the Gateway that holds it; its result could not be recovered."
-                        )
+                if reattach_run and endpoint_moved:
+                    raise RuntimeError(
+                        "This profile's Gateway URL changed after the run started, so the WebUI cannot "
+                        "authenticate to the Gateway that holds it; its result could not be recovered."
+                    )
+                if _use_session_rpc:
+                    final_text, usage, canonical_snapshot = run_session(
+                        s, stream_id, msg_text, emit=put_gateway_event, cancel=cancel_event,
+                        record=record_run, saved=reattach_run,
+                    )
+                elif reattach_run:
                     run_id = str(reattach_run.get("run_id") or "").strip()
                     if not run_id:
                         # Crashed between admission and saving the id: the same key returns the original run.
@@ -3375,16 +3535,26 @@ def _run_gateway_chat_streaming(
                         active_provider=(model_provider or ""),
                         on_run_id=record_run,
                     )
+            except SessionTransportDisconnected as exc:
+                preserve_gateway_pending = True
+                put_gateway_event("apperror", {"label": "Gateway connection lost",
+                    "type": "gateway_session_disconnected", "message": str(exc),
+                    "hint": "Reopen the conversation to recover the existing turn. Do not resend it."})
+                return
             except Exception as exc:
                 code = getattr(exc, "code", None) or getattr(exc.__cause__, "code", None)
                 hint = "" if reattach_run else _gateway_profile_route_hint(base_url, code, keyless_profile)
+                terminal_error = (
+                    _gateway_http_error_event(exc, api_key_configured=bool(api_key), route_hint=hint)
+                    if isinstance(exc, urllib.error.HTTPError) else str(exc)
+                )
                 error_payload = _settle_gateway_terminal_error(
                     session_id,
                     stream_id,
                     workspace,
                     model,
                     model_provider,
-                    str(exc),
+                    terminal_error,
                     persisted_model=persisted_model,
                     persisted_model_provider=persisted_model_provider,
                     route_classification=_gateway_route_error_classification(code, hint) if hint else None,
@@ -3701,6 +3871,17 @@ def _run_gateway_chat_streaming(
                 ]
                 if len(current_display_rows) == 1:
                     current_display_rows[0]["timestamp"] = user_msg["timestamp"]
+            if canonical_snapshot is not None:
+                # Gateway history remains authoritative across surfaces. In particular,
+                # a messaging sidecar may start empty; never replace its older turns
+                # with just this WebUI user/assistant pair, or append a recovered pair twice.
+                canonical_messages = canonical_snapshot.get("messages") or []
+                s.context_messages = list(canonical_messages)
+                from api.gateway_sessions import display_history
+                s.messages = display_history(canonical_snapshot)
+                info = canonical_snapshot.get("info") or {}
+                persisted_model = info.get("model") or s.model
+                persisted_model_provider = info.get("provider") or s.model_provider
             s.active_stream_id = None
             s.gateway_run = None
             s.pending_user_message = None
@@ -3822,18 +4003,19 @@ def _run_gateway_chat_streaming(
             )
         from api.streaming import _session_payload_with_full_messages
         gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
-        put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
+        from api.helpers import public_session_projection
+        put_gateway_event("done", {"session": public_session_projection(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
-        try:
-            err_body = exc.read(2048).decode("utf-8", errors="replace")
-        except Exception:
-            err_body = ""
-        put_gateway_event(
-            "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(api_key),
+        error_payload = _settle_gateway_terminal_error(
+            session_id, stream_id, workspace, model, model_provider,
+            _gateway_http_error_event(exc, api_key_configured=bool(api_key),
                                       route_hint=_gateway_profile_route_hint(base_url, exc.code, keyless_profile)),
+            persisted_model=persisted_model,
+            persisted_model_provider=persisted_model_provider,
         )
+        if error_payload is not None:
+            put_gateway_event("apperror", error_payload)
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]
         put_gateway_event("apperror", {
@@ -3851,7 +4033,7 @@ def _run_gateway_chat_streaming(
             )
         except Exception:
             logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
-        if s is not None:
+        if s is not None and not preserve_gateway_pending:
             try:
                 with _get_session_agent_lock(session_id):
                     _clear_gateway_pending_state(get_session(session_id), stream_id)

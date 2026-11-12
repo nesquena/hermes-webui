@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
+from unittest import mock
 
 import api.config as config
 import api.onboarding as onboarding
 import api.profiles as profiles
 import pytest
 
+from tests.conftest import TEST_STATE_DIR
 from tests.js_source_extract import extract_function
 from tests.test_provider_management import _install_fake_hermes_cli, _post
 
@@ -20,6 +23,12 @@ from tests.test_provider_management import _install_fake_hermes_cli, _post
 ROOT = Path(__file__).resolve().parents[1]
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
+
+# Every env var apply_self_hosted_provider_setup() can write into os.environ for the
+# providers this file exercises (_SUPPORTED_PROVIDER_SETUPS[...]["env_var"]).
+_SELF_HOSTED_ENV_VARS = tuple(
+    onboarding._SUPPORTED_PROVIDER_SETUPS[provider]["env_var"] for provider in ("ollama", "lmstudio")
+)
 
 
 _DRIVER = r"""
@@ -215,13 +224,46 @@ def isolated_self_hosted_env(monkeypatch, tmp_path):
     monkeypatch.setattr(onboarding, "_get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(onboarding, "_get_config_path", lambda: fake_config_path)
     monkeypatch.setattr(config, "_get_config_path", lambda: fake_config_path)
-    yield tmp_path, fake_config_path
+    # A get_config() under the fake path reloads and rebinds these markers; restore them,
+    # or the next test reloads the shared test home config.yaml over its in-memory cfg.
+    monkeypatch.setattr(config, "_cfg_path", config._cfg_path)
+    monkeypatch.setattr(config, "_cfg_fingerprint", config._cfg_fingerprint)
+    # Its _reload_dotenv() also rebinds the set of keys it owns; restore that marker too.
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", profiles._loaded_profile_env_keys)
+    # The real setup writes os.environ[env_var] directly, and its _reload_dotenv() first
+    # pops every key the previous load owned, so snapshot and restore the whole mapping
+    # (monkeypatch.delenv() records nothing for an absent var). The provider vars start
+    # absent so an ambient value can't change what the setup writes.
+    with mock.patch.dict(os.environ):
+        for env_var in _SELF_HOSTED_ENV_VARS:
+            os.environ.pop(env_var, None)
+        yield tmp_path, fake_config_path
     config.cfg.clear()
     config.cfg.update(old_cfg)
     config._cfg_mtime = old_mtime
 
 
-def test_post_self_hosted_provider_succeeds_for_ollama(isolated_self_hosted_env):
+@pytest.fixture
+def restore_shared_test_config_yaml():
+    """Restore the live test server's config.yaml (bytes and mtime, or absence).
+
+    The route tests POST to the shared server process, which writes the real test
+    home config.yaml; the in-process _get_config_path patch cannot reach it.
+    """
+    shared_config_path = TEST_STATE_DIR / "config.yaml"
+    try:
+        saved = (shared_config_path.read_bytes(), shared_config_path.stat().st_mtime_ns)
+    except FileNotFoundError:
+        saved = None
+    yield
+    if saved is None:
+        shared_config_path.unlink(missing_ok=True)
+    else:
+        shared_config_path.write_bytes(saved[0])
+        os.utime(shared_config_path, ns=(saved[1], saved[1]))
+
+
+def test_post_self_hosted_provider_succeeds_for_ollama(isolated_self_hosted_env, restore_shared_test_config_yaml):
     _tmp_path, _fake_config_path = isolated_self_hosted_env
     body, status = _post("/api/providers/self-hosted", {
         "provider": "ollama",
@@ -233,7 +275,7 @@ def test_post_self_hosted_provider_succeeds_for_ollama(isolated_self_hosted_env)
     assert body["provider"] == "ollama"
 
 
-def test_post_self_hosted_provider_succeeds_for_lmstudio(isolated_self_hosted_env):
+def test_post_self_hosted_provider_succeeds_for_lmstudio(isolated_self_hosted_env, restore_shared_test_config_yaml):
     _tmp_path, _fake_config_path = isolated_self_hosted_env
     body, status = _post("/api/providers/self-hosted", {
         "provider": "lmstudio",
@@ -360,7 +402,7 @@ def test_apply_self_hosted_provider_setup_writes_only_target_provider_key_and_sk
     assert reload_calls == []
 
 
-def test_post_self_hosted_provider_rejects_invalid_provider(isolated_self_hosted_env):
+def test_post_self_hosted_provider_rejects_invalid_provider(isolated_self_hosted_env, restore_shared_test_config_yaml):
     body, status = _post("/api/providers/self-hosted", {
         "provider": "custom",
         "model": "x",
@@ -370,9 +412,23 @@ def test_post_self_hosted_provider_rejects_invalid_provider(isolated_self_hosted
     assert "unsupported self-hosted provider" in body.get("error", "")
 
 
+def _pin_own_config_path(monkeypatch, tmp_path):
+    """Give a test that sets ``config.cfg`` in memory its own (absent) config path.
+
+    ``get_config()`` reloads from disk whenever ``_cfg_path`` differs from the current
+    config path, whatever is in memory, so a path an earlier test left behind would
+    reload over the in-memory cfg. With both pinned to the same absent file and
+    ``_cfg_mtime`` set to 0.0 by the test, nothing reloads.
+    """
+    own_config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(config, "_get_config_path", lambda: own_config_path)
+    monkeypatch.setattr(config, "_cfg_path", own_config_path)
+
+
 def test_get_providers_exposes_self_hosted_flags_and_base_url(monkeypatch, tmp_path):
     _install_fake_hermes_cli(monkeypatch)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    _pin_own_config_path(monkeypatch, tmp_path)
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
     config.cfg.clear()
@@ -504,6 +560,7 @@ def test_provider_card_uses_backend_projection_authority_matrix(isolated_self_ho
 def test_saved_provider_payload_has_no_singular_model_authority(monkeypatch, tmp_path):
     _install_fake_hermes_cli(monkeypatch)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    _pin_own_config_path(monkeypatch, tmp_path)
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
     config.cfg.clear()

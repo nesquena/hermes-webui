@@ -79,6 +79,85 @@ def _wait_for_reattach_threads(timeout=10.0):
             assert not thread.is_alive(), "reattach worker did not settle"
 
 
+@pytest.mark.parametrize("profile", ["default", "work", "family", "lab"])
+def test_native_lost_ack_retains_worker_and_pending_on_reopen(isolated_sessions, monkeypatch, tmp_path, profile):
+    import asyncio
+    from contextlib import asynccontextmanager
+    import sys
+    from types import ModuleType
+    from api import gateway_sessions
+
+    protocol = ModuleType("hermes_cli.gateway_client")
+    protocol.GatewayRPCError = type("GatewayRPCError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "hermes_cli.gateway_client", protocol)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _: tmp_path)
+    monkeypatch.setattr(gateway_sessions, "config_for_session", lambda _: {"webui_gateway_session_transport": "local"})
+    s = new_session()
+    s.profile, s.source_tag, s.model = profile, "desktop", "native-model"
+    stream_id = "native-reconnect-" + profile
+    s.active_stream_id, s.pending_user_message, s.pending_started_at = stream_id, "one prompt", 1.0
+    s.save()
+    reached, release = threading.Event(), threading.Event()
+    attempts, submissions = [], []
+
+    class NativeClient:
+        def __init__(self, lose_ack=False):
+            self.events, self.lose_ack = asyncio.Queue(), lose_ack
+
+        async def rpc(self, method, **params):
+            if method == "session.resume":
+                return {"session_id": s.session_id, "display_messages": [
+                    {"role": "user", "text": "one prompt", "row_id": 1},
+                    {"role": "assistant", "text": "one reply", "row_id": 2},
+                ]}
+            if method == "prompt.submit":
+                submissions.append(params.copy())
+                if self.lose_ack:
+                    raise ConnectionError("acknowledgement lost")
+            return {"admission_id": "original-admission", "status": "terminal", "outcome": "completed",
+                    "result": {"final_response": "one reply"}}
+
+    @asynccontextmanager
+    async def connect(home):
+        attempts.append(home)
+        if len(attempts) == 1:
+            yield NativeClient(lose_ack=True)
+        elif len(attempts) <= 6:
+            raise gateway_sessions.SessionTransportError("Temporary discovery failure")
+        else:
+            reached.set()
+            assert await asyncio.to_thread(release.wait, 10)
+            yield NativeClient()
+
+    async def no_delay(_):
+        pass
+
+    monkeypatch.setattr(gateway_sessions, "connect_local", connect)
+    monkeypatch.setattr(gateway_sessions.asyncio, "sleep", no_delay)
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = create_stream_channel()
+    worker = threading.Thread(target=gateway_chat._run_gateway_chat_streaming,
+                              args=(s.session_id, "one prompt", s.model, str(tmp_path), stream_id, []))
+    worker.start()
+    try:
+        assert reached.wait(10), "recovery stopped after an uncertain admission"
+        models.SESSIONS.clear()  # reopening forces the normal disk-load repair path
+        reopened = models.get_session(s.session_id)
+        assert worker.is_alive() and stream_id in ACTIVE_RUNS and stream_id in STREAMS
+        assert reopened.active_stream_id == stream_id
+        assert reopened.pending_user_message == "one prompt"
+        assert reopened.gateway_run["session_request"] == submissions[0]
+        assert not models._repair_stale_pending(reopened)
+    finally:
+        release.set()
+        worker.join(10)
+    assert not worker.is_alive()
+    assert len(submissions) == 2 and submissions[0] == submissions[1]
+    saved = _saved(s.session_id)
+    assert saved["gateway_run"] is None and saved["active_stream_id"] is None
+    assert [m["content"] for m in saved["messages"]] == ["one prompt", "one reply"]
+
+
 def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessions, monkeypatch):
     s = new_session()
     stream_id = "stream-live"
