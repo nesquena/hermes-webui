@@ -283,6 +283,45 @@ def test_owner_resident_copy_beside_a_foreign_sidecar_is_left_to_the_load(isolat
     assert status == 200
 
 
+@pytest.mark.parametrize("sidecar_ahead,expected", [(True, 200), (False, 404)], ids=["sidecar_ahead", "sidecar_level"])
+@pytest.mark.parametrize("route", ROUTES)
+def test_foreign_resident_copy_beside_an_owned_sidecar(isolated_sessions, monkeypatch, route, sidecar_ahead, expected):
+    """One visible stored copy leaves the decision to the load, even beside a foreign one.
+
+    The pre-load check refuses only when NO stored copy is visible (``any``, not
+    ``all``). Here the cache holds a copy another profile owns and the sidecar
+    belongs to the active profile. When the sidecar is ahead of the cached copy,
+    the load serves the sidecar, so the owner's upload succeeds, as on master.
+    When it isn't, the load serves the foreign cached copy and the check after
+    the load refuses, also as on master. Requiring every copy to be visible
+    would refuse the first case up front.
+    """
+    directory, cache, attachments, workspace = isolated_sessions
+    one = [{"role": "user", "content": "hello"}]
+    three = one + [{"role": "assistant", "content": "hi"}, {"role": "user", "content": "again"}]
+    _sidecar(directory, profile="work", messages=three if sidecar_ahead else one)
+    cache[SID] = models.Session(session_id=SID, profile="evil", messages=list(one))
+    calls = []
+    real = upload.get_session
+
+    def _spy(*a, **k):
+        calls.append(a)
+        return real(*a, **k)
+
+    monkeypatch.setattr(upload, "get_session", _spy)
+    obj, status = _call(route, monkeypatch, active="work")
+    assert status == expected, obj
+    assert calls == [(SID,)], "the pre-load check must leave a mixed-owner session to the load"
+    if expected == 200:
+        assert cache[SID].profile == "work"
+        landed = {"upload": attachments / SID / "note.txt",
+                  "upload_extract": attachments / SID / "archive" / "inside.txt",
+                  "workspace_upload": workspace / "note.txt"}[route]
+        assert landed.exists()
+    else:
+        assert not attachments.exists() and list(workspace.iterdir()) == []
+
+
 @pytest.mark.parametrize("sid,expected", [
     ("missing-8855", {"upload": NOT_FOUND, "upload_extract": NOT_FOUND, "workspace_upload": NOT_FOUND}),
     ("", {"upload": NOT_FOUND, "upload_extract": NOT_FOUND,
