@@ -902,7 +902,9 @@ def test_all_sessions_sidecar_refresh_stays_metadata_only(monkeypatch):
     )
     monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
 
-    with patch.object(Session, "load", side_effect=AssertionError("full sidecar load should not run")):
+    with patch.object(Session, "load", side_effect=AssertionError("full sidecar load should not run")), \
+            patch.object(models, "_load_session_for_listing",
+                         side_effect=AssertionError("full sidecar load should not run")):
         rows = models.all_sessions()
 
     assert rows[0]["session_id"] == "metadata_refresh_sid"

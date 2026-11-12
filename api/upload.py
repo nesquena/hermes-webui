@@ -14,7 +14,7 @@ from api.helpers import (
     unreadable_content_length,
     unsupported_transfer_encoding,
 )
-from api.models import get_session
+from api.models import UNVERIFIABLE_SESSION_OWNER, get_session, session_owner_readings_readonly
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
     safe_resolve_ws,
@@ -266,16 +266,53 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
-def _session_visible_to_active_profile(session) -> bool:
-    """Return whether an upload target session belongs to the active profile."""
-    session_profile = getattr(session, 'profile', None)
+def _profile_visible_to_active_profile(session_profile) -> bool:
+    """Return whether a recorded session owner is the active profile."""
     if not isinstance(session_profile, str):
         session_profile = None
     return _profiles_match(session_profile, _get_active_profile_name())
 
 
+def _session_visible_to_active_profile(session) -> bool:
+    """Return whether an upload target session belongs to the active profile."""
+    return _profile_visible_to_active_profile(getattr(session, 'profile', None))
+
+
 def _reject_invisible_session(handler, session) -> bool:
     if _session_visible_to_active_profile(session):
+        return False
+    j(handler, {'error': 'Session not found'}, status=404)
+    return True
+
+
+def _reject_invisible_session_before_load(handler, session_id) -> bool:
+    """#8855: refuse another profile's upload target before ``get_session`` loads it.
+
+    The upload routes take the session id from a multipart field, so the
+    generic request-session guard never sees it, and each handler decided
+    ownership on the loaded session. ``get_session`` runs ``Session.load``,
+    which can collapse duplicate partials and save (a ``.bak`` too), and caches
+    what it loads, so an upload refused with 404 still rewrote and cached
+    another profile's session. A refused request must never write (#8094).
+
+    This reads the owner of every stored copy a full load could serve
+    (``session_owner_readings_readonly``, as #8834 does for the session routes)
+    and answers the same 404 as the check after the load when none of them is
+    visible; ownership it can't verify counts as not visible (fail closed). The
+    refusal never depends on which copy the load would serve, because every
+    invisible copy gets this one answer. Any visible copy, or no stored session
+    at all (an unsafe id included), leaves the decision to the load as before,
+    and the check after it stays as the backstop. True when a refusal was sent.
+    """
+    if not isinstance(session_id, str):
+        return False
+    readings = session_owner_readings_readonly(
+        session_id, full_load=True, visible=_profile_visible_to_active_profile,
+    )
+    if not readings or any(
+        reading is not UNVERIFIABLE_SESSION_OWNER and _profile_visible_to_active_profile(reading)
+        for reading in readings
+    ):
         return False
     j(handler, {'error': 'Session not found'}, status=404)
     return True
@@ -333,6 +370,8 @@ def handle_upload(handler):
         filename, file_bytes = files['file']
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             s = get_session(session_id)
         except KeyError:
@@ -537,6 +576,8 @@ def handle_upload_extract(handler):
         filename, file_bytes = files['file']
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             s = get_session(session_id)
         except KeyError:
@@ -667,7 +708,17 @@ def _stt_provider_capability_from_module(stt):
                 return False
 
         def has_browser_audio_converter():
+            # Older agents define the ffmpeg resolver on transcription_tools itself.
+            # Current agents moved it to tools.transcription_audio (which
+            # transcription_tools imports, so it's already loaded) without
+            # re-exporting it. Ask the Agent's own resolver in either layout, so
+            # the probe agrees with what /api/transcribe will do (#8909).
             helper = getattr(stt, "_find_ffmpeg_binary", None)
+            if not callable(helper):
+                try:
+                    from tools.transcription_audio import _find_ffmpeg_binary as helper
+                except Exception:
+                    helper = None
             try:
                 return bool(helper()) if callable(helper) else False
             except Exception:
@@ -784,7 +835,9 @@ def handle_workspace_upload(handler):
         if not files:
             return j(handler, {'error': 'No file field in request'}, status=400)
 
-        # Validate session
+        # Validate session (#8855: ownership first, so a refusal never loads it)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             session = get_session(session_id)
         except KeyError:

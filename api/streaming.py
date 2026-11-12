@@ -467,7 +467,8 @@ def _strip_compact_echo_suffix(value: str, suffix: str) -> tuple[str, bool]:
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
     """Best-effort terminal SSE session payload for already-persisted state."""
     try:
-        return redact_session_data(
+        from api.helpers import public_session_projection
+        return public_session_projection(
             _session_payload_with_full_messages(session, tool_calls=tool_calls)
         )
     except Exception:
@@ -3515,16 +3516,35 @@ def _resolve_current_session_for_write(session):
     lock.
 
     Returns ``None`` (fail closed) when the current object cannot be
-    resolved — missing/deleted session, transient error, or no session id.
+    resolved — missing/deleted session, transient error, no session id, or
+    a session loaded from a file whose body names another session (#8852).
     Callers MUST no-op on ``None`` and must NEVER fall back to the
     worker-held snapshot: that object may be a detached LRU-evicted
     generation whose save would overwrite the current session state.
     """
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: the object's id is that other session's, so resolving it
+        # would hand that session to this write.
+        return None
     sid = getattr(session, "session_id", None)
     if not sid:
         return None
     try:
-        return get_session(sid)
+        current = get_session(sid)
+        # #9000: the file may have been replaced since the turn started with a
+        # copy of another session's file. The reload then carries that other
+        # session's id and path (the #8852 loader marks it), so a write through
+        # it (the cwd mirror, an ephemeral cancel's unlink) would land on the
+        # other conversation. Fail closed instead.
+        if getattr(current, "_sidecar_names_other_session", None):
+            logger.info(
+                "Not resolving session %s for a delayed write: its file now "
+                "holds session %r (#9000)",
+                sid,
+                getattr(current, "session_id", None),
+            )
+            return None
+        return current
     except Exception:
         logger.debug(
             "Failed to resolve current session %s for delayed-cancel write; "
@@ -7519,6 +7539,10 @@ def _preserve_pre_compression_snapshot(
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
     """
+    if getattr(s, '_sidecar_names_other_session', None):
+        # #8852: old_sid is the object's id, which came from a file whose body
+        # names another session, so the stamp below would land in that session.
+        return False
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
         return False
@@ -16711,7 +16735,15 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 try:
                     import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    if getattr(s, '_sidecar_names_other_session', None):
+                        # #9000: loaded from a copy of another session's file, so
+                        # s.path is that other conversation. Never delete it.
+                        logger.info(
+                            "Not removing /btw file for %s: it holds session %r (#9000)",
+                            session_id, s.session_id,
+                        )
+                    else:
+                        pathlib.Path(s.path).unlink(missing_ok=True)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions
@@ -17853,16 +17885,25 @@ def _run_agent_streaming(
                     try:
                         from agent.model_metadata import get_model_context_length
                         from api.routes import _context_length_lookup_inputs_for_model
+                        from api.routes import _context_lookup_agent_fallback
                         _cfg_base_url = getattr(agent, 'base_url', '') or resolved_base_url or ''
+                        # #8822: the lookup picks the config key that owns the URL, as
+                        # on v0.52.544; the Agent's own credential (key, URL, provider
+                        # together) is only its fallback, under the same rule, and
+                        # nothing is added after the lookup, so a key never lands on a
+                        # host it doesn't own.
                         _ctx_lookup = _context_length_lookup_inputs_for_model(
                             getattr(agent, 'model', resolved_model or '') or '',
                             resolved_provider,
                             base_url=_cfg_base_url,
                             cfg=_cfg if isinstance(_cfg, dict) else {},
+                            **_context_lookup_agent_fallback(
+                                agent, resolved_api_key, resolved_base_url, resolved_provider
+                            ),
                         )
                         _cfg_ctx_len = _ctx_lookup.config_context_length
                         _cfg_custom_providers = _ctx_lookup.custom_providers
-                        _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
+                        _cfg_api_key = _ctx_lookup.api_key
                         _cfg_base_url = _ctx_lookup.base_url or _cfg_base_url
                         _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                         _resolved_cl = get_model_context_length(
@@ -18225,15 +18266,22 @@ def _run_agent_streaming(
                 try:
                     from agent.model_metadata import get_model_context_length as _get_cl
                     from api.routes import _context_length_lookup_inputs_for_model
+                    from api.routes import _context_lookup_agent_fallback
                     _ctx_lookup = _context_length_lookup_inputs_for_model(
                         getattr(agent, 'model', resolved_model or '') or '',
                         resolved_provider,
                         base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
                         cfg=_cfg if isinstance(_cfg, dict) else {},
+                        # #8822: the Agent's own credential (key, URL, provider together)
+                        # only as the lookup's fallback, under the same ownership rule;
+                        # nothing is added afterwards.
+                        **_context_lookup_agent_fallback(
+                            agent, resolved_api_key, resolved_base_url, resolved_provider
+                        ),
                     )
                     _cfg_ctx_len = _ctx_lookup.config_context_length
                     _cfg_custom_providers = _ctx_lookup.custom_providers
-                    _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
+                    _cfg_api_key = _ctx_lookup.api_key
                     _cfg_base_url = _ctx_lookup.base_url
                     _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                     try:
