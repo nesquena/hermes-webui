@@ -20,6 +20,8 @@ function requestAnimationFrame(fn){rafs.push(fn);return rafs.length;}
 let _renderPending=false, _streamFinalized=false, _pendingRafHandle=null;
 let _lastRenderMs=0, _lastRenderCostMs=0;
 const LIVE_RENDER_BUSY_FACTOR=4;
+// Tolerate a sibling typing-deferral hook inside _doRender.
+function _deferLiveRenderForTyping(){return false;}
 let assistantText='', liveReasoningText='', segmentStart=0;
 let _cachedParsed=null, _cachedParsedText='', _cachedParsedReasoning='';
 const S={activeStreamId:'stream'}, streamId='stream', assistantBody=null, assistantRow=null;
