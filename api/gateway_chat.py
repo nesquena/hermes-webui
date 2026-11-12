@@ -399,12 +399,14 @@ def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None 
     return webui_chat_backend_mode(config_data, environ) == "gateway"
 
 
-def _owning_profile_config(resolver, config_data) -> dict:
-    """Resolve the owning profile's config, falling back to the request rule.
+def _owning_profile_rule(resolver, profile, config_data) -> tuple:
+    """Resolve the owning profile's (config, environ), or fall back to the request rule.
 
     An empty dict is a valid, fully-local owning-profile answer — only a
-    resolution failure (exception / None / non-dict) falls back to the
-    request rule (``config_data``).
+    resolution failure (exception / non-dict) falls back to the request rule.
+    On that fallback the environ is ``None`` (live ``os.environ``) so the whole
+    decision is the pre-#8860 request rule, never a mix of one profile's config
+    with another profile's env (#9024 review round 2).
     """
     try:
         resolved = resolver()
@@ -413,15 +415,17 @@ def _owning_profile_config(resolver, config_data) -> dict:
             "owning-profile config resolution failed; using the request profile's rule"
         )
         resolved = None
-    if isinstance(resolved, dict):
-        return resolved
-    return config_data if isinstance(config_data, dict) else {}
+    if not isinstance(resolved, dict):
+        return (config_data if isinstance(config_data, dict) else {}), None
+    from api.profiles import chat_backend_environ_for_profile
+
+    return resolved, chat_backend_environ_for_profile(profile)
 
 
-def chat_backend_config_for_profile(profile, config_data=None) -> dict:
-    """Chat-backend eligibility for a bare owning profile (#9024 review).
+def chat_backend_rule_for_profile(profile, config_data=None) -> tuple:
+    """The (config, environ) pair deciding a bare owning profile's backend.
 
-    Same rule as :func:`chat_backend_config_for_session` for callers that read
+    Same rule as :func:`chat_backend_rule_for_session` for callers that read
     the owner through ``get_session_profile_readonly()`` and must not run the
     full session loader: ``Session.load`` can collapse duplicate partials and
     save the sidecar (with a ``.bak``), so a request that will be refused must
@@ -429,26 +433,38 @@ def chat_backend_config_for_profile(profile, config_data=None) -> dict:
     """
     from api.gateway_sessions import config_for_profile
 
-    return _owning_profile_config(lambda: config_for_profile(profile), config_data)
+    return _owning_profile_rule(
+        lambda: config_for_profile(profile), profile, config_data
+    )
 
 
-def chat_backend_config_for_session(session, config_data=None) -> dict:
+def chat_backend_rule_for_session(session, config_data=None) -> tuple:
     """Chat-backend eligibility comes from the session's owning profile (#8971).
 
     ``get_config_snapshot()`` answers for the request thread's active profile,
     so with mixed backends across profiles a session could be refused — or
-    admitted to an in-process agent — by another profile's setting. Resolve the
-    owning profile's config instead, the same rule ``config_for_session()``
-    already gives workers, ``gateway_session_chat_read_only_reason()`` and the
-    native-transport model-change guard. ``config_data`` is the fallback for
-    callers with no session context (the request snapshot) and for resolution
-    failures; fail-open here only picks the pre-#8860 rule, never a local
-    in-process turn the owning profile did not ask for — a session whose
-    profile resolves to gateway mode still refuses through the sites below.
+    admitted to an in-process agent — by another profile's setting. The owning
+    profile's ENV decides alongside its config (#9024 review round 2): the
+    launcher export captured at process start wins, then the owner's own
+    ``.env``, then its config.yaml — the live ``os.environ`` (the active
+    profile's ``.env`` after a switch) never decides another profile's session.
+    ``config_data`` is the fallback for callers with no session context (the
+    request snapshot) and for resolution failures; fail-open here only picks
+    the pre-#8860 rule, never a local in-process turn the owning profile did
+    not ask for — a session whose profile resolves to gateway mode still
+    refuses through the sites below.
     """
     from api.gateway_sessions import config_for_session
 
-    return _owning_profile_config(lambda: config_for_session(session), config_data)
+    profile = session.get("profile") if isinstance(session, dict) else None
+    return _owning_profile_rule(
+        lambda: config_for_session(session), profile, config_data
+    )
+
+
+def webui_gateway_chat_enabled_for_session(session, config_data=None) -> bool:
+    """Gateway admission for an existing session, by its owning profile's rule."""
+    return webui_gateway_chat_enabled(*chat_backend_rule_for_session(session, config_data))
 
 
 class GatewayExternalSessionReadOnly(PermissionError):
@@ -471,9 +487,15 @@ def gateway_session_chat_read_only_reason(session: dict, config_data=None) -> st
     ):
         return ""
     from api.gateway_sessions import configured, config_for_session, external_session
+    from api.profiles import chat_backend_environ_for_profile
     if config_data is None:
         config_data = config_for_session(session)
-    if not webui_gateway_chat_enabled(config_data):
+    # The session's owning profile decides, config AND env (#9024 review
+    # round 2): the live process env holds the active profile's .env after a
+    # switch, which must not decide this session's transport eligibility.
+    if not webui_gateway_chat_enabled(
+        config_data, chat_backend_environ_for_profile(session.get("profile"))
+    ):
         return ""
     if configured(session, config_data):
         return ""
@@ -492,7 +514,7 @@ def gateway_session_chat_read_only_reason(session: dict, config_data=None) -> st
 GATEWAY_MODE_UNSUPPORTED = "gateway_mode_unsupported"
 
 
-def refuse_on_gateway_backend(handler, route: str, config_data=None) -> bool:
+def refuse_on_gateway_backend(handler, route: str, config_data=None, environ=None) -> bool:
     """Refuse a feature that still runs the agent in the WebUI process.
 
     ``/btw``, ``/background``, ``/compress``, the synchronous ``/api/chat`` and
@@ -506,8 +528,11 @@ def refuse_on_gateway_backend(handler, route: str, config_data=None) -> bool:
     Sends the 409 and returns True when the backend is the gateway, else returns
     False without touching the response. Callers use it before any state
     mutation: ``if refuse_on_gateway_backend(handler, "/btw", cfg): return``.
+    Session-scoped sites pass the owning profile's (config, environ) pair from
+    ``chat_backend_rule_for_profile/session`` (#9024 review round 2); ``environ``
+    None keeps the live process env for request-scoped rules.
     """
-    if not webui_gateway_chat_enabled(config_data):
+    if not webui_gateway_chat_enabled(config_data, environ):
         return False
     from api.helpers import j
 

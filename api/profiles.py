@@ -974,6 +974,52 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+# The env key that selects the browser chat backend (api/gateway_chat.py
+# webui_chat_backend_mode reads it first, then the profile config.yaml).
+# Defined as a literal here because gateway_chat imports this module's
+# resolvers transitively (gateway_chat -> gateway_sessions -> profiles).
+CHAT_BACKEND_ENV_KEY = 'HERMES_WEBUI_CHAT_BACKEND'
+
+# (home, mtime) -> value read from that home's .env for CHAT_BACKEND_ENV_KEY
+# (#9024 review round 2). chat_backend_environ_for_profile runs on every
+# session payload projection (via gateway_session_chat_read_only_reason), so
+# the .env read is cached and re-validated by mtime only.
+_CHAT_BACKEND_ENV_CACHE: dict = {}
+
+
+def chat_backend_environ_for_profile(profile) -> dict:
+    """The env slice deciding a profile's browser chat backend (#9024 review).
+
+    A launcher/deployment export captured at process start wins — a genuine
+    operator override (``_INITIAL_PROCESS_ENV``, taken before any profile
+    ``.env`` was applied). A profile's own ``.env`` applies only when the
+    launcher did not set the key. Live ``os.environ`` is never read: after a
+    profile switch it holds the ACTIVE profile's ``.env`` (#8432), which would
+    let the requesting profile decide another profile's backend.
+    """
+    value = _INITIAL_PROCESS_ENV.get(CHAT_BACKEND_ENV_KEY)
+    if not value:
+        try:
+            home = get_hermes_home_for_profile(profile)
+            env_path = Path(home) / '.env'
+            try:
+                mtime = env_path.stat().st_mtime_ns
+            except OSError:
+                mtime = None
+            cached = _CHAT_BACKEND_ENV_CACHE.get(str(home))
+            if cached is None or cached[0] != mtime:
+                value = _read_dotenv_values(env_path).get(CHAT_BACKEND_ENV_KEY) if mtime is not None else None
+                _CHAT_BACKEND_ENV_CACHE[str(home)] = (mtime, value)
+            else:
+                value = cached[1]
+        except Exception:
+            logger.debug(
+                "chat-backend env unavailable for profile %r", profile, exc_info=True
+            )
+            value = None
+    return {CHAT_BACKEND_ENV_KEY: value} if value else {}
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',

@@ -10,7 +10,10 @@ session, job or any other state.
 
 #8971 item 1: the refusal follows the SESSION'S OWNING PROFILE, not the request
 thread's active profile, so mixed backends across profiles cannot let one
-profile's setting admit or refuse another profile's session.
+profile's setting admit or refuse another profile's session. The owner's ENV
+decides alongside its config (#9024 review round 2): launcher export first,
+then the owner's own .env, then its config.yaml — never the live process env,
+which after a profile switch holds the active profile's .env.
 """
 import sys
 from pathlib import Path
@@ -20,10 +23,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from api import gateway_sessions, helpers, routes  # noqa: E402
+from api import gateway_sessions, helpers, profiles, routes  # noqa: E402
 
 _REFUSAL = "is unavailable on gateway-backed sessions"
 _GATEWAY_CFG = {"webui_chat_backend": "gateway"}
+_ENV_KEY = profiles.CHAT_BACKEND_ENV_KEY
+
+
+@pytest.fixture
+def no_owner_env(monkeypatch):
+    """The owner's env slice is empty: config-only backend selection, hermetic.
+
+    Also keeps the real ~/.hermes/.env (or a developer's exported
+    HERMES_WEBUI_CHAT_BACKEND) out of these tests.
+    """
+    monkeypatch.setattr(profiles, "chat_backend_environ_for_profile", lambda _p=None: {})
 
 
 @pytest.fixture
@@ -48,11 +62,12 @@ def captured(monkeypatch):
 
 
 @pytest.fixture
-def gateway_mode(monkeypatch):
+def gateway_mode(monkeypatch, no_owner_env):
     """The session's owning profile runs the gateway backend (#8971 item 1).
 
     Patches ``config_for_profile`` — the seam both the session and profile
-    resolvers go through (``config_for_session`` delegates to it).
+    resolvers go through (``config_for_session`` delegates to it) — with an
+    empty owner env slice, so the gateway answer comes from config alone.
     """
     monkeypatch.setattr(gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG))
 
@@ -112,7 +127,7 @@ def test_in_process_routes_refuse_in_gateway_mode(
 
 
 def test_gateway_request_profile_does_not_refuse_a_local_owned_session(
-    monkeypatch, captured_route_j
+    monkeypatch, captured_route_j, no_owner_env
 ):
     """The inverse mixed-backend case: a gateway REQUEST profile must not refuse.
 
@@ -175,7 +190,7 @@ def test_refusal_helper_is_false_off_gateway(monkeypatch):
     assert not refuse_on_gateway_backend(object(), "/btw", {})
 
 
-def test_refusal_does_not_load_or_rewrite_the_session(tmp_path, monkeypatch):
+def test_refusal_does_not_load_or_rewrite_the_session(tmp_path, monkeypatch, no_owner_env):
     """#9024 review: the refusal learns the owner without the full loader.
 
     ``get_session()`` runs ``Session.load``, which collapses adjacent
@@ -237,3 +252,92 @@ def test_refusal_does_not_load_or_rewrite_the_session(tmp_path, monkeypatch):
     assert sidecar.read_bytes() == before, "the refused request rewrote the sidecar"
     assert list(directory.glob("*.bak")) == [], "the refused request wrote a backup"
     assert sid not in cache, "the refused request loaded (and cached) the session"
+
+
+def _owner_env_from(monkeypatch, tmp_path, *, launcher=None, dotenv=None):
+    """Point the real owner-env resolver at controlled inputs.
+
+    ``launcher`` seeds the process-start snapshot; ``dotenv`` seeds a REAL
+    ``.env`` in the owner profile's home (the resolver stats the file, so it
+    must exist). The live ``os.environ`` is set separately per test to prove it
+    is never consulted for the owner's decision.
+    """
+    monkeypatch.setattr(profiles, "_INITIAL_PROCESS_ENV", dict(launcher or {}))
+    home = tmp_path / "owner-home"
+    home.mkdir()
+    if dotenv:
+        (home / ".env").write_text(
+            "".join(f"{k}={v}\n" for k, v in dotenv.items()), encoding="utf-8"
+        )
+
+    def fake_home(_name):
+        return home
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", fake_home)
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+
+
+def test_live_process_env_cannot_unlock_a_gateway_owner(monkeypatch, tmp_path, captured):
+    """#9024 review round 2: the active profile's env must not decide the owner.
+
+    The owning profile's config selects gateway, but the live process env —
+    which after a profile switch carries the REQUESTING profile's .env — says
+    legacy. The refusal must stand: only the owner's launcher export, its own
+    .env, or its config can change the answer.
+    """
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG))
+    _owner_env_from(monkeypatch, tmp_path, launcher={}, dotenv={})
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "legacy")
+
+    routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+
+
+def test_owner_env_file_selects_gateway(monkeypatch, tmp_path, captured):
+    """The owner's own .env selects gateway even when its config is local."""
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(gateway_sessions, "config_for_profile", lambda _profile=None: {})
+    _owner_env_from(monkeypatch, tmp_path, launcher={}, dotenv={"HERMES_WEBUI_CHAT_BACKEND": "gateway"})
+    monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
+
+    routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+
+
+def test_launcher_export_overrides_owner_env_file(monkeypatch, tmp_path, captured_route_j):
+    """A genuine launcher export (process-start env) wins over the owner's .env.
+
+    The operator started the process with legacy; the owner profile's .env
+    says gateway. The launcher posture decides, so the local owner config
+    admits the feature and the next admission gate (#7293) answers.
+    """
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(
+        routes, "get_config_snapshot", lambda: {}
+    )
+    monkeypatch.setattr(gateway_sessions, "config_for_profile", lambda _profile=None: {})
+    _owner_env_from(
+        monkeypatch,
+        tmp_path,
+        launcher={"HERMES_WEBUI_CHAT_BACKEND": "legacy"},
+        dotenv={"HERMES_WEBUI_CHAT_BACKEND": "gateway"},
+    )
+    monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+
+    routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+
+    assert captured_route_j["status"] == 503
+    assert captured_route_j["payload"]["code"] == "server_draining"
