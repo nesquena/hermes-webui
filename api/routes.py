@@ -13306,19 +13306,12 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     or _cross_store_pairing_key(agent_row, from_sidecar=False)
                     != _cross_store_pairing_key(sidecar_row, from_sidecar=True)
                     or not _cross_store_pairable(sidecar_row, agent_row)
-                    or (
-                        STATE_DB_ROW_TIMESTAMP_KEY in sidecar_row
-                        and sidecar_row[STATE_DB_ROW_TIMESTAMP_KEY] != agent_row.get("timestamp")
-                    )
-                    # With no stable id on either side, the Agent's own
-                    # timestamp is required: the stamped one, or for a row
-                    # copied verbatim from state.db, its own.
-                    or (
-                        not _identified(sidecar_row)
-                        and not _identified(agent_row)
-                        and sidecar_row.get(STATE_DB_ROW_TIMESTAMP_KEY, sidecar_row.get("timestamp"))
-                        != agent_row.get("timestamp")
-                    )
+                    # A row id alone is no proof: a restored or recreated
+                    # state.db hands the same ids out again. The stamp must
+                    # also pin the Agent row's own timestamp; a bare legacy
+                    # id renders both rows.
+                    or STATE_DB_ROW_TIMESTAMP_KEY not in sidecar_row
+                    or sidecar_row[STATE_DB_ROW_TIMESTAMP_KEY] != agent_row.get("timestamp")
                 ):
                     continue
                 if _identified(agent_row):
@@ -13389,16 +13382,13 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                         seen_message_keys.add(key)
                         kept_positions.add(position)
                         continue
-                    exact_key = (from_sidecar, _session_message_dedup_key(msg))
                     survivor = survivor_for.get(position)
                     if survivor in kept_positions:
                         _reconcile_cross_store_twin(
                             survivor, ordered[survivor][0], msg, from_sidecar
                         )
-                        # A byte-identical copy in the same store is still
-                        # the same message.
-                        seen_unmatched_exact_keys.add(exact_key)
                         continue
+                    exact_key = (from_sidecar, _session_message_dedup_key(msg))
                     if exact_key in seen_unmatched_exact_keys:
                         continue
                     cross_key = _session_message_merge_key(msg)
@@ -14304,7 +14294,6 @@ from api.models import (
     _session_message_dedup_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
-    _normalized_session_message_content,
     _copy_api_content_sidecar,
     _message_timestamp_as_float,
     _persisted_session_meta_prefix,

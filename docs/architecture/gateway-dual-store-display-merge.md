@@ -85,7 +85,8 @@ rows pair only on proof: the state.db row id the two copies share.
    run's) is dropped first, so an unproven row never pairs, and a failure
    while stamping leaves the rows unstamped rather than losing the reply.
    The in-process streaming path stamps its rows too, from the ids
-   `append_message` returns rather than from a floor and a text match. The
+   `append_message` returns, but with the row id only; those stamps do not
+   pair here (see the exact lane). The
    session transport is not stamped: it replaces the transcript with the
    Gateway's canonical rows.
 2. **Exact lane.** Callers read the Agent store with row ids
@@ -93,13 +94,15 @@ rows pair only on proof: the state.db row id the two copies share.
    aside once; every other lane, and every row that leaves the merge, sees
    the default projection (`without_requested_row_identity()`), exactly as
    before. One row id on exactly one row per store, with the same role and
-   pairing key and passing the checks above, is one message -- and, for a
-   gateway stamp, only when the Agent row still has the stamped timestamp.
-   A rewrite (`/retry`, `/undo`, `/compress`) reinserts rows under new ids
-   with fresh timestamps, so a stamp it invalidated matches nothing. The
-   Agent's `messages.id` is `AUTOINCREMENT`, so one file never reissues an
-   id, but a state.db restored from a backup or recreated does; the
-   timestamp is what keeps such a reissued id from pairing.
+   pairing key and passing the checks above, is one message -- and only when
+   the sidecar row also carries the stamped Agent timestamp and the Agent
+   row still has it. A row id alone is not proof: the Agent's `messages.id`
+   is `AUTOINCREMENT`, so one file never reissues an id, but a state.db
+   restored from a backup or recreated does. A rewrite (`/retry`, `/undo`,
+   `/compress`) reinserts rows under new ids with fresh timestamps, so a
+   stamp it invalidated matches nothing either. A bare row-id stamp (legacy
+   in-process rows, rows copied from state.db) never pairs, and a missing
+   timestamp is never filled from the candidate row.
 
 Nothing else pairs. A row without that proof renders as it did before this
 reconciliation existed: a duplicate row is a cosmetic wart, a hidden reply
@@ -108,9 +111,7 @@ is lost data.
 Two rows that both carry a stable id stay distinct messages. A pair with one
 identified row folds into it. A pair with no stable id on either side -- the
 gateway's display prompt has none, only its context copy does -- folds into
-the sidecar row, and only when the Agent row still has the timestamp the
-sidecar recorded for it (the stamped one, or for a row copied verbatim from
-state.db, its own). Such a survivor is admitted with the identified rows and
+the sidecar row. Such a survivor is admitted with the identified rows and
 kept out of the coarse pools below: its one cross-store twin is already
 proven, so it neither absorbs another Agent row with the same text in the
 same second nor is absorbed by one. The pass is linear in the number of
@@ -165,6 +166,9 @@ never to the second-granularity merge key alone:
   sit in that run's window; when it shows no rows of its own yet and the
   prompt and reply repeat the previous turn's text, the next turn would be
   stamped with the previous turn's ids.
+- **Row-id-only stamps do not pair.** The in-process path stamps
+  `_state_db_row_id` without the Agent timestamp, so its rows render as on
+  master here. Giving that producer the same timestamp would let them pair.
 - **A stamp the Agent has since renumbered contradicts the new id** wherever
   `_message_private_identity_compatible` or the append-only merge compares
   row ids, so an Agent row's `api_content` is not adopted onto that sidecar

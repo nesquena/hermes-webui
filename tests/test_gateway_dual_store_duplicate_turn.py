@@ -210,14 +210,30 @@ import api.models as models
 import api.routes as routes
 
 
+
+def _pin_stamps(session, cli_messages):
+    """Give stamped sidecar rows the Agent row's own timestamp, as the gateway
+    writeback does. A bare row id proves nothing on its own (a restored or
+    recreated state.db reissues ids), so fixtures of proven twins carry both."""
+    by_id = {}
+    for row in cli_messages:
+        row_id, valid = models._state_db_row_identity_details(row)
+        if valid and row_id is not None:
+            by_id[row_id] = row
+    for row in session.messages:
+        row_id, valid = models._state_db_row_identity_details(row)
+        if valid and row_id in by_id and "timestamp" in by_id[row_id]:
+            row["_state_db_row_timestamp"] = by_id[row_id]["timestamp"]
+    return session
+
 def _gateway_turn_session():
     """Sidecar rows exactly as the gateway chat worker writes them."""
-    return SimpleNamespace(
+    return _pin_stamps(SimpleNamespace(
         messages=[
             {"id": 7, "role": "user", "content": "show tomorrow's weather", "timestamp": 100.5, "_state_db_row_id": 1},
             {"id": 8, "role": "assistant", "content": "Tomorrow: sunny, 35C.", "timestamp": 130.542, "_state_db_row_id": 4},
         ]
-    )
+    ), _gateway_agent_rows())
 
 
 def _gateway_agent_rows():
@@ -307,6 +323,8 @@ def test_gateway_reconciliation_pairs_across_differing_api_content():
             "reasoning": "AGENT REASONING",
         },
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -432,6 +450,8 @@ def test_repeated_identical_answers_pair_one_to_one_in_order():
          "_state_db_row_id": 22},
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     by_id = {m["id"]: m for m in merged if m.get("id")}
@@ -476,6 +496,8 @@ def test_repeated_answers_inside_one_second_pair_one_to_one():
             "_state_db_row_id": 12,
         },
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -586,6 +608,8 @@ def test_semantic_payload_travels_only_from_agent_to_sidecar():
         {"role": "tool", "content": "looked it up", "timestamp": 5.0, "tool_call_id": "c1"},
         {"id": "a1", "role": "assistant", "content": "answer", "timestamp": 10.4, "_state_db_row_id": 3},
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -937,6 +961,8 @@ def test_row_identity_pairs_with_its_own_survivor_among_repeats():
         },
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     by_id = {m["id"]: m for m in merged if m.get("id")}
@@ -974,6 +1000,8 @@ def test_matching_state_db_row_identity_still_pairs():
             "reasoning": "AGENT REASONING",
         },
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -1032,6 +1060,8 @@ def test_repeat_pairs_with_the_occurrence_in_its_own_turn():
         {"role": "assistant", "content": "Done.", "timestamp": 12.0, "reasoning": "second", "_state_db_row_id": 4},
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     assert [(m.get("id"), m.get("content")) for m in merged] == [
@@ -1080,6 +1110,8 @@ def test_row_identity_breaks_an_unequal_repeat_tie():
         {"role": "assistant", "content": "Done.", "timestamp": 20.4, "_row_id": 22, "reasoning": "second"},
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     replies = [m for m in merged if m.get("content") == "Done."]
@@ -1108,6 +1140,8 @@ def test_distinct_rows_sharing_a_dedup_key_each_pair_with_their_own_twin():
         {"role": "assistant", "content": "Done.", "timestamp": 10.0, "reasoning": "r2", "_state_db_row_id": 3},
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     replies = [m for m in merged if m.get("content") == "Done."]
@@ -1132,6 +1166,8 @@ def test_sidecar_rows_without_timestamps_still_pair_by_row_id():
         {"role": "user", "content": "q2", "timestamp": 3.0, "_state_db_row_id": 4},
         {"role": "assistant", "content": "A2", "timestamp": 4.0, "reasoning": "r2", "_state_db_row_id": 5},
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -1228,6 +1264,8 @@ def test_structured_agent_prompt_pairs_with_its_sidecar_copy():
         {"role": "assistant", "content": "A cat.", "timestamp": 5.0, "reasoning": "r", "_state_db_row_id": 4},
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     assert [m.get("id") for m in merged if m.get("role") == "user"] == ["u1"]
@@ -1254,6 +1292,8 @@ def test_stamped_twins_pair_by_row_id_across_a_repeated_prompt():
         {"role": "user", "content": "continue", "timestamp": 9.0, "_state_db_row_id": 7},
         {"role": "assistant", "content": "Done.", "timestamp": 9.5, "reasoning": "turn 2", "_state_db_row_id": 8},
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -1309,36 +1349,40 @@ def test_a_row_id_with_different_text_is_not_a_twin():
     assert [m["content"] for m in merged if m["role"] == "assistant"] == ["something else", "hello"]
 
 
-def test_in_process_stamps_pair_while_an_unstamped_gateway_turn_renders_twice():
-    """A session that ran in-process (stamped) and then on an older gateway (unstamped)."""
+def test_bare_legacy_row_ids_do_not_pair_after_the_store_reissued_them():
+    """The maintainer's repro. In-process stamps carry only the row id. A
+    restored or recreated state.db hands ids 41/42 out again to a later
+    exchange with the same text; without the stamped timestamp nothing proves
+    the rows are one message, so both exchanges render and each keeps its
+    own payload, exactly as on master."""
     session = SimpleNamespace(
         messages=[
-            {"id": "u1", "role": "user", "content": "local q", "timestamp": 1.1, "_state_db_row_id": 1},
-            {"id": "a1", "role": "assistant", "content": "local a", "timestamp": 2.1, "_state_db_row_id": 2},
-            {"id": "u2", "role": "user", "content": "gw q", "timestamp": 3.1},
-            {"id": "a2", "role": "assistant", "content": "gw a", "timestamp": 5.1},
+            {"id": "u1", "role": "user", "content": "continue", "timestamp": 100.1, "_state_db_row_id": 41},
+            {"id": "a1", "role": "assistant", "content": "Done.", "timestamp": 130.1, "_state_db_row_id": 42},
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "local q", "timestamp": 1.0, "_state_db_row_id": 1},
-        {"role": "assistant", "content": "local a", "timestamp": 2.0, "_state_db_row_id": 2},
-        {"role": "user", "content": "gw q", "timestamp": 3.0, "_state_db_row_id": 3},
-        {"role": "tool", "content": "t", "timestamp": 4.0, "tool_call_id": "c1", "_state_db_row_id": 4},
-        {"role": "assistant", "content": "gw a", "timestamp": 5.0, "reasoning": "r", "_state_db_row_id": 5},
+        {"role": "user", "content": "continue", "timestamp": 900.0, "_state_db_row_id": 41},
+        {"role": "assistant", "content": "Done.", "timestamp": 930.0, "reasoning": "later independent turn",
+         "api_content": "LATER BYTES", "_state_db_row_id": 42},
+        {"role": "tool", "content": "ok", "timestamp": 940.0, "tool_call_id": "c1", "_state_db_row_id": 43},
     ]
+    before = copy.deepcopy((session.messages, cli_messages))
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     assert [(m.get("id"), m["content"]) for m in merged] == [
-        ("u1", "local q"),
-        ("a1", "local a"),
-        (None, "gw q"),
-        ("u2", "gw q"),
-        (None, "t"),
-        (None, "gw a"),
-        ("a2", "gw a"),
+        ("u1", "continue"),
+        ("a1", "Done."),
+        (None, "continue"),
+        (None, "Done."),
+        (None, "ok"),
     ]
-
+    old, later = (m for m in merged if m["content"] == "Done.")
+    assert "reasoning" not in old and "api_content" not in old, "the old row takes nothing from the later turn"
+    assert later["reasoning"] == "later independent turn"
+    assert later["api_content"] == "LATER BYTES"
+    assert (session.messages, cli_messages) == before
 
 def test_agent_only_repeat_of_a_legacy_prompt_keeps_every_row():
     """Unstamped turns pair with nothing, so a later Agent-only turn repeating
@@ -1369,7 +1413,8 @@ def test_reader_row_identity_stays_private_to_the_union_branch():
     """
     agent_only = {"role": "assistant", "content": "agent only", "timestamp": 9.0, "_state_db_row_id": 9}
     session = SimpleNamespace(
-        messages=[{"id": "u1", "role": "user", "content": "q", "timestamp": 1.1, "_state_db_row_id": 1}]
+        messages=[{"id": "u1", "role": "user", "content": "q", "timestamp": 1.1,
+                   "_state_db_row_id": 1, "_state_db_row_timestamp": 1.0}]
     )
     union = routes._merged_session_messages_for_display(
         session,
@@ -1625,6 +1670,8 @@ def test_unpaired_repeat_of_a_stamped_prompt_is_not_paired_by_text():
         {"role": "assistant", "content": "Done.", "timestamp": 9.5, "reasoning": "telegram", "_state_db_row_id": 9},
     ]
 
+    _pin_stamps(session, cli_messages)
+
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     assert [m.get("id") for m in merged if m["role"] == "user"] == ["u0", "u1", None]
@@ -1643,6 +1690,8 @@ def test_rows_before_the_first_prompt_are_not_paired_by_text():
         {"role": "tool", "content": "ok", "timestamp": 0.2, "tool_call_id": "c0", "_state_db_row_id": 2},
         {"role": "user", "content": "q", "timestamp": 1.0, "_state_db_row_id": 3},
     ]
+
+    _pin_stamps(session, cli_messages)
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
@@ -2011,10 +2060,10 @@ def test_a_proven_survivor_is_not_absorbed_by_another_turns_agent_row():
     ]
 
 
-def test_without_stable_ids_a_row_id_needs_the_agents_own_timestamp():
-    """A sidecar row copied from state.db carries the row id but no stamp;
-    its own timestamp must then be the Agent's, or a reissued id could fold
-    another turn's row."""
+def test_a_row_id_without_a_stamped_timestamp_proves_nothing():
+    """A sidecar row copied from state.db carries the row id but no stamped
+    timestamp. It is never folded on the id: a verbatim copy still collapses
+    through master's coarse same-second key, and a reissued id renders both."""
     cli_messages = [
         {"role": "user", "content": "go", "timestamp": 900.0, "_state_db_row_id": 7},
         {"role": "tool", "content": "ok", "timestamp": 901.0, "tool_call_id": "c1", "_state_db_row_id": 8},
@@ -2043,7 +2092,10 @@ def test_two_identified_rows_with_one_row_id_stay_distinct():
     assert [m.get("id") for m in merged if m["role"] == "user"] == ["agent-u1", "u1"]
 
 
-def test_an_exact_agent_copy_of_a_folded_row_still_collapses():
+def test_a_distinct_agent_row_beside_a_folded_twin_survives():
+    """Two Agent rows with the same text and timestamp but different row ids
+    and reasoning are two messages. Folding one into its proven sidecar twin
+    must not drop the other as an exact duplicate."""
     session = SimpleNamespace(
         messages=[
             {"role": "user", "content": "continue", "timestamp": 99.3,
@@ -2051,11 +2103,14 @@ def test_an_exact_agent_copy_of_a_folded_row_still_collapses():
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "continue", "timestamp": 99.0, "_state_db_row_id": 10},
-        {"role": "user", "content": "continue", "timestamp": 99.0, "_state_db_row_id": 11},
+        {"role": "user", "content": "continue", "timestamp": 99.0, "reasoning": "first", "_state_db_row_id": 10},
+        {"role": "user", "content": "continue", "timestamp": 99.0, "reasoning": "second", "_state_db_row_id": 11},
         {"role": "assistant", "content": "x", "timestamp": 101.0, "_state_db_row_id": 12},
     ]
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
-    assert [m["timestamp"] for m in merged if m["role"] == "user"] == [99.3]
+    assert [(m["timestamp"], m.get("reasoning")) for m in merged if m["role"] == "user"] == [
+        (99.0, "second"),
+        (99.3, "first"),
+    ]
