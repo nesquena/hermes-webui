@@ -24,7 +24,10 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
-from api.agent_health import get_active_profile_gateway_running_pid
+from api.agent_health import (
+    gateway_lifecycle_capability,
+    get_active_profile_gateway_running_pid,
+)
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT
@@ -229,6 +232,21 @@ def _update_blocker_snapshot(target: str) -> dict:
     return _blocker_snapshot_from_runs(run_drain.all_active_runs())
 
 
+def _is_gateway_lifecycle_managed() -> bool:
+    """Return whether the active profile's Gateway lifecycle is managed.
+
+    Calls ``gateway_lifecycle_capability()`` safely without caching. Returns
+    False on any exception or malformed result so an unproven restart is never
+    promised.
+    """
+    try:
+        capability = gateway_lifecycle_capability()
+        return bool(isinstance(capability, dict) and capability.get('managed') is True)
+    except Exception:
+        logger.debug('Failed to resolve Gateway lifecycle capability', exc_info=True)
+        return False
+
+
 def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
     if isinstance(blocker_snapshot, int):
         blocker_snapshot = {
@@ -246,25 +264,48 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
     # its refusal counts and names both kinds of run. A WebUI update keeps the
     # WebUI-owned wording: the Gateway runs it does not settle keep running
     # (#7293).
+    # #8746: qualify the Agent copy by Gateway lifecycle ownership. When the
+    # Gateway is unmanaged (managed: False), updating the Agent does not cycle it
+    # and its runs keep running; only the WebUI runs are interrupted on force.
+    payload_extra: dict = {}
     if target == 'agent':
+        gateway_managed = _is_gateway_lifecycle_managed()
+        payload_extra['gateway_restart_managed'] = gateway_managed
         detail = (
             f"{active_runs} agent run{'s are' if plural else ' is'} active "
             '(WebUI and Gateway)'
         )
-        gateway_note = (
-            ' Updating the Agent also restarts the Gateway and stops '
-            + ('them' if plural else 'it') + '.'
-        )
+        if gateway_managed:
+            gateway_note = (
+                ' Updating the Agent also restarts the Gateway and stops '
+                + ('them' if plural else 'it') + '.'
+            )
+            force_sentence = (
+                'Wait for the response to finish and retry, or force the update '
+                'to interrupt the active run' + ('s' if plural else '') + '.'
+            )
+        else:
+            gateway_note = (
+                ' The Gateway for this profile is managed outside the WebUI, '
+                'so updating the Agent does not restart it and its runs keep running.'
+            )
+            force_sentence = (
+                'Wait for the response to finish and retry, or force the update '
+                'to interrupt the WebUI run' + ('s' if plural else '') + '.'
+            )
     else:
         detail = f"{active_runs} WebUI agent run{'s are' if plural else ' is'} active"
         gateway_note = ''
+        force_sentence = (
+            'Wait for the response to finish and retry, or force the update '
+            'to interrupt the active run' + ('s' if plural else '') + '.'
+        )
     return {
         'ok': False,
         'message': (
             f'Cannot update {target} while {detail}.'
             f'{gateway_note} '
-            'Wait for the response to finish and retry, or force the update '
-            'to interrupt the active run' + ('s' if plural else '') + '.'
+            f'{force_sentence}'
         ),
         'target': target,
         'restart_blocked': True,
@@ -276,6 +317,7 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
         'active_runs': active_runs,
         'blocking_stream_ids': blocker_snapshot.get('blocking_stream_ids') or [],
         'blocking_run_ids': blocker_snapshot.get('blocking_run_ids') or [],
+        **payload_extra,
     }
 
 
@@ -561,14 +603,24 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
                 # #8667: name both cases — the WebUI settles its own runs, the
                 # Gateway runs end with the Gateway cycle and are settled
                 # afterwards by the worker teardown/watchdog.
+                # #8746: qualify the Agent forced log by Gateway lifecycle ownership.
                 if target == 'agent':
-                    logger.warning(
-                        "Forced %s update with %s active run(s) (WebUI and "
-                        "Gateway); the WebUI runs are settled as interrupted "
-                        "before the restart and the Gateway runs end when the "
-                        "Gateway cycles",
-                        target, blocker_snapshot.get('active_runs'),
-                    )
+                    if _is_gateway_lifecycle_managed():
+                        logger.warning(
+                            "Forced %s update with %s active run(s) (WebUI and "
+                            "Gateway); the WebUI runs are settled as interrupted "
+                            "before the restart and the Gateway runs end when the "
+                            "Gateway cycles",
+                            target, blocker_snapshot.get('active_runs'),
+                        )
+                    else:
+                        logger.warning(
+                            "Forced %s update with %s active run(s) (WebUI and "
+                            "Gateway); the WebUI runs are settled as interrupted "
+                            "before the restart, and the Gateway runs keep running "
+                            "because the Gateway is managed outside the WebUI",
+                            target, blocker_snapshot.get('active_runs'),
+                        )
                 else:
                     logger.warning(
                         "Forced %s update with %s active WebUI run(s); they will "

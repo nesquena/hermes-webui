@@ -15023,11 +15023,17 @@ function _renderActiveRunsForceOffer(target,res,resend){
     // #8667: an Agent update also cycles the Gateway that executes the
     // resumable runs, so its confirmation names both kinds of run. A WebUI
     // update keeps the WebUI-only copy (#7293).
+    // #8746: qualify the Agent confirmation by Gateway lifecycle ownership.
     const agentTarget=target==='agent';
-    const confirmMessageKey=agentTarget?'update_force_active_runs_message_agent':'update_force_active_runs_message';
-    const confirmMessageFallback=agentTarget
-      ? count+' agent run'+(count===1?' is':'s are')+' still working in the WebUI and in the Gateway. Updating the Agent also restarts the Gateway and stops '+(count===1?'it':'them')+'; the WebUI runs are saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
-      : count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.';
+    const agentExternal=agentTarget&&Boolean(res)&&res.gateway_restart_managed===false;
+    const confirmMessageKey=agentExternal
+      ?'update_force_active_runs_message_agent_external'
+      :(agentTarget?'update_force_active_runs_message_agent':'update_force_active_runs_message');
+    const confirmMessageFallback=agentExternal
+      ? count+' agent run'+(count===1?' is':'s are')+' still working in the WebUI and in the Gateway. The Gateway for this profile is managed outside the WebUI, so updating the Agent does not restart it and those Gateway runs keep running; the WebUI runs are saved as interrupted. Wait for them to finish if you can.'
+      : (agentTarget
+        ? count+' agent run'+(count===1?' is':'s are')+' still working in the WebUI and in the Gateway. Updating the Agent also restarts the Gateway and stops '+(count===1?'it':'them')+'; the WebUI runs are saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
+        : count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.');
     const confirmed=await showConfirmDialog({
       title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
       message:_activeRunsUpdateText(confirmMessageKey,count,confirmMessageFallback),

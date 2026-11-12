@@ -30,19 +30,25 @@ BOTH_RUN_TYPES = ("WebUI", "Gateway")
 _MESSAGE_KEYS = (
     "update_force_active_runs_message",
     "update_force_active_runs_message_agent",
+    "update_force_active_runs_message_agent_external",
 )
 
 
 # ── The refusal payload the banner renders ──────────────────────────────────
 
 
-def test_agent_refusal_names_webui_and_gateway_runs():
+def test_agent_refusal_names_webui_and_gateway_runs(monkeypatch):
     import api.updates as upd
+
+    monkeypatch.setattr(
+        upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": True}
+    )
 
     result = upd._restart_blocked_response(
         "agent", {"active_runs": 2, "active_streams": 2}
     )
 
+    assert result["gateway_restart_managed"] is True
     message = result["message"]
     assert "2 agent runs are active" in message
     assert "(WebUI and Gateway)" in message
@@ -55,12 +61,18 @@ def test_agent_refusal_names_webui_and_gateway_runs():
     assert "force the update to interrupt the active runs" in message
 
 
-def test_agent_refusal_uses_the_singular_form():
+def test_agent_refusal_uses_the_singular_form(monkeypatch):
     import api.updates as upd
 
-    message = upd._restart_blocked_response(
+    monkeypatch.setattr(
+        upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": True}
+    )
+
+    result = upd._restart_blocked_response(
         "agent", {"active_runs": 1, "active_streams": 0}
-    )["message"]
+    )
+    assert result["gateway_restart_managed"] is True
+    message = result["message"]
 
     assert "1 agent run is active" in message
     for kind in BOTH_RUN_TYPES:
@@ -68,14 +80,74 @@ def test_agent_refusal_uses_the_singular_form():
     assert "interrupt the active run." in message
 
 
+def test_agent_refusal_when_gateway_unmanaged_does_not_promise_restart(monkeypatch):
+    import api.updates as upd
+
+    monkeypatch.setattr(
+        upd,
+        "gateway_lifecycle_capability",
+        lambda profile=None: {"managed": False, "reason": "external_gateway"},
+    )
+
+    result_plural = upd._restart_blocked_response(
+        "agent", {"active_runs": 2, "active_streams": 2}
+    )
+    assert result_plural["gateway_restart_managed"] is False
+    assert result_plural["message"] == (
+        "Cannot update agent while 2 agent runs are active (WebUI and Gateway). "
+        "The Gateway for this profile is managed outside the WebUI, so updating the Agent "
+        "does not restart it and its runs keep running. "
+        "Wait for the response to finish and retry, or force the update to interrupt the WebUI runs."
+    )
+    assert "restarts the Gateway" not in result_plural["message"]
+    assert "managed outside the WebUI" in result_plural["message"]
+    for kind in BOTH_RUN_TYPES:
+        assert kind in result_plural["message"]
+
+    result_singular = upd._restart_blocked_response(
+        "agent", {"active_runs": 1, "active_streams": 0}
+    )
+    assert result_singular["gateway_restart_managed"] is False
+    assert result_singular["message"] == (
+        "Cannot update agent while 1 agent run is active (WebUI and Gateway). "
+        "The Gateway for this profile is managed outside the WebUI, so updating the Agent "
+        "does not restart it and its runs keep running. "
+        "Wait for the response to finish and retry, or force the update to interrupt the WebUI run."
+    )
+
+
+def test_agent_refusal_resolves_unproven_capability_safely_to_unmanaged(monkeypatch):
+    import api.updates as upd
+
+    def _broken(profile=None):
+        raise RuntimeError("capability check failed")
+
+    monkeypatch.setattr(upd, "gateway_lifecycle_capability", _broken)
+
+    result = upd._restart_blocked_response(
+        "agent", {"active_runs": 2, "active_streams": 2}
+    )
+    assert result["gateway_restart_managed"] is False
+    assert "managed outside the WebUI" in result["message"]
+
+    monkeypatch.setattr(
+        upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": "invalid"}
+    )
+    result_malformed = upd._restart_blocked_response(
+        "agent", {"active_runs": 2, "active_streams": 2}
+    )
+    assert result_malformed["gateway_restart_managed"] is False
+
+
 def test_webui_refusal_keeps_its_webui_only_wording():
     """A WebUI update still reattaches resumable Gateway runs (#7293)."""
 
     import api.updates as upd
 
-    message = upd._restart_blocked_response(
+    result = upd._restart_blocked_response(
         "webui", {"active_runs": 2, "active_streams": 2}
-    )["message"]
+    )
+    message = result["message"]
 
     assert message == (
         "Cannot update webui while 2 WebUI agent runs are active. "
@@ -83,6 +155,7 @@ def test_webui_refusal_keeps_its_webui_only_wording():
         "interrupt the active runs."
     )
     assert "Gateway" not in message
+    assert "gateway_restart_managed" not in result
 
 
 def test_agent_update_refusal_reaches_the_caller_with_both_run_types(tmp_path, monkeypatch):
@@ -97,6 +170,9 @@ def test_agent_update_refusal_reaches_the_caller_with_both_run_types(tmp_path, m
     monkeypatch.setattr(upd, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(upd, "_AGENT_DIR", tmp_path)
     monkeypatch.setattr(upd, "_run_git", lambda *a, **k: ("", True))
+    monkeypatch.setattr(
+        upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": True}
+    )
     monkeypatch.setattr(
         upd,
         "_schedule_restart",
@@ -144,6 +220,10 @@ def _forced_update(monkeypatch, target):
 def test_forced_agent_update_log_names_both_run_types(monkeypatch, caplog):
     import api.updates as upd
 
+    monkeypatch.setattr(
+        upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": True}
+    )
+
     with caplog.at_level(logging.WARNING, logger=upd.logger.name):
         result = _forced_update(monkeypatch, "agent")
 
@@ -156,6 +236,27 @@ def test_forced_agent_update_log_names_both_run_types(monkeypatch, caplog):
     # cycle and are settled afterwards by the worker teardown/watchdog.
     assert "settled as interrupted" in text
     assert "Gateway cycles" in text
+
+
+def test_forced_agent_update_log_when_gateway_unmanaged(monkeypatch, caplog):
+    import api.updates as upd
+
+    monkeypatch.setattr(
+        upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": False}
+    )
+
+    with caplog.at_level(logging.WARNING, logger=upd.logger.name):
+        result = _forced_update(monkeypatch, "agent")
+
+    assert result == {"ok": True}
+    text = " ".join(record.getMessage() for record in caplog.records)
+    assert (
+        "Forced agent update with 3 active run(s) (WebUI and Gateway); "
+        "the WebUI runs are settled as interrupted before the restart, "
+        "and the Gateway runs keep running because the Gateway is managed "
+        "outside the WebUI"
+    ) in text
+    assert "Gateway cycles" not in text
 
 
 def test_forced_webui_update_log_does_not_claim_gateway_runs_stop(monkeypatch, caplog):
@@ -240,11 +341,32 @@ def test_every_locale_has_the_agent_message_key(locale_messages):
     assert len(locale_messages["order"]) == 15
 
 
+def test_every_locale_has_the_agent_external_message_key(locale_messages):
+    missing = [
+        code
+        for code, keys in locale_messages["messages"].items()
+        if keys["update_force_active_runs_message_agent_external"] is None
+    ]
+    assert missing == [], f"locales without update_force_active_runs_message_agent_external: {missing}"
+    assert len(locale_messages["order"]) == 15
+
+
 def test_agent_confirm_message_names_both_run_types_in_every_locale(locale_messages):
     failures = []
     for code, keys in locale_messages["messages"].items():
         for index, count in ((0, 1), (1, 2)):
             message = keys["update_force_active_runs_message_agent"][index]
+            for kind in BOTH_RUN_TYPES:
+                if kind not in message:
+                    failures.append(f"{code} (n={count}): missing {kind!r} -> {message!r}")
+    assert failures == [], "\n".join(failures)
+
+
+def test_agent_external_confirm_message_names_both_run_types_in_every_locale(locale_messages):
+    failures = []
+    for code, keys in locale_messages["messages"].items():
+        for index, count in ((0, 1), (1, 2)):
+            message = keys["update_force_active_runs_message_agent_external"][index]
             for kind in BOTH_RUN_TYPES:
                 if kind not in message:
                     failures.append(f"{code} (n={count}): missing {kind!r} -> {message!r}")
@@ -263,6 +385,18 @@ def test_agent_confirm_message_differs_from_the_webui_one_in_every_locale(locale
     assert identical == [], f"locales where the Agent copy is the WebUI copy: {identical}"
 
 
+def test_agent_external_confirm_message_differs_from_managed_in_every_locale(locale_messages):
+    """The external Agent copy must differ from the managed Agent copy in every locale."""
+
+    identical = [
+        code
+        for code, keys in locale_messages["messages"].items()
+        if keys["update_force_active_runs_message_agent_external"]
+        == keys["update_force_active_runs_message_agent"]
+    ]
+    assert identical == [], f"locales where external copy is managed copy: {identical}"
+
+
 def test_agent_confirm_message_reports_the_run_count(locale_messages):
     """Every locale interpolates N — a message that drops it loses the context."""
 
@@ -270,6 +404,18 @@ def test_agent_confirm_message_reports_the_run_count(locale_messages):
     for code, keys in locale_messages["messages"].items():
         for index, count in ((0, 1), (1, 2)):
             message = keys["update_force_active_runs_message_agent"][index]
+            if str(count) not in message:
+                missing_count.append(f"{code} (n={count}): {message!r}")
+    assert missing_count == [], "\n".join(missing_count)
+
+
+def test_agent_external_confirm_message_reports_the_run_count(locale_messages):
+    """Every locale interpolates N — a message that drops it loses the context."""
+
+    missing_count = []
+    for code, keys in locale_messages["messages"].items():
+        for index, count in ((0, 1), (1, 2)):
+            message = keys["update_force_active_runs_message_agent_external"][index]
             if str(count) not in message:
                 missing_count.append(f"{code} (n={count}): {message!r}")
     assert missing_count == [], "\n".join(missing_count)

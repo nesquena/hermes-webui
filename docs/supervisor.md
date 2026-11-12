@@ -74,8 +74,8 @@ of the default. The server prints the effective value at startup
 before it falls back to ``SIGKILL``.
 
 Updates started from the WebUI's update banner follow the same rule from the
-other side: while active runs are being interrupted the update is refused with
-the run count, and the banner offers an explicit **Update anyway (interrupts N
+other side: while agent runs are active the update is refused with the run
+count, and the banner offers an explicit **Update anyway (interrupts N
 runs)**. That update settles those runs as interrupted before the server
 re-executes itself.
 
@@ -83,13 +83,14 @@ Which runs the count covers depends on the target:
 
 - **WebUI update:** only WebUI-owned work blocks, so a resumable Gateway run is
   not counted and keeps running across the restart (#7293).
-- **Agent update:** the update also cycles the Hermes Gateway
-  (``_ensure_gateway_restart_for_agent_update``), which ends the resumable
-  Gateway runs a WebUI restart would reattach. Every live run blocks, and the
-  refusal says so. The WebUI runs are settled as interrupted before the
-  re-exec; the Gateway runs end with the Gateway cycle and the worker teardown
-  and the watchdog settle them afterwards, so a forced Agent update leaves no
-  turn silently unfinished.
+- **Agent update:** every live run blocks (WebUI and Gateway), but what happens
+  to Gateway runs depends on lifecycle ownership. A managed Gateway is cycled
+  (``_ensure_gateway_restart_for_agent_update``) and its runs end with the
+  cycle; the WebUI runs are settled as interrupted before the re-exec and the
+  worker teardown and watchdog settle the Gateway runs afterwards. An unmanaged
+  Gateway (``managed: false``) is not restarted, nothing is launched, the
+  Agent checkout still updates and its runs keep running; only the WebUI runs
+  are interrupted on a forced update.
 
 ### The supervisor's stop timeout must outlast the drain
 

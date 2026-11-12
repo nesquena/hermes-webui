@@ -448,6 +448,45 @@ def test_agent_target_confirmation_names_the_gateway_runs_too(tmp_path):
     ]
 
 
+def test_agent_target_confirmation_external_gateway_wording(tmp_path):
+    """#8746: when Gateway is unmanaged, confirmation dialog uses external copy."""
+
+    out = _run(
+        {
+            "entry": "apply",
+            "target": "agent",
+            "updateData": _AGENT_BEHIND,
+            "responses": [
+                _refusal(2, target="agent", gateway_restart_managed=False),
+                {"ok": True, "target": "agent"},
+            ],
+            "clickOffer": True,
+            "confirmAnswers": [True],
+        },
+        tmp_path,
+    )
+    assert out["afterRefusal"]["offer"]["label"] == "Update anyway (interrupts 2 runs)"
+    assert out["confirmCalls"] == [
+        {
+            "title": "Interrupt active runs?",
+            "message": (
+                "2 agent runs are still working in the WebUI and in the Gateway. "
+                "The Gateway for this profile is managed outside the WebUI, so "
+                "updating the Agent does not restart it and those Gateway runs "
+                "keep running; the WebUI runs are saved as interrupted. Wait "
+                "for them to finish if you can."
+            ),
+            "confirmLabel": "Interrupt and update",
+            "danger": True,
+            "focusCancel": True,
+        }
+    ]
+    assert out["apiCalls"] == [
+        {"url": "/api/updates/apply", "body": {"target": "agent"}},
+        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True}},
+    ]
+
+
 def test_webui_target_confirmation_keeps_the_webui_only_copy(tmp_path):
     """The #7293 copy is unchanged for a WebUI update (Gateway runs survive)."""
 
