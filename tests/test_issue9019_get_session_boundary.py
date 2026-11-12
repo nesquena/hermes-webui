@@ -655,3 +655,75 @@ def test_handoff_summary_never_writes_into_a_swapped_session(store, tmp_path, mo
     assert replies and replies[0][1] == 400, replies
     assert own_rows() == 24
     assert _files(store) == before
+
+
+# --- GET routes with a state.db fallback (independent review: G1, G2) ------------------------------
+# GET /api/session claimed or synthesized a CLI session over the refused file (200 with a writable-looking
+# stub); /api/list and /api/git-info fell back to the state.db workspace. Each must answer 404 before its
+# KeyError fallback runs.
+
+
+def _get(monkeypatch, path):
+    """``handle_get`` end to end; returns (kind, status, payload) replies."""
+    import api.routes as routes
+
+    replies = []
+
+    def _status(args, kwargs, default):
+        return kwargs.get("status", args[0] if args else default)
+
+    monkeypatch.setattr(routes, "j", lambda _h, obj, *a, **k: replies.append(("j", _status(a, k, 200), obj)) or True)
+    monkeypatch.setattr(
+        routes, "bad", lambda _h, msg, *a, **k: replies.append(("bad", _status(a, k, 400), msg)) or True,
+    )
+
+    class _GetHandler:
+        headers = {}
+        command = "GET"
+        client_address = ("127.0.0.1", 0)
+
+    handler = _GetHandler()
+    handler.path = path
+    routes.handle_get(handler, urlparse(path))
+    return replies
+
+
+def _recording_state_db_lookup(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    lookups = []
+    row = {"session_id": OWN, "title": "Own", "profile": "default", "source_tag": "cli", "workspace": str(tmp_path)}
+
+    def lookup(sid, **_k):
+        lookups.append(sid)
+        return dict(row) if sid == OWN else {}
+
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lookup)
+    return lookups
+
+
+def test_get_session_never_claims_a_cli_session_over_the_replaced_file(store, monkeypatch):  # noqa: F811
+    _victim(store)
+    _own(store)
+    _swap_while_open(store)
+    before = _files(store)
+    claims = _foreign_state_rows(monkeypatch)
+
+    replies = _get(monkeypatch, f"/api/session?session_id={OWN}")
+
+    assert claims == []
+    assert replies == NOT_FOUND, replies
+    assert _files(store) == before
+
+
+@pytest.mark.parametrize("path", ["/api/list", "/api/git-info"])
+def test_workspace_routes_never_fall_back_to_state_db_for_a_replaced_file(store, tmp_path, monkeypatch, path):  # noqa: F811
+    _victim(store)
+    _own(store)
+    _swap_while_open(store)
+    lookups = _recording_state_db_lookup(monkeypatch, tmp_path)
+
+    replies = _get(monkeypatch, f"{path}?session_id={OWN}")
+
+    assert lookups == [], "the state.db fallback ran for a refused id"
+    assert replies == NOT_FOUND, replies

@@ -17949,6 +17949,12 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         if _diag: _diag.finish()
         return resp
+    except SessionFileNamesOtherSession:
+        # #9019: the file names another session, so this id is not found. Never
+        # fall through to the KeyError branch below, which claims or synthesizes
+        # a CLI session over the refused file.
+        if _diag: _diag.finish()
+        return bad(handler, "Session not found", 404)
     except KeyError:
         # perf(webui/session-load-latency) tier2c-followup: fire
         # _diag.finish() in the exception branch too. Greptile flagged
@@ -18975,6 +18981,8 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "session_id required")
         try:
             workspace = get_session(sid).workspace
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
         except KeyError:
             # state.db-only sessions (CLI, delegated subagents): same fallback as /api/list.
             cli_meta = _lookup_cli_session_metadata(sid)
@@ -24324,6 +24332,8 @@ def _handle_list_dir(handler, parsed):
         s = get_session(sid)
         webui_session = s
         workspace = s.workspace
+    except SessionFileNamesOtherSession:
+        return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory. Resolved through
         # the same lookup as open/pin/rename, so a session outside the default
