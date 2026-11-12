@@ -77,6 +77,7 @@ eval(extractFunc('_stripWorkspaceDisplayPrefix'));
 eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
 eval(extractFunc('_messageIsRenderable'));
 eval(extractFunc('_getVisibleMessagesWithIdx'));
+eval(extractFunc('_topbarLoadedMessageCount'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
 
 const wakeup = {
@@ -92,6 +93,22 @@ S.messages = [
 ];
 
 const visible = _getVisibleMessagesWithIdx();
+const delegated = {role:'user',content:'internal delegation instructions',_source:'delegation_wakeup'};
+const attachmentDelegated = {role:'user',content:'',attachments:[{name:'internal.txt'}],_source:'delegation_wakeup'};
+S.messages = [S.messages[0], delegated, wakeup, attachmentDelegated, S.messages[2]];
+const delegatedVisible = _getVisibleMessagesWithIdx();
+// Simulate a paginated prepend (new array) and virtualized head/tail slices.
+S.messages = [
+  {role:'user',content:'older human question'},
+  {role:'user',content:'older private wakeup',_source:'delegation_wakeup'},
+  ...S.messages,
+];
+const pagedVisible = _getVisibleMessagesWithIdx();
+const virtualHead = pagedVisible.slice(0,2).map(e=>e.rawIdx);
+const virtualTail = pagedVisible.slice(-2).map(e=>e.rawIdx);
+// Reload replaces message objects at the same length, so the cache must rebuild.
+S.messages = S.messages.map(m=>({...m}));
+const reloadedVisible = _getVisibleMessagesWithIdx().map(e=>e.rawIdx);
 const turns = [];
 let current = [];
 for(const entry of visible){
@@ -129,6 +146,12 @@ process.stdout.write(JSON.stringify({
   virtualHeight,
   attachmentOnlyRenderable: _messageIsRenderable(attachmentOnlyWakeup),
   strippedWakeupDisplay: _stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(markerWakeupContent)),
+  delegatedVisible: delegatedVisible.map(e=>[e.rawIdx,e.m._source||'',e.m.content]),
+  delegatedRenderable: _messageIsRenderable(delegated),
+  attachmentDelegatedRenderable: _messageIsRenderable(attachmentDelegated),
+  retainedInState: S.messages.some(m=>m._source==='delegation_wakeup'),
+  visibleTopbarCount: _topbarLoadedMessageCount(),
+  pagedVisible: pagedVisible.map(e=>e.rawIdx), virtualHead, virtualTail, reloadedVisible,
 }));
 """
 
@@ -174,6 +197,63 @@ def test_attachment_only_process_wakeup_is_visible_and_display_markers_are_strip
 
     assert result["attachmentOnlyRenderable"] is True
     assert result["strippedWakeupDisplay"] == "Visible wakeup text"
+
+
+def test_delegation_wakeup_is_only_hidden_from_visible_projection():
+    result = _run_driver()
+    assert result["delegatedRenderable"] is False
+    assert result["attachmentDelegatedRenderable"] is False
+    assert result["retainedInState"] is True
+    assert result["visibleTopbarCount"] == 4
+    assert result["delegatedVisible"] == [
+        [0, "", "previous assistant report"],
+        [2, "process_wakeup", "[IMPORTANT: Background process proc_123 completed (exit_code=0).\nCommand: sleep 1\nOutput:\ndone]"],
+        [4, "", "assistant response to wakeup"],
+    ]
+    assert result["pagedVisible"] == [0, 2, 4, 6]
+    assert result["virtualHead"] == [0, 2]
+    assert result["virtualTail"] == [4, 6]
+    assert result["reloadedVisible"] == [0, 2, 4, 6]
+
+
+def test_delegation_wakeup_not_in_export_or_provisional_title():
+    driver = _DRIVER.split("const wakeup = {")[0] + r"""
+const messageSrc=fs.readFileSync(process.argv[2], 'utf8');
+// The extraction helper reads src; use a local shadow for the two messages.js functions.
+function extractMessageFunc(name){
+  return extractFuncFromSource(messageSrc,name);
+}
+function extractFuncFromSource(source,name){
+  const start=source.indexOf('function '+name);
+  const brace=source.indexOf('{',start);
+  let depth=0;
+  for(let i=brace;i<source.length;i++){
+    if(source[i]==='{') depth++;
+    else if(source[i]==='}'&&!--depth) return source.slice(start,i+1);
+  }
+  throw new Error(name+' not found');
+}
+eval(extractMessageFunc('transcript'));
+eval(extractMessageFunc('_firstUserMessageTitleCandidate'));
+S.session={session_id:'session-1',workspace:'test',model:'test'};
+S.messages=[
+  {role:'user',content:'SECRET INTERNAL HANDOFF',_source:'delegation_wakeup'},
+  {role:'user',content:'visible human question'},
+  {role:'user',content:'ordinary process event',_source:'process_wakeup'},
+  {role:'assistant',content:'visible reply'},
+];
+process.stdout.write(JSON.stringify({exported:transcript(),title:_firstUserMessageTitleCandidate(),retained:S.messages.length}));
+"""
+    assert NODE is not None
+    proc = subprocess.run([NODE, "-e", driver, str(UI_JS_PATH), str(ROOT / "static" / "messages.js")], text=True,
+                          capture_output=True, timeout=30, check=False)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert "SECRET INTERNAL HANDOFF" not in result["exported"]
+    assert "ordinary process event" in result["exported"]
+    assert "visible human question" in result["exported"]
+    assert result["title"] == "visible human question"
+    assert result["retained"] == 4
 
 
 def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():

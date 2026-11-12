@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 import api.paths as _paths
+from api import startup as _startup
 from api.plugin_providers import (
     effective_provider_display_name as _effective_provider_display_name,
     is_plugin_model_provider as _is_plugin_model_provider,
@@ -49,6 +50,189 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 # ── Network config (env-overridable) ─────────────────────────────────────────
 HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
+
+
+def _natural_model_id_key(_m, _provider_id: str = ""):
+    r"""Locale-independent natural sort key for model ids (#7528 round-4).
+
+    Contract shared with the frontend ``_compareModelPickerEntries`` in
+    ``static/ui.js``: no localeCompare, no browser collation — both sides run
+    the identical token algorithm so ordering is deterministic across Python
+    and JS boundaries:
+
+    1. lowercase the id;
+    2. strip ONE provider-routing ``@<provider>:`` segment when the exact
+       provider id is known — a named custom provider such as
+       ``custom:abc`` must strip the FULL ``@custom:abc:`` prefix so the
+       underlying model id is compared (``@custom:abc:z-model`` →
+       ``z-model``), matching the frontend's provider-aware branch. Without
+       the provider id we fall back to a single leading ``@...:`` strip so
+       bare routing prefixes still collapse to the model id;
+    3. split into ASCII digit runs and text runs (``[0-9]+|[^0-9]+`` — ASCII
+       on purpose so JS ``/\d+/`` and Python agree on what counts as a digit;
+       Arabic-Indic ٢ etc. stay in the text run);
+    4. digit run vs digit run: compare numeric value (strip leading zeros,
+       compare core length then core text), tie-break by raw run text so
+       ``007`` vs ``7`` is deterministic;
+    5. text run vs text run: compare Unicode code points;
+    6. digit run sorts before text run at the same position;
+    7. shorter run list sorts first when prefix-identical.
+
+    ``model-2`` sorts before ``model-10`` while plain lexical sort would emit
+    ``model-10`` first. The returned key is a comparable wrapper, so callers
+    keep using ``sort(key=_natural_model_id_key)`` unchanged.
+
+    The key is ONLY the routing-stripped id. A bare id and its routed twin
+    (``a-model`` vs ``@custom:abc:a-model``) strip to the same value and
+    therefore compare EQUAL here, so Python's stable sort preserves input
+    order. That is deliberate: the picker's provider-aware tie-break sorts
+    routed-first, and matching it here WOULD flip the API order — the two
+    boundaries disagree only for this pair, which the final picker dedups
+    away, so there is no visible row either way. See
+    ``test_provider_aware_tie_is_left_equal_by_design``.
+    """
+    return _NaturalModelKey(
+        _natural_model_routing_stripped(str((_m or {}).get("id") or ""), _provider_id)
+    )
+
+
+def _natural_model_routing_stripped(value, _provider_id: str = "") -> str:
+    """Strip one leading ``@<provider>:`` routing segment.
+
+    When ``_provider_id`` is supplied AND the value carries that exact
+    routing prefix (case-insensitive), the FULL ``@<provider>:`` segment is
+    removed. This mirrors the frontend ``_modelPickerSortableId`` provider-
+    aware branch: a named custom provider id like ``custom:abc`` must strip
+    ``@custom:abc:`` (not just the first colon) so the underlying model id
+    is what gets compared, with the api and the picker agreeing on order
+    for mixed bare / @custom:<name>:routed entries (review blocker 2,
+    2026-09-19). When the prefix doesn't match (e.g. a legacy alias) or no
+    provider is given, drop a single leading ``@...:`` segment so the common
+    routing shapes still collapse cleanly.
+    """
+    _s = str(value or "")
+    if _s.startswith("@"):
+        _pid = str(_provider_id or "").strip()
+        if _pid:
+            _prefix = "@" + _pid + ":"
+            if _s[: len(_prefix)].lower() == _prefix.lower():
+                return _s[len(_prefix):]
+        colon = _s.find(":")
+        if colon >= 0:
+            return _s[colon + 1:]
+    return _s
+
+
+def _natural_model_key_runs(text: str) -> list:
+    # ASCII-only digit definition; see _natural_model_id_key docstring. Using
+    # an explicit [0-9] class guarantees the Python side agrees with the JS
+    # /\d+/ (ASCII) so the two runtime comparators tokenize identically for
+    # every input — including non-ASCII decimal digits such as Arabic-Indic
+    # U+0662, which must fall into the text run on both sides (review
+    # blocker 3, 2026-09-19).
+    return re.findall(r"[0-9]+|[^0-9]+", str(text or "").lower())
+
+
+class _NaturalModelKey:
+    """Hash-free, comparison-only sort key implementing the shared contract."""
+
+    __slots__ = ("_runs",)
+
+    def __init__(self, value):
+        self._runs = _natural_model_key_runs(value)
+
+    @staticmethod
+    def _is_digit_run(run: str) -> bool:
+        """True when the run is ASCII digits ONLY.
+
+        ``str.isdigit()`` is Unicode-aware and returns True for non-ASCII
+        decimal digits (Arabic-Indic U+0662, Devanagari, fullwidth), which is
+        exactly where the shared contract says text. The JS side classifies
+        with ``/^\\d+$/`` (ASCII), so a run of ``٢`` was numeric here but text
+        there — and two distinct ids like ``model-1٢`` / ``model-1a`` came out
+        in OPPOSITE order in the picker and the api (#7528 re-gate).
+
+        The tokenizer already emits ASCII-only digit runs
+        (``_natural_model_key_runs`` uses ``[0-9]+|[^0-9]+``), so this is
+        belt-and-braces: any digit-looking run reaching here is ASCII by
+        construction, and the classification no longer depends on a Unicode
+        predicate that the JS side cannot replicate.
+        """
+        return bool(run) and all("0" <= ch <= "9" for ch in run)
+
+    @staticmethod
+    def _cmp_runs(a: str, b: str) -> int:
+        a_digit = _NaturalModelKey._is_digit_run(a)
+        b_digit = _NaturalModelKey._is_digit_run(b)
+        if a_digit and b_digit:
+            a_core = a.lstrip("0") or "0"
+            b_core = b.lstrip("0") or "0"
+            if len(a_core) != len(b_core):
+                return -1 if len(a_core) < len(b_core) else 1
+            if a_core != b_core:
+                return -1 if a_core < b_core else 1
+            if a != b:
+                return -1 if a < b else 1
+            return 0
+        if not a_digit and not b_digit:
+            for ca, cb in zip(a, b, strict=False):
+                if ord(ca) != ord(cb):
+                    return -1 if ord(ca) < ord(cb) else 1
+            if len(a) != len(b):
+                return -1 if len(a) < len(b) else 1
+            return 0
+        return -1 if a_digit else 1
+
+    def _cmp(self, other) -> int:
+        common = min(len(self._runs), len(other._runs))
+        for i in range(common):
+            c = self._cmp_runs(self._runs[i], other._runs[i])
+            if c:
+                return c
+        if len(self._runs) != len(other._runs):
+            return -1 if len(self._runs) < len(other._runs) else 1
+        return 0
+
+    def __lt__(self, other):
+        return self._cmp(other) < 0
+
+    def __le__(self, other):
+        return self._cmp(other) <= 0
+
+    def __gt__(self, other):
+        return self._cmp(other) > 0
+
+    def __ge__(self, other):
+        return self._cmp(other) >= 0
+
+    def __eq__(self, other):
+        return isinstance(other, _NaturalModelKey) and self._cmp(other) == 0
+
+
+def _sort_picker_group_models(group: dict) -> None:
+    """Apply the natural model sort WHERE it belongs (#7528 owner option B).
+
+    Custom / aggregator groups (``custom``, ``custom:<name>``) arrive in
+    machine insertion order (New-API style gateways with 50+ ids), so their
+    ``models`` are natural-sorted whole. Built-in providers keep their
+    curated catalog order in ``models`` (newest-first lists such as OpenAI's
+    stay newest-first). Every group's ``extra_models`` overflow tail is
+    machine-provided and natural-sorted, so the API order matches the
+    picker's Show-more order. Mirrors the frontend policy in ``static/ui.js``
+    (``_sortModelPickerOptions`` and ``renderModelDropdown``'s
+    ``_orderGroupRows``: custom groups whole, built-in groups only their
+    ``extra`` rows after the curated ones).
+    """
+    provider_id = str(group.get("provider_id") or "")
+    lowered = provider_id.strip().lower()
+    is_custom = lowered == "custom" or lowered.startswith("custom:")
+    for bucket in ("models", "extra_models") if is_custom else ("extra_models",):
+        rows = group.get(bucket)
+        if isinstance(rows, list) and len(rows) > 1:
+            try:
+                rows.sort(key=lambda _m, _pid=provider_id: _natural_model_id_key(_m, _pid))
+            except Exception:
+                pass
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -122,6 +306,17 @@ logger = logging.getLogger(__name__)
 # short hard cap and graceful degradation.
 CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 5.0
 
+# Attempt-only timeout for a probe that ``_CustomProbeSchedule`` reaches *after*
+# the shared rebuild window is already spent while the foreground caller is still
+# waiting — the narrow hand-off race described on ``next_timeout``. It is NOT a
+# per-probe minimum and NOT a share of the window: by the time it applies the
+# window is already gone, so nothing is being divided out of it, and it can never
+# be handed out on the fair-share path. Not zero, because urllib reads a zero
+# timeout as "non-blocking" and would report a probe that is genuinely still in
+# flight as an instant connection failure. The full per-endpoint cap is reserved
+# for the deliberately out-of-band continuation, never for this state.
+CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS = 0.01
+
 
 def _env_mb_bytes(name: str, default_mb: int) -> int:
     """Parse an optional megabyte environment variable into bytes.
@@ -154,92 +349,30 @@ def _env_mb_bytes(name: str, default_mb: int) -> int:
 
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
-def _discover_agent_dir() -> Path:
-    """
-    Locate the hermes-agent checkout using a multi-strategy search.
-
-    Priority:
-      1. HERMES_WEBUI_AGENT_DIR env var  -- explicit override always wins
-      2. HERMES_HOME / hermes-agent      -- e.g. ~/.hermes/hermes-agent
-      3. Sibling of this repo            -- ../hermes-agent
-      4. Parent of this repo             -- ../../hermes-agent (nested layout)
-      5. Common install paths            -- ~/.hermes/hermes-agent (again as fallback)
-      6. HOME / hermes-agent             -- ~/hermes-agent (simple flat layout)
-    """
-    explicit_override = os.getenv("HERMES_WEBUI_AGENT_DIR")
-    if explicit_override:
-        explicit_path = Path(explicit_override).expanduser().resolve()
-        if explicit_path.exists() and _looks_like_agent_source_root(explicit_path):
-            return explicit_path
-
-    candidates = []
-
-    # 2. HERMES_HOME / hermes-agent
-    hermes_home = os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))
-    candidates.append(Path(hermes_home).expanduser() / "hermes-agent")
-
-    # 3. Sibling: <repo-root>/../hermes-agent
-    candidates.append(REPO_ROOT.parent / "hermes-agent")
-
-    # 4. Parent is the agent repo itself (repo cloned inside hermes-agent/)
-    if _looks_like_agent_source_root(REPO_ROOT.parent):
-        candidates.append(REPO_ROOT.parent)
-
-    # 5. ~/.hermes/hermes-agent (explicit common path)
-    candidates.append(_DEFAULT_HERMES_HOME / "hermes-agent")
-
-    # 6. ~/hermes-agent
-    candidates.append(HOME / "hermes-agent")
-
-    # 7. XDG_DATA_HOME / hermes-agent  (e.g. ~/.local/share/hermes-agent)
-    xdg_data = Path(os.getenv("XDG_DATA_HOME", str(HOME / ".local" / "share")))
-    candidates.append(xdg_data.expanduser() / "hermes-agent")
-
-    # 8. System-wide install paths (e.g. /opt/hermes-agent, /usr/local/hermes-agent)
-    for sys_prefix in ("/opt", "/usr/local", "/usr/local/share"):
-        candidates.append(Path(sys_prefix) / "hermes-agent")
-
-    # Prefer real source checkouts before pip-style roots so lookalikes cannot preempt them.
-    for path in candidates:
-        if path.exists() and (path / "run_agent.py").exists():
-            return path.resolve()
-
-    for path in candidates:
-        if path.exists() and _looks_like_pip_style_agent_source_root(path):
-            return path.resolve()
-
-    return None
-
-
-def _looks_like_agent_source_root(path: Path) -> bool:
-    """Return True when a directory resembles a hermes-agent source root."""
-    if (path / "run_agent.py").exists():
-        return True
-    return _looks_like_pip_style_agent_source_root(path)
-
-
-def _looks_like_pip_style_agent_source_root(path: Path) -> bool:
-    """Return True for pip-style agent roots with a real agent package signal."""
-    if not (path / "cron" / "jobs.py").exists():
-        return False
-    if (path / "hermes").exists():
-        return True
-    hermes_cli_dir = path / "hermes_cli"
-    return (
-        (hermes_cli_dir / "__init__.py").exists()
-        or (hermes_cli_dir / "main.py").exists()
+def _discovery_result():
+    # Same helper managed_agent_startup uses to pick the Agent it activates, so
+    # startup activation and the runtime Agent cannot diverge (#8529).
+    return _startup.discover_runtime_agent_identity(
+        repo_root=REPO_ROOT,
+        default_hermes_home=_DEFAULT_HERMES_HOME,
+        user_home=HOME,
     )
 
 
-def _discover_python(agent_dir: Path) -> str:
+def _discover_agent_dir() -> Path | None:
+    return _discovery_result().agent_dir
+
+
+def _discover_python(agent_dir: Path | None, proven_python: str | None = None) -> str:
     """
     Locate a Python executable that has the Hermes agent dependencies installed.
 
     Priority:
       1. HERMES_WEBUI_PYTHON env var
       2. Agent venv at <agent_dir>/venv/bin/python
-      3. Local .venv inside this repo
-      4. System python3
+      3. Interpreter that proved the Agent root
+      4. Local .venv inside this repo
+      5. System python3
     """
     if os.getenv("HERMES_WEBUI_PYTHON"):
         return os.getenv("HERMES_WEBUI_PYTHON")
@@ -257,10 +390,13 @@ def _discover_python(agent_dir: Path) -> str:
         venv_py_win = agent_dir / "venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
-        
+
         venv_py_win = agent_dir / ".venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
+
+    if proven_python:
+        return proven_python
 
     # Local .venv inside this repo
     for subdir, binary in (("bin", "python"), ("Scripts", "python.exe")):
@@ -280,8 +416,9 @@ def _discover_python(agent_dir: Path) -> str:
 
 
 # Run discovery
-_AGENT_DIR = _discover_agent_dir()
-PYTHON_EXE = _discover_python(_AGENT_DIR)
+_DISCOVERY = _discovery_result()
+_AGENT_DIR = _DISCOVERY.agent_dir
+PYTHON_EXE = _discover_python(_AGENT_DIR, _DISCOVERY.python_exe)
 
 # ── Inject agent dir into sys.path so Hermes modules are importable ──────────
 
@@ -661,6 +798,31 @@ _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
 
+def _detached_copy(value, _active=None):
+    """Deep-copy a parsed YAML tree so every mapping/list OCCURRENCE is its own
+    object. ``copy.deepcopy`` keeps YAML anchor/alias identity (its memo maps a
+    shared node to one copy), so a writer that mutates one aliased slot in a
+    raw write snapshot would silently change every other slot sharing the
+    anchor. The env-expanding reader always produced detached copies; raw
+    write transactions (#8032) must too. A genuinely self-referential node
+    (a recursive alias) keeps deepcopy semantics instead of recursing forever.
+    """
+    if not isinstance(value, (dict, list)):
+        return value
+    if _active is None:
+        _active = set()
+    key = id(value)
+    if key in _active:
+        return copy.deepcopy(value)
+    _active.add(key)
+    try:
+        if isinstance(value, dict):
+            return {k: _detached_copy(v, _active) for k, v in value.items()}
+        return [_detached_copy(v, _active) for v in value]
+    finally:
+        _active.discard(key)
+
+
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
     """Return the RAW (un-env-expanded) parsed config dict, memoized on
     (resolved path, st_mtime_ns, st_size). Shared parse core for
@@ -696,7 +858,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
             raw = cached[1]
             if not isinstance(raw, dict):
                 return {}
-            return copy.deepcopy(raw) if _copy else raw
+            return _detached_copy(raw) if _copy else raw
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
     # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
@@ -709,7 +871,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
-    return copy.deepcopy(raw) if _copy else raw
+    return _detached_copy(raw) if _copy else raw
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
@@ -723,7 +885,87 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
-def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
+_AMBIENT_CONFIG = object()
+
+
+def _profile_home_config_source(
+    profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+):
+    """Pick the config file :func:`get_config_for_profile_home` reads.
+
+    Returns ``_AMBIENT_CONFIG`` for the ambient ``get_config()`` (whose file is
+    ``_get_config_path()``), ``None`` for a missing profile home, or the
+    profile's own ``config.yaml``.
+    """
+    if not profile_home:
+        return _AMBIENT_CONFIG
+    try:
+        target = Path(profile_home).expanduser()
+    except Exception:
+        return _AMBIENT_CONFIG
+
+    from api.workspace import _safe_resolve as _cfg_safe_resolve
+
+    # Canonicalize BOTH sides before every identity comparison (#7168 re-gate
+    # round 5): when HERMES_HOME (or the config parent) is a symlink alias,
+    # lexical equality fails and an authoritative HERMES_CONFIG_PATH inside
+    # the aliased home would be bypassed in favor of a direct — wrong — read.
+    target = _cfg_safe_resolve(target)
+    try:
+        from api.profiles import get_active_hermes_home, get_hermes_home_for_profile
+
+        root_home = _cfg_safe_resolve(get_hermes_home_for_profile("default"))
+        override = os.getenv("HERMES_CONFIG_PATH")
+        # Resolve the folder, not the file: a symlinked config.yaml belongs to the
+        # profile home it sits in, not to wherever its target lives.
+        override_path = None
+        if override:
+            _override_raw = Path(override).expanduser()
+            override_path = _cfg_safe_resolve(_override_raw.parent) / _override_raw.name
+        # An external override is the root profile's config whichever named
+        # profile is process-active, unless it lives under a named profile home.
+        if (
+            isolate_config_override and override_path is not None
+            and target == root_home
+            and not override_path.is_relative_to(_cfg_safe_resolve(root_home / "profiles"))
+        ):
+            return _AMBIENT_CONFIG
+        # Root is handled above; an override under <root>/profiles belongs to
+        # that named profile, never to root, so root must not match it here.
+        override_matches = (
+            not isolate_config_override
+            or override_path is None
+            or (target != root_home and override_path.is_relative_to(target))
+        )
+        active_home = _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser())
+        if override_matches and active_home == target:
+            return _AMBIENT_CONFIG
+    except Exception:
+        pass
+    # If the ambient resolver already points at this profile home, defer to
+    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
+    # MUST run before the nonexistent-home guard below: a matching ambient home
+    # whose directory doesn't physically exist yet (fresh install, monkeypatched
+    # cfg) must still resolve through get_config(), not return {} (#4516 gate).
+    try:
+        # Resolve the parent directory, not the file, so a symlinked config.yaml
+        # still matches its own home (master's comparison).
+        config_parent = _cfg_safe_resolve(_get_config_path().parent)
+        if config_parent == target or (
+            isolate_config_override and target != root_home
+            and config_parent.is_relative_to(target)
+        ):
+            return _AMBIENT_CONFIG
+    except Exception:
+        pass
+    if not target.exists():
+        return None
+    return target / "config.yaml"
+
+
+def get_config_for_profile_home(
+    profile_home: "Path | str | None", *, isolate_config_override: bool = False,
+) -> dict:
     """Return the config dict for an explicit profile home directory.
 
     The streaming agent runs on a detached worker thread that does NOT inherit
@@ -740,53 +982,44 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     the path the ambient resolver would pick (the common single-profile case),
     we return the cached ``get_config()`` to preserve in-memory overrides used
     by tests and runtime callers, and to honour an authoritative
-    ``HERMES_CONFIG_PATH`` override. Only when the session's profile home
-    diverges from the ambient path do we read the session profile's file
+    ``HERMES_CONFIG_PATH`` override. Session defaults and Gateway workers pass
+    ``isolate_config_override=True`` so a named profile never uses an override
+    outside its own home, even when request-local context selects that profile;
+    in that mode the root profile always uses an override that is not under
+    ``<root>/profiles``, whichever named profile is process-active.
+    Settings/workspace callers retain their ambient read/write authority.
+    When the session's profile home diverges from the ambient path or its
+    isolated override check rejects the ambient file, we read the profile file
     directly — a pure read with no global cache mutation, so it is race-free
     across concurrent sessions on different profiles. Divergent profiles stay
     isolated: a nonexistent home returns ``{}`` and an existing home without a
     ``config.yaml`` yields defaults — neither ever falls back to the ambient
     config (profiles-are-islands).
     """
-    if not profile_home:
+    source = _profile_home_config_source(
+        profile_home, isolate_config_override=isolate_config_override
+    )
+    if source is _AMBIENT_CONFIG:
         return get_config()
-    try:
-        target = Path(profile_home).expanduser()
-    except Exception:
-        return get_config()
-
-    from api.workspace import _safe_resolve as _cfg_safe_resolve
-
-    # Canonicalize BOTH sides before every identity comparison (#7168 re-gate
-    # round 5): when HERMES_HOME (or the config parent) is a symlink alias,
-    # lexical equality fails and an authoritative HERMES_CONFIG_PATH inside
-    # the aliased home would be bypassed in favor of a direct — wrong — read.
-    target = _cfg_safe_resolve(target)
-    try:
-        from api.profiles import get_active_hermes_home
-
-        if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
-            return get_config()
-    except Exception:
-        pass
-    # If the ambient resolver already points at this profile home, defer to
-    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
-    # MUST run before the nonexistent-home guard below: a matching ambient home
-    # whose directory doesn't physically exist yet (fresh install, monkeypatched
-    # cfg) must still resolve through get_config(), not return {} (#4516 gate).
-    try:
-        if _cfg_safe_resolve(_get_config_path().parent) == target:
-            return get_config()
-    except Exception:
-        pass
-    if not target.exists():
+    if source is None:
         return {}
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
-    profile_cfg = _load_yaml_config_file(target / "config.yaml")
+    profile_cfg = _load_yaml_config_file(source)
     _apply_config_defaults(profile_cfg)
     return profile_cfg
+
+
+def isolated_profile_config_path(profile_home: "Path | str | None") -> "Path | None":
+    """Return the file ``get_config_for_profile_home(..., isolate_config_override=True)``
+    reads for ``profile_home`` (``None`` when that home does not exist).
+
+    Lets the reasoning-effort chip and its writer use the same file as the
+    isolated readers (session defaults, local and Gateway workers).
+    """
+    source = _profile_home_config_source(profile_home, isolate_config_override=True)
+    return _get_config_path() if source is _AMBIENT_CONFIG else source
 
 
 def _config_for_yaml_save(config_data: dict) -> dict:
@@ -810,6 +1043,54 @@ def _config_for_yaml_save(config_data: dict) -> dict:
         if not agent_cfg:
             data.pop("agent", None)
     return data
+
+
+# ── Config WRITE rule (#8032 / #5619) ─────────────────────────────────────────
+# A config write transaction must read config.yaml with
+# _load_yaml_config_file_raw(), mutate that RAW document and save it. Env
+# expansion (_load_yaml_config_file / get_config) is for READS only: saving an
+# expanded dict writes the resolved secret in place of its ``${VAR}``
+# reference. ``${env:VAR}`` and every other reference form must likewise be
+# saved verbatim. A writer that must COMPARE a stored value against a
+# resolved one expands a copy for the comparison and keeps the raw value; a
+# writer that re-saves a field the UI displayed resolved goes through
+# _preserve_env_ref().
+_ENV_REF_PATTERN = re.compile(r"\$\{[^}]+\}")
+
+
+def _has_env_ref(value) -> bool:
+    """True when *value* is a string holding at least one ``${...}`` reference."""
+    return isinstance(value, str) and _ENV_REF_PATTERN.search(value) is not None
+
+
+def _preserve_env_ref(raw_value, new_value, normalize=None):
+    """Return *raw_value* when it is a ``${VAR}`` reference that currently
+    resolves to *new_value* (after the optional ``normalize``), else *new_value*.
+
+    Lets a writer re-save a value the UI displayed from an env-backed field
+    without baking the resolved value into config.yaml, while a value the user
+    really changed is still written exactly as given (#8032).
+
+    This includes an EMPTY submission: a reference whose variable is set to ""
+    is displayed as "" and re-submitted as "", which is an unchanged field, so
+    the reference is kept rather than dropped.
+    """
+    if not _has_env_ref(raw_value) or not isinstance(new_value, str) or new_value == raw_value:
+        return new_value
+    try:
+        expanded = _expand_env_vars(raw_value)
+        if normalize is not None:
+            same = normalize(expanded) == normalize(new_value)
+        else:
+            same = expanded == new_value
+    except Exception:
+        return new_value
+    return raw_value if same else new_value
+
+
+def _normalize_base_url_for_compare(value) -> str:
+    """Comparison form of a base URL (writers persist it stripped, no trailing /)."""
+    return str(value or "").strip().rstrip("/")
 
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
@@ -1074,6 +1355,10 @@ MIME_MAP = {
     ".pdf": "application/pdf",
     ".zip": "application/zip",
     ".json": "application/json",
+    ".csv": "text/csv",
+    ".diff": "text/x-diff",
+    ".patch": "text/x-diff",
+    ".excalidraw": "application/vnd.excalidraw+json",
     ".html": "text/html",
     ".htm": "text/html",
     ".xls": "application/vnd.ms-excel",
@@ -1409,12 +1694,133 @@ def _custom_provider_slug_from_name(name: object) -> str:
     return "custom:" + slug
 
 
-def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
+def _is_native_custom_provider_key(key: object) -> bool:
+    """Separate custom mapping keys from built-in/plugin provider settings."""
+    if not isinstance(key, str) or not key.strip():
+        return False
+    raw = key.strip().lower()
+    # Registered names preserve underscores; runtime alias folding does not.
+    # Explicit custom:<slug> keys still declare independent named providers.
+    if not raw.startswith("custom:") and _is_plugin_model_provider(raw):
+        return False
+    canonical = _canonicalise_provider_id(key)
+    if canonical == "custom":
+        return False  # generic default-endpoint settings, not a named identity
+    return raw.startswith("custom:") or not (
+        canonical in _PROVIDER_DISPLAY or canonical in _PROVIDER_MODELS
+        or _is_plugin_model_provider(canonical)
+    )
+
+
+def _native_identity_index(native: dict) -> tuple[list, dict, dict, dict]:
+    """One pass over ``providers:`` for :func:`_custom_provider_entries`.
+
+    Maps every alias and slug a record can be named by (the two vocabularies of
+    :func:`_custom_record_names_identity`, from the same ``name or key``
+    expression the selectors use) to the record's position. Built once per view,
+    so resolving N identities costs O(N) instead of rescanning every key per
+    identity, which made the view quadratic in the number of native providers.
+    """
+    items = list(native.items())
+    by_alias: dict[str, set[int]] = {}
+    by_slug: dict[str, set[int]] = {}
+    by_key: dict = {}
+    for pos, (key, record) in enumerate(items):
+        by_key[key] = pos
+        display = (record.get("name") if isinstance(record, dict) else None) or key
+        for alias in _custom_provider_alias_set(display, key):
+            by_alias.setdefault(alias, set()).add(pos)
+        for value in (display, key):
+            if str(value or "").strip():
+                by_slug.setdefault(_custom_provider_slug_key(value), set()).add(pos)
+    return items, by_alias, by_slug, by_key
+
+
+def _native_identity_scope(native: dict, index: tuple, pid: str, slug: str) -> dict:
+    """The ``providers:`` entries that can name ``pid``, in their original order.
+
+    A superset of every key :func:`_native_custom_provider_record` can accept for
+    ``pid`` (its exact key, any record whose name or key carries ``pid`` as an
+    Agent alias, any whose name or key normalizes to ``slug``), so selecting from
+    it gives the same record, the same disabled verdict and the same collision
+    error as selecting from the whole mapping.
+    """
+    items, by_alias, by_slug, by_key = index
+    positions = set(by_alias.get(pid, ())) | set(by_slug.get(slug, ()))
+    if pid in by_key:
+        positions.add(by_key[pid])
+    return dict(items[pos] for pos in sorted(positions))
+
+
+def _custom_provider_entries(
+    config_obj: dict | None = None, *, for_catalog: bool = False,
+) -> list[dict]:
+    """Read-only legacy-shaped view of configured custom providers.
+
+    A missing, empty or malformed legacy store has no legacy winners; native
+    providers are still read, as v0.52.544's catalog and routing did (#8685).
+    In a mixed store legacy identities win. Native mapping keys are
+    identities; their editable names are labels only. Never insert this view
+    into config or use it in place of the complete record during connection
+    selection (``_select_custom_provider_record``). Catalogs retain the older
+    inactive bare models-only exclusion; other metadata readers remain complete.
+    """
     source = config_obj if isinstance(config_obj, dict) else cfg
-    entries = source.get("custom_providers", [])
-    if not isinstance(entries, list):
-        return []
-    return [entry for entry in entries if isinstance(entry, dict)]
+    raw_entries = source.get("custom_providers", [])
+    entries = (
+        [entry for entry in raw_entries if isinstance(entry, dict)]
+        if isinstance(raw_entries, list) else []
+    )
+    native = source.get("providers")
+    if not isinstance(native, dict):
+        return entries
+    seen = {_custom_provider_slug_from_name(entry.get("name")) for entry in entries}
+    index = _native_identity_index(native)
+    for key in native:
+        if not _is_native_custom_provider_key(key):
+            continue
+        identity = _custom_provider_slug_from_name(key)
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        # Use the same exact-key precedence and collision check as runtime;
+        # insertion order must never choose a different native authority.
+        slug = _custom_provider_slug_key(identity)
+        try:
+            record, _disabled = _native_custom_provider_record(
+                _native_identity_scope(native, index, identity, slug), identity, slug,
+            )
+        except AmbiguousCustomProviderError:
+            # Omit only this unusable identity. Explicit routing still validates
+            # its raw authority at the point of return, not during enumeration.
+            continue
+        if record is None:
+            continue
+        model_cfg = source.get("model")
+        active = model_cfg.get("provider") if isinstance(model_cfg, dict) else None
+        explicit_native = key.strip().lower().startswith("custom:") or identity in native
+        if (for_catalog and not explicit_native
+                and _custom_provider_slug_from_name(active) != identity
+                and not _custom_record_owns_connection(record, identity)):
+            # A bare models-only settings block is not a new picker route
+            # (#1970/#5301). Explicit custom: keys still declare native catalogs.
+            continue
+        entry = copy.deepcopy(record)
+        entry["name"] = identity if identity in native else key
+        fallback_label = key if explicit_native else key.replace("-", " ").title()
+        entry["display_name"] = str(record.get("name") or fallback_label).strip()
+        # Native records are hand-edited config; only a string names a default
+        # model in the legacy-shaped view. A non-string ``model`` / ``default_model``
+        # (``model: 42``) must not reach consumers that call ``.strip()`` on it:
+        # it crashed resolution for UNRELATED providers (@openai:...), which
+        # v0.52.544 resolved (#8685 gate).
+        model = entry.get("model")
+        if not isinstance(model, str) or not model.strip():
+            default_model = record.get("default_model")
+            model = default_model if isinstance(default_model, str) else ""
+        entry["model"] = model
+        entries.append(entry)
+    return entries
 
 
 def _configured_model_ids(raw_models: object) -> list[str]:
@@ -1488,6 +1894,17 @@ def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
     ]
 
 
+def _configured_model_explicit_labels(raw_models: object) -> dict[str, str]:
+    """Read explicit labels without changing custom catalogs' fallback labels."""
+    if not isinstance(raw_models, list):
+        return {}
+    labelled = [
+        row for row in raw_models
+        if isinstance(row, dict) and str(row.get("label") or "").strip()
+    ]
+    return {row["id"]: row["label"] for row in _configured_model_options(labelled)}
+
+
 def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
     """Merge picker option rows from multiple sources, first-seen order, deduped by id.
 
@@ -1530,14 +1947,150 @@ def _named_custom_provider_slug_for_provider(
     if not raw:
         return ""
     raw_suffix = raw.removeprefix("custom:")
+    # A bare built-in or plugin id (``openai``) is claimed only by a legacy
+    # ``custom_providers`` entry of that name, as on v0.52.544. A native
+    # ``providers['custom:openai']`` record needs the explicit ``custom:openai``
+    # selector; WebUI selector resolution never hands it the bare built-in
+    # route (#8685). The Agent's own runtime resolution is order-dependent
+    # downstream of this (#8690).
+    legacy_only = _is_bare_builtin_provider_id(raw)
+    legacy_names = _legacy_custom_provider_names(config_obj) if legacy_only else set()
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
         slug = _custom_provider_slug_from_name(entry_name)
         if not entry_name or not slug:
             continue
+        if legacy_only and entry_name not in legacy_names:
+            continue
         if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
             return slug
     return ""
+
+
+def _legacy_custom_provider_names(config_obj: dict | None = None) -> set[str]:
+    """Lower-cased names of the legacy ``custom_providers`` list entries."""
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    raw_entries = source.get("custom_providers", [])
+    if not isinstance(raw_entries, list):
+        return set()
+    return {
+        str(entry.get("name") or "").strip().lower()
+        for entry in raw_entries
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+    }
+
+
+def _is_bare_builtin_provider_id(provider: object) -> bool:
+    """Whether a bare (non-``custom:``) id names a built-in or plugin provider.
+
+    Such an id is claimed only by a legacy ``custom_providers`` entry of that
+    name, never by a native ``providers['custom:<id>']`` record (#8685, #8816).
+
+    ``_is_native_custom_provider_key`` alone decides plugin-backed built-ins from
+    the plugin registry, so with plugin discovery unavailable the Agent's
+    canonical ``xai`` (WebUI's tables say ``x-ai``) read as a native custom key,
+    and a bare xAI session took the ``custom:xai`` record's endpoint and key
+    (#8816). A static-table built-in is therefore also matched through the
+    provider alias table, independent of plugin discovery.
+    """
+    raw = str(provider or "").strip().lower()
+    if not raw or raw.startswith("custom:"):
+        return False
+    if not _is_native_custom_provider_key(raw):
+        return True
+
+    targets = _provider_id_forms(raw)
+    # A registered plugin reached through an alias (``fw`` -> ``fireworks``).
+    if any(_is_plugin_model_provider(t) for t in targets):
+        return True
+    # A built-in from WebUI's tables or the Agent's own provider catalog, so the
+    # answer doesn't depend on WebUI's plugin discovery (``fireworks`` is in the
+    # Agent catalog but not in WebUI's tables).
+    return bool(targets & _known_builtin_provider_forms())
+
+
+def _provider_id_forms(value: object) -> set[str]:
+    """A provider id's spellings: itself, ``_`` as ``-``, and each one's alias target."""
+    value = str(value or "").strip().lower()
+    forms = {value, value.replace("_", "-")}
+    forms |= {str(_resolve_provider_alias(f) or f).strip().lower() for f in tuple(forms)}
+    # The generic ``custom`` target (Agent aliases ollama/local/vllm -> custom;
+    # catalog slug ``custom``) is a placeholder, not a provider identity: a
+    # bare ``vllm`` with its own ``custom:vllm`` record keeps that route, as on
+    # .630. A raw ``custom`` id never reaches here (the caller returns first).
+    return {f for f in forms if f and f != "custom"}
+
+
+# (key, forms) for _known_builtin_provider_forms; replaced whole, never mutated.
+_KNOWN_BUILTIN_FORMS_CACHE: tuple[tuple, frozenset[str]] | None = None
+
+
+def _known_builtin_provider_forms() -> frozenset[str]:
+    """Every spelling of every built-in id WebUI knows: its tables plus the Agent catalog.
+
+    Rebuilding this for each unknown bare custom name made ``resolve_model_provider``
+    up to ~6x slower (#8816, round 7). The cache key is everything the result
+    depends on: the Agent's and WebUI's alias tables (by content), WebUI's provider
+    tables (by key) and the Agent catalog's entries. Any change rebuilds it, so a
+    stale answer is never served.
+    """
+    global _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+
+        agent_aliases = tuple(_agent_aliases.items()) if isinstance(_agent_aliases, dict) else ()
+    except Exception:
+        agent_aliases = ()
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS as _catalog
+
+        # The entries (NamedTuples in every Agent so far) themselves, not their slugs:
+        # plugin admission inserts entries at runtime, which changes this tuple, and
+        # comparing it short-circuits on identity, so the slug walk below runs only
+        # when the catalog changed.
+        catalog_key = tuple(_catalog or ())
+    except Exception:
+        catalog_key = ()
+    key = (
+        agent_aliases,
+        tuple(_PROVIDER_ALIASES.items()),
+        tuple(_PROVIDER_DISPLAY),
+        tuple(_PROVIDER_MODELS),
+        catalog_key,
+    )
+    cached = _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        if cached is not None and cached[0] == key:
+            return cached[1]
+    except Exception:
+        pass  # an entry type whose comparison raises: rebuild
+    known = [k for k in (*_PROVIDER_DISPLAY, *_PROVIDER_MODELS) if isinstance(k, str)]
+    known.extend(_agent_builtin_provider_ids())
+    forms = frozenset(form for k in known for form in _provider_id_forms(k))
+    _KNOWN_BUILTIN_FORMS_CACHE = (key, forms)
+    return forms
+
+
+def _agent_builtin_provider_ids() -> tuple[str, ...]:
+    """Provider slugs in the Agent's canonical catalog, or ``()`` when the Agent
+    (or an older Agent without the catalog) isn't importable, or the catalog has
+    a shape this WebUI doesn't know. Never raises into routing."""
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS
+
+        slugs = []
+        for entry in CANONICAL_PROVIDERS or ():
+            if isinstance(entry, str):
+                slug = entry
+            else:
+                slug = getattr(entry, "slug", None)
+                if slug is None and isinstance(entry, (tuple, list)) and entry:
+                    slug = entry[0]
+            if isinstance(slug, str) and slug.strip():
+                slugs.append(slug.strip().lower())
+        return tuple(slugs)
+    except Exception:
+        return ()
 
 
 def _resolve_configured_provider_id(
@@ -1546,6 +2099,7 @@ def _resolve_configured_provider_id(
     *,
     base_url: object = None,
     resolve_alias: bool = True,
+    model_id: str | None = None,
 ) -> str:
     """Normalize a configured provider id.
 
@@ -1568,7 +2122,9 @@ def _resolve_configured_provider_id(
     if not resolve_alias:
         raw = str(provider or "").strip().lower()
         if base_url and raw == "custom":
-            by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+            by_base_url = _named_custom_provider_slug_for_base_url(
+                base_url, config_obj, model_id=model_id
+            )
             if by_base_url:
                 return by_base_url
         return str(provider or "")
@@ -1578,7 +2134,9 @@ def _resolve_configured_provider_id(
         base_url
         and str(resolved or "").strip().lower() == "custom"
     ):
-        by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+        by_base_url = _named_custom_provider_slug_for_base_url(
+            base_url, config_obj, model_id=model_id
+        )
         if by_base_url:
             return by_base_url
 
@@ -1610,7 +2168,12 @@ def _canonicalise_provider_id(name: object) -> str:
     """
     if not name:
         return ""
-    raw = str(name).strip().lower().replace("_", "-")
+    raw = str(name).strip().lower()
+    if raw.startswith("custom:"):
+        # This namespace is already minted by _custom_provider_slug_from_name;
+        # folding underscores would disconnect catalog IDs from raw selection.
+        return raw
+    raw = raw.replace("_", "-")
     if not raw:
         return ""
     # Already a canonical id known to _PROVIDER_DISPLAY/_PROVIDER_MODELS:
@@ -1710,19 +2273,54 @@ def _lookup_custom_api_key_env(provider_id: object) -> str | None:
     return None
 
 
+def _custom_provider_entry_owns_model(entry: dict, model_id: str) -> bool:
+    """True when a ``custom_providers[]`` entry declares ``model_id`` itself.
+
+    Ownership is by declaration, not substring: an exact ``model:`` match or a
+    listed id in a pinned ``models:`` allowlist (all shapes via
+    ``_configured_model_ids``). A live discovered catalog is metadata, not a
+    declaration. Used to disambiguate several entries sharing one ``base_url``
+    (#7176): the declaring owner outranks declaration order, and among several
+    declaring owners the first-declared one wins.
+    """
+    model = str(model_id or "").strip()
+    if not model or not isinstance(entry, dict):
+        return False
+    if str(entry.get("model") or "").strip() == model:
+        return True
+    if _provider_models_are_discovered_catalog(entry):
+        return False
+    return model in _configured_model_ids(entry.get("models"))
+
+
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
+    model_id: str | None = None,
 ) -> str:
+    """Slug of the custom_providers[] entry for ``base_url``.
+
+    Several entries may share one ``base_url`` (a gateway fronting several
+    APIs on one host, one entry per ``api_mode`` — #7176). A plain first-match
+    then routes every model through the FIRST-declared entry, producing an
+    opaque 401 for models owned by later entries. When ``model_id`` is given,
+    the entry that declares the model outranks declaration order; otherwise
+    (or when no entry declares it) the historical first-match stands.
+    """
     target = _normalize_base_url_for_match(base_url)
     if not target:
         return ""
+    fallback = ""
     for entry in _custom_provider_entries(config_obj):
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
-    return ""
+        slug = _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        if not fallback:
+            fallback = slug
+        if model_id and _custom_provider_entry_owns_model(entry, model_id):
+            return slug
+    return fallback
 
 
 def _provider_is_known_or_configured(
@@ -2686,6 +3284,20 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
+class _ConfiguredCustomLaneModel(str):
+    """A model id bound to the Custom lane of the configured endpoint (#7955).
+
+    model_with_provider_context() returns it for a ``custom`` session under a
+    configured provider that aliases to ``custom`` (``ollama``, legacy
+    ``local``), and resolve_model_provider() routes it to ``model.base_url``.
+    The lane travels as this type, not as text: every caller passes the value
+    straight from one to the other, and no ``@<provider>:<model>`` string a
+    ``providers.<name>`` entry can produce is an instance of it.
+    """
+
+    __slots__ = ()
+
+
 def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
 
@@ -2793,6 +3405,82 @@ def _custom_provider_slug_key(value: object) -> str:
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
+# Fields _custom_provider_entries() writes on its copy of a native record; every
+# other field of the entry is the normalized record's own.
+_CUSTOM_PROVIDER_ENTRY_VIEW_FIELDS = frozenset({"name", "display_name", "model"})
+
+
+def _raw_custom_provider_url(raw_cfg: dict, exp_cfg: dict, match: dict, url: str) -> str:
+    """Return the raw config text behind the selected custom provider's URL (#8032).
+
+    ``match`` was selected from ``_custom_provider_entries(exp_cfg)``, the
+    env-expanded view, and ``url`` is its resolved base URL. Recover the field of
+    THAT record, never a value search across records:
+
+    * a legacy winner is the very dict from ``exp_cfg["custom_providers"]``;
+      expansion keeps list positions, so its raw twin is at the same index;
+    * a native winner is a normalized copy. Its source record is the one whose
+      ``_normalized_raw_provider_record(record, key)`` equals the entry on every
+      field the entries view copies (the normalizer stamps the record's own
+      config key as ``provider_key``), and the URL field is the one the
+      normalizer read: the first non-empty ``api``/``url``/``base_url`` of the
+      expanded record.
+
+    The raw text is used only when it expands to ``url``. Otherwise, or when the
+    source is not exactly one raw text, return ``url`` itself, which is what
+    master writes. Pure and lock-safe.
+    """
+    want = _normalize_base_url_for_compare(url)
+
+    def _same(raw):
+        if isinstance(raw, str) and raw.strip():
+            if _normalize_base_url_for_compare(_expand_env_vars(raw)) == want:
+                return raw.strip()
+        return None
+
+    if not (isinstance(raw_cfg, dict) and isinstance(exp_cfg, dict)):
+        return url
+    exp_list = exp_cfg.get("custom_providers")
+    raw_list = raw_cfg.get("custom_providers")
+    if isinstance(exp_list, list):
+        for index, entry in enumerate(exp_list):
+            if entry is not match:
+                continue
+            twin = raw_list[index] if (
+                isinstance(raw_list, list) and len(raw_list) == len(exp_list)
+            ) else None
+            return (_same(twin.get("base_url")) if isinstance(twin, dict) else None) or url
+    exp_native = exp_cfg.get("providers")
+    raw_native = raw_cfg.get("providers")
+    if not (isinstance(exp_native, dict) and isinstance(raw_native, dict)):
+        return url
+    found = set()
+    for key, record in exp_native.items():
+        if not isinstance(record, dict) or not record:
+            continue
+        normalized = _normalized_raw_provider_record(record, key)
+        if any(
+            match.get(field) != value
+            for field, value in normalized.items()
+            if field not in _CUSTOM_PROVIDER_ENTRY_VIEW_FIELDS
+        ):
+            continue
+        url_field = next(
+            (
+                field for field in _RAW_PROVIDER_URL_FIELDS
+                if isinstance(record.get(field), str) and record.get(field).strip()
+            ),
+            None,
+        )
+        raw_record = raw_native.get(key)
+        if url_field is None or not isinstance(raw_record, dict):
+            continue
+        raw = _same(raw_record.get(url_field))
+        if raw is not None:
+            found.add(raw)
+    return found.pop() if len(found) == 1 else url
+
+
 def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
     """Return the single named ``custom_providers`` entry matching ``slug_key``.
 
@@ -2868,6 +3556,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             cfg,
             base_url=config_base_url,
             resolve_alias=False,
+            model_id=model_id,
         )
 
     # Heal legacy ``provider: local`` entries (written by WebUI < v0.50.252)
@@ -2888,22 +3577,28 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         request that resolves to a DIFFERENT provider (an unrelated
         ``@openrouter:...`` / ``@custom:safe-provider:...`` lane, or the bare
         ``custom`` proxy), so the ambiguity check runs only on the slug actually
-        being returned. ``_unique_custom_provider_entry`` raises
-        AmbiguousCustomProviderError when >=2 config entries share the slug, so a
-        downstream credential lookup can never first-match a different entry than
-        the one whose endpoint we resolved. No-op for bare ``custom`` and every
-        non-custom provider.
+        being returned. ``_select_custom_provider_record`` validates the raw
+        legacy/native authority for that target, including identities omitted by
+        the read view, so downstream credential lookup cannot first-match a
+        different record. No-op for bare ``custom`` and non-custom providers.
         """
         if isinstance(provider, str) and provider.startswith("custom:"):
-            _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
-                _custom_provider_slug_key(provider),
-            )
+            _select_custom_provider_record(provider, _custom_provider_slug_key(provider), cfg)
         return model, provider, base_url
 
+    # Read before the strip below, which returns a plain str.
+    configured_custom_lane = isinstance(model_id, _ConfiguredCustomLaneModel)
     model_id = (model_id or "").strip()
     if not model_id:
         return _finalize(model_id, config_provider, config_base_url)
+
+    # The Custom lane of the configured endpoint (#7955). It is bound to
+    # ``model.base_url`` and answered before anything is looked up by name: a
+    # ``providers.<name>`` or ``custom_providers[]`` record that carries the
+    # configured provider's name, or lists the same model id, has its own
+    # endpoint and credential and is not this lane.
+    if configured_custom_lane:
+        return _finalize(model_id, "custom", config_base_url)
 
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
@@ -2962,7 +3657,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             or model_id in _provider_models_set
         )
     )
-    custom_providers = cfg.get('custom_providers', [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         # Disambiguation guard: when two custom_providers[] entries both list the
         # same bare model id (e.g. dogapi and packyapi both advertise
@@ -3049,6 +3744,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
                 continue
+            if target not in _configured_model_ids(pdef.get('models')):
+                continue
+            if _is_native_custom_provider_key(slug) and not _is_bare_builtin_provider_id(slug):
+                # Handled by the read view, including enabled/legacy precedence.
+                # A built-in's own record (``providers.fireworks`` when plugin
+                # discovery is unavailable) stays its URL override, as on .630
+                # and v0.52.544 (#8816 senior round 4).
+                continue
             # Copilot is the documented exception: `providers.copilot.models` is
             # a per-model SETTINGS map (reasoning_effort, limits, etc.), NOT a
             # routable allowlist (see the exception at the catalog-build site).
@@ -3125,7 +3828,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # to _get_provider_base_url() when no exact custom_providers[] row exists.
         if provider_hint.startswith("custom:"):
             entry = _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
+                _custom_provider_entries(cfg),
                 _custom_provider_slug_key(provider_hint),
             )
             if entry is not None:
@@ -3176,7 +3879,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default config provider. MUST come BEFORE
         # the config_base_url branch because many providers have a base_url set.
         if prefix and config_provider and prefix != config_provider:
-            _custom_cfg = cfg.get("custom_providers", [])
+            _custom_cfg = _custom_provider_entries(cfg)
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
@@ -3413,6 +4116,8 @@ CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
 # Kept beside the custom-provider reasons because it travels the same terminal
 # verdict path: an unresolvable route must stop before any provider routing.
 MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
+# A built-in provider name that another provider record also claims (#8690).
+PROVIDER_NAME_AMBIGUOUS = "provider_name_ambiguous"
 
 # Key the verdict travels under on a merged bundle. ``None`` == routable.
 CUSTOM_ROUTE_ERROR_FIELD = "route_error"
@@ -3647,6 +4352,275 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
     )
 
 
+# ``hermes_cli.config._ENV_REF_RE``: the references the Agent expands in string values.
+_AGENT_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _agent_expands_env_ref(value: object) -> bool:
+    """True when the Agent expands a ``${VAR}`` / ``${env:VAR}`` in string ``value``.
+
+    Mirror of ``hermes_cli.config._env_ref_var_name``; ``${env:}``, other sources
+    (``${file:...}``) and an incomplete ``${`` stay verbatim, as do mapping keys.
+    """
+    if not isinstance(value, str):
+        return False
+    for inner in _AGENT_ENV_REF_RE.findall(value):
+        ref = inner.strip()
+        if ref.startswith("env:"):
+            if ref[len("env:"):].strip():
+                return True
+        elif not re.match(r"^[a-z][a-z0-9_-]*:", ref):
+            return True
+    return False
+
+
+def _agent_expanded_text(value: object) -> str | None:
+    """String ``value`` as the installed Agent's ``load_config()`` expands it here, else None.
+
+    Calls the Agent's own expander (``hermes_cli.config._expand_env_vars``: an env
+    ``${VAR}`` / ``${env:VAR}`` is read through ``agent.secret_scope.get_secret`` under the
+    bound scope; an unset or non-env reference stays verbatim), and only while
+    ``agent.secret_scope.current_secret_scope()`` is not None. When it is None this returns
+    None, so a templated name claims every name and a templated ``enabled`` flag keeps its
+    record claiming: fail closed, even where the Agent's own resolver would expand the value
+    from the process env. The rule is that condition, not a list of routes.
+
+    A known request path where it is None: the chat route's
+    ``streaming._resolve_runtime_connection_bundle`` (and the model-alias variant) for the
+    root profile (``default`` or a renamed root alias) or with no profile name, when no
+    outer scope is bound. ``profiles.profile_scope_for_detached_worker`` binds no scope for
+    those and leaves any outer one in place; for a named profile it binds one through
+    ``profiles.profile_env_for_background_worker``. Other paths may bind one, the root
+    profile included: read-only request scopes
+    (``profiles.profile_env_for_active_request_readonly``, the root profile too with
+    ``include_root=True``) and background workers such as title generation
+    (``profile_env_for_background_worker`` binds one for a non-empty profile name other
+    than ``default``, a renamed root alias included). None as well when the expander is unavailable or
+    fails: callers keep their fail-closed reading.
+    """
+    try:
+        from agent.secret_scope import current_secret_scope
+        from hermes_cli.config import _expand_env_vars as agent_expand_env_vars
+    except ImportError:
+        return None
+    try:
+        # Without a bound profile secret scope the expander reads the shared process env,
+        # which a concurrent worker for another profile can hold: keep the reading closed.
+        # Known case: the chat route's bundle resolution for the root profile or with no
+        # profile name, when no outer scope is bound (see the docstring).
+        # Re-reading that env after the resolver could see another value than the resolver
+        # read (test_a_concurrent_profile_env_between_the_resolver_and_the_guard_...).
+        # Follow-up: judge against the exact value the Agent resolver read for this request.
+        if current_secret_scope() is None:
+            return None
+        expanded = agent_expand_env_vars(value)
+    except Exception:
+        logger.debug("provider name check: Agent env expansion failed", exc_info=True)
+        return None
+    return expanded if isinstance(expanded, str) else None
+
+
+def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
+    """The first identity in ``keys`` / ``values`` whose spellings include one of ``names``.
+
+    Spellings: the Agent's alias vocabulary (:func:`_custom_provider_alias_set`)
+    plus underscore folding. The claiming identity is returned for the message in
+    its raw spelling (never a URL, credential or expanded value). A value the Agent
+    env-expands is judged by the Agent's own expansion (:func:`_agent_expanded_text`,
+    an unset reference stays verbatim) only while an Agent profile secret scope is bound
+    (``agent.secret_scope.current_secret_scope()`` is not None); otherwise (no scope bound,
+    for example the chat route's bundle resolution for the root profile with no outer
+    scope; or no expander) it claims every name, since WebUI cannot then reproduce the
+    value the Agent's resolver reads with certainty.
+    """
+    for value, expandable in (*((key, False) for key in keys), *((val, True) for val in values)):
+        text = spelled = str(value or "").strip()
+        if expandable and _agent_expands_env_ref(value):
+            expanded = _agent_expanded_text(value)
+            if expanded is None:
+                return text
+            spelled = expanded.strip()
+        aliases = _custom_provider_alias_set(spelled, "") if spelled else frozenset()
+        if names & (aliases | {alias.replace("_", "-") for alias in aliases}):
+            return text
+    return None
+
+
+def _provider_identity_sources(config: object) -> tuple:
+    """The config views :func:`provider_name_ambiguity_verdict` reads identities from.
+
+    An explicit ``config`` is the only view. Otherwise the active profile's
+    config.yaml as parsed but NOT env-expanded (the file :func:`get_config`
+    serves, via :func:`_get_config_path`) comes first, then the cached view.
+    The Agent re-expands ``${VAR}`` references from the profile's current
+    secret scope on every load, while the cache keeps the expansion it saw when
+    it last reloaded (an edited .env does not change config.yaml's mtime), so
+    only the raw spelling tells reliably that a name is a reference (Codex r3).
+    The cached view still counts, so an in-memory config is never ignored.
+    Every view carries the Agent's managed scope (:func:`_with_managed_scope`).
+    """
+    if config is not None:
+        return (_with_managed_scope(config),)
+    try:
+        raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+    except Exception:
+        logger.debug("provider name check: raw config unreadable", exc_info=True)
+        raw = None
+    # A detached snapshot, not get_config()'s live cache dict: another profile's request can
+    # refill that dict in place while this check runs, and a retained reference then judged
+    # this profile's name against the other profile's records (release-lane tag-delta audit).
+    return (_with_managed_scope(raw), _with_managed_scope(get_config_snapshot()))
+
+
+def _with_managed_scope(view: object) -> object:
+    """``view`` with the Agent's managed-scope config.yaml merged on top (Codex r5).
+
+    The Agent resolves providers from ``load_config()``, which deep-merges the
+    IT-pushed managed config over the profile's, managed winning per leaf
+    (``hermes_cli.config._merge_managed_overlay``). Same reader and merge as
+    ``managed_scope.apply_managed_overlay``, minus its ``${VAR}`` expansion, so
+    a managed reference is judged like any other (:func:`_claiming_value`: by the
+    Agent's expander under a bound profile secret scope, else a wildcard). ``view``
+    is never mutated; an Agent
+    without managed scope, or no managed config, leaves it unchanged.
+    """
+    try:
+        from hermes_cli.config import _deep_merge
+        from hermes_cli.managed_scope import load_managed_config
+    except ImportError:
+        return view
+    try:
+        managed = load_managed_config() if isinstance(view, dict) else None
+        return _deep_merge(copy.deepcopy(view), managed) if isinstance(managed, dict) and managed else view
+    except Exception:
+        # The Agent fails open the same way (``apply_managed_overlay``).
+        logger.debug("provider name check: managed scope unreadable", exc_info=True)
+        return view
+
+
+def provider_name_ambiguity_verdict(provider: object, config: object = None) -> dict | None:
+    """Terminal verdict when one built-in provider name has two claimants (#8690).
+
+    Identities are read from every view :func:`_provider_identity_sources`
+    returns; the first view with an ambiguity decides (fail closed).
+
+    The Agent answers a name with the first record whose alias set contains it
+    and shares one credential pool between such records, so the endpoint and key
+    it returns can belong to different records depending on config order. The
+    route fails closed instead. Purely name-based (no URL is read); a record
+    claims in any spelling the Agent accepts. A keyed record the Agent treats as
+    disabled claims nothing; a templated ``enabled`` flag is judged after the Agent's
+    env expansion only while an Agent profile secret scope is bound
+    (``current_secret_scope()`` is not None), and with none bound the record keeps
+    claiming (fail closed). A templated ``name`` follows the same rule
+    (:func:`_agent_expanded_text`, which names a known request path with no scope). A legacy row counts enabled or not (the Agent's
+    legacy view still selects disabled rows).
+
+    * Bare built-in ``X``: ambiguous when any record other than ``providers.X``
+      claims ``X``, or two keys are ``X``. Without ``providers.X`` the built-in
+      identity (default endpoint, ambient key) is still the second claimant:
+      WebUI routes bare ``X`` as the built-in (#8685), the Agent as the sibling.
+    * Explicit ``custom:X`` (``X`` built-in): ambiguous when ``providers.X``
+      exists and another record also claims ``custom:X`` (the Agent's alias set
+      for ``providers.X`` contains it). Otherwise untouched.
+    """
+    route = str(provider or "").strip().lower().replace(" ", "-")
+    explicit = route.startswith("custom:")
+    builtin = _canonicalise_provider_id(route.split(":", 1)[1].strip() if explicit else route)
+    if (
+        not builtin
+        or builtin in {"custom", "auto"}
+        or builtin.startswith("custom:")
+        or _is_native_custom_provider_key(builtin)
+    ):
+        return None
+    names = {route, route.replace("_", "-"), f"custom:{builtin}" if explicit else builtin}
+    for source in _provider_identity_sources(config):
+        if isinstance(source, dict):
+            verdict = _provider_name_ambiguity_in(source, route, builtin, explicit, names)
+            if verdict is not None:
+                return verdict
+    return None
+
+
+def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit: bool, names: set) -> dict | None:
+    """:func:`provider_name_ambiguity_verdict` for one config view."""
+    own: list[str] = []
+    others: list[str] = []
+    providers = source.get("providers")
+    for key, record in (providers.items() if isinstance(providers, dict) else ()):
+        key_text = str(key or "").strip()
+        if not key_text or not isinstance(record, dict):
+            continue
+        # The Agent skips a keyed record whose ``enabled`` is false in both of its views
+        # (``_match_new_style_provider`` and ``providers_dict_to_custom_providers``), so a
+        # disabled one claims nothing. Legacy ``custom_providers`` rows stay counted below:
+        # the Agent's legacy view still selects a row the user switched off. A templated
+        # flag is judged as the Agent expands it only while a profile secret scope is bound
+        # (``current_secret_scope()`` is not None, :func:`_agent_expanded_text`); with none
+        # bound or no expander it is unknown and keeps the record claiming (fail closed).
+        flag = record.get("enabled", True)
+        if _agent_expands_env_ref(flag):
+            expanded = _agent_expanded_text(flag)
+            flag = flag if expanded is None else expanded
+        if not _raw_provider_record_enabled({"enabled": flag}):
+            continue
+        # The Agent's identities for a keyed record: its ``name`` (or key) and its key.
+        claimed_by = _claiming_value((key_text,), (record.get("name"),), names)
+        if claimed_by is None:
+            continue
+        if not key_text.lower().startswith("custom:") and _canonicalise_provider_id(key_text) == builtin:
+            own.append(key_text)
+        else:
+            others.append(f"'{key_text}'" + (f" (named '{claimed_by}')" if claimed_by != key_text else ""))
+    legacy = source.get("custom_providers")
+    # A legacy row's only identity is its ``name``; the Agent ignores a
+    # non-list section and a row's raw ``provider_key``.
+    for row in legacy if isinstance(legacy, list) else ():
+        claimed_by = _claiming_value((), (row.get("name"),), names) if isinstance(row, dict) else None
+        if claimed_by is not None:
+            others.append(f"custom_providers entry '{claimed_by}'")
+    if explicit:
+        ambiguous = bool(own) and len(own) + len(others) >= 2
+    else:
+        ambiguous = bool(others) or len(own) >= 2
+    if not ambiguous:
+        return None
+    claimants = [f"the built-in '{builtin}'"] + [f"'{key}'" for key in own[1:]] + others
+    count = {2: "Two", 3: "Three"}.get(len(claimants), str(len(claimants)))
+    listed = ", ".join(claimants[:-1]) + " and " + claimants[-1]
+    return {
+        "reason": PROVIDER_NAME_AMBIGUOUS,
+        "provider": route,
+        "message": (
+            f"{count} providers claim '{builtin}': {listed}. Rename the custom one "
+            "(for example custom:my-proxy) or remove one, then retry."
+        ),
+        "hint": "Edit the provider under Settings -> Providers or in config.yaml.",
+    }
+
+
+def _refuse_ambiguous_provider_name(bundle: dict, *providers: object, log=None) -> dict | None:
+    """Make ``bundle`` terminal when any of ``providers`` is ambiguous (#8690).
+
+    The verdict is what stops the turn (:data:`CUSTOM_ROUTE_ERROR_FIELD`); the
+    connection and every side field are cleared too, so a consumer that reads
+    the fields without checking it still has nothing to send. ``log`` replaces
+    the warning for a read path that builds no agent (``lookup_only``).
+    """
+    for provider in dict.fromkeys(providers):
+        verdict = provider_name_ambiguity_verdict(provider)
+        if verdict is not None:
+            bundle["base_url"] = None
+            bundle["api_key"] = None
+            for field in CUSTOM_CONNECTION_SIDE_FIELDS:
+                bundle[field] = None
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = verdict
+            (log or logger.warning)("refusing provider route: %s", verdict["message"])
+            return verdict
+    return None
+
+
 # ``enabled:`` words YAML may hand us as strings, matching
 # hermes_cli.config_providers._FALSE_WORDS.
 _PROVIDER_DISABLED_WORDS = frozenset({"false", "0", "no", "off"})
@@ -3755,6 +4729,64 @@ def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> d
     return owning[0][1] if owning else None
 
 
+def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -> tuple[dict | None, bool]:
+    """Return the native authority and whether its explicit disable is terminal.
+
+    Exact canonical keys outrank aliases, including their disabled verdict.
+    Without one, reuse the raw selector's collision check rather than silently
+    choosing the first key that normalizes to the same identity.
+    """
+    if not isinstance(providers_cfg, dict):
+        return None, False
+    exact = providers_cfg.get(pid)
+    normalized = None
+    if isinstance(exact, dict) and exact:
+        if not _raw_provider_record_enabled(exact):
+            return None, True
+        normalized = _normalized_raw_provider_record(exact, pid)
+        if _custom_record_owns_connection(normalized, pid):
+            return normalized, False
+    record = _unique_raw_provider_record(providers_cfg, pid, slug)
+    if record is not None:
+        return record, False
+    disabled = any(
+        _is_native_custom_provider_key(key)
+        and isinstance(candidate, dict) and bool(candidate)
+        and not _raw_provider_record_enabled(candidate)
+        and _custom_record_names_identity(candidate.get("name") or key, key, pid, slug)
+        for key, candidate in providers_cfg.items()
+    )
+    if disabled:
+        return None, True
+    # Metadata-only rows remain readable, but the runtime candidate loop still
+    # requires a declared connection. They cannot displace an owning alias above.
+    if normalized is not None:
+        return normalized, False
+    metadata = [
+        _normalized_raw_provider_record(candidate, key)
+        for key, candidate in providers_cfg.items()
+        if _is_native_custom_provider_key(key) and isinstance(candidate, dict) and candidate
+        and _raw_provider_record_enabled(candidate) and _custom_provider_slug_key(key) == slug
+    ]
+    return (metadata[0] if len(metadata) == 1 else None), False
+
+
+def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool:
+    """Whether an owned native identity forbids even a persisted-pool probe.
+
+    A legacy winner retains its established precedence. Missing configuration
+    is not disabled: explicitly persisted pool-only browsing remains valid.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid.startswith("custom:"):
+        return False
+    slug = _custom_provider_slug_key(pid)
+    if not slug or _unique_custom_provider_entry(cfg_data.get("custom_providers"), slug) is not None:
+        return False
+    _record, disabled = _native_custom_provider_record(cfg_data.get("providers"), pid, slug)
+    return disabled
+
+
 def _select_custom_provider_record(
     pid: str,
     slug: str,
@@ -3819,21 +4851,11 @@ def _select_custom_provider_record(
     # Fallbacks for setups that don't use custom_providers names directly. Every
     # one of them is keyed on this provider's OWN identity.
     providers_cfg = cfg_data.get("providers", {})
-    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
     provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
-
-    if (
-        isinstance(provider_specific, dict)
-        and provider_specific
-        and not _raw_provider_record_enabled(provider_specific)
-    ):
-        # ``providers['custom:<slug>']`` names THIS slug by its own exact key, so
-        # switching it off is a statement about this route and not merely about
-        # one candidate among several. Falling through to the generic ``custom``
-        # record or the ``model:`` block would honour the disable by routing the
-        # turn somewhere ELSE — the ambient provider's endpoint and credential
-        # under the name the user just took offline. The slug's own authority
-        # said no, so the route is terminal here.
+    native_record, disabled = _native_custom_provider_record(providers_cfg, pid, slug)
+    if disabled:
+        # The identity's authority said no; generic model/pool fallbacks cannot
+        # resurrect it under the name the user explicitly took offline.
         return None, "", False, CUSTOM_SELECTION_MISSING
 
     model_cfg = cfg_data.get("model", {})
@@ -3863,26 +4885,13 @@ def _select_custom_provider_record(
     )
 
     def _candidates():
-        """Identity-owned candidates, most specific first — evaluated LAZILY.
+        """Identity-owned candidates, most specific first.
 
-        Laziness is load-bearing for the raw-``providers:`` scan alone: that one
-        RAISES on an alias collision, and a config whose route is already decided
-        by the exact ``providers['custom:<slug>']`` key must not be failed closed
-        by a collision further down a list it never reaches.
+        Native exact-key precedence and lazy alias-collision checks are shared
+        with the read view in _native_custom_provider_record().
         """
-        if isinstance(provider_specific, dict) and provider_specific:
-            # Keyed by this provider's own id: ``providers['custom:<slug>']``.
-            yield provider_specific, "providers"
-        # The standard v12 shape: a raw ``providers:<key>`` record that names
-        # this identity by its own config key or display name (``providers:
-        # {omni: ...}`` for ``custom:omni``), matched with the installed Agent's
-        # alias rules. This is identity ownership, not an ambient-field escape —
-        # a record that names some OTHER provider never appears here, and an
-        # unknown slug still matches nothing and falls through to the terminal
-        # verdict below.
-        raw_record = _unique_raw_provider_record(providers_cfg, pid, slug)
-        if raw_record is not None:
-            yield raw_record, "providers"
+        if native_record is not None:
+            yield native_record, "providers"
         if generic_claims_slug:
             yield provider_custom, "providers"
         if isinstance(model_cfg, dict) and model_cfg and _raw_provider_record_enabled(model_cfg) and (
@@ -4182,6 +5191,7 @@ def resolve_custom_provider_bundle(
     provider_id: str,
     *,
     connection_resolver=None,
+    lookup_only: bool = False,
 ) -> dict | None:
     """Return the COMPLETE connection bundle a named ``custom:*`` record owns.
 
@@ -4230,6 +5240,20 @@ def resolve_custom_provider_bundle(
     the caller's namespace still takes effect. An injected resolver can only
     report a URL/key pair — there is no record behind it — so the bundle it
     yields owns no side fields and the caller keeps the runtime's.
+
+    ``lookup_only`` is for a read path that only asks which endpoint and key the
+    chat would use (GET /api/session's context-length lookup, #8928). Record
+    selection and endpoint ownership are unchanged, but the credential comes only
+    from what the record declares in config (literal / ``${ENV}`` / ``key_env`` /
+    ``CUSTOM_<SLUG>_API_KEY``). The credential pool (whose selection can rotate or
+    refresh entries) and the ``key_cmd`` token provider (which runs a command when
+    used) are skipped, and a host-gated env key is never taken as the credential.
+    The keyless declaration still READS that env key, as a plain environment
+    lookup (a record the chat could serve from it is not keyless). It differs from
+    the chat's in one case: a pool the record doesn't declare in config (an
+    auth.json ``custom:<name>`` pool) is never consulted, so a record whose only
+    credential is such a pool reads as keyless here and the read path looks up
+    without a key, where the chat would use the pool's.
     """
     pid = str(provider_id or "").strip().lower()
     if not pid.startswith("custom:"):
@@ -4290,7 +5314,7 @@ def resolve_custom_provider_bundle(
     # Pool first, exactly like the runtime's named-custom path: a pooled
     # endpoint's credential AND its pool object come from the same lookup.
     api_key = None
-    pool_runtime = _custom_record_pool_runtime(base_url, record)
+    pool_runtime = None if lookup_only else _custom_record_pool_runtime(base_url, record)
     if pool_runtime:
         api_key = pool_runtime.get("api_key") or None
         if pool_runtime.get("credential_pool") is not None:
@@ -4298,13 +5322,13 @@ def resolve_custom_provider_bundle(
 
     if not api_key:
         api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
-    if not api_key:
+    if not api_key and not lookup_only:
         api_key = _host_gated_env_key(base_url)
 
     # ``key_cmd`` beats a static api_key / key_env (short-lived bearers go stale
     # mid-session), but never displaces a pooled credential, which the pool
     # itself already rotates.
-    if not pool_runtime:
+    if not pool_runtime and not lookup_only:
         token_provider = _custom_record_key_cmd_provider(base_url, record, pid)
         if token_provider is not None:
             api_key = token_provider
@@ -4517,6 +5541,7 @@ def _custom_provider_runtime_bundle_with_provenance(
     *,
     lookup_provider: str | None = None,
     connection_resolver=None,
+    lookup_only: bool = False,
 ) -> tuple[dict, dict | None]:
     """:func:`merge_custom_provider_runtime_bundle` plus the record it selected.
 
@@ -4526,8 +5551,15 @@ def _custom_provider_runtime_bundle_with_provenance(
     Callers that also need the provenance take it from here rather than
     re-resolving: a second resolution re-reads the config and can mint a second
     ``key_cmd`` token provider or select a different pool entry.
+
+    ``lookup_only`` (see :func:`resolve_custom_provider_bundle`) answers the same
+    question for a read path that builds no agent (GET /api/session's
+    context-length lookup, #8928): config-declared credentials only, and a
+    refused route is logged at debug rather than as a warning.
     """
     _rt = runtime_provider if isinstance(runtime_provider, dict) else {}
+    # A lookup builds no agent, so a refused route is not news worth a warning.
+    _route_log = logger.debug if lookup_only else logger.warning
     bundle = {
         "provider": resolved_provider,
         "base_url": resolved_base_url,
@@ -4536,18 +5568,24 @@ def _custom_provider_runtime_bundle_with_provenance(
         "acp_command": _rt.get("acp_command", _rt.get("command")),
         "acp_args": _rt.get("acp_args", _rt.get("args")),
         "credential_pool": _rt.get("credential_pool"),
-        # Routable until a named custom route proves otherwise. Non-custom
-        # routes legitimately leave the endpoint and/or credential to the
-        # runtime provider, so only the named-``custom:`` branches below can
-        # record a verdict here.
+        # Routable until a route proves otherwise. Non-custom routes
+        # legitimately leave the endpoint and/or credential to the runtime
+        # provider; they record a verdict only when two records claim their
+        # name (#8690). Named ``custom:`` routes are judged below.
         CUSTOM_ROUTE_ERROR_FIELD: None,
     }
 
     lookup = lookup_provider or resolved_provider
+    # A name two records claim (#8690) is refused before any record is chosen:
+    # the runtime dict may already pair one record's endpoint with another's key.
+    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider, log=_route_log) is not None:
+        return bundle, None
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
         return bundle, None
 
-    custom = resolve_custom_provider_bundle(lookup, connection_resolver=connection_resolver)
+    custom = resolve_custom_provider_bundle(
+        lookup, connection_resolver=connection_resolver, lookup_only=lookup_only
+    )
     if custom is None:
         return bundle, None
 
@@ -4573,7 +5611,7 @@ def _custom_provider_runtime_bundle_with_provenance(
         # unresolvable route as a resolved one; and no KEYLESS_CUSTOM_API_KEY —
         # ``keyless`` is False on an unowned bundle precisely so the placeholder
         # cannot claim that an endpoint we never found is unauthenticated.
-        logger.warning(
+        _route_log(
             "custom provider %s matches no custom_providers[] row, keyed "
             "providers[] record or model: authority, and the resolved connection "
             "belongs to %s; refusing to route it through that provider's "
@@ -4632,7 +5670,7 @@ def _custom_provider_runtime_bundle_with_provenance(
         bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
             CUSTOM_ROUTE_NO_ENDPOINT, custom["provider_id"]
         )
-        logger.warning(
+        _route_log(
             "custom provider %s resolved no endpoint of its own; refusing to pair "
             "its credential with the connection resolved for %s",
             custom["provider_id"],
@@ -4758,7 +5796,7 @@ def _custom_provider_runtime_bundle_with_provenance(
                 # built). Substituting the placeholder would turn that into a
                 # silent 401 against an endpoint that does require auth; leave the
                 # credential unset so the failure names its real cause.
-                logger.warning(
+                _route_log(
                     "custom provider %s declares a credential source that produced "
                     "no key; sending without one rather than the keyless placeholder",
                     custom["provider_id"],
@@ -4775,7 +5813,7 @@ def _custom_provider_runtime_bundle_with_provenance(
             CUSTOM_ROUTE_NO_CREDENTIAL if bundle["base_url"] else CUSTOM_ROUTE_NO_ENDPOINT,
             custom["provider_id"],
         )
-        logger.warning(
+        _route_log(
             "custom provider %s resolved no routable connection (%s); refusing to "
             "build an agent that would re-enter provider routing",
             custom["provider_id"],
@@ -4870,6 +5908,23 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if provider == config_provider:
         return model
 
+    # The picker reports a configured provider that aliases to the generic
+    # ``custom`` lane (``local``, or ``ollama`` through the agent's alias table)
+    # as ``custom``, so the session's ``custom`` IS the configured provider even
+    # though the raw strings differ. Qualifying it as ``custom`` would mint
+    # ``@custom:qwen3.8:27b``, whose tag prefix resolve_model_provider() reads
+    # as a named-provider slug (``custom:qwen3.8``). A bare id is not safe
+    # either: it goes through the custom_providers[] / providers: ownership
+    # scans, so another endpoint listing the same id would take the request.
+    # Nor is the configured provider's own hint (``@ollama:``), which picks up
+    # a same-named providers: / custom_providers[] record, nor any other
+    # ``@<name>:`` text, which a providers.<name> entry of that name produces.
+    # The lane is carried as a type, resolved to ``model.base_url`` before any
+    # lookup. (#7955)
+    if provider == "custom" and config_provider:
+        if str(_resolve_provider_alias(config_provider) or "").strip().lower() == "custom":
+            return _ConfiguredCustomLaneModel(model)
+
     # OpenRouter selections with slash IDs are explicit provider/model paths.
     if provider == "openrouter":
         return f"@{provider}:{model}"
@@ -4910,7 +5965,7 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
         # for collisions, matching the point-of-return guard used by
         # resolve_model_provider. (#7356 maintainer review)
         if provider.startswith("custom:"):
-            custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else []
+            custom_providers = _custom_provider_entries(cfg) if isinstance(cfg, dict) else []
             if (
                 _unique_custom_provider_entry(
                     custom_providers, _custom_provider_slug_key(provider)
@@ -5934,14 +6989,69 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def _config_reasoning_effort(config_data) -> str:
+    """Return a config dict's ``agent.reasoning_effort`` ("" when unset)."""
+    agent_cfg = config_data.get("agent") if isinstance(config_data, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return ""
+    return str(agent_cfg.get("reasoning_effort") or "").strip().lower()
+
+
+def resolve_session_reasoning_effort(
+    config_data,
+    *,
+    session_effort=None,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Resolve the effort used by one WebUI session for its next turn.
+
+    ``Session.reasoning_effort`` is authoritative when present, including the
+    empty string (provider default). Legacy sessions store ``None`` and inherit
+    the active profile's CLI-compatible ``agent.reasoning_effort`` value.
+    """
+    effort_raw = session_effort
+    if effort_raw is None:
+        effort_raw = _config_reasoning_effort(config_data)
+    return coerce_reasoning_effort_for_model(
+        effort_raw,
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
+def effective_session_reasoning_effort(session_effort, profile_home) -> str:
+    """Return the stored effort a session's next turn starts from.
+
+    ``session_effort`` wins when present (``""`` = provider default). Legacy
+    sessions (``None``) inherit ``agent.reasoning_effort`` from their own
+    profile's isolated config: the single source shared by the composer chip,
+    new-session defaults, and the local and Gateway workers.
+    """
+    if session_effort is not None:
+        return str(session_effort)
+    return _config_reasoning_effort(
+        get_config_for_profile_home(profile_home, isolate_config_override=True)
+    )
+
+
+_REASONING_EFFORT_UNSET = object()
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    effort_override=_REASONING_EFFORT_UNSET,
 ) -> dict:
-    """Return current reasoning configuration from the active profile's
-    config.yaml — the same source of truth the CLI reads from.
+    """Return current reasoning configuration for a model.
+
+    The active profile's config.yaml is the default (and remains the CLI source
+    of truth). ``effort_override`` lets a WebUI session supply its durable
+    per-session selection without changing capability resolution.
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
@@ -5949,9 +7059,17 @@ def get_reasoning_status(
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
-    agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    if effort_override is not _REASONING_EFFORT_UNSET:
+        effort_raw = effort_override
+    else:
+        # The profile default comes from the same isolated file the session
+        # readers and write_reasoning_effort() use, not the ambient override.
+        default_path = _active_isolated_config_path()
+        effort_raw = (
+            _config_reasoning_effort(_load_yaml_config_file(default_path))
+            if default_path is not None else ""
+        )
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -6087,7 +7205,8 @@ def set_reasoning_display(show: bool) -> dict:
     """
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load: a write must never save env-expanded values (#8032 write rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         display_cfg = config_data.get("display")
         if not isinstance(display_cfg, dict):
             display_cfg = {}
@@ -6096,6 +7215,20 @@ def set_reasoning_display(show: bool) -> dict:
         _save_yaml_config_file(config_path, config_data)
     reload_config()
     return get_reasoning_status()
+
+
+def normalize_reasoning_effort(effort) -> str:
+    """Return the canonical stored form of a ``/reasoning`` level.
+
+    ``""`` means provider default. Raises ``ValueError`` for unknown levels.
+    """
+    raw = str(effort or "").strip().lower()
+    if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:
+        raise ValueError(
+            f"Unknown reasoning effort '{effort}'. "
+            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
+        )
+    return raw
 
 
 def set_reasoning_effort(
@@ -6119,15 +7252,50 @@ def set_reasoning_effort(
 
     Raises ``ValueError`` on any other unrecognised level so callers can 400.
     """
-    raw = str(effort or "").strip().lower()
-    if raw and raw != "none" and raw not in VALID_REASONING_EFFORTS:
-        raise ValueError(
-            f"Unknown reasoning effort '{effort}'. "
-            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
-        )
-    config_path = _get_config_path()
+    write_reasoning_effort(effort)
+    return get_reasoning_status(
+        model_id=model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
+def _active_isolated_config_path() -> "Path | None":
+    from api.profiles import get_active_hermes_home
+
+    return isolated_profile_config_path(get_active_hermes_home())
+
+
+def write_reasoning_effort(effort: str, profile_home: "Path | str | None" = None) -> str:
+    """Write ``agent.reasoning_effort`` to a profile's config.yaml.
+
+    The local file write half of :func:`set_reasoning_effort`, without the
+    capability lookup (which may do network I/O), so callers can hold a
+    session lock across it. ``profile_home`` (default: the active profile)
+    selects the file through :func:`isolated_profile_config_path`, the same
+    file every reader of the profile default uses. A missing profile home is
+    never redirected to another profile's file: for a session's profile the
+    write is skipped (the session keeps its own value, and the profile's
+    readers see ``""``); for the active profile, where the profile default is
+    the only thing saved, it raises ``ValueError``. Returns the normalized
+    stored value.
+    """
+    raw = normalize_reasoning_effort(effort)
+    if profile_home is None:
+        config_path = _active_isolated_config_path()
+        if config_path is None:
+            raise ValueError("The active profile no longer exists.")
+    else:
+        config_path = isolated_profile_config_path(profile_home)
+        if config_path is None:
+            logger.warning(
+                "reasoning effort: profile home %s is missing; profile default not written",
+                profile_home,
+            )
+            return raw
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
@@ -6142,11 +7310,7 @@ def set_reasoning_effort(
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()
-    return get_reasoning_status(
-        model_id=model_id,
-        provider_id=provider_id,
-        base_url=base_url,
-    )
+    return raw
 
 
 def _public_advanced_model_options(model_cfg: dict) -> dict:
@@ -6338,6 +7502,23 @@ def _main_model_request_overrides(
     return overrides
 
 
+def _same_json_value(a, b) -> bool:
+    """Equal as JSON, so type edits count: Python treats 1 == True == 1.0 (#8129 r7).
+
+    One JSON round-trip first: JSON object keys are strings, so a YAML mapping
+    with mixed int/str keys (``logit_bias: {100: 1, '101': 2}``) can be sorted,
+    while values keep their JSON types. A value JSON cannot encode at all
+    (non-scalar mapping keys) falls back to plain equality.
+    """
+    def _canonical(value):
+        return json.dumps(json.loads(json.dumps(value, default=str)), sort_keys=True)
+
+    try:
+        return _canonical(a) == _canonical(b)
+    except (TypeError, ValueError):
+        return a == b
+
+
 def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
     """Apply supported advanced model options to a config block in-place."""
     if advanced is None:
@@ -6346,8 +7527,15 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         raise ValueError("advanced model options must be an object")
     if "base_url" in advanced:
         base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
-        if base_url:
-            model_cfg["base_url"] = base_url
+        # model_cfg is the RAW block: re-submitting the displayed (resolved)
+        # URL keeps a ${VAR} reference instead of baking it (#8032). That
+        # includes "" for a reference whose variable is empty: the field is
+        # unchanged, so the reference survives instead of being removed.
+        stored_base_url = _preserve_env_ref(
+            model_cfg.get("base_url"), base_url, normalize=_normalize_base_url_for_compare
+        )
+        if stored_base_url:
+            model_cfg["base_url"] = stored_base_url
         else:
             model_cfg.pop("base_url", None)
     for field in ("timeout", "download_timeout", "max_concurrency"):
@@ -6368,10 +7556,13 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         if extra_body in (None, ""):
             model_cfg.pop("extra_body", None)
         elif isinstance(extra_body, dict):
-            if extra_body:
-                model_cfg["extra_body"] = extra_body
-            else:
+            if not extra_body:
                 model_cfg.pop("extra_body", None)
+            elif not _same_json_value(_expand_env_vars(model_cfg.get("extra_body")), extra_body):
+                # Only a changed object is written: re-submitting the displayed
+                # (resolved) one unchanged keeps the raw block and its ${VAR}
+                # references (#8032).
+                model_cfg["extra_body"] = extra_body
         else:
             raise ValueError("extra_body must be a JSON object")
     if "service_tier" in advanced:
@@ -6400,12 +7591,20 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): model_cfg stays raw so ${VAR} references
+        # in fields this save doesn't change are written back verbatim.
+        config_data = _load_yaml_config_file_raw(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
+        raw_model_cfg = dict(model_cfg)
 
-        previous_provider = str(model_cfg.get("provider") or "").strip()
+        # Compare the RESOLVED provider: ``provider: ${MODEL_PROVIDER}`` must not
+        # look like a provider switch (which would drop a valid base_url) just
+        # because the raw placeholder differs from the caller's resolved value.
+        previous_provider = str(
+            _expand_env_vars(str(model_cfg.get("provider") or "").strip()) or ""
+        ).strip()
         requested_provider = str(provider or "").strip()
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
@@ -6430,12 +7629,25 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if persisted_provider.lower() == "local":
             persisted_provider = "custom"
 
-        model_cfg["default"] = persisted_model
+        # Keep an env reference when it already resolves to the value being
+        # saved (the user re-saved what the UI displayed); a changed value is
+        # written as given.
+        model_cfg["default"] = _preserve_env_ref(
+            raw_model_cfg.get("default"), persisted_model, normalize=str.strip
+        )
         if persisted_provider:
-            model_cfg["provider"] = persisted_provider
+            model_cfg["provider"] = _preserve_env_ref(
+                raw_model_cfg.get("provider"), persisted_provider, normalize=str.strip
+            )
 
         if resolved_base_url and not provider_override_won:
-            model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+            # Same value as master writes; only a ${VAR} already in model.base_url
+            # that resolves to it is kept instead of its expansion (#8032).
+            model_cfg["base_url"] = _preserve_env_ref(
+                raw_model_cfg.get("base_url"),
+                str(resolved_base_url).strip().rstrip("/"),
+                normalize=_normalize_base_url_for_compare,
+            )
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
@@ -6612,7 +7824,9 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     model = str(model or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): untouched slots/fields keep their
+        # ${VAR} references.
+        config_data = _load_yaml_config_file_raw(config_path)
         if task != "__reset__" and task not in AUX_TASK_SLOTS:
             raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
         if task == "__reset__":
@@ -6639,8 +7853,10 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             slot_cfg = aux_cfg.get(task, {})
             if not isinstance(slot_cfg, dict):
                 slot_cfg = {}
-            slot_cfg["provider"] = provider
-            slot_cfg["model"] = model
+            # Keep a ${VAR} that already resolves to the submitted value: the
+            # advanced dialog re-posts the provider/model it displayed (#8032).
+            slot_cfg["provider"] = _preserve_env_ref(slot_cfg.get("provider"), provider, normalize=str.strip)
+            slot_cfg["model"] = _preserve_env_ref(slot_cfg.get("model"), model, normalize=str.strip)
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 # Resolve the auxiliary slot's base_url against the SELECTED
                 # provider, not the active main provider. A bare
@@ -6676,12 +7892,23 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     # closed on a collision (raises AmbiguousCustomProviderError)
                     # exactly like every other path — otherwise the ambiguity
                     # would be swallowed and the wrong endpoint persisted.
+                    # config_data is RAW (#8032). Select on an env-EXPANDED
+                    # snapshot, exactly as master selected on its expanded read:
+                    # legacy-over-native precedence (#8448), enabled state,
+                    # uniqueness and the native api/url/base_url alias order all
+                    # depend on resolved values. Then write the raw text behind
+                    # the winning URL, so a ${VAR} endpoint stays a reference.
+                    _exp_cfg = _expand_env_vars(config_data)
                     _cp_match = _unique_custom_provider_entry(
-                        config_data.get("custom_providers", []),
+                        _custom_provider_entries(_exp_cfg),
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
-                        resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
+                        _url = str(_cp_match.get("base_url") or "").strip()
+                        if _url:
+                            resolved_base_url = _raw_custom_provider_url(
+                                config_data, _exp_cfg, _cp_match, _url,
+                            )
                 if not resolved_base_url:
                     # Best-effort fallback for the unnamed `custom` case (no own
                     # entry). Keep it non-fatal for unexpected errors, but let a
@@ -6693,7 +7920,13 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     except Exception:
                         resolved_base_url = None
                 if resolved_base_url:
-                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+                    # A ${VAR} already in the slot's base_url that resolves to
+                    # the new URL is kept instead of its expansion (#8032).
+                    slot_cfg["base_url"] = _preserve_env_ref(
+                        slot_cfg.get("base_url"),
+                        str(resolved_base_url).strip().rstrip("/"),
+                        normalize=_normalize_base_url_for_compare,
+                    )
             if advanced is not None:
                 try:
                     _apply_advanced_model_options(slot_cfg, advanced)
@@ -6715,10 +7948,141 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
-_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
+_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
+
+# ── Catalog publication ordering ─────────────────────────────────────────────
+# Every cold rebuild takes the next sequence number, and the published catalog
+# remembers the sequence it came from. A build may publish only if it is newer
+# than whatever is already published. That is what stops an over-budget worker
+# finishing late — the out-of-band publisher, which outlives the foreground
+# caller that gave up on it — from resurrecting a superseded catalog over a
+# newer one. Wall-clock stamps cannot express this ordering: an OLDER build can
+# publish *after* a newer build has already started, and a time comparison would
+# read that publication as "newer" and wrongly discard the newer build's result
+# (#7481 review).
+_models_rebuild_seq: int = 0
+
+
+def _allocate_models_rebuild_seq() -> int:
+    """Take the next catalog-rebuild sequence number.
+
+    The caller must hold ``_available_models_cache_lock`` (the cold path does),
+    so the counter is never advanced by two builds at once.
+    """
+    global _models_rebuild_seq
+    _models_rebuild_seq += 1
+    return _models_rebuild_seq
+
+
+def _models_rebuild_superseded(rebuild_seq: int) -> bool:
+    """True when a newer rebuild has been allocated since ``rebuild_seq``.
+
+    The caller must hold ``_cache_build_cv`` (which shares its RLock with
+    ``_available_models_cache_lock``) so this reads ``_models_rebuild_seq``
+    atomically with respect to ``_allocate_models_rebuild_seq``.
+
+    A build is superseded by the newest *allocated* generation, not merely by the
+    newest *published* one. ``invalidate_models_cache()`` clears
+    ``_cache_build_in_progress`` without cancelling an in-flight worker (#7481
+    review), so a newer rebuild can be allocated while an older one is still
+    running. Comparing against the last published sequence would let that older
+    worker publish an invalidated catalog before the newer build publishes, and
+    then release the build flag that already belongs to the newer rebuild — the
+    invalidation has to fence against the latest allocated generation to be a
+    real freshness boundary.
+
+    Invalidation advances the allocated generation itself, so a build that was
+    already running when the cache was invalidated is superseded even when no
+    successor rebuild is ever allocated. Without that, the delayed worker stayed
+    eligible and repopulated the catalog that had just been cleared.
+    """
+    return rebuild_seq < _models_rebuild_seq
+
+
+def _clear_build_in_progress(rebuild_seq: int) -> None:
+    """Release the single-flight slot only if this build still owns it.
+
+    ``_cache_build_in_progress`` is one shared flag, so a build that has been
+    superseded — a newer rebuild was allocated, or an invalidation advanced the
+    generation — must leave it alone: clearing it here would wake waiters to an
+    empty cache and let another cold rebuild start beside the newer one (#7481
+    review). Used by the error paths inside the catalog critical section and by
+    the post-lock durable commit, so it lives at module scope rather than being
+    redefined inside ``get_available_models``.
+    """
+    global _cache_build_in_progress
+    with _cache_build_cv:
+        if _models_rebuild_superseded(rebuild_seq):
+            # A newer rebuild owns the flag now; releasing it here would wake
+            # waiters to an empty cache and let another cold rebuild start
+            # concurrently with the newer one.
+            return
+        _cache_build_in_progress = False
+        _cache_build_cv.notify_all()
+
+
+def _models_build_identity_current(
+    build_fingerprint, build_profile
+) -> bool:
+    """True when a build's source/profile identity is still the current one.
+
+    A catalog is only an answer for the config, auth state and provider catalog
+    it was *read from*. A build that started before a config edit and publishes
+    afterwards would otherwise stamp its stale catalog with the fingerprint of
+    the sources it never saw — a fresh-looking provenance on stale data — and on
+    the disk path that is exactly what makes the stale file look loadable
+    (#7481 review). So the identity captured when the build started is compared
+    again at publication and at the durable commit; a mismatch means the result
+    is dropped and the next caller rebuilds.
+
+    ``build_fingerprint`` / ``build_profile`` are ``None`` for the legacy caller
+    that has no rebuild to fence (nothing is validated then). A ``None``
+    profile — single-profile installs, or a runtime where ``api.profiles`` could
+    not be imported — skips the profile axis; the fingerprint's
+    ``config_yaml`` axis is the profile-specific config path, so a foreign
+    profile's catalog still fails that comparison.
+
+    Fails CLOSED: an identity that cannot be read is not treated as a match.
+    """
+    if build_fingerprint is None:
+        return True
+    try:
+        if _models_cache_source_fingerprint() != build_fingerprint:
+            return False
+    except Exception:
+        return False
+    if build_profile is not None:
+        try:
+            from api.profiles import get_active_profile_name
+
+            if (get_active_profile_name() or "").strip() != build_profile:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+# Serializes the durable (on-disk) catalog commit. The in-memory generation
+# fence alone cannot order two *file* writers: a publisher decides under
+# ``_cache_build_cv`` and then writes the file with that lock released (a disk
+# write must not run inside the catalog lock), so an older publisher can reach
+# the filesystem after a newer one has already committed and revert the durable
+# catalog — valid-looking JSON from a superseded build (#7481 review). The
+# commit is therefore taken under this lock and re-validated against the
+# generation and the sources it was built from, immediately before the rename.
+_models_cache_disk_commit_lock = threading.Lock()
+# Generation of the newest rebuild whose payload actually reached the durable
+# file, guarded by ``_models_cache_disk_commit_lock``. The generation fence alone
+# leaves one check-then-use window on the disk path: a publisher can pass its
+# check, be descheduled, let a newer build commit, and only then take the commit
+# lock — reverting the file it just lost to. Remembering the last committed
+# generation inside the lock closes that window without holding the catalog lock
+# across a file write.
+_models_disk_committed_seq: int = 0
+
 
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
@@ -6852,6 +8216,108 @@ try:
     )
 except (TypeError, ValueError):
     _LIVE_REBUILD_BUDGET_SECONDS = 4.0
+
+
+class _CustomProbeSchedule:
+    """Fair-share timing for the serial custom-endpoint probe chain (#7481).
+
+    The cold model-catalog rebuild probes the active endpoint first and each
+    named ``custom_providers`` entry after it, serially, and every probe in the
+    chain shares the one ``_LIVE_REBUILD_BUDGET_SECONDS`` wall-clock budget
+    while individually being capped at ``CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS``.
+    One unreachable endpoint — a LAN LM Studio/Ollama host the webui container
+    cannot route to is the common case, since the probe runs server-side —
+    therefore used to spend the entire budget on its connect timeout, and every
+    reachable provider scheduled behind it never got an in-band ``/v1/models``
+    probe at all: its group rendered from a stale disk cache or stayed empty and
+    the whole rebuild was pushed out-of-band.
+
+    This schedule hands each probe a fair slice of the *remaining* budget rather
+    than letting it consume the whole cap, so an endpoint that times out cannot
+    starve the endpoints after it. Two cases intentionally keep the historical
+    unthrottled cap, and both are stated rather than inferred:
+
+    * the legacy unbounded path (``_LIVE_REBUILD_BUDGET_SECONDS <= 0``), where
+      there is no window to share;
+    * the out-of-band continuation, i.e. the rebuild worker still running after
+      the foreground caller already gave up — reported by the ``out_of_band``
+      predicate — whose probes are no longer holding anyone up and must keep
+      their full attempt so the refresh can complete.
+
+    A slice is ``left / (remaining + 0.1)`` with no lower bound: a fractional
+    slot reserves publication headroom without halving a lone endpoint's window.
+    A slice bounds the serial wait, not the HTTP attempt: attempts may overlap
+    against the same deadline. After later probes, unused time is lent back to
+    still-running attempts before rebuilding from their outcomes in-band. The
+    active/LM Studio duplicate does not reserve a second slot when its URL and
+    configured credential match.
+
+    Even the shared window can truncate a healthy endpoint. A timeout below the
+    full cap is therefore not evidence of unreachability: return a partial,
+    uncached catalog, then retry truncated targets at the full cap on the worker.
+    Successful probes are retained and the final catalog uses the existing
+    generation, identity, ownership and durable-publication fences.
+
+    The window is the CALLER's window, not this chain's: ``deadline`` is an
+    absolute instant captured once before the worker and the foreground wait
+    start (see ``__init__``), so work that happens earlier in the rebuild is paid
+    out of the same window instead of being re-granted to the chain.
+    """
+
+    def __init__(self, endpoint_count: int, *, out_of_band=None, deadline=None) -> None:
+        """``deadline`` is the ABSOLUTE ``time.monotonic()`` instant the shared
+        window ends — the same instant the foreground caller stops waiting on
+        (#7481 review). The caller that owns the rebuild captures it once, before
+        the worker and the foreground wait start, because a deadline minted here
+        would be minted at construction time: any discovery work that ran before
+        the custom-probe phase (provider detection, the live id lookups, the
+        profile rebind) would be spent twice — once against the caller's wait and
+        again against a fresh window handed to this chain — so the chain could
+        still be probing for seconds after the caller had been served a fallback.
+        ``None`` falls back to "one window from now" for standalone callers.
+        """
+        self._remaining = max(1, int(endpoint_count))
+        self._cap = float(CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS)
+        self._attempt_only = float(CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS)
+        self._out_of_band = out_of_band
+        if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
+            # Legacy unbounded path: there is no window to share, so an absolute
+            # deadline is meaningless and the explicit one (if any) is ignored.
+            self._deadline = None
+        elif deadline is not None:
+            self._deadline = float(deadline)
+        else:
+            self._deadline = time.monotonic() + float(_LIVE_REBUILD_BUDGET_SECONDS)
+
+    def next_timeout(self) -> float:
+        """Timeout for the next probe in the chain, then advance the schedule."""
+        remaining = self._remaining
+        self._remaining = max(1, remaining - 1)
+        # Legacy unbounded path: no window exists, so there is nothing to share.
+        if self._deadline is None:
+            return self._cap
+        # Deliberately out-of-band continuation: the foreground caller has already
+        # stopped waiting and served its fallback, so this chain is no longer
+        # holding anyone up and keeps the full attempt for the refresh to be able
+        # to complete. This is an explicit signal rather than an inference from
+        # the deadline, because the deadline being spent does NOT imply the
+        # foreground has given up — a probe can find the window spent while the
+        # caller is still waiting (the hand-off race handled below), and that
+        # state has to stay bounded.
+        if self._out_of_band is not None and self._out_of_band():
+            return self._cap
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            # In-band, window already spent: attempt the probe with the smallest
+            # workable timeout instead of the full cap. Handing out the cap here
+            # is what let a long chain outspend the window once its early slices
+            # were floored up — the later probes paid a full per-endpoint cap each
+            # after the window was gone, so a reachable provider behind them still
+            # landed out-of-band (or not at all), which is the reported defect.
+            return min(self._cap, self._attempt_only)
+        # Fractional headroom, not a whole extra endpoint. No fixed floor:
+        # arbitrary-length chains must not over-allocate the shared window.
+        return min(self._cap, left / (remaining + 0.1))
 
 
 # ── Budget-exceeded warning rate-limit ───────────────────────────────────────
@@ -7034,10 +8500,13 @@ def _minimal_static_models_catalog() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        # Resolved before provider detection so the shared-base_url
+        # disambiguation (#7176) can prefer the entry that owns this model.
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
-                    active_provider, cfg, base_url=cfg_base_url
+                    active_provider, cfg, base_url=cfg_base_url, model_id=default_model
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -7048,13 +8517,13 @@ def _minimal_static_models_catalog() -> dict:
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
                         _resolve_configured_provider_id(
-                            _store.get("active_provider"), cfg, base_url=cfg_base_url
+                            _store.get("active_provider"), cfg,
+                            base_url=cfg_base_url, model_id=default_model,
                         )
                         or None
                     )
             except Exception:
                 pass
-        default_model = get_effective_default_model(cfg)
         groups: list[dict] = []
         if default_model:
             try:
@@ -7097,12 +8566,16 @@ def _static_models_catalog_without_live_probes() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        # Resolved before provider detection so the shared-base_url
+        # disambiguation (#7176) can prefer the entry that owns this model.
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
                     active_provider,
                     cfg,
                     base_url=cfg_base_url,
+                    model_id=default_model,
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -7118,13 +8591,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                             auth_store.get("active_provider"),
                             cfg,
                             base_url=cfg_base_url,
+                            model_id=default_model,
                         )
                         or None
                     )
         except Exception:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
-        default_model = get_effective_default_model(cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
@@ -7166,6 +8639,8 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if isinstance(providers_cfg, dict):
             for provider_key, provider_cfg in providers_cfg.items():
+                if _is_native_custom_provider_key(provider_key):
+                    continue  # named groups are populated from the read view below
                 canonical = _canonicalise_provider_id(provider_key)
                 if not canonical:
                     continue
@@ -7222,13 +8697,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
 
-        for entry in _custom_provider_entries(cfg):
+        for entry in _custom_provider_entries(cfg, for_catalog=True):
             provider_name = str(entry.get("name") or "").strip()
             provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
-                    {"name": provider_name, "models": []},
+                    {"name": entry.get("display_name") or provider_name, "models": []},
                 )
             detected_providers.add(provider_slug)
 
@@ -7240,8 +8715,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                 if configured_id not in configured_ids:
                     configured_ids.append(configured_id)
 
+            configured_labels = _configured_model_explicit_labels(entry.get("models"))
             for configured_id in configured_ids:
-                label = _get_label_for_model(configured_id, [])
+                label = configured_labels.get(configured_id) or _get_label_for_model(configured_id, [])
                 if provider_slug == "custom":
                     custom_group_models.append({"id": configured_id, "label": label})
                 else:
@@ -7252,7 +8728,9 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if cfg_base_url:
             detected_providers.add(
-                _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                _named_custom_provider_slug_for_base_url(
+                    cfg_base_url, cfg, model_id=default_model
+                )
                 or active_provider
                 or "custom"
             )
@@ -7422,6 +8900,17 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         groups.sort(key=_group_sort_key)
 
+        # Natural, case-insensitive model order (#7528) — applied ONLY where
+        # the owner's option B allows it: custom/aggregator groups are sorted
+        # whole (a newapi-style gateway otherwise shows jd-* / sn-* / sub-*
+        # intermixed in insertion order, user request 2026-09-05); built-in
+        # providers keep their curated catalog order. The exact provider_id is
+        # threaded so a named custom provider such as `custom:abc` strips the
+        # FULL `@custom:abc:` prefix when sorting (review blocker 2,
+        # 2026-09-19). See `_sort_picker_group_models`.
+        for _group in groups:
+            _sort_picker_group_models(_group)
+
         model_aliases = _model_aliases_from_config()
 
         if not groups and default_model:
@@ -7559,7 +9048,6 @@ def _has_explicit_pool_credentials(provider_id: str) -> bool:
     cost more than once per TTL window.
     """
     return bool(_pool_entry_payloads(provider_id))
-_provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timestamp of last invalidation
 
 # Disk-backed in-memory cache for get_available_models().
 # Written to disk on every cache population so the cache survives server restarts.
@@ -8121,6 +9609,178 @@ def _is_loadable_disk_cache(cache: object) -> bool:
     return True
 
 
+# --- Durable-cache read memo (#7723 follow-up) ---------------------------
+# Since #7932 the models-cache freshness clock lives INSIDE the payload
+# (``_built_at``), so reading it costs a full parse of the whole catalog file.
+# A session visit needs that stamp AND the catalog groups, which meant parsing
+# the same file twice per visit — ~10 ms of redundant JSON parsing on a
+# 675 KB / 5000-model catalog, doubling session-open disk I/O.
+#
+# This one-slot memo lets the first reader parse the file once and hand the
+# result to the readers that immediately follow on the same visit. It changes
+# NO public or private signatures and no call sites, so every existing stub of
+# these loaders keeps working.
+#
+# Correctness: the entry is keyed on the IDENTITY OF THE BYTES ACTUALLY PARSED
+# — (path, st_mtime_ns, st_size, st_ino, st_dev) read from the open file
+# descriptor — and re-validated by a fresh stat() before use, so a cache
+# rewritten between the two reads is never served from a stale memo.
+#
+# The descriptor stat matters on its own: the writer replaces the file with a
+# temp file plus os.replace(), which mints a NEW inode but can land inside the
+# same coarse-clock mtime tick at an identical size. A precheck-then-open
+# window measured on Linux showed a same-size rewrite served the old generation
+# in 1,461 of 2,000 trials. Keying on the inode of the bytes we parsed makes
+# that window unobservable, because the key and the payload are taken from the
+# same open file.
+#
+# Slot access is guarded by a lock held across the producer's write and across
+# the consumer's whole read-validate-clear path. Without it two threads that
+# interleave inside that path both pass validation and both receive the SAME
+# payload object, which is exactly the shared-mutable-catalog aliasing the
+# consume step exists to prevent.
+#
+# The entry ALSO carries the catalog generation (``_models_rebuild_seq``) that
+# was current when the payload was parsed. A catalog invalidation advances
+# that generation, so an entry parsed before one describes the PRE-invalidation
+# catalog. The file's stat identity cannot detect that on its own — a rebuild
+# is not guaranteed to change ANY part of that key (same coarse-clock mtime
+# tick, same size, and a filesystem that reissues the freed inode) — so the
+# generation travels with the entry and fences it. The producer refuses to
+# publish an entry whose generation is no longer current, and the consumer
+# rejects one whose generation no longer matches. BOTH are required:
+# ``invalidate_models_cache()`` clears the slot BEFORE it advances the
+# generation, so a producer can publish into that gap and only the consumer's
+# check can catch it.
+#
+# ``None`` in the payload slot means "the file parsed, but not to a dict" — a
+# real answer, distinct from "no memo entry". An unreadable/unparseable file
+# takes a different route: the read raises, the memo slot is CLEARED, and the
+# next reader retries from scratch.
+_MODELS_DISK_PAYLOAD_UNSET = object()
+# (path, st_mtime_ns, st_size, st_ino, st_dev, catalog generation, payload)
+_models_disk_payload_memo: tuple[str, int, int, int, int, int, dict | None] | None = None
+_models_disk_payload_memo_lock = threading.Lock()
+
+
+def _clear_models_disk_payload_memo() -> None:
+    """Drop the one-slot parse memo (a no-op when the slot is already empty).
+
+    Callers that abandon a parse without consuming it MUST go through here, so
+    the memo cannot keep a whole parsed catalog resident past the visit that
+    produced it. The memo lock is a leaf — nothing is acquired while it is
+    held — so this is safe to call while holding the catalog lock.
+    """
+    global _models_disk_payload_memo
+    with _models_disk_payload_memo_lock:
+        _models_disk_payload_memo = None
+
+
+def _read_models_cache_disk_payload(cache_path: Path) -> dict | None:
+    """Read + parse the durable models cache, memoising it for immediate reuse.
+
+    Returns the raw on-disk payload, or None when the file is missing or
+    unreadable/unparseable (which also clears the memo).
+    """
+    global _models_disk_payload_memo
+    # Capture the catalog generation BEFORE the parse. An invalidation that
+    # lands while this read is in flight advances the generation, and the
+    # bytes parsed here then describe the PRE-invalidation catalog.
+    generation = _models_rebuild_seq
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            # fstat describes the bytes json.load is about to parse, so the
+            # memo key and the payload cannot disagree.
+            st = os.fstat(f.fileno())
+            payload = json.load(f)
+    except Exception:
+        _clear_models_disk_payload_memo()
+        return None
+    if not isinstance(payload, dict):
+        payload = None
+    entry = (
+        str(cache_path),
+        st.st_mtime_ns,
+        st.st_size,
+        st.st_ino,
+        st.st_dev,
+        generation,
+        payload,
+    )
+    with _models_disk_payload_memo_lock:
+        # Publish only while the generation this parse belongs to is still
+        # current. A catalog invalidation that landed during the parse
+        # supersedes these bytes, and a reader must never be handed them.
+        if generation == _models_rebuild_seq:
+            _models_disk_payload_memo = entry
+    return payload
+
+
+def _memoized_models_cache_disk_payload(cache_path: Path):
+    """Consume the memoised payload if it still matches the file on disk.
+
+    Returns ``_MODELS_DISK_PAYLOAD_UNSET`` when there is no usable entry, in
+    which case the caller must read the file itself.
+
+    The entry is CONSUMED on a hit (the memo slot is cleared before the
+    payload is returned). The memo exists to collapse the precheck+loader
+    double-parse inside a single session visit — never to serve one parse to
+    readers spread across time. A pre-#7932-era read always produced a fresh
+    ``json.load``, so each caller owned its catalog exclusively and could
+    mutate it freely; handing the SAME objects to a second reader would let
+    one caller's in-place edits (e.g. ``_annotate_fast_tier_model_groups``
+    writing ``supports_fast_tier`` into the model dicts, or
+    ``warm_models_catalog_provenance_if_cold`` publishing it into the
+    process-wide ``_available_models_cache`` without a deepcopy) corrupt a
+    later read that would then hand the edited catalog back as if it had just
+    been parsed from disk.
+
+    Consuming the slot restores the pre-existing ownership invariant: the memo
+    hands its payload to exactly one reader, and every later read re-parses.
+    That keeps the single-parse win for the one sequence that matters (the
+    freshness precheck immediately followed by the loader in the same visit)
+    while making aliasing impossible.
+
+    The lock is held across the whole read-validate-clear path, not just the
+    clear. Reading the slot and then calling ``stat()`` releases the GIL, so
+    without the lock two threads can both be inside this function at once, both
+    pass validation, and both return the same object. The consume step would
+    then be a no-op in exactly the case it exists for.
+    """
+    global _models_disk_payload_memo
+    with _models_disk_payload_memo_lock:
+        memo = _models_disk_payload_memo
+        if memo is None:
+            return _MODELS_DISK_PAYLOAD_UNSET
+        path_str, mtime_ns, size, ino, dev, generation, payload = memo
+        if path_str != str(cache_path):
+            return _MODELS_DISK_PAYLOAD_UNSET
+        try:
+            st = cache_path.stat()
+        except OSError:
+            return _MODELS_DISK_PAYLOAD_UNSET
+        if (st.st_mtime_ns, st.st_size, st.st_ino, st.st_dev) != (mtime_ns, size, ino, dev):
+            return _MODELS_DISK_PAYLOAD_UNSET
+        # Generation fence, checked AFTER the stat so that an invalidation
+        # landing during the stat() is still caught. The stat identity alone
+        # cannot tell a pre-invalidation catalog from the rebuilt one: a
+        # rebuild is not guaranteed to change any part of that key. The
+        # generation can, because an invalidation always advances it.
+        #
+        # The producer refuses to publish a stale generation, but it cannot
+        # cover this window: ``invalidate_models_cache()`` clears the slot
+        # BEFORE it advances the generation, so a producer can publish into
+        # that gap. This check is what catches it.
+        if generation != _models_rebuild_seq:
+            # The entry belongs to a superseded catalog generation. It can
+            # never be served, so drop it rather than keep a parsed catalog
+            # resident.
+            _models_disk_payload_memo = None
+            return _MODELS_DISK_PAYLOAD_UNSET
+        _models_disk_payload_memo = None
+        return payload
+
+
 def _load_models_cache_from_disk() -> dict | None:
     """Load /api/models cache from disk if it exists and has current metadata.
 
@@ -8135,10 +9795,16 @@ def _load_models_cache_from_disk() -> dict | None:
         import json as _j
 
         cache_path = _get_models_cache_path()
-        if not cache_path.exists():
+        cache = _memoized_models_cache_disk_payload(cache_path)
+        if cache is _MODELS_DISK_PAYLOAD_UNSET:
+            if not cache_path.exists():
+                return None
+            with open(cache_path, encoding="utf-8") as f:
+                cache = _j.load(f)
+        elif cache is None:
+            # The memo recorded that this exact file parsed to a non-dict, so
+            # there is no usable catalog in it.
             return None
-        with open(cache_path, encoding="utf-8") as f:
-            cache = _j.load(f)
         if not _is_loadable_disk_cache(cache):
             return None
         # Strip the disk-only metadata before returning, so the in-memory
@@ -8477,6 +10143,12 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+        elif not explicit_credential:
+            # The credential came from the provider's runtime, host-gated against the
+            # alias URL. For a name two records claim that is the shared pool's key,
+            # which can be the other record's (#8690): the alias takes the provider's
+            # verdict. An alias with its own key owns both halves and is untouched.
+            _refuse_ambiguous_provider_name(bundle, logical_provider)
         return bundle
 
     resolved_provider = provider
@@ -8518,6 +10190,9 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+    # Last, so an alias credential can neither complete nor relabel a pair the
+    # provider's runtime resolved under a name two records claim (#8690).
+    _refuse_ambiguous_provider_name(bundle, provider, route.get("provider"))
     return bundle
 
 
@@ -8536,10 +10211,15 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         import json as _j
 
         cache_path = _get_models_cache_path()
-        if not cache_path.exists():
+        cache = _memoized_models_cache_disk_payload(cache_path)
+        if cache is _MODELS_DISK_PAYLOAD_UNSET:
+            if not cache_path.exists():
+                return None
+            with open(cache_path, encoding="utf-8") as f:
+                cache = _j.load(f)
+        elif cache is None:
+            # The memo recorded that this exact file parsed to a non-dict.
             return None
-        with open(cache_path, encoding="utf-8") as f:
-            cache = _j.load(f)
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
@@ -8566,7 +10246,9 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         return None
 
 
-def _save_models_cache_to_disk(cache: dict) -> None:
+def _save_models_cache_to_disk(
+    cache: dict, *, rebuild_seq=None, build_fingerprint=None, build_profile=None
+) -> None:
     """Save cache to disk so it survives server restarts.
 
     Stamps the payload with `_webui_version` and `_schema_version` (#1633) so
@@ -8581,13 +10263,32 @@ def _save_models_cache_to_disk(cache: dict) -> None:
     a mismatch (since runtime_version is non-None on every subsequent call),
     so this is safe — at worst we write one cache file that gets rejected
     once on the next boot.
+
+    The commit is fenced (#7481 review). Two overlapping publishers used to
+    pick the SAME ``.<pid>.tmp`` path, so the newer writer's rename could be
+    undone by the older writer's still-open descriptor, leaving stale-but-valid
+    JSON as the durable catalog; and there was no re-check between the in-memory
+    generation decision and the rename. So the temp file is unique per build, and
+    the rename is taken under ``_models_cache_disk_commit_lock`` after
+    re-validating that this build is still the newest allocated generation and is
+    still publishing for the sources it read. A superseded or re-sourced commit
+    discards its temp file and leaves the durable catalog to the build that won.
+    ``_source_fingerprint`` records the fingerprint the build READ, so the file
+    can never claim provenance it did not have.
     """
+    global _models_disk_committed_seq
+    tmp = None
     try:
         if not _is_valid_models_cache(cache):
             return
         payload = {
             "_schema_version": _MODELS_CACHE_SCHEMA_VERSION,
-            "_source_fingerprint": _models_cache_source_fingerprint(),
+            "_source_fingerprint": (
+                build_fingerprint
+                if build_fingerprint is not None
+                else _models_cache_source_fingerprint()
+            ),
+            "_built_at": time.time(),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -8597,12 +10298,145 @@ def _save_models_cache_to_disk(cache: dict) -> None:
         if runtime_version is not None:
             payload["_webui_version"] = runtime_version
         cache_path = _get_models_cache_path()
-        tmp = str(cache_path) + f".{os.getpid()}.tmp"
+        # Unique per build AND per thread: a shared per-pid name is what let two
+        # concurrent publishers collide on one temp path. Same directory, so the
+        # commit stays a same-filesystem (atomic) rename.
+        tmp = "{}.{}.{}.{}.tmp".format(
+            cache_path,
+            os.getpid(),
+            threading.get_ident(),
+            "unfenced" if rebuild_seq is None else int(rebuild_seq),
+        )
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        os.rename(tmp, str(cache_path))
+        with _models_cache_disk_commit_lock:
+            # Commit-time fence, not merely a pre-write check: the write above is
+            # slow enough for a newer build to publish in the meantime, and the
+            # durable file must never be reverted to an older catalog.
+            #
+            # Lock order is commit lock -> catalog lock; nothing takes them the
+            # other way round (the publishers call this with `_cache_build_cv`
+            # released, because a file write must not run inside the catalog
+            # lock).
+            # Hold the catalog lock through the rename: invalidation takes
+            # commit -> catalog in that same order and deletes under both.
+            # Otherwise it can revoke the build after this check, delete the
+            # file, and return before this stale rename restores it.
+            with _cache_build_cv:
+                superseded = rebuild_seq is not None and _models_rebuild_superseded(
+                    rebuild_seq
+                )
+                if superseded or (
+                    rebuild_seq is not None
+                    and (
+                        int(rebuild_seq) < _models_disk_committed_seq
+                        or not _models_build_identity_current(
+                            build_fingerprint, build_profile
+                        )
+                    )
+                ):
+                    logger.debug(
+                        "discarding models-cache disk commit from superseded rebuild "
+                        "#%s (latest allocated rebuild #%s, latest committed #%s)",
+                        rebuild_seq, _models_rebuild_seq, _models_disk_committed_seq,
+                    )
+                    return
+                os.replace(tmp, str(cache_path))
+                tmp = None
+                if rebuild_seq is not None:
+                    _models_disk_committed_seq = max(
+                        _models_disk_committed_seq, int(rebuild_seq)
+                    )
     except Exception:
         pass  # Non-fatal -- cache will rebuild on next call
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass  # already gone / never created
+
+
+def _commit_models_cache_to_disk_after_lock(
+    cache: dict, rebuild_seq, build_fingerprint, build_profile
+) -> None:
+    """Foreground durable publication, run with the catalog lock NOT held.
+
+    ``get_available_models`` holds ``_available_models_cache_lock`` across the
+    whole cold path, including the foreground wait. It publishes memory there
+    and queues the durable commit for this helper, which runs only after that
+    outer lock scope has fully ended (#7481 review). Calling
+    ``_save_models_cache_to_disk`` while the catalog lock was still held acquired
+    the two locks in the order catalog -> commit, while
+    ``_invalidate_models_catalog_epoch`` (and the writer itself) uses
+    commit -> catalog: a foreground publisher then blocked on a commit mutex an
+    invalidator already held, while that invalidator blocked on the catalog lock
+    the publisher owned. Both acquisitions are unbounded in production, so that
+    is a cycle with no escape — the foreground `/api/models` load and the
+    invalidation would each wait forever.
+
+    Running the commit here keeps the writer's own order (commit -> catalog)
+    intact with no outer catalog ownership held, so the two can never cycle.
+    The single-flight release rides with the commit, so ownership still spans
+    the durable write; ``_clear_build_in_progress`` refuses to release a slot a
+    newer rebuild owns, so a superseded foreground publisher cannot clear the
+    newer build's flag (#7481 review).
+    """
+    try:
+        _save_models_cache_to_disk(
+            cache,
+            rebuild_seq=rebuild_seq,
+            build_fingerprint=build_fingerprint,
+            build_profile=build_profile,
+        )
+    except Exception:
+        logger.debug("models cache disk save failed", exc_info=True)
+    finally:
+        _clear_build_in_progress(rebuild_seq)
+
+
+class _DeferredCatalogPublication:
+    """Hold the models-catalog lock for one cold path, then flush the commits.
+
+    ``get_available_models`` runs its whole cold path under
+    ``_available_models_cache_lock`` and, on the foreground paths, publishes the
+    catalog to memory *and* to disk. Committing to disk while that lock is held
+    acquires the two locks as catalog -> commit, while
+    ``_invalidate_models_catalog_epoch`` and ``_save_models_cache_to_disk``
+    itself take commit -> catalog (#7481 review): a foreground publisher then
+    waits forever on a commit mutex an invalidator already holds, and that
+    invalidator waits forever on the catalog lock the publisher owns. Both
+    acquisitions are unbounded in production, so this is a hard deadlock, not a
+    latency bug.
+
+    This scope owns the catalog lock for the critical section and, on exit,
+    releases it *before* running the queued durable commits. Ordering is the
+    whole point: the exit runs after the ``with`` body (including on the way out
+    of a ``return``), and the release happens first, so the commits below acquire
+    commit -> catalog with no outer catalog ownership — the writer's own order,
+    which cannot cycle with an invalidator.
+
+    The queue is handed to the body (``as deferred``) so the closures inside it
+    can enqueue instead of committing inline.
+    """
+
+    def __init__(self, lock) -> None:
+        self._lock = lock
+        self._commits: list = []
+
+    def __enter__(self) -> list:
+        self._lock.acquire()
+        return self._commits
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # Release exactly the level acquired in __enter__ — the body's own
+        # re-entries (``_cache_build_cv`` shares this RLock) are balanced, so
+        # the lock is fully free from here on. Doing this before the flush is
+        # what removes the cycle; holding it would recreate the deadlock.
+        self._lock.release()
+        while self._commits:
+            _commit_models_cache_to_disk_after_lock(*self._commits.pop(0))
+        return False
 
 
 def _get_fresh_memory_models_cache(now: float) -> dict | None:
@@ -8636,6 +10470,50 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     return None
 
 
+def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: str | None = None) -> None:
+    """Revoke readers and workers, then remove the durable snapshot atomically.
+
+    Lock order is always disk-commit -> catalog. Keeping both through unlink
+    prevents an already-admitted rename from restoring a deleted cache. Readers
+    that loaded disk outside the lock use the epoch to reject those bytes.
+    """
+    global _available_models_cache, _available_models_cache_ts
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
+    global _cache_build_in_progress
+    # Drop the one-slot parse memo BEFORE the disk unlink below. The memo is
+    # keyed on (path, mtime_ns, size, st_ino, st_dev), so a payload parsed
+    # before this call keeps a key that still matches the freshly rebuilt file:
+    # the writer creates a new inode, but the rebuild can land inside the same
+    # coarse-clock mtime tick at an identical size, and on any filesystem that
+    # reuses inodes the st_ino/st_dev pair can match too. A reader that then
+    # consumed the memo would be handed the PRE-invalidation catalog -- and
+    # because the consume step hands out that object without a copy, the
+    # caller's in-place edits would corrupt it for every reader after it.
+    # Invalidating the memory cache while leaving the parse memo populated is
+    # therefore not a no-op: the memo is the one cache that survives here.
+    _clear_models_disk_payload_memo()
+    with _models_cache_disk_commit_lock:
+        with _cache_build_cv:
+            _allocate_models_rebuild_seq()
+            _available_models_cache = None
+            _available_models_cache_ts = 0.0
+            _available_models_live_rebuild_ts = 0.0
+            _available_models_cache_source_fingerprint = None
+            _sync_models_cache_provenance()
+            # Evict credentials before reopening rebuild admission. Otherwise a
+            # new generation can persist an old pool with the new fingerprint.
+            if provider_id is None:
+                _CREDENTIAL_POOL_CACHE.clear()
+            else:
+                tag = _credential_pool_profile_tag()
+                _CREDENTIAL_POOL_CACHE.pop((tag, provider_id), None)
+                _CREDENTIAL_POOL_CACHE.pop((tag, _resolve_provider_alias(provider_id)), None)
+            _cache_build_in_progress = False
+            _cache_build_cv.notify_all()
+            if delete_disk:
+                _delete_models_cache_on_disk()
+
+
 def invalidate_models_cache(*, delete_disk: bool = True):
     """Force the TTL cache for get_available_models() to be cleared.
 
@@ -8650,27 +10528,11 @@ def invalidate_models_cache(*, delete_disk: bool = True):
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
 
-    ``delete_disk=False`` keeps the fingerprint-guarded disk snapshot (profile switch).
+    Invalidation revokes running rebuilds even without a successor. A profile
+    switch passes ``delete_disk=False`` to preserve its fingerprint-guarded disk
+    snapshot; the generation/owner epoch still advances.
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
-    with _available_models_cache_lock:
-        _available_models_cache = None
-        _available_models_cache_ts = 0.0
-        _available_models_live_rebuild_ts = 0.0
-        _available_models_cache_source_fingerprint = None
-        _sync_models_cache_provenance()
-        _cache_build_in_progress = False
-        _cache_build_cv.notify_all()
-        # Clear the credential pool cache too (all profiles). Without this,
-        # tests (and live provider key edits) see a stale CredentialPool from a
-        # prior auth_store payload — the test_credential_pool_providers suite was
-        # hitting this directly. A full reset is intentionally profile-wide.
-        _CREDENTIAL_POOL_CACHE.clear()
-    # Also delete the disk cache so the next cold build starts fresh.
-    # Disk delete is outside the lock — file I/O shouldn't block other readers.
-    if delete_disk:
-        _delete_models_cache_on_disk()
+    _invalidate_models_catalog_epoch(delete_disk=delete_disk)
     try:
         from api.plugin_providers import invalidate_plugin_model_provider_cache
 
@@ -8706,30 +10568,12 @@ def invalidate_provider_models_cache(provider_id: str):
 
     Also invalidates the full cache so that the next get_available_models()
     call rebuilds all groups cleanly (the rebuilt provider is merged with any
-    other cached groups from the 24h TTL window).  After the next
-    get_available_models() call, _provider_models_invalidated_ts[provider_id]
-    is cleared so the provider's fresh models are used.
+    other cached groups from the 24h TTL window).
 
     Args:
         provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
     """
-    global _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _CREDENTIAL_POOL_CACHE
-    with _available_models_cache_lock:
-        _available_models_cache = None
-        _available_models_cache_ts = 0.0
-        _available_models_live_rebuild_ts = 0.0
-        _available_models_cache_source_fingerprint = None
-        _sync_models_cache_provenance()
-        _provider_models_invalidated_ts[provider_id] = time.time()
-        # Also evict the credential pool so the next cold path re-loads it.
-        # Must evict both the original key and its canonical form (load_pool
-        # may be called with either, and both paths cache under their own key),
-        # scoped to the active profile's cache key.
-        _cp_tag = _credential_pool_profile_tag()
-        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, provider_id), None)
-        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_provider_alias(provider_id)), None)
-    _delete_models_cache_on_disk()
+    _invalidate_models_catalog_epoch(provider_id=provider_id)
 
 
 def _get_label_for_model(model_id: str, existing_groups: list) -> str:
@@ -9001,6 +10845,99 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
+    #
+    # #7481: explicit foreground-vs-out-of-band signal for the probe schedule.
+    # The bounded path below runs the rebuild on a daemon worker and lets the
+    # foreground caller stop waiting at the budget; from that moment the worker's
+    # remaining probes are out-of-band and keep the full per-endpoint cap so the
+    # refresh can complete. That is a *different* contract from the in-band chain,
+    # which must stay inside the shared window — and the two cannot be told apart
+    # by the deadline alone (a probe can find the window spent while the caller is
+    # still waiting). The foreground sets this event when it gives up; every
+    # rebuild invocation gets its own, so a still-running worker from an earlier
+    # rebuild cannot read a later caller's state. Defined before the builder
+    # closure so the closure can capture it as a free variable; on the legacy
+    # synchronous path it is simply never set and there is no window to share.
+    _models_rebuild_abandoned = threading.Event()
+
+    # ONE absolute deadline for this whole rebuild (#7481 review). Captured
+    # before the worker and the foreground wait start, then read by BOTH: by
+    # ``_CustomProbeSchedule`` (so the custom-probe chain spends what is LEFT of
+    # the caller's window rather than minting a fresh one after whatever
+    # discovery work already ran) and by the foreground ``build_done.wait``
+    # below. A schedule that minted its own deadline let earlier discovery work
+    # — provider detection, live id lookups, the profile rebind — be paid twice:
+    # once against the caller's wait, again against the chain's fresh window, so
+    # the chain could still be probing seconds after the caller had been served
+    # the over-budget fallback. ``None`` means the legacy unbounded path
+    # (budget <= 0), where there is no window to share. Defined before the
+    # builder closure so the closure can capture it as a free variable; assigned
+    # in the cold path below, before either caller runs.
+    _models_rebuild_deadline: float | None = None
+
+    # Retain successful probes across the full-cap continuation; only truncated
+    # attempts are removed before rebuilding the catalog on the same worker.
+    _custom_endpoint_probe_memo: dict[tuple[str, str], tuple[str, object]] = {}
+    _truncated_probes: set[tuple[str, str]] = set()
+    # A slice limits serial waiting, not the lifetime of the HTTP attempt.
+    # Later probes can run while earlier slow probes use the shared window.
+    # Only the catalog worker consumes outcomes/mutates the probe memo.
+    _pending_probes: dict[tuple[str, str], tuple[threading.Event, dict]] = {}
+
+    def _read_probe_payload(req, probe_key, timeout):
+        import urllib.request
+
+        pending = _pending_probes.get(probe_key)
+        if pending is None:
+            # Keep synchronous/full-cap continuation semantics. A bounded
+            # attempt gets the remaining caller window, not just its fair slice.
+            if _models_rebuild_deadline is None or _models_rebuild_abandoned.is_set():
+                with urllib.request.urlopen(req, timeout=timeout) as response:  # nosec B310
+                    return json.loads(response.read().decode("utf-8"))
+            remaining = max(timeout, _models_rebuild_deadline - time.monotonic() - 0.05)
+            request_timeout = min(CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS, remaining)
+            done, outcome = threading.Event(), {"timeout": request_timeout}
+
+            def read():
+                try:
+                    with urllib.request.urlopen(req, timeout=request_timeout) as response:  # nosec B310
+                        outcome["data"] = json.loads(response.read().decode("utf-8"))
+                except Exception as exc:
+                    outcome["error"] = exc
+                finally:
+                    done.set()
+
+            _pending_probes[probe_key] = (done, outcome)
+            threading.Thread(target=read, name="models-endpoint-probe", daemon=True).start()
+        else:
+            done, outcome = pending
+        if not done.wait(timeout):
+            raise TimeoutError("catalog probe slice exhausted")
+        _pending_probes.pop(probe_key, None)
+        if "error" in outcome:
+            exc = outcome["error"]
+            if outcome.get("timeout", 0.0) >= CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS:
+                # The HTTP attempt itself ran at the full endpoint cap, so its
+                # timeout IS evidence of unreachability even when a later pass
+                # consumes the outcome under a smaller fair-share slice.
+                exc.hermes_full_cap_attempt = True
+            raise exc
+        return outcome["data"]
+    # A full-cap custom retry must not repeat unrelated provider discovery.
+    # Empty/failure fallbacks are retained too, but only for this invocation.
+    _live_provider_memo: dict[str, tuple[bool, object]] = {}
+
+    def _memoized_live_lookup(key, lookup):
+        if key not in _live_provider_memo:
+            try:
+                _live_provider_memo[key] = (True, lookup())
+            except Exception as exc:
+                _live_provider_memo[key] = (False, exc)
+        succeeded, value = _live_provider_memo[key]
+        if not succeeded:
+            raise value
+        return copy.deepcopy(value)
+
     def _build_available_models_uncached() -> dict:
         active_provider = None
         default_model = get_effective_default_model(cfg)
@@ -9145,6 +11082,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 active_provider,
                 cfg,
                 base_url=cfg_base_url,
+                model_id=default_model,
             )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
@@ -9160,6 +11098,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         auth_store.get("active_provider"),
                         cfg,
                         base_url=cfg_base_url,
+                        model_id=default_model,
                     )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
@@ -9379,6 +11318,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _canonical_to_raw_provider_key: dict[str, str] = {}
         if isinstance(_cfg_providers, dict):
             for _pid_key, _provider_cfg in _cfg_providers.items():
+                if _is_native_custom_provider_key(_pid_key):
+                    continue  # named groups are populated from the read view below
                 _canonical = _canonicalise_provider_id(_pid_key)
                 if not _canonical:
                     continue
@@ -9455,6 +11396,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         model_cfg.get("provider"),
                         cfg,
                         base_url=base_url,
+                        model_id=default_model,
                     )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
@@ -9464,6 +11406,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for provider_key, provider_cfg in providers_cfg.items():
                     if not isinstance(provider_cfg, dict):
                         continue
+                    if _is_native_custom_provider_key(provider_key):
+                        continue  # normalized native URLs/identities come from the view
                     provider_base_url = _normalize_base_url_for_match(
                         provider_cfg.get("base_url")
                     )
@@ -9472,20 +11416,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         if provider_hint:
                             return str(provider_hint).strip().lower()
 
-            custom_providers_cfg = cfg.get("custom_providers", [])
-            if isinstance(custom_providers_cfg, list):
-                for entry in custom_providers_cfg:
-                    if not isinstance(entry, dict):
-                        continue
-                    entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
-                    if entry_base_url != target:
-                        continue
-                    entry_name = str(entry.get("name") or "").strip()
-                    if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
-                    return "custom"
-
-            return ""
+            return _named_custom_provider_slug_for_base_url(
+                base_url, cfg, model_id=default_model
+            )
 
         def _models_endpoint_for_base_url(base_url: str) -> str:
             base = str(base_url or "").strip().rstrip("/")
@@ -9522,7 +11455,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         def _custom_endpoint_error(
             provider: str,
-            exc: Exception,
+            exc: Exception | None = None,
             *,
             code: int | None = None,
         ) -> dict:
@@ -9546,16 +11479,47 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 "message": f"Models endpoint unreachable for {provider_label}; verify base_url.",
             }
 
+        # ── In-rebuild probe de-duplication (#7481 follow-up) ────────────────
+        # One rebuild can consult the same endpoint more than once: step 4 probes
+        # the active ``model.base_url``, and the LM Studio provider-group fallback
+        # later reads ``providers.lmstudio.base_url`` (falling back to
+        # ``model.base_url`` when lmstudio is the active provider) — in the config
+        # shape the issue reports those are the SAME unreachable LAN host, so one
+        # dead endpoint cost the rebuild two full connect timeouts and two slots of
+        # the shared window. A named ``custom_providers`` entry can likewise repeat
+        # an endpoint an earlier entry already probed. Memoise by (endpoint URL,
+        # credential) and reuse the outcome, so an endpoint is probed at most once
+        # per initial pass (slice-truncated attempts get one full-cap retry).
+        #
+        # The credential is part of the identity: the same URL with a different key
+        # is a different probe and still runs. The raw payload is cached rather than
+        # the parsed entries, so each consumer still shapes the list for its own
+        # provider, and the memo is consulted only AFTER the per-endpoint
+        # SSRF/validation checks — a consumer that would have been blocked is still
+        # blocked rather than served another caller's result.
+
+        def _custom_endpoint_probe_key(endpoint_url: str, headers: dict) -> tuple[str, str]:
+            """Identity of one custom-endpoint probe: the URL it hits + the credential it sends."""
+            return (endpoint_url, str(headers.get("Authorization") or ""))
+
         def _read_custom_endpoint_models(
             base_url: object,
             provider: str,
             *,
             api_key: object = "",
             trusted_base_urls: tuple[object, ...] = (),
+            timeout_seconds: float | None = None,
         ) -> tuple[list[dict], dict | None]:
             base = str(base_url or "").strip()
             if not base:
                 return [], None
+            # Filled in once the endpoint has passed validation; the failure paths
+            # below memoize their outcome under it so a later consumer in the same
+            # rebuild does not pay the same timeout twice. It stays None when the
+            # validation refuses the URL, so a consumer that would have been blocked
+            # is never served another caller's memoized result.
+            probe_key: tuple[str, str] | None = None
+            probe_timeout = CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
             try:
                 import ipaddress
                 import urllib.error
@@ -9598,25 +11562,122 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     except socket.gaierror:
                         pass
 
+                probe_key = _custom_endpoint_probe_key(endpoint_url, headers)
+                memoized = _custom_endpoint_probe_memo.get(probe_key)
+                if memoized is not None:
+                    # This exact endpoint + credential was already probed earlier in
+                    # this rebuild, so reuse the outcome rather than paying the
+                    # connect timeout a second time (#7481 follow-up). A memoized
+                    # failure is re-reported for THIS provider (its own label).
+                    memo_kind, memo_value = memoized
+                    if memo_kind == "ok":
+                        logger.debug("Reusing in-rebuild /models probe for %s", endpoint_url)
+                        return _extract_model_entries_from_payload(memo_value, provider), None
+                    if memo_kind == "truncated":
+                        return [], None
+                    return [], _custom_endpoint_error(provider, code=memo_value)
+
                 req = urllib.request.Request(endpoint_url, method="GET")
                 req.add_header("User-Agent", "OpenAI/Python 1.0")
                 for k, v in headers.items():
                     req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as response:  # nosec B310
-                    data = json.loads(response.read().decode("utf-8"))
+                # #7481: the caller may hand us a fair-share slice of the shared
+                # rebuild budget (see _CustomProbeSchedule) instead of the full
+                # per-endpoint cap, so one unreachable endpoint cannot starve the
+                # providers probed after it. Default stays the documented cap.
+                probe_timeout = (
+                    CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                    if timeout_seconds is None
+                    else float(timeout_seconds)
+                )
+                data = _read_probe_payload(req, probe_key, probe_timeout)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("ok", data)
                 return _extract_model_entries_from_payload(data, provider), None
             except urllib.error.HTTPError as exc:
-                error = _custom_endpoint_error(provider, exc, code=getattr(exc, "code", None))
+                response_code = getattr(exc, "code", None)
+                error = _custom_endpoint_error(provider, exc, code=response_code)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("error", response_code)
                 logger.debug("Custom endpoint models fetch failed for provider %s: %s", provider, error)
                 return [], error
             except Exception as exc:
+                reason = getattr(exc, "reason", exc)
+                if (probe_key is not None and probe_timeout < CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                        and not getattr(exc, "hermes_full_cap_attempt", False)
+                        and isinstance(reason, (TimeoutError, socket.timeout))):
+                    _truncated_probes.add(probe_key)
+                    _custom_endpoint_probe_memo[probe_key] = ("truncated", None)
+                    return [], None
                 error = _custom_endpoint_error(provider, exc)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("error", None)
                 logger.debug("Custom endpoint unreachable or misconfigured for provider %s: %s", provider, error)
                 return [], error
+
+        # ── Fair-share schedule for the serial custom-endpoint probe chain ───
+        # #7481: step 4 probes the active endpoint and step 5 probes each named
+        # ``custom_providers`` entry after it, serially, off one shared rebuild
+        # budget. Without a schedule the first endpoint in the chain could spend
+        # that entire budget on its own connect timeout and leave every later —
+        # reachable — provider with no in-band probe at all. See
+        # _CustomProbeSchedule for the allocation rules.
+        def _pending_custom_probe_count() -> int:
+            """How many endpoints this rebuild is about to probe live, in order.
+
+            Counts the active endpoint (step 4) plus the named
+            ``custom_providers`` entries that will need a live ``/v1/models``
+            probe (step 5). Providers carrying a static ``models:`` allowlist
+            never probe live, so they must not dilute the schedule. Entries
+            whose base_url is only resolvable later from the credential pool are
+            counted anyway — over-counting merely makes the earlier slices a
+            little smaller, whereas under-counting would over-spend the budget.
+            """
+            count = 1 if cfg_base_url else 0
+            custom_providers_cfg = _custom_provider_entries(cfg, for_catalog=True)
+            if isinstance(custom_providers_cfg, list):
+                for entry in custom_providers_cfg:
+                    if not isinstance(entry, dict):
+                        continue
+                    if not (entry.get("name") or "").strip():
+                        continue
+                    configured_models = entry.get("models")
+                    if (isinstance(configured_models, (dict, list)) and len(configured_models) > 0
+                            and not _provider_models_are_discovered_catalog(entry)):
+                        continue
+                    count += 1
+            # The LM Studio provider-group branch re-probes the same
+            # /v1/models endpoint from ``providers.lmstudio.base_url`` in its own
+            # right — the second consumer of a single dead LAN endpoint in the
+            # common #7481 config — so it has to hold a slot in the schedule too.
+            # When the hermes_cli tier answers first no HTTP probe happens and
+            # the slot simply goes unused, which only makes the earlier slices a
+            # touch smaller.
+            if (
+                "lmstudio" in {str(pid).strip().lower() for pid in detected_providers}
+                and _get_provider_base_url("lmstudio")
+            ):
+                lm_base = _get_provider_base_url("lmstudio")
+                lm_key = str(_get_provider_cfg("lmstudio").get("api_key") or "").strip()
+                active_key = str(model_cfg.get("api_key") or lm_key).strip() if isinstance(model_cfg, dict) else ""
+                # The common active-LM-Studio shape has one distinct target,
+                # not two competing probes. Do not halve its healthy latency.
+                if (not cfg_base_url or active_provider != "lmstudio"
+                        or _models_endpoint_for_base_url(str(cfg_base_url)) != (str(lm_base) + "/models").rstrip("/")
+                        or active_key != lm_key):
+                    count += 1
+            return count
+
+        custom_probe_schedule = _CustomProbeSchedule(
+            _pending_custom_probe_count(),
+            out_of_band=_models_rebuild_abandoned.is_set,
+            deadline=_models_rebuild_deadline,
+        )
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
         auto_detected_models_by_provider: dict[str, list[dict]] = {}
+        _active_probe_owner = None
         if cfg_base_url:
             base_url = cfg_base_url.strip()
             configured_provider = _configured_provider_for_base_url(base_url)
@@ -9676,7 +11737,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         break
 
             _trusted_custom_bases: list[object] = [cfg_base_url]
-            _custom_providers_for_trust = cfg.get("custom_providers", [])
+            _custom_providers_for_trust = _custom_provider_entries(cfg)
             if isinstance(_custom_providers_for_trust, list):
                 _trusted_custom_bases.extend(
                     _cp.get("base_url")
@@ -9688,14 +11749,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider,
                 api_key=api_key,
                 trusted_base_urls=tuple(_trusted_custom_bases),
+                timeout_seconds=custom_probe_schedule.next_timeout(),
             )
             for auto_model in _active_endpoint_models:
                 auto_detected_models.append(auto_model)
                 provider_key = provider.lower()
                 auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
                 detected_providers.add(provider_key)
+            _active_probe_owner = (provider.lower(), str(api_key or "").strip())
 
-        _custom_providers_cfg = cfg.get("custom_providers", [])
+        _custom_providers_cfg = _custom_provider_entries(cfg, for_catalog=True)
         _named_custom_groups: dict = {}
         _named_custom_errors: dict[str, dict] = {}
         if isinstance(_custom_providers_cfg, list):
@@ -9706,14 +11769,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _cp_name = (_cp.get("name") or "").strip()
                 _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
-                    _named_custom_groups[_slug] = (_cp_name, [])
+                    _named_custom_groups[_slug] = (_cp.get("display_name") or _cp_name, [])
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
-                _cp_api_key = str(_cp.get("api_key") or "").strip()
-                if not _cp_api_key:
-                    _cp_key_env = str(_cp.get("key_env") or "").strip()
-                    if _cp_key_env:
-                        _cp_api_key = _thread_local_env_value(_cp_key_env).strip()
+                _cp_api_key = _resolve_custom_record_key(
+                    _cp.get("api_key"), _cp.get("key_env"), _slug,
+                ) or ""
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
                     try:
@@ -9743,7 +11804,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cp_has_configured_models = (
                         isinstance(_cp_configured_models, (dict, list))
                         and len(_cp_configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(_cp)
                     )
+                    if (
+                        _active_probe_owner
+                        and _active_probe_owner[0] == _slug
+                        and str(_cp_api_key or "").strip() != _active_probe_owner[1]
+                    ):
+                        # #7176: a shared-URL entry whose credential (even none)
+                        # differs must not inherit the active probe's catalog.
+                        auto_detected_models_by_provider.pop(_slug, None)
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
                     if _cp_has_configured_models:
@@ -9761,6 +11831,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             _slug,
                             api_key=_cp_api_key,
                             trusted_base_urls=(_cp_base_url,),
+                            timeout_seconds=custom_probe_schedule.next_timeout(),
                         )
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
@@ -9782,6 +11853,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
 
                 # Collect configured model IDs as a fallback/sticky entry after live discovery.
+                _cp_labels = _configured_model_explicit_labels(_cp.get("models"))
                 _cp_model_ids: list[str] = []
                 _cp_model = _cp.get("model", "")
                 if _cp_model:
@@ -9793,7 +11865,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
                     if _cp_model and _dedup_key not in _seen_custom_ids:
-                        _cp_label = _get_label_for_model(_cp_model, [])
+                        _cp_label = _cp_labels.get(_cp_model) or _get_label_for_model(_cp_model, [])
                         _seen_custom_ids.add(_dedup_key)
                         if _slug:
                             detected_providers.add(_slug)
@@ -9822,7 +11894,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
-        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(
+            cfg_base_url, cfg, model_id=default_model
+        )
         if _base_matched_named_slug and _named_custom_slugs:
             for _pid in list(detected_providers):
                 _pid_norm = str(_pid or "").strip().lower()
@@ -9838,13 +11912,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 configured_providers.add(active_provider)
             cfg_providers = cfg.get("providers", {})
             if isinstance(cfg_providers, dict):
-                # Canonicalise here too — same rationale as #1568 detection
-                # path. Without this, only_show_configured mode could
-                # exclude detected ``opencode-go`` because configured_providers
-                # only has the underscore-variant key from config.yaml.
-                configured_providers.update(
-                    _canonicalise_provider_id(k) or k for k in cfg_providers.keys()
-                )
+                # Native keys use the same stable identity as the read view;
+                # built-in/plugin aliases retain their existing canonical ids.
+                # Scalar siblings such as only_configured are settings, not ids.
+                for key, value in cfg_providers.items():
+                    if _is_native_custom_provider_key(key):
+                        if isinstance(value, dict):
+                            configured_providers.add(_custom_provider_slug_from_name(key))
+                    else:
+                        configured_providers.add(_canonicalise_provider_id(key) or key)
             # Only show providers that are both detected and configured
             detected_providers = detected_providers.intersection(configured_providers)
 
@@ -9982,7 +12058,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         from hermes_cli.models import (
                             fetch_openrouter_models as _fetch_or_models,
                         )
-                        live_curated = _fetch_or_models() or []
+                        live_curated = _memoized_live_lookup("openrouter-curated", _fetch_or_models) or []
                         for mid, _desc in live_curated:
                             if mid and mid not in seen_ids:
                                 seen_ids.add(mid)
@@ -10007,8 +12083,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
                         free_tier_models = []
                         selected_free_tier_model = None
-                        with _urlreq.urlopen(_req, timeout=8.0) as _resp:
-                            _payload = json.loads(_resp.read().decode())
+                        def _fetch_free_tier(req=_req):
+                            with _urlreq.urlopen(req, timeout=8.0) as _resp:
+                                return json.loads(_resp.read().decode())
+
+                        _payload = _memoized_live_lookup("openrouter-free", _fetch_free_tier)
                         for _item in _payload.get("data", []) or []:
                             if not isinstance(_item, dict):
                                 continue
@@ -10082,7 +12161,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                         raw_models = [
                             {"id": mid, "label": _format_ollama_label(mid)}
-                            for mid in (_provider_model_ids("ollama-cloud") or [])
+                            for mid in (_memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or [])
                         ]
                     except Exception:
                         logger.warning("Failed to load Ollama Cloud models from hermes_cli")
@@ -10099,7 +12178,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
 
-                        codex_ids = [mid for mid in (_provider_model_ids("openai-codex") or []) if mid]
+                        codex_ids = [mid for mid in (_memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []) if mid]
                     except Exception:
                         logger.warning("Failed to load OpenAI Codex models from hermes_cli")
 
@@ -10137,7 +12216,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
 
-                        live_ids = _provider_model_ids("nous") or []
+                        live_ids = _memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []
                     except Exception:
                         logger.warning("Failed to load Nous Portal models from hermes_cli")
                         live_ids = []
@@ -10197,7 +12276,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     lm_ids: list[str] = []
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
-                        lm_ids = _provider_model_ids("lmstudio") or []
+                        lm_ids = _memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []
                     except Exception:
                         logger.debug("hermes_cli LM Studio lookup unavailable; using urlopen fallback")
 
@@ -10218,17 +12297,61 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 headers["Authorization"] = f"Bearer {lm_api_key}"
                             endpoint = (lm_base_url + "/models").rstrip("/")
                             try:
-                                import urllib.request as _urlreq
-                                req = _urlreq.Request(endpoint, method="GET", headers=headers)
-                                with _urlreq.urlopen(req, timeout=5) as resp:
-                                    lm_data = json.loads(resp.read().decode())
-                                for m in (lm_data.get("data") or []):
+                                _lm_probe_key = _custom_endpoint_probe_key(endpoint, headers)
+                            except Exception:
+                                _lm_probe_key = None
+                            _lm_memo = (
+                                _custom_endpoint_probe_memo.get(_lm_probe_key)
+                                if _lm_probe_key is not None
+                                else None
+                            )
+                            lm_data = None
+                            if _lm_memo is not None:
+                                # #7481 follow-up: this endpoint was already probed
+                                # earlier in this rebuild — typically by the active
+                                # model.base_url probe, since
+                                # _get_provider_base_url("lmstudio") falls back to
+                                # model.base_url when lmstudio is the active
+                                # provider. Reuse that payload (or its failure)
+                                # instead of stalling on the same host a second
+                                # time, which is what made one dead LAN endpoint
+                                # cost the rebuild two connect timeouts.
+                                if _lm_memo[0] == "ok":
+                                    lm_data = _lm_memo[1]
+                                else:
+                                    logger.debug(
+                                        "LM Studio endpoint %s already failed in this rebuild; not re-probing",
+                                        endpoint,
+                                    )
+                            else:
+                                lm_timeout = CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                                try:
+                                    import urllib.request as _urlreq
+                                    req = _urlreq.Request(endpoint, method="GET", headers=headers)
+                                    # #7481: this probe is part of the same rebuild as
+                                    # the custom-endpoint chain, so it draws from the
+                                    # shared schedule instead of a hardcoded 5s that
+                                    # could push the rebuild past the budget on its own.
+                                    lm_timeout = custom_probe_schedule.next_timeout()
+                                    lm_data = _read_probe_payload(req, _lm_probe_key, lm_timeout)
+                                    if _lm_probe_key is not None:
+                                        _custom_endpoint_probe_memo[_lm_probe_key] = ("ok", lm_data)
+                                except Exception as exc:
+                                    if _lm_probe_key is not None:
+                                        if (lm_timeout < CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                                                and not getattr(exc, "hermes_full_cap_attempt", False)
+                                                and isinstance(getattr(exc, "reason", exc), TimeoutError)):
+                                            _truncated_probes.add(_lm_probe_key)
+                                            _custom_endpoint_probe_memo[_lm_probe_key] = ("truncated", None)
+                                        else:
+                                            _custom_endpoint_probe_memo[_lm_probe_key] = ("error", None)
+                                    logger.debug("LM Studio /models fetch failed at %s", endpoint)
+                            if isinstance(lm_data, dict) and isinstance(lm_data.get("data"), list):
+                                for m in lm_data["data"]:
                                     if isinstance(m, dict):
                                         mid = str(m.get("id") or "").strip()
                                         if mid and {"id": mid, "label": mid} not in raw_models:
                                             raw_models.append({"id": mid, "label": mid})
-                            except Exception:
-                                logger.debug("LM Studio /models fetch failed at %s", endpoint)
 
                     if raw_models:
                         _append_picker_group(provider_name, pid, raw_models)
@@ -10282,7 +12405,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         else:
                             raw_models = _models_from_live_provider_ids(
                                 pid,
-                                _read_live_provider_model_ids(pid),
+                                _memoized_live_lookup(pid, lambda pid=pid: _read_live_provider_model_ids(pid)),
                             )
                             if (
                                 not raw_models
@@ -10392,13 +12515,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     default_model,
                 )
             else:
-                all_ids_norm = {
+                # Model IDs are provider-scoped: an OpenAI API entry cannot
+                # satisfy a configured Codex default with the same bare ID.
+                # Keep the global fallback only when no active group exists.
+                active_groups = [
+                    g for g in groups if g.get("provider_id") == active_provider
+                ] if active_provider else []
+                existing_ids_norm = {
                     _norm_model_id(m["id"])
-                    for g in groups
+                    for g in (active_groups or groups)
                     for bucket_name in ("models", "extra_models")
                     for m in g.get(bucket_name, [])
                 }
-                if _norm_model_id(default_model) not in all_ids_norm:
+                if _norm_model_id(default_model) not in existing_ids_norm:
                     label = _get_label_for_model(default_model, groups)
                     target_display = (
                         _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
@@ -10470,6 +12599,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             return (3, pid)
         groups.sort(key=_group_sort_key)
 
+        # Natural model order (#7528 owner option B): custom/aggregator groups
+        # sorted whole, built-in providers keep their curated catalog order,
+        # and every group's `extra_models` overflow tail is sorted so the API
+        # order matches the picker's Show-more order. Mirrors the static
+        # catalog path (user request 2026-09-05; review blocker 2, 2026-09-19).
+        for _group in groups:
+            _sort_picker_group_models(_group)
+
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases = _model_aliases_from_config()
 
@@ -10497,10 +12634,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     _cfg_changed = _current_mtime != _cfg_mtime
 
     # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
-    # Then acquire lock and check memory cache.  Cold path runs inside the lock
-    # so only one thread rebuilds while others wait.
+    # Capture the epoch before that load: the bytes must not be published to
+    # memory under a fresh fingerprint if invalidation advanced the epoch in
+    # between. Cold rebuilds still serialize on the lock.
     disk_groups = None
     stale_disk_groups = None
+    disk_epoch = _models_rebuild_seq
     if _available_models_cache is None and not force_refresh:
         disk_groups = _load_models_cache_from_disk()
         if disk_groups is None:
@@ -10508,7 +12647,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     elif force_refresh:
         stale_disk_groups = _load_stale_models_cache_from_disk()
 
-    with _available_models_cache_lock:
+    # Durable commits queued while the catalog lock is held, run after it is
+    # released (#7481 review). A foreground publisher owns
+    # ``_available_models_cache_lock`` for this whole critical section, and the
+    # durable writer takes commit-lock -> catalog-lock — so committing inline
+    # here would acquire the two in the reverse order of
+    # ``_invalidate_models_catalog_epoch`` and deadlock against a concurrent
+    # invalidation. Memory publication stays inside the short critical sections
+    # below; the durable commit is queued and executed by the scope's exit
+    # (after the catalog lock is released) via
+    # ``_commit_models_cache_to_disk_after_lock``.
+    with _DeferredCatalogPublication(_available_models_cache_lock) as deferred_disk_commits:
+        if disk_epoch != _models_rebuild_seq:
+            # Invalidation advanced the epoch after the unlocked read, so these
+            # bytes may describe the catalog it just cleared: they must not be
+            # published to memory here, nor served as the fresh answer.
+            # ``stale_disk_groups`` is deliberately NOT fenced — it is the
+            # degraded fallback handed to a caller that already stopped waiting
+            # (and to the strict-metadata miss below), and it is never published
+            # to memory, so discarding it would only turn a stale-but-real answer
+            # into a static catalog without protecting anything.
+            disk_groups = None
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
         if should_wait:
@@ -10599,7 +12758,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
 
-        # Cold path: disk cache hit — use it (fast, no lock contention)
+        # Cold path: disk cache hit — use it only from the captured epoch.
         if disk_groups is not None and not force_refresh:
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
@@ -10632,6 +12791,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
             _cache_build_in_progress = True
+        # This build's position in the publication order. Taken while holding
+        # _available_models_cache_lock (above), so no two builds can share one,
+        # and used to keep a late out-of-band publisher from overwriting a newer
+        # catalog (#7481).
+        rebuild_seq = _allocate_models_rebuild_seq()
+        # The one absolute deadline this rebuild runs against: the custom-probe
+        # schedule and the foreground wait below both measure THIS instant, so
+        # discovery work done before the probe chain is spent out of the caller's
+        # window instead of being re-granted to the chain (#7481 review).
+        if _LIVE_REBUILD_BUDGET_SECONDS > 0:
+            _models_rebuild_deadline = (
+                time.monotonic() + float(_LIVE_REBUILD_BUDGET_SECONDS)
+            )
 
         # Capture the active per-request profile (#3957). The live provider
         # probe inside the rebuild resolves credentials from os.environ /
@@ -10644,6 +12816,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _active_profile_name = ""
         _prof_env_request = None
         _prof_scope_worker = None
+        _profile_resolver = None
         try:
             from api.profiles import (
                 get_active_profile_name as _gapn,
@@ -10651,9 +12824,28 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 profile_scope_for_detached_worker as _prof_scope_worker,
             )
             _active_profile_name = (_gapn() or "").strip()
+            _profile_resolver = _gapn
         except Exception:
             _prof_env_request = None
             _prof_scope_worker = None
+
+        # The sources and the profile this build is reading (#7481 review). The
+        # result is only an answer for THESE inputs, so both are captured here —
+        # on the request thread, where the profile TLS is valid, before the
+        # worker starts — and re-validated at publication and at the durable
+        # commit. Without that, a build that outlives a config edit publishes its
+        # stale catalog stamped with the *current* fingerprint, which is exactly
+        # how stale data acquires fresh-looking provenance. ``None`` profile
+        # means the resolver was unavailable; the fingerprint's config-path axis
+        # still fences a foreign profile.
+        rebuild_source_fingerprint = _models_cache_source_fingerprint()
+        rebuild_profile = (
+            _active_profile_name if _profile_resolver is not None else None
+        )
+
+        # ``_clear_build_in_progress`` is the module-level single-flight release
+        # used by every exit path here and by the post-lock durable commit.
+
 
         # Legacy synchronous (unbounded) rebuild — opt-in via budget<=0.
         if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
@@ -10670,24 +12862,55 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 with _sync_scope:
                     result = _invoke_models_rebuild(_build_available_models_uncached)
             except BaseException:
-                # Always reset the flag so waiting threads don't block for 60s
-                with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                # Always reset the flag so waiting threads don't block for 60s —
+                # unless a newer rebuild has been allocated in the meantime, in
+                # which case the flag now belongs to it (#7481 review). Same
+                # ownership rule as the success path, one implementation.
+                _clear_build_in_progress(rebuild_seq)
                 raise
             with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            try:
-                _save_models_cache_to_disk(result)
-            finally:
-                with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                _superseded = _models_rebuild_superseded(rebuild_seq)
+                _identity_current = _models_build_identity_current(
+                    rebuild_source_fingerprint, rebuild_profile
+                )
+                if not _superseded and _identity_current:
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = rebuild_source_fingerprint
+                    _sync_models_cache_provenance()
+            if _superseded:
+                # An invalidated/older generation must not overwrite the disk
+                # cache either, and must leave the build flag to the newer build.
+                logger.debug(
+                    "discarding superseded models-catalog rebuild result "
+                    "(rebuild #%d, latest allocated rebuild #%d)",
+                    rebuild_seq,
+                    _models_rebuild_seq,
+                )
+                return copy.deepcopy(result)
+            if not _identity_current:
+                # The config/auth/catalog this build read changed while it ran, so
+                # it describes sources that no longer exist. Publishing it would
+                # stamp stale data with the current fingerprint; drop it and let
+                # the next caller rebuild (#7481 review).
+                logger.debug(
+                    "discarding models-catalog rebuild result for changed sources "
+                    "(rebuild #%d)",
+                    rebuild_seq,
+                )
+                _clear_build_in_progress(rebuild_seq)
+                return copy.deepcopy(result)
+            # Foreground durable commit, queued rather than performed here: the
+            # caller still holds the catalog lock, and taking the commit mutex in
+            # that state is the lock-order cycle the #7481 review reproduced. The
+            # single-flight release rides with the queued commit (see
+            # _commit_models_cache_to_disk_after_lock), so ownership still spans
+            # it.
+            deferred_disk_commits.append(
+                (result, rebuild_seq, rebuild_source_fingerprint, rebuild_profile)
+            )
             return copy.deepcopy(result)
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
@@ -10719,33 +12942,94 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         publish_lock = threading.Lock()
         box: dict = {}
 
-        def _publish_models_result(result):
+        def _publish_models_result(
+            result,
+            *,
+            rebuild_seq: int,
+            build_fingerprint,
+            build_profile,
+            defer_durable: bool = False,
+        ):
             global _cache_build_in_progress, _available_models_cache
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
-            with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = (
-                    _models_cache_source_fingerprint()
-                )
-                _sync_models_cache_provenance()
+            deferred = False
             try:
-                _save_models_cache_to_disk(result)
-            except Exception:
-                logger.debug("models cache disk save failed", exc_info=True)
-            finally:
                 with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
-
-        def _clear_build_in_progress():
-            global _cache_build_in_progress
-            with _cache_build_cv:
-                _cache_build_in_progress = False
-                _cache_build_cv.notify_all()
+                    if _models_rebuild_superseded(rebuild_seq):
+                        # #7481 failure isolation: a newer rebuild has been
+                        # allocated since this one started, so this result is
+                        # superseded and must not overwrite the cache or the
+                        # disk. Invalidation revokes the running generation and
+                        # clears _cache_build_in_progress without cancelling this
+                        # worker, which is how a newer build can be allocated while
+                        # this one is still running; the flag now belongs to that
+                        # newer build, so the ``finally`` below deliberately leaves
+                        # it set rather than releasing it for a build that is not
+                        # ours. Ordered by allocated generation, not by wall clock:
+                        # an older build can publish *after* a newer one started,
+                        # and a timestamp comparison would misread that as newer
+                        # and drop the newer result instead.
+                        logger.debug(
+                            "discarding superseded models-catalog rebuild result "
+                            "(rebuild #%d, latest allocated rebuild #%d)",
+                            rebuild_seq,
+                            _models_rebuild_seq,
+                        )
+                        return
+                    if not _models_build_identity_current(
+                        build_fingerprint, build_profile
+                    ):
+                        # The sources this build read are gone (config/auth/catalog
+                        # edit) or the publishing thread is no longer in the
+                        # profile the build belonged to. Publishing would hand the
+                        # catalog the CURRENT fingerprint — fresh-looking
+                        # provenance on data that was never built from it — so it
+                        # is dropped instead. Fail closed (#7481 review).
+                        logger.debug(
+                            "discarding models-catalog rebuild result for changed "
+                            "sources (rebuild #%d)",
+                            rebuild_seq,
+                        )
+                        return
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = build_fingerprint
+                    _sync_models_cache_provenance()
+                if defer_durable:
+                    # Foreground caller: it still owns the outer catalog lock,
+                    # so the durable commit is queued for the post-lock flush
+                    # instead of taking commit -> catalog underneath it (#7481
+                    # review). The single-flight release rides with the queued
+                    # commit, so ownership still spans the durable write.
+                    deferred_disk_commits.append(
+                        (result, rebuild_seq, build_fingerprint, build_profile)
+                    )
+                    deferred = True
+                    return
+                try:
+                    _save_models_cache_to_disk(
+                        result,
+                        rebuild_seq=rebuild_seq,
+                        build_fingerprint=build_fingerprint,
+                        build_profile=build_profile,
+                    )
+                except Exception:
+                    logger.debug("models cache disk save failed", exc_info=True)
+            finally:
+                # Release the single-flight slot only when this build still owns
+                # it. A newer rebuild may have been allocated while the disk write
+                # above ran with the catalog lock released; clearing the flag
+                # unconditionally there ended that rebuild's single-flight
+                # ownership and let a third rebuild in beside it (#7481 review).
+                # This also covers the error paths, including anything raised
+                # after the disk I/O. A deferred (foreground) publication skips
+                # the release here: it is queued, and the flush performs the
+                # commit and then the release, in that order.
+                if not deferred:
+                    _clear_build_in_progress(rebuild_seq)
 
         def _claim_publish() -> bool:
             """Return True iff the caller won the right to publish."""
@@ -10770,6 +13054,36 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             with _worker_scope:
                 try:
                     box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    if _pending_probes:
+                        # Lend all time left by later fast probes back to the
+                        # still-running attempts before yielding a partial.
+                        for done, _outcome in list(_pending_probes.values()):
+                            left = max(0.0, (_models_rebuild_deadline or 0.0) - time.monotonic())
+                            done.wait(max(0.0, left - 0.05))
+                        completed = [key for key, (done, _) in _pending_probes.items() if done.is_set()]
+                        if completed:
+                            for key in completed:
+                                _custom_endpoint_probe_memo.pop(key, None)
+                                _truncated_probes.discard(key)
+                            box.pop("result", None)
+                            box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    if _truncated_probes:
+                        # The foreground may use this partial catalog, but it is
+                        # not authoritative and must never enter either cache.
+                        box["partial"] = box.pop("result")
+                        build_done.set()
+                        _models_rebuild_abandoned.wait()
+                        with _cache_build_cv:
+                            if _models_rebuild_superseded(rebuild_seq):
+                                return
+                        for key in _truncated_probes:
+                            _custom_endpoint_probe_memo.pop(key, None)
+                            # A surviving HTTP attempt owns only its private box.
+                            # It cannot publish or write into this build's memo.
+                            _pending_probes.pop(key, None)
+                        _truncated_probes.clear()
+                        box.pop("result", None)
+                        box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
                 except Exception as exc:  # noqa: BLE001 — propagated to caller
                     box["error"] = exc
                 finally:
@@ -10782,9 +13096,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # the correct profile's cache file.
                     if budget_exceeded.is_set() and _claim_publish():
                         if "result" in box:
-                            _publish_models_result(box["result"])
+                            _publish_models_result(
+                                box["result"],
+                                rebuild_seq=rebuild_seq,
+                                build_fingerprint=rebuild_source_fingerprint,
+                                build_profile=rebuild_profile,
+                            )
                         else:
-                            _clear_build_in_progress()
+                            _clear_build_in_progress(rebuild_seq)
 
         _worker = threading.Thread(
             target=_rebuild_worker,
@@ -10793,25 +13112,62 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         )
         _worker.start()
 
-        if build_done.wait(timeout=_LIVE_REBUILD_BUDGET_SECONDS):
+        # Wait on the SAME absolute deadline the probe schedule draws its slices
+        # from (#7481 review), not on a fresh full window started here: with two
+        # windows, discovery work that ran before the custom-probe phase was paid
+        # by the caller but re-granted to the chain, so the chain could still be
+        # probing after this caller had already been served the over-budget
+        # fallback. Computed after start() so thread-launch time counts too.
+        timeout_remaining = (
+            max(0.0, _models_rebuild_deadline - time.monotonic())
+            if _models_rebuild_deadline is not None
+            else float(_LIVE_REBUILD_BUDGET_SECONDS)
+        )
+        finished_in_time = build_done.wait(timeout=timeout_remaining)
+        if finished_in_time and "partial" not in box:
             # Build finished within budget — foreground publishes
             # synchronously, exactly like the legacy path.
             if "error" in box:
-                _clear_build_in_progress()
+                _clear_build_in_progress(rebuild_seq)
                 raise box["error"]
             if _claim_publish():
-                _publish_models_result(box["result"])
+                _publish_models_result(
+                    box["result"],
+                    rebuild_seq=rebuild_seq,
+                    build_fingerprint=rebuild_source_fingerprint,
+                    build_profile=rebuild_profile,
+                    # Foreground publisher: queue the durable commit for the
+                    # post-catalog-lock flush (#7481 review).
+                    defer_durable=True,
+                )
             return copy.deepcopy(box["result"])
 
         # Budget elapsed. Mark it so the worker knows it owns out-of-band
-        # publication. Handle the tiny race where the build completed between
-        # wait() returning False and here: if so, still publish synchronously
-        # so this caller honours the cache contract.
+        # publication, and so the probe schedule hands its remaining probes the
+        # full per-endpoint cap instead of a share of a window nobody is waiting
+        # on any more (#7481). Handle the tiny race where the build completed
+        # between wait() returning False and here: if so, still publish
+        # synchronously so this caller honours the cache contract.
         budget_exceeded.set()
-        if build_done.is_set() and "error" not in box and "result" in box:
-            if _claim_publish():
-                _publish_models_result(box["result"])
-            return copy.deepcopy(box["result"])
+        _models_rebuild_abandoned.set()
+        if build_done.is_set() and "error" not in box:
+            if "partial" in box:
+                if box["partial"].get("groups"):
+                    return copy.deepcopy(box["partial"])
+                # An all-truncated pass has no picker options. Use the same
+                # stale/static fallback as a still-running first pass below.
+            elif "result" in box and _claim_publish():
+                _publish_models_result(
+                    box["result"],
+                    rebuild_seq=rebuild_seq,
+                    build_fingerprint=rebuild_source_fingerprint,
+                    build_profile=rebuild_profile,
+                    # Budget-boundary foreground winner: same deferred durable
+                    # commit as the within-budget path above (#7481 review).
+                    defer_durable=True,
+                )
+            if "partial" not in box:
+                return copy.deepcopy(box["result"])
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
         # keeps going and refreshes the cache for the next caller.
@@ -10822,10 +13178,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             "live provider-catalog rebuild exceeded %.1fs budget — serving "
             "fallback, refreshing catalog out-of-band"
         )
-        if _should_warn_budget("live_rebuild_budget_exceeded"):
-            logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
-        else:
-            logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+        if not finished_in_time:
+            if _should_warn_budget("live_rebuild_budget_exceeded"):
+                logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+            else:
+                logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
         # ``stale_disk_groups`` is shape-valid but failed the strict metadata
         # checks required for authoritative cold-path use. It was read before
         # acquiring _available_models_cache_lock so this over-budget fallback
@@ -10835,11 +13192,44 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         return copy.deepcopy(_static_models_catalog_without_live_probes())
 
 
-def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+def _models_disk_cache_built_at(cache_path: Path) -> float | None:
+    """Return the persisted ``_built_at`` (last live rebuild) stamp, if present.
+
+    Returns None for caches written before the stamp existed (their freshness
+    falls back to file mtime), future-stamped caches, and any unreadable/unparseable
+    payload, so the freshness decision never hard-fails on a malformed cache.
+
+    Goes through ``_read_models_cache_disk_payload`` so the parse is memoised:
+    this is the first reader on the session-visit path, and the loaders that
+    follow it in the same call reuse the parse rather than re-reading the file.
+    """
     try:
-        return max(0.0, now - cache_path.stat().st_mtime)
+        payload = _read_models_cache_disk_payload(cache_path)
+        if not isinstance(payload, dict):
+            return None
+        built_at = payload.get("_built_at")
+        if isinstance(built_at, (int, float)) and math.isfinite(built_at) and 0 < built_at <= time.time():
+            return float(built_at)
+        return None
+    except Exception:
+        return None
+
+
+def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+    """Age of the disk models cache judged against when it was built.
+
+    The refresh clock is the persisted ``_built_at`` stamp (last live rebuild)
+    written by ``_save_models_cache_to_disk``. A cache written before the stamp
+    existed (or carrying an invalid/future stamp) falls back to mtime age.
+    """
+    try:
+        mtime_age = max(0.0, now - cache_path.stat().st_mtime)
     except OSError:
         return None
+    built_at = _models_disk_cache_built_at(cache_path)
+    if built_at is not None:
+        return max(0.0, now - built_at)
+    return mtime_age
 
 
 def warm_models_catalog_provenance_if_cold() -> None:
@@ -10959,24 +13349,40 @@ def get_available_models_for_session_visit() -> dict:
             cached = _get_fresh_memory_models_cache(now_mono)
             if cached is not None:
                 _mark("memory_cache_hit")
+                # The freshness precheck above parsed the durable cache into
+                # the one-slot parse memo, but this visit is served from
+                # memory and never reaches the loader that would consume it.
+                # Drop the entry so the memo cannot keep a whole parsed
+                # catalog resident (2.2 MB at 5000 models) past the visit
+                # that produced it, and so an unrelated later read cannot
+                # consume a parse this visit abandoned.
+                #
+                # The memo lock is a leaf, so taking it under the catalog lock
+                # cannot invert the commit -> catalog order.
+                _clear_models_disk_payload_memo()
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
         _mark("memory_cache_miss_loading_disk")
+        disk_epoch = _models_rebuild_seq
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
             with _available_models_cache_lock:
+                if disk_epoch != _models_rebuild_seq:
+                    disk_cached = None
                 cached = _get_fresh_memory_models_cache(time.monotonic())
                 if cached is not None:
                     _mark("disk_then_memory_cache_hit")
                     _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                     return cached
-                _available_models_cache = copy.deepcopy(disk_cached)
-                _available_models_cache_ts = time.monotonic()
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            _mark("disk_cache_returned")
-            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-            return copy.deepcopy(disk_cached)
+                if disk_cached is not None:
+                    _available_models_cache = copy.deepcopy(disk_cached)
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
+            if disk_cached is not None:
+                _mark("disk_cache_returned")
+                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                return copy.deepcopy(disk_cached)
 
     _mark("cache_age_stale_or_missing")
     stale_cached = disk_cached or _load_stale_models_cache_from_disk()
@@ -11366,6 +13772,13 @@ def create_stream_channel() -> StreamChannel:
 
 STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
+# Launch-phase ownership claims, keyed by stream_id and guarded by STREAMS_LOCK
+# (no extra lock edge). A claim is published in the SAME critical section that
+# creates the STREAMS entry and retired by identity once the worker is admitted
+# or the stream is torn down. While it exists the stream is still launching, so
+# chat/start must keep it whatever the pending age -- a slow session save between
+# registration and worker admission is not evidence of an orphan.
+PRE_ADMISSION_CLAIMS: dict = {}
 
 
 def peek_stream(stream_id):
@@ -11393,6 +13806,248 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+# #6885 admission correction (round 2, maintainer review): marker and prompt
+# are ONE record so the two collections cannot drift apart. Value shape:
+#   {"prompt": str, "continuation_id": str}
+# #7855: the routes.py consumer admits the turn by "continuation_id" — the
+# token the server issues here and carries on the goal_continue SSE event,
+# which the browser keeps on the queued entry through inline edits and
+# combines. A genuine user/queued turn carries no ID, so it keeps user
+# priority and the record stays for the real continuation dispatch.
+# Written atomically next to the set add in streaming/gateway goal_continue
+# paths; consumed together with the marker by
+# _consume_pending_goal_continuation.
+# There is deliberately no wall-clock expiry: the browser keeps a queued
+# continuation across refreshes and restores it into the composer for a
+# later send, so a TTL retired perfectly usable records (#7855 blocker 1).
+# A record lives until it is consumed or explicitly retired (goal clear /
+# session retirement, plus an orphan sweep for broken halves). Pause does
+# NOT retire it: a paused goal is resumed with the same pending
+# continuation, so clearing it on pause broke the resume retry
+# (test_7855_regate_behaviour CORE 2).
+PENDING_GOAL_CONTINUATION_PROMPTS: dict = {}
+PENDING_GOAL_CONTINUATION_LOCK = threading.Lock()
+
+# ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
+# Every registry a stream owns. Both the local worker teardown (api/streaming.py)
+# and the chat/start orphan recovery (api/routes.py) iterate THIS list instead of
+# hand-maintained pop lists, so a new per-stream registry cannot be added to one
+# teardown path and silently forgotten in the other.
+def stream_owned_registries() -> tuple:
+    """The per-stream registries, resolved on EVERY call.
+
+    Deliberately a function, not a module-level constant: a frozen tuple holds
+    the dict objects that existed at import time, so rebinding a registry
+    (``config.STREAMS = {...}``) would leave every teardown popping the stale
+    dict and leaking the live one. Module-level attribute lookup keeps the list
+    in step with whichever object is current.
+    """
+    return (
+        STREAMS,
+        AGENT_INSTANCES,
+        CANCEL_FLAGS,
+        STREAM_GOAL_RELATED,
+        STREAM_PARTIAL_TEXT,
+        STREAM_REASONING_TEXT,
+        STREAM_LIVE_TOOL_CALLS,
+        STREAM_LAST_EVENT_ID,
+    )
+
+
+def _release_stream_owned_rows(stream_id: str, session_id: str | None) -> None:
+    """Drop this stream's rows from every registry. Caller holds the locks."""
+    for _registry in stream_owned_registries():
+        _registry.pop(stream_id, None)
+    # The launch-phase claim dies with the stream it was published for. This is
+    # the single teardown entry point every release path goes through, so the
+    # claim can never outlive its stream and block a later chat/start.
+    PRE_ADMISSION_CLAIMS.pop(stream_id, None)
+    # Owner registries. The writeback entry is compare-and-clear: a successor
+    # admitted after cancel must keep its registry claim (#6623 re-gate).
+    unregister_stream_owner(stream_id)
+    if session_id:
+        try:
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear session writeback owner for stream %s", stream_id,
+                exc_info=True,
+            )
+
+
+def release_stream_owned_registries(
+    stream_id: str, *, session_id: str | None = None, streams_lock_held: bool = False
+) -> None:
+    """Release EVERY registry a stream can own -- the single teardown entry point.
+
+    ``streams_lock_held=True`` is for callers already inside ``STREAMS_LOCK``
+    (``threading.Lock`` is not reentrant). Lock order stays
+    ``STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK``, the order the rest of the
+    lifecycle uses; ``_release_stream_owned_rows`` never takes a lock itself, so
+    the nesting is the caller's.
+
+    The Gateway-owned rows (``_STREAM_RUN_LIFECYCLE`` / ``_STREAM_RUN_IDS`` /
+    ``_STREAM_ENDPOINTS``) are NOT touched here: they live in api/gateway_chat.py
+    and are released through ``release_gateway_stream_state()``, which uses the
+    lifecycle/waiter protocol and must run OUTSIDE ``STREAMS_LOCK``.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return
+    if streams_lock_held:
+        _release_stream_owned_rows(stream_id, session_id)
+        return
+    with STREAMS_LOCK:
+        _release_stream_owned_rows(stream_id, session_id)
+
+
+def publish_pre_admission_claim(stream_id: str, *, streams_lock_held: bool = False) -> str:
+    """Publish the launch-phase ownership claim for a stream being registered.
+
+    MUST run inside the same ``STREAMS_LOCK`` critical section that creates the
+    ``STREAMS`` entry (pass ``streams_lock_held=True``; ``threading.Lock`` is not
+    reentrant): the orphan check in ``_active_stream_blocks_chat_start`` reads this
+    registry under that lock, and a stream registered without its claim is
+    indistinguishable from a crashed turn once the pending window expires.
+
+    Returns the claim token; retire with ``retire_pre_admission_claim_if_owned``.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return ""
+    claim_token = uuid.uuid4().hex
+    if streams_lock_held:
+        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
+        return claim_token
+    with STREAMS_LOCK:
+        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
+    return claim_token
+
+
+def retire_pre_admission_claim_if_owned(
+    stream_id: str, *, claim_token: str | None = None, streams_lock_held: bool = False
+) -> bool:
+    """Retire a launch-phase claim by IDENTITY. Idempotent; returns whether it retired.
+
+    ``claim_token=None`` is the stream's own teardown speaking for the whole
+    stream (Stop, launch failure, worker admission): the claim goes with it. With
+    a token, only that exact claim is retired, so a successor that registered the
+    same stream id keeps its own claim.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+
+    def _retire() -> bool:
+        current = PRE_ADMISSION_CLAIMS.get(stream_id)
+        if current is None:
+            return False
+        if claim_token is not None and current != claim_token:
+            return False
+        PRE_ADMISSION_CLAIMS.pop(stream_id, None)
+        return True
+
+    if streams_lock_held:
+        return _retire()
+    with STREAMS_LOCK:
+        return _retire()
+
+
+def _is_orphaned_stream_locked(
+    stream_id: str, pending_turn_in_window: bool
+) -> bool:
+    """Orphan decision body. The caller holds ``STREAMS_LOCK``.
+
+    Split out so the decision and the release can share ONE lock acquisition
+    (``release_orphaned_stream_if_still_orphaned``); ``is_orphaned_stream`` is the
+    locking wrapper for readers that only need the answer.
+    """
+    if stream_id not in STREAMS:
+        return False
+    if stream_id in PRE_ADMISSION_CLAIMS:
+        return False
+    if pending_turn_in_window:
+        return False
+    try:
+        with ACTIVE_RUNS_LOCK:
+            if stream_id in (ACTIVE_RUNS or {}):
+                return False
+    except Exception:
+        # Fail closed: an unreadable liveness registry must never be taken as
+        # proof of an orphan.
+        return False
+    return True
+
+
+def is_orphaned_stream(
+    stream_id: str,
+    *,
+    pending_turn_in_window: bool = False,
+    streams_lock_held: bool = False,
+) -> bool:
+    """Single definition of an orphaned stream, shared by every reader.
+
+    A stream is an orphan only when ALL of these hold:
+
+      * it is still registered in ``STREAMS``;
+      * no worker owns it (``ACTIVE_RUNS`` has no row);
+      * it is not still launching (``PRE_ADMISSION_CLAIMS`` has no claim);
+      * its pending turn is outside the registration window
+        (``pending_turn_in_window`` -- the caller's call, since only callers with
+        the session at hand can evaluate it).
+
+    ``STREAMS`` membership alone is not liveness: the entry is removed by the
+    worker's own finalization, so a hard-killed or wedged worker leaves it behind.
+    ``ACTIVE_RUNS`` is the authoritative worker-liveness registry, the
+    launch-phase claim covers the window between registration and worker
+    admission, and the pending window covers the shortest gap for callers that
+    hold a session.
+
+    The claim check is mandatory. Without it a stream that is still launching is
+    classified as orphaned and reaped, which makes its first worker exit without
+    running the turn (finding 5). Callers that already hold ``STREAMS_LOCK`` must
+    pass ``streams_lock_held=True``: ``threading.Lock`` is not reentrant.
+
+    Reading this answer and acting on it later is NOT safe on its own -- see
+    ``release_orphaned_stream_if_still_orphaned`` for the decide-and-release
+    contract.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    if streams_lock_held:
+        return _is_orphaned_stream_locked(stream_id, pending_turn_in_window)
+    with STREAMS_LOCK:
+        return _is_orphaned_stream_locked(stream_id, pending_turn_in_window)
+
+
+def release_orphaned_stream_if_still_orphaned(
+    stream_id: str, *, pending_turn_in_window: bool = False
+) -> bool:
+    """Decide AND release on ONE ``STREAMS_LOCK`` edge. Returns whether it released.
+
+    Callers that decide and release under two separate acquisitions hand the worker
+    a race: it can publish its ``ACTIVE_RUNS`` row (or its launch claim) in the gap,
+    and the release then drops a stream that is live -- taking its ownership state
+    with it while the worker keeps running. Re-validating inside the same critical
+    section that drops the rows makes a stale decision impossible.
+
+    ``_release_stream_owned_rows`` takes no locks ("caller holds the locks"), and
+    ``stream_owner_session_id`` only takes ``STREAM_SESSION_OWNERS_LOCK``, which
+    respects the documented ``STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK`` order.
+
+    Gateway-owned rows are deliberately NOT touched here: they live in
+    api/gateway_chat.py and must be released OUTSIDE ``STREAMS_LOCK``, so the caller
+    runs ``release_gateway_stream_state()`` when this returns True.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    with STREAMS_LOCK:
+        if not _is_orphaned_stream_locked(stream_id, pending_turn_in_window):
+            return False
+        _release_stream_owned_rows(stream_id, stream_owner_session_id(stream_id))
+        return True
 
 
 def register_stream_owner(stream_id: str, session_id: str) -> None:
@@ -11620,6 +14275,13 @@ DEFERRED_PROCESS_WAKEUPS_LOCK = threading.Lock()
 # subscribers-empty grace path (60s) handles ordinary tab-close traffic.
 SESSION_CHANNEL_IDLE_TTL_SECS: int = 14400  # 4 hours
 SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
+# Positive dead-subscriber signal. How long a subscriber's queue
+# must reject broadcasts CONTINUOUSLY before the reaper may treat it as dead
+# (a ghost/half-open tab that never drains). A healthy tab drains on every
+# event, so it can never accumulate a run this long; 300s is well above the
+# SSE heartbeat interval and any plausible transient backpressure. Age alone
+# never collects a subscribed channel — only this signal or an explicit close.
+SESSION_CHANNEL_SUBSCRIBER_STALL_SECS: int = 300  # 5 minutes
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
 # than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
@@ -11712,6 +14374,37 @@ def unregister_active_run(stream_id: str) -> None:
         ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
     unregister_stream_owner(stream_id)
+
+
+def unregister_active_run_if_owned(stream_id: str, *, claim_token: str | None = None) -> bool:
+    """Retire an active-run row only while it is still the caller's own claim.
+
+    ``Stop`` (``cancel_stream``) deliberately leaves the row behind in
+    ``phase="cancelling"`` so recovery/health polling sees the detached run while
+    the worker unwinds; the worker's normal ``finally`` retires it and stamps
+    ``LAST_RUN_FINISHED_AT``. A worker cancelled BEFORE it admits the stream takes
+    the early-return path, which never reaches that ``finally`` -- so the claim
+    published before the worker was scheduled has to be retired here, BY IDENTITY,
+    so a row that a successor legitimately registered for the same stream id is
+    never deleted. Returns True when this call retired the row.
+
+    ``unregister_stream_owner`` is deliberately NOT called: the owner registry is a
+    stream-owned registry (already released by ``release_stream_owned_registries``)
+    and a successor may own it.
+    """
+    if not stream_id:
+        return False
+    global LAST_RUN_FINISHED_AT
+    with ACTIVE_RUNS_LOCK:
+        entry = ACTIVE_RUNS.get(stream_id)
+        if entry is None:
+            return False
+        if claim_token is not None:
+            if not isinstance(entry, dict) or str(entry.get("claim_token") or "") != str(claim_token):
+                return False
+        ACTIVE_RUNS.pop(stream_id, None)
+        LAST_RUN_FINISHED_AT = time.time()
+    return True
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
@@ -11808,6 +14501,19 @@ def _clear_thread_env():
 SESSION_AGENT_LOCKS = weakref.WeakValueDictionary()
 SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
+# Per-session lock for share create/revoke only (#8255 review). Kept separate from
+# the agent-turn lock on purpose: the agent lock is held across a turn's retry and
+# credential refresh, so coordinating shares on it would make a revoke wait for a
+# whole agent operation, and a create would block the streaming worker while it
+# redacts and embeds a large snapshot. This lock covers token resolution, the
+# snapshot write/mark and the token persist, nothing else.
+SHARE_SESSION_LOCKS = weakref.WeakValueDictionary()
+SHARE_SESSION_LOCKS_LOCK = threading.Lock()
+
+# A share call waits at most this long for another share call on the same session
+# (the repo's other handlers use the same bound and answer 503 instead of hanging).
+SHARE_SESSION_LOCK_TIMEOUT_SECONDS = 5.0
+
 
 def _get_session_agent_lock(session_id: str) -> threading.Lock:
     """Return the per-session Lock used to serialize all Session mutations.
@@ -11831,6 +14537,23 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             SESSION_AGENT_LOCKS[session_id] = lock
+        return lock
+
+
+def _get_session_share_lock(session_id: str) -> threading.Lock:
+    """Return the per-session Lock that serializes share create/revoke (#8255).
+
+    Deliberately separate from ``_get_session_agent_lock``: the agent lock is held
+    across an agent turn (including its credential-refresh retry), so coordinating
+    shares on it would make a revoke wait for a whole agent operation and a create
+    would lock the streaming worker out while it redacts a large snapshot. Weak
+    registry, same lifecycle as the agent locks.
+    """
+    with SHARE_SESSION_LOCKS_LOCK:
+        lock = SHARE_SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            SHARE_SESSION_LOCKS[session_id] = lock
         return lock
 
 
@@ -11898,6 +14621,14 @@ _SETTINGS_DEFAULTS = {
     "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
+    # Run-journal retention caps (#7613). 0 disables an individual cap. The sweep
+    # ARCHIVES eligible runs (compresses + moves them to _run_journal_archive/)
+    # rather than deleting, so these caps only decide when a run leaves the live
+    # directory; reads fall back to the archive. Defaults mirror api.run_journal.
+    "run_journal_retention_ttl_days": 14,  # archived once the run file is N days old
+    "run_journal_retention_max_runs_per_session": 40,  # keep at most N newest runs live per session
+    "run_journal_retention_max_bytes_per_session": 256 * 1024 * 1024,  # per-session live byte budget
+    "run_journal_archive_ttl_days": 0,  # delete ARCHIVES older than N days; 0 = never (keep forever)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
     "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
@@ -11943,6 +14674,7 @@ _SETTINGS_DEFAULTS = {
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # legacy compatibility; Worklog renderer remains enabled
+    "screen_reader_mode": False,  # opt-in screen reader optimizations (currently: xterm.js screenReaderMode)
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
     "workspace_todos_tab": False,  # show a Todos tab in the workspace panel (right side)
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
@@ -12220,10 +14952,14 @@ _SETTINGS_INT_RANGES = {
     "inflight_state_max_json_chars": (100000, 4000000),
     "structured_code_auto_tree_lines": (1, 1000),
     "voice_silence_ms": (200, 60000),
+    "run_journal_retention_max_runs_per_session": (0, 100_000),
+    "run_journal_retention_max_bytes_per_session": (0, 100 * 1024 * 1024 * 1024),
 }
 _SETTINGS_FLOAT_RANGES = {
     "tts_rate": (0.5, 2.0),
     "tts_pitch": (0.0, 2.0),
+    "run_journal_retention_ttl_days": (0.0, 3650.0),
+    "run_journal_archive_ttl_days": (0.0, 3650.0),
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
@@ -12257,6 +14993,7 @@ _SETTINGS_BOOL_KEYS = {
     "rtl",
     "notifications_enabled",
     "show_thinking",
+    "screen_reader_mode",
     "terminal_auto_expand_on_output",
     "workspace_todos_tab",
     "api_redact_enabled",

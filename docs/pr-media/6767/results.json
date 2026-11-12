@@ -1,0 +1,194 @@
+[
+  {
+    "version": "before",
+    "width": 1440,
+    "metrics": {
+      "open": true,
+      "output": "# Response\n\nSample run output.\n\nThe report is complete. This open output must remain visible when another task finishes.",
+      "detailColor": "rgb(76, 175, 80)",
+      "unread": [
+        "reading",
+        "finished"
+      ],
+      "dots": [],
+      "overflow": true
+    },
+    "page_errors": [],
+    "action_races": [],
+    "prompt_races": []
+  },
+  {
+    "version": "before",
+    "width": 390,
+    "metrics": {
+      "open": true,
+      "output": "# Response\n\nSample run output.\n\nThe report is complete. This open output must remain visible when another task finishes.",
+      "detailColor": "rgb(76, 175, 80)",
+      "unread": [
+        "reading",
+        "finished"
+      ],
+      "dots": [],
+      "overflow": false
+    },
+    "page_errors": [],
+    "action_races": [],
+    "prompt_races": []
+  },
+  {
+    "version": "review-before",
+    "width": 1440,
+    "metrics": {
+      "open": false,
+      "output": "Loading...",
+      "detailColor": "rgb(229, 62, 62)",
+      "unread": [
+        "reading",
+        "finished"
+      ],
+      "dots": [
+        "rgb(229, 62, 62)",
+        "rgb(229, 62, 62)"
+      ],
+      "overflow": true
+    },
+    "page_errors": [],
+    "action_races": [],
+    "prompt_races": []
+  },
+  {
+    "version": "review-before",
+    "width": 390,
+    "metrics": {
+      "open": false,
+      "output": "Loading...",
+      "detailColor": "rgb(229, 62, 62)",
+      "unread": [
+        "reading",
+        "finished"
+      ],
+      "dots": [
+        "rgb(229, 62, 62)",
+        "rgb(229, 62, 62)"
+      ],
+      "overflow": false
+    },
+    "page_errors": [],
+    "action_races": [],
+    "prompt_races": []
+  },
+  {
+    "version": "after",
+    "width": 1440,
+    "metrics": {
+      "open": true,
+      "output": "# Response\n\nSample run output.\n\nThe report is complete. This open output must remain visible when another task finishes.",
+      "detailColor": "rgb(229, 62, 62)",
+      "unread": [
+        "reading",
+        "finished"
+      ],
+      "dots": [
+        "rgb(229, 62, 62)",
+        "rgb(229, 62, 62)"
+      ],
+      "overflow": true
+    },
+    "page_errors": [],
+    "action_races": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "prompt_races": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": "",
+        "order": "latest-first"
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none",
+        "order": "latest-first"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": "",
+        "order": "older-first"
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none",
+        "order": "older-first"
+      }
+    ]
+  },
+  {
+    "version": "after",
+    "width": 390,
+    "metrics": {
+      "open": true,
+      "output": "# Response\n\nSample run output.\n\nThe report is complete. This open output must remain visible when another task finishes.",
+      "detailColor": "rgb(229, 62, 62)",
+      "unread": [
+        "reading",
+        "finished"
+      ],
+      "dots": [
+        "rgb(229, 62, 62)",
+        "rgb(229, 62, 62)"
+      ],
+      "overflow": false
+    },
+    "page_errors": [],
+    "action_races": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "prompt_races": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": "",
+        "order": "latest-first"
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none",
+        "order": "latest-first"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": "",
+        "order": "older-first"
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none",
+        "order": "older-first"
+      }
+    ]
+  }
+]

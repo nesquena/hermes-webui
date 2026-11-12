@@ -100,6 +100,55 @@ recovery waits for visibility return or explicit session loading. Behavior cover
 heartbeat interval for SSE streams. Phase 1 reuses this constant rather than
 adding a separate configurable knob.
 
+### Implemented browser-subscriber lifetime and replay
+
+The existing browser-facing subscription streams are not one unbounded HTTP
+generation. `_SSE_SUBSCRIBER_LEASE_SECONDS = 300` caps each generation for:
+
+- `GET /api/session/stream` (per-session background-completion/live-turn bridge),
+- `GET /api/sessions/events` (global session-list invalidation), and
+- `GET /api/sessions/gateway/stream` (gateway session snapshots).
+
+At the lease boundary the handler sets `BaseHTTPRequestHandler.close_connection`
+and returns; it does **not** emit a `Connection: close` response header. A live
+`EventSource` treats the resulting EOF as reconnectable and opens a replacement
+generation. If only an upstream proxy remains, no browser reconnect arrives, so
+the old handler releases its exact subscriber queue and the channel reaper can
+collect it. Active tabs therefore incur one reconnect plus the endpoint's normal
+refresh/snapshot work every five minutes.
+
+`GET /api/session/stream` also uses the native `Last-Event-ID` request header to
+bridge the reconnect gap. `SessionChannel` retains at most 32 copied events that
+carry stable payload `event_id` values, each stamped with a channel-monotonic
+sequence number. The SSE `id:` line of every retained frame is that frame's own
+replay cursor (`session-channel:<token>@<seq>`), **not** the payload `event_id`:
+the dual-name completion emit (`bg_task_complete` plus the legacy
+`process_complete` alias) repeats one `event_id` across two frames, so an
+`event_id` cannot name a unique replay position. The payload `event_id` is kept
+for the browser's `(session_id, event_id)` dedupe. Every first `initial` frame
+establishes a synthetic cursor in the same grammar; a known cursor replays only
+the retained frames recorded after its sequence number, in order. The `<token>`
+names the channel incarnation: a cursor minted by a channel the reaper has since
+collected, or by a pre-restart process, is rejected rather than read in the new
+channel's sequence space. A fresh, unknown, evicted, or foreign-incarnation
+cursor replays no old completion toast and falls back to the existing
+active-turn and persisted-message-count recovery. The channel's
+subscriber-drop grace is preserved for the full reconnect interval even when the
+channel itself is older than its idle TTL.
+
+A channel that has been explicitly closed (`SessionChannel.close()`, the #7302
+end-of-channel protocol) never replays: a late subscriber receives only the
+`None` close sentinel, so the sentinel always fits its queue, the response ends,
+and the browser reconnects onto the replacement channel, where the old
+channel's cursor is a foreign incarnation and fails closed. A sentinel met
+while the handler is still draining the replay prefix ends the response the same
+way. Every completed frame write, replayed or live, also counts as writer-side
+subscriber liveness for the reaper.
+
+This lifecycle applies only to the three endpoints above. Approval/clarify SSE,
+run-journal observers, the proposed `GET /api/sessions/{session_id}/events`, and
+other event streams keep their own documented contracts.
+
 ### Run-journal cursor and replay
 
 Current replay identity is run/stream-scoped:
@@ -112,8 +161,8 @@ shift in `api/routes.py` cannot invalidate the doc or its contract test.
 - `_parse_run_journal_event_id()` and `_parse_run_journal_after_seq()` (both in
   `api/routes.py`) parse the replay cursor from the `after_event_id` /
   `after_seq` **query params** (not the
-  `Last-Event-ID` header — that header is the *proposed* new-endpoint contract
-  below, §Reconnect).
+  `Last-Event-ID` header used by `GET /api/session/stream` above and proposed for
+  the new endpoint below, §Reconnect).
 - `_runner_event_id()` (in `api/routes.py`) constructs the event `id`
   field as `stream_id:seq`.
 - SSE frames carry their `id:` via the `_sse_with_id()` helper, emitted on the
@@ -231,6 +280,46 @@ Relay close set (stop draining the live queue): `stream_end`, `cancel`,
 `apperror`, and legacy `error` — see `api.run_journal.SSE_RELAY_CLOSE_EVENTS`.
 `done` is **not** a relay-close event because `title` and `stream_end` follow it.
 
+#### `goal_continue` admission semantics
+
+`goal_continue` tells the client the standing goal wants another turn and
+carries the continuation prompt (`continuation_prompt` / `text`) plus a
+server-issued `continuation_id`. The client queues that prompt as a normal
+next user message, so the queued turn and a genuine user message race on the
+same session.
+
+Server-side admission (`api.goals.register/consume_pending_goal_continuation`,
+wired into `/api/chat/start` by `routes.py`):
+
+- When the turn fires, the server records **one** entry per session — marker,
+  prompt, and a `uuid4().hex` `continuation_id`. The `goal_continue` SSE event
+  is emitted only after the record lands, so the browser queue and the server
+  record cannot disagree.
+- The **next** `/chat/start` is treated as goal-related only when it carries
+  the matching `continuation_id` (`goal_continuation_id` field, normalized to
+  a compact 32-char hex token by `routes.py`, compared with
+  `secrets.compare_digest`). Any turn without it — a genuine user message, or
+  a queued turn whose entry lost its ID — keeps normal user priority and the
+  record stays for the browser's real dispatch.
+- Admission is by ID rather than prompt text: the browser queue lets the user
+  edit or combine a queued continuation, and an exact-text comparison silently
+  turned those into ordinary turns, ending the goal loop.
+- The ID travels with the browser's queued entry through inline edits and
+  combines (`static/ui.js`), through refresh-restore into the composer
+  (`static/sessions.js`), and through the requeue path when a user send
+  interrupts an in-flight drain (`static/messages.js`). It is sent on
+  `/api/chat/start` by `send()` and cleared immediately after.
+- The record is single-use on a match. There is no wall-clock expiry: the
+  browser deliberately keeps a queued continuation — it survives a refresh
+  and is restored for the user to send later — so a TTL retired continuations
+  that were still perfectly usable. A record ends when it is consumed
+  (admitted-and-consumed by its ID) or explicitly retired: `goal clear`,
+  session retirement, and the orphan sweep inside the `/goal` command handler,
+  which also collapses a marker without a record (or vice versa) so the two
+  halves cannot drift apart. Pause does NOT retire a record: the resume path
+  restores the active goal with the same pending continuation, so clearing it
+  on pause silently stopped the goal loop (#7855 regate CORE 2).
+
 The semantic taxonomy table remains a draft for the proposed per-session
 endpoint vocabulary and must be confirmed during maintainer review before that
 endpoint claims parity.
@@ -309,6 +398,22 @@ filtered; clients must not infer missing durable content from those gaps.
 Metering missed while disconnected is not recovered from the journal; fresh
 live updates remain available. This exception does not remove token, reasoning,
 tool, or terminal events from durable replay.
+
+A second replay-only omission covers settled prompts (#8533). Both emitters apply
+`journal_replay_prompt_visible()` and skip
+a `clarify` or `approval` row that is already settled, so a reconnecting tab does
+not re-show a card the user can no longer answer:
+
+- a `clarify` row is settled by a later `tool_complete` row of the same run whose
+  payload names a blocking prompt tool (`settled_prompt_events()`);
+- any prompt row, including `approval`, is settled when the same run later writes
+  a terminal row with `terminal: true` (`terminal_settled_prompt_events()`).
+
+A clarify completion is never evidence for an approval: approvals are a queue and
+the respond path writes no journal row, so an approval only settles through its
+run's terminal row. Prompt rows after the terminal row stay visible. Direct
+readers still return every prompt row, and the omission creates event-ID gaps in
+replay just like the metering exception.
 
 Coverage: `tests/test_run_journal.py`, `tests/test_run_journal_routes.py`,
 `tests/test_issue4812_session_sse_stream.py`, and

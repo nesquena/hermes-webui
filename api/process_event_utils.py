@@ -139,6 +139,19 @@ def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
         msg["_wakeup_meta"] = meta
 
 
+def is_hidden_transcript_row(msg: Any) -> bool:
+    """Return True when a transcript row is internal and must never render.
+
+    Single predicate every transcript consumer calls — restore window, retry
+    target, content search, title derivation, HTML export, public shares, and
+    visible counts — so a hidden row hidden in one surface stays hidden in all
+    of them (#quiet-delegation gate review). Keyed on the typed ``_source``
+    stamp only, never on content: content sniffing would misclassify real user
+    rows whose text merely resembles a wakeup envelope.
+    """
+    return isinstance(msg, dict) and msg.get("_source") == "delegation_wakeup"
+
+
 def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:
     """Return the exact eager-row token for one active WebUI turn."""
     if not stream_id:
@@ -302,6 +315,18 @@ def schedule_async_delegation_claim_retry(
         return False
     if not isinstance(durable, dict) or durable.get("delivery_state") != "pending":
         return False
+    # Current Agent cores offer each restored row once per process
+    # (tools.async_delegation._offered). This drain discarded its copy, so hand the
+    # offer back or the restore sweep below skips the still-pending row.
+    try:
+        from tools.async_delegation import return_completion_offer
+    except (ImportError, AttributeError):
+        return_completion_offer = None
+    if callable(return_completion_offer):
+        try:
+            return_completion_offer(evt)
+        except Exception:
+            logger.debug("Failed to return async delegation offer %s", delegation_id, exc_info=True)
 
     retry_delay = (
         ASYNC_DELIVERY_CLAIM_RETRY_SECONDS if delay is None else max(0.0, float(delay))

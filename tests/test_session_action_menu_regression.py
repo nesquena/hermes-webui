@@ -28,6 +28,9 @@ def test_session_list_refresh_does_not_close_open_conversation_actions():
 
     assert "if(_renamingSid) return;" in body
     assert "if(_sessionActionMenu) return;" in body
+    assert "&&!_sidebarRepaintBackgroundChurn" in body
+    assert "_sessionListRepaintDeferredByActionMenu=true;" in body
+    assert body.index("_sessionListRepaintDeferredByActionMenu=true;") < body.index("if(_sessionActionMenu) return;")
     assert body.index("if(_sessionActionMenu) return;") < body.index("closeSessionActionMenu();")
 
 
@@ -38,7 +41,13 @@ def test_archive_action_repaints_sidebar_before_full_refresh():
 
     api_call = "const response=await api('/api/session/archive'"
     optimistic = "if(cached) cached.archived=archived;"
-    cached_render = "renderSessionListFromCache();"
+    # The archive response lands after an await, so its repaint routes through
+    # _repaintSidebarAfterSessionCompletion(), which paints the durable result
+    # immediately while keeping a project picker the user opened for another
+    # conversation — instead of a bare renderSessionListFromCache(), which
+    # would retire it, or a deferral (gate L6). The helper still repaints from
+    # cache before the full refresh.
+    cached_render = "_repaintSidebarAfterSessionCompletion(session.session_id);"
     full_refresh = "void renderSessionList();"
 
     assert "await _archiveSession(session,!session.archived);" in menu_body

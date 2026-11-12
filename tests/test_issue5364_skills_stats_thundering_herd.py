@@ -20,8 +20,10 @@ These tests prove:
   * concurrent misses on one profile collapse to a SINGLE compute;
   * the per-profile lock registry returns a stable lock per profile;
   * a concurrent ``list_profiles_api`` burst builds the rows exactly ONCE;
-  * the #4783 contract is preserved — the cheap mtime probe still runs on every
-    call so out-of-band changes stay promptly visible.
+  * out-of-band changes stay visible: since #7940 the cache is
+    stale-while-revalidate — the probe moved off the request path onto a
+    background worker that a stale-window hit triggers (bounded by
+    ``_SKILLS_STATS_REVALIDATE_AFTER`` + one probe instead of per-call).
 """
 import sys
 import threading
@@ -327,11 +329,19 @@ class TestListProfilesSingleFlight:
 
 
 # ---------------------------------------------------------------------------
-# 4. #4783 contract preserved: the cheap mtime probe still runs on every call
+# 4. #7940 SWR contract: the probe moved off the request path — fresh-window
+#    hits are zero-I/O, stale hits re-probe on the background worker
 # ---------------------------------------------------------------------------
 
-class TestProbeStillRunsEveryCall:
-    def test_probe_runs_on_cache_hit(self, mod, tmp_path):
+class TestProbeMovedOffTheRequestPath:
+    """#7940 turned the cache stale-while-revalidate: the probe no longer runs
+    inside the revalidate window (zero-I/O fresh hit) — a stale-window hit
+    answers immediately and re-probes on the background worker. The probe +
+    compute still run, just off the request path; out-of-band visibility is
+    bounded by _SKILLS_STATS_REVALIDATE_AFTER + one probe instead of per-call.
+    """
+
+    def test_fresh_hit_runs_no_probe_stale_hit_probes_on_worker(self, mod, tmp_path):
         profile_dir = tmp_path / "p"
         (profile_dir / "skills").mkdir(parents=True)
 
@@ -340,14 +350,38 @@ class TestProbeStillRunsEveryCall:
                          wraps=mod._compute_profile_skills_stats) as mock_compute,
             patch.object(mod, "_skill_tree_max_mtime_ns",
                          wraps=mod._skill_tree_max_mtime_ns) as mock_probe,
+            patch.object(mod, "_start_skills_stats_revalidate_thread") as mock_spawn,
         ):
             mod._get_profile_skills_stats(profile_dir)
             compute_after_first = mock_compute.call_count
             probe_after_first = mock_probe.call_count
 
-            mod._get_profile_skills_stats(profile_dir)  # within TTL, unchanged
+            mod._get_profile_skills_stats(profile_dir)  # fresh-window hit
 
             assert mock_compute.call_count == compute_after_first, \
-                "expensive compute must be skipped within TTL when unchanged"
-            assert mock_probe.call_count > probe_after_first, \
-                "cheap mtime probe MUST still run on every call (#4783 contract)"
+                "expensive compute must be skipped on a fresh-window hit"
+            assert mock_probe.call_count == probe_after_first, \
+                "mtime probe must NOT run on a fresh-window hit (#7940 SWR)"
+            mock_spawn.assert_not_called()
+
+        # Age the entry past the revalidate window: the next hit still answers
+        # immediately, and the probe moves to the worker (driven inline via
+        # the spawn seam so the assertion is deterministic).
+        resolved = profile_dir.resolve()
+        enabled, compat, mtime_ns, expiry, org, _ = mod._SKILLS_STATS_CACHE[resolved]
+        mod._SKILLS_STATS_CACHE[resolved] = (
+            enabled, compat, mtime_ns, expiry, org,
+            time.time() - mod._SKILLS_STATS_REVALIDATE_AFTER - 1.0,
+        )
+        with (
+            patch.object(mod, "_skill_tree_max_mtime_ns",
+                         wraps=mod._skill_tree_max_mtime_ns) as mock_probe,
+            patch.object(
+                mod, "_start_skills_stats_revalidate_thread",
+                side_effect=lambda pd: mod._revalidate_skills_stats_worker(pd),
+            ),
+        ):
+            mod._get_profile_skills_stats(profile_dir)
+
+        assert mock_probe.call_count >= 1, \
+            "a stale-window hit must re-probe on the revalidate worker (#7940 SWR)"

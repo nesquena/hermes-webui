@@ -68,7 +68,7 @@ def test_compression_cache_migration_never_moves_unverified_cached_object_to_new
     streaming_src = open("api/streaming.py", encoding="utf-8").read()
 
     assert "SESSIONS[new_sid] = SESSIONS.pop(old_sid)" not in streaming_src
-    assert "cached_old_session is not s" in streaming_src
+    assert "SESSIONS.get(old_sid) is not s" in streaming_src
     assert "SESSIONS[new_sid] = s" in streaming_src
 
 

@@ -105,7 +105,9 @@ def test_handoff_delete_clears_local_storage_markers():
     assert "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, null);" in SESSIONS_JS
     assert "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT, null);" in SESSIONS_JS
     assert "_clearHandoffStorageForSession(sid);" in SESSIONS_JS
-    assert "ids.forEach(_clearHandoffStorageForSession);" in SESSIONS_JS
+    # Only the sessions that actually committed are cleared: a refused delete
+    # (409, live gateway work) keeps its markers so the row can be retried.
+    assert "deletedIds.forEach(_clearHandoffStorageForSession);" in SESSIONS_JS
 
 
 def test_handoff_catch_surfaces_400_message_verbatim():

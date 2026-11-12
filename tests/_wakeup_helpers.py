@@ -26,6 +26,13 @@ class FakeProcessRegistry:
     def __init__(self):
         self._lock = threading.Lock()
         self._completion_consumed: set[str] = set()
+        # `process(action="poll")` records its read-only PREVIEW observation
+        # here (NOT in `_completion_consumed`), mirroring
+        # tools/process_registry.py: poll returns only the final 1000 chars, so
+        # it is not consumption and must not suppress the autonomous wakeup
+        # (#8363). The WebUI delivery check reads ONLY the public
+        # `is_completion_consumed` contract.
+        self._poll_observed: set[str] = set()
         self.completion_queue: queue.Queue = queue.Queue()
         self._procs: dict[str, types.SimpleNamespace] = {}
 
@@ -77,9 +84,14 @@ def install_fake_start_session_turn(monkeypatch, *, status: int = 200):
 
     holder = {"calls": [], "event": threading.Event()}
 
-    def _fake(session_id, message, *, source="process_wakeup"):
+    def _fake(session_id, message, *, source="process_wakeup", process_id="", **extra):
         holder["calls"].append(
-            {"session_id": session_id, "message": message, "source": source}
+            {
+                "session_id": session_id,
+                "message": message,
+                "source": source,
+                "process_id": process_id,
+            }
         )
         holder["event"].set()
         return {"stream_id": "fake-stream", "session_id": session_id, "_status": status}

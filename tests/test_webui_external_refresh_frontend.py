@@ -117,7 +117,7 @@ def test_session_time_refresh_has_own_visibility_hook():
     block = SESSIONS_JS[start:start + 900]
     assert "_sessionTimeRefreshVisibilityHandler" in SESSIONS_JS
     assert "document.addEventListener('visibilitychange', _sessionTimeRefreshVisibilityHandler);" in block
-    assert "if(!document.hidden) renderSessionListFromCache();" in block
+    assert "if(!document.hidden) _repaintSidebarForBackgroundChurn();" in block
     assert "startStreamingPoll re-renders the list" not in block
 
 
@@ -138,7 +138,10 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "void _refreshSessionListAfterSidebarResume('focus')" in SESSIONS_JS
     assert "void _refreshSessionListAfterSidebarResume('visible')" in SESSIONS_JS
     assert "void _refreshSessionListAfterSidebarResume('reconnect')" in SESSIONS_JS
-    assert "renderSessionList({deferWhileInteracting:!force})" in SESSIONS_JS
+    assert "const userOwnedRefresh = (opts&&opts.keepProjectPicker===true) || reason==='pull';" in SESSIONS_JS
+    assert "if(userOwnedRefresh){" in SESSIONS_JS
+    assert "await renderSessionList();" in SESSIONS_JS
+    assert "await _refreshSidebarForBackgroundChurn();" in SESSIONS_JS
     assert "const refreshActive = !!(opts && opts.refreshActive)" in SESSIONS_JS
     assert "if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list')" in SESSIONS_JS
     assert "_sessionListRefreshPendingRequest = {" in SESSIONS_JS
@@ -172,6 +175,7 @@ def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():
     functions = "\n\n".join(
         [
             merge_body,
+            _function_body(SESSIONS_JS, "_refreshSidebarForBackgroundChurn"),
             _function_body(SESSIONS_JS, "refreshSessionList"),
             _function_body(SESSIONS_JS, "_scheduleSessionEventsRefresh"),
         ]
@@ -203,7 +207,9 @@ def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():
     )
     out = _run_node(script)
     assert out == [
-        {"kind": "render", "opts": {"deferWhileInteracting": False}},
+        # A forced refresh paints immediately: the explicit non-deferred
+        # background pair, never the churn deferral (re-gate finding).
+        {"kind": "render", "opts": {"deferWhileInteracting": False, "keepProjectPicker": False}},
         {"kind": "active", "reason": "event-active-session"},
     ]
 
@@ -214,6 +220,7 @@ def test_session_list_external_refresh_forced_resume_survives_hidden_inflight_re
         _function_body(SESSIONS_JS, name)
         for name in (
             "_mergeSessionListRefreshOptions",
+            "_refreshSidebarForBackgroundChurn",
             "refreshSessionList",
             "_scheduleSessionEventsRefresh",
             "_refreshSessionListAfterSidebarResume",
@@ -261,9 +268,10 @@ def test_session_list_external_refresh_forced_resume_survives_hidden_inflight_re
     )
     out = _run_node(script)
     assert out["record"] == [
-        {"kind": "render", "opts": {"deferWhileInteracting": True}},
+        {"kind": "render", "opts": {"deferWhileInteracting": True, "keepProjectPicker": False}},
         {"kind": "active", "reason": "event"},
-        {"kind": "render", "opts": {"deferWhileInteracting": False}},
+        # The queued forced resume paints immediately, not via the deferral.
+        {"kind": "render", "opts": {"deferWhileInteracting": False, "keepProjectPicker": False}},
     ]
     assert "refreshSessionList(reason, {force:true})" in out["resumeSrc"]
     assert "refreshActive:true" not in out["resumeSrc"]
@@ -275,6 +283,7 @@ def test_session_events_refresh_timer_merges_pending_force_and_active_options():
         _function_body(SESSIONS_JS, name)
         for name in (
             "_mergeSessionListRefreshOptions",
+            "_refreshSidebarForBackgroundChurn",
             "refreshSessionList",
             "_scheduleSessionEventsRefresh",
         )
@@ -306,7 +315,8 @@ def test_session_events_refresh_timer_merges_pending_force_and_active_options():
         """
     )
     assert _run_node(script) == [
-        {"kind": "render", "opts": {"deferWhileInteracting": False}},
+        # The merged forced intent paints immediately, not via the deferral.
+        {"kind": "render", "opts": {"deferWhileInteracting": False, "keepProjectPicker": False}},
         {"kind": "active", "reason": "event-active-session"},
     ]
 

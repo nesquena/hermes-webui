@@ -79,6 +79,29 @@ not raw debug detail. Compact Activity may collapse tool arguments, long tool
 results, and low-level reasoning detail, but it must not make concise
 user-visible progress text available only inside a collapsed disclosure.
 
+A live Thinking card follows its own tail while reasoning streams: new text
+scrolls into view when the card is open at its bottom, exactly like the message
+pane. Scrolling up inside the card holds the reader's place (follow resumes on
+returning to the bottom), and collapsing the card mid-stream pauses the inner
+follow — expanding again restores it. Settled history cards never auto-scroll;
+they open at the top like any other persisted content, and opening one must not
+give it follow state: a persisted card that acquired a latch would chase its own
+tail on any later re-render, such as a 1280px-to-390px reflow.
+
+Opening a card is a transition, not an instant: the body animates from zero
+height, so its position only becomes meaningful once `max-height` finishes
+(`opacity` ends earlier and means nothing here). While that animation runs the
+card is "settling" — no follow state is seeded and no streaming delta may move
+it, so a reader who opens a long card and scrolls up is never yanked to the
+bottom by text arriving mid-animation. A card closed again before the animation
+ends stays unbound and re-measures on the next open.
+
+Follow intent survives rebuilds in both directions: a collapsed following card
+carries its latch across a scene-update rebuild and resumes follow when reopened
+(never re-measured at its top and put on hold), and a rebuild that interrupts a
+card's very first open lets the replacement body finish the open — it seeds
+follow state from its real position instead of staying follow-less.
+
 Automatic compression is a live-only context barrier, not a special branded
 tool card. Render it as a centered, non-interactive divider with quiet horizontal
 rules: `Compressing context` while the compression barrier is active and
@@ -189,6 +212,37 @@ For UI changes, verify the relevant states:
 
 Controls should remain usable at touch sizes, and mobile navigation should not
 steal chat height unnecessarily.
+
+### Keyboard and assistive-tech behavior on closed mobile panels
+
+On the compact off-canvas bands, the closed sidebar and workspace drawer stay
+laid out so their slide-out can animate, which would otherwise leave their whole
+subtree in the tab order. Three layers keep a closed mobile panel out of the
+keyboard sequence, and changes to this area must keep all three:
+
+1. The panel takes the `inert` attribute the moment it closes
+   (`_setPanelInert()` in `static/boot.js`, set by `closeMobileSidebar()` and
+   `_setWorkspacePanelMode()`), so the 250 ms closing window is inert too — not
+   just the settled state.
+2. `visibility:hidden`, delayed past the slide-out
+   (`visibility 0s linear .25s` in `static/style.css`), removes the settled
+   subtree from the tab order without cutting the transform transition.
+3. `pointer-events:none` keeps the parked panel from swallowing clicks aimed at
+   the chat underneath it.
+
+Focus handling when a mobile panel closes out from under a focused control
+(`_releaseFocusFromClosedPanel()`) follows the same split as the desktop drawer:
+
+- an explicit dismiss (the "Close menu" X, the overlay, the drawer's Close,
+  tapping outside the drawer) returns focus to the control that opened the panel
+  — the hamburger, or the band-appropriate workspace toggle;
+- content-selection closes (picking a session or a panel item) leave focus on
+  the composer, which those paths already move it to.
+
+Browser probes that drive real key events are the only coverage that sees this:
+a computed-style or `tabIndex` assertion cannot observe the browser refusing or
+stranding a `focus()` call, and a static source assertion cannot observe a path
+the probes never take. Keep both halves when adding a case.
 
 ## Themes and skins
 

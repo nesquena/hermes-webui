@@ -74,6 +74,9 @@ def test_successful_chat_start_delivers_access_record(tmp_path, capture):
         "HERMES_HOME": str(tmp_path / "home"),
         "HERMES_WEBUI_STATE_DIR": str(tmp_path / "state"),
         "HERMES_WEBUI_TEST_NETWORK_BLOCK": "1",
+        # A from-scratch env drops the suite's HERMES_DISABLE_LAZY_INSTALLS; without it a
+        # PM-managed Agent installs a full ~1.1 GB environment into this temp HOME per test.
+        "HERMES_DISABLE_LAZY_INSTALLS": "1",
     }
     result = subprocess.run(
         [sys.executable, "-c", script, capture],

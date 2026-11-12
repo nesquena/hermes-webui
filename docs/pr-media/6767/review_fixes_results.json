@@ -1,0 +1,354 @@
+[
+  {
+    "version": "review-before",
+    "width": 1440,
+    "theme": "dark",
+    "failed_poll_actions": [
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      }
+    ],
+    "away_and_back": [
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      }
+    ],
+    "removed": [
+      {
+        "cleared": false,
+        "run": "",
+        "edit": ""
+      },
+      {
+        "cleared": false,
+        "run": "",
+        "edit": ""
+      }
+    ],
+    "scroll_before": 250,
+    "scroll_after": 250,
+    "page_errors": []
+  },
+  {
+    "version": "review-before",
+    "width": 1440,
+    "theme": "light",
+    "failed_poll_actions": [
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      }
+    ],
+    "away_and_back": [
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      }
+    ],
+    "removed": [
+      {
+        "cleared": false,
+        "run": "",
+        "edit": ""
+      },
+      {
+        "cleared": false,
+        "run": "",
+        "edit": ""
+      }
+    ],
+    "scroll_before": 250,
+    "scroll_after": 250,
+    "page_errors": []
+  },
+  {
+    "version": "review-before",
+    "width": 390,
+    "theme": "dark",
+    "failed_poll_actions": [
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      }
+    ],
+    "away_and_back": [
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      }
+    ],
+    "removed": [
+      {
+        "cleared": false,
+        "run": "",
+        "edit": ""
+      },
+      {
+        "cleared": false,
+        "run": "",
+        "edit": ""
+      }
+    ],
+    "scroll_before": 250,
+    "scroll_after": 250,
+    "page_errors": []
+  },
+  {
+    "version": "review-before",
+    "width": 390,
+    "theme": "light",
+    "failed_poll_actions": [
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      }
+    ],
+    "away_and_back": [
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      },
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      }
+    ],
+    "removed": [
+      {
+        "cleared": false,
+        "run": "",
+        "edit": ""
+      },
+      {
+        "cleared": false,
+        "run": "",
+        "edit": ""
+      }
+    ],
+    "scroll_before": 250,
+    "scroll_after": 250,
+    "page_errors": []
+  },
+  {
+    "version": "review-fixed",
+    "width": 1440,
+    "theme": "dark",
+    "failed_poll_actions": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "away_and_back": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "removed": [
+      {
+        "cleared": true,
+        "run": "none",
+        "edit": "none"
+      },
+      {
+        "cleared": true,
+        "run": "none",
+        "edit": "none"
+      }
+    ],
+    "scroll_before": 250,
+    "scroll_after": 250,
+    "page_errors": []
+  },
+  {
+    "version": "review-fixed",
+    "width": 1440,
+    "theme": "light",
+    "failed_poll_actions": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "away_and_back": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "removed": [
+      {
+        "cleared": true,
+        "run": "none",
+        "edit": "none"
+      },
+      {
+        "cleared": true,
+        "run": "none",
+        "edit": "none"
+      }
+    ],
+    "scroll_before": 250,
+    "scroll_after": 250,
+    "page_errors": []
+  },
+  {
+    "version": "review-fixed",
+    "width": 390,
+    "theme": "dark",
+    "failed_poll_actions": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "away_and_back": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "removed": [
+      {
+        "cleared": true,
+        "run": "none",
+        "edit": "none"
+      },
+      {
+        "cleared": true,
+        "run": "none",
+        "edit": "none"
+      }
+    ],
+    "scroll_before": 250,
+    "scroll_after": 250,
+    "page_errors": []
+  },
+  {
+    "version": "review-fixed",
+    "width": 390,
+    "theme": "light",
+    "failed_poll_actions": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "away_and_back": [
+      {
+        "state": "paused",
+        "pause": "none",
+        "resume": ""
+      },
+      {
+        "state": "active",
+        "pause": "",
+        "resume": "none"
+      }
+    ],
+    "removed": [
+      {
+        "cleared": true,
+        "run": "none",
+        "edit": "none"
+      },
+      {
+        "cleared": true,
+        "run": "none",
+        "edit": "none"
+      }
+    ],
+    "scroll_before": 250,
+    "scroll_after": 250,
+    "page_errors": []
+  }
+]

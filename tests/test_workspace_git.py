@@ -13,6 +13,15 @@ from io import BytesIO
 import pytest
 
 from tests._pytest_port import BASE
+from tests._git_host_config_isolation import (
+    EMULATED_HOST_WITH_SENTINEL_HELPERS,
+    credential_helpers_seen,
+)
+
+# Git children here must never read the host's system/global git config: on a
+# Mac that runs osxkeychain against the test servers (#8931). See
+# tests/_git_host_config_isolation.py.
+pytestmark = pytest.mark.usefixtures("isolated_host_git_config")
 
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -240,6 +249,82 @@ def test_git_status_ignores_filemode_only_noise(tmp_path):
     assert status["noise_filtering"]["active"] is True
 
 
+def _stale_index_repo(tmp_path):
+    """A stale index: a real edit, a same-content touch, a CRLF-only change."""
+    import os
+
+    repo = _init_repo(tmp_path / "repo")
+    for name in ("edited.txt", "touched.txt", "crlf.txt"):
+        (repo / name).write_text("one\n", encoding="utf-8", newline="\n")
+    _commit_all(repo)
+    (repo / "edited.txt").write_text("one\ntwo\n", encoding="utf-8", newline="\n")
+    (repo / "crlf.txt").write_text("one\n", encoding="utf-8", newline="\r\n")
+    for name in ("edited.txt", "touched.txt", "crlf.txt"):
+        path = repo / name
+        later = path.stat().st_mtime + 120
+        os.utime(path, (later, later))
+    return repo
+
+
+def test_full_panel_status_does_not_rewrite_a_stale_index(tmp_path, monkeypatch):
+    """The panel's diff reads must not refresh the index either (#8520).
+
+    `git diff` refreshes a stale index on its own and ignores
+    GIT_OPTIONAL_LOCKS, so a diff killed at its timeout could leave
+    .git/index.lock behind just like status could.
+    """
+    from api.workspace_git import git_diff, git_status
+
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    repo = _stale_index_repo(tmp_path)
+    index = repo / ".git" / "index"
+    before = index.read_bytes()
+
+    status = git_status(repo)
+    diff = git_diff(repo, "edited.txt", "unstaged")
+
+    by_path = {item["path"]: item for item in status["files"]}
+    assert set(by_path) == {"edited.txt"}
+    assert by_path["edited.txt"]["unstaged"] is True
+    assert (by_path["edited.txt"]["additions"], by_path["edited.txt"]["deletions"]) == (1, 0)
+    assert status["noise_filtering"]["crlf_only"] == 1
+    assert "+two" in diff["diff"]
+    assert index.read_bytes() == before
+    assert not (repo / ".git" / "index.lock").exists()
+
+
+def test_full_panel_status_reads_past_a_held_index_lock(tmp_path, monkeypatch):
+    """A lock held by a writer (or left by a killed one) is not ours to touch."""
+    from api.workspace_git import git_status
+
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    repo = _stale_index_repo(tmp_path)
+    lock = repo / ".git" / "index.lock"
+    lock.write_bytes(b"held by someone else")
+
+    status = git_status(repo)
+
+    assert {item["path"] for item in status["files"]} == {"edited.txt"}
+    assert lock.read_bytes() == b"held by someone else"
+
+
+def test_writes_still_take_the_index_lock(tmp_path, monkeypatch):
+    """Only reads skip the refresh; stage keeps Git's normal locking."""
+    from api.workspace_git import GitWorkspaceError, git_stage
+
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    repo = _stale_index_repo(tmp_path)
+    lock = repo / ".git" / "index.lock"
+    lock.write_bytes(b"")
+
+    with pytest.raises(GitWorkspaceError):
+        git_stage(repo, ["edited.txt"])
+
+    lock.unlink()
+    staged = git_stage(repo, ["edited.txt"])
+    assert staged["totals"]["staged"] == 1
+
+
 def test_git_status_scopes_nested_workspace_to_that_directory(tmp_path):
     from api.workspace_git import git_status
 
@@ -340,6 +425,34 @@ def test_git_diff_skips_repo_local_clean_filter_without_destructive_mode(tmp_pat
 
     assert "+two" in diff["diff"]
     assert not marker.exists()
+
+
+def test_status_check_does_not_take_the_index_lock(tmp_path, monkeypatch):
+    """A background status check must not rewrite the index (#8520).
+
+    Rewriting needs .git/index.lock, and a status killed at its timeout
+    could leave that lock behind.
+    """
+    import os
+
+    from api.workspace_git import _dirty_worktree, resolve_git_context
+
+    # Pin the parent setting on, so the test can't pass just because the
+    # runner already has optional locks turned off.
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    # Same content, newer mtime: plain `git status` would refresh and
+    # rewrite the index here.
+    tracked = repo / "tracked.txt"
+    later = tracked.stat().st_mtime + 120
+    os.utime(tracked, (later, later))
+    index = repo / ".git" / "index"
+    before = index.read_bytes()
+
+    assert _dirty_worktree(resolve_git_context(repo)) is False
+    assert index.read_bytes() == before
 
 
 def test_git_status_reports_untracked_files_inside_directories(tmp_path):
@@ -1262,6 +1375,57 @@ def test_git_fetch_blocks_repo_local_credential_helper_execution(tmp_path):
 
     assert exc.value.code == "auth_failed"
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("host_git", [EMULATED_HOST_WITH_SENTINEL_HELPERS], indirect=True)
+def test_git_fetch_never_runs_host_credential_helpers(tmp_path, host_git):
+    """#8931 guard: the host's system/global credential helpers never run here.
+
+    ``host_git`` emulates a developer machine whose system and global git config
+    name a sentinel helper, the role Homebrew's osxkeychain plays on a Mac. This
+    fetch keeps the host's HOME, so without this module's
+    ``isolated_host_git_config`` both sentinels answer the 401.
+    """
+    import os
+
+    if os.name == "nt":
+        pytest.skip("executable credential helper setup is POSIX-only")
+
+    from api.subprocess_utils import clean_git_env
+    from api.workspace_git import GitWorkspaceError, git_fetch
+
+    # The emulation is live: a scrubbed git child of the bare host sees both helpers.
+    assert credential_helpers_seen(host_git.executable, tmp_path, clean_git_env()) == [
+        f"system\t{host_git.sentinel_helpers[0]}",
+        f"global\t{host_git.sentinel_helpers[1]}",
+    ]
+
+    class AuthRequiredHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="hermes-test"')
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            del format, args
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), AuthRequiredHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _git(repo, "remote", "add", "origin", f"http://127.0.0.1:{server.server_port}/repo.git")
+        with pytest.raises(GitWorkspaceError) as exc:
+            git_fetch(repo)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert exc.value.code == "auth_failed"
+    assert host_git.sentinel_calls() == []
 
 
 def test_git_fetch_blocks_repo_local_askpass_execution(tmp_path):
@@ -2221,8 +2385,10 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
 
     monkeypatch.setenv("GIT_DIR", "/tmp/evil-git-dir")
     monkeypatch.setenv("GIT_WORK_TREE", "/tmp/evil-work-tree")
+    monkeypatch.setenv("GIT_CONFIG", "/tmp/evil-repo-config")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/tmp/evil-config")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/tmp/evil-system-config")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "ssh -i /tmp/evil-key")
@@ -2231,14 +2397,18 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     monkeypatch.setenv("SSH_ASKPASS", "/tmp/evil-ssh-askpass")
     monkeypatch.setenv("GIT_SSH", "/tmp/evil-ssh")
     monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/evil-key")
+    monkeypatch.setenv("GIT_PROXY_COMMAND", "/tmp/evil-proxy")
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/trusted-agent.sock")
 
     env = _clean_git_env({"GIT_INDEX_FILE": "/tmp/hermes-index"})
 
     assert "GIT_DIR" not in env
     assert "GIT_WORK_TREE" not in env
+    assert "GIT_CONFIG" not in env
     assert "GIT_CONFIG_GLOBAL" not in env
     assert "GIT_CONFIG_SYSTEM" not in env
+    assert "GIT_CONFIG_NOSYSTEM" not in env
     assert "GIT_CONFIG_COUNT" not in env
     assert "GIT_CONFIG_KEY_0" not in env
     assert "GIT_CONFIG_VALUE_0" not in env
@@ -2247,7 +2417,9 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     assert "SSH_ASKPASS" not in env
     assert "GIT_SSH" not in env
     assert "GIT_SSH_COMMAND" not in env
+    assert "GIT_PROXY_COMMAND" not in env
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["SSH_AUTH_SOCK"] == "/tmp/trusted-agent.sock"
     assert env["GIT_INDEX_FILE"] == "/tmp/hermes-index"
 
 
@@ -2573,3 +2745,26 @@ def test_config_names_for_scope_passes_windows_hide_flags(monkeypatch, tmp_path)
     assert captured.get("creationflags") == windows_hide_flags(), (
         "_config_names_for_scope must pass creationflags=windows_hide_flags()"
     )
+
+
+@pytest.mark.parametrize(("version", "skips"), [("2.31.8", True), ("2.32.0", False), ("2.43.0", False)])
+def test_host_git_isolation_skips_instead_of_running_on_git_without_config_redirects(
+    tmp_path, version, skips,
+):
+    """#8931: Git older than 2.32 ignores GIT_CONFIG_SYSTEM/GLOBAL, so the opted-in
+    tests must skip there rather than run with the host's credential helpers."""
+    import os
+
+    if os.name == "nt":
+        pytest.skip("the fake git is a shell script")
+    from tests import _git_host_config_isolation as isolation
+
+    fake = tmp_path / f"git-{version}"
+    fake.write_text(f"#!/bin/sh\necho 'git version {version}'\n", encoding="utf-8")
+    fake.chmod(0o755)
+    if skips:
+        with pytest.raises(pytest.skip.Exception, match="older than 2.32"):
+            isolation.require_config_redirects(str(fake))
+    else:
+        assert isolation.git_supports_config_redirects(str(fake)) is True
+        isolation.require_config_redirects(str(fake))

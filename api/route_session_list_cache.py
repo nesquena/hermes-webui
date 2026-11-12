@@ -53,6 +53,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "model",
     "model_provider",
     "message_count",
+    "visible_message_count",
     "transcript_generation",
     "transcript_generation_baseline",
     "user_message_count",
@@ -90,6 +91,13 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "parent_session_id",
     "parent_title",
     "parent_source",
+    "parent_is_cli_session",
+    # #8245: the server's derived sidebar bucket (full scoped payload, before
+    # source filtering and archive pagination); the client trusts it.
+    "sidebar_is_cli_session",
+    # #8791: the row's canonical profile group (renamed-root aliases folded onto
+    # "default"); the client groups rows by it without needing the profile roster.
+    "sidebar_profile_group",
     "relationship_type",
     "pre_compression_snapshot",
     "_lineage_root_id",
@@ -107,6 +115,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "read_only",
     "is_read_only",
     "gateway_routing",
+    "last_used_model",
 }
 
 
