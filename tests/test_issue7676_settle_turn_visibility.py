@@ -413,6 +413,8 @@ class TestTransparentSettleInPlace:
             "_worklogDetailScrollableBody",
             "_setWorklogDetailDisclosureOpen",
             "_worklogDetailDisclosureKeyForElement",
+            "_thinkingCardText",
+            "_worklogDetailTurnScope",
             "_captureWorklogDetailDisclosureState",
             "_restoreWorklogDetailDisclosureState",
         ]

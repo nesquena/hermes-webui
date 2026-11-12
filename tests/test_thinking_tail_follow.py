@@ -769,16 +769,115 @@ const out={};
 
   const state=_captureWorklogDetailDisclosureState(live.row);
 
-  // Settled row: not live, and loses its stream data-thinking-key
+  // Settled row: not live, loses its stream data-thinking-key, and destination is taller
   const settled=makeThinkingRow('deep reasoning steps\nsecond line\nthird line\nend of thought', false);
   settled.row.removeAttribute('data-thinking-key');
   settled.body.clientHeight=200;
-  settled.body.scrollHeight=1000;
+  settled.body.scrollHeight=1400;
   settled.body.scrollTop=0; // starts at top in freshly built DOM
 
   _restoreWorklogDetailDisclosureState(settled.row, state);
   out.s23_settled_scroll=settled.body.scrollTop;
+  out.s23_settled_bottom=settled.body.scrollHeight-settled.body.clientHeight;
   out.s23_settled_pinned=settled.body.scrollTop===800;
+}
+
+// ── S24: settled thinking card holding midway restores absolute offset (#8286) ──
+{
+  const live=makeThinkingRow('deep reasoning steps\nmidway reader\nend of thought', true);
+  live.body.clientHeight=200;
+  live.body.scrollHeight=1000;
+  live.body.scrollTop=300; // holding midway
+  _bindThinkingTailFollow(live.body, false);
+
+  const state=_captureWorklogDetailDisclosureState(live.row);
+
+  const settled=makeThinkingRow('deep reasoning steps\nmidway reader\nend of thought', false);
+  settled.row.removeAttribute('data-thinking-key');
+  settled.body.clientHeight=200;
+  settled.body.scrollHeight=1400;
+  settled.body.scrollTop=0;
+
+  _restoreWorklogDetailDisclosureState(settled.row, state);
+  out.s24_midway_scroll=settled.body.scrollTop;
+  out.s24_midway_restored=settled.body.scrollTop===300;
+}
+
+// ── S25: collapsed settled card does not scroll while closed (#8286) ──
+{
+  const live=makeThinkingRow('deep reasoning steps\ncollapsed card\nend of thought', true);
+  live.card.classList.remove('open');
+  live.body.clientHeight=200;
+  live.body.scrollHeight=1000;
+  live.body.scrollTop=800;
+  _bindThinkingTailFollow(live.body, true);
+
+  const state=_captureWorklogDetailDisclosureState(live.row);
+
+  const settled=makeThinkingRow('deep reasoning steps\ncollapsed card\nend of thought', false);
+  settled.card.classList.remove('open');
+  settled.row.removeAttribute('data-thinking-key');
+  settled.body.clientHeight=200;
+  settled.body.scrollHeight=1400;
+  settled.body.scrollTop=0;
+
+  _restoreWorklogDetailDisclosureState(settled.row, state);
+  out.s25_collapsed_scroll=settled.body.scrollTop;
+  out.s25_collapsed_open=settled.card.classList.contains('open');
+}
+
+// ── S26: turn scoping distinguishes identical reasoning text across turns (#8286) ──
+{
+  const container=new FakeElement('div');
+  const turn0=new FakeElement('div');
+  turn0.className='assistant-turn';
+  const turn1=new FakeElement('div');
+  turn1.className='assistant-turn';
+  container.appendChild(turn0);
+  container.appendChild(turn1);
+
+  const sharedText='same reasoning text across turns\nline two\nline three';
+  const live0=makeThinkingRow(sharedText, true);
+  live0.body.clientHeight=200;
+  live0.body.scrollHeight=1000;
+  live0.body.scrollTop=300;
+  _bindThinkingTailFollow(live0.body, false);
+  turn0.appendChild(live0.row);
+
+  const live1=makeThinkingRow(sharedText, true);
+  live1.body.clientHeight=200;
+  live1.body.scrollHeight=1000;
+  live1.body.scrollTop=0;
+  _bindThinkingTailFollow(live1.body, false);
+  turn1.appendChild(live1.row);
+
+  const state=_captureWorklogDetailDisclosureState(container);
+
+  const rebuiltContainer=new FakeElement('div');
+  const rebuiltTurn0=new FakeElement('div');
+  rebuiltTurn0.className='assistant-turn';
+  const rebuiltTurn1=new FakeElement('div');
+  rebuiltTurn1.className='assistant-turn';
+  rebuiltContainer.appendChild(rebuiltTurn0);
+  rebuiltContainer.appendChild(rebuiltTurn1);
+
+  const settled0=makeThinkingRow(sharedText, false);
+  settled0.row.removeAttribute('data-thinking-key');
+  settled0.body.clientHeight=200;
+  settled0.body.scrollHeight=1400;
+  settled0.body.scrollTop=0;
+  rebuiltTurn0.appendChild(settled0.row);
+
+  const settled1=makeThinkingRow(sharedText, false);
+  settled1.row.removeAttribute('data-thinking-key');
+  settled1.body.clientHeight=200;
+  settled1.body.scrollHeight=1400;
+  settled1.body.scrollTop=0;
+  rebuiltTurn1.appendChild(settled1.row);
+
+  _restoreWorklogDetailDisclosureState(rebuiltContainer, state);
+  out.s26_turn0_scroll=settled0.body.scrollTop;
+  out.s26_turn1_scroll=settled1.body.scrollTop;
 }
 
 console.log(JSON.stringify(out, null, 2));
@@ -790,7 +889,8 @@ def _run_scenarios() -> dict:
     env = os.environ.copy()
     env["THINKFOLLOW_UI_JS"] = str(ROOT / "static" / "ui.js")
     result = subprocess.run(
-        [NODE, "-e", _NODE_PROGRAM],
+        [NODE, "-"],
+        input=_NODE_PROGRAM,
         cwd=ROOT,
         env=env,
         text=True,
@@ -1096,4 +1196,27 @@ def test_thinking_card_settled_scroll_restored_across_key_change():
     out = _run_scenarios()
     assert out["s23_settled_pinned"] is True
     assert out["s23_settled_scroll"] == 800
+    assert out["s23_settled_bottom"] == 1200
+    assert out["s23_settled_scroll"] != out["s23_settled_bottom"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_thinking_card_settled_scroll_restored_midway():
+    out = _run_scenarios()
+    assert out["s24_midway_restored"] is True
+    assert out["s24_midway_scroll"] == 300
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_thinking_card_settled_collapsed_stays_closed_and_unscrolled():
+    out = _run_scenarios()
+    assert out["s25_collapsed_scroll"] == 0
+    assert out["s25_collapsed_open"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_thinking_card_turn_scoping_differentiates_identical_text():
+    out = _run_scenarios()
+    assert out["s26_turn0_scroll"] == 300
+    assert out["s26_turn1_scroll"] == 0
 

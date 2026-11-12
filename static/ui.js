@@ -16355,19 +16355,15 @@ function _restoreWorklogDetailDisclosureState(root, state){
   const counts=Object.create(null);
   root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
-    let saved=null;
-    if(key&&state.has(key)){
-      saved=state.get(key);
-      if(el.classList&&el.classList.contains('thinking-card')&&Array.isArray(state._thinkingFallbacks)){
-        for(let i=0;i<state._thinkingFallbacks.length;i++){
-          const fb=state._thinkingFallbacks[i];
-          if(!fb.consumed&&fb.snap===saved){
-            fb.consumed=true;
-            break;
-          }
-        }
-      }
-    }else if(el.classList&&el.classList.contains('thinking-card')&&Array.isArray(state._thinkingFallbacks)){
+    const isThinkingCard=!!(el.classList&&el.classList.contains('thinking-card'));
+    // Key recovery (#8286): a rebuilt card can lose the stream key its snapshot
+    // was captured under. Reattach the snapshot captured for the same turn scope
+    // and reasoning text under this element's key BEFORE the read, so the restore
+    // keeps master's single `state.get(key)` shape instead of carrying a second
+    // lookup branch. Fallbacks are single-use: identical text in another turn
+    // must not inherit one, and a card that matched its own key consumes the
+    // fallback captured alongside it so no later card can replay it.
+    if(key&&isThinkingCard&&!state.has(key)&&Array.isArray(state._thinkingFallbacks)){
       const text=_thinkingCardText(el);
       if(text){
         const turnScope=_worklogDetailTurnScope(el, root);
@@ -16375,9 +16371,19 @@ function _restoreWorklogDetailDisclosureState(root, state){
           const fb=state._thinkingFallbacks[i];
           if(!fb.consumed&&fb.turnScope===turnScope&&fb.text===text){
             fb.consumed=true;
-            saved=fb.snap;
+            state.set(key, fb.snap);
             break;
           }
+        }
+      }
+    }
+    const saved=state.get(key);
+    if(saved&&isThinkingCard&&Array.isArray(state._thinkingFallbacks)){
+      for(let i=0;i<state._thinkingFallbacks.length;i++){
+        const fb=state._thinkingFallbacks[i];
+        if(!fb.consumed&&fb.snap===saved){
+          fb.consumed=true;
+          break;
         }
       }
     }
@@ -16411,8 +16417,7 @@ function _restoreWorklogDetailDisclosureState(root, state){
         // The re-pin reads scrollHeight; skip it on a collapsed card (the tail
         // read forces a layout) — _toggleThinkingCard re-pins on open.
         const elOpen=!el.classList||el.classList.contains('open');
-        const settledPinToTail = !destLive && !!(saved && typeof saved === 'object' && saved.atBottom === true);
-        if((atBottom || settledPinToTail) && elOpen){
+        if(atBottom && elOpen){
           body.scrollTop=Math.max(0, body.scrollHeight-body.clientHeight);
         }else if(Number.isFinite(scrollTop)&&scrollTop>0){
           body.scrollTop=Math.min(scrollTop, Math.max(0, body.scrollHeight-body.clientHeight));
