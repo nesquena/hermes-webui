@@ -325,3 +325,100 @@ def test_foreign_cli_persisted_sidecar_metadata_miss_stays_in_display_coordinate
     assert metadata["message_count"] == full["message_count"] == 3
     assert metadata["last_message_at"] == full["last_message_at"]
     assert metadata["message_count"] != 7
+
+
+def test_foreign_cli_cold_persisted_pending_metadata_hydrates_saved_transcript(monkeypatch, tmp_path):
+    """Cold persisted pending metadata stub must hydrate saved sidecar transcript.
+
+    4 sidecar rows + persisted pending_user_message + state.db at the first 2 rows,
+    no resident => metadata, limited and full all report message_count == 4 and the
+    same last_message_at; metadata still ships messages == [].
+    """
+    import api.models as models
+
+    sid = "cli7050_cold_pending"
+    sidecar_rows = [
+        {"role": "user", "content": "q0", "timestamp": 1000.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1001.0},
+        {"role": "user", "content": "q1", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a1", "timestamp": 1003.0},
+    ]
+    state_rows = sidecar_rows[:2]
+
+    session = _install_session(monkeypatch, tmp_path, sid, sidecar_rows)
+    session.pending_user_message = "persisted pending prompt"
+    session.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", sid, state_rows)
+
+    # Ensure no resident in memory
+    models.SESSIONS.clear()
+
+    metadata, limited, full = _solution(sid)
+
+    assert metadata["message_count"] == full["message_count"] == limited["message_count"] == 4
+    assert metadata["last_message_at"] == full["last_message_at"] == limited["last_message_at"]
+    assert metadata["messages"] == []
+    assert metadata["_messages_truncated"] is False
+
+
+def test_foreign_cli_idle_cold_session_without_pending_control_a(monkeypatch, tmp_path):
+    """Control A: idle cold session (no pending field) reports 4/4/4 unchanged."""
+    import api.models as models
+
+    sid = "cli7050_cold_idle_control_a"
+    sidecar_rows = [
+        {"role": "user", "content": "q0", "timestamp": 1000.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1001.0},
+        {"role": "user", "content": "q1", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a1", "timestamp": 1003.0},
+    ]
+    state_rows = sidecar_rows[:2]
+
+    _install_session(monkeypatch, tmp_path, sid, sidecar_rows)
+    _make_state_db(tmp_path / "state.db", sid, state_rows)
+
+    models.SESSIONS.clear()
+
+    metadata, limited, full = _solution(sid)
+
+    assert metadata["message_count"] == full["message_count"] == limited["message_count"] == 4
+    assert metadata["last_message_at"] == full["last_message_at"] == limited["last_message_at"]
+    assert metadata["messages"] == []
+    assert metadata["_messages_truncated"] is False
+
+
+def test_foreign_cli_live_unsaved_resident_with_pending_answers_from_memory(monkeypatch, tmp_path):
+    """Control B: live resident with unsaved messages + pending answers from memory.
+
+    A warm resident in memory carrying unsaved messages and an in-flight
+    pending_user_message must NOT regress to a disk snapshot.
+    """
+    import api.models as models
+
+    sid = "cli7050_live_resident_pending_control_b"
+    disk_rows = [
+        {"role": "user", "content": "q0", "timestamp": 1000.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1001.0},
+    ]
+    _install_session(monkeypatch, tmp_path, sid, disk_rows)
+    _make_state_db(tmp_path / "state.db", sid, disk_rows)
+
+    # Warm resident into memory
+    resident = models.get_session(sid)
+    assert resident is not None
+    assert len(resident.messages) == 2
+    assert getattr(resident, "_loaded_metadata_only", False) is False
+
+    # Add unsaved in-memory messages + pending_user_message without saving to disk
+    resident.messages.extend([
+        {"role": "user", "content": "q1", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a1", "timestamp": 1003.0},
+    ])
+    resident.pending_user_message = "live in-flight prompt"
+
+    metadata, limited, full = _solution(sid)
+
+    assert metadata["message_count"] == full["message_count"] == limited["message_count"] == 4
+    assert metadata["last_message_at"] == full["last_message_at"] == limited["last_message_at"]
+    assert metadata["messages"] == []
+

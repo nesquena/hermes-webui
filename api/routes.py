@@ -13571,17 +13571,22 @@ def _foreign_session_display_message_summary(
     transcript: only the cheap coordinate leaves the server.
     """
     source_session = session
-    if not (
+    is_stub = bool(
+        getattr(session, "_loaded_metadata_only", False)
+        or not getattr(session, "messages", None)
+    )
+    is_active_resident = not is_stub and bool(
         getattr(session, "active_stream_id", None)
         or getattr(session, "pending_user_message", None)
-    ):
+    )
+    if not is_active_resident:
         from api.models import (
             _cached_session_lags_disk,
             get_sidecar_session_profile_readonly,
         )
 
         try:
-            if _cached_session_lags_disk(session):
+            if is_stub or _cached_session_lags_disk(session):
                 disk_profile = get_sidecar_session_profile_readonly(sid)
                 if disk_profile == getattr(session, "profile", None):
                     loaded = Session.load(sid)
