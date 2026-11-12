@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from io import BytesIO
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -355,5 +356,74 @@ def test_a_commit_hidden_by_a_colliding_stat_pair_is_not_held(tmp_path, monkeypa
         expected = env.read()
         assert expected != initial
         assert routes._get_cached_session_list_payload(key=env.key, builder=env.read) == expected
+    finally:
+        routes._session_list_cache_clear()
+
+
+# --- a waiter without a stale payload re-probes strictly (independent review of 07ea09fce) ---------
+# A waiter that holds no stale payload must not take an entry stored before a later commit: master pops
+# that entry and rebuilds, so the waiter's answer includes the commit. Known limit, not fixed here (W1):
+# a waiter that HOLDS a stale payload can answer with that older payload when a commit landed during the
+# owner's build (master returned the owner's rows); a correct fix needs build-order generations.
+
+
+def _commit(env, sid):
+    with sqlite3.connect(env.db) as conn:
+        conn.execute("INSERT INTO sessions VALUES(?, ?)", (sid, sid))
+        conn.execute("INSERT INTO messages(session_id) VALUES(?)", (sid,))
+
+
+def _waiter_beside_owner(env, monkeypatch, owner_builder, *, seed):
+    """Run GET A (owner, ``owner_builder``) and GET B (waiter) concurrently; return both replies."""
+    monkeypatch.setattr(routes, "_SESSIONS_CACHE_STALE_WAIT_SECONDS", 5.0)
+    monkeypatch.setattr(routes, "_SESSIONS_CACHE_WAIT_SECONDS", 5.0)
+    building = threading.Event()
+    release = threading.Event()
+
+    def owner_build():
+        building.set()
+        assert release.wait(5.0)
+        return owner_builder()
+
+    def waiter_build():
+        return env.read()  # only the owner-died fallback may build here
+
+    if seed:
+        routes._get_cached_session_list_payload(key=env.key, builder=env.read)
+        _commit(env, "s1")  # the entry is now source-stale
+    replies = {}
+    owner = threading.Thread(
+        target=lambda: replies.__setitem__("a", routes._get_cached_session_list_payload(key=env.key, builder=owner_build))
+    )
+    owner.start()
+    assert building.wait(5.0)
+    waiter = threading.Thread(
+        target=lambda: replies.__setitem__("b", routes._get_cached_session_list_payload(key=env.key, builder=waiter_build))
+    )
+    waiter.start()
+    time.sleep(0.2)  # B has probed, found A's claim and is waiting on A's event
+    release.set()
+    owner.join(5.0)
+    waiter.join(5.0)
+    return replies
+
+
+def _ids(payload):
+    return sorted(row["session_id"] for row in payload["sessions"])
+
+
+def test_a_waiter_without_a_stale_payload_still_rebuilds_after_a_later_commit(tmp_path, monkeypatch):
+    env = _real_state_db_env(tmp_path, monkeypatch)
+    real_done = routes._session_list_cache_done
+
+    def done_then_commit(key, event):
+        _commit(env, "s3")  # after A stored its entry, before B re-probes
+        return real_done(key, event)
+
+    monkeypatch.setattr(routes, "_session_list_cache_done", done_then_commit)
+    try:
+        replies = _waiter_beside_owner(env, monkeypatch, env.read, seed=False)
+        assert "s3" not in _ids(replies["a"])
+        assert "s3" in _ids(replies["b"]), "a waiter with nothing stale must not take an entry older than master's"
     finally:
         routes._session_list_cache_clear()

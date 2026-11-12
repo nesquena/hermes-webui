@@ -8458,10 +8458,12 @@ function _scheduleSessionEventsRefresh(reason, opts={}, schedule={}){
   // event — a rename or delete from another tab, a cron finishing — paints after
   // the short burst window, and only events arriving within
   // `_SESSION_EVENTS_REFRESH_COALESCE_MS` of the last refresh this timer fired
-  // (an event-driven one or a parked re-send) wait for that cap. A PARKED request (`schedule.prompt`: a new chat, a pull or a
-  // resume that arrived while another refresh was in flight) was asked for by
-  // the user or the UI, so it re-sends after the burst window and is never held
-  // behind the cap; it also pulls an already-pending capped timer forward.
+  // (an event-driven one or a parked re-send) wait for that cap. A PARKED request (`schedule.prompt`) arrived
+  // while another refresh was in flight: usually a new chat, a pull or a resume
+  // the user or the UI asked for, but this timer's own event refresh is parked
+  // the same way when it fires mid-flight. It re-sends after the burst window and
+  // is never held behind the cap (at most one extra refresh per in-flight one);
+  // it also pulls an already-pending capped timer forward.
   // The cap is clamped to its own length: `Date.now()` follows the wall clock,
   // and after a backward clock step `_sessionEventsLastRefreshAt` lies in the
   // future, which would otherwise freeze every event refresh for the size of the
