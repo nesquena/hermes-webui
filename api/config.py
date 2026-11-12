@@ -7577,7 +7577,10 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
           holds expands to the submitted value at the same path, requiring at least one
           preserved reference.
        f. Residue: dict against dict with identical key sets where at least one ``${...}``
-          leaf the raw row holds expands to the submitted value at the same path (#8740 CR r4).
+          leaf the raw row holds expands to the submitted value at the same path (#8740 CR r4),
+          adopted only when corroborated: either the raw candidate is the sole row in
+          *raw_list* with that key set, or an additional leaf or reference corresponds
+          (#8740 CR r5). Multiple candidates reject as ambiguous before writing.
     3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
     4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
        rows disputing the same raw row, or non-unique match in a list with references) raises
@@ -7746,6 +7749,44 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 out.append(raw_idx)
         return out
 
+    def _iter_all_leaves(obj, path=()):
+        if isinstance(obj, dict) and obj:
+            for k, v in obj.items():
+                yield from _iter_all_leaves(v, path + (k,))
+        elif isinstance(obj, list) and obj:
+            for idx, item in enumerate(obj):
+                yield from _iter_all_leaves(item, path + (idx,))
+        else:
+            yield path, obj
+
+    def _corroborated_residue_match(raw_item, new_item) -> bool:
+        """True if *raw_item* has ownership evidence beyond a single ${...} leaf (#8740 CR r5).
+
+        Adoption requires either that *raw_item* is the sole row in *raw_list*
+        with this key set (no other row could own or dispute the bindings), or
+        that at least one additional leaf or reference corresponds (>= 2 matching
+        leaves total).
+        """
+        if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
+            return False
+        same_keys_count = sum(
+            1
+            for r in raw_list
+            if isinstance(r, dict) and set(r.keys()) == set(new_item.keys())
+        )
+        if same_keys_count == 1:
+            return True
+        matching_leaves = 0
+        for path, raw_val in _iter_all_leaves(raw_item):
+            exists, new_val = _get_at_path(new_item, path)
+            if exists and (
+                _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+            ):
+                matching_leaves += 1
+                if matching_leaves >= 2:
+                    return True
+        return False
+
     matches: dict[int, int | None] = {}
     for new_idx, new_item in enumerate(new_list):
         # 2.b: Expanded value
@@ -7793,12 +7834,16 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
         # 2.f: Residue: dict against dict with identical key sets where at least
         # one ${...} leaf the raw row holds expands to the submitted value at the
         # same path (#8740 CR r4).
+        # A single candidate is adopted only when corroborated (#8740 CR r5):
+        # one matching reference expansion does not establish ownership of a row.
         cands_2f = _residue_candidates(new_item)
         if len(cands_2f) > 1:
             raise ValueError(ambiguous_err)
         if len(cands_2f) == 1:
-            matches[new_idx] = cands_2f[0]
-            continue
+            raw_idx = cands_2f[0]
+            if _corroborated_residue_match(raw_list[raw_idx], new_item):
+                matches[new_idx] = raw_idx
+                continue
 
         matches[new_idx] = None
 

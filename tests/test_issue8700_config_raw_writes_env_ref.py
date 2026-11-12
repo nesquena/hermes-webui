@@ -1041,6 +1041,287 @@ def test_extra_body_residue_ambiguous_candidates_reject_without_writing(
     assert cfg_path.read_bytes() == before_bytes
 
 
+def test_extra_body_residue_does_not_adopt_removed_row_binding(
+    cfg_path, monkeypatch
+):
+    """Residue match does not adopt a removed row's binding when only a single reference matches (#8740 CR r5)."""
+    from api import config
+
+    monkeypatch.setenv("A", "token-alpha")
+    monkeypatch.setenv("C", "other-alpha")
+    monkeypatch.setenv("B", "token-beta")
+    monkeypatch.setenv("D", "other-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${A}", "other": "${C}", "temperature": 1, "depth": 1},
+            {"label": "beta", "token": "${B}", "other": "${D}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha",
+                "token": "token-beta",
+                "other": "new-other-literal",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["rows"]
+    assert written == [
+        {
+            "label": "alpha",
+            "token": "token-beta",
+            "other": "new-other-literal",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "${B}" not in text
+
+    # Rotating B must not affect the remaining alpha row since it was written as literal
+    monkeypatch.setenv("B", "rotated-token-beta")
+    _reload_config()
+    resolved = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]["rows"]
+    assert resolved == [
+        {
+            "label": "alpha",
+            "token": "token-beta",
+            "other": "new-other-literal",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+
+
+def test_auxiliary_extra_body_residue_does_not_adopt_removed_row_binding(
+    cfg_path, monkeypatch
+):
+    """Auxiliary residue match does not adopt a removed row's binding when only a single reference matches (#8740 CR r5)."""
+    from api import config
+
+    monkeypatch.setenv("A", "token-alpha")
+    monkeypatch.setenv("C", "other-alpha")
+    monkeypatch.setenv("B", "token-beta")
+    monkeypatch.setenv("D", "other-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${A}", "other": "${C}", "temperature": 1, "depth": 1},
+            {"label": "beta", "token": "${B}", "other": "${D}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha",
+                "token": "token-beta",
+                "other": "new-other-literal",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert written == [
+        {
+            "label": "alpha",
+            "token": "token-beta",
+            "other": "new-other-literal",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "${B}" not in text
+
+    monkeypatch.setenv("B", "rotated-token-beta")
+    _reload_config()
+    resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert resolved == [
+        {
+            "label": "alpha",
+            "token": "token-beta",
+            "other": "new-other-literal",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+
+
+def test_extra_body_residue_keeps_untouched_reference_for_genuine_multi_row_owner(
+    cfg_path, monkeypatch
+):
+    """Residue match preserves untouched references when corroborated by an additional matching leaf (#8740 CR r5)."""
+    from api import config
+
+    monkeypatch.setenv("A", "token-alpha")
+    monkeypatch.setenv("C", "other-alpha")
+    monkeypatch.setenv("B", "token-beta")
+    monkeypatch.setenv("D", "other-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${A}", "other": "${C}", "temperature": 1, "depth": 1},
+            {"label": "beta", "token": "${B}", "other": "${D}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha",
+                "token": "brand-new-literal-token",
+                "other": "other-alpha",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["rows"]
+    assert written == [
+        {
+            "label": "alpha",
+            "token": "brand-new-literal-token",
+            "other": "${C}",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "other-alpha" not in text
+    assert "${C}" in text
+
+    monkeypatch.setenv("C", "rotated-other-alpha-new")
+    _reload_config()
+    resolved = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]["rows"]
+    assert resolved == [
+        {
+            "label": "alpha",
+            "token": "brand-new-literal-token",
+            "other": "rotated-other-alpha-new",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+
+
+def test_auxiliary_extra_body_residue_keeps_untouched_reference_for_genuine_multi_row_owner(
+    cfg_path, monkeypatch
+):
+    """Auxiliary residue match preserves untouched references when corroborated by an additional matching leaf (#8740 CR r5)."""
+    from api import config
+
+    monkeypatch.setenv("A", "token-alpha")
+    monkeypatch.setenv("C", "other-alpha")
+    monkeypatch.setenv("B", "token-beta")
+    monkeypatch.setenv("D", "other-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${A}", "other": "${C}", "temperature": 1, "depth": 1},
+            {"label": "beta", "token": "${B}", "other": "${D}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha",
+                "token": "brand-new-literal-token",
+                "other": "other-alpha",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert written == [
+        {
+            "label": "alpha",
+            "token": "brand-new-literal-token",
+            "other": "${C}",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "other-alpha" not in text
+    assert "${C}" in text
+
+    monkeypatch.setenv("C", "rotated-other-alpha-new")
+    _reload_config()
+    resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert resolved == [
+        {
+            "label": "alpha",
+            "token": "brand-new-literal-token",
+            "other": "rotated-other-alpha-new",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+
+
 def test_extra_body_reordered_rows_follow_reference_valued_identity(
     cfg_path, monkeypatch
 ):
