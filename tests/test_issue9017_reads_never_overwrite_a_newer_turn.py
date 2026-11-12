@@ -401,3 +401,85 @@ def test_load_skips_the_repair_save_when_the_file_changed_after_the_read(store, 
     assert fired and len(session.messages) == 2
     on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert any(m.get("content") == "newer turn" for m in on_disk["messages"])
+
+
+def test_cleanup_clears_in_one_pass_when_its_own_reload_repaired_the_file(store):
+    """The reload's own repair save is this thread's write, not another writer's: the cleanup
+    clears the dead stream on the same poll instead of deferring to the next one."""
+    import api.models as models
+    import api.routes as routes
+
+    path = _write(store, "webui", partials=True)
+    stub = models.Session.load_metadata_only(SID)
+    assert routes._clear_stale_stream_state(stub) is True
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after.get("active_stream_id") is None
+    assert len(after["messages"]) == 2
+    assert stub.active_stream_id is None
+
+
+def _newer_session(path):
+    import api.models as models
+
+    newer = json.loads(path.read_text(encoding="utf-8"))
+    newer["messages"] = newer["messages"] + [{"role": "user", "content": "newer turn", "timestamp": NOW}]
+    return models.Session(**{k: v for k, v in newer.items() if k not in ("message_count", "anchor_scene_index")})
+
+
+@pytest.mark.parametrize("stat_blind", [False, True])
+def test_load_takes_its_marker_before_reading(store, monkeypatch, stat_blind):
+    """A writer saving right after the load read the file (before the collapse) is newer than the
+    load's copy. With ``stat_blind`` the stat signature can't tell, so only the write count does."""
+    import pathlib
+
+    import api.models as models
+
+    path = _write_partials_only(store)
+    newer = _newer_session(path)
+    if stat_blind:
+        monkeypatch.setattr(models, "_sidecar_stat_signature", lambda _path: (1, 1, 1))
+    real_read_text = pathlib.Path.read_text
+    fired = []
+
+    def _read_then_write(self, *args, **kwargs):
+        text = real_read_text(self, *args, **kwargs)
+        if self.name == f"{SID}.json" and not fired and threading.current_thread().name == "load-under-test":
+            fired.append(True)
+            worker = threading.Thread(target=lambda: newer.save(touch_updated_at=False))
+            worker.start()
+            worker.join(10)
+        return text
+
+    monkeypatch.setattr(pathlib.Path, "read_text", _read_then_write)
+    loaded = {}
+    reader = threading.Thread(target=lambda: loaded.setdefault("s", models.Session.load(SID)), name="load-under-test")
+    reader.start()
+    reader.join(20)
+    assert fired and len(loaded["s"].messages) == 2
+    on_disk = json.loads(real_read_text(path, encoding="utf-8"))
+    assert any(m.get("content") == "newer turn" for m in on_disk["messages"])
+
+
+def test_save_without_the_session_lock_cannot_land_between_check_and_repair_save(store, monkeypatch):
+    """The check and the repair save run under the persist lock: a writer that skips the session
+    lock waits for the repair save and lands after it, so its turn is the one on disk."""
+    import api.models as models
+
+    path = _write_partials_only(store)
+    newer = _newer_session(path)
+    real_check = models._sidecar_unchanged_since
+    writer = threading.Thread(target=lambda: newer.save(touch_updated_at=False))
+
+    def _check_then_write(*args, **kwargs):
+        result = real_check(*args, **kwargs)
+        if not writer.is_alive() and writer.ident is None:
+            writer.start()
+            writer.join(0.5)
+        return result
+
+    monkeypatch.setattr(models, "_sidecar_unchanged_since", _check_then_write)
+    session = models.Session.load(SID)
+    writer.join(10)
+    assert not writer.is_alive() and len(session.messages) == 2
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert any(m.get("content") == "newer turn" for m in on_disk["messages"])

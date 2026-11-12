@@ -2649,11 +2649,15 @@ class Session:
             _lock = _get_session_agent_lock(sid)
             if _lock.acquire(blocking=False):
                 try:
-                    if _sidecar_unchanged_since(sid, _read_marker):
-                        # Self-heal bloated sessions without touching recency/index
-                        # ordering; save() creates a .bak because this
-                        # intentionally shrinks the transcript (#2592).
-                        session.save(touch_updated_at=False, skip_index=True)
+                    # save() takes this reentrant lock anyway; taking it before
+                    # the check keeps a save made without the session lock from
+                    # landing between the check and this save.
+                    with _session_persist_lock(sid):
+                        if _sidecar_unchanged_since(sid, _read_marker):
+                            # Self-heal bloated sessions without touching recency/index
+                            # ordering; save() creates a .bak because this
+                            # intentionally shrinks the transcript (#2592).
+                            session.save(touch_updated_at=False, skip_index=True)
                 except Exception:
                     logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
                 finally:
