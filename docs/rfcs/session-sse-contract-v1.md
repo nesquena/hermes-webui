@@ -319,6 +319,17 @@ wired into `/api/chat/start` by `routes.py`):
   halves cannot drift apart. Pause does NOT retire a record: the resume path
   restores the active goal with the same pending continuation, so clearing it
   on pause silently stopped the goal loop (#7855 regate CORE 2).
+- The browser holds a continuation as a lease. When a subscribed browser is
+  sent `goal_continue`, it has `GOAL_CONTINUATION_BROWSER_GRACE_SECONDS`
+  (15 s, `api/goals.py`) to post it; after that the server takes the record
+  over and starts the turn itself with the same `continuation_id`, so a
+  browser POST that still lands is admitted at most once. With no subscriber
+  the server owns the record from the start. `goal clear` drops the record
+  and cancels the timer; a paused goal is skipped by the server-side start
+  (`goal_inactive`) and its record is kept for resume.
+- While the session has running subagents, the goal does not continue: the
+  decision becomes `wait` ("Goal waiting on N running subagent(s)") and the
+  goal is re-evaluated when they finish.
 
 The semantic taxonomy table remains a draft for the proposed per-session
 endpoint vocabulary and must be confirmed during maintainer review before that

@@ -1771,6 +1771,9 @@ def test_sealed_parent_retirement_cannot_overwrite_concurrent_goal_clear(
 ):
     """Review 5711530615: load -> is_active -> pause must be one critical section with /goal clear.
 
+    The retirement blocks inside manager construction, so loading the manager before
+    taking the lock (and only checking/pausing under it) fails as well.
+
     The manager caches goal state when it is loaded, so a /goal clear that lands after the
     retirement's active read must not be overwritten by a stale ``paused`` save
     (active -> cleared -> paused). Real threads and the real ``_handle_goal_command``.
@@ -1799,13 +1802,14 @@ def test_sealed_parent_retirement_cannot_overwrite_concurrent_goal_clear(
             self.session_id = session_id
             st = holder["state"]
             self._snap = None if st is None else SimpleNamespace(**vars_of(st))
-
-        def is_active(self):
-            active = self._snap is not None and self._snap.status == "active"
-            if active and threading.current_thread().name == "retirement":
+            # Block right after the load: a manager built outside the goal-control lock lets
+            # the clear land here and the stale snapshot is then paused back over it.
+            if self._snap is not None and threading.current_thread().name == "retirement":
                 read_active.set()
                 release.wait(timeout=5)
-            return active
+
+        def is_active(self):
+            return self._snap is not None and self._snap.status == "active"
 
         def has_goal(self):
             return holder["state"] is not None
@@ -1833,7 +1837,7 @@ def test_sealed_parent_retirement_cannot_overwrite_concurrent_goal_clear(
         name="retirement",
     )
     retirement.start()
-    assert read_active.wait(timeout=5), "retirement never read the goal as active"
+    assert read_active.wait(timeout=5), "retirement never loaded the active goal"
     clear_result = {}
     clearer = threading.Thread(
         target=lambda: clear_result.update(
