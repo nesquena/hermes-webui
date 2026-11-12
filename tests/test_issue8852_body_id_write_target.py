@@ -171,7 +171,7 @@ def test_a_later_save_of_a_loaded_copy_is_refused(store, partials):
     _copy(store, partials=partials)
     before = _files(store)
 
-    session = models.get_session(COPY)
+    session = models.get_session(COPY, allow_foreign_body=True)
     session.title = "Mutated"
     with pytest.raises(RuntimeError, match="8852"):
         session.save()
@@ -302,7 +302,8 @@ def test_file_operations_on_a_copy_never_write_the_session_it_names(store, monke
     assert getattr(stub, "_loaded_metadata_only", False) and stub.session_id == VICTIM
     assert getattr(stub, "_sidecar_names_other_session", None) == COPY
     models.SESSIONS.clear()
-    with pytest.raises(models.WorkspaceBindingPersistenceError):
+    # #9019: the copy is not found at all now (before: the workspace writer refused it).
+    with pytest.raises(models.SessionFileNamesOtherSession):
         models.get_session_for_file_ops(COPY)
 
     _unchanged_victim(store, before)
@@ -361,11 +362,11 @@ def test_a_copy_taken_mid_turn_loads_quietly(store, caplog, entry):
         for _ in range(2):
             models.SESSIONS.clear()
             if entry == "get_session":
-                session = models.get_session(COPY)
+                session = models.get_session(COPY, allow_foreign_body=True)
                 state = (session.pending_user_message, session.active_stream_id)
                 expected = ("half-sent", "dead-stream")
             elif entry == "clear_stale_stream_state":
-                session = models.get_session(COPY)
+                session = models.get_session(COPY, allow_foreign_body=True)
                 assert routes._clear_stale_stream_state(session) is False
                 state = (session.pending_user_message, session.active_stream_id)
                 expected = (None, None)
@@ -397,7 +398,7 @@ def test_a_copy_of_a_turn_that_is_still_running_keeps_showing_it(store):
     with config.STREAMS_LOCK:
         config.STREAMS["dead-stream"] = object()
     try:
-        session = models.get_session(COPY)
+        session = models.get_session(COPY, allow_foreign_body=True)
         assert routes._clear_stale_stream_state(session) is False
         state = (session.pending_user_message, session.active_stream_id)
     finally:
@@ -419,7 +420,7 @@ def test_the_reasoning_writer_refuses_a_session_loaded_from_a_copy(store):
     before = _files(store)
 
     with pytest.raises(RuntimeError, match="8852"):
-        models.set_session_reasoning_effort(models.get_session(COPY), "high")
+        models.set_session_reasoning_effort(models.get_session(COPY, allow_foreign_body=True), "high")
 
     _unchanged_victim(store, before)
     assert _files(store) == before
@@ -438,7 +439,7 @@ def test_the_title_writer_refuses_a_session_loaded_from_a_copy(store):
 
     with pytest.raises(RuntimeError, match="8852"):
         routes._persist_generated_session_title(
-            models.get_session(COPY), "Hijacked by copy", event_reason="test"
+            models.get_session(COPY, allow_foreign_body=True), "Hijacked by copy", event_reason="test"
         )
 
     _unchanged_victim(store, before)
