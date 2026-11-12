@@ -5,6 +5,8 @@
 
 const LOCALES = {
   en: {
+    composer_placeholder_read_only: 'Read-only in WebUI',
+    composer_read_only_connection: 'How to connect',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
@@ -694,7 +696,8 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} update(s) available',
+    // {0} is the target list from _formatUpdateTargetStatus(), count and unit included (#8283)
+    settings_updates_available_targets: '{0} available',
     settings_latest_tag_suffix: '·\u00a0Latest\u00a0tag:\u00a0{0}',
     settings_updates_disabled: 'Update checks disabled',
     settings_update_check_failed: 'Update check failed',
@@ -1934,6 +1937,8 @@ const LOCALES = {
   },
 
   it: {
+    composer_placeholder_read_only: 'Sola lettura in WebUI',
+    composer_read_only_connection: 'Come connettersi',
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -2666,7 +2671,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} aggiornamento/i disponibile/i',
+    settings_updates_available_targets: 'Aggiornamenti disponibili: {0}',
     settings_latest_tag_suffix: '·\u00a0Ultima\u00a0tag:\u00a0{0}',
     settings_updates_disabled: 'Verifica aggiornamenti disabilitata',
     settings_update_check_failed: 'Verifica aggiornamenti fallita',
@@ -3842,6 +3847,8 @@ const LOCALES = {
   },
 
   ja: {
+    composer_placeholder_read_only: 'WebUIでは読み取り専用',
+    composer_read_only_connection: '接続方法',
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -4574,7 +4581,7 @@ const LOCALES = {
     update_force_active_runs_confirm: '中断して更新',
     update_failed_network: '更新に失敗しました: WebUIサーバーに到達できませんでした。サーバーが再起動したか、接続が中断された可能性があります。数秒待ってからページを再読み込みし、それでも復旧しない場合はサーバーを確認してください。',
     update_failed_prefix: '更新に失敗しました: ',
-    settings_updates_available: '{count} 件のアップデートあり',
+    settings_updates_available_targets: '{0} 利用可能',
     settings_latest_tag_suffix: '·\u00a0最新タグ:\u00a0{0}',
     settings_update_check_failed: 'アップデート確認失敗',
     settings_update_no_git: 'アップデートを確認できません（gitチェックアウトではありません）',
@@ -5755,6 +5762,8 @@ const LOCALES = {
   },
 
   ru: {
+    composer_placeholder_read_only: 'Только чтение в WebUI',
+    composer_read_only_connection: 'Как подключиться',
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -7267,7 +7276,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Прервать и обновить',
     update_failed_network: 'Не удалось обновить: сервер WebUI недоступен. Возможно, он перезапустился или соединение прервалось. Подождите несколько секунд, перезагрузите страницу и проверьте сервер, если он не вернётся.',
     update_failed_prefix: 'Не удалось обновить: ',
-    settings_updates_available: 'Доступно обновлений: {count}',
+    settings_updates_available_targets: 'Доступно: {0}',
     settings_latest_tag_suffix: '·\u00a0Последний\u00a0тег:\u00a0{0}',
     settings_updates_disabled: 'Проверка обновлений отключена',
     settings_update_check_failed: 'Ошибка проверки обновлений',
@@ -7650,6 +7659,8 @@ const LOCALES = {
   },
 
   es: {
+    composer_placeholder_read_only: 'Solo lectura en WebUI',
+    composer_read_only_connection: 'Cómo conectarse',
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -9144,7 +9155,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} actualización(es) disponible(s)',
+    settings_updates_available_targets: 'Actualizaciones disponibles: {0}',
     settings_latest_tag_suffix: '·\u00a0Última\u00a0etiqueta:\u00a0{0}',
     settings_updates_disabled: 'Comprobación de actualizaciones desactivada',
     settings_update_check_failed: 'Error al comprobar actualizaciones',
@@ -9503,6 +9514,8 @@ const LOCALES = {
   },
 
   de: {
+    composer_placeholder_read_only: 'In WebUI nur lesbar',
+    composer_read_only_connection: 'So stellst du eine Verbindung her',
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -10659,7 +10672,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} Update(s) verfügbar',
+    settings_updates_available_targets: '{0} verfügbar',
     settings_latest_tag_suffix: '·\u00a0Neuester\u00a0Tag:\u00a0{0}',
     settings_updates_disabled: 'Update-Prüfung deaktiviert',
     settings_update_check_failed: 'Update-Prüfung fehlgeschlagen',
@@ -11410,6 +11423,8 @@ const LOCALES = {
   },
 
   zh: {
+    composer_placeholder_read_only: '在 WebUI 中只读',
+    composer_read_only_connection: '如何连接',
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -12915,7 +12930,7 @@ const LOCALES = {
     update_force_active_runs_confirm: '中断并更新',
     update_failed_network: '更新失败：无法连接到 WebUI 服务器。服务可能已重启，或者连接被中断。请稍等几秒，重新加载页面，如果服务器仍未恢复，请检查服务器状态。 ',
     update_failed_prefix: '更新失败： ',
-    settings_updates_available: '有 {count} 个更新可用',
+    settings_updates_available_targets: '{0} 可用',
     settings_latest_tag_suffix: '·\u00a0最新标签:\u00a0{0}',
     settings_updates_disabled: '更新检查已禁用',
     settings_update_check_failed: '更新检查失败',
@@ -13253,6 +13268,8 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
+    composer_placeholder_read_only: '在 WebUI 中唯讀',
+    composer_read_only_connection: '如何連線',
 
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
@@ -13977,7 +13994,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '有 {count} 個更新可用',
+    settings_updates_available_targets: '{0} 可用',
     settings_latest_tag_suffix: '·\u00a0最新標籤:\u00a0{0}',
     settings_updates_disabled: '更新檢查已停用',
     settings_update_check_failed: '更新檢查失敗',
@@ -15164,6 +15181,8 @@ const LOCALES = {
   },
 
   pt: {
+    composer_placeholder_read_only: 'Somente leitura no WebUI',
+    composer_read_only_connection: 'Como conectar',
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -15774,7 +15793,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} atualização(ões) disponível(is)',
+    settings_updates_available_targets: 'Atualizações disponíveis: {0}',
     settings_latest_tag_suffix: '·\u00a0Última\u00a0tag:\u00a0{0}',
     settings_updates_disabled: 'Verificação de updates desativada',
     settings_update_check_failed: 'Falha ao verificar updates',
@@ -16883,6 +16902,8 @@ const LOCALES = {
     pb_update_failed: 'Não foi possível salvar as configurações do projeto: ',
   },
   ko: {
+    composer_placeholder_read_only: 'WebUI에서 읽기 전용',
+    composer_read_only_connection: '연결 방법',
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -17578,7 +17599,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} update(s) available',
+    settings_updates_available_targets: '{0} 사용 가능',
     settings_latest_tag_suffix: '·\u00a0최신\u00a0태그:\u00a0{0}',
     settings_updates_disabled: 'Update checks disabled',
     settings_update_check_failed: 'Update check failed',
@@ -18781,6 +18802,8 @@ const LOCALES = {
   },
 
   fr: {
+    composer_placeholder_read_only: 'Lecture seule dans WebUI',
+    composer_read_only_connection: 'Comment se connecter',
     offline_title: 'Connexion perdue',
     offline_browser_detail: 'Votre navigateur signale que cet appareil est hors ligne.',
     offline_network_detail: 'Hermes est actuellement inaccessible depuis ce navigateur.',
@@ -19500,7 +19523,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} mise(s) à jour disponible(s)',
+    settings_updates_available_targets: 'Mises à jour disponibles : {0}',
     settings_latest_tag_suffix: '·\u00a0Dernier\u00a0tag\u00a0:\u00a0{0}',
     settings_updates_disabled: 'Vérifications des mises à jour désactivées',
     settings_update_check_failed: 'Échec de la vérification des mises à jour',
@@ -20659,6 +20682,8 @@ const LOCALES = {
   },
 
   cs: {
+    composer_placeholder_read_only: 'Ve WebUI pouze ke čtení',
+    composer_read_only_connection: 'Jak se připojit',
     _label: 'Čeština',
     sessions_source_webui: 'Relace WebUI ({0})',
     sessions_source_cli: 'Relace CLI ({0})',
@@ -21838,7 +21863,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: 'Dostupných {count} aktualizací',
+    settings_updates_available_targets: 'K dispozici: {0}',
     settings_latest_tag_suffix: '·\u00a0Nejnovější\u00a0tag:\u00a0{0}',
     settings_updates_disabled: 'Kontroly aktualizací zakázány',
     sign_out: 'Odhlásit se',
@@ -22526,6 +22551,8 @@ const LOCALES = {
     pb_update_failed: 'Nastavení projektu se nepodařilo uložit: ',
   },
   tr: {
+    composer_placeholder_read_only: 'WebUI’de salt okunur',
+    composer_read_only_connection: 'Nasıl bağlanılır',
 
 
 
@@ -23240,7 +23267,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} güncelleme mevcut',
+    settings_updates_available_targets: '{0} mevcut',
     settings_latest_tag_suffix: '·\u00a0Son\u00a0etiket:\u00a0{0}',
     settings_updates_disabled: 'Güncelleme kontrolleri devre dışı bırakıldı',
     settings_update_check_failed: 'Güncelleme kontrolü başarısız oldu',
@@ -24429,6 +24456,8 @@ const LOCALES = {
     pb_update_failed: 'Proje ayarları kaydedilemedi: ',
   },
   pl: {
+    composer_placeholder_read_only: 'Tylko do odczytu w WebUI',
+    composer_read_only_connection: 'Jak się połączyć',
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -25164,7 +25193,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: 'Dostępne aktualizacje ({count})',
+    settings_updates_available_targets: 'Dostępne aktualizacje: {0}',
     settings_latest_tag_suffix: '·\u00a0Najnowszy\u00a0tag:\u00a0{0}',
     settings_updates_disabled: 'Sprawdzanie aktualizacji wyłączone',
     settings_update_check_failed: 'Sprawdzanie aktualizacji nie powiodło się',
@@ -26332,6 +26361,8 @@ const LOCALES = {
     pb_update_failed: 'Nie udało się zapisać ustawień projektu: ',
   },
   vi: {
+    composer_placeholder_read_only: 'Chỉ đọc trong WebUI',
+    composer_read_only_connection: 'Cách kết nối',
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',
@@ -28112,7 +28143,7 @@ const LOCALES = {
     update_force_active_runs_confirm: 'Interrupt and update',
     update_failed_network: 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.',
     update_failed_prefix: 'Update failed: ',
-    settings_updates_available: '{count} bản cập nhật khả dụng',
+    settings_updates_available_targets: '{0} khả dụng',
     settings_latest_tag_suffix: '·\u00a0Tag\u00a0mới\u00a0nhất:\u00a0{0}',
     settings_updates_disabled: 'Đã tắt kiểm tra cập nhật',
     settings_update_check_failed: 'Kiểm tra cập nhật thất bại',
