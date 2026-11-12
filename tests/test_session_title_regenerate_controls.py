@@ -98,7 +98,7 @@ def test_streaming_helper_generates_title_from_persisted_transcript(monkeypatch)
     monkeypatch.setattr(
         streaming,
         "_generate_llm_session_title_via_aux",
-        lambda user, assistant, agent=None: ("Sidebar title controls", "llm", "raw"),
+        lambda user, assistant, agent=None, **kwargs: ("Sidebar title controls", "llm", "raw"),
     )
 
     title, status, raw = streaming.generate_session_title_for_session(session)

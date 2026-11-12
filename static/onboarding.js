@@ -705,7 +705,7 @@ async function startCodexOAuth(){
           <p style="margin-top:8px"><strong>${t('oauth_codex_step2')}</strong></p>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">
             <code style="display:inline-block;font-size:18px;letter-spacing:0.1em;background:rgba(255,255,255,.08);padding:6px 14px;border-radius:8px;user-select:all">${esc(user_code)}</code>
-            <button class="sm-btn" type="button" onclick="copyCodexOAuthCode('${esc(user_code)}')">Copy code</button>
+            <button class="sm-btn" type="button" onclick="copyCodexOAuthCode(${jsArg(user_code)})">Copy code</button>
             <button class="sm-btn" type="button" onclick="cancelCodexOAuth()">Cancel</button>
           </div>
           <p style="margin-top:8px;color:var(--muted);font-size:13px">${t('oauth_codex_polling')}</p>

@@ -24,6 +24,20 @@ def _function_body(src: str, signature: str) -> str:
     raise AssertionError(f"could not extract function body for {signature!r}")
 
 
+def _optional_function_body(src: str, signature: str) -> str:
+    """Extract a helper if present, else return "".
+
+    Used for helpers whose ABSENCE is itself the regression under test: the
+    probe must still run so the behavioral assertion reports the duplicate,
+    rather than dying with a substring-not-found extraction error that says
+    nothing about observable behavior.
+    """
+    try:
+        return _function_body(src, signature)
+    except (ValueError, AssertionError):
+        return ""
+
+
 def _run_session_identity_probe() -> dict:
     prompt = "same submitted prompt\nwith a second line"
     workspace_prompt = f"[Workspace::v1: /tmp/hermes-webui]\n{prompt}"
@@ -197,12 +211,16 @@ def _run_pending_session_message_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _optional_function_body(UI_SRC, "function _messageTimestampSeconds"),
+            _optional_function_body(UI_SRC, "function _activeTurnTokenMatches"),
+            _optional_function_body(UI_SRC, "function _pendingActiveTurnUserMessage"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
             _function_body(UI_SRC, "function getPendingSessionMessage"),
         ]
     )
     script = f"""
+const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;
 {helpers}
 const prompt = {json.dumps(prompt)};
 const historical = {{role:'user', content:prompt, _ts:1}};
@@ -270,6 +288,76 @@ const repeatedCompletedPromptCount = repeatedCompletedMessages.filter(
 ).length;
 const compactionCurrentTail = _pendingCurrentTailUserMessage([historical, historicalAnswer, currentTailForCompaction, compactionMarker]);
 
+// Mid-run reload: the server already reconciled the active turn's user row into
+// the transcript AND this turn's assistant/tool output follows it, while
+// pending_user_message is still set. The strict tail scan cannot see the user
+// row (it stops at the completed assistant), so without the pending_started_at
+// fallback the prompt is materialized a second time -> duplicate user bubble.
+const midRunStartedAt = 500;
+const midRunTranscript = [
+  {{role:'user', content:'earlier question', timestamp:100}},
+  {{role:'assistant', content:'earlier answer', timestamp:200}},
+  {{role:'user', content:prompt, timestamp:midRunStartedAt}},
+  {{role:'assistant', content:'', timestamp:midRunStartedAt+15}},
+  {{role:'tool', content:'{{"ok":true}}', timestamp:midRunStartedAt+16}},
+  {{role:'assistant', content:'partial answer', timestamp:midRunStartedAt+60}},
+];
+const midRunResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt}},
+  midRunTranscript
+);
+const midRunWorkspaceTranscript = [
+  {{role:'user', content:'earlier question', timestamp:100}},
+  {{role:'assistant', content:'earlier answer', timestamp:200}},
+  {{role:'user', content:{json.dumps(current_workspace_prompt)}, timestamp:midRunStartedAt}},
+  {{role:'assistant', content:'partial answer', timestamp:midRunStartedAt+30}},
+];
+const midRunWorkspaceResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt}},
+  midRunWorkspaceTranscript
+);
+// A same-text row from an OLDER turn must never be adopted: only the row whose
+// timestamp matches pending_started_at identifies the active turn.
+const staleSameTextTranscript = [
+  {{role:'user', content:prompt, timestamp:midRunStartedAt-600}},
+  {{role:'assistant', content:'old answer', timestamp:midRunStartedAt-500}},
+];
+const staleSameTextResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt}},
+  staleSameTextTranscript
+);
+// Legacy/absent pending_started_at disables the fallback rather than guessing.
+const noStartedAtResult = getPendingSessionMessage(
+  {{pending_user_message:prompt}},
+  midRunTranscript
+);
+
+// Regression (review round 2): two completed identical-text turns whose
+// started_at differ by ~1s. The old 1.5s tolerance adopted the EARLIER row as
+// the "active turn", hiding the second (still-pending) turn and copying its
+// attachments onto the old row. With the precision-only epsilon the second turn
+// is materialized and the first row stays untouched.
+const rapidRepeatTurnOne = {{role:'user', content:prompt, timestamp:100}};
+const rapidRepeatAnswerOne = {{role:'assistant', content:'done', timestamp:101}};
+const rapidRepeatSecondAttachments = [{{name:'second.txt', path:'second.txt', mime:'text/plain'}}];
+const rapidRepeatResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:101, pending_attachments:rapidRepeatSecondAttachments}},
+  [rapidRepeatTurnOne, rapidRepeatAnswerOne]
+);
+// Exact token identity: the eager-checkpoint row carries _active_turn_token
+// built from the same stream_id + started_at as the session — adopted even
+// though its timestamp (499.9) is NOT within the epsilon of pending_started_at.
+const tokenIdentityTranscript = [
+  {{role:'user', content:'earlier question', timestamp:100}},
+  {{role:'assistant', content:'earlier answer', timestamp:200}},
+  {{role:'user', content:prompt, timestamp:499.9, _active_turn_token:'stream-abc:500'}},
+  {{role:'assistant', content:'partial', timestamp:560}},
+];
+const tokenIdentityResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt, active_stream_id:'stream-abc'}},
+  tokenIdentityTranscript
+);
+
 process.stdout.write(JSON.stringify({{
   historicalSameTextSurvives: !!fromHistoricalSameText && fromHistoricalSameText.content===prompt && fromHistoricalSameText._pending===true,
   historicalWorkspaceSurvives: !!fromHistoricalWorkspace && fromHistoricalWorkspace.content===prompt && fromHistoricalWorkspace._pending===true,
@@ -282,6 +370,13 @@ process.stdout.write(JSON.stringify({{
   compactionBoundaryCurrentTail: compactionCurrentTail&&compactionCurrentTail.role==='user'&&compactionCurrentTail.content===prompt,
   compactionCurrentTailAttachmentsCopied: Array.isArray(currentTailForCompaction.attachments) && currentTailForCompaction.attachments[0].name==='note.txt',
   repeatedCompletedPromptsRemainValid: repeatedCompletedPromptCount===3,
+  midRunReloadDedupe: midRunResult===null,
+  midRunWorkspaceReloadDedupe: midRunWorkspaceResult===null,
+  staleSameTextStillMaterializes: !!staleSameTextResult && staleSameTextResult._pending===true,
+  legacyNoStartedAtStillMaterializes: !!noStartedAtResult && noStartedAtResult._pending===true,
+  rapidRepeatSecondTurnReturned: !!rapidRepeatResult && rapidRepeatResult._pending===true && rapidRepeatResult.content===prompt && Array.isArray(rapidRepeatResult.attachments) && rapidRepeatResult.attachments[0].name==='second.txt',
+  rapidRepeatFirstRowKeptClean: !Array.isArray(rapidRepeatTurnOne.attachments),
+  tokenIdentityDedupe: tokenIdentityResult===null,
   isContextCompactionText: _isContextCompactionText(compactionMarker.content),
   isContextCompactionMessage: _isContextCompactionMessage(compactionMarker),
 }}));
@@ -361,7 +456,13 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
         MESSAGES_SRC.index("function _updateLiveThinkingCard") :
         MESSAGES_SRC.index("// Split a content string", MESSAGES_SRC.index("function _updateLiveThinkingCard"))
     ]
-    assert "_updateLiveThinkingCard(" in wire_block, "reasoning replay should use the live Thinking card path"
+    # #8171: replayed reasoning is coalesced like live reasoning. The shared
+    # listener schedules _flushPendingReasoningRender(), which owns the live
+    # Thinking card fallback.
+    assert "_reasoningRenderPending=true;" in wire_block, "reasoning replay should schedule the live coalesced render"
+    flush_start = MESSAGES_SRC.index("function _flushPendingReasoningRender(){")
+    flush_block = MESSAGES_SRC[flush_start : MESSAGES_SRC.index("// Split a content string", flush_start)]
+    assert "_updateLiveThinkingCard(" in flush_block, "reasoning replay should use the live Thinking card path"
     assert "updateThinking(text, opts)" in thinking_helper and "appendThinking(text, opts)" in thinking_helper, (
         "the shared Thinking helper should still route replay/live reasoning into the Worklog Thinking card path"
     )
@@ -496,6 +597,16 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["compactionBoundaryCurrentTail"] is True
     assert result["compactionCurrentTailAttachmentsCopied"] is True
     assert result["repeatedCompletedPromptsRemainValid"] is True
+    # #6649 follow-up: mid-run reload must not duplicate the active turn's user row
+    assert result["midRunReloadDedupe"] is True
+    assert result["midRunWorkspaceReloadDedupe"] is True
+    assert result["staleSameTextStillMaterializes"] is True
+    assert result["legacyNoStartedAtStillMaterializes"] is True
+    # #6670 review round 2: ~1s-apart identical turns must not be collapsed by
+    # the active-turn fallback (no over-dedup, no attachment mis-attachment).
+    assert result["rapidRepeatSecondTurnReturned"] is True
+    assert result["rapidRepeatFirstRowKeptClean"] is True
+    assert result["tokenIdentityDedupe"] is True
     assert result["isContextCompactionText"] is True
     assert result["isContextCompactionMessage"] is True
 
@@ -512,3 +623,93 @@ def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
         assert key in live_tid_block
         assert key in find_block
         assert key in upsert_block
+
+
+def test_wakeup_pending_row_never_hides_real_user_row_by_text_alone():
+    """#7882 gate review finding 4: a delegation_wakeup pending prompt that
+    text-matches an EARLIER real user row must not stamp that row hidden.
+    Stamping/adoption requires the pending turn's identity (token or exact
+    pending_started_at timestamp); on text-only match the earlier row is left
+    alone and the pending row is materialized separately."""
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _function_body(UI_SRC, "function _messageTimestampSeconds"),
+            _function_body(UI_SRC, "function _activeTurnTokenMatches"),
+            _function_body(UI_SRC, "function _pendingActiveTurnUserMessage"),
+            _function_body(UI_SRC, "function _isContextCompactionText"),
+            _function_body(UI_SRC, "function _isContextCompactionMessage"),
+            _function_body(UI_SRC, "function getPendingSessionMessage"),
+        ]
+    )
+    script = f"""
+const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;
+{helpers}
+const prompt = 'continue the task';
+
+// Case 1: a REAL earlier row with the same text and a DIFFERENT timestamp.
+// The wakeup pending prompt must NOT adopt/stamp it — the row stays clean and
+// the pending row is materialized separately.
+const earlierRealRow = {{role:'user', content:prompt, timestamp:100}};
+const resultNoIdentity = getPendingSessionMessage(
+  {{
+    pending_user_message:prompt,
+    pending_started_at:900,
+    pending_user_source:'delegation_wakeup',
+  }},
+  [earlierRealRow]
+);
+const earlierRowClean = !earlierRealRow._source;
+const pendingMaterialized = !!resultNoIdentity
+  && resultNoIdentity._pending===true
+  && resultNoIdentity._source==='delegation_wakeup';
+
+// Case 2: the row that IS the pending turn (exact timestamp) gets stamped so
+// the deferred-save hidden-row predicate still applies.
+const pendingTurnRow = {{role:'user', content:prompt, timestamp:900}};
+getPendingSessionMessage(
+  {{
+    pending_user_message:prompt,
+    pending_started_at:900,
+    pending_user_source:'delegation_wakeup',
+  }},
+  [pendingTurnRow]
+);
+const identityRowStamped = pendingTurnRow._source==='delegation_wakeup';
+
+// Case 3: ordinary webui prompts keep text-only dedupe — no identity needed.
+const webuiTailRow = {{role:'user', content:prompt, timestamp:300}};
+const webuiResult = getPendingSessionMessage(
+  {{
+    pending_user_message:prompt,
+    pending_started_at:900,
+    pending_user_source:'webui',
+  }},
+  [webuiTailRow]
+);
+const webuiTextDedupeIntact = webuiResult===null;
+
+process.stdout.write(JSON.stringify({{
+  earlierRowClean,
+  pendingMaterialized,
+  identityRowStamped,
+  webuiTextDedupeIntact,
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["earlierRowClean"] is True, (
+        "a real earlier user row must never be stamped delegation_wakeup on "
+        "text equality alone"
+    )
+    assert result["pendingMaterialized"] is True
+    assert result["identityRowStamped"] is True
+    assert result["webuiTextDedupeIntact"] is True

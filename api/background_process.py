@@ -42,16 +42,32 @@ this module routes them to the same listener so the frontend's single
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
 import uuid
+from collections import OrderedDict, deque
 from typing import Any, Optional
+
+from api.process_event_utils import (
+    ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    claim_async_delegation_delivery,
+    complete_async_delegation_delivery,
+    completion_delivery_id,
+    release_async_delegation_delivery,
+    requeue_async_delegation_event,
+    restore_durable_process_completions,
+    schedule_async_delegation_claim_retry,
+)
 
 logger = logging.getLogger(__name__)
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()
+_PROCESS_RECOVERY_DONE = False
+_PROCESS_CHECKPOINT_RECOVERED = False
+_PROCESS_RECOVERY_LOCK = threading.Lock()
 
 _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
@@ -92,6 +108,60 @@ _PENDING_EMIT_TIMERS: dict[str, threading.Timer] = {}
 #   stream_end / cancel / reconnect.
 SESSION_CHANNELS: dict[str, "SessionChannel"] = {}
 SESSION_CHANNELS_LOCK = threading.Lock()
+# Keepalive interval of the session SSE writer (api/routes.py:
+# ``_SSE_HEARTBEAT_INTERVAL_SECONDS``). Mirrored here as a plain number on purpose:
+# routes imports this module, so importing back would be circular. It bounds how
+# often a HEALTHY idle subscriber proves itself to the writer-liveness signal.
+SESSION_CHANNEL_KEEPALIVE_SECS = 5.0
+_SESSION_CHANNEL_REPLAY_LIMIT = 32
+
+
+def _parse_channel_cursor_watermark(cursor: str | None) -> int | None:
+    """Extract the replay watermark from a channel cursor.
+
+    A cursor has the shape ``session-channel:<token>@<seq>`` where ``<seq>`` is
+    the channel's monotonic replay counter (the value observed at connect time
+    for the synthetic ``initial`` cursor, or the frame's own position for a
+    delivered frame). Returns the integer watermark, or ``None`` when ``cursor``
+    is not a watermarked cursor (a payload event id, a legacy marker without an
+    ``@seq`` suffix, or anything malformed) so the caller fails closed. This
+    parses the grammar only; ``SessionChannel._cursor_watermark`` additionally
+    binds ``<token>`` to the minting channel incarnation.
+    """
+    if not cursor or not isinstance(cursor, str):
+        return None
+    if not cursor.startswith("session-channel:"):
+        return None
+    marker, sep, seq_text = cursor.rpartition("@")
+    if not sep or not marker.startswith("session-channel:"):
+        return None
+    try:
+        return int(seq_text)
+    except (TypeError, ValueError):
+        return None
+
+
+class _SessionChannelFrame(tuple):
+    """An ``(event, data)`` subscriber payload that also knows its wire cursor.
+
+    Consumers keep unpacking/comparing it as a plain two-tuple. ``cursor`` is
+    the SSE ``id:`` the route writes for this frame: a per-frame replay cursor
+    in the same ``session-channel:<token>@<seq>`` grammar as the synthetic
+    subscribe cursor, NOT the payload ``event_id``. The dual-name completion
+    emit (``bg_task_complete`` + legacy ``process_complete`` alias) repeats one
+    ``event_id`` across two retained frames, so an ``event_id`` cannot address
+    a unique replay position; the monotonic ``seq`` can. Frames without a
+    replayable ``event_id`` carry an empty cursor and are written without an
+    ``id:`` line. The payload itself is untouched, so the browser's
+    ``(session_id, event_id)`` dedupe is unaffected.
+    """
+
+    cursor: str
+
+    def __new__(cls, event: str, data: Any, cursor: str = ""):
+        frame = tuple.__new__(cls, (event, data))
+        frame.cursor = cursor
+        return frame
 
 
 class SessionChannel:
@@ -99,9 +169,9 @@ class SessionChannel:
 
     Subscribers are ``queue.Queue`` instances owned by the SSE route
     handler — one per active EventSource (tab). ``emit`` broadcasts to every
-    live subscriber; subscribers whose buffer is full silently drop the
-    event (the tab will reconnect on disconnect and the SSE-level disconnect
-    detection will tear it down).
+    live subscriber. Events carrying a stable ``event_id`` also enter a small
+    bounded replay history so EventSource reconnect can bridge a connection-
+    generation gap. A fresh tab with no cursor never receives old history.
 
     Lifecycle:
       - Created on demand by ``get_or_create_session_channel`` when the first
@@ -109,29 +179,167 @@ class SessionChannel:
       - ``subscribe`` / ``unsubscribe`` are refcount-style: zero subscribers
         does NOT immediately collect the channel; the reaper waits a 60s
         grace so a quick navigation away/back doesn't churn the registry.
-      - The reaper collects the channel when subscribers stay empty past the
-        grace period, OR when subscribers are empty AND ``created_at`` is
-        older than SESSION_CHANNEL_IDLE_TTL_SECS (zombie cap — applies only
-        when nobody is subscribed; a live subscriber keeps the channel even
-        past the idle TTL).
+      - After a subscriber drops, the reaper always preserves the full grace
+        period for EventSource reconnect and cursor replay. A never-subscribed
+        empty channel is capped by SESSION_CHANNEL_IDLE_TTL_SECS.
     """
 
     def __init__(self, session_id: str):
         self.session_id = session_id
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
+        # Only events with stable event_id values are replayable. This closes the
+        # tiny gap between a bounded SSE generation reaching EOF and EventSource
+        # opening its replacement without replaying old toasts on a fresh tab.
+        # Each retained event carries a monotonic ``seq`` so a fresh/reconnecting
+        # subscriber's cursor can point at a replay watermark WITHOUT occupying a
+        # slot in this bounded deque — fresh-connection churn from other tabs must
+        # never evict another subscriber's still-replayable events (#7105 gate).
+        self._history: deque[tuple[str, dict, str, int]] = deque(
+            maxlen=_SESSION_CHANNEL_REPLAY_LIMIT
+        )
+        # Monotonic counter over replayable events. A subscribe cursor encodes the
+        # value observed at connect time; reconnect replays only events past it.
+        self._event_seq: int = 0
+        # Opaque prefix for the per-frame wire cursors this channel mints.
+        self._cursor_token = uuid.uuid4().hex
         now = time.time()
         self.created_at = now
         self.last_event_at = now
         self.last_subscriber_drop_at: float | None = None
+        # Explicit-close protocol (#7302). ``_closed`` latches once
+        # ``close()`` has signalled every subscriber, so the registry entry is
+        # collectible on the next reaper tick and a late ``subscribe()`` can be
+        # told to reconnect immediately instead of hanging on keepalives.
+        self._closed = False
+        self.closed_at: float | None = None
+        self.close_reason: str | None = None
+        # Positive dead-subscriber signal: per-queue timestamp of the FIRST
+        # consecutive ``queue.Full`` in the current stall run. Cleared the
+        # moment that subscriber drains. A healthy tab drains on every event,
+        # so it never accumulates a stall run — only a genuinely stuck/ghost
+        # subscriber does.
+        self._stalled_since: dict[queue.Queue, float] = {}
+        # Writer-side liveness (re-gate finding 1): per-queue timestamp of the last
+        # write/flush that COMPLETED for that subscriber, whatever it carried --
+        # event frame or keepalive. This is the signal the queue can never give:
+        # an idle session never fills a 64-slot queue, so a half-open socket (the
+        # client vanished without a FIN reaching us) is invisible to the
+        # ``queue.Full`` evidence and its channel would zombie indefinitely.
+        self._last_write_ok_at: dict[queue.Queue, float] = {}
 
-    def subscribe(self, maxsize: int = 16) -> queue.Queue:
+    def subscribe(
+        self,
+        maxsize: int = 16,
+        after_event_id: str | None = None,
+    ) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=maxsize)
         with self._lock:
+            matched_cursor = False
+            replay_count = 0
+            # A closed channel (#7302) never replays: the late subscriber only
+            # gets the close sentinel below, which must always fit its queue,
+            # and the browser reconnects onto the replacement channel.
+            if after_event_id and not self._closed:
+                history = list(self._history)
+                oldest_seq = history[0][3] if history else None
+                # Every cursor a client can hold — the `initial` frame's
+                # synthetic cursor or a delivered frame's own cursor — carries
+                # an ``@<seq>`` watermark. Replay the retained frames recorded
+                # strictly after it, but only when the watermark is provably
+                # contiguous with retained history; a watermark older than the
+                # oldest retained event means an intervening event was evicted,
+                # so fail closed (fresh marker, replay nothing). A payload
+                # ``event_id`` is deliberately NOT a cursor: the dual-name
+                # completion emit records it on two frames, so matching it is
+                # ambiguous (it would land on the newest alias and skip every
+                # completion between the original and that alias).
+                watermark = self._cursor_watermark(after_event_id)
+                pending: list[tuple[str, dict, str, int]] = []
+                if watermark is not None and (
+                    oldest_seq is None or watermark >= oldest_seq - 1
+                ):
+                    matched_cursor = True
+                    pending = [
+                        item
+                        for item in history
+                        if item[3] > watermark and item[0]
+                    ]
+                if matched_cursor and pending and len(pending) <= maxsize:
+                    for event, data, _event_id, seq in pending:
+                        q.put_nowait(
+                            _SessionChannelFrame(
+                                event, dict(data), self._frame_cursor(seq)
+                            )
+                        )
+                    replay_count = len(pending)
+            if matched_cursor and replay_count > 0:
+                # A synthetic reconnect WITH queued replay: keep advertising the
+                # client's INCOMING watermark cursor, not the post-replay one.
+                # The replay events are delivered AFTER this `initial` frame; if
+                # the connection drops between the initial frame and replay
+                # delivery, the next reconnect must still re-replay them. (Once a
+                # replay frame is actually delivered, its own frame cursor
+                # advances the client's Last-Event-ID past it, so resumption is
+                # correct on either side of the drop.)
+                initial_event_id = str(after_event_id)
+            else:
+                # A first connection, a fail-closed reconnect, or a synthetic
+                # reconnect with nothing pending: issue a cursor encoding the
+                # CURRENT replay watermark so an event emitted during the later
+                # EOF/reconnect gap can still replay — without appending anything
+                # to the bounded replay history. Unknown/evicted cursors fall
+                # here too and never replay stale data (fail-closed). The cursor
+                # is minted with THIS channel's token so a reaped-and-recreated
+                # (or pre-restart) channel, whose ``seq`` space restarts at 0,
+                # rejects it instead of misreading the watermark as its own.
+                initial_event_id = self._frame_cursor(self._event_seq)
+            q._session_channel_initial_event_id = initial_event_id
+            q._session_channel_replay_count = replay_count
             self._subscribers.append(q)
+            # NO seed here: a brand-new subscriber has not COMPLETED a write yet, and
+            # absence of write evidence is not death evidence. The upstream contract
+            # (tests/test_session_channel_option_x.py::test_session_channel_reaper_keeps_live_subscriber)
+            # asserts an attached subscriber survives a far-future now, and the mark
+            # starts at the first completed write (note_subscriber_write_ok) so that
+            # "no completed write for a whole window" stays POSITIVE evidence of death.
             # Cancel any pending subscribers-empty grace timer.
             self.last_subscriber_drop_at = None
+            already_closed = self._closed
+        if already_closed:
+            # Late-subscriber race (mirrors gateway_watcher.subscribe): the
+            # channel was closed between the caller resolving it and appending
+            # here, so it will never receive a broadcast. Enqueue the sentinel
+            # ourselves so the SSE handler breaks out, calls unsubscribe(), and
+            # the browser reconnects onto the replacement channel instead of
+            # hanging open on keepalives forever.
+            try:
+                q.put_nowait(None)
+            except Exception:
+                logger.debug("Failed to send close sentinel to late subscriber")
         return q
+
+    def _frame_cursor(self, seq: int) -> str:
+        """Wire ``id:`` for the retained frame stamped with ``seq``."""
+        return f"session-channel:{self._cursor_token}@{seq}"
+
+    def _cursor_watermark(self, cursor: str | None) -> int | None:
+        """``seq`` encoded in a cursor THIS channel minted, else ``None``.
+
+        The ``<token>`` half of ``session-channel:<token>@<seq>`` identifies the
+        channel incarnation. ``seq`` restarts at 0 on every new ``SessionChannel``
+        (reaper collected the old one during a long tab absence, or the server
+        restarted), so a cursor from another incarnation must not be read in
+        this channel's sequence space: the contiguity check would pass and
+        frames the client never saw would be skipped or partially replayed.
+        Rejecting it makes the caller fail closed (fresh cursor, no replay).
+        """
+        if not isinstance(cursor, str):
+            return None
+        prefix = f"session-channel:{self._cursor_token}@"
+        if not cursor.startswith(prefix):
+            return None
+        return _parse_channel_cursor_watermark(cursor)
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
@@ -139,35 +347,301 @@ class SessionChannel:
                 self._subscribers.remove(q)
             except ValueError:
                 pass
+            self._stalled_since.pop(q, None)
+            self._last_write_ok_at.pop(q, None)
             if not self._subscribers:
                 self.last_subscriber_drop_at = time.time()
+
+    def note_subscriber_write_ok(self, q: queue.Queue) -> None:
+        """Record that a write/flush to this subscriber's socket COMPLETED.
+
+        The SSE writer calls this after every successful write -- event frames and
+        keepalives alike. It is the only positive proof of life for a subscriber
+        that is idle: ``emit()`` cannot provide it (an idle session never fills the
+        queue, so no ``queue.Full`` is ever recorded) and the client's own
+        disappearance never reaches us (a half-open socket sends no FIN). A healthy
+        idle subscriber proves itself once per keepalive interval, which is exactly
+        what makes "no completed write for a whole window" positive evidence of
+        death rather than of quiet.
+
+        A write that FAILS is stronger, immediate evidence and needs no mark: the
+        handler's error path unsubscribes in its ``finally``.
+
+        Same clock as the reaper's ``now`` (``time.time()``), so the two are
+        directly comparable.
+        """
+        with self._lock:
+            if q in self._subscribers:
+                self._last_write_ok_at[q] = time.time()
+            else:
+                # Already unsubscribed: never keep a mark for a detached queue.
+                self._last_write_ok_at.pop(q, None)
 
     def subscriber_count(self) -> int:
         with self._lock:
             return len(self._subscribers)
 
     def emit(self, event: str, data: Any) -> int:
-        """Broadcast (event, data) to all live subscribers. Returns delivered count."""
+        """Broadcast (event, data) to all live subscribers. Returns delivered count.
+
+        The broadcast and its stall bookkeeping are ONE ``self._lock`` transition
+        (re-gate finding 4). ``put_nowait`` never blocks, so holding the lock
+        across it cannot park the channel -- what it buys is that the reaper,
+        which revalidates eligibility and claims the collection under this same
+        lock, can only observe the pre-put state or the state where the record is
+        already cleared by the put that revived the subscriber. Taking the lock
+        again after the put left a window where a subscriber that had just
+        drained, and was refilled by this very put, looked full again with a
+        stale stall record, and the reaper evicted the completion it had just
+        accepted to make room for the close sentinel.
+        """
         delivered = 0
+        now = time.time()
         with self._lock:
-            subs = list(self._subscribers)
+            event_id = (
+                str(data.get("event_id") or "").strip()
+                if isinstance(data, dict)
+                else ""
+            )
+            cursor = ""
+            if event_id:
+                self._event_seq += 1
+                self._history.append((event, dict(data), event_id, self._event_seq))
+                cursor = self._frame_cursor(self._event_seq)
+            frame = _SessionChannelFrame(event, data, cursor)
             self.last_event_at = time.time()
+            # Deliver to live subscribers INSIDE the lock so history ordering and
+            # subscriber-queue ordering are one atomic serialized operation.
+            # Concurrent emits must never record A-before-B in history yet
+            # deliver B-before-A: a drop after B would then resume replay past B
+            # and permanently lose A. The same critical section keeps the stall
+            # bookkeeping current for the reaper (see the docstring above).
+            for q in list(self._subscribers):
+                try:
+                    q.put_nowait(frame)
+                    delivered += 1
+                    # Drained — any previous stall run is over. A live tab lands
+                    # here on every event, which is exactly why the stall window
+                    # below can never be reached by a healthy connection.
+                    self._stalled_since.pop(q, None)
+                except queue.Full:
+                    # Slow tab: drop this event for that tab. If the payload
+                    # carries an event_id, a reconnect can replay it from the
+                    # bounded history; process_complete is also intrinsically
+                    # idempotent (frontend dedupes by ``(session_id, event_id)``
+                    # using a small ring-buffer in static/messages.js — see the
+                    # bg_task_complete consumer-side dedupe introduced in PR #2971).
+                    #
+                    # Record the START of the stall run. If this queue
+                    # keeps rejecting for the whole stall window it becomes positive
+                    # evidence that the subscriber is dead rather than merely slow,
+                    # which is the only signal allowed to evict a subscribed channel.
+                    self._stalled_since.setdefault(q, now)
+                    logger.debug("SessionChannel emit: subscriber buffer full, dropping")
+                except Exception:
+                    logger.debug("SessionChannel emit failed", exc_info=True)
+        return delivered
+
+    def close(self, reason: str = "") -> int:
+        """Explicitly close the channel and unblock every subscriber.
+
+        This is the ONLY supported way to end a channel that still has
+        subscribers. Merely dropping the registry entry leaves the live
+        ``_handle_session_sse_stream()`` loop holding local references to the
+        channel and its queue: it keeps `q.get(timeout=...)`-ing and writing
+        keepalives forever, and the tab is stranded on an orphaned channel that
+        receives no further events.
+
+        Contract:
+          1. Latch ``_closed`` and detach all subscribers under ``self._lock``
+             (lock order: ``SESSION_CHANNELS_LOCK`` -> ``self._lock``, the same
+             order ``subscribe_to_session_channel`` documents).
+          2. Put the ``None`` sentinel into EVERY detached queue. The handler
+             already treats ``None`` as end-of-stream (``api/routes.py``), so it
+             breaks the loop, runs ``unsubscribe()`` in its ``finally``, closes
+             the response, and the browser's ``EventSource`` auto-reconnects.
+          3. Idempotent: a second call signals nobody and returns 0.
+
+        Signals are sent OUTSIDE ``self._lock`` -- unlike ``emit()``, which holds
+        the lock across each subscriber's ``put_nowait`` so its stall record
+        cannot go stale (re-gate finding 4) -- so a queue whose ``put_nowait``
+        blocks on a slow consumer can never hold the channel lock. A saturated
+        queue cannot accept the sentinel, so one stale entry is evicted first to
+        guarantee the sentinel lands.
+
+        Returns the number of subscribers that received the sentinel.
+        """
+        with self._lock:
+            subs = self._latch_close_locked(reason)
+            if subs is None:
+                return 0
+
+        return self._signal_close_sentinels(subs)
+
+    def _latch_close_locked(self, reason: str):
+        """Latch ``_closed`` and detach every subscriber; caller holds ``self._lock``.
+
+        Returns the detached queues, or ``None`` when the channel was already
+        closed (idempotent no-op). Detaching here rather than in :meth:`close` is
+        what allows the reaper to revalidate eligibility, claim the close and
+        detach subscribers as one transition -- see :meth:`collect_if_eligible`.
+        """
+        if self._closed:
+            return None
+        self._closed = True
+        self.closed_at = time.time()
+        self.close_reason = reason or "close"
+        subs = list(self._subscribers)
+        self._subscribers.clear()
+        self._stalled_since.clear()
+        return subs
+
+    def _signal_close_sentinels(self, subs) -> int:
+        """Hand the ``None`` end-of-stream sentinel to every detached queue."""
+        signalled = 0
         for q in subs:
             try:
-                q.put_nowait((event, data))
-                delivered += 1
+                q.put_nowait(None)
+                signalled += 1
+                continue
             except queue.Full:
-                # Slow tab: drop this event for that tab. SSE-level disconnect
-                # detection will eventually tear the connection down and the
-                # browser will reconnect, replaying the live stream from
-                # whatever fires next. process_complete is intrinsically
-                # idempotent (frontend dedupes by ``(session_id, event_id)``
-                # using a small ring-buffer in static/messages.js — see the
-                # bg_task_complete consumer-side dedupe introduced in PR #2971).
-                logger.debug("SessionChannel emit: subscriber buffer full, dropping")
+                pass
             except Exception:
-                logger.debug("SessionChannel emit failed", exc_info=True)
-        return delivered
+                logger.debug("SessionChannel close: sentinel failed", exc_info=True)
+                continue
+            # Buffer saturated: make room for the sentinel, otherwise the
+            # handler would never see it and the connection would stay open.
+            try:
+                q.get_nowait()
+            except Exception:
+                pass
+            try:
+                q.put_nowait(None)
+                signalled += 1
+            except Exception:
+                logger.debug("SessionChannel close: sentinel dropped (queue full)")
+        logger.debug(
+            "SessionChannel close(%s) for %s signalled %d subscriber(s)",
+            self.close_reason, self.session_id, signalled,
+        )
+        return signalled
+
+    def collect_if_eligible(self, now: float, reason: str = "reaper") -> bool:
+        """Revalidate eligibility, claim the close and detach subscribers atomically.
+
+        Called by ``_reaper_loop`` with ``SESSION_CHANNELS_LOCK`` held (lock order
+        ``SESSION_CHANNELS_LOCK`` -> ``self._lock``, the order
+        ``subscribe_to_session_channel`` documents). The reaper's registry entry is
+        removed by the caller in the same ``SESSION_CHANNELS_LOCK`` transition.
+
+        Deciding collectability in one lock acquisition and acting on it in
+        another IS the race the review flagged: a stalled subscriber can drain and
+        accept a completion in that gap -- which clears its stall evidence in
+        ``emit()`` -- and the stale decision would still close the channel,
+        evicting the just-delivered event to make room for the sentinel. Because
+        the revalidation runs under the same ``self._lock`` that ``emit()`` uses to
+        clear stall evidence, either the drain lands first (no longer eligible, so
+        nothing is collected) or this claim lands first (subscribers detached, and
+        the later drain is no longer evidence of liveness).
+
+        Returns True when this call collected the channel.
+        """
+        with self._lock:
+            if not self._reaper_should_collect_locked(now):
+                return False
+            subs = self._latch_close_locked(reason)
+        # Sentinels go out with ``self._lock`` released (same shape as ``close``).
+        self._signal_close_sentinels(subs or [])
+        return True
+
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` has latched."""
+        with self._lock:
+            return self._closed
+
+    @staticmethod
+    def _queue_has_capacity(q: queue.Queue) -> bool:
+        """True when ``q`` has a free slot, i.e. its consumer drained something.
+
+        Only the consumer ever removes items, so a queue that is no longer full
+        proves the subscriber dequeued at least one event after the ``queue.Full``
+        that opened its stall run. ``maxsize <= 0`` is unbounded and can never be
+        full, so it always counts as draining.
+        """
+        maxsize = int(getattr(q, "maxsize", 0) or 0)
+        if maxsize <= 0:
+            return True
+        try:
+            return q.qsize() < maxsize
+        except Exception:
+            return False
+
+    def _dead_subscriber_signal(self, now: float) -> bool:
+        """Positive evidence that EVERY attached subscriber is dead/stuck.
+
+        Two independent signals, either one is enough per subscriber:
+
+        1. Queue pressure: the subscriber's queue has rejected a broadcast
+           (``queue.Full``) continuously for ``SESSION_CHANNEL_SUBSCRIBER_STALL_SECS``
+           — it has not drained a single event in that whole window. A live tab
+           drains on each event, so a healthy connection can never accumulate one.
+        2. Writer staleness (re-gate finding 1): no write to that subscriber has
+           COMPLETED for ``max(STALL_SECS, 3 x keepalive)``. Signal 1 is blind to a
+           half-open socket on an idle session, because a 64-slot queue never fills
+           up when nothing is emitted; the keepalive write is the only thing that
+           proves such a subscriber is still there.
+
+        Returns False when there is no subscriber or when any one of them is still
+        alive (a single live subscriber protects the channel, per the Option X
+        contract).
+        """
+        with self._lock:
+            return self._dead_subscriber_signal_locked(now)
+
+    def _dead_subscriber_signal_locked(self, now: float) -> bool:
+        """``_dead_subscriber_signal`` body; the caller holds ``self._lock``."""
+        from api import config as _cfg
+
+        sub_count = len(self._subscribers)
+        # A dequeue is progress (review #7302, finding 1). ``_handle_session_sse_stream``
+        # drains with ``q.get()``, which cannot clear the run that ``emit()`` opened on
+        # ``queue.Full``: a subscriber that drained its whole backlog after a burst and
+        # then received no further event -- a quiet session, the normal case -- kept the
+        # run and was reaped as dead. Free space in the queue is the proof the emit path
+        # cannot see, so sample it here, under the same ``self._lock`` the emit path
+        # records the run with.
+        for q in self._subscribers:
+            if q in self._stalled_since and self._queue_has_capacity(q):
+                self._stalled_since.pop(q, None)
+        window = float(getattr(_cfg, "SESSION_CHANNEL_SUBSCRIBER_STALL_SECS", 300))
+        # Writer staleness window: max(stall window, 3 keepalive ticks). The
+        # multiplier buys tolerance for a couple of missed keepalive ticks
+        # (scheduler jitter, one slow flush), which is why 3 and not 1: a live but
+        # quiet subscriber must never be called dead. With the current 5 s
+        # keepalive the stall window dominates (300 s), so this only tightens if
+        # the keepalive interval is ever raised past 100 s.
+        stale_after = max(window, 3.0 * SESSION_CHANNEL_KEEPALIVE_SECS)
+        dead = 0
+        for q in self._subscribers:
+            queue_stalled = (
+                q in self._stalled_since
+                and (now - self._stalled_since[q]) >= window
+            )
+            last_ok = self._last_write_ok_at.get(q)
+            # Absent write evidence is NOT death evidence. A subscriber that has not
+            # recorded a successful write is the normal state of a quiet session whose
+            # handler has not flushed yet, and the upstream contract
+            # (tests/test_session_channel_option_x.py::test_session_channel_reaper_keeps_live_subscriber)
+            # requires a channel with an attached subscriber to survive a far-future now.
+            # Death still needs POSITIVE proof: a stalled queue (queue_stalled above) or
+            # a write that succeeded and then aged past the window.
+            write_stale = last_ok is not None and (now - last_ok) >= stale_after
+            if queue_stalled or write_stale:
+                dead += 1
+        if sub_count == 0 or dead != sub_count:
+            return False
+        return True
 
     def reaper_should_collect(self, now: float) -> bool:
         """True when the reaper should remove this channel.
@@ -175,26 +649,57 @@ class SessionChannel:
         Two collection conditions (per Option X spec):
           1. Subscribers empty AND last_subscriber_drop_at is older than
              SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS (normal teardown).
-          2. created_at older than SESSION_CHANNEL_IDLE_TTL_SECS AND
-             subscribers empty (zombie cap — survived too long).
+          2. A never-subscribed empty channel is older than
+             SESSION_CHANNEL_IDLE_TTL_SECS (zombie cap). Once a subscriber has
+             dropped, condition 1 alone applies, so a bounded SSE generation
+             expiring on an aged channel still gets the full reconnect grace
+             (#7105).
+          3. ``close()`` was called on a channel that still had subscribers
+             (explicit-close protocol — collectible on the next tick).
+          4. POSITIVE dead-subscriber evidence: every attached subscriber has
+             been stalled past SESSION_CHANNEL_SUBSCRIBER_STALL_SECS. This is
+             the only path that may collect a channel with ``sub_count > 0``
+             without an explicit ``close()`` — age alone never does.
+
+        The live-subscriber invariant is deliberately unchanged: an attached,
+        draining subscriber keeps the channel alive regardless of age. Age is
+        not evidence of death; a saturated queue that never drains is.
+        """
+        with self._lock:
+            return self._reaper_should_collect_locked(now)
+
+    def _reaper_should_collect_locked(self, now: float) -> bool:
+        """``reaper_should_collect`` body; the caller holds ``self._lock``.
+
+        Split out so :meth:`collect_if_eligible` can revalidate eligibility and
+        claim the close as ONE transition, which is what removes the window the
+        review flagged.
         """
         from api import config as _cfg
 
-        with self._lock:
-            sub_count = len(self._subscribers)
-            drop_at = self.last_subscriber_drop_at
-            created_at = self.created_at
+        sub_count = len(self._subscribers)
+        drop_at = self.last_subscriber_drop_at
+        created_at = self.created_at
+        closed = self._closed
 
+        if closed:
+            # Explicitly closed with subscribers still attached: the reaper has
+            # already signalled them, so the entry is now collectible.
+            return True
         if sub_count > 0:
-            # Live subscriber — never collect, even past idle TTL (a tab is
-            # genuinely listening). The browser will close on its own.
-            return False
+            # Live (or at least draining) subscriber — NOT collectible by age.
+            # Only a positive dead-subscriber signal may evict it, and the
+            # caller must close() first so the handler actually unblocks.
+            return self._dead_subscriber_signal_locked(now)
         # No subscribers — check grace period.
         grace = float(getattr(_cfg, "SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS", 60))
-        if drop_at is not None and (now - drop_at) >= grace:
-            return True
-        # Hard cap on lifetime (even if subscribers oscillated): if created
-        # long ago AND nobody's subscribed right now, sweep.
+        if drop_at is not None:
+            # A bounded SSE generation may expire after the channel itself is
+            # older than the idle TTL. Preserve the complete reconnect grace;
+            # otherwise the reaper can delete its replay history during the
+            # browser's normal ~3s EventSource gap (#7105).
+            return (now - drop_at) >= grace
+        # Hard cap for a channel that was created but never acquired a viewer.
         ttl = float(getattr(_cfg, "SESSION_CHANNEL_IDLE_TTL_SECS", 14400))
         if (now - created_at) >= ttl:
             return True
@@ -218,7 +723,9 @@ def get_session_channel(session_id: str) -> Optional[SessionChannel]:
 
 
 def subscribe_to_session_channel(
-    session_id: str, maxsize: int = 16
+    session_id: str,
+    maxsize: int = 16,
+    after_event_id: str | None = None,
 ) -> tuple["SessionChannel", "queue.Queue"]:
     """Atomically get-or-create the channel for ``session_id`` AND register a
     subscriber on it, both under ``SESSION_CHANNELS_LOCK``.
@@ -254,8 +761,81 @@ def subscribe_to_session_channel(
         if ch is None:
             ch = SessionChannel(session_id)
             SESSION_CHANNELS[session_id] = ch
-        q = ch.subscribe(maxsize=maxsize)
-        return ch, q
+        return ch, ch.subscribe(
+            maxsize=maxsize,
+            after_event_id=after_event_id,
+        )
+
+
+# Bounded window a cancelling worker may stay lifecycle-busy before an entry
+# with no live SSE channel is treated as an orphan. Matches the unwind ceiling
+# used by the chat-start successor guard in ``api.routes``.
+_ACTIVE_RUN_CANCEL_UNWIND_SECONDS = 180.0
+
+
+def _active_run_ids_for_session(
+    session_id: str,
+    *,
+    attachable_only: bool,
+) -> list[str]:
+    """Return this session's run stream ids under the requested semantics.
+
+    ``attachable_only`` selects browser-recovery semantics and drops every
+    ``phase="cancelling"`` row: cancellation is already terminal for the client
+    even while the worker unwinds. Busy checks pass ``False`` so a freshly
+    cancelled run still blocks a successor for its bounded unwind window.
+
+    A cancelling row past that window with no live ``STREAMS`` channel is an
+    orphan: it is dropped from ``ACTIVE_RUNS`` and its stream-owner entry is
+    released, so a wedged worker cannot suppress background wakeups forever.
+    """
+    from api import config as _cfg
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        with _cfg.STREAMS_LOCK:
+            live_stream_ids = set((_cfg.STREAMS or {}).keys())
+        now = time.time()
+        matches: list[str] = []
+        stale_keys: list[str] = []
+        with _cfg.ACTIVE_RUNS_LOCK:
+            for run_key, meta in list((_cfg.ACTIVE_RUNS or {}).items()):
+                if not isinstance(meta, dict) or meta.get("session_id") != sid:
+                    continue
+                stream_id = str(meta.get("stream_id") or run_key or "").strip()
+                if not stream_id:
+                    continue
+                cancelling = not _cfg.active_run_is_attachable(meta)
+                stale_cancel = (
+                    cancelling
+                    and _cfg.active_run_cancel_is_stale(
+                        meta,
+                        grace_seconds=_ACTIVE_RUN_CANCEL_UNWIND_SECONDS,
+                        now=now,
+                    )
+                    and run_key not in live_stream_ids
+                    and stream_id not in live_stream_ids
+                )
+                if stale_cancel:
+                    stale_keys.append(run_key)
+                    continue
+                if attachable_only and cancelling:
+                    continue
+                matches.append(stream_id)
+            for run_key in stale_keys:
+                (_cfg.ACTIVE_RUNS or {}).pop(run_key, None)
+        for run_key in stale_keys:
+            _cfg.unregister_stream_owner(run_key)
+        return matches
+    except Exception:
+        logger.debug(
+            "ACTIVE_RUNS lookup failed for %s",
+            sid,
+            exc_info=True,
+        )
+        return []
 
 
 def active_stream_id_for_session(session_id: str) -> Optional[str]:
@@ -275,25 +855,21 @@ def active_stream_id_for_session(session_id: str) -> Optional[str]:
 
     Keys on ACTIVE_RUNS (worker-lifecycle registry) — the same source
     ``_session_has_active_turn`` / ``_emit_to_session_streams`` already trust
-    to map a stream back to its owning session. Returns the first matching
-    stream_id (a session has at most one live run; cancel/reconnect can
-    briefly hold two — either is a valid attach target, the frontend dedupes
-    by stream_id).
+    to map a stream back to its owning session — but returns only rows that
+    are still ATTACHABLE. A ``phase="cancelling"`` row stays lifecycle-busy
+    while its worker unwinds, yet the client already reached a terminal state
+    for that run, so replaying ``server_turn_started`` for it makes the tab
+    attach, receive the terminal event, resubscribe, and loop forever.
     """
-    from api import config as _cfg
+    matches = _active_run_ids_for_session(session_id, attachable_only=True)
+    return matches[0] if matches else None
 
-    try:
-        with _cfg.ACTIVE_RUNS_LOCK:
-            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
-                if isinstance(meta, dict) and meta.get("session_id") == session_id:
-                    return str(_stream_id)
-    except Exception:
-        logger.debug(
-            "active_stream_id_for_session lookup failed for %s",
-            session_id,
-            exc_info=True,
-        )
-    return None
+
+# Bounded per-file-version memo for persisted_message_count_for_session().
+_PERSISTED_COUNT_MEMO: "OrderedDict[tuple, Optional[int]]" = OrderedDict()
+_PERSISTED_COUNT_MEMO_LOCK = threading.Lock()
+_PERSISTED_COUNT_MEMO_MAX = 512
+_PERSISTED_COUNT_MEMO_MIN_AGE_S = 2.0
 
 
 def persisted_message_count_for_session(session_id: str) -> Optional[int]:
@@ -311,23 +887,62 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     compares the freshly-(re)subscribed tab's last-known count against this
     persisted count; a server that is AHEAD means a turn landed during the gap.
 
-    Reads via ``metadata_only=True`` so it never parses the full transcript
-    (this runs on every per-session SSE (re)connect). The persisted count is
-    written by ``Session.save`` as ``meta['message_count'] = len(messages)`` —
-    the SAME basis the frontend's ``S.session.message_count`` is built from —
-    so the comparison is apples-to-apples. Returns None when the count is
-    unknown (legacy sidecars without a persisted count); the caller treats
-    None as "cannot tell, do nothing", never as a trigger.
+    Reads the CURRENT on-disk sidecar instead of the generic ``get_session``
+    resolver.  The generic resolver may return a cached metadata stub whose
+    count predates a gateway-backed sidecar rewrite; comparing that stale count
+    with the fresh ``/api/session`` response creates an endless
+    ``session-updated`` reconnect/reload loop (#7672).
+
+    The read is bounded and count-only (``_prefix_message_count``: a 64 KiB
+    first stage, 1 MiB hard cap, never a full transcript parse).  This runs on
+    every per-session SSE (re)connect, so it must not fall back to
+    ``Session.load()`` the way ``Session.load_metadata_only()`` does for an
+    oversized metadata prefix: on a ~30 MiB sidecar that fallback costs ~0.9 s
+    per subscribe, multiplied by every reconnecting tab.
+
+    The count is trusted only when the writer marker (``_mc_v``) vouches that
+    the same atomic write produced both the count and the messages array; an
+    unvouched count can be stale against its rows, which is exactly the shape
+    that drives the reload loop.  The persisted count is written by
+    ``Session.save`` as ``meta['message_count'] = len(messages)`` -- the SAME
+    basis the frontend's ``S.session.message_count`` is built from.
+
+    Returns None whenever the count cannot be cheaply established (missing,
+    legacy/unmarked, corrupt or oversized metadata); the caller treats None as
+    "cannot tell, do nothing", never as a trigger.
     """
     try:
-        from api.models import get_session
+        import api.models as _models
 
-        s = get_session(session_id, metadata_only=True)
-        count = getattr(s, "_metadata_message_count", None)
-        if count is None:
-            msgs = getattr(s, "messages", None)
-            count = len(msgs) if isinstance(msgs, list) and msgs else None
-        return int(count) if count is not None else None
+        if not _models.is_safe_session_id(session_id):
+            return None
+        path = _models.SESSION_DIR / f"{session_id}.json"
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        # Memoize per file version so a legacy sidecar whose metadata overflows
+        # the 64 KiB first stage does not pay the bounded 1 MiB scan on every
+        # reconnect (#7673 gate). Sidecar writers publish through tmp +
+        # os.replace, so (path, inode, size, mtime_ns) changes on every write in
+        # practice. The one theoretical collision -- several same-size rewrites
+        # inside one mtime tick -- could serve a stale-HIGH count and re-emit
+        # session-updated on each reconnect until the next write (the #7672
+        # shape), so a version younger than _PERSISTED_COUNT_MEMO_MIN_AGE_S is
+        # never memoized: the mtime must be settled before its count is cached.
+        key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
+        with _PERSISTED_COUNT_MEMO_LOCK:
+            if key in _PERSISTED_COUNT_MEMO:
+                _PERSISTED_COUNT_MEMO.move_to_end(key)
+                return _PERSISTED_COUNT_MEMO[key]
+        count = _models._prefix_message_count(path)
+        if time.time() - st.st_mtime >= _PERSISTED_COUNT_MEMO_MIN_AGE_S:
+            with _PERSISTED_COUNT_MEMO_LOCK:
+                _PERSISTED_COUNT_MEMO[key] = count
+                _PERSISTED_COUNT_MEMO.move_to_end(key)
+                while len(_PERSISTED_COUNT_MEMO) > _PERSISTED_COUNT_MEMO_MAX:
+                    _PERSISTED_COUNT_MEMO.popitem(last=False)
+        return count
     except Exception:
         logger.debug(
             "persisted_message_count_for_session lookup failed for %s",
@@ -369,7 +984,27 @@ def _reaper_loop() -> None:
             collected: list[str] = []
             with SESSION_CHANNELS_LOCK:
                 for sid, ch in list(SESSION_CHANNELS.items()):
-                    if ch.reaper_should_collect(now):
+                    # One atomic transition per channel: revalidate eligibility,
+                    # claim the close and detach subscribers under ch._lock, then
+                    # drop the registry entry -- all inside this same
+                    # SESSION_CHANNELS_LOCK acquisition (explicit-close protocol,
+                    # #7302). Lock order: SESSION_CHANNELS_LOCK -> ch._lock, the
+                    # order subscribe_to_session_channel documents. Deciding
+                    # outside the lock and closing after it is what let a
+                    # subscriber's drain in that gap be overwritten by the
+                    # sentinel. collect_if_eligible() signals every still-attached
+                    # subscriber BEFORE the registry entry is dropped, otherwise
+                    # the live SSE handler keeps looping on keepalives forever and
+                    # the tab is stranded on an orphan channel.
+                    try:
+                        collect = ch.collect_if_eligible(now, "reaper")
+                    except Exception:
+                        logger.debug(
+                            "SessionChannel reaper collect failed for %s",
+                            sid, exc_info=True,
+                        )
+                        collect = False
+                    if collect:
                         SESSION_CHANNELS.pop(sid, None)
                         collected.append(sid)
             if collected:
@@ -385,6 +1020,63 @@ def _reaper_loop() -> None:
                     for sid in collected:
                         _LAST_EMIT_TS.pop(sid, None)
                 logger.debug("SessionChannel reaper collected: %s", collected)
+
+            # Orphan streams (re-gate, greptile finding 2): a STREAMS entry whose
+            # worker died before running its teardown is never reclaimed by
+            # anything -- this loop only ever looked at SESSION_CHANNELS -- so it
+            # holds its stream-owned rows and keeps the session reporting busy
+            # (see _session_has_active_turn) for the life of the process. Reclaim
+            # it with the SAME orphan definition chat/start's guard uses, so there
+            # is one notion of "orphan" in the codebase.
+            #
+            # Lock order: snapshot ACTIVE_RUNS under ACTIVE_RUNS_LOCK BEFORE taking
+            # STREAMS_LOCK, so this sweep never takes them in the reverse order.
+            # ``STREAMS_LOCK`` -> ``ACTIVE_RUNS_LOCK`` is the documented one
+            # (docs/architecture/session-channel-lifecycle.md); the two locks are
+            # not "independent" any more. is_orphaned_stream() then
+            # re-validates, including the launch-phase claim -- without that check
+            # this sweep would reap a stream that is still launching and
+            # reintroduce finding 5 through the back door.
+            try:
+                from api import config as _cfg
+
+                with _cfg.ACTIVE_RUNS_LOCK:
+                    _active_runs_snapshot = dict(_cfg.ACTIVE_RUNS or {})
+                with _cfg.STREAMS_LOCK:
+                    _claimed = set((_cfg.PRE_ADMISSION_CLAIMS or {}).keys())
+                    _stream_candidates = [
+                        _sid
+                        for _sid in list((_cfg.STREAMS or {}).keys())
+                        if _sid not in _active_runs_snapshot and _sid not in _claimed
+                    ]
+            except Exception:
+                _stream_candidates = []
+                logger.debug("orphan-stream sweep snapshot failed", exc_info=True)
+            for _orphan_sid in _stream_candidates:
+                try:
+                    # Decide AND release on ONE STREAMS_LOCK edge (re-gate finding A):
+                    # deciding here and releasing in a separate acquisition let a
+                    # worker publish its ACTIVE_RUNS row (or its launch claim) in the
+                    # gap, and the release then dropped a stream that was live. The
+                    # candidate list above is only a prefiltro.
+                    if not _cfg.release_orphaned_stream_if_still_orphaned(_orphan_sid):
+                        continue
+                    # Gateway-owned rows live in api/gateway_chat.py and must be
+                    # released outside STREAMS_LOCK, exactly as the guard does.
+                    from api.gateway_chat import release_gateway_stream_state
+
+                    release_gateway_stream_state(_orphan_sid)
+                    logger.info(
+                        "reaper reclaimed orphaned stream %s (no worker, no "
+                        "launch claim, no pending turn)",
+                        _orphan_sid,
+                    )
+                except Exception:
+                    logger.debug(
+                        "reaper failed to reclaim orphaned stream %s",
+                        _orphan_sid,
+                        exc_info=True,
+                    )
             # Sweep the per-session completion-dedup map by DELIVERY lifecycle,
             # not channel collection. ``BG_TASK_COMPLETE_EVENTS_SEEN`` gains a
             # ``session_id -> set[process_id]`` entry the first time a bg task
@@ -411,6 +1103,15 @@ def _reaper_loop() -> None:
                     if s not in _cfg.PENDING_BG_TASK_COMPLETIONS
                 ]:
                     _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
+            # Run-journal archival retention (#7613): archive runs past the age /
+            # count / size caps so an unbounded journal cannot grow forever. The
+            # sweep is hourly and gated inside `maybe_sweep_run_journal` (this
+            # tick fires far more often); it never runs on a request path, and
+            # its first pass is delayed past boot. Errors are swallowed there so
+            # a retention failure can never take the reaper down with it.
+            from api.run_journal import maybe_sweep_run_journal
+
+            maybe_sweep_run_journal()
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.
@@ -541,15 +1242,19 @@ def _build_payload(evt: dict, session_id: str) -> dict:
       ``(session_id, event_id)`` to dedupe across reconnects.
     """
     # ProcessRegistry completion events use the field name ``session_id`` for
-    # the process id. Alias it locally before exposing it as payload ``task_id``
-    # to avoid confusing that wire-format name with the WebUI session id.
-    process_id = str(evt.get("session_id") or "")
+    # the process id. Async delegation completions carry ``delegation_id``
+    # instead; expose either stable delivery id as payload ``task_id``.
+    process_id = completion_delivery_id(evt)
     payload: dict[str, Any] = {
         "session_id": str(session_id),
         "task_id": process_id,
         "completed_at": time.time(),
         "event_id": uuid.uuid4().hex,
     }
+    # Source provenance is explicit: the browser can quiet child report-backs
+    # without muting ordinary process completion notifications.
+    if evt.get("type") == "async_delegation":
+        payload["kind"] = "async_delegation"
     # Best-effort optional summary: the first non-empty line of the synthetic
     # wakeup body, trimmed. Omitted entirely when nothing useful is available.
     try:
@@ -802,6 +1507,80 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
         )
 
 
+def _completion_consumed_by_agent(process_id: str) -> bool:
+    """True when the agent genuinely CONSUMED this completion in the running turn.
+
+    The producer exposes exactly one consumption contract on
+    ``tools.process_registry.ProcessRegistry``: the public
+    ``is_completion_consumed()`` (backed by ``_completion_consumed``). It is set
+    only by the reads that hand the agent the result itself:
+
+      * ``process(action="wait")`` once the process exited, and
+      * ``process(action="log")`` when the log view covers the completion
+        output.
+
+    A read-only ``process(action="poll")`` deliberately does NOT set it. Poll
+    returns only ``_output_tail(session, 1000)`` — the final 1000 characters —
+    and records the private ``_poll_observed`` set instead, whose own upstream
+    comment says a status check "must not suppress the watcher's autonomous
+    delivery turn". The producer's own autonomous watcher therefore drains with
+    ``skip_poll_observed=False``: a preview is not consumption, and suppressing
+    the full notification on it would silently omit whatever lies beyond the
+    preview (a result longer than 1000 characters). This WebUI wakeup IS that
+    autonomous delivery, so it follows the same rule (#8363 review) and never
+    treats a poll as a read.
+
+    Best-effort and fail-open: an absent registry (pure WebUI unit-test
+    contexts), a renamed public method, or any registry error means "not
+    consumed", which keeps the previous deliver-once behaviour. The mark is
+    read at DELIVERY time (turn teardown) and the defer branch never writes it,
+    so a mark found here is a real read or a delivery claim owned by the
+    next-turn drain. A mark claimed by THIS module's own rejected dispatch is
+    handled per-entry by ``_deferred_entry_already_consumed`` instead.
+    """
+    if not process_id:
+        return False
+    try:
+        from tools.process_registry import process_registry as _pr
+    except Exception:
+        return False
+    try:
+        return bool(_pr.is_completion_consumed(process_id))
+    except Exception:
+        logger.debug(
+            "is_completion_consumed read failed for %r while checking a "
+            "deferred wakeup",
+            process_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _deferred_entry_already_consumed(entry: dict) -> bool:
+    """Whether the finished turn already consumed this deferred completion.
+
+    ``record_deferred_wakeup`` may persist an entry after a REJECTED dispatch
+    from the idle branch (409 race, 5xx, raised launch). That dispatch claims
+    the shared registry key BEFORE it knows the outcome — that is the cross-A/B
+    transport dedupe, not an observation — so a later ``is_completion_consumed``
+    read would report our own claim as if the agent had read the result and the
+    retry would be dropped (#8363 review: dispatch-in-flight/transport dedupe
+    must stay distinct from actual agent observation). The entry carries that
+    provenance, so the retry stays eligible.
+
+    The registry key itself is never cleared on rejection: it may simultaneously
+    be a legitimate ``wait``/``log`` mark for the same process_id, and clearing
+    it would let the next-turn drain re-deliver a completion the agent already
+    has.
+    """
+    process_id = str((entry or {}).get("process_id") or "")
+    if not process_id:
+        return False
+    if (entry or {}).get("consumed_claimed_by_dispatch"):
+        return False
+    return _completion_consumed_by_agent(process_id)
+
+
 # ── xsession wakeup misroute defense-in-depth (Option 3) ───────────────────
 # Option 1 (api/streaming._set_turn_session_identity) is the ROOT fix: it binds
 # the per-turn session identity to a contextvar so a notify_on_complete spawn
@@ -822,7 +1601,12 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
 # registry, pre-Option-1 spawns) it is a PURE PASS-THROUGH — it never
 # suppresses a legitimate Option Z wakeup on uncertainty (Option Z must keep
 # working).
-_ENV_IMMUNE_OWNER_ATTRS = ("spawn_session_id", "owner_session_id", "turn_session_id")
+_ENV_IMMUNE_OWNER_ATTRS = (
+    "origin_ui_session_id",  # modern hermes-agent exact browser-tab return address
+    "spawn_session_id",
+    "owner_session_id",
+    "turn_session_id",
+)
 
 
 def _env_immune_spawn_owner(proc_session) -> str:
@@ -872,6 +1656,357 @@ def _resolve_wakeup_target(
     return owner
 
 
+def _requeue_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    claim=None,
+    delay: float = 0.5,
+) -> bool:
+    """Retry without enqueueing new work once drain shutdown has started."""
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    return requeue_async_delegation_event(
+        evt,
+        completion_queue,
+        delay=delay,
+        stop_event=_DRAIN_STOP,
+        durable=(bool(getattr(claim, "durable", False)) if claim is not None else None),
+    )
+
+
+def _retry_unclaimed_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    keep_legacy_retrying: bool = False,
+) -> None:
+    """Retry from durable state, or make a bounded legacy routing pass.
+
+    ``keep_legacy_retrying`` is reserved for a completion whose target session
+    is known but currently busy. That wait state is neither an unroutable event
+    nor a failed delivery attempt, so compatibility-mode delivery must keep
+    backing off until the session becomes idle.
+    """
+    completion_queue = getattr(process_registry, "completion_queue", None)
+    if schedule_async_delegation_claim_retry(
+        evt,
+        completion_queue,
+        delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    ):
+        return
+    if not keep_legacy_retrying and evt.get("_webui_routing_retry_attempted"):
+        return
+    retry_evt = dict(evt)
+    if not keep_legacy_retrying:
+        retry_evt["_webui_routing_retry_attempted"] = True
+    _requeue_async_delegation_event(
+        process_registry,
+        retry_evt,
+        delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    )
+
+
+def _record_async_delegation_accepted(
+    evt: dict,
+    *,
+    session_id: str,
+    claim,
+) -> None:
+    """ACK durable delivery and publish live-view state after turn acceptance."""
+
+    complete_async_delegation_delivery(evt, claim)
+    payload = _build_payload(evt, session_id)
+    try:
+        _emit_bg_task_complete_events_coalesced(session_id, payload)
+    except Exception:
+        logger.debug(
+            "async delegation live-view emit failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _wakeup_refusal_is_transient(resp: dict | None, status: int) -> bool:
+    """True when the target refused the wake-up for a reason it will recover from.
+
+    Such refusals are not delivery failures of the completion itself, so they
+    must not consume its bounded durable delivery budget. Otherwise a burst of
+    refusals (e.g. ``agent_runtime_stale`` answers while the Agent runtime is
+    being replaced) terminally drops a completion whose origin session is alive:
+
+    * any payload that explicitly says ``retryable: True`` (stale runtime);
+    * the paused-wakeup contract (``process_wakeup_paused``);
+    * a session busy with another turn (``active_stream_id`` on a 409).
+    """
+    if not isinstance(resp, dict):
+        return False
+    if resp.get("retryable") is True:
+        return True
+    if status != 409:
+        return False
+    if resp.get("error") == "process_wakeup_paused":
+        return True
+    return bool(resp.get("active_stream_id"))
+
+
+def _start_async_delegation_wakeup_turn(
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    delegation_id: str,
+    evt: dict,
+    claim,
+    process_registry,
+) -> None:
+    """Start one autonomous delegation turn and ACK only after acceptance."""
+
+    def _runner() -> None:
+        try:
+            from api.routes import start_session_turn
+
+            resp = start_session_turn(
+                session_id,
+                wakeup_prompt,
+                source="delegation_wakeup",
+            )
+            raw_status = (resp or {}).get("_status")
+            if raw_status is None:
+                status = 200 if (resp or {}).get("stream_id") else 500
+            else:
+                status = int(raw_status)
+            if 200 <= status < 300:
+                _record_async_delegation_accepted(
+                    evt,
+                    session_id=session_id,
+                    claim=claim,
+                )
+                logger.info(
+                    "async delegation wakeup turn accepted for session %s "
+                    "(stream_id=%s)",
+                    session_id,
+                    (resp or {}).get("stream_id"),
+                )
+                return
+
+            transient = _wakeup_refusal_is_transient(resp, status)
+            if transient:
+                release_async_delegation_delivery(evt, claim, retryable=True)
+            else:
+                release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
+            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                logger.info(
+                    "async delegation wakeup paused for session %s; delivery remains retryable",
+                    session_id,
+                )
+            elif transient:
+                logger.info(
+                    "async delegation wakeup refused transiently for session %s "
+                    "(status=%s err=%r); attempt refunded, durable retry scheduled",
+                    session_id,
+                    status,
+                    (resp or {}).get("error"),
+                )
+            else:
+                logger.debug(
+                    "async delegation wakeup not accepted for session %s: "
+                    "status=%s err=%r; durable retry scheduled",
+                    session_id,
+                    status,
+                    (resp or {}).get("error"),
+                )
+        except Exception:
+            release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
+            logger.warning(
+                "async delegation wakeup turn failed for session %s; durable retry scheduled",
+                session_id,
+                exc_info=True,
+            )
+        finally:
+            # The wakeup turn has resolved (accepted, rejected, or raised): the
+            # per-origin admission slot is free for the next backlogged
+            # completion. Never release earlier — the slot must stay reserved
+            # for the whole claim→turn window so siblings defer without
+            # consuming the finite delivery budget (#6959).
+            _release_async_delegation_wakeup_admission(session_id)
+
+    threading.Thread(
+        target=_runner,
+        name=f"hermes-webui-delegation-wakeup-{str(session_id)[:8]}",
+        daemon=True,
+    ).start()
+
+
+# ── Per-origin wakeup admission reservation (#6959) ────────────────────────
+# A durable claim has a finite delivery-attempt budget, and the pre-claim busy
+# check is NOT atomic with turn publication: several completed delegations for
+# one idle origin can all pass it, each obtain a durable claim, then race for a
+# single ``start_session_turn`` admission slot. The losers' transient 409s
+# release already-counted claims, and repeated rounds can drive completed rows
+# to the terminal ``dropped`` state. Reserve the per-origin admission slot
+# ATOMICALLY before claiming so at most one async-delegation wakeup per session
+# is in flight at a time; siblings that lose the reservation defer WITHOUT
+# claiming (no delivery attempt consumed). The reservation is in-process only:
+# the wakeup thread releases it on every exit path and it vanishes on restart,
+# so it can never strand a durable claim.
+_ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK = threading.Lock()
+_ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT: set[str] = set()
+
+
+def _try_reserve_async_delegation_wakeup_admission(session_id: str) -> bool:
+    """Atomically reserve the single in-flight wakeup slot for *session_id*.
+
+    Returns False when another async-delegation wakeup for the same origin is
+    already in flight (claimed but not yet resolved), so the caller can defer
+    without touching the finite delivery budget.
+    """
+    with _ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        if session_id in _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT:
+            return False
+        _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.add(session_id)
+        return True
+
+
+def _release_async_delegation_wakeup_admission(session_id: str) -> None:
+    """Release the in-flight wakeup slot for *session_id* (idempotent)."""
+    with _ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.discard(session_id)
+
+
+def _process_async_delegation_event(
+    evt: dict,
+    *,
+    session_id: str,
+    delegation_id: str,
+    process_registry,
+) -> None:
+    """Claim and route one async completion without private registry markers."""
+
+    # A durable claim has a finite attempt budget. A busy foreground turn is
+    # not a delivery attempt, so leave the record unclaimed and let the shared
+    # restore sweep retry after the session can accept a wakeup.
+    if _session_has_active_turn(session_id):
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
+        return
+
+    # Atomic per-origin wakeup admission (#6959): the busy check above is a
+    # pre-check, not a reservation — several idle completions for one origin
+    # can all pass it together. Only one may own the in-flight wakeup slot; a
+    # sibling that loses this reservation must NOT claim, because a claim
+    # released by a transient 409 would count against the finite delivery
+    # budget. The admitted wakeup releases the slot when its turn resolves.
+    if not _try_reserve_async_delegation_wakeup_admission(session_id):
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
+        return
+
+    # Ownership-transfer guard (#6959 gate): the outer finally releases the
+    # per-origin reservation on EVERY exit below — claim exception, claim-None,
+    # formatting failure, dispatch failure, or any exception raised by the
+    # retry helpers themselves — UNLESS the wakeup thread successfully started,
+    # in which case the thread's own finally now owns the release. No raisable
+    # call can therefore strand the reservation (a stranded slot would defer
+    # every later completion for this origin forever, without delivery).
+    transfer_owned = False
+    try:
+        try:
+            claim = claim_async_delegation_delivery(evt, "webui-background")
+        except Exception:
+            _requeue_async_delegation_event(process_registry, evt)
+            return
+        if claim is None:
+            completion_queue = getattr(process_registry, "completion_queue", None)
+            schedule_async_delegation_claim_retry(evt, completion_queue)
+            return
+
+        try:
+            wakeup_prompt_raw = format_wakeup_prompt(evt)
+            wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
+            if not wakeup_prompt:
+                raise RuntimeError("async delegation completion could not be formatted")
+        except Exception:
+            # A formatting failure is a permanent, non-retryable defect (a malformed
+            # event will never format correctly), so it must stay on the bounded
+            # one-shot path — never keep_legacy_retrying, or it would loop forever.
+            release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(process_registry, evt)
+            logger.warning(
+                "async delegation completion could not be formatted for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return
+
+        try:
+            _start_async_delegation_wakeup_turn(
+                session_id,
+                wakeup_prompt,
+                delegation_id=delegation_id,
+                evt=evt,
+                claim=claim,
+                process_registry=process_registry,
+            )
+        except Exception:
+            # A post-format dispatch failure against a resolved target is transient
+            # (the target may accept on a later pass), so keep the legacy completion
+            # retrying rather than dropping it after one bounded attempt.
+            release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
+            logger.warning(
+                "server-side async delegation dispatch failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        # The wakeup thread is running: its own finally owns the release from
+        # here on (set only after Thread.start() returns, so a mid-start
+        # failure still releases here).
+        transfer_owned = True
+    finally:
+        if not transfer_owned:
+            _release_async_delegation_wakeup_admission(session_id)
+
+
+def _resolve_completion_target(
+    *,
+    session_key_resolved_sid: str,
+    origin_ui_session_id: str,
+) -> str:
+    """Return the WebUI session that owns a detached completion event.
+
+    Modern Hermes Agent events carry ``origin_ui_session_id`` as an exact,
+    immutable return address captured from the commissioning browser turn.
+    It is authoritative over the mutable/legacy session-key index. Older
+    Agent events omit it and retain the existing session-key fallback.
+    """
+    resolved = str(session_key_resolved_sid or "")
+    owner = str(origin_ui_session_id or "")
+    if not owner:
+        return resolved
+    if resolved and resolved != owner:
+        logger.error(
+            "cross-session completion route BLOCKED: session_key resolved to %r "
+            "but exact origin_ui_session_id is %r; routing to the exact owner",
+            resolved,
+            owner,
+        )
+    return owner
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -887,55 +2022,59 @@ def _process_one(evt: dict) -> None:
     except Exception:
         _process_registry = None
 
-    process_id = str(evt.get("session_id") or "")
+    process_id = completion_delivery_id(evt)
     session_key = str(evt.get("session_key") or "")
+    origin_ui_session_id = str(evt.get("origin_ui_session_id") or "")
     # Root-cause fix (t_0f447014): the notify_on_complete completion event
-    # enqueued by ProcessRegistry._move_to_finished() carries NO "session_key"
-    # field — only the watch_match enqueue includes one. Without it the old
-    # `evt.get("session_key") or process_id` fell back to the process id
-    # ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key (only
-    # webui_session_id -> webui_session_id is registered at chat-start), so
-    # every wakeup was silently dropped here and the frontend never POSTed an
-    # ack. Recover the spawn-time session_key from the process registry's
-    # ProcessSession: the terminal tool captured it synchronously at spawn
-    # (while the turn's env was active), so it survives the turn-end env
-    # restore and is the WebUI session_id for WebUI-spawned processes.
-    if not session_key and process_id:
+    # enqueued by ProcessRegistry._move_to_finished() historically carried NO
+    # "session_key" field — only the watch_match enqueue included one. Without
+    # it the old `evt.get("session_key") or process_id` fell back to the
+    # process id ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key.
+    # Recover spawn-time routing metadata from the process registry.
+    if process_id and (not session_key or not origin_ui_session_id):
         try:
             if _process_registry is not None:
                 _ps = _process_registry.get(process_id)
-                if _ps is not None and getattr(_ps, "session_key", ""):
-                    session_key = str(_ps.session_key)
+                if _ps is not None:
+                    if not session_key and getattr(_ps, "session_key", ""):
+                        session_key = str(_ps.session_key)
+                    if not origin_ui_session_id:
+                        origin_ui_session_id = (
+                            str(getattr(_ps, "origin_ui_session_id", "") or "")
+                            or str(getattr(_ps, "spawn_session_id", "") or "")
+                        )
         except Exception:
             logger.debug(
-                "session_key recovery from process registry failed for %r",
+                "session ownership recovery from process registry failed for %r",
                 process_id,
                 exc_info=True,
             )
-    if not session_key:
+    if not session_key and not origin_ui_session_id:
         logger.debug(
-            "process_complete drop: no recoverable session_key for process_id=%r",
+            "process_complete drop: no recoverable session_key or exact UI owner "
+            "for process_id=%r",
             process_id,
         )
+        if evt.get("type") == "async_delegation":
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
-    with _cfg.PROCESS_SESSION_INDEX_LOCK:
-        session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key)
-    if not session_id:
+    session_id = ""
+    if session_key:
+        with _cfg.PROCESS_SESSION_INDEX_LOCK:
+            session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key) or ""
+    if not session_id and not origin_ui_session_id:
         # No mapping — could be a cron/gateway process that uses the same
-        # registry but a non-WebUI session_key. Ignore.
+        # registry but a non-WebUI session_key. Durable delegation events stay
+        # pending and are retried because their WebUI ownership mapping can be
+        # registered shortly after process restore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
+        if evt.get("type") == "async_delegation":
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
-    # session_id above came from PROCESS_SESSION_INDEX.get(session_key), and
-    # session_key was captured by the terminal tool from the (historically
-    # racy) process-global env at spawn. Option 1 binds the per-turn identity
-    # to a contextvar so that capture is no longer racy — but as an INDEPENDENT
-    # safety net, cross-check the resolved target against the env-immune
-    # spawn owner (when the core ProcessSession exposes one). On a positive
-    # mismatch this re-routes the wakeup (and the live-view emit + dedupe
-    # markers below) to the TRUE owner instead of waking the wrong session.
-    # Pure pass-through when no env-immune owner is available (today's core,
-    # cron/CLI procs, pre-Option-1 spawns) — never suppresses a valid wakeup.
+    # First retain the process-registry spawn-owner cross-check for legacy
+    # terminal events. Then apply origin_ui_session_id as the final authority;
+    # that exact owner is shared by process and async-delegation completions.
     try:
         _ps_xs = _process_registry.get(process_id) if (_process_registry is not None and process_id) else None
     except Exception:
@@ -945,6 +2084,35 @@ def _process_one(evt: dict) -> None:
         session_key_resolved_sid=session_id,
         proc_session=_ps_xs,
     )
+    # origin_ui_session_id is the exact, immutable return address; it is the
+    # FINAL routing authority over the (mutable) session-key/Option-3 result.
+    session_id = _resolve_completion_target(
+        session_key_resolved_sid=session_id,
+        origin_ui_session_id=origin_ui_session_id,
+    )
+    if not session_id:
+        logger.debug("process_complete drop: completion target resolved empty")
+        # An async delegation event that resolves empty here must NOT silently
+        # return: no durable claim was taken, so the core row stays pending and
+        # the restart-restore sweep would re-deliver it forever. Route it into
+        # the bounded retry instead (arms a durable retry / one best-effort
+        # legacy requeue), so it stays retryable without a spurious ACK.
+        if evt.get("type") == "async_delegation":
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
+        return
+    # ── THE SEAM: async delegations take the durable-claim delivery path,
+    # routed to the origin-resolved session. The claim/complete/release
+    # lifecycle (keyed on the immutable delegation_id) is the sole dedupe +
+    # restart-safety authority for async events, so they early-return before
+    # the terminal-process idempotency/emit/Option-Z machinery below. ──
+    if evt.get("type") == "async_delegation":
+        _process_async_delegation_event(
+            evt,
+            session_id=session_id,
+            delegation_id=process_id,
+            process_registry=_process_registry,
+        )
+        return
     # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
     # The real merged #2279 next-turn drain
     # (api/streaming._drain_webui_process_notifications) dedupes ONLY via
@@ -979,14 +2147,13 @@ def _process_one(evt: dict) -> None:
     payload = _build_payload(evt, session_id)
     _emit_bg_task_complete_events_coalesced(session_id, payload)
     _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
-    # Mark the event consumed in the agent's process registry so the REAL
-    # merged PR #2279's next-turn drain
-    # (api/streaming._drain_webui_process_notifications) treats this process_id
-    # as already-delivered and does not re-fire a wakeup (B-first order).
-    # This is the SHARED upstream dedupe key (see _mark_registry_completion_
-    # consumed for the coupling contract + why a future rename now fails loud).
-    if process_id:
-        _mark_registry_completion_consumed(process_id)
+    # NOTE: the registry consumed-marker is NOT set here any more. Whether the
+    # completion is delivered NOW (idle branch) or later (defer branch) is
+    # decided below, and only the branch that actually delivers may set the
+    # shared key: pre-marking the defer path made a genuine wait/log/poll read
+    # indistinguishable from the drain's own bookkeeping, so a completion the
+    # agent had already read still woke it again at turn teardown (#8363).
+    # See _mark_registry_completion_consumed for the coupling contract.
 
     # ── Option Z (PRIMARY): server-side wakeup, NO browser round-trip ──────
     # The SSE emit above is now demoted to a pure live-view layer (an open tab
@@ -1009,6 +2176,8 @@ def _process_one(evt: dict) -> None:
     # Idempotency is already guaranteed above: BG_TASK_COMPLETE_EVENTS_SEEN +
     # the registry _completion_consumed marker mean this process_id reached
     # here at most once, so the wakeup turn starts at most once.
+    wakeup_prompt = ""
+    consumed_claimed_by_dispatch = False
     try:
         # ``wakeup_prompt`` is server-internal state used only by the
         # Option Z server-side wakeup; it was previously surfaced on the
@@ -1018,27 +2187,51 @@ def _process_one(evt: dict) -> None:
         # prior _build_payload used).
         wakeup_prompt_raw = format_wakeup_prompt(evt)
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
-        if wakeup_prompt:
-            if _session_has_active_turn(session_id):
-                # Defer-path fix: persist the prompt so a turn-teardown
-                # idle-hook can redeliver it once the session goes idle.
-                # The OLD behavior only logged + left a bare
-                # PENDING_BG_TASK_COMPLETIONS session flag; the prompt was
-                # discarded and the next-turn drain reads completion_queue
-                # (already emptied by THIS drain thread), so for an
-                # autonomous agent with no next user turn the wakeup was
-                # lost forever. process_id is already in
-                # BG_TASK_COMPLETE_EVENTS_SEEN + the registry
-                # _completion_consumed marker (set above), so persisting it
-                # here cannot cause a double-fire — the atomic claim in
-                # ``claim_deferred_wakeups`` guarantees exactly one delivery.
-                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
-                logger.debug(
-                    "server-side wakeup deferred: turn active for session %s "
-                    "(persisted for turn-teardown idle-hook redelivery)",
-                    session_id,
-                )
-            else:
+        if wakeup_prompt and _session_has_active_turn(session_id):
+            # Defer-path fix: persist the prompt so a turn-teardown
+            # idle-hook can redeliver it once the session goes idle.
+            # The OLD behavior only logged + left a bare
+            # PENDING_BG_TASK_COMPLETIONS session flag; the prompt was
+            # discarded and the next-turn drain reads completion_queue
+            # (already emptied by THIS drain thread), so for an
+            # autonomous agent with no next user turn the wakeup was
+            # lost forever.
+            #
+            # #8363: the shared registry consumed-marker is deliberately NOT
+            # set on this branch. The agent may still read the completion in
+            # the turn that is running right now (``process(action="wait")``
+            # or ``log``; a ``poll`` is only a preview and consumes nothing);
+            # pre-marking made that real read look like this drain's own
+            # bookkeeping, so the teardown hook could not tell it apart and
+            # woke the agent again for a completion it had already acted on.
+            # The event was already popped from the shared completion_queue by
+            # this drain, so the next-turn drain has no copy to re-deliver; a
+            # duplicate enqueue it does deliver marks itself. The atomic claim
+            # in ``claim_deferred_wakeups`` still guarantees exactly one
+            # delivery of the persisted prompt.
+            record_deferred_wakeup(session_id, process_id, wakeup_prompt)
+            logger.debug(
+                "server-side wakeup deferred: turn active for session %s "
+                "(persisted for turn-teardown idle-hook redelivery)",
+                session_id,
+            )
+        else:
+            # Delivered now: the idle branch (Option Z) starts the turn, and a
+            # completion with no wakeup body is never redelivered by us. Both
+            # claim the SHARED upstream dedupe key the merged PR #2279
+            # next-turn drain reads (B-first order) — see
+            # _mark_registry_completion_consumed for the coupling contract.
+            #
+            # That claim is a TRANSPORT dedupe, not an observation: the start
+            # is asynchronous and can still be rejected (409 race, 5xx,
+            # raised launch). Those re-defer paths tag the entry with
+            # ``consumed_claimed_by_dispatch`` so the teardown hook does not
+            # read this key back as "the agent already read it" and drop the
+            # retry (#8363 review).
+            if process_id:
+                _mark_registry_completion_consumed(process_id)
+                consumed_claimed_by_dispatch = True
+            if wakeup_prompt:
                 # Idle-path sibling of the F1 (409/teardown) fix: pass
                 # ``process_id`` so that if this idle wakeup's daemon thread
                 # loses the per-session lock race and 409s, the re-defer in
@@ -1048,15 +2241,42 @@ def _process_one(evt: dict) -> None:
                 # path so a second 409 race cannot accumulate a duplicate
                 # deferred entry (which would deliver the same wakeup twice).
                 _start_server_side_wakeup_turn(
-                    session_id, wakeup_prompt, process_id=process_id
+                    session_id,
+                    wakeup_prompt,
+                    process_id=process_id,
+                    consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                 )
     except Exception:
         logger.warning(
             "server-side wakeup dispatch failed for session %s", session_id, exc_info=True
         )
+        # The dispatch never reached the agent, so do not let the prompt die
+        # here: re-defer it (idempotent per process_id, atomic claim) so a
+        # later turn teardown still delivers it. The provenance flag keeps this
+        # module's own transport claim from being mistaken for an agent read.
+        try:
+            if wakeup_prompt:
+                record_deferred_wakeup(
+                    session_id,
+                    process_id,
+                    wakeup_prompt,
+                    consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+                )
+        except Exception:
+            logger.debug(
+                "re-defer after failed wakeup dispatch failed for session %s",
+                session_id,
+                exc_info=True,
+            )
 
 
-def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str) -> None:
+def record_deferred_wakeup(
+    session_id: str,
+    process_id: str,
+    wakeup_prompt: str,
+    *,
+    consumed_claimed_by_dispatch: bool = False,
+) -> bool:
     """Persist a deferred process-completion wakeup for later redelivery.
 
     Called from ``_process_one`` when a completion arrives while a turn is
@@ -1066,28 +2286,65 @@ def record_deferred_wakeup(session_id: str, process_id: str, wakeup_prompt: str)
     claims it if a user turn comes first. Whoever claims first wins (atomic
     pop in ``claim_deferred_wakeups``); the other finds nothing.
 
+    ``consumed_claimed_by_dispatch`` records provenance for a retry created by a
+    REJECTED dispatch: the idle branch claims the shared registry key before the
+    turn start is accepted (the cross-A/B transport dedupe), so that key must
+    not later be mistaken for an agent read at turn teardown (#8363 review).
+    Only the rejected-dispatch re-defer paths set it; a plain defer (turn was
+    active) and the next-turn drain leave it False.
+
     Idempotent per process_id: if the same process_id is already queued for
     this session (kill_process racing the reader thread), it is not appended
-    twice. Best-effort — never raises into the drain loop.
+    twice. Returns whether the prompt is safely queued; never raises into the
+    drain loop.
     """
     if not session_id or not wakeup_prompt:
-        return
+        return False
     from api import config as _cfg
 
     try:
         with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
             entries = _cfg.DEFERRED_PROCESS_WAKEUPS.setdefault(session_id, [])
-            if process_id and any(
-                e.get("process_id") == process_id for e in entries
-            ):
-                return
-            entries.append(
-                {"process_id": process_id, "wakeup_prompt": wakeup_prompt}
-            )
+            # Idempotent per (process_id, wakeup_prompt).
+            #
+            # A non-empty ``process_id`` is the authoritative, immutable
+            # identity of its background completion — assigned once by the
+            # registry and already deduped upstream by
+            # ``BG_TASK_COMPLETE_EVENTS_SEEN`` / the ``_completion_consumed``
+            # marker — so two deferred entries for the SAME non-empty id can
+            # never represent two DIFFERENT wakeups: collapsing on the id is
+            # exact, not over-broad.
+            #
+            # An EMPTY process_id is NOT "no identity": it is what a
+            # multi-line (heredoc) command's display text parses to, and there
+            # are genuine callers that must still dedup (the launch-abort
+            # re-arm, whose best-effort id recovery yields ""). Such entries
+            # key on the prompt text instead: two DIFFERENT id-less wakeups
+            # necessarily differ in ``wakeup_prompt``, so both survive, while
+            # an exact duplicate recorded twice by a race collapses.
+            for existing in entries:
+                if existing.get("process_id") == process_id and (
+                    bool(process_id)
+                    or str(existing.get("wakeup_prompt") or "") == wakeup_prompt
+                ):
+                    # Keep the strongest retry provenance: a later rejected
+                    # dispatch re-defer for the same id upgrades a plain entry
+                    # (and never downgrades it).
+                    if consumed_claimed_by_dispatch and not existing.get(
+                        "consumed_claimed_by_dispatch"
+                    ):
+                        existing["consumed_claimed_by_dispatch"] = True
+                    return True
+            entry = {"process_id": process_id, "wakeup_prompt": wakeup_prompt}
+            if consumed_claimed_by_dispatch:
+                entry["consumed_claimed_by_dispatch"] = True
+            entries.append(entry)
+        return True
     except Exception:
         logger.debug(
             "record_deferred_wakeup failed for session %s", session_id, exc_info=True
         )
+        return False
 
 
 def claim_deferred_wakeups(session_id: str) -> list[dict]:
@@ -1115,7 +2372,47 @@ def claim_deferred_wakeups(session_id: str) -> list[dict]:
         return []
 
 
-def drain_deferred_wakeups_for_session(session_id: str) -> int:
+def discard_deferred_wakeups_for_session(session_id: str) -> None:
+    """Drop any queued process-wakeup state for *session_id* (terminal path).
+
+    Used when a wakeup resolves a session that was DELETED (``start_session_turn``
+    returns 404). Treating the missing session as TERMINAL rather than
+    retryable means any prompt recorded for it — whether already in
+    ``DEFERRED_PROCESS_WAKEUPS`` before the in-flight wakeup resolved, or left
+    over from a prior failed re-queue — is removed, so a deleted session never
+    retains wakeup state until process restart. The bare
+    ``PENDING_BG_TASK_COMPLETIONS`` telemetry marker is dropped too, so no
+    drain / next-turn path can re-fire a wakeup for the removed session.
+
+    Terminal-side effect only (pop / discard) — never re-queues; idempotent.
+    """
+    if not session_id:
+        return
+    from api import config as _cfg
+
+    try:
+        with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            _cfg.DEFERRED_PROCESS_WAKEUPS.pop(session_id, None)
+    except Exception:
+        logger.debug(
+            "discard_deferred_wakeups_for_session failed for %s",
+            session_id,
+            exc_info=True,
+        )
+        return
+    try:
+        _cfg.PENDING_BG_TASK_COMPLETIONS.discard(session_id)
+    except Exception:
+        logger.debug(
+            "PENDING_BG_TASK_COMPLETIONS discard failed for %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def drain_deferred_wakeups_for_session(
+    session_id: str, *, retry_attempt: int = 0
+) -> int:
     """Turn-teardown idle-hook: redeliver deferred wakeups once idle.
 
     Called from ``api/streaming`` right AFTER ``unregister_active_run`` so
@@ -1124,11 +2421,26 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
     case: idle now → fire now (Option Z idle branch); busy now → fire here
     when the turn ends and the session goes idle.
 
+    ``retry_attempt`` is the per-delivery attempt marker threaded in by the
+    bounded retry timer (``api.routes._run_deferred_wakeup_retry``). A value
+    >= 1 means this drain IS the retry, so a launch failure during it must be
+    treated as final by the abort cleanup: the prompt stays queued, no new
+    retry is scheduled. Without it the retry reschedules itself every
+    ``_DEFERRED_WAKEUP_RETRY_DELAY_SECS`` forever under a persistent launch
+    failure (#7680 CORE).
+
     Multi-stream / cancel-reconnect guard: if ANY other ACTIVE_RUNS row still
     exists for this session (a second stream from cancel/reconnect), the
     session is NOT yet idle — leave the deferred entries untouched so a later
     teardown (or the next-turn drain) delivers them. Only the teardown of the
     LAST active stream for the session claims + fires.
+
+    Read-at-delivery check (#8363): an entry whose completion the finished turn
+    already consumed (``wait``/``log`` — the producer's public
+    ``is_completion_consumed`` contract) is dropped instead of redelivered —
+    the agent acted on it, a second wakeup would only cost an empty turn. A
+    read-only ``poll`` is a truncated preview, not consumption, so it never
+    suppresses the full autonomous notification.
 
     Returns the number of wakeup turns started (0 when nothing pending or the
     session is still busy). Best-effort — never raises into the streaming
@@ -1162,6 +2474,23 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 "PENDING discard failed for session %s", session_id, exc_info=True
             )
         started = 0
+        # #8363: only a completion the agent has NOT already consumed may wake
+        # it. The turn that just ended may have read this completion itself
+        # (``process(action="wait")`` / ``log`` → the producer's public
+        # ``is_completion_consumed`` contract). The mark is read at DELIVERY
+        # time, and the defer branch never writes it, so a mark here means a
+        # real read (or a duplicate copy the next-turn drain actually
+        # delivered) — except for an entry whose own rejected dispatch claimed
+        # the key as a transport dedupe: ``_deferred_entry_already_consumed``
+        # keeps that retry eligible without clearing the shared key.
+        unread = [e for e in entries if not _deferred_entry_already_consumed(e)]
+        if len(unread) != len(entries):
+            logger.debug(
+                "turn-teardown idle-hook dropped %d deferred wakeup(s) for "
+                "session %s already read in the finished turn",
+                len(entries) - len(unread),
+                session_id,
+            )
         # Greptile P1 fix: do NOT fire one daemon-threaded wakeup per entry in
         # a tight loop. Each ``_start_server_side_wakeup_turn`` spawns a daemon
         # thread that races for the per-session agent lock; only ONE can win,
@@ -1172,30 +2501,39 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
         # (or next-turn drain) delivers the next one — one wakeup per turn,
         # which matches the single-prompt-per-turn design and the
         # BG_TASK_COMPLETE_EVENTS_SEEN dedup (no double-fire).
-        leftover = [e for e in entries if str((e or {}).get("wakeup_prompt") or "").strip()]
+        leftover = [e for e in unread if str((e or {}).get("wakeup_prompt") or "").strip()]
         if leftover:
             first = leftover[0]
             # Re-defer entries 2..N BEFORE starting the first turn, so they are
             # already persisted if the first wakeup's own teardown re-runs this
-            # hook and tries to claim them.
+            # hook and tries to claim them. Preserve each entry's dispatch-claim
+            # provenance so a retry is never re-classified as an agent read.
             for entry in leftover[1:]:
                 record_deferred_wakeup(
                     session_id,
                     str((entry or {}).get("process_id") or ""),
                     str((entry or {}).get("wakeup_prompt") or "").strip(),
+                    consumed_claimed_by_dispatch=bool(
+                        (entry or {}).get("consumed_claimed_by_dispatch")
+                    ),
                 )
             _start_server_side_wakeup_turn(
                 session_id,
                 str((first or {}).get("wakeup_prompt") or "").strip(),
                 process_id=str((first or {}).get("process_id") or ""),
+                retry_attempt=retry_attempt,
+                consumed_claimed_by_dispatch=bool(
+                    (first or {}).get("consumed_claimed_by_dispatch")
+                ),
             )
             started = 1
         if started:
             logger.info(
                 "turn-teardown idle-hook redelivered %d deferred wakeup(s) "
-                "for session %s",
+                "for session %s (retry_attempt=%d)",
                 started,
                 session_id,
+                retry_attempt,
             )
         return started
     except Exception:
@@ -1215,27 +2553,75 @@ def _session_has_active_turn(session_id: str) -> bool:
     ``_emit_to_session_streams``) to map a stream back to its owning session.
     ACTIVE_RUNS is registered at agent-worker start and removed in the worker's
     outer ``finally``, so it survives cancel/reconnect races better than
-    STREAMS. There is a brief window where ``_start_chat_stream_for_session``
-    has populated STREAMS but the worker thread has not yet called
-    ``register_active_run``; in that window this returns False and the
-    subsequent ``start_session_turn`` is rejected with a 409 by
-    ``_start_chat_stream_for_session``'s own active-stream guard — i.e. the
-    same lock /api/chat/start uses is the authoritative race backstop.
+    STREAMS. We ALSO count a same-session live STREAMS entry (via the
+    synchronously-populated STREAM_SESSION_OWNERS registry): the worker
+    publishes its stream BEFORE it registers in ACTIVE_RUNS, and that
+    pre-registration window must not look idle to a sibling completion
+    (#6959 gate — see the STREAMS check below). For how long that entry counts,
+    ask ``api.config.is_orphaned_stream()``: it stays busy while it is still
+    launching (its ``PRE_ADMISSION_CLAIMS`` claim) or worker-backed, and a
+    worker-less, claim-less entry — a turn that died before admission — reads
+    idle, so an orphan cannot defer a sibling completion until the reaper's
+    sweep. ``_start_chat_stream_for_session``'s
+    own active-stream guard remains the authoritative 409 backstop for any
+    residual race.
     """
+    # ACTIVE_RUNS rows (including a bounded cancelling-run unwind window,
+    # per _active_run_ids_for_session).
+    if _active_run_ids_for_session(session_id, attachable_only=False):
+        return True
+
+    # Pre-ACTIVE_RUNS publication window (#6959 gate): the agent worker
+    # publishes its stream — register_stream_owner() first, then the live
+    # STREAMS channel, with its launch-phase claim published in that same
+    # STREAMS_LOCK section — BEFORE it registers in ACTIVE_RUNS. In that window a
+    # same-session live STREAMS entry means a turn is already (or about to be)
+    # active, so it must count here: otherwise a sibling async-delegation
+    # completion would pass the busy pre-check, reserve the per-origin
+    # admission, claim, and then 409 against the already-published stream —
+    # burning the finite delivery-attempt budget on every retry round. The
+    # worker's teardown finally pops STREAMS (and unregisters the stream owner)
+    # before the turn-teardown idle-hook drain runs, so the just-ended turn
+    # does not keep the session busy.
     from api import config as _cfg
 
     try:
-        with _cfg.ACTIVE_RUNS_LOCK:
-            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
-                if isinstance(meta, dict) and meta.get("session_id") == session_id:
-                    return True
+        with _cfg.STREAMS_LOCK:
+            live_stream_ids = list((_cfg.STREAMS or {}).keys())
+        with _cfg.STREAM_SESSION_OWNERS_LOCK:
+            stream_owners = dict(_cfg.STREAM_SESSION_OWNERS or {})
     except Exception:
-        logger.debug("ACTIVE_RUNS active-turn check failed", exc_info=True)
+        logger.debug("STREAMS active-turn check failed", exc_info=True)
+        return False
+    for _stream_id in live_stream_ids:
+        if str(stream_owners.get(_stream_id) or "") != str(session_id or ""):
+            continue
+        # A registered stream is BUSY while it is still launching OR owned by a
+        # live worker: membership alone is not liveness. The launch-phase claim
+        # covers the publication window (upstream contract, #6959 gate) and this
+        # pre-check only DEFERS a sibling completion — it never claims and never
+        # spends a delivery attempt — so deferring on a launching stream is the
+        # safe side. An entry left behind by a worker that died before admission
+        # has no claim and no ACTIVE_RUNS row, though: counting it busy kept the
+        # session looking active until the channel reaper's sweep collected the
+        # orphan, deferring an otherwise idle session's async-delegation wakeup by
+        # up to ``_REAPER_INTERVAL_SECS`` (greptile P2, 06-oct). Ask the ONE
+        # shared orphan predicate instead of reading membership here. This loop
+        # already runs outside STREAMS_LOCK (both registries were snapshotted
+        # above), so the locking wrapper is the right entry point; the chat/start
+        # orphan path and the reaper keep their own responsibilities.
+        if not _cfg.is_orphaned_stream(_stream_id):
+            return True
     return False
 
 
 def _start_server_side_wakeup_turn(
-    session_id: str, wakeup_prompt: str, *, process_id: str = ""
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    process_id: str = "",
+    retry_attempt: int = 0,
+    consumed_claimed_by_dispatch: bool = False,
 ) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
@@ -1243,6 +2629,29 @@ def _start_server_side_wakeup_turn(
     ``start_session_turn`` itself spawns the agent worker thread, but does
     synchronous session-load / workspace / model resolution first, which must
     not stall the single drain thread shared by every WebUI session.
+
+    ``retry_attempt`` is the per-delivery attempt marker from the bounded
+    retry timer. It is forwarded to ``start_session_turn`` and from there into
+    the launch-abort cleanup, so a launch failure on this already-retried
+    attempt keeps the prompt queued WITHOUT scheduling another retry
+    (#7680 CORE).
+
+    ``consumed_claimed_by_dispatch`` is carried into every re-defer below AND
+    into ``start_session_turn``: the idle branch of ``_process_one`` claims the
+    shared registry consumed key before this dispatch (transport dedupe for the
+    A/B contract). A rejected start must stay retryable, so the re-deferred
+    entry remembers that the key was claimed by our own dispatch rather than by
+    an agent read (#8363 review). The launch-abort re-arm inside
+    ``_start_chat_stream_for_session`` gets the same provenance; without it, a
+    retry timer that fires before this abort's exception reaches the handler
+    below drains an untagged entry, reads the dispatch's own claim as an agent
+    read, and drops the only retry (#8363 review, stalled-unwind ordering).
+
+    This is the ONLY caller that opts into the deferred-wakeup re-arm
+    (``rearm_deferred_wakeup=True``): an async-delegation completion starts its
+    turn with the same ``source="process_wakeup"`` but owns a durable
+    claim/retry, so re-arming for it too would deliver one completion twice
+    (#7680 CORE, maintainer 2026-10-01).
 
     Concurrency + idempotency are enforced by the layers below, not here:
       - ``start_session_turn`` → ``_start_chat_stream_for_session`` serializes
@@ -1271,14 +2680,42 @@ def _start_server_side_wakeup_turn(
             from api.routes import start_session_turn
 
             resp = start_session_turn(
-                session_id, wakeup_prompt, source="process_wakeup"
+                session_id,
+                wakeup_prompt,
+                source="process_wakeup",
+                process_id=process_id,
+                retry_attempt=retry_attempt,
+                rearm_deferred_wakeup=True,
+                # Thread the transport-claim provenance into the launch-abort
+                # re-arm (#8363 review). The one-shot retry timer can fire
+                # before this abort's exception reaches our ``except`` below;
+                # the drain it triggers must already see an entry tagged as
+                # dispatch-claimed instead of reading it as an agent read.
+                consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
             )
             status = int((resp or {}).get("_status", 200) or 200)
-            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+            if status == 404 and (resp or {}).get("error") == "Session not found":
+                # Terminal, NOT retryable: the session was deleted while this
+                # wakeup was in flight. Re-queuing the prompt here would
+                # recreate DEFERRED_PROCESS_WAKEUPS[sid] with no expiry for a
+                # session that no longer exists — an orphaned prompt that
+                # survives until process restart. Drop any queued wakeup state
+                # for the removed session (including a pre-existing entry from
+                # before the deletion) and do NOT re-queue.
+                discard_deferred_wakeups_for_session(session_id)
+                logger.info(
+                    "server-side wakeup dropped for deleted session %s "
+                    "(404 session-not-found): queued wakeup state cleared",
+                    session_id,
+                )
+            elif status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     session_id,
                 )
+                # Deliberate suppression: re-queuing here would recreate the
+                # same provider-unavailable 409 on every subsequent teardown,
+                # so the prompt is intentionally dropped.
             elif status == 409:
                 # Raced an active turn (e.g. a human /api/chat/start, or a
                 # sibling deferred-wakeup thread). Re-defer this prompt so it
@@ -1288,15 +2725,36 @@ def _start_server_side_wakeup_turn(
                 # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
                 # this process_id, so re-recording cannot double-fire.
                 if wakeup_prompt:
-                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
+                    record_deferred_wakeup(
+                        session_id,
+                        process_id,
+                        wakeup_prompt,
+                        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+                    )
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
                     "re-deferred for redelivery on next teardown/turn",
                     session_id,
                 )
             elif status >= 400:
+                # The turn never started, and whoever called us
+                # (``drain_deferred_wakeups_for_session``) already popped this
+                # prompt from DEFERRED_PROCESS_WAKEUPS — so dropping it here
+                # loses the wakeup permanently. Keep it queued so a later turn
+                # teardown (or the next-turn drain) still delivers it. This is
+                # the "launch-abort retry's own launch failed" case: the prompt
+                # must survive, and it must NOT loop — the retry timer is
+                # one-shot and nothing here reschedules it.
+                if wakeup_prompt:
+                    record_deferred_wakeup(
+                        session_id,
+                        process_id,
+                        wakeup_prompt,
+                        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+                    )
                 logger.warning(
-                    "server-side wakeup failed for session %s: status=%s err=%r",
+                    "server-side wakeup failed for session %s: status=%s err=%r; "
+                    "prompt kept queued for later delivery",
                     session_id,
                     status,
                     (resp or {}).get("error"),
@@ -1308,8 +2766,24 @@ def _start_server_side_wakeup_turn(
                     (resp or {}).get("stream_id"),
                 )
         except Exception:
+            # A launch that RAISED (worker-thread construction/``start()``
+            # failure, session-load throw, model-resolution blow-up, …) is the
+            # same loss case as a 5xx: the entry was already claimed, so
+            # without a re-defer the prompt is gone with no retry. Re-defer it
+            # — idempotent per process_id, atomic claim, no reschedule. (The
+            # launch-abort re-arm inside ``start_session_turn`` handles the
+            # narrower worker-start failure; this covers everything that
+            # escapes before/around it.)
+            if wakeup_prompt:
+                record_deferred_wakeup(
+                    session_id,
+                    process_id,
+                    wakeup_prompt,
+                    consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+                )
             logger.warning(
-                "server-side wakeup turn raised for session %s",
+                "server-side wakeup turn raised for session %s; prompt kept "
+                "queued for later delivery",
                 session_id,
                 exc_info=True,
             )
@@ -1329,6 +2803,7 @@ def _drain_loop() -> None:
         logger.warning("bg_task_complete drain unavailable: %s", exc)
         return
     logger.info("bg_task_complete drain thread started")
+    restore_durable_process_completions(process_registry)
     while not _DRAIN_STOP.is_set():
         # Read the queue defensively: a rebuilt/partially-initialized registry
         # may not expose ``completion_queue`` (mirrors streaming.py's
@@ -1359,6 +2834,73 @@ def _drain_loop() -> None:
             _process_one(evt)
         except Exception:
             logger.warning("bg_task_complete event handling failed", exc_info=True)
+
+
+def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> int:
+    """Recover core background processes and restore WebUI routing metadata.
+
+    The core gateway performs this during gateway startup, but this WebUI host
+    previously started only the queue drain. That left checkpointed processes
+    invisible after a WebUI restart.
+    """
+    global _PROCESS_CHECKPOINT_RECOVERED, _PROCESS_RECOVERY_DONE
+    if process_registry is None:
+        try:
+            from tools.process_registry import process_registry
+        except ImportError:
+            # Hermes Agent is optional in isolated WebUI/test environments.
+            # The drain loop already treats a missing registry as unavailable;
+            # startup recovery must preserve that fail-soft contract.
+            logger.debug("process recovery unavailable: Hermes Agent is not installed")
+            return 0
+    if get_session_fn is None:
+        from api.models import get_session as get_session_fn
+
+    with _PROCESS_RECOVERY_LOCK:
+        if _PROCESS_RECOVERY_DONE:
+            return 0
+
+        recovered = 0
+        if not _PROCESS_CHECKPOINT_RECOVERED:
+            recovered = process_registry.recover_from_checkpoint()
+            _PROCESS_CHECKPOINT_RECOVERED = True
+
+        for row in process_registry.list_sessions():
+            process_id = str(row.get("session_id") or "")
+            if not process_id:
+                continue
+            try:
+                proc_session = process_registry.get(process_id)
+                session_key = str(getattr(proc_session, "session_key", "") or "")
+                if not session_key:
+                    continue
+                # The session resolver (``api.models._resolve_session_once``)
+                # raises ``KeyError(sid)`` for a missing session — that is its
+                # documented contract for the "owner gone" outcome, not a
+                # fault. Treat it identically to a ``None`` return: skip the
+                # process without logging, and let a neighbouring live
+                # process still rebind. The narrow ``except KeyError`` lives
+                # INSIDE the outer try so an unrelated ``KeyError`` from
+                # ``process_registry.get()`` (or any routing-index work) still
+                # surfaces in the existing warning path.
+                try:
+                    resolved = get_session_fn(session_key, metadata_only=True)
+                except KeyError:
+                    continue
+                if resolved is None:
+                    continue
+            except Exception:
+                logger.warning(
+                    "Could not resolve recovered WebUI process %r",
+                    process_id,
+                    exc_info=True,
+                )
+                continue
+            register_process_session(session_key, session_key)
+        _PROCESS_RECOVERY_DONE = True
+        if recovered:
+            logger.info("Recovered %d background process(es) for WebUI", recovered)
+        return recovered
 
 
 def register_process_session(session_key: str, session_id: str) -> None:
@@ -1407,6 +2949,12 @@ def start_drain_thread() -> bool:
     with _THREAD_LIFECYCLE_LOCK:
         if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
             return False
+        try:
+            recover_processes_for_webui()
+        except Exception:
+            # Recovery is best-effort. A corrupt checkpoint or transient I/O
+            # error must not disable notifications for newly spawned tasks.
+            logger.warning("background process recovery failed", exc_info=True)
         _DRAIN_STOP.clear()
         _DRAIN_THREAD = threading.Thread(
             target=_drain_loop,

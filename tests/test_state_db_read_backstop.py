@@ -117,3 +117,49 @@ def test_limit_composes_with_since_timestamp(tmp_path, monkeypatch):
     msgs = get_state_db_session_messages("s1", since_timestamp=50.0, limit=10)
     assert len(msgs) == 10
     assert [m["content"] for m in msgs] == [f"msg{i}" for i in range(90, 100)]
+
+
+def test_reader_uses_durable_id_order_when_timestamps_are_non_monotonic(
+    tmp_path,
+    monkeypatch,
+):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY)")
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT,
+            content TEXT,
+            timestamp REAL,
+            active INTEGER DEFAULT 1
+        )
+        """
+    )
+    conn.execute("INSERT INTO sessions (id) VALUES ('s1')")
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            ("s1", "user", "id-1 timestamp-300", 300.0),
+            ("s1", "assistant", "id-2 timestamp-100", 100.0),
+            ("s1", "user", "id-3 timestamp-200", 200.0),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    full = get_state_db_session_messages("s1")
+    limited = get_state_db_session_messages("s1", limit=2)
+
+    assert [message["content"] for message in full] == [
+        "id-1 timestamp-300",
+        "id-2 timestamp-100",
+        "id-3 timestamp-200",
+    ]
+    assert [message["content"] for message in limited] == [
+        "id-2 timestamp-100",
+        "id-3 timestamp-200",
+    ]

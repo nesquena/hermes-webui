@@ -129,6 +129,12 @@ def _scrub_provider_env(monkeypatch):
         "XIAOMI_API_KEY",
         "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
         "NOUS_API_KEY", "NVIDIA_API_KEY", "LM_API_KEY", "LMSTUDIO_API_KEY",
+        # Model-selection overrides: get_effective_default_model() treats these
+        # as the highest-priority default-model source, above config. A runner
+        # that exports HERMES_MODEL (e.g. a live agent session set to "opus-4.8")
+        # injects that id into the picker/catalog and breaks the @nous: prefix
+        # invariant below. Scrub so detection sees only the installed stubs.
+        "HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL",
     ):
         monkeypatch.delenv(var, raising=False)
 

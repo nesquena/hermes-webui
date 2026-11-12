@@ -19,7 +19,18 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 def _extract_fn(src: str, name: str, prefix: str = "function ") -> str:
     start = src.index(f"{prefix}{name}(")
-    brace = src.index("{", start)
+    paren = src.index("(", start)
+    paren_depth = 0
+    for i in range(paren, len(src)):
+        if src[i] == "(":
+            paren_depth += 1
+        elif src[i] == ")":
+            paren_depth -= 1
+            if paren_depth == 0:
+                brace = src.index("{", i + 1)
+                break
+    else:
+        raise AssertionError(f"{name} parameter list not closed")
     depth = 0
     for i in range(brace, len(src)):
         if src[i] == "{":
@@ -38,11 +49,12 @@ def _run_node(script: str) -> dict:
     try:
         result = subprocess.run(
             [NODE, script_path],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             timeout=15,
         )
+        assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
     finally:
         Path(script_path).unlink(missing_ok=True)
@@ -55,16 +67,30 @@ def _run_failure_case(api_js: str) -> dict:
             _extract_fn(MESSAGES_JS, "_getDismissedApprovals"),
             _extract_fn(MESSAGES_JS, "_isApprovalDismissed"),
             _extract_fn(MESSAGES_JS, "_unmarkApprovalDismissed"),
+            _extract_fn(MESSAGES_JS, "_promptNotifyKey"),
+            _extract_fn(MESSAGES_JS, "_retirePromptNotifyKey"),
+            _extract_fn(MESSAGES_JS, "_approvalPromptGeneration"),
+            _extract_fn(MESSAGES_JS, "_bumpApprovalPromptGeneration"),
             _extract_fn(MESSAGES_JS, "_promptActiveSessionId"),
             _extract_fn(MESSAGES_JS, "_approvalPromptBelongsToActiveSession"),
             _extract_fn(MESSAGES_JS, "_rememberApprovalPending"),
             _extract_fn(MESSAGES_JS, "_clearApprovalPendingForSession"),
             _extract_fn(MESSAGES_JS, "_renderPendingApprovalForActiveSession"),
+            _extract_fn(MESSAGES_JS, "_approvalMirrorOwnerFor"),
+            _extract_fn(MESSAGES_JS, "_approvalOwnerForPending"),
+            _extract_fn(MESSAGES_JS, "_approvalOwnerIdentityMatches"),
+            _extract_fn(MESSAGES_JS, "_captureApprovalResponseOwner"),
+            _extract_fn(MESSAGES_JS, "_approvalResponseOwnerIsCurrent"),
             _extract_fn(MESSAGES_JS, "_approvalResponseMatches"),
+            _extract_fn(MESSAGES_JS, "_releaseApprovalResponseOwner"),
             _extract_fn(MESSAGES_JS, "_setApprovalControlsDisabled"),
             _extract_fn(MESSAGES_JS, "_setPromptFlyoutHidden"),
             _extract_fn(MESSAGES_JS, "showApprovalCard"),
             _extract_fn(MESSAGES_JS, "_restoreFailedApprovalResponse"),
+            _extract_fn(MESSAGES_JS, "_isGatewayUnavailableOrphan"),
+            _extract_fn(MESSAGES_JS, "_handleGatewayUnavailable", prefix="async function "),
+            _extract_fn(MESSAGES_JS, "_approvalLogicalKey"),
+            _extract_fn(MESSAGES_JS, "_reconcileApprovalToHead", prefix="async function "),
             _extract_fn(MESSAGES_JS, "respondApproval", prefix="async function "),
         ]
     )
@@ -85,11 +111,16 @@ let renderCalls = 0;
 let _approvalSessionId = 'sess-1';
 let _approvalCurrentId = 'appr-1';
 let _approvalPendingBySession = new Map();
+const _approvalPromptGenerationBySession = new Map();
+let _loadSessionGeneration = 1;
 let _approvalResponding = null;
+let _approvalClearedOwner = null;
+let _approvalDisplayedOwner = null;
 let _approvalSignature = '';
 let _approvalVisibleSince = 0;
 let _approvalHideTimer = null;
 const _clarifyPendingBySession = new Map();
+const _promptNotifySeen = new Map();
 const buttons = new Map();
 function makeButton(id) {{
   return {{
@@ -237,16 +268,30 @@ def test_poll_rerender_keeps_inflight_buttons_disabled_and_blocks_duplicates():
             _extract_fn(MESSAGES_JS, "_getDismissedApprovals"),
             _extract_fn(MESSAGES_JS, "_isApprovalDismissed"),
             _extract_fn(MESSAGES_JS, "_unmarkApprovalDismissed"),
+            _extract_fn(MESSAGES_JS, "_promptNotifyKey"),
+            _extract_fn(MESSAGES_JS, "_retirePromptNotifyKey"),
+            _extract_fn(MESSAGES_JS, "_approvalPromptGeneration"),
+            _extract_fn(MESSAGES_JS, "_bumpApprovalPromptGeneration"),
             _extract_fn(MESSAGES_JS, "_promptActiveSessionId"),
             _extract_fn(MESSAGES_JS, "_approvalPromptBelongsToActiveSession"),
             _extract_fn(MESSAGES_JS, "_rememberApprovalPending"),
             _extract_fn(MESSAGES_JS, "_clearApprovalPendingForSession"),
             _extract_fn(MESSAGES_JS, "_renderPendingApprovalForActiveSession"),
+            _extract_fn(MESSAGES_JS, "_approvalMirrorOwnerFor"),
+            _extract_fn(MESSAGES_JS, "_approvalOwnerForPending"),
+            _extract_fn(MESSAGES_JS, "_approvalOwnerIdentityMatches"),
+            _extract_fn(MESSAGES_JS, "_captureApprovalResponseOwner"),
+            _extract_fn(MESSAGES_JS, "_approvalResponseOwnerIsCurrent"),
             _extract_fn(MESSAGES_JS, "_approvalResponseMatches"),
+            _extract_fn(MESSAGES_JS, "_releaseApprovalResponseOwner"),
             _extract_fn(MESSAGES_JS, "_setApprovalControlsDisabled"),
             _extract_fn(MESSAGES_JS, "_setPromptFlyoutHidden"),
             _extract_fn(MESSAGES_JS, "showApprovalCard"),
             _extract_fn(MESSAGES_JS, "_restoreFailedApprovalResponse"),
+            _extract_fn(MESSAGES_JS, "_isGatewayUnavailableOrphan"),
+            _extract_fn(MESSAGES_JS, "_handleGatewayUnavailable", prefix="async function "),
+            _extract_fn(MESSAGES_JS, "_approvalLogicalKey"),
+            _extract_fn(MESSAGES_JS, "_reconcileApprovalToHead", prefix="async function "),
             _extract_fn(MESSAGES_JS, "respondApproval", prefix="async function "),
         ]
     )
@@ -262,11 +307,16 @@ const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 let _approvalSessionId = 'sess-1';
 let _approvalCurrentId = 'appr-1';
 let _approvalPendingBySession = new Map();
+const _approvalPromptGenerationBySession = new Map();
+let _loadSessionGeneration = 1;
 let _approvalResponding = null;
+let _approvalClearedOwner = null;
+let _approvalDisplayedOwner = null;
 let _approvalSignature = '';
 let _approvalVisibleSince = 0;
 let _approvalHideTimer = null;
 const _clarifyPendingBySession = new Map();
+const _promptNotifySeen = new Map();
 let resolveApi;
 let apiCalls = 0;
 const buttons = new Map();
@@ -330,9 +380,16 @@ function setTimeout(fn) {{ return 1; }}
 function showToast() {{}}
 function setStatus() {{}}
 function t(key) {{ return key; }}
-function api() {{
+function api(path) {{
   apiCalls += 1;
-  return new Promise(resolve => {{ resolveApi = resolve; }});
+  // #7091: respondApproval now reconciles against the authoritative head with
+  // a best-effort GET before POSTing; serve it immediately with no head so the
+  // flow proceeds to the respond POST.
+  if (path.startsWith('/api/approval/pending')) return Promise.resolve({{ pending: null }});
+  // Fail the respond POST one microtask after it is issued (the reconcile GET
+  // settles first), preserving the original "inflight failure restores the
+  // card" flow.
+  return new Promise(resolve => {{ Promise.resolve().then(() => resolve({{ ok: false }})); }});
 }}
 {helpers}
 const pending = {{
@@ -351,7 +408,6 @@ const second = respondApproval('once');
 output.apiCallsDuringFlight = apiCalls;
 output.onceDisabledDuringFlight = buttons.get('approvalBtnOnce').disabled;
 output.onceLoadingDuringFlight = buttons.get('approvalBtnOnce').classList.contains('loading');
-resolveApi({{ ok: false }});
 Promise.all([first, second]).then(() => {{
   output.apiCallsFinal = apiCalls;
   output.onceDisabledAfter = buttons.get('approvalBtnOnce').disabled;
@@ -364,7 +420,8 @@ Promise.all([first, second]).then(() => {{
     assert out["apiCallsDuringFlight"] == 1
     assert out["onceDisabledDuringFlight"] is True
     assert out["onceLoadingDuringFlight"] is True
-    assert out["apiCallsFinal"] == 1
+    # #7091: reconcile GET + respond POST.
+    assert out["apiCallsFinal"] == 2
     assert out["onceDisabledAfter"] is False
     assert out["onceLoadingAfter"] is False
     assert out["cardVisibleAfter"] is True

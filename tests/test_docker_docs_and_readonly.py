@@ -155,14 +155,16 @@ def test_docker_md_documents_isolation_model():
     )
 
 
-# ── 5: docker_init.bash stages agent source to a writable build dir ─────────
+# ── 5: docker_init.bash stages agent source for editable install ─────────────
 #
 # The :ro mount fixed in PR #2470 broke a second, less obvious surface:
 # `uv pip install "$_agent_src[all]"` invokes setuptools' egg_info build step,
 # which touches `hermes_agent.egg-info/` *inside the source tree* even under
 # PEP 517 build isolation. On a `:ro` mount this returns `EROFS` and (under
 # `set -e`) kills container startup. The fix: copy the source tree into a
-# writable tmpfs build dir, run the install against THAT, then clean up.
+# writable persistent directory (/app/hermes-agent-src) and run an editable
+# install against it. The staged copy shares the venv's lifecycle — both
+# survive restarts and are lost together on container recreation.
 #
 # This was caught the first time the Docker smoke gate ran on its own PR — a
 # real regression that 5800+ source-level pytests had no way to surface
@@ -176,7 +178,7 @@ def test_docker_init_stages_agent_source_for_writable_install():
     invocation)."""
     src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
 
-    # The fix uses a /tmp staging path that's clearly distinct from the
+    # The fix uses an /app staging path that's clearly distinct from the
     # mounted source path. Pin the staging marker.
     assert "_stage_src=" in src, (
         "docker_init.bash must declare a _stage_src writable build dir "
@@ -189,6 +191,8 @@ def test_docker_init_stages_agent_source_for_writable_install():
     #   uv pip install "$_agent_src[all]" ...
     # The fixed code is:
     #   uv pip install "$_stage_src[all]" ...
+    # Since #8524 the install lives in install_staged_agent(), whose $_isa_src
+    # parameter is bound to "$_stage_src" by its only caller (pinned below).
     install_lines = [
         line for line in src.splitlines()
         if "uv pip install" in line and "[all]" in line
@@ -202,10 +206,13 @@ def test_docker_init_stages_agent_source_for_writable_install():
             "Use the writable $_stage_src path instead. "
             f"Offending line: {line!r}"
         )
-        assert "_stage_src" in line, (
+        assert "_stage_src" in line or '"$_isa_src[all]"' in line, (
             "the `uv pip install ...[all]` line must use the staged writable "
             f"path. Offending line: {line!r}"
         )
+    callers = [line.strip() for line in src.splitlines()
+               if "install_staged_agent " in line and "() {" not in line]
+    assert callers and all(c.startswith('install_staged_agent "$_stage_src"') for c in callers), callers
 
 
 def test_docker_init_excludes_egg_info_during_staging():
@@ -264,6 +271,31 @@ def test_docker_init_excludes_egg_info_during_staging():
     )
 
 
+def test_docker_init_excludes_unreadable_install_lock_during_staging():
+    """An unreadable `tools/.install.lock` in the agent source must not be staged.
+
+    rsync exits 23 when it cannot read a file it was asked to copy, and the
+    staging step runs under `set -e`, so a single mode-000 file shipped by the
+    agent image kills container startup with
+    `Failed to stage hermes-agent source to writable build dir`. This is the
+    same class as `.playwright` above: an unreadable file in the source tree
+    that only the exclusion list keeps out of the copy.
+
+    Found while validating #8113 — the two/three-container smoke jobs could not
+    reach the interpreter fix because staging aborted first.
+    """
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    stage_idx = src.index("_stage_src=")
+    install_idx = src.index("uv pip install", stage_idx)
+    stage_block = src[stage_idx:install_idx]
+
+    assert "--exclude='.install.lock'" in stage_block, (
+        "rsync staging must --exclude='.install.lock'; the agent source ships it "
+        "unreadable, which makes rsync exit 23 and kills startup."
+    )
+
+
 def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
     """Regression test for the docker-init "could not create hermes_agent.egg-info:
     Permission denied" failure on :ro multi-container mounts.
@@ -311,4 +343,88 @@ def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
         "inside one branch means the other copy path skips it and the "
         ":ro mount perm leak returns."
     )
+
+
+# ── 6: docker_init.bash editable install with persistent staging ─────────────
+#
+# The upstream hermes-agent setup.py build guard blocks bdist_wheel outside Nix
+# builds. The WebUI uses an editable install (`uv pip install -e`) to bypass
+# this. The staged source lives at /app/hermes-agent-src (persistent, same
+# lifecycle as the venv) so the editable .pth link remains valid across
+# container restarts without sentinel files or state machines.
+
+
+def test_docker_init_uses_editable_install():
+    """docker_init.bash must use `uv pip install -e` (editable) for the
+    hermes-agent staged source. The upstream setup.py build guard blocks
+    bdist_wheel outside Nix builds. Editable installs use build_editable
+    which bypasses the guard entirely."""
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    install_lines = [
+        line for line in src.splitlines()
+        if "uv pip install" in line and "[all]" in line
+    ]
+    assert install_lines, "expected a `uv pip install ...[all]` line in docker_init.bash"
+    for line in install_lines:
+        assert re.search(r"uv\s+pip\s+install\s+-e\b", line), (
+            "docker_init.bash must use editable install (`uv pip install -e`) "
+            "for hermes-agent. The upstream setup.py build guard blocks "
+            "bdist_wheel outside Nix builds, causing container startup failure. "
+            f"Offending line: {line!r}"
+        )
+
+
+def test_docker_init_stages_to_persistent_path():
+    """The staged source must share the venv's container-layer lifecycle.
+
+    An editable install records the staged path in a .pth file. Keeping that
+    target under /app/ alongside the venv avoids runtimes that mount or clean
+    /tmp independently while retaining /app/ across ordinary restarts.
+    """
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    stage_line = [
+        line for line in src.splitlines()
+        if "_stage_src=" in line and "=" in line and "#" not in line.split("=")[0]
+    ]
+    assert stage_line, "expected a _stage_src= assignment in docker_init.bash"
+    for line in stage_line:
+        assert "/tmp" not in line, (
+            "docker_init.bash stages the editable source under /tmp/ which is "
+            "ephemeral. The editable .pth link will dangle after tmpfs flush "
+            "or external cleanup. Stage under /app/ beside the venv. "
+            f"Offending line: {line!r}"
+        )
+        assert "/app/" in line, (
+            "docker_init.bash must stage the editable source under /app/ "
+            "(persistent, same lifecycle as the venv). "
+            f"Offending line: {line!r}"
+        )
+
+
+def test_docker_init_retains_staged_source_after_editable_install():
+    """An editable install records the staged source path in a .pth file.
+    Removing the source tree after install breaks imports at runtime.
+    Ensure no `rm -rf "$_stage_src"` appears after the install line."""
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    stage_idx = src.index("_stage_src=")
+    install_idx = src.index("uv pip install", stage_idx)
+
+    # Everything after the install line
+    post_install = src[install_idx:]
+
+    # Find lines that delete the staged source after install
+    post_install_lines = post_install.splitlines()
+    for i, line in enumerate(post_install_lines):
+        stripped = line.strip()
+        if re.search(r"rm\s+-rf\s+.*\$_stage_src", stripped):
+            if i > 0:  # line 0 is the install line itself
+                assert False, (
+                    "docker_init.bash must NOT delete $_stage_src after an "
+                    "editable install. The .pth link points to the staged "
+                    "source; deleting it breaks imports at runtime. "
+                    f"Offending line: {stripped!r}"
+                )
 

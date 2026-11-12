@@ -344,7 +344,12 @@ console.log(JSON.stringify({
     prefill_pos = BOOT_JS.find(
         "const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;"
     )
-    first_await_pos = BOOT_JS.find("const s=await api('/api/settings');", prefill_pos)
+    first_await_match = re.search(
+        r"const s=await api\('/api/settings'(?:,\{[^)]*\})?\);",
+        BOOT_JS[prefill_pos:],
+    )
+    assert first_await_match, "settings fetch with optional options not found after prefill intent"
+    first_await_pos = prefill_pos + first_await_match.start()
     active_profile_pos = BOOT_JS.find(
         "const activeProfileState = await _resolveActiveProfileBootstrapState();",
         first_await_pos,

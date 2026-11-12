@@ -50,11 +50,11 @@ def test_content_grew_keeps_pin_and_resnaps_not_unpin():
     # did NOT move up and auto-follow is on, keep the pin and re-snap to bottom
     # rather than unpinning. Assert the new guard + re-snap call are present.
     c = _compact(UI_JS)
-    assert _compact("}else if(!movedUp && _autoScrollFollow && _scrollPinned){") in c, (
+    assert _compact("}else if(!movedUp && window._autoScrollFollow && _scrollPinned){") in c, (
         "content-grew-beneath-pinned guard missing from the scroll listener"
     )
     # The guard body must re-snap to bottom, not set _scrollPinned=false.
-    idx = c.find(_compact("else if(!movedUp && _autoScrollFollow && _scrollPinned){"))
+    idx = c.find(_compact("else if(!movedUp && window._autoScrollFollow && _scrollPinned){"))
     assert idx != -1
     # The re-snap call must be the FIRST scroll action after the guard opens,
     # before the chain reaches any `else{ _scrollPinned=false }` fallthrough.

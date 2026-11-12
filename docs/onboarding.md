@@ -71,6 +71,32 @@ entries there before using the isolated command above.
 For managed hosting or fully preconfigured images, set
 `HERMES_WEBUI_SKIP_ONBOARDING=1` to bypass the wizard.
 
+## If the port is already in use
+
+The bootstrap checks the resolved host and port before it installs the agent,
+sets up dependencies, or creates state. When another service already holds
+the port, it stops there and reports the address it could not bind together
+with a free alternative it verified, for example:
+
+```text
+Port 8787 on 127.0.0.1 is already in use by another service. Try an available port instead: ./start.sh 8789 Or set HERMES_WEBUI_PORT=8789 in /path/to/hermes-webui/.env. The existing service was left untouched; no configuration was changed.
+```
+
+Nothing is reconfigured for you: the running service is untouched and `.env`
+is not rewritten. Re-run with the suggested port as the argument
+(`./start.sh 8789`) or put `HERMES_WEBUI_PORT=8789` in `.env`.
+
+A port held by a healthy WebUI is not a conflict: re-running bootstrap (or
+`start.sh` falling back to it without curl/wget) reports the already-running
+instance ready and exits 0. Only a foreground/supervisor launch, which
+would be a second server on the same port, reports the duplicate start.
+
+Only the WebUI's own `/health` payload counts as that running instance: any
+other service, including one answering a generic `{"status": "ok"}`, is
+reported as the conflict above. A bind address that cannot be used at all
+(`--host` naming another machine, for example) stays a hard error, so a
+bootstrap that started nothing never claims to be running.
+
 ## What the wizard checks
 
 The first screen reports the runtime state WebUI can see:
@@ -103,6 +129,11 @@ For local providers, the API key field can be blank when the server is keyless.
 Most LM Studio, Ollama, vLLM, llama-server, and TabbyAPI installs run this way.
 Use **Test connection** to verify the Base URL and populate the model list
 before continuing.
+
+After reload, a saved self-hosted Base URL is shown as **Configured** even when
+the provider has no API key. This label means that an endpoint is saved; it does
+not mean the endpoint is reachable now or that it is the active runtime
+provider. Use **Test connection** to verify reachability.
 
 AIML API uses the existing custom OpenAI-compatible setup path, not a
 first-class built-in Hermes provider id. Configure it under the
@@ -178,7 +209,9 @@ server-side. You can change it later from Settings.
 The wizard uses the same files and APIs as the normal app:
 
 - Active Hermes `config.yaml`: provider, default model, and Base URL when
-  relevant.
+  relevant. A self-hosted provider keeps its saved Base URL independently of
+  the active model; activating a selection updates the existing active
+  provider/default-model/Base-URL tuple.
 - Active Hermes `.env`: provider API keys when you entered one.
 - WebUI `settings.json`: onboarding completion, workspace, password state, and
   other WebUI preferences.

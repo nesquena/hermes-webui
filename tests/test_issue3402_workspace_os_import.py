@@ -81,3 +81,39 @@ console.log(JSON.stringify(cases.map(([a,b]) => b)));
         ".", "docs", "docs/reports", "src/lib/utils",
         "projects", "projects/bundle", "bundle/sub",
     ]
+
+
+def test_os_drop_snapshots_entries_before_async_traversal():
+    node = shutil.which("node")
+    if not node:
+        return
+    js = r"""
+const fs=require('fs'),vm=require('vm');
+const src=fs.readFileSync('static/workspace.js','utf8');
+const block=src.slice(
+  src.indexOf('async function _readAllDirectoryEntries'),
+  src.indexOf('function _clearWorkspaceOsUploadDragOver'));
+const uploaded=[],acquired=[],atTraversal=[];
+const ctx={
+  S:{session:true,currentDir:'.'},_workspacePathIsReadOnly:()=>false,
+  showToast(){},t:x=>x,_targetDirForRelDir:(d,r)=>r||d,
+  uploadToWorkspace:async f=>uploaded.push(f.name),loadDir:async()=>{}};
+vm.createContext(ctx);vm.runInContext(block+';this.collect=_collectOsDropUploads;this.upload=uploadOsDropToWorkspace',ctx);
+let locked=false;
+const fileEntry=name=>({isFile:true,file:resolve=>queueMicrotask(()=>{atTraversal.push(acquired.length);locked=true;resolve({name})})});
+const names=['alpha.txt','beta.txt','gamma.txt'];
+const items=names.map(name=>({kind:'file',webkitGetAsEntry(){acquired.push(name);return locked?null:fileEntry(name)}}));
+(async()=>{
+  await ctx.upload({items,files:[]},'.');
+  let reads=0;const nested={name:'nested',isDirectory:true,createReader:()=>({readEntries:resolve=>queueMicrotask(()=>resolve(reads++?[]:[fileEntry('inside.txt')]))})};
+  const nestedFiles=await ctx.collect({items:[{kind:'file',getAsEntry:()=>nested}],files:[]});
+  const fallback=await ctx.collect({items:[{kind:'file',getAsEntry:()=>null}],files:[{name:'fallback.txt'}]});
+  console.log(JSON.stringify([acquired,atTraversal.slice(0,3),uploaded,nestedFiles.map(x=>[x.file.name,x.relDir]),fallback.map(x=>x.file.name)]));
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+    out = subprocess.check_output([node, "-e", js], text=True).strip()
+    assert json.loads(out) == [
+        ["alpha.txt", "beta.txt", "gamma.txt"], [3, 3, 3],
+        ["alpha.txt", "beta.txt", "gamma.txt"],
+        [["inside.txt", "nested/"]], ["fallback.txt"],
+    ]

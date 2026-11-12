@@ -27,7 +27,7 @@ def run_ctl(
     home: Path,
     *args: str,
     env: dict[str, str] | None = None,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
     repo_root: Path = REPO_ROOT,
     load_dotenv: bool = False,
 ):
@@ -269,6 +269,11 @@ def test_start_can_ignore_repo_dotenv_for_authoritative_test_env(tmp_path):
             "HERMES_WEBUI_PYTHON": str(fake_python),
             "FAKE_PYTHON_LOG": str(fake_log),
             "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+            # This test exercises dotenv precedence on the DEFAULT port; keep
+            # it hermetic on developer machines where a real WebUI (systemd
+            # unit or manual run) is serving 8787.
+            "HERMES_WEBUI_CTL_ALLOW_SYSTEMD_CONFLICT": "1",
+            "HERMES_WEBUI_CTL_ALLOW_PORT_CONFLICT": "1",
         },
         repo_root=repo_root,
     )

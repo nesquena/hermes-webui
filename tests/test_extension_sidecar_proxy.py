@@ -135,6 +135,8 @@ def test_extension_sidecar_proxy_requires_consent_and_reconfirms_after_origin_ch
         "origin": "http://127.0.0.1:17787",
         "proxy_path": "/api/extensions/templates/sidecar/",
         "upstream_url": "http://127.0.0.1:17787/v1/ping?debug=1",
+        "proxy_auth": "legacy",
+        "auth_token": None,
     }
 
     encoded_target = resolve_extension_sidecar_proxy_target("templates", "v1%2Fprivate")
@@ -963,3 +965,285 @@ def test_extension_sidecar_proxy_consent_route_is_wired(monkeypatch):
         "status": 200,
         "data": {"ok": True, "id": "templates", "approved": True},
     }
+
+
+def test_extension_sidecar_proxy_consent_route_fails_closed_auth_off(tmp_path, monkeypatch):
+    # Frank #6331 blocker 1 (route-level regression): with WebUI auth OFF, driving
+    # the REAL consent function through the HTTP route for a token-v1 sidecar must
+    # return 403 (fail closed), not persist consent. Uses the real
+    # set_extension_sidecar_proxy_consent (NOT a mock) so the route + auth gate are
+    # exercised end-to-end.
+    from api import routes
+
+    monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+    from api.auth import _invalidate_password_hash_cache, is_auth_enabled
+    _invalidate_password_hash_cache()
+    assert is_auth_enabled() is False
+    _token_v1_manifest(monkeypatch, tmp_path, origin="http://127.0.0.1:17787")
+
+    captured = {}
+
+    def fake_bad(handler, msg, status=400):
+        captured["status"] = status
+        captured["msg"] = msg
+        return True
+
+    def fake_j(handler, data, status=200, headers=None):
+        captured["status"] = status
+        captured["data"] = data
+        return True
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {"id": "templates", "approved": True})
+    monkeypatch.setattr(routes, "j", fake_j)
+    monkeypatch.setattr(routes, "bad", fake_bad)
+    handler = FakeHandler()
+
+    assert routes.handle_post(
+        handler,
+        SimpleNamespace(path="/api/extensions/sidecar-proxy-consent"),
+    ) is True
+    # Must be a fail-closed 403 from the real consent function, not a 200 grant.
+    assert captured.get("status") == 403
+    assert "data" not in captured
+    # And no consent must have been persisted.
+    from api.extensions import resolve_extension_sidecar_proxy_target, ExtensionSidecarProxyError
+    with pytest.raises(ExtensionSidecarProxyError) as exc:
+        resolve_extension_sidecar_proxy_target("templates", "v1/ping")
+    assert exc.value.status == 403
+
+
+# ── token-v1 proxy auth (§9.1/§9.2) ─────────────────────────────────────────
+
+def _token_v1_manifest(monkeypatch, tmp_path, origin="http://127.0.0.1:17787"):
+    return _configure_manifest_extension(
+        monkeypatch,
+        tmp_path,
+        {
+            "extensions": [
+                {
+                    "id": "templates",
+                    "sidecar": {
+                        "type": "loopback",
+                        "origin": origin,
+                        "proxy_auth": "token-v1",
+                    },
+                }
+            ]
+        },
+    )
+
+
+def test_token_v1_injects_persisted_token_when_auth_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "pw")
+    from api.auth import _invalidate_password_hash_cache
+    _invalidate_password_hash_cache()
+    _token_v1_manifest(monkeypatch, tmp_path)
+    from api.extensions import (
+        resolve_extension_sidecar_proxy_target,
+        set_extension_sidecar_proxy_consent,
+    )
+    import api.extension_sidecar_auth as sc
+
+    set_extension_sidecar_proxy_consent("templates", True)
+    target = resolve_extension_sidecar_proxy_target("templates", "v1/ping")
+    assert target["proxy_auth"] == "token-v1"
+    assert target["auth_token"] and len(target["auth_token"]) > 30
+    assert target["auth_token"] == sc.current_token("templates")
+
+
+def test_token_v1_auth_off_blocks_consent_and_resolution_fail_closed(tmp_path, monkeypatch):
+    # Frank #6331 blocker 1: with WebUI auth OFF, token-v1 must fail closed at BOTH
+    # the consent grant and the resolution path — regardless of a loopback origin.
+    # A loopback sidecar is NOT a sufficient guard: any caller that can reach the
+    # (unauthenticated) WebUI listener could otherwise self-grant consent and drive
+    # the token-bearing proxy (a forwarding oracle); another local UID can reach the
+    # listener without ever reading the 0600 token file.
+    monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+    from api.auth import _invalidate_password_hash_cache, is_auth_enabled
+    _invalidate_password_hash_cache()
+    assert is_auth_enabled() is False
+    _token_v1_manifest(monkeypatch, tmp_path, origin="http://127.0.0.1:17787")
+    from api.extensions import (
+        ExtensionSidecarProxyError,
+        set_extension_sidecar_proxy_consent,
+    )
+
+    # Consent grant is rejected fail-closed (403) even for a loopback origin.
+    with pytest.raises(ExtensionSidecarProxyError) as consent_exc:
+        set_extension_sidecar_proxy_consent("templates", True)
+    assert consent_exc.value.status == 403
+
+
+def test_token_v1_resolution_fails_closed_when_auth_disabled_after_consent(tmp_path, monkeypatch):
+    # Defense in depth: even if a consent record somehow exists (e.g. granted while
+    # auth was enabled, then auth turned off), the resolution path must ALSO fail
+    # closed so a stale consent can't be exercised without WebUI auth.
+    monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "pw")
+    from api.auth import _invalidate_password_hash_cache, is_auth_enabled
+    _invalidate_password_hash_cache()
+    _token_v1_manifest(monkeypatch, tmp_path, origin="http://127.0.0.1:17787")
+    from api.extensions import (
+        ExtensionSidecarProxyError,
+        resolve_extension_sidecar_proxy_target,
+        set_extension_sidecar_proxy_consent,
+    )
+
+    # Grant consent WHILE auth is enabled (allowed).
+    assert is_auth_enabled() is True
+    set_extension_sidecar_proxy_consent("templates", True)
+    # Now disable auth and confirm resolution refuses the pre-existing consent.
+    monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+    _invalidate_password_hash_cache()
+    assert is_auth_enabled() is False
+    with pytest.raises(ExtensionSidecarProxyError) as exc:
+        resolve_extension_sidecar_proxy_target("templates", "v1/ping")
+    assert exc.value.status == 403
+
+
+def test_unknown_proxy_auth_value_rejects_sidecar(tmp_path, monkeypatch):
+    _configure_manifest_extension(
+        monkeypatch,
+        tmp_path,
+        {
+            "extensions": [
+                {
+                    "id": "templates",
+                    "sidecar": {
+                        "type": "loopback",
+                        "origin": "http://127.0.0.1:17787",
+                        "proxy_auth": "totally-bogus",
+                    },
+                }
+            ]
+        },
+    )
+    from api.extensions import (
+        ExtensionSidecarProxyError,
+        set_extension_sidecar_proxy_consent,
+    )
+
+    # Unknown proxy_auth -> _sidecar_from_manifest_entry rejects the record, so the
+    # sidecar never becomes available/consentable (fail closed, not silent-open).
+    # The rejection surfaces at consent time (the earliest resolve path).
+    with pytest.raises(ExtensionSidecarProxyError):
+        set_extension_sidecar_proxy_consent("templates", True)
+
+
+def test_status_payload_flags_local_unprotected_when_auth_off(tmp_path, monkeypatch):
+    _token_v1_manifest(monkeypatch, tmp_path)
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    sidecars = status.get("sidecars") or []
+    tmpl = next((s for s in sidecars if s.get("id") == "templates"), None)
+    assert tmpl is not None
+    proxy = tmpl["proxy"]
+    assert proxy["proxy_auth"] == "token-v1"
+    assert proxy["posture"] == "local_unprotected"  # auth off -> panel warns pre-consent
+
+
+def test_inbound_x_hermes_header_is_stripped(monkeypatch):
+    from api.routes import _extension_sidecar_proxy_request_headers
+
+    class H:
+        headers = {
+            "X-Hermes-Sidecar-Token": "forged",
+            "X-Custom": "ok",
+            "Cookie": "secret",
+        }
+
+    out = _extension_sidecar_proxy_request_headers(H())
+    assert "X-Custom" in out
+    assert not any(k.lower().startswith("x-hermes-") for k in out)
+    assert not any(k.lower() == "cookie" for k in out)
+
+
+def test_token_module_persists_and_rotates(tmp_path, monkeypatch):
+    import api.extension_sidecar_auth as sc
+
+    # Patch the dynamic dir resolver (mirrors how _extension_state_dir is patched
+    # elsewhere) so the token lands in an isolated tmp dir, not the shared session
+    # state dir.
+    token_dir = tmp_path / "sidecar-auth"
+    monkeypatch.setattr(sc, "_token_dir", lambda: token_dir)
+    sc._CACHE.clear()
+    tok = sc.ensure_token("templates")
+    assert tok and sc.current_token("templates") == tok
+    assert (token_dir / "templates.token").exists()
+    assert sc.current_token("never") is None            # fail closed
+    assert sc.ensure_token("../evil") is None            # path-escape rejected
+    # IDs are filename components. Reject rather than silently trim whitespace so
+    # validation and _token_path() always operate on the exact same string.
+    for invalid_id in ("templates\n", " templates", "templates "):
+        assert sc.ensure_token(invalid_id) is None
+        assert not (token_dir / f"{invalid_id}.token").exists()
+    # canonical (wider) id grammar is honored: uppercase/dot ids work
+    assert sc.ensure_token("RSS.Feeds") is not None
+    new = sc.reset_token("templates")
+    assert new and new != tok and sc.current_token("templates") == new
+    sc._CACHE.clear()
+
+
+def test_token_v1_route_injects_token_and_strips_response(monkeypatch):
+    # The 5 most load-bearing lines: the injected token must reach the upstream
+    # Request, and any x-hermes-* on the response must be stripped before it
+    # reaches the browser. (Fable coreA item 3.)
+    from api import routes
+
+    captured = {}
+
+    class FakeResponse:
+        def __init__(self):
+            self.status = 200
+            self.headers = {
+                "Content-Type": "application/json",
+                "X-Hermes-Echo": "leak-me",  # must be stripped from client response
+            }
+
+        def read(self, *_a):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeOpener:
+        def open(self, request, timeout=10):
+            captured["headers"] = {k.lower(): v for k, v in request.header_items()}
+            return FakeResponse()
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        "api.extensions.resolve_extension_sidecar_proxy_target",
+        lambda extension_id, proxy_path, query="": {
+            "extension_id": extension_id,
+            "origin": "http://127.0.0.1:17787",
+            "proxy_path": "/api/extensions/templates/sidecar/",
+            "upstream_url": "http://127.0.0.1:17787/v1/ping",
+            "proxy_auth": "token-v1",
+            "auth_token": "injected-token-abc",
+        },
+    )
+    monkeypatch.setattr(
+        routes, "_extension_sidecar_proxy_same_origin_opener", lambda o: FakeOpener()
+    )
+
+    handler = FakeHandler()
+    handler.headers = {
+        "Accept": "application/json",
+        "Host": "webui.local",
+        "Origin": "http://webui.local",
+        "Referer": "http://webui.local/",
+    }
+    result = routes.handle_get(
+        handler,
+        SimpleNamespace(path="/api/extensions/templates/sidecar/v1/ping", query=""),
+    )
+    assert result is True
+    # token injected on the way to the sidecar
+    assert captured["headers"].get("x-hermes-sidecar-token") == "injected-token-abc"
+    # token/x-hermes header stripped on the way back to the browser
+    assert handler.header("X-Hermes-Echo") is None

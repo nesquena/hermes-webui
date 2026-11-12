@@ -214,6 +214,62 @@ def test_image_is_not_gzipped(isolated_static):
     assert h.header("Content-Type") == "image/png"
 
 
+def test_standard_binary_extension_uses_system_mime_type(isolated_static):
+    """Known binary formats outside the hand-written map keep their real MIME."""
+    from api import routes
+
+    payload = b"%PDF-1.7\n" + b"\x00" * 128
+    _make_static_file(isolated_static, "manual.pdf", payload)
+
+    h = _serve(routes, "/static/manual.pdf")
+    assert h.status == 200
+    assert h.header("Content-Type") == "application/pdf"
+    assert bytes(h.body) == payload
+
+
+def test_apk_is_served_as_android_package_when_platform_database_lacks_it(
+    isolated_static, monkeypatch
+):
+    """Android package MIME must not depend on the host's MIME database."""
+    from api import routes
+
+    monkeypatch.setattr(routes.mimetypes, "guess_type", lambda _name: (None, None))
+    payload = b"PK\x03\x04" + b"\x00" * 128
+    _make_static_file(isolated_static, "hermes-webui.apk", payload)
+
+    h = _serve(routes, "/static/hermes-webui.apk")
+    assert h.status == 200
+    assert h.header("Content-Type") == "application/vnd.android.package-archive"
+    assert bytes(h.body) == payload
+
+
+def test_unknown_static_extension_falls_back_to_octet_stream(isolated_static):
+    """Unknown files fail closed as downloads instead of being exposed as text."""
+    from api import routes
+
+    payload = b"\x00\xff\x10binary"
+    _make_static_file(isolated_static, "artifact.hermes-unknown", payload)
+
+    h = _serve(routes, "/static/artifact.hermes-unknown")
+    assert h.status == 200
+    assert h.header("Content-Type") == "application/octet-stream"
+    assert bytes(h.body) == payload
+
+
+def test_encoded_static_suffix_falls_back_to_octet_stream(isolated_static):
+    """Do not advertise decoded media types without Content-Encoding support."""
+    from api import routes
+
+    payload = b"\x1f\x8b" + b"compressed-svg"
+    _make_static_file(isolated_static, "diagram.svgz", payload)
+
+    h = _serve(routes, "/static/diagram.svgz")
+    assert h.status == 200
+    assert h.header("Content-Type") == "application/octet-stream"
+    assert h.header("Content-Encoding") is None
+    assert bytes(h.body) == payload
+
+
 def test_tiny_file_is_not_gzipped(isolated_static):
     """Files under 1 KB skip gzip — framing overhead exceeds savings."""
     from api import routes

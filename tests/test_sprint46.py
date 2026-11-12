@@ -155,6 +155,7 @@ def test_session_compress_stale_runtime_returns_typed_409_before_mutation(
         "error": "restart required",
         "type": "agent_runtime_stale",
         "retryable": True,
+        "restart_scheduled": False,
     }
     loaded_after = Session.load(sid)
     assert loaded_after is not None
@@ -187,6 +188,7 @@ def test_session_compress_start_stale_runtime_returns_409_before_job_creation(
         "error": "restart required",
         "type": "agent_runtime_stale",
         "retryable": True,
+        "restart_scheduled": False,
     }
     with routes._MANUAL_COMPRESSION_JOBS_LOCK:
         assert sid not in routes._MANUAL_COMPRESSION_JOBS
@@ -688,7 +690,6 @@ def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, 
         }
 
     routes._run_manual_compression_job(sid, {"session_id": sid})
-
     assert EnvAssertingAgent.seen_env == {
         "HERMES_HOME": str(profile_home),
         "HERMES_TEST_PROFILE_ENV": "work-runtime",
@@ -697,8 +698,8 @@ def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, 
         "SKILL_MODULE_HOME": profile_home,
         "SKILL_MODULE_DIR": profile_home / "skills",
     }
-    assert str(getattr(fake_skill_module, "HERMES_HOME")) == "default-home"
-    assert str(getattr(fake_skill_module, "SKILLS_DIR")) == "default-home/skills"
+    assert str(fake_skill_module.HERMES_HOME) == "default-home"
+    assert str(fake_skill_module.SKILLS_DIR) == "default-home/skills"
     assert os.environ.get("HERMES_HOME") == "default-home"
     assert os.environ.get("HERMES_TEST_PROFILE_ENV") is None
     with routes._MANUAL_COMPRESSION_JOBS_LOCK:

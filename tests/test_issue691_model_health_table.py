@@ -52,7 +52,7 @@ def test_no_runtime_quality_or_hallucination_fetch_added():
     assert "quality" not in load.lower()
     assert "hallucination" not in load.lower()
     assert "/api/model" not in load
-    assert "api(`/api/insights?days=${period}`)" in load
+    assert "api(`/api/insights?${qs.toString()}`)" in load
 
 
 def test_model_health_i18n_keys_exist_in_locale_blocks():

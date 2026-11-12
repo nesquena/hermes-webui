@@ -5,12 +5,16 @@ from api.streaming import _compact_for_echo_compare
 
 def test_streaming_initializes_one_run_journal_writer_per_stream():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
+    worker_idx = src.index("def _run_agent_streaming(")
+    cancel_idx = src.index("cancel_event = threading.Event()", worker_idx)
     register_idx = src.index("register_active_run(")
     writer_idx = src.index("RunJournalWriter(session_id, stream_id)", register_idx)
-    cancel_idx = src.index("cancel_event = threading.Event()", writer_idx)
 
     assert "from api.run_journal import RunJournalWriter" in src
-    assert register_idx < writer_idx < cancel_idx
+    assert src.count("RunJournalWriter(session_id, stream_id)") == 1
+    # The cancellation signal must exist before the run becomes visible, not
+    # be recreated after journal setup (which may overlap an accepted Stop).
+    assert cancel_idx < register_idx < writer_idx
 
 
 def test_streaming_journals_sse_events_before_queue_delivery():
@@ -22,7 +26,21 @@ def test_streaming_journals_sse_events_before_queue_delivery():
 
     assert put_idx < journal_idx < queue_idx
     assert "Failed to append run journal event" in block
-    assert "queue_item = (event, data, event_id) if event_id and hasattr(q, \"subscribe_with_snapshot\") else (event, data)" in block
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in block
+
+
+
+def test_streaming_compacts_all_successful_agent_result_writebacks():
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    run_src = src[src.index("def _run_agent_streaming("):]
+    settle_src = src[src.index("def _settle_result_messages("):]
+    settle_src = settle_src[: settle_src.index("\n\ndef _current_turn_already_has_visible_assistant_answer(")]
+
+    # Normal completion plus both credential self-heal retry-success paths now
+    # route through one shared settlement helper, which owns the compaction.
+    assert "def _settle_result_messages(" in src
+    assert "_compact_session_image_parts_for_persistence(session)" in settle_src
+    assert run_src.count("_settle_result_messages(") == 3
 
 
 def test_visible_process_echo_compare_ignores_all_whitespace():

@@ -246,7 +246,7 @@ def test_messages_js_handles_offline_warning_without_touching_unsupported_branch
     assert "Gateway offline" in MESSAGES_JS
     assert "d.type==='approval_gateway_unsupported'" in MESSAGES_JS
     assert "Approvals not supported" in MESSAGES_JS
-    assert "setComposerStatus(`${d.message||'Warning'}`);" in MESSAGES_JS
+    assert "setComposerStatus(`${d.message||'Warning'}`,d.type==='fallback'?4000:undefined);" in MESSAGES_JS
 
 
 def test_gateway_chat_source_mentions_offline_warning_type():

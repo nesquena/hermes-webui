@@ -173,6 +173,10 @@ def test_cleared_title_allows_initial_auto_generation(monkeypatch):
         "profile_env_for_background_worker",
         lambda *_args, **_kwargs: contextlib.nullcontext(),
     )
+    monkeypatch.setattr(
+        "api.state_sync.sync_session_title",
+        lambda *_args, **_kwargs: None,
+    )
 
     streaming._run_background_title_update(
         session.session_id,

@@ -37,6 +37,7 @@ final-check.png
 
 # Version file written by Docker/CI build — generated, never committed
 api/_version.py
+api/_scm_version.py
 
 # OS files
 .DS_Store
@@ -76,3 +77,10 @@ graphify-out/
 node_modules/
 package-lock.json
 docs/ui-ux/review-shots/
+
+# Python build metadata (never commit generated egg-info)
+*.egg-info/
+
+# Local WebUI runtime data and credentials
+.webui_password
+attachments/

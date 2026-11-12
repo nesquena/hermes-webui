@@ -798,6 +798,34 @@ process.stdout.write(JSON.stringify({
     assert data["omittedEventAt"] is None
 
 
+def test_transparent_event_timestamp_toggle_hides_chip_but_preserves_event_anchor():
+    data = _run_node(
+        """
+window._transparentEventTimestamps = false;
+const row = makeToolRow(null, false);
+const header = row.querySelector('.tool-card-header');
+_syncTransparentEventTimestamp(row, header, { ts: 1700000910 });
+const footer = document.createElement('span');
+footer.className = 'msg-time';
+footer.textContent = '10:15 PM';
+row.appendChild(footer);
+process.stdout.write(JSON.stringify({
+  count: header.querySelectorAll('.transparent-event-time').length,
+  eventAt: row.getAttribute('data-event-at'),
+  source: row.getAttribute('data-event-at-source'),
+  footerCount: row.querySelectorAll('.msg-time').length,
+  footerText: footer.textContent,
+}));
+"""
+    )
+
+    assert data["count"] == 0
+    assert data["eventAt"] == "1700000910"
+    assert data["source"] == "event"
+    assert data["footerCount"] == 1
+    assert data["footerText"] == "10:15 PM"
+
+
 def test_ordered_tool_use_row_prefers_later_valid_timestamp_field():
     data = _run_node(
         """

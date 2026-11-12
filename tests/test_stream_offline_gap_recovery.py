@@ -377,14 +377,17 @@ def test_cursor_past_buffer_head_does_not_double_render_queued_frames(monkeypatc
     assert stream.unsubscribed is True
 
 
-def test_bogus_cursor_is_clamped_so_terminal_frame_survives(monkeypatch):
-    """The client-cursor dedup bound is clamped at the snapshot cutoff.
+def test_ahead_of_stream_cursor_does_not_filter_terminal_frame(monkeypatch):
+    """An ahead-of-stream cursor (after_seq past the snapshot cutoff) is NOT
+    clamped onto the snapshot's terminal fence.
 
-    A legitimate cursor can never exceed the channel's last known frame; an
-    out-of-range one (corrupt client state) must not raise the dedup cutoff
-    past the queued terminal frame — the drain loop's `seq <=` skip runs
-    BEFORE its terminal break, so a filtered stream_end would pin the loop on
-    heartbeats until the write deadline."""
+    The old clamp (``min(cursor, snapshot_cutoff)``) set the dedup bound to the
+    terminal frame's own seq, so the drain loop's ``seq <=`` filter — which runs
+    BEFORE its terminal break — swallowed the queued terminal frame and pinned
+    the loop on heartbeats until the write deadline (Codex CORE #2 terminal
+    filter). Ahead-of-stream means the client already believes it holds
+    everything the buffer has; nothing must be filtered and the terminal frame
+    must survive."""
     from urllib.parse import parse_qs
 
     monkeypatch.setattr(routes, "find_run_summary", lambda _sid: None)
@@ -401,6 +404,8 @@ def test_bogus_cursor_is_clamped_so_terminal_frame_survives(monkeypatch):
         },
     )
     assert handled is False
-    # Clamped to the cutoff (105): the queued stream_end (seq 106) passes the
-    # drain loop's dedup filter and terminates the connection.
-    assert cutoff == 105
+    # Not clamped to 105: the cutoff stays None (journal replay found nothing,
+    # and an ahead-of-stream cursor contributes no dedup bound), so the queued
+    # terminal frame (seq 106) passes the drain loop's filter and terminates
+    # the connection instead of being filtered onto the fence.
+    assert cutoff is None

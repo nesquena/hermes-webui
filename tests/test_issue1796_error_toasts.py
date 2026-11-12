@@ -8,7 +8,7 @@ STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 def test_error_toast_default_duration_is_substantially_longer_than_info_toasts():
     assert "const TOAST_DEFAULT_MS=2800" in UI_JS
     assert "const TOAST_ERROR_DEFAULT_MS=20000" in UI_JS
-    assert "const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms" in UI_JS
+    assert "const duration=(ms==null||!(Number(ms)>0))?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms" in UI_JS
     assert "ms||2800" not in UI_JS
 
 
