@@ -437,6 +437,40 @@ def gateway_session_chat_read_only_reason(session: dict, config_data=None) -> st
     return f"Read-only in WebUI. Continue in {client}."
 
 
+GATEWAY_MODE_UNSUPPORTED = "gateway_mode_unsupported"
+
+
+def refuse_on_gateway_backend(handler, route: str, config_data=None) -> bool:
+    """Refuse a feature that still runs the agent in the WebUI process.
+
+    ``/btw``, ``/background``, ``/compress``, the synchronous ``/api/chat`` and
+    the one-shot model calls (update summaries, commit messages) have no gateway
+    transport yet: they build an in-process agent. In gateway mode that either
+    fails with a provider-credential error (the WebUI is often deployed without
+    a model key) or silently runs a turn outside the gateway. Refuse explicitly,
+    with the same status and phrasing as the MoA refusal, until each feature is
+    routed through the gateway.
+
+    Sends the 409 and returns True when the backend is the gateway, else returns
+    False without touching the response. Callers use it before any state
+    mutation: ``if refuse_on_gateway_backend(handler, "/btw", cfg): return``.
+    """
+    if not webui_gateway_chat_enabled(config_data):
+        return False
+    from api.helpers import j
+
+    j(
+        handler,
+        {
+            "error": f"{route} is unavailable on gateway-backed sessions",
+            "code": GATEWAY_MODE_UNSUPPORTED,
+            "feature": route,
+        },
+        status=409,
+    )
+    return True
+
+
 def _gateway_base_url(config_data=None, environ: dict[str, str] | None = None) -> str:
     source = os.environ if environ is None else environ
     cfg = config_data if isinstance(config_data, dict) else {}

@@ -9,7 +9,11 @@ from collections import OrderedDict
 from pathlib import Path
 
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
-from api.models import _active_state_db_path, _active_stream_ids
+from api.models import (
+    ALL_PROFILES_ROSTER_INCOMPLETE,
+    _active_state_db_path,
+    _active_stream_ids,
+)
 from api.profiles import _profiles_match
 
 
@@ -33,6 +37,12 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # still invalidate immediately. Keep this strictly greater than
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
+# Statuses `_session_list_cache_probe` reports, so the consumer reads the stale
+# reason from the same stamp read that classified the entry.
+_SESSION_LIST_CACHE_MISSING = "missing"
+_SESSION_LIST_CACHE_FRESH = "fresh"
+_SESSION_LIST_CACHE_STALE_SOURCE = "source"
+_SESSION_LIST_CACHE_STALE_AGE = "age"
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -374,56 +384,68 @@ def _session_list_cache_key(
     )
 
 
-def _session_list_cache_get(
+# Appended to an all-profiles state stamp built from a PARTIAL roster: the same
+# marker ``_all_profiles_cli_contexts`` puts in its cache key, so a stamp from a
+# roster that skipped a profile never equals one from the complete roster. Not a
+# 3-tuple, so it can never be read as a profile's (stat, wal-stat, fingerprint)
+# entry. (#8694)
+_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE = ALL_PROFILES_ROSTER_INCOMPLETE
+
+
+def _session_list_cache_probe(
     key: tuple,
     allow_stale: bool = False,
-) -> tuple[dict | None, bool]:
+) -> tuple[dict | None, str]:
+    """Look the entry up and report WHY its payload is (not) directly usable.
+
+    Statuses:
+      ``missing`` — nothing cached (or the entry was dropped as unusable)
+      ``fresh``   — usable as-is, no rebuild needed
+      ``source``  — the source stamp moved: rebuild now
+      ``age``     — stale by TTL only
+    """
     now = time.monotonic()
     current_stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
-            return None, False
+            return None, _SESSION_LIST_CACHE_MISSING
         ts, stamp, payload = entry
         if stamp != current_stamp:
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
-                return _session_list_cache_copy_payload(payload), False
+                return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_SOURCE
             _SESSIONS_CACHE.pop(key, None)
-            return None, False
+            return None, _SESSION_LIST_CACHE_MISSING
         # #4808: widen the freshness window while a turn is streaming so the fixed
         # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
             ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        fresh = (now - ts) < ttl
-        if fresh:
+        if (now - ts) < ttl:
             _SESSIONS_CACHE.move_to_end(key)
-            return _session_list_cache_copy_payload(payload), True
+            return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_FRESH
         if allow_stale:
             _SESSIONS_CACHE.move_to_end(key)
-            return _session_list_cache_copy_payload(payload), False
+            return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_AGE
         _SESSIONS_CACHE.pop(key, None)
-        return None, False
+        return None, _SESSION_LIST_CACHE_MISSING
+
+
+def _session_list_cache_get(
+    key: tuple,
+    allow_stale: bool = False,
+) -> tuple[dict | None, bool]:
+    payload, status = _session_list_cache_probe(key, allow_stale=allow_stale)
+    return payload, status == _SESSION_LIST_CACHE_FRESH
 
 
 def _session_list_cache_stale_reason(key: tuple) -> str | None:
-    """Return why an existing cache entry is stale, if it is stale."""
-    now = time.monotonic()
-    current_stamp = _session_list_cache_resolved_source_stamp(key)
-    with _SESSIONS_CACHE_LOCK:
-        entry = _SESSIONS_CACHE.get(key)
-        if not entry:
-            return None
-        ts, stamp, _payload = entry
-        if stamp != current_stamp:
-            return "source"
-        ttl = _SESSIONS_CACHE_TTL_SECONDS
-        if _session_list_cache_streaming_freeze_marker() is not None:
-            ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        if (now - ts) >= ttl:
-            return "age"
+    """Return why an existing cache entry is stale, if a rebuild is warranted."""
+    payload, status = _session_list_cache_probe(key, allow_stale=True)
+    if payload is None or status == _SESSION_LIST_CACHE_FRESH:
         return None
+    return status
 
 
 def _session_list_cache_set(
@@ -431,10 +453,27 @@ def _session_list_cache_set(
     payload: dict,
     *,
     expected_invalidation_stamp: tuple[int, int] | None = None,
+    source_stamp=None,
 ) -> bool:
+    """Store a built payload under the source stamp it was certified against.
+
+    ``source_stamp`` is the stamp the CALLER read *before* it invoked the
+    builder. Storing the stamp read here instead — after the builder returned —
+    certifies the payload with evidence the builder never saw: a commit that
+    lands between the builder's row read and this insertion is folded into the
+    stored stamp, so the pair "old payload, new stamp" is then served as FRESH
+    for a full TTL, and the reconciliation contract is violated even after the
+    source moves again. Callers that build pass the pre-build stamp; callers
+    that already hold a consistent snapshot (tests, direct seed) may omit it, in
+    which case the current stamp is used. (#8694)
+    """
     if not isinstance(payload, dict):
         return False
-    stamp = _session_list_cache_resolved_source_stamp(key)
+    stamp = (
+        _session_list_cache_resolved_source_stamp(key)
+        if source_stamp is None
+        else source_stamp
+    )
     bounded = _session_list_cache_bounded_payload(payload)
     with _SESSIONS_CACHE_LOCK:
         # Projection intentionally happens outside the lock so large source rows
@@ -620,8 +659,8 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
     all_profiles_state_stamp = None
     if _cache_all_profiles:
         try:
-            from api.models import _all_profiles_cli_contexts
-            contexts, _ = _all_profiles_cli_contexts()
+            from api.models import _all_profiles_cli_contexts, all_profiles_roster_incomplete
+            contexts, roster_key = _all_profiles_cli_contexts()
             all_profiles_state_stamp = tuple(
                 (
                     _session_list_cache_path_stamp(ctx_db),
@@ -630,6 +669,11 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
                 )
                 for _home, ctx_db, _prof in contexts
             )
+            if all_profiles_roster_incomplete(roster_key):
+                # A profile the roster could not see can commit without moving
+                # any entry above. Carry the marker so a partial roster's stamp
+                # never equals the complete roster's. (#8694)
+                all_profiles_state_stamp = all_profiles_state_stamp + (_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE,)
         except Exception:
             all_profiles_state_stamp = None
 
