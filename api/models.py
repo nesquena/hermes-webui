@@ -311,6 +311,28 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
     return total, own
 
 
+def _sidecar_change_marker(session_id):
+    """Write generation and stat signature of ``session_id``'s sidecar, taken before a read."""
+    sid = str(session_id or '')
+    return _sidecar_write_generation(sid), _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
+
+
+def _sidecar_unchanged_since(session_id, marker) -> bool:
+    """True if no other writer replaced the sidecar since ``marker`` (#9017).
+
+    In-process writers bump the write generation around every replace. The
+    stat signature covers writers outside this process; it's only comparable
+    when this thread hasn't written the file since (a load's own self-heal).
+    """
+    (total_before, own_before), sig_before = marker
+    total, own = _sidecar_write_generation(session_id)
+    if total - total_before != own - own_before:
+        return False
+    if own != own_before:
+        return True
+    return sig_before is not None and _sidecar_stat_signature(SESSION_DIR / f'{session_id}.json') == sig_before
+
+
 def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
     _note_sidecar_write(session_id)
     try:
@@ -2583,7 +2605,8 @@ class Session:
         # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
-        _pre_read_sig = _sidecar_stat_signature(p)
+        _read_marker = _sidecar_change_marker(sid)
+        _pre_read_sig = _read_marker[1]
         data = json.loads(p.read_text(encoding='utf-8'))
         # #8830: exp-v0.52.621..630 left a shared legacy sidecar's share fields
         # after ``messages``, where the metadata prefix reader never sees them.
@@ -2621,13 +2644,27 @@ class Session:
                 sid, data.get('session_id'),
             )
         elif _collapsed_partials:
-            try:
-                # Self-heal bloated sessions on first full load without touching
-                # recency/index ordering; save() creates a .bak because this
-                # intentionally shrinks the transcript (#2592).
-                session.save(touch_updated_at=False, skip_index=True)
-            except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+            # #9017: a read (another profile's sidebar poll, a cleanup's reload)
+            # must not save an older copy over a newer turn. Persist the collapse
+            # only under the session lock and only if nobody wrote since this
+            # read; a caller already holding the lock saves it with its own save.
+            # Otherwise it stays in memory and a later save persists it.
+            _lock = _get_session_agent_lock(sid)
+            if _lock.acquire(blocking=False):
+                try:
+                    # save() takes this reentrant lock anyway; taking it before
+                    # the check keeps a save made without the session lock from
+                    # landing between the check and this save.
+                    with _session_persist_lock(sid):
+                        if _sidecar_unchanged_since(sid, _read_marker):
+                            # Self-heal bloated sessions without touching recency/index
+                            # ordering; save() creates a .bak because this
+                            # intentionally shrinks the transcript (#2592).
+                            session.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+                finally:
+                    _lock.release()
         else:
             # #5854: for a LEGACY sidecar (no modern anchor_scene_index key), the
             # cheap metadata-prefix read cannot recover message_count/scenes when
@@ -2637,8 +2674,8 @@ class Session:
             # Keyed by stat signature, so any edit invalidates it; the next
             # save() rewrites the modern layout and the fallback stops firing.
             # expected_sig guards against an atomic replace during the read.
-            # (When _collapsed_partials fired, save() above already rewrote the
-            # modern layout, so no legacy caching is needed.)
+            # (When _collapsed_partials fired, the file is rewritten by the save
+            # above or by a later one, so no legacy caching is needed.)
             #
             # WHY STILL GATED, and not "obviously" broadened to modern files: the
             # cache is only READ from the two sites that reach it when the cheap

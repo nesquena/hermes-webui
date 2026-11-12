@@ -204,6 +204,10 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
         cli_meta = dict(cli_meta or {})
         if not session or cli_meta.get("read_only") or not _looks_like_default_cli_title(cli_meta):
             return
+        if getattr(session, "_sidecar_names_other_session", None):
+            # #8852: the thread below reloads the session the object's id
+            # names; the id came from a file whose body names another session.
+            return
         sid = str(getattr(session, "session_id", "") or "")
         if not sid:
             return
@@ -4373,9 +4377,15 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
                              # patch the caller's in-memory copy after a
                              # successful clear, avoiding one ghost SSE
                              # reconnect on the very next /api/session GET.
+    reload_marker = None
     if getattr(session, "_loaded_metadata_only", False):
         try:
+            from api.models import _sidecar_change_marker
             from api.models import get_session as _get_session
+            # #9017: the reload stays outside the lock so its own self-heals
+            # (the state.db sync, the pending repair) can take it; the marker
+            # lets the locked section below see a writer that saved meanwhile.
+            reload_marker = _sidecar_change_marker(session.session_id)
             session = _get_session(session.session_id, metadata_only=False)
         except Exception:
             # If we cannot upgrade to a full load (file gone, decode error,
@@ -4415,9 +4425,22 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
+    persist_lock = _session_persist_lock(original_stub.session_id)
     if not session_lock.acquire(blocking=wait_for_writer):
         return False
+    # #9017: hold the persist lock from the changed-since check through the
+    # save. A save made without the session lock (journal recovery on another
+    # thread's cache hit) takes only the persist lock, so it can't land between
+    # the check and this save. Order: session -> persist, as save() nests it.
+    persist_lock.acquire()
     try:
+        if reload_marker is not None:
+            from api.models import _sidecar_unchanged_since
+            if not _sidecar_unchanged_since(original_stub.session_id, reload_marker):
+                # Another writer saved after the reload: its turn is newer than
+                # this copy, so clearing and saving it would drop that turn.
+                # Skip this time; the next read retries on the current file.
+                return False
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
         if getattr(session, "pending_user_message", None):
@@ -4476,6 +4499,7 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
                 getattr(session, "session_id", "?"),
             )
     finally:
+        persist_lock.release()
         session_lock.release()
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
