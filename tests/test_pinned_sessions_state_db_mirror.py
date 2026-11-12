@@ -583,3 +583,66 @@ def test_superseded_mirror_never_reaches_state_db(tmp_path, monkeypatch, sidecar
 
     assert _db_snapshot(db)[1] == {"s1": sidecar_pinned}
     assert session.state_db_mirror == {}
+
+
+def test_failed_repin_after_desktop_unpin_stays_pinned(tmp_path, monkeypatch):
+    db, sessions, post = _pin_setup(tmp_path, monkeypatch, rows=(("s1", 0),))
+    assert post("s1", True)[0] == 200  # mirrored: the record says True
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute("UPDATE sessions SET pinned = 0 WHERE id = 's1'")  # Desktop unpins
+        conn.commit()
+    assert post("s1", False)[0] == 200 and post("s1", True)[0] == 200
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute("UPDATE sessions SET pinned = 0 WHERE id = 's1'")  # Desktop unpins again
+        conn.commit()
+    holder = sqlite3.connect(str(db), isolation_level=None)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        assert post("s1", True)[0] == 200  # the re-pin cannot reach state.db
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    row = {**_flag_row("s1", pinned=True), "state_db_mirror": sessions["s1"].state_db_mirror}
+    assert _sidebar_rows(monkeypatch, [row])["s1"]["pinned"] is True
+
+
+def test_profileless_rows_read_and_write_root_state_db_from_a_named_profile(tmp_path, monkeypatch):
+    import api.profiles as profiles
+    from api import routes
+
+    homes = _homes(tmp_path, monkeypatch, names=("default", "work"))
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(homes["work"]))
+    _make_state_db(homes["default"] / "state.db", rows=(("s1", 0),))
+    _make_state_db(homes["work"] / "state.db", rows=(("s1", 1),))
+
+    rows = _pinned_flags(_sidebar_payload(monkeypatch, _webui_rows(
+        ("s1", None, False), ("s1", "work", False),
+    ), active_profile="work", all_profiles=True))
+    assert rows == {(None, "s1"): False, ("work", "s1"): True}
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    legacy = _PinSession("s1", profile=None)
+    legacy.archived = True
+    monkeypatch.setattr(routes, "SESSIONS", {"s1": legacy})
+    routes._mirror_to_state_db(legacy, "archived", True)
+    assert _column(homes["default"] / "state.db", "archived") == {"s1": 1}
+    assert _column(homes["work"] / "state.db", "archived") == {"s1": 0}
+
+
+@pytest.mark.parametrize("reset", ["Untitled", "", "new chat"])
+def test_title_reset_clears_the_mirrored_user_title(tmp_path, monkeypatch, reset):
+    from api import routes
+    from api.session_ops import apply_session_title_rename
+
+    homes = _homes(tmp_path, monkeypatch)
+    db = homes["default"] / "state.db"
+    _make_state_db(db, rows=(("s1", 0),))
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    session = _PinSession("s1")
+    monkeypatch.setattr(routes, "SESSIONS", {"s1": session})
+    for title in ("Manual name", reset):
+        apply_session_title_rename(session, title)
+        routes._mirror_session_title(session)
+
+    with closing(sqlite3.connect(str(db))) as conn:
+        assert conn.execute("SELECT title, title_source FROM sessions WHERE id = 's1'").fetchone() == (None, None)

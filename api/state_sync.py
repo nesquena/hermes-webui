@@ -434,8 +434,11 @@ _MIRROR_UPDATES = {
         lambda sid, v: (sid, sid, int(bool(v))),
     ),
     "title": (
-        lambda cols: "UPDATE sessions SET title = ?, title_source = 'user' WHERE id = ?",
-        lambda sid, v: (str(v), sid),
+        # None is a reset: clear the title and its user protection, as the Agent does.
+        lambda cols: "UPDATE sessions SET title = ?1"
+        + (", title_source = CASE WHEN ?1 IS NULL THEN NULL ELSE 'user' END" if "title_source" in cols else "")
+        + " WHERE id = ?2",
+        lambda sid, v: (None if v is None else str(v), sid),
     ),
 }
 
