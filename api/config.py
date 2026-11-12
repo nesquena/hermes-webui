@@ -7576,6 +7576,8 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
        e. Preserved references: dict against dict where every ``${...}`` leaf the raw row
           holds expands to the submitted value at the same path, requiring at least one
           preserved reference.
+       f. Residue: dict against dict with identical key sets where at least one ``${...}``
+          leaf the raw row holds expands to the submitted value at the same path (#8740 CR r4).
     3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
     4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
        rows disputing the same raw row, or non-unique match in a list with references) raises
@@ -7721,6 +7723,29 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 out.append(raw_idx)
         return out
 
+    def _residue_candidates(new_item) -> list[int]:
+        """Raw rows with the same key set and at least one preserved ${...} leaf (#8740 CR r4)."""
+        if not isinstance(new_item, dict):
+            return []
+        out = []
+        for raw_idx, raw_item in enumerate(raw_list):
+            if not isinstance(raw_item, dict) or set(raw_item.keys()) != set(new_item.keys()):
+                continue
+            ref_leaves = list(_iter_env_ref_leaves(raw_item))
+            if not ref_leaves:
+                continue
+            has_matching_ref = False
+            for path, raw_val in ref_leaves:
+                exists, new_val = _get_at_path(new_item, path)
+                if exists and (
+                    _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+                ):
+                    has_matching_ref = True
+                    break
+            if has_matching_ref:
+                out.append(raw_idx)
+        return out
+
     matches: dict[int, int | None] = {}
     for new_idx, new_item in enumerate(new_list):
         # 2.b: Expanded value
@@ -7763,6 +7788,16 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             raise ValueError(ambiguous_err)
         if len(cands_2e) == 1:
             matches[new_idx] = cands_2e[0]
+            continue
+
+        # 2.f: Residue: dict against dict with identical key sets where at least
+        # one ${...} leaf the raw row holds expands to the submitted value at the
+        # same path (#8740 CR r4).
+        cands_2f = _residue_candidates(new_item)
+        if len(cands_2f) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2f) == 1:
+            matches[new_idx] = cands_2f[0]
             continue
 
         matches[new_idx] = None

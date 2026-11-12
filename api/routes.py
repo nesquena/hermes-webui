@@ -4148,7 +4148,6 @@ from api.config import (
     _load_yaml_config_file_raw,
     _has_env_ref,
     _preserve_env_ref,
-    _normalize_base_url_for_compare,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -38370,12 +38369,13 @@ def _handle_mcp_server_update(handler, name, body):
             # submits the resolved string. Keep the ${VAR} already stored when
             # it still resolves to what was submitted — otherwise the
             # expansion (and a token inside it) replaces the reference on disk
-            # (#8700).
+            # (#8700). Comparison is whitespace-only so real path or query edits
+            # are persisted exactly as submitted (#8740 CR r4).
             existing_url = existing_cfg.get("url") if isinstance(existing_cfg, dict) else None
             server_cfg["url"] = _preserve_env_ref(
                 existing_url,
                 body["url"].strip(),
-                normalize=_normalize_base_url_for_compare,
+                normalize=str.strip,
             )
             if body.get("headers"):
                 server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))

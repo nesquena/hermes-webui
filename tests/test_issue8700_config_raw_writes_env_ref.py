@@ -188,14 +188,52 @@ def test_mcp_server_url_reference_survives_unchanged_resave(cfg_path):
     _assert_no_secret(cfg_path, "MCP server update")
 
 
-def test_mcp_server_url_reference_survives_trailing_slash_normalisation(cfg_path):
-    """The writer stores url stripped; a reference must compare the same way."""
+def test_mcp_server_url_reference_survives_surrounding_whitespace_resave(cfg_path):
+    """An unchanged resave that differs only by surrounding whitespace keeps the reference on disk."""
     import api.routes as routes
 
     handler = _FakeHandler()
-    routes._handle_mcp_server_update(handler, "bus", {"url": MCP_URL + "/  "})
+    routes._handle_mcp_server_update(handler, "bus", {"url": f"  {MCP_URL}  \n"})
     assert handler.status == 200, handler.json_body()
     assert _raw(cfg_path)["mcp_servers"]["bus"]["url"] == RAW_MCP_URL
+    _assert_no_secret(cfg_path, "MCP server update with surrounding whitespace")
+
+
+def test_mcp_server_url_slash_edits_in_both_directions_are_written_as_given(
+    cfg_path, monkeypatch
+):
+    """Path and query slash edits in both directions are persisted exactly as submitted (#8740 CR r4)."""
+    import api.routes as routes
+    from api import config
+
+    cases = [
+        # Direction A: slash added
+        ("bus", MCP_URL, MCP_URL + "/", "query slash added"),
+        ("path_add", "https://host.example.test/mcp", "https://host.example.test/mcp/", "path slash added"),
+        # Direction B: slash removed
+        ("query_rem", "https://host.example.test/mcp?token=abc/", "https://host.example.test/mcp?token=abc", "query slash removed"),
+        ("path_rem", "https://host.example.test/mcp/", "https://host.example.test/mcp", "path slash removed"),
+    ]
+
+    for srv_name, stored_val, submitted_url, desc in cases:
+        env_var = f"HERMES_TEST_MCP_{srv_name.upper()}"
+        monkeypatch.setenv(env_var, stored_val)
+        _seed(
+            cfg_path,
+            lambda raw, name=srv_name, var=env_var: raw["mcp_servers"].__setitem__(
+                name, {"url": f"${{{var}}}"}
+            ),
+        )
+
+        handler = _FakeHandler()
+        routes._handle_mcp_server_update(handler, srv_name, {"url": submitted_url})
+        assert handler.status == 200, f"{desc}: {handler.json_body()}"
+
+        written = _raw(cfg_path)["mcp_servers"][srv_name]["url"]
+        assert written == submitted_url, f"slash edit lost for {desc}: got {written!r}"
+        assert config.get_config()["mcp_servers"][srv_name]["url"] == submitted_url, (
+            f"resolved URL mismatch for {desc}"
+        )
 
 
 def test_mcp_server_url_edit_is_written_as_given(cfg_path):
@@ -845,6 +883,162 @@ def test_auxiliary_extra_body_shape3_keeps_reference_when_non_ref_key_removed(
     assert written == [{"token": "${TOKEN}"}]
     text = cfg_path.read_text(encoding="utf-8")
     assert "secret" not in text
+
+
+def test_extra_body_residue_keeps_untouched_reference_when_reference_and_numerics_edited(
+    cfg_path, monkeypatch
+):
+    """Residue match: editing one reference leaf and two numeric leaves keeps the untouched reference (#8740 CR r4)."""
+    monkeypatch.setenv("REF_EDITED", "secret-edited-111")
+    monkeypatch.setenv("REF_UNTOUCHED", "secret-untouched-222")
+
+    raw_eb = {
+        "rows": [
+            {
+                "token": "${REF_EDITED}",
+                "other": "${REF_UNTOUCHED}",
+                "temperature": 1,
+                "depth": 1,
+            }
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    submitted = {
+        "rows": [
+            {
+                "token": "brand-new-literal-token",
+                "other": "secret-untouched-222",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["rows"]
+    assert written == [
+        {
+            "token": "brand-new-literal-token",
+            "other": "${REF_UNTOUCHED}",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "secret-untouched-222" not in text
+    assert "secret-edited-111" not in text
+    assert "brand-new-literal-token" in text
+
+
+def test_auxiliary_extra_body_residue_keeps_untouched_reference_when_reference_and_numerics_edited(
+    cfg_path, monkeypatch
+):
+    """Auxiliary residue match: editing one reference and two numeric leaves keeps the untouched reference (#8740 CR r4)."""
+    monkeypatch.setenv("REF_EDITED", "secret-edited-111")
+    monkeypatch.setenv("REF_UNTOUCHED", "secret-untouched-222")
+
+    raw_eb = {
+        "rows": [
+            {
+                "token": "${REF_EDITED}",
+                "other": "${REF_UNTOUCHED}",
+                "temperature": 1,
+                "depth": 1,
+            }
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    submitted = {
+        "rows": [
+            {
+                "token": "brand-new-literal-token",
+                "other": "secret-untouched-222",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert written == [
+        {
+            "token": "brand-new-literal-token",
+            "other": "${REF_UNTOUCHED}",
+            "temperature": 2,
+            "depth": 2,
+        }
+    ]
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "secret-untouched-222" not in text
+    assert "secret-edited-111" not in text
+    assert "brand-new-literal-token" in text
+
+
+def test_extra_body_residue_ambiguous_candidates_reject_without_writing(
+    cfg_path, monkeypatch
+):
+    """When multiple raw rows qualify as residue candidates, write is rejected without modifying disk (#8740 CR r4)."""
+    monkeypatch.setenv("REF_A", "secret-a")
+    monkeypatch.setenv("REF_B", "secret-b")
+    monkeypatch.setenv("REF_COMMON", "shared-untouched-secret")
+
+    raw_eb = {
+        "rows": [
+            {"token": "${REF_A}", "key": "${REF_COMMON}", "temperature": 1, "depth": 1},
+            {"token": "${REF_B}", "key": "${REF_COMMON}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {
+                "token": "brand-new-literal-token",
+                "key": "shared-untouched-secret",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced model options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
 
 
 def test_extra_body_reordered_rows_follow_reference_valued_identity(
