@@ -11720,7 +11720,6 @@ async function handleComposerPrimaryAction(){
 function setBusy(v){
   S.busy=v;
   try{_updateActiveRunDot();}catch(_){}
-  try{_persistActiveRunState();}catch(_){}
   updateSendBtn();
   if(!v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();

@@ -1866,7 +1866,7 @@ function _steerOwnerStreamIsCurrent(ownerSid, ownerStreamId){
 function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
   if(!_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId))return false;
   let changed=false;
-  if(S.busy){S.busy=false;changed=true;}
+  if(S.busy){S.busy=false;try{_updateActiveRunDot();}catch(_){}changed=true;}
   if(S.activeStreamId){S.activeStreamId=null;changed=true;}
   if(S.session&&S.session.active_stream_id){S.session.active_stream_id=null;changed=true;}
   if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[ownerSid]){

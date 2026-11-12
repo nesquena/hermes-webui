@@ -1309,7 +1309,7 @@ function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   S.activeStreamId=null;
   if(session) session.active_stream_id=null;
   if(typeof setBusy==='function') setBusy(false);
-  else S.busy=false;
+  else { S.busy=false; try{_updateActiveRunDot();}catch(_){} }
   if(typeof setComposerStatus==='function') setComposerStatus('');
   if(typeof setStatus==='function') setStatus('');
   if(typeof updateSendBtn==='function') updateSendBtn();
@@ -7174,7 +7174,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // it for the settled anchor scene. Removing it first exposes an empty
           // transcript frame on large sessions.
           clearLiveToolCards({preserveDom:true});
-          S.busy=false;
+          S.busy=false; try{_updateActiveRunDot();}catch(_){}
           // No-reply guard (#373): if agent returned nothing, show inline error
           if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
           if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
@@ -9456,7 +9456,7 @@ function _attachServerInitiatedStream(sid, streamId, recovered) {
     if (S.activeStreamId === streamId) return true;
     const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
     if (existingLive && existingLive.streamId === streamId) return true;
-    S.busy = true;
+    S.busy = true; try{_updateActiveRunDot();}catch(_){}
     S.activeStreamId = streamId;
     if (S.session && S.session.session_id === sid) {
       S.session.active_stream_id = streamId;
@@ -9499,7 +9499,7 @@ function _attachServerInitiatedStream(sid, streamId, recovered) {
       const stillOurs = (S.session && S.session.session_id === sid) &&
         (S.activeStreamId === streamId || (S.session && S.session.active_stream_id === streamId));
       if (stillOurs) {
-        S.busy = false;
+        S.busy = false; try{_updateActiveRunDot();}catch(_){}
         S.activeStreamId = null;
         if (S.session) S.session.active_stream_id = null;
         if (typeof updateSendBtn === 'function') updateSendBtn();
@@ -9793,7 +9793,7 @@ function startSessionStream(sid) {
         // Mirror the loadSession reattach setup. For a fresh frame the turn
         // renders from its first token; for a recovered (replay) frame
         // attachLiveStream reconstructs the in-progress stream.
-        S.busy = true;
+        S.busy = true; try{_updateActiveRunDot();}catch(_){}
         S.activeStreamId = streamId;
         if (S.session && S.session.session_id === sid) {
           S.session.active_stream_id = streamId;

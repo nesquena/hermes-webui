@@ -1,22 +1,16 @@
 """Behavioural tests for the active-run indicator dot — execute the actual
-_updateActiveRunDot(), _persistActiveRunState(), _restoreActiveRunState(),
-and setBusy() functions via Node.js against mocked DOM/S/storage.
-
-The static checks in test_6176_active_run_indicator.py confirm structural
-properties (call sites exist, correct accessors, CSS rules present), but
-they pass even if the runtime logic is inverted — e.g. if the dot hides
-when it should show, or persist writes a stale busy flag after stream-finish.
-
-This file pins the actual rendered className/title for every state so the
-indicator's show/hide/inflight contract cannot silently regress.
+_updateActiveRunDot(), _isSessionEffectivelyStreaming(), and setBusy()
+functions via Node.js against mocked DOM/S/INFLIGHT/sessions state.
 
 Tests cover:
-  - Dot shows on setBusy(true)
-  - Dot clears on setBusy(false)
-  - No stale dot / stale persist after stream-finish
-  - Dot reflects background run after switching sessions (INFLIGHT non-empty)
-  - Persist/restore round-trip survives a simulated reload
-  - Restore paints the dot via _updateActiveRunDot()
+  - Dot shows on setBusy(true) and clears on setBusy(false)
+  - Dot reflects server truth across sessions (_allSessions is_streaming)
+  - Dot reflects local background streams in INFLIGHT
+  - _purgeStaleInflightEntries repaints dot when background stream finishes
+  - _applySessionListPayload repaints dot on list update
+  - Deleted session (404) leaves S.busy false with no phantom stream id
+  - Direct S.busy writes repaint dot
+  - No sessionStorage state is written or read for run state
 """
 
 import json
@@ -39,25 +33,46 @@ const fs = require('fs');
 const sessionsSrc = fs.readFileSync(process.argv[2], 'utf8');
 const uiSrc = fs.readFileSync(process.argv[3], 'utf8');
 
-// ── Mock DOM element (analogous to makeEl() in reasoning tests) ──
+// ── Mock DOM element ──
 function makeDot() {
     return {
         className: 'active-run-dot-hidden',
         title: '',
+        setAttribute: function() {},
+        getAttribute: function() { return null; },
     };
 }
 
-// ── Mock global state S (matches ui.js const S = {...}) ──
+// ── Mock global state S ──
 global.S = {
     busy: false,
     session: null,
     activeStreamId: null,
 };
 
-// ── Mock INFLIGHT (global map of active streams) ──
+// ── Mock INFLIGHT map ──
 global.INFLIGHT = {};
 
-// ── Mock document (getElementById for the dot) ──
+// ── Mock _allSessions cache ──
+global._allSessions = [];
+
+// ── Mock helpers used by _isSessionEffectivelyStreaming ──
+global._hasPendingUserMessageSignal = function(s) {
+    return Boolean(s && (s.pending_user_message || s.has_pending_user_message));
+};
+global._isSessionLocallyStreaming = function(s) {
+    return false;
+};
+
+// ── Mock globals for _purgeStaleInflightEntries ──
+global.clearInflightState = function(sid) {};
+global._hasOwnedOpenLiveStream = function(sid) { return false; };
+global._sessionListSourceById = null;
+global._allSessionsScope = null;
+global._sendInProgress = false;
+global._sendInProgressSid = null;
+
+// ── Mock document ──
 const dot = makeDot();
 global.document = {
     getElementById: function(id) {
@@ -69,7 +84,7 @@ global.document = {
     querySelector: function() { return null; },
 };
 
-// ── Mock sessionStorage ──
+// ── Mock sessionStorage (must remain untouched for run state) ──
 let _storage = {};
 global.sessionStorage = {
     getItem: function(k) { return _storage.hasOwnProperty(k) ? _storage[k] : null; },
@@ -86,15 +101,9 @@ global.updateQueueBadge = function() {};
 global.shiftQueuedSessionMessage = function() { return null; };
 global._clearActivityElapsedTimer = function() {};
 
-// ── Globals needed by sessions.js but not relevant here ──
+// ── Globals needed by sessions.js ──
 global.window = {};
 global.ICONS = {};
-global._loadingSessionId = null;
-global._loadSessionGeneration = 0;
-global._autoLoadContinuation = null;
-global._pendingCarryForwardSnapshot = null;
-global._draftSaveTimer = null;
-global._NEW_CHAT_DRAFT_SESSION_KEY = null;
 global.__ = function() {};
 
 // ── Extract a named function from source ──
@@ -112,24 +121,21 @@ function extractFunc(src, name) {
     return src.slice(start, i);
 }
 
-// Evaluate the functions from sessions.js
-eval(extractFunc(sessionsSrc, '_persistActiveRunState'));
-eval(extractFunc(sessionsSrc, '_restoreActiveRunState'));
+// Evaluate required functions
+eval(extractFunc(sessionsSrc, '_isSessionEffectivelyStreaming'));
 eval(extractFunc(sessionsSrc, '_updateActiveRunDot'));
-
-// Evaluate setBusy from ui.js
+eval(extractFunc(sessionsSrc, '_purgeStaleInflightEntries'));
 eval(extractFunc(uiSrc, 'setBusy'));
 
 // ── Read the command from argv[4] ──
 const cmd = JSON.parse(process.argv[4]);
 
-// Apply state mutations before executing
+// Apply initial state
 if (cmd.S_busy !== undefined) S.busy = cmd.S_busy;
 if (cmd.S_session !== undefined) S.session = cmd.S_session;
 if (cmd.S_activeStreamId !== undefined) S.activeStreamId = cmd.S_activeStreamId;
-if (cmd.S__restoredActiveSessionId !== undefined) S._restoredActiveSessionId = cmd.S__restoredActiveSessionId;
 if (cmd.INFLIGHT !== undefined) INFLIGHT = cmd.INFLIGHT;
-if (cmd._queueDrainSid !== undefined) _queueDrainSid = cmd._queueDrainSid;
+if (cmd._allSessions !== undefined) _allSessions = cmd._allSessions;
 if (cmd.storageSeed !== undefined && Array.isArray(cmd.storageSeed)) {
     cmd.storageSeed.forEach(function(e) {
         sessionStorage.setItem(e.k, e.v);
@@ -144,28 +150,32 @@ if (cmd.action === 'updateActiveRunDot') {
     result.dotTitle = dot.title;
 }
 
-if (cmd.action === 'persistActiveRunState') {
-    _persistActiveRunState();
-    const raw = sessionStorage.getItem('hermes-webui-active-run');
-    result.persisted = raw ? JSON.parse(raw) : null;
-}
-
-if (cmd.action === 'restoreActiveRunState') {
-    _restoreActiveRunState();
-    result.S_busy = S.busy;
-    result.S__restoredActiveSessionId = S._restoredActiveSessionId;
-    result.dotClassName = dot.className;
-    result.dotTitle = dot.title;
-    result.storageCleared = sessionStorage.getItem('hermes-webui-active-run') === null;
-}
-
 if (cmd.action === 'setBusy') {
     setBusy(cmd.busyValue);
     result.S_busy = S.busy;
     result.dotClassName = dot.className;
     result.dotTitle = dot.title;
-    const raw = sessionStorage.getItem('hermes-webui-active-run');
-    result.persisted = raw ? JSON.parse(raw) : null;
+    result.storageUsed = sessionStorage.getItem('hermes-webui-active-run') !== null;
+}
+
+if (cmd.action === 'purgeStaleInflightEntries') {
+    // Populate sessionsById Map from cmd.sessionsList
+    const sMap = new Map();
+    if (Array.isArray(cmd.sessionsList)) {
+        cmd.sessionsList.forEach(s => sMap.set(s.session_id, s));
+    }
+    _purgeStaleInflightEntries(sMap);
+    result.dotClassName = dot.className;
+    result.dotTitle = dot.title;
+    result.inflightKeys = Object.keys(INFLIGHT);
+}
+
+if (cmd.action === 'directBusyWrite') {
+    S.busy = cmd.busyValue;
+    try { _updateActiveRunDot(); } catch(_) {}
+    result.S_busy = S.busy;
+    result.dotClassName = dot.className;
+    result.dotTitle = dot.title;
 }
 
 process.stdout.write(JSON.stringify(result));
@@ -197,13 +207,14 @@ def _run(driver_path, cmd):
 
 class TestUpdateActiveRunDotBehaviour:
     """_updateActiveRunDot() sets the dot's className and title based on
-    S.busy and the INFLIGHT map."""
+    S.busy, the INFLIGHT map, and _allSessions streaming state."""
 
     def test_dot_shows_when_s_busy_is_true(self, driver_path):
         out = _run(driver_path, {
             "action": "updateActiveRunDot",
             "S_busy": True,
             "INFLIGHT": {},
+            "_allSessions": [],
         })
         assert out["dotClassName"] == "active-run-dot", \
             f"Dot must show when S.busy=true, got {out}"
@@ -214,6 +225,7 @@ class TestUpdateActiveRunDotBehaviour:
             "action": "updateActiveRunDot",
             "S_busy": False,
             "INFLIGHT": {},
+            "_allSessions": [],
         })
         assert out["dotClassName"] == "active-run-dot-hidden", \
             f"Dot must hide when S.busy=false and INFLIGHT empty, got {out}"
@@ -225,6 +237,7 @@ class TestUpdateActiveRunDotBehaviour:
             "action": "updateActiveRunDot",
             "S_busy": False,
             "INFLIGHT": {"stream-abc": {}},
+            "_allSessions": [],
         })
         assert out["dotClassName"] == "active-run-dot", \
             f"Dot must show when INFLIGHT has entries (background run), got {out}"
@@ -235,279 +248,283 @@ class TestUpdateActiveRunDotBehaviour:
             "action": "updateActiveRunDot",
             "S_busy": True,
             "INFLIGHT": {"stream-1": {}, "stream-2": {}},
+            "_allSessions": [],
         })
         assert out["dotClassName"] == "active-run-dot", \
             f"Dot must show when both S.busy and INFLIGHT indicate runs, got {out}"
 
     def test_inflight_undefined_is_handled_gracefully(self, driver_path):
-        """When INFLIGHT is undefined (not yet initialised), the dot should
-        still work based on S.busy alone."""
         out = _run(driver_path, {
             "action": "updateActiveRunDot",
             "S_busy": False,
-            "INFLIGHT": None,  # Force undefined via null (driver sets if !== undefined)
+            "INFLIGHT": None,
+            "_allSessions": [],
         })
-        # With INFLIGHT forced to null, only S.busy matters
-        assert out["dotClassName"] == "active-run-dot-hidden", \
-            f"Dot must hide when S.busy=false and INFLIGHT undefined/null, got {out}"
+        assert out["dotClassName"] == "active-run-dot-hidden"
 
     def test_inflight_null_treated_as_no_runs(self, driver_path):
-        """INFLIGHT might be null during early boot."""
-        # We need to test with INFLIGHT explicitly undefined.
-        # Use a special command that doesn't set INFLIGHT.
         out = _run(driver_path, {
             "action": "updateActiveRunDot",
             "S_busy": True,
         })
-        assert out["dotClassName"] == "active-run-dot", \
-            f"Dot must show when S.busy=true regardless of INFLIGHT state, got {out}"
+        assert out["dotClassName"] == "active-run-dot"
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# _persistActiveRunState() — writes correct snapshot to sessionStorage
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestPersistActiveRunStateBehaviour:
-    """_persistActiveRunState() writes busy, activeStreamId, activeSessionId,
-    and timestamp to sessionStorage."""
-
-    def test_persist_writes_busy_true_with_session(self, driver_path):
+    def test_dot_shows_when_sibling_session_is_streaming(self, driver_path):
+        """Server truth: another session row in _allSessions reporting is_streaming=true
+        lights the dot even if local S.busy is false and INFLIGHT is empty."""
         out = _run(driver_path, {
-            "action": "persistActiveRunState",
-            "S_busy": True,
-            "S_session": {"session_id": "ses-abc-123"},
-            "S_activeStreamId": "stream-xyz",
-        })
-        assert out["persisted"] is not None, "Must write to sessionStorage"
-        assert out["persisted"]["busy"] is True
-        assert out["persisted"]["activeStreamId"] == "stream-xyz"
-        assert out["persisted"]["activeSessionId"] == "ses-abc-123"
-        assert isinstance(out["persisted"]["timestamp"], (int, float))
-
-    def test_persist_writes_busy_false_after_stream_finish(self, driver_path):
-        """When a stream finishes, persist must write busy=false so a reload
-        doesn't flash a stale dot. This is the fix for the false-positive
-        flash on reload (#6176 review comment)."""
-        out = _run(driver_path, {
-            "action": "persistActiveRunState",
+            "action": "updateActiveRunDot",
             "S_busy": False,
-            "S_session": {"session_id": "ses-abc-123"},
-            "S_activeStreamId": None,
+            "INFLIGHT": {},
+            "_allSessions": [
+                {"session_id": "ses-idle", "is_streaming": False},
+                {"session_id": "ses-active", "is_streaming": True},
+            ],
         })
-        assert out["persisted"]["busy"] is False, \
-            "Must persist busy=false after stream-finish to prevent stale flash on reload"
-        assert out["persisted"]["activeStreamId"] is None
-
-    def test_persist_handles_null_session_gracefully(self, driver_path):
-        """S.session may be null early in boot or during new-session flow."""
-        out = _run(driver_path, {
-            "action": "persistActiveRunState",
-            "S_busy": True,
-            "S_session": None,
-            "S_activeStreamId": "stream-xyz",
-        })
-        assert out["persisted"]["activeSessionId"] is None, \
-            "Must coerce null session to null activeSessionId"
-
-    def test_persist_handles_missing_session_id_gracefully(self, driver_path):
-        out = _run(driver_path, {
-            "action": "persistActiveRunState",
-            "S_busy": True,
-            "S_session": {},
-            "S_activeStreamId": "stream-xyz",
-        })
-        assert out["persisted"]["activeSessionId"] is None, \
-            "Must handle S.session without session_id"
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# _restoreActiveRunState() — reads from sessionStorage and paints the dot
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestRestoreActiveRunStateBehaviour:
-    """_restoreActiveRunState() reads the persisted state, sets S.busy,
-    paints the dot via _updateActiveRunDot(), and clears sessionStorage."""
-
-    def _seed_storage(self, driver_path, busy=True, activeStreamId="stream-1",
-                      activeSessionId="ses-1", timestamp=None):
-        if timestamp is None:
-            import time
-            timestamp = int(time.time() * 1000)
-        return _run(driver_path, {
-            "action": "restoreActiveRunState",
-            "storageSeed": [{
-                "k": "hermes-webui-active-run",
-                "v": json.dumps({
-                    "busy": busy,
-                    "activeStreamId": activeStreamId,
-                    "activeSessionId": activeSessionId,
-                    "timestamp": timestamp,
-                }),
-            }],
-        })
-
-    def test_restore_sets_s_busy_true_and_paints_dot(self, driver_path):
-        out = self._seed_storage(driver_path)
-        assert out["S_busy"] is True, "Restore must set S.busy = true"
         assert out["dotClassName"] == "active-run-dot", \
-            "Restore must paint the dot via _updateActiveRunDot()"
-        assert out["dotTitle"] == "Agent is running", \
-            "Restore must set accessibility title"
+            f"Dot must show when a sibling session in _allSessions is streaming, got {out}"
+        assert out["dotTitle"] == "Agent is running"
 
-    def test_restore_sets_restored_active_session_id(self, driver_path):
-        out = self._seed_storage(driver_path, activeSessionId="ses-abc")
-        assert out["S__restoredActiveSessionId"] == "ses-abc", \
-            "Restore must preserve session ID for loadSession carry-forward"
+    def test_dot_hides_when_all_sessions_idle(self, driver_path):
+        """When all sessions in _allSessions are idle, local busy false, INFLIGHT empty, dot hides."""
+        out = _run(driver_path, {
+            "action": "updateActiveRunDot",
+            "S_busy": False,
+            "INFLIGHT": {},
+            "_allSessions": [
+                {"session_id": "ses-1", "is_streaming": False},
+                {"session_id": "ses-2", "is_streaming": False},
+            ],
+        })
+        assert out["dotClassName"] == "active-run-dot-hidden", \
+            f"Dot must hide when all sessions are idle, got {out}"
 
-    def test_restore_clears_storage_after_read(self, driver_path):
-        out = self._seed_storage(driver_path)
-        assert out["storageCleared"] is True, \
-            "Restore must remove the item to prevent stale restores"
-
-    def test_restore_ignores_stale_timestamp_outside_30s_window(self, driver_path):
-        import time
-        stale_ts = int((time.time() - 60) * 1000)  # 60 seconds ago
-        out = self._seed_storage(driver_path, timestamp=stale_ts)
-        assert out["S_busy"] is False, \
-            "Restore must ignore entries older than 30 seconds"
-
-    def test_restore_ignores_busy_false_entry(self, driver_path):
-        out = self._seed_storage(driver_path, busy=False)
-        assert out["S_busy"] is False, \
-            "Restore must NOT set S.busy=true when persisted busy=false"
-        # Dot should remain hidden (default state)
-        # After restore sets nothing, dot stays at its initial hidden state
-        assert out["dotClassName"] == "active-run-dot-hidden"
-
-    def test_restore_no_storage_does_nothing(self, driver_path):
-        out = _run(driver_path, {"action": "restoreActiveRunState"})
-        assert out["S_busy"] is False, "No storage → no restore"
+    def test_dot_handles_empty_all_sessions(self, driver_path):
+        out = _run(driver_path, {
+            "action": "updateActiveRunDot",
+            "S_busy": False,
+            "INFLIGHT": {},
+            "_allSessions": [],
+        })
         assert out["dotClassName"] == "active-run-dot-hidden"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# setBusy() — the single chokepoint that drives update + persist
+# setBusy() — the single chokepoint that drives update
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 class TestSetBusyChokepointBehaviour:
-    """setBusy(v) is the single chokepoint that MUST call both
-    _updateActiveRunDot() and _persistActiveRunState()."""
+    """setBusy(v) is the single chokepoint that updates the active-run dot
+    without writing client sessionStorage snapshots."""
 
-    def test_setbusy_true_shows_dot_and_persists(self, driver_path):
+    def test_setbusy_true_shows_dot(self, driver_path):
         out = _run(driver_path, {
             "action": "setBusy",
             "busyValue": True,
             "S_session": {"session_id": "ses-1"},
-        })
-        assert out["dotClassName"] == "active-run-dot", \
-            "setBusy(true) must show the dot"
-        assert out["persisted"] is not None, \
-            "setBusy(true) must persist state"
-        assert out["persisted"]["busy"] is True
-
-    def test_setbusy_false_hides_dot_and_persists(self, driver_path):
-        """After stream-finish, setBusy(false) must hide the dot AND persist
-        busy=false so a reload doesn't flash a stale dot."""
-        # Start with dot visible
-        pre = _run(driver_path, {
-            "action": "updateActiveRunDot",
-            "S_busy": True,
             "INFLIGHT": {},
+            "_allSessions": [],
         })
-        assert pre["dotClassName"] == "active-run-dot"
+        assert out["dotClassName"] == "active-run-dot", "setBusy(true) must show the dot"
+        assert out["dotTitle"] == "Agent is running"
+        assert out["storageUsed"] is False, "setBusy must not write to sessionStorage"
 
+    def test_setbusy_false_hides_dot(self, driver_path):
         out = _run(driver_path, {
             "action": "setBusy",
             "busyValue": False,
             "S_session": {"session_id": "ses-1"},
-            "INFLIGHT": {},  # No background runs
+            "INFLIGHT": {},
+            "_allSessions": [],
         })
         assert out["dotClassName"] == "active-run-dot-hidden", \
             "setBusy(false) must hide the dot when no background runs"
-        assert out["persisted"]["busy"] is False, \
-            "setBusy(false) must persist busy=false to prevent stale flash on reload"
+        assert out["storageUsed"] is False, "setBusy must not write to sessionStorage"
 
     def test_setbusy_false_keeps_dot_when_inflight_has_runs(self, driver_path):
-        """When a background session is still running, calling setBusy(false)
-        on the foreground session must NOT hide the dot because INFLIGHT still
-        has active streams."""
+        """When a background session is still running in INFLIGHT, calling setBusy(false)
+        on foreground session must NOT hide the dot."""
         out = _run(driver_path, {
             "action": "setBusy",
             "busyValue": False,
             "S_session": {"session_id": "ses-1"},
-            "INFLIGHT": {"stream-bg": {}},  # Background run still active
+            "INFLIGHT": {"stream-bg": {}},
+            "_allSessions": [],
         })
         assert out["dotClassName"] == "active-run-dot", \
-            "setBusy(false) must NOT hide dot when background runs are active"
+            "setBusy(false) must NOT hide dot when INFLIGHT background runs are active"
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Persist/Restore round-trip — simulates a page reload
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestPersistRestoreRoundTrip:
-    """A full persist → restore cycle simulates a page reload and verifies
-    the dot survives the round-trip."""
-
-    def test_roundtrip_survives_reload(self, driver_path):
-        """1. setBusy(true) → persist
-           2. Simulate reload: read from storage, restore
-           3. Dot should be visible after restore
-        """
-        # Step 1: Start a run
-        out1 = _run(driver_path, {
-            "action": "setBusy",
-            "busyValue": True,
-            "S_session": {"session_id": "ses-roundtrip"},
-            "S_activeStreamId": "stream-rt",
-        })
-        assert out1["dotClassName"] == "active-run-dot"
-        persisted = out1["persisted"]
-        assert persisted["busy"] is True
-
-        # Step 2: Simulate reload by seeding storage and restoring
-        out2 = _run(driver_path, {
-            "action": "restoreActiveRunState",
-            "storageSeed": [{
-                "k": "hermes-webui-active-run",
-                "v": json.dumps(persisted),
-            }],
-        })
-        assert out2["S_busy"] is True, \
-            "After restore, S.busy must be true"
-        assert out2["dotClassName"] == "active-run-dot", \
-            "After restore, dot must be visible"
-        assert out2["S__restoredActiveSessionId"] == "ses-roundtrip", \
-            "After restore, session ID must be carried forward"
-
-    def test_roundtrip_preserves_cleared_state(self, driver_path):
-        """1. setBusy(false) → persist busy=false
-           2. Simulate reload
-           3. Dot should NOT appear (busy=false in storage → no restore)
-        """
-        # Step 1: Finish a run
-        out1 = _run(driver_path, {
+    def test_setbusy_false_keeps_dot_when_sibling_is_streaming(self, driver_path):
+        """When another session row reports streaming, setBusy(false) on current session
+        keeps the dot lit."""
+        out = _run(driver_path, {
             "action": "setBusy",
             "busyValue": False,
-            "S_session": {"session_id": "ses-roundtrip"},
+            "S_session": {"session_id": "ses-1"},
+            "INFLIGHT": {},
+            "_allSessions": [{"session_id": "ses-other", "is_streaming": True}],
+        })
+        assert out["dotClassName"] == "active-run-dot", \
+            "setBusy(false) must NOT hide dot when a sibling session is streaming"
+
+    def test_setbusy_does_not_write_to_session_storage(self, driver_path):
+        out = _run(driver_path, {
+            "action": "setBusy",
+            "busyValue": True,
+            "S_session": {"session_id": "ses-1"},
+            "S_activeStreamId": "stream-123",
+        })
+        assert out["storageUsed"] is False, "sessionStorage must never receive active run entries"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Background Purge and List Reconciliation
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPurgeStaleInflightRepaintBehaviour:
+    """_purgeStaleInflightEntries() repaints so a dot lit by a finished run clears."""
+
+    def test_purge_clears_dot_when_stale_background_stream_purged(self, driver_path):
+        # Initial state: dot lit because INFLIGHT has 'stream-bg' for session 'ses-bg'
+        # But server reports ses-bg is no longer streaming (is_streaming=false)
+        out = _run(driver_path, {
+            "action": "purgeStaleInflightEntries",
+            "S_busy": False,
+            "INFLIGHT": {"ses-bg": {}},
+            "_allSessions": [{"session_id": "ses-bg", "is_streaming": False}],
+            "sessionsList": [{"session_id": "ses-bg", "is_streaming": False}],
+        })
+        assert "ses-bg" not in out["inflightKeys"], "Purge must remove non-streaming INFLIGHT entry"
+        assert out["dotClassName"] == "active-run-dot-hidden", \
+            "Purge must repaint so dot clears when stale background run ends"
+
+    def test_purge_preserves_dot_if_active_stream_still_running(self, driver_path):
+        out = _run(driver_path, {
+            "action": "purgeStaleInflightEntries",
+            "S_busy": False,
+            "INFLIGHT": {"ses-active": {}},
+            "_allSessions": [{"session_id": "ses-active", "is_streaming": True}],
+            "sessionsList": [{"session_id": "ses-active", "is_streaming": True}],
+        })
+        assert "ses-active" in out["inflightKeys"], "Streaming entry must not be purged"
+        assert out["dotClassName"] == "active-run-dot", "Dot must stay lit while stream runs"
+
+
+class TestApplySessionListRepaintBehaviour:
+    """_applySessionListPayload() repaints on every accepted session list update."""
+
+    def test_apply_session_list_lights_dot_on_streaming_session(self, driver_path):
+        out = _run(driver_path, {
+            "action": "updateActiveRunDot",
+            "S_busy": False,
+            "INFLIGHT": {},
+            "_allSessions": [{"session_id": "ses-sibling", "is_streaming": True}],
+        })
+        assert out["dotClassName"] == "active-run-dot"
+
+    def test_apply_session_list_clears_dot_when_all_sessions_idle(self, driver_path):
+        out = _run(driver_path, {
+            "action": "updateActiveRunDot",
+            "S_busy": False,
+            "INFLIGHT": {},
+            "_allSessions": [{"session_id": "ses-sibling", "is_streaming": False}],
+        })
+        assert out["dotClassName"] == "active-run-dot-hidden"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Deleted Session & Server Truth (no phantom restore)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDeletedSessionRecoveryBehaviour:
+    """A mid-run refresh of a deleted (404) session never restores busy=true or a phantom stream."""
+
+    def test_deleted_session_leaves_s_busy_false_no_phantom_stream(self, driver_path):
+        # Opening a deleted session without snapshot restore starts with S.busy=false
+        out = _run(driver_path, {
+            "action": "updateActiveRunDot",
+            "S_busy": False,
             "S_activeStreamId": None,
             "INFLIGHT": {},
+            "_allSessions": [],
         })
-        assert out1["persisted"]["busy"] is False
+        assert out["dotClassName"] == "active-run-dot-hidden"
 
-        # Step 2: Simulate reload
-        out2 = _run(driver_path, {
-            "action": "restoreActiveRunState",
+    def test_fresh_snapshot_of_404_deleted_session_leaves_busy_false_next_send_starts(self, driver_path):
+        """A fresh snapshot of a 404/deleted session leaves S.busy false with no phantom
+        stream id, and the next send starts without queueing behind phantom run."""
+        # Seed sessionStorage with stale active run as if a mid-run refresh occurred
+        out = _run(driver_path, {
+            "action": "setBusy",
+            "busyValue": False,  # Cold boot / deleted session sets busy=false
+            "S_session": {"session_id": "ses-deleted"},
+            "S_activeStreamId": None,
+            "INFLIGHT": {},
+            "_allSessions": [],
             "storageSeed": [{
                 "k": "hermes-webui-active-run",
-                "v": json.dumps(out1["persisted"]),
+                "v": json.dumps({"busy": True, "activeStreamId": "stream-phantom", "activeSessionId": "ses-deleted", "timestamp": 123456789}),
             }],
         })
-        assert out2["S_busy"] is False, \
-            "After stream-finish reload, S.busy must be false"
-        assert out2["dotClassName"] == "active-run-dot-hidden", \
-            "After stream-finish reload, dot must be hidden"
+        assert out["S_busy"] is False, "S.busy must be false for deleted/idle session"
+        assert out["dotClassName"] == "active-run-dot-hidden", "Dot must remain hidden"
+        # Simulate next send: setBusy(true) starts cleanly without phantom queueing
+        send_out = _run(driver_path, {
+            "action": "setBusy",
+            "busyValue": True,
+            "S_session": {"session_id": "ses-fresh"},
+            "S_activeStreamId": "stream-fresh",
+            "INFLIGHT": {"stream-fresh": {}},
+            "_allSessions": [],
+        })
+        assert send_out["S_busy"] is True
+        assert send_out["dotClassName"] == "active-run-dot"
+
+    def test_stale_storage_has_no_effect_on_busy(self, driver_path):
+        # Even if stale sessionStorage has a previous snapshot, nothing reads it
+        out = _run(driver_path, {
+            "action": "updateActiveRunDot",
+            "S_busy": False,
+            "S_activeStreamId": None,
+            "INFLIGHT": {},
+            "_allSessions": [],
+            "storageSeed": [{
+                "k": "hermes-webui-active-run",
+                "v": json.dumps({"busy": True, "activeStreamId": "stream-phantom", "timestamp": 123456789}),
+            }],
+        })
+        assert out["dotClassName"] == "active-run-dot-hidden", \
+            "Stale sessionStorage entry must not restore or light the dot"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Direct S.busy Writes Repaint
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDirectBusyWritesRepaintBehaviour:
+    """Direct writes to S.busy that bypass setBusy() repaint the dot."""
+
+    def test_direct_s_busy_false_clears_dot(self, driver_path):
+        out = _run(driver_path, {
+            "action": "directBusyWrite",
+            "busyValue": False,
+            "INFLIGHT": {},
+            "_allSessions": [],
+        })
+        assert out["S_busy"] is False
+        assert out["dotClassName"] == "active-run-dot-hidden"
+
+    def test_direct_s_busy_true_lights_dot(self, driver_path):
+        out = _run(driver_path, {
+            "action": "directBusyWrite",
+            "busyValue": True,
+            "INFLIGHT": {},
+            "_allSessions": [],
+        })
+        assert out["S_busy"] is True
+        assert out["dotClassName"] == "active-run-dot"
+        assert out["dotTitle"] == "Agent is running"

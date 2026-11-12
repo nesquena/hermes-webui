@@ -7867,7 +7867,12 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
 
-/* Active-run indicator dot - green pulsing animation (#6025) */
-#activeRunDot.active-run-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#2ecc71;margin:0 6px 0 2px;vertical-align:middle;position:relative;box-shadow:0 0 4px rgba(46,204,113,.6);animation:active-run-pulse 2s ease-in-out infinite}
-#activeRunDot.active-run-dot-hidden{display:none!important}
+/* Active-run indicator dot — theme token pulsing animation (#6025, #6176) */
+.app-titlebar-active-run{display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;flex-shrink:0}
+#activeRunDot.active-run-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin:0;vertical-align:middle;position:relative;box-shadow:0 0 4px color-mix(in srgb,var(--success) 60%,transparent);animation:active-run-pulse 2s ease-in-out infinite}
+#activeRunDot.active-run-dot-hidden{display:inline-block;width:8px;height:8px;margin:0;vertical-align:middle;visibility:hidden;pointer-events:none}
 @keyframes active-run-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.85)}}
+@media (prefers-reduced-motion:reduce){
+  #activeRunDot.active-run-dot{animation:none}
+  @keyframes active-run-pulse{0%,100%{opacity:1;transform:none}50%{opacity:1;transform:none}}
+}
