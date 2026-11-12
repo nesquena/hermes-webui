@@ -19249,6 +19249,94 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
         return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
 
 
+BACKGROUND_RUN_NOTE = (
+    "Move the running command to the background and keep working: do not re-run it. "
+    "Poll it with process_manage (action=\"poll\") when its result matters."
+)
+
+
+def _background_refusal(agent, stream_id: Optional[str]) -> Optional[dict]:
+    """Why *agent* cannot yield a running command, or None when it can."""
+    if agent is None:
+        return {"accepted": False, "reason": "no_agent", "stream_id": stream_id}
+    if not getattr(agent, "_executing_tools", False):
+        return {"accepted": False, "reason": "no_tool_running", "stream_id": stream_id}
+    if not callable(getattr(agent, "redirect", None)):
+        return {"accepted": False, "reason": "agent_lacks_redirect", "stream_id": stream_id}
+    return None
+
+
+def _request_background(agent, sid: str, stream_id: Optional[str]) -> dict:
+    """Ask the live agent to yield: ``redirect()`` steers the model and flags every
+    tool-worker thread, so a foreground terminal command hands its process to the
+    background registry and returns at once instead of parking the turn (see
+    ``tools.interrupt.request_yield``). The command is never killed."""
+    refusal = _background_refusal(agent, stream_id)
+    if refusal is not None:
+        return refusal
+    try:
+        accepted = bool(agent.redirect(BACKGROUND_RUN_NOTE))
+    except Exception:
+        logger.debug("Background request failed for session %s", sid, exc_info=True)
+        return {"accepted": False, "reason": "redirect_error", "stream_id": stream_id}
+    return {"accepted": accepted, "reason": None if accepted else "refused", "stream_id": stream_id}
+
+
+def _background_bound_stream(sid: str, stream_id: str) -> dict | None:
+    """Yield on a verified live worker; None retains cache-only compatibility."""
+    from api import config as cfg
+
+    with cfg.STREAMS_LOCK:
+        agent = cfg.AGENT_INSTANCES.get(stream_id)
+        owner = cfg.stream_owner_session_id(stream_id)
+        with cfg.ACTIVE_RUNS_LOCK:
+            run = dict(cfg.ACTIVE_RUNS.get(stream_id) or {})
+        if run.get("backend") == "gateway":
+            return {"accepted": False, "reason": "gateway_run", "stream_id": stream_id}
+        if (stream_id not in cfg.STREAMS or owner != sid
+                or run.get("session_id") != sid
+                or run.get("phase") not in _LOCAL_STEERABLE_PHASES):
+            return {"accepted": False, "reason": "stream_dead", "stream_id": None}
+        return _request_background(agent, sid, stream_id)
+
+
+def _handle_chat_background(handler, body: dict) -> bool:
+    """Move the command this session's turn is waiting on to the background.
+
+    A foreground terminal call blocks the agent loop until it exits, so a five
+    minute build or a long poll freezes the chat: the user can type, but nothing
+    reaches the model. This is the WebUI counterpart of Claude Code's Ctrl+B —
+    the running process keeps going as a tracked background session (its
+    completion reaches the agent like any ``terminal(background=true)`` spawn)
+    and the turn continues immediately.
+
+    Accepts ``{"session_id": str}``. Returns 200 with ``{"accepted": bool,
+    "reason": str|None, "stream_id": str|None}``; the frontend surfaces a
+    refusal without cancelling the run.
+    """
+    from api import config as _cfg
+    from api.helpers import bad, j
+
+    sid = str((body or {}).get("session_id", "") or "").strip()
+    if not sid:
+        return bad(handler, "session_id required")
+
+    try:
+        session = get_session(sid)
+    except KeyError:
+        session = None
+    stream_id = getattr(session, "active_stream_id", None) or None
+    if stream_id:
+        result = _background_bound_stream(sid, stream_id)
+        if result is not None:
+            return j(handler, result)
+
+    with _cfg.SESSION_AGENT_CACHE_LOCK:
+        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
+    agent = cached[0] if cached and _cached_agent_matches_session(cached[0], sid) else None
+    return j(handler, _request_background(agent, sid, None))
+
+
 def _deliver_gateway_steer(sid: str, result: dict, text: str) -> dict:
     """Forward a Gateway-owned steer to its run; keep the queue fallback on refusal.
 

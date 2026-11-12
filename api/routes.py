@@ -22035,6 +22035,10 @@ def handle_post(handler, parsed) -> bool:
         from api.streaming import _handle_chat_steer
         return _handle_chat_steer(handler, body)
 
+    if parsed.path == "/api/chat/background":
+        from api.streaming import _handle_chat_background
+        return _handle_chat_background(handler, body)
+
     if parsed.path == "/api/terminal/start":
         return _handle_terminal_start(handler, body)
 
