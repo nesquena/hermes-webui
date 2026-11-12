@@ -311,6 +311,28 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
     return total, own
 
 
+def _sidecar_change_marker(session_id):
+    """Write generation and stat signature of ``session_id``'s sidecar, taken before a read."""
+    sid = str(session_id or '')
+    return _sidecar_write_generation(sid), _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
+
+
+def _sidecar_unchanged_since(session_id, marker) -> bool:
+    """True if no other writer replaced the sidecar since ``marker`` (#9017).
+
+    In-process writers bump the write generation around every replace. The
+    stat signature covers writers outside this process; it's only comparable
+    when this thread hasn't written the file since (a load's own self-heal).
+    """
+    (total_before, own_before), sig_before = marker
+    total, own = _sidecar_write_generation(session_id)
+    if total - total_before != own - own_before:
+        return False
+    if own != own_before:
+        return True
+    return sig_before is not None and _sidecar_stat_signature(SESSION_DIR / f'{session_id}.json') == sig_before
+
+
 def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
     _note_sidecar_write(session_id)
     try:
@@ -1474,6 +1496,45 @@ def _load_session_from_path(path: Path) -> "Session | None":
     return Session(**data)
 
 
+def _load_session_for_listing(sid) -> "Session | None":
+    """``Session.load(sid)`` without its repair save, for read-only listing paths (#9007).
+
+    ``Session.load`` saves a sidecar whose duplicate partials it collapsed. The
+    session list reads sessions the requesting profile may not own, without
+    their lock, so that save could overwrite a turn the owner wrote meanwhile.
+    This keeps the collapse in memory, as ``_load_session_from_path`` does, and
+    is otherwise ``Session.load``: same id and path checks, a corrupt file still
+    raises, the draft overlay and the #8852/#8830 marks are keyed by ``sid``,
+    and an uncollapsed legacy file fills the facts cache.
+    """
+    if not is_safe_session_id(sid):
+        return None
+    p = SESSION_DIR / f'{sid}.json'
+    if not p.exists():
+        return None
+    pre_read_sig = _sidecar_stat_signature(p)
+    data = json.loads(p.read_text(encoding='utf-8'))
+    share_fields_misplaced = isinstance(data, dict) and bool(_sidecar_keys_after_body(data, _SHARE_FIELD_KEYS))
+    data['_pending_hidden_wakeup_from_writer'] = True
+    data['messages'], collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    names_other_session = data.get('session_id') != sid
+    session = Session(**_apply_session_draft_overlay(data, sid))
+    session._share_fields_misplaced = share_fields_misplaced
+    if names_other_session:
+        session._sidecar_names_other_session = sid
+    if not collapsed_partials and 'anchor_scene_index' not in data:
+        try:
+            _legacy_sidecar_facts_put(
+                sid,
+                len(session.messages or []),
+                _anchor_scene_index_from_records(getattr(session, 'anchor_activity_scenes', None)),
+                expected_sig=pre_read_sig,
+            )
+        except Exception:
+            logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+    return session
+
+
 def _lookup_index_message_count(session_id):
     """Return the indexed message count without loading the full session file."""
     return _index_message_count_map().get(str(session_id))
@@ -2313,10 +2374,14 @@ class Session:
                 existing = None
                 existing_guarded_messages = None
                 existing_exact_replay_rows_removed = 0
+                existing_bytes = None
                 existing_msg_count = _prefix_message_count(self.path)
                 if existing_msg_count is None:
-                    existing_text = self.path.read_text(encoding='utf-8')
                     try:
+                        # A sidecar cut inside a multi-byte character is
+                        # handled like malformed JSON (#8798), so it cannot
+                        # stop the valid in-memory snapshot from saving.
+                        existing_text = self.path.read_text(encoding='utf-8')
                         existing = json.loads(existing_text)
                         existing_messages = existing.get('messages') or []
                         existing_msg_count = len(existing_messages)
@@ -2325,11 +2390,15 @@ class Session:
                                 existing_guarded_messages,
                                 existing_exact_replay_rows_removed,
                             ) = _deduplicate_exact_stable_messages(existing_messages)
-                    except (json.JSONDecodeError, ValueError, AttributeError):
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, AttributeError):
                         existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(guarded_messages or [])
+                # Preserve when the on-disk count is known-positive *or*
+                # unknown (-1 after UnicodeDecodeError / corrupt JSON). An
+                # unmarked torn sidecar sets -1, and must not lose its raw
+                # bytes to an empty active/pending snapshot (#8807 gate R2).
                 if (
-                    existing_msg_count > 0
+                    existing_msg_count != 0
                     and incoming_msg_count == 0
                     and (self.active_stream_id or self.pending_user_message)
                 ):
@@ -2347,8 +2416,14 @@ class Session:
                     if existing_text is None:
                         # The .bak body is the one thing that needs the full text,
                         # and a shrink is the one time it is needed.
-                        existing_text = self.path.read_text(encoding='utf-8')
-                    if existing is None:
+                        try:
+                            existing_text = self.path.read_text(encoding='utf-8')
+                        except UnicodeDecodeError:
+                            # The prefix count was readable but the body is
+                            # cut mid-character (#8798). Back up the exact
+                            # bytes below instead of aborting the save.
+                            existing_bytes = self.path.read_bytes()
+                    if existing is None and existing_text is not None:
                         try:
                             existing = json.loads(existing_text)
                             existing_messages = existing.get('messages') or []
@@ -2367,10 +2442,13 @@ class Session:
                     # failure mode pre-fix was "backup is lost"; with
                     # this fix the backup either lands cleanly or doesn't
                     # land at all.
+                    bak_tmp = None
+                    salvage_tmp = None
                     try:
                         backup_text = existing_text
                         if (
-                            existing_exact_replay_rows_removed
+                            backup_text is not None
+                            and existing_exact_replay_rows_removed
                             and isinstance(existing, dict)
                             and isinstance(existing_guarded_messages, list)
                         ):
@@ -2390,20 +2468,57 @@ class Session:
                                 existing_exact_replay_rows_removed,
                                 self.session_id,
                             )
-                        bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
-                        )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(backup_text)
-                            bf.flush()
-                            os.fsync(bf.fileno())
-                        _safe_replace(bak_tmp, bak_path)
+                        if backup_text is None:
+                            # Undecodable old sidecar (#8798 / #8807 P1): never
+                            # publish torn bytes onto the recovery ``.json.bak``.
+                            # Keep any readable backup as-is (count vs the
+                            # uncommitted incoming snapshot does not matter —
+                            # primary publication may still fail). Park the raw
+                            # bytes on a non-recovery sibling for manual salvage.
+                            salvage_path = self.path.with_suffix('.json.torn')
+                            salvage_tmp = salvage_path.with_name(
+                                f'{salvage_path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                            )
+                            with open(salvage_tmp, 'wb') as bf:
+                                bf.write(existing_bytes)
+                                bf.flush()
+                                os.fsync(bf.fileno())
+                            _safe_replace(salvage_tmp, salvage_path)
+                            if _readable_recovery_backup(bak_path):
+                                logger.warning(
+                                    "Kept existing backup for session %s; "
+                                    "undecodable old sidecar salvaged at %s",
+                                    self.session_id,
+                                    salvage_path.name,
+                                )
+                            else:
+                                logger.warning(
+                                    "Old sidecar for session %s is not valid UTF-8; "
+                                    "salvaged bytes at %s (not a recovery backup)",
+                                    self.session_id,
+                                    salvage_path.name,
+                                )
+                        else:
+                            bak_tmp = bak_path.with_suffix(
+                                f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                            )
+                            with open(bak_tmp, 'w', encoding='utf-8') as bf:
+                                bf.write(backup_text)
+                                bf.flush()
+                                os.fsync(bf.fileno())
+                            # Only rename a temp this save just wrote; a stale
+                            # one left by an earlier failed save must never
+                            # land on the backup (#8807 gate).
+                            _safe_replace(bak_tmp, bak_path)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.
-                        try:
-                            bak_tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                        for _tmp in (bak_tmp, salvage_tmp):
+                            if _tmp is None:
+                                continue
+                            try:
+                                _tmp.unlink(missing_ok=True)
+                            except Exception:
+                                pass
         except OSError:
             pass
 
@@ -2487,7 +2602,8 @@ class Session:
         # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
-        _pre_read_sig = _sidecar_stat_signature(p)
+        _read_marker = _sidecar_change_marker(sid)
+        _pre_read_sig = _read_marker[1]
         data = json.loads(p.read_text(encoding='utf-8'))
         # #8830: exp-v0.52.621..630 left a shared legacy sidecar's share fields
         # after ``messages``, where the metadata prefix reader never sees them.
@@ -2525,13 +2641,27 @@ class Session:
                 sid, data.get('session_id'),
             )
         elif _collapsed_partials:
-            try:
-                # Self-heal bloated sessions on first full load without touching
-                # recency/index ordering; save() creates a .bak because this
-                # intentionally shrinks the transcript (#2592).
-                session.save(touch_updated_at=False, skip_index=True)
-            except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+            # #9017: a read (another profile's sidebar poll, a cleanup's reload)
+            # must not save an older copy over a newer turn. Persist the collapse
+            # only under the session lock and only if nobody wrote since this
+            # read; a caller already holding the lock saves it with its own save.
+            # Otherwise it stays in memory and a later save persists it.
+            _lock = _get_session_agent_lock(sid)
+            if _lock.acquire(blocking=False):
+                try:
+                    # save() takes this reentrant lock anyway; taking it before
+                    # the check keeps a save made without the session lock from
+                    # landing between the check and this save.
+                    with _session_persist_lock(sid):
+                        if _sidecar_unchanged_since(sid, _read_marker):
+                            # Self-heal bloated sessions without touching recency/index
+                            # ordering; save() creates a .bak because this
+                            # intentionally shrinks the transcript (#2592).
+                            session.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+                finally:
+                    _lock.release()
         else:
             # #5854: for a LEGACY sidecar (no modern anchor_scene_index key), the
             # cheap metadata-prefix read cannot recover message_count/scenes when
@@ -2541,8 +2671,8 @@ class Session:
             # Keyed by stat signature, so any edit invalidates it; the next
             # save() rewrites the modern layout and the fallback stops firing.
             # expected_sig guards against an atomic replace during the read.
-            # (When _collapsed_partials fired, save() above already rewrote the
-            # modern layout, so no legacy caching is needed.)
+            # (When _collapsed_partials fired, the file is rewritten by the save
+            # above or by a later one, so no legacy caching is needed.)
             #
             # WHY STILL GATED, and not "obviously" broadened to modern files: the
             # cache is only READ from the two sites that reach it when the cheap
@@ -6265,6 +6395,23 @@ def _sidecar_stat_signature(path):
 _MESSAGE_COUNT_MARKER = 1
 
 
+def _readable_recovery_backup(bak_path) -> bool:
+    """True when ``bak_path`` is a readable session recovery can use (#8807).
+
+    Count relative to an uncommitted incoming snapshot is irrelevant: a
+    failed primary publication must not have already swapped this file for
+    undecodable bytes.
+    """
+    try:
+        data = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    messages = data.get('messages')
+    return isinstance(messages, list)
+
+
 def _prefix_message_count(path):
     """The sidecar's own persisted ``message_count``, from a bounded prefix.
 
@@ -9713,7 +9860,7 @@ def all_sessions(
             for i, s in enumerate(index):
                 if 'last_message_at' not in s:
                     _diag_stage(diag, "all_sessions.backfill_load")
-                    full = Session.load(s.get('session_id'))
+                    full = _load_session_for_listing(s.get('session_id'))  # never saves (#9007)
                     if full:
                         index[i] = full.compact(sidebar_metadata_only=sidebar_metadata_only)
                         backfilled.append(full)
@@ -9849,7 +9996,7 @@ def all_sessions(
     for p in SESSION_DIR.glob('*.json'):
         if p.name.startswith('_'): continue
         try:
-            s = Session.load(p.stem)
+            s = _load_session_for_listing(p.stem)  # never saves (#9007)
             if s: out.append(s)
         except Exception:
             logger.debug("Failed to load session from %s", p)
@@ -10996,6 +11143,44 @@ def _callable_accepts_keyword(callable_obj, keyword: str) -> bool:
     )
 
 
+class _ContentFingerprintUnreadable:
+    """Sentinel: the fingerprint read for one table FAILED (lock/timeout).
+
+    Distinct from SQLite's own ``NULL`` for an empty table: an unreadable read
+    says nothing about the contents, so it must never equal a genuine empty-table
+    read. Two unreadable reads still compare equal, as master's ``None == None``
+    did; the session-list cache keeps its file-stat slots and TTL for that case,
+    so no consumer gates on ``_content_fingerprint_readable`` (it documents the
+    contract for tests and diagnostics). (#8694, #8986)
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<content-fingerprint-unreadable>"
+
+
+_CONTENT_FINGERPRINT_UNREADABLE = _ContentFingerprintUnreadable()
+
+
+def _content_fingerprint_readable(fingerprint) -> bool:
+    """True when ``fingerprint`` was actually READ, i.e. is safe to compare.
+
+    ``None`` is this module's total-failure value (no DB, unopenable, outer
+    exception) and ``_CONTENT_FINGERPRINT_UNREADABLE`` marks a failed per-table
+    read. Both mean "contents unknown" and must never authorize a caller to
+    conclude "unchanged". A readable fingerprint may still contain ``None`` for a
+    table that is genuinely empty — that is a real observation, not a failure.
+    """
+    if fingerprint is None or fingerprint is _CONTENT_FINGERPRINT_UNREADABLE:
+        return False
+    if isinstance(fingerprint, (tuple, list)):
+        if not fingerprint:
+            return False
+        return all(part is not _CONTENT_FINGERPRINT_UNREADABLE for part in fingerprint)
+    return True
+
+
 def _sqlite_content_fingerprint(db_path: Path):
     """Return a commit-reliable content fingerprint for a state.db.
 
@@ -11054,7 +11239,9 @@ def _sqlite_content_fingerprint(db_path: Path):
                     ).fetchone()
                     parts.append(row[0] if row else None)
                 except Exception:
-                    parts.append(None)
+                    # A failed read is NOT "no rows": mark it unreadable so a
+                    # consumer never treats two unknown stamps as unchanged.
+                    parts.append(_CONTENT_FINGERPRINT_UNREADABLE)
             return tuple(parts)
         finally:
             try:
@@ -11167,8 +11354,29 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
     return hermes_home, db_path, cli_profile, cache_key
 
 
+# Trailing element of the cache key ``_all_profiles_cli_contexts`` returns when
+# it could NOT see every profile: the named-profile directory enumeration failed,
+# a profile's home failed to resolve, or ``api.profiles`` itself failed to import.
+# The contexts it returns are then a SUBSET of the real roster, and a profile it
+# skipped can commit without moving anything the caller compares. A 1-tuple, so
+# it can never be mistaken for a 3-tuple roster entry, and hashable/comparable by
+# value, so two incomplete keys still compare equal exactly as before. (#8694)
+ALL_PROFILES_ROSTER_INCOMPLETE = ('<all-profiles-roster-incomplete>',)
+
+def all_profiles_roster_incomplete(cache_key) -> bool:
+    """True when ``cache_key`` (from ``_all_profiles_cli_contexts``) marks a partial roster."""
+    return isinstance(cache_key, tuple) and ALL_PROFILES_ROSTER_INCOMPLETE in cache_key
+
+
 def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], tuple]:
-    """Return per-profile CLI scan contexts plus a cache key fragment."""
+    """Return per-profile CLI scan contexts plus a cache key fragment.
+
+    Best-effort by design: a profile that cannot be enumerated or resolved is
+    skipped rather than failing the whole sidebar. When that happens the cache
+    key ends with ``ALL_PROFILES_ROSTER_INCOMPLETE`` so a consumer can tell "these
+    are all the profiles" from "these are the profiles I managed to see". Only
+    the former is evidence that nothing outside ``contexts`` changed. (#8694)
+    """
     try:
         from api.profiles import (
             _profiles_root,
@@ -11176,19 +11384,32 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
             get_hermes_home_for_profile,
         )
     except Exception:
-        return [], ()
+        return [], (ALL_PROFILES_ROSTER_INCOMPLETE,)
 
     contexts: list[tuple[Path, Path, str | None]] = []
     cache_entries: list[tuple[str, str, object]] = []
     seen_homes: set[str] = set()
+    complete = True
 
     def _add_context(profile_name) -> None:
+        nonlocal complete
         try:
             hermes_home = Path(get_hermes_home_for_profile(profile_name)).expanduser().resolve()
+        except ValueError:
+            # The resolver's containment refusal (a named profile directory that
+            # resolves outside the profiles root): WebUI deliberately never reads
+            # that home, so excluding it is a policy decision, not lost evidence.
+            logger.debug("All-profiles CLI excluded profile %r", profile_name, exc_info=True)
+            return
         except Exception:
+            complete = False
+            logger.debug("All-profiles CLI home resolution failed for %r", profile_name, exc_info=True)
             return
         home_key = _path_cache_key(hermes_home)
-        if not home_key or home_key in seen_homes:
+        if not home_key:
+            complete = False
+            return
+        if home_key in seen_homes:
             return
         seen_homes.add(home_key)
         db_path = hermes_home / 'state.db'
@@ -11199,19 +11420,28 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
     try:
         _add_context(get_active_profile_name())
     except Exception:
-        pass
+        complete = False
     # The root profile, then one home per directory under the named-profile
     # root. Deliberately not list_profiles_api(): that builds the picker's rows,
     # skill counts included, and this scan needs only the homes (#7940).
     _add_context('default')
     try:
-        for entry in sorted(_profiles_root().iterdir()):
+        try:
+            entries = sorted(_profiles_root().iterdir())
+        except FileNotFoundError:
+            # No named-profile root yet (a fresh install): the roster is just the
+            # profiles added above, and that is a complete observation.
+            entries = []
+        for entry in entries:
             if not entry.is_dir():
                 continue
             _add_context(entry.name)
     except Exception:
+        complete = False
         logger.debug("All-profiles CLI directory enumeration failed", exc_info=True)
 
+    if not complete:
+        cache_entries.append(ALL_PROFILES_ROSTER_INCOMPLETE)
     return contexts, tuple(cache_entries)
 
 
@@ -13473,9 +13703,10 @@ def _reconciled_visible_count_for_sidebar(
         session = None
     if session is None or getattr(session, '_loaded_metadata_only', False):
         # Metadata-only stubs carry messages=[] by contract; the sidecar
-        # transcript needs a full load (bounded to this one session).
+        # transcript needs a full load (bounded to this one session). A sidebar
+        # poll holds no session lock, so the read must not save (#9007).
         try:
-            session = Session.load(str(sid))
+            session = _load_session_for_listing(str(sid))
         except Exception:
             return None
     if session is None:
