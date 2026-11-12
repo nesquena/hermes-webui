@@ -147,6 +147,10 @@ def _btw_turn(directory, monkeypatch, *, swap, marked_saves_pass=False):
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(streaming, "_attempt_credential_self_heal", lambda *a, **k: None)
     if marked_saves_pass:
+        # #9019: get_session no longer returns a marked snapshot; let the worker see it so the
+        # cleanup's own guard is still exercised.
+        monkeypatch.setattr(streaming, "get_session", lambda sid, *a, **k: models.get_session(
+            sid, *a, allow_foreign_body=True, **k))
         save = models.Session.save
         monkeypatch.setattr(models.Session, "save", lambda self, *a, **k: (
             None if getattr(self, "_sidecar_names_other_session", None) else save(self, *a, **k)))
