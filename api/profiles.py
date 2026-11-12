@@ -8,6 +8,7 @@ Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
 cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
+import collections
 import copy
 import json
 import logging
@@ -81,6 +82,24 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+
+# Keys currently owned in os.environ by a held-open profile env MIRROR
+# (#9024 review round 3): profile_env_for_background_worker writes the worker
+# profile's .env/runtime values into process env (snapshot + restore under
+# api.streaming._ENV_LOCK) without going through _reload_dotenv, so
+# _loaded_profile_env_keys alone cannot prove a live value's provenance. A
+# counted set because two worker scopes may hold overlapping keys; setup and
+# restore both run under _ENV_LOCK, so the counter is race-free.
+_WORKER_OWNED_ENV_KEYS: collections.Counter = collections.Counter()
+
+
+def profile_env_writer_owns(key) -> bool:
+    """True when a PROFILE-owned env writer (not the launcher) owns the key's
+    live ``os.environ`` value right now: ``_reload_dotenv`` or a held-open
+    ``profile_env_for_background_worker`` mirror. A live value absent from
+    both writers is a genuine launcher/operator export (#9024 review round 3).
+    """
+    return key in _loaded_profile_env_keys or key in _WORKER_OWNED_ENV_KEYS
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -991,15 +1010,16 @@ def chat_backend_environ_for_profile(profile) -> dict:
     """The env slice deciding a profile's browser chat backend (#9024 review).
 
     A live ``os.environ`` value counts as a launcher/operator export only when
-    ``_reload_dotenv`` did NOT load it — provenance is tracked in
-    ``_loaded_profile_env_keys`` (#8432). A key loaded from the ACTIVE
-    profile's ``.env`` must not decide another profile's session, so only the
-    owner's own ``.env`` applies then (mtime-cached: the read runs on every
-    session payload projection).
+    no PROFILE-owned env writer owns it — ``_reload_dotenv``
+    (``_loaded_profile_env_keys``, #8432) or a held-open
+    ``profile_env_for_background_worker`` mirror (``_WORKER_OWNED_ENV_KEYS``,
+    #9024 review round 3). A value written by either must not decide another
+    profile's session, so only the owner's own ``.env`` applies then
+    (mtime-cached: the read runs on every session payload projection).
     """
     value = os.environ.get(CHAT_BACKEND_ENV_KEY)
-    if value and CHAT_BACKEND_ENV_KEY in _loaded_profile_env_keys:
-        # The active profile's .env value — not this profile's rule.
+    if value and profile_env_writer_owns(CHAT_BACKEND_ENV_KEY):
+        # A profile-owned writer's value — not this profile's rule.
         value = None
     if not value:
         try:
@@ -1636,10 +1656,19 @@ def profile_env_for_background_worker(
             old_hermes_home = os.environ.get("HERMES_HOME")
             os.environ.update(safe_runtime_env)
             os.environ["HERMES_HOME"] = str(profile_home_path)
+            # #9024 review round 3: record the mirror so a live value held by
+            # this scope is never mistaken for a launcher export.
+            _WORKER_OWNED_ENV_KEYS.update(safe_runtime_env.keys())
         yield
     finally:
         try:
             with _ENV_LOCK:
+                for key in safe_runtime_env:
+                    remaining = _WORKER_OWNED_ENV_KEYS.get(key, 0) - 1
+                    if remaining > 0:
+                        _WORKER_OWNED_ENV_KEYS[key] = remaining
+                    else:
+                        _WORKER_OWNED_ENV_KEYS.pop(key, None)
                 for key, old_value in old_runtime_env.items():
                     if old_value is None:
                         os.environ.pop(key, None)

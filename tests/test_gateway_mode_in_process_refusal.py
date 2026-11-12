@@ -344,3 +344,123 @@ def test_launcher_export_overrides_owner_env_file(monkeypatch, tmp_path, capture
 
     assert captured_route_j["status"] == 503
     assert captured_route_j["payload"]["code"] == "server_draining"
+
+
+def _profile_homes(monkeypatch, tmp_path, *, owner_env=None, other_env=None):
+    """Real profile homes for the owner and a second profile's worker scope.
+
+    ``other_env`` seeds the OTHER profile's .env — the values
+    ``profile_env_for_background_worker`` mirrors into os.environ while its
+    scope is held open (#9024 review round 3).
+    """
+    homes = {}
+    for name, env_text in (("owner", owner_env), ("other", other_env)):
+        home = tmp_path / f"home-{name}"
+        home.mkdir()
+        if env_text:
+            (home / ".env").write_text(env_text, encoding="utf-8")
+        homes[name] = home
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name, _h=homes: _h.get(str(name or "owner"), _h["owner"]),
+    )
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+    return homes
+
+
+def test_held_worker_scope_cannot_unlock_a_gateway_owner(monkeypatch, tmp_path, captured):
+    """#9024 review round 3: another profile's open worker env is not launcher authority.
+
+    The owner's config selects gateway; a background worker for profile
+    "other" holds its .env (HERMES_WEBUI_CHAT_BACKEND=legacy) mirrored into the
+    live process env. The mirror must not decide the owner's session: /btw
+    refuses with 409 while the worker scope is open.
+    """
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(
+        gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG)
+    )
+    _profile_homes(
+        monkeypatch,
+        tmp_path,
+        owner_env=None,
+        other_env="HERMES_WEBUI_CHAT_BACKEND=legacy\n",
+    )
+    with profiles.profile_env_for_background_worker("other", "refusal test"):
+        assert profiles.profile_env_writer_owns(_ENV_KEY), "fixture setup: worker mirror not recorded"
+        routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+    assert not profiles.profile_env_writer_owns(_ENV_KEY), "worker restore must drop the mirror"
+
+
+def test_held_worker_scope_cannot_refuse_a_local_owner(
+    monkeypatch, tmp_path, captured_route_j
+):
+    """The inverse direction: a worker's gateway .env must not refuse a local owner.
+
+    The owner's config is local; the held-open worker for profile "other"
+    mirrors HERMES_WEBUI_CHAT_BACKEND=gateway into the live env. The refusal
+    must be skipped so the next admission gate (#7293) answers.
+    """
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(
+        gateway_sessions, "config_for_profile", lambda _profile=None: {}
+    )
+    _profile_homes(
+        monkeypatch,
+        tmp_path,
+        owner_env=None,
+        other_env="HERMES_WEBUI_CHAT_BACKEND=gateway\n",
+    )
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+    with profiles.profile_env_for_background_worker("other", "refusal test"):
+        routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+
+    assert captured_route_j["status"] == 503
+    assert captured_route_j["payload"]["code"] == "server_draining"
+
+
+def test_gateway_owned_commit_message_never_reaches_the_model_boundary(
+    monkeypatch, tmp_path, captured
+):
+    """A gateway-owned refusal must happen before any in-process model call.
+
+    The owner's config selects gateway; a held-open worker for profile
+    "other" mirrors HERMES_WEBUI_CHAT_BACKEND=legacy into the live env. The
+    git commit-message handler must answer 409 with ZERO calls to the
+    in-process model boundary.
+    """
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(
+        gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG)
+    )
+    _profile_homes(
+        monkeypatch,
+        tmp_path,
+        owner_env=None,
+        other_env="HERMES_WEBUI_CHAT_BACKEND=legacy\n",
+    )
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("gateway-owned refusal reached the in-process model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+    with profiles.profile_env_for_background_worker("other", "refusal test"):
+        routes._handle_git_commit_message(object(), {"session_id": "s1"})
+
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+    assert calls["model_boundary"] == 0
