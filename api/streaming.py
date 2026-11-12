@@ -3516,11 +3516,16 @@ def _resolve_current_session_for_write(session):
     lock.
 
     Returns ``None`` (fail closed) when the current object cannot be
-    resolved — missing/deleted session, transient error, or no session id.
+    resolved — missing/deleted session, transient error, no session id, or
+    a session loaded from a file whose body names another session (#8852).
     Callers MUST no-op on ``None`` and must NEVER fall back to the
     worker-held snapshot: that object may be a detached LRU-evicted
     generation whose save would overwrite the current session state.
     """
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: the object's id is that other session's, so resolving it
+        # would hand that session to this write.
+        return None
     sid = getattr(session, "session_id", None)
     if not sid:
         return None
@@ -7534,6 +7539,10 @@ def _preserve_pre_compression_snapshot(
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
     """
+    if getattr(s, '_sidecar_names_other_session', None):
+        # #8852: old_sid is the object's id, which came from a file whose body
+        # names another session, so the stamp below would land in that session.
+        return False
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
         return False
@@ -16723,7 +16732,15 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 try:
                     import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    if getattr(s, '_sidecar_names_other_session', None):
+                        # #9000: loaded from a copy of another session's file, so
+                        # s.path is that other conversation. Never delete it.
+                        logger.info(
+                            "Not removing /btw file for %s: it holds session %r (#9000)",
+                            session_id, s.session_id,
+                        )
+                    else:
+                        pathlib.Path(s.path).unlink(missing_ok=True)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions

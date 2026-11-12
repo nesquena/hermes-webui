@@ -203,6 +203,10 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
         cli_meta = dict(cli_meta or {})
         if not session or cli_meta.get("read_only") or not _looks_like_default_cli_title(cli_meta):
             return
+        if getattr(session, "_sidecar_names_other_session", None):
+            # #8852: the thread below reloads the session the object's id
+            # names; the id came from a file whose body names another session.
+            return
         sid = str(getattr(session, "session_id", "") or "")
         if not sid:
             return
@@ -3101,8 +3105,10 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                 # pays nothing because it skips the load via the
                 # ``else`` branch below.
                 try:
-                    from api.models import Session as _Session
-                    _loaded = _Session.load(sid)
+                    # Never a repairing Session.load: this row may be another
+                    # profile's, read without its lock (#9007).
+                    from api.models import _load_session_for_listing
+                    _loaded = _load_session_for_listing(sid)
                     sidecar_has_messages = bool(
                         _loaded is not None and len(_loaded.messages or []) > 0
                     )
@@ -32462,6 +32468,15 @@ def _current_cwd_sync_target(sid):
             cur = get_session(sid)
         except KeyError:
             return None
+        if getattr(cur, "_sidecar_names_other_session", None):
+            # #9000: the file was replaced with a copy of another session's file.
+            # The reloaded object carries that session's id, workspace and profile,
+            # so the mirror would rewrite the other session's state.db row.
+            logger.info(
+                "Skipping cwd sync for %s: its file now holds session %r (#9000)",
+                sid, cur.session_id,
+            )
+            return None
         return (cur.session_id, cur.workspace, getattr(cur, "profile", None))
 
 
@@ -32483,6 +32498,10 @@ def _handle_chat_sync(handler, body):
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
     s = get_session(body["session_id"])
+    if getattr(s, "_sidecar_names_other_session", None):
+        # #9000: the file holds a copy of another session's file, so the loaded
+        # object carries that session's id; the turn would run under it.
+        return bad(handler, "Session not found", 404)
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
