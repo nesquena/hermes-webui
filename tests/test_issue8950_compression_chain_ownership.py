@@ -595,3 +595,26 @@ def test_oversized_intermediate_snapshot_marker_boolean_false_control_refuses_re
     )
     _assert_revocation_refused_for_tampered_chain(session_c, token, sid_a, sid_c, share_dir)
 
+
+@pytest.mark.parametrize("oversized", [False, True], ids=["prefix", "full-read"])
+def test_tampered_intermediate_marker_never_lets_tip_refresh_overwrite(store, oversized):
+    """A malformed intermediate marker cannot authorize a refresh either.
+
+    The refresh path never raises: like every other unproven ownership claim
+    (#8734) it mints the tip its own token instead of rewriting A's snapshot.
+    """
+    session_c, token, sid_a, sid_c, share_dir = _setup_tampered_intermediate_chain(
+        store, f"refresh-{int(oversized)}".replace(".", ""), "false", oversized=oversized
+    )
+    before = (share_dir / f"{token}.json").read_bytes()
+
+    refreshed = shares.create_or_refresh_share(session_c)
+    assert refreshed["token_reassigned"] is True
+    assert refreshed["share_token"] != token
+
+    # A's snapshot is byte-identical: still owned by A, still public.
+    assert (share_dir / f"{token}.json").read_bytes() == before
+    public = shares.load_share(token)
+    assert public is not None
+    assert public["title"].startswith("Session A")
+
