@@ -4349,7 +4349,7 @@ def _drain_webui_process_notifications(
 
     notifications: list[str] = []
     skipped_events: list[dict] = []
-    async_retry_events: list[tuple[dict, bool]] = []
+    async_retry_events: list[tuple[dict, object]] = []
     completion_queue = getattr(process_registry, 'completion_queue', None)
     if completion_queue is None:
         return []
@@ -4465,9 +4465,7 @@ def _drain_webui_process_notifications(
                 if notification_added:
                     notifications.pop()
                 release_async_delegation_delivery(evt, claim)
-                async_retry_events.append(
-                    (evt, bool(getattr(claim, "durable", False)))
-                )
+                async_retry_events.append((evt, claim))
                 logger.warning(
                     "Failed to accept async delegation completion for session %s",
                     session_id,
@@ -4498,11 +4496,12 @@ def _drain_webui_process_notifications(
         # replayed forever on later turns.
         _mark_process_completion_consumed(process_registry, evt_sid)
 
-    for evt, durable in async_retry_events:
+    for evt, claim in async_retry_events:
         requeue_async_delegation_event(
             evt,
             completion_queue,
-            durable=durable,
+            durable=bool(getattr(claim, "durable", False)),
+            claim=claim,
         )
     for evt in skipped_events:
         try:
@@ -4529,6 +4528,7 @@ def _accept_pending_async_delegations(
                 evt,
                 completion_queue,
                 durable=bool(getattr(claim, "durable", False)),
+                claim=claim,
             )
             rejected_notifications.append(notification)
             logger.warning(
