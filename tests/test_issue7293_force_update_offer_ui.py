@@ -415,14 +415,23 @@ _AGENT_BEHIND = {"agent": {"behind": 1}}
 
 
 def test_agent_target_confirmation_names_the_gateway_runs_too(tmp_path):
-    """#8667: an Agent update cycles the Gateway, so its copy says so."""
+    """#8667/#8746: an Agent update cycles the Gateway, so its copy says so."""
 
     out = _run(
         {
             "entry": "apply",
             "target": "agent",
             "updateData": _AGENT_BEHIND,
-            "responses": [_refusal(2, target="agent"), {"ok": True, "target": "agent"}],
+            "responses": [
+                _refusal(
+                    2,
+                    target="agent",
+                    gateway_restart_managed=True,
+                    webui_owned_runs=1,
+                    gateway_runs=1,
+                ),
+                {"ok": True, "target": "agent"},
+            ],
             "clickOffer": True,
             "confirmAnswers": [True],
         },
@@ -433,11 +442,11 @@ def test_agent_target_confirmation_names_the_gateway_runs_too(tmp_path):
         {
             "title": "Interrupt active runs?",
             "message": (
-                "2 agent runs are still working in the WebUI and in the Gateway. "
-                "Updating the Agent also restarts the Gateway for this profile and "
-                "stops the Gateway runs it is executing; Gateway runs in other "
-                "profiles are outside that restart. The WebUI runs are saved as "
-                "interrupted. Wait for them to finish if you can."
+                "1 WebUI agent run is still working and 1 Gateway run is running. "
+                "Updating the Agent also restarts the Gateway this profile uses and "
+                "stops every run that Gateway is executing, including runs started "
+                "from other profiles that use the same Gateway endpoint. The WebUI "
+                "runs are saved as interrupted. Wait for them to finish if you can."
             ),
             "confirmLabel": "Interrupt and update",
             "danger": True,
@@ -459,7 +468,13 @@ def test_agent_target_confirmation_external_gateway_wording(tmp_path):
             "target": "agent",
             "updateData": _AGENT_BEHIND,
             "responses": [
-                _refusal(2, target="agent", gateway_restart_managed=False),
+                _refusal(
+                    2,
+                    target="agent",
+                    gateway_restart_managed=False,
+                    webui_owned_runs=1,
+                    gateway_runs=1,
+                ),
                 {"ok": True, "target": "agent"},
             ],
             "clickOffer": True,
@@ -467,16 +482,14 @@ def test_agent_target_confirmation_external_gateway_wording(tmp_path):
         },
         tmp_path,
     )
-    assert out["afterRefusal"]["offer"]["label"] == "Update anyway (interrupts 2 runs)"
+    assert out["afterRefusal"]["offer"]["label"] == "Update anyway (interrupts 1 run)"
     assert out["confirmCalls"] == [
         {
             "title": "Interrupt active runs?",
             "message": (
-                "2 agent runs are still working in the WebUI and in the Gateway. "
-                "The Gateway for this profile is managed outside the WebUI, so "
-                "updating the Agent does not restart it and those Gateway runs "
-                "keep running; the WebUI runs are saved as interrupted. Wait "
-                "for them to finish if you can."
+                "1 WebUI agent run is still working, and 1 Gateway run keeps running "
+                "because the WebUI cannot restart this profile's Gateway. Only the "
+                "WebUI runs are saved as interrupted."
             ),
             "confirmLabel": "Interrupt and update",
             "danger": True,

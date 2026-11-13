@@ -31,6 +31,8 @@ _MESSAGE_KEYS = (
     "update_force_active_runs_message",
     "update_force_active_runs_message_agent",
     "update_force_active_runs_message_agent_external",
+    "update_force_active_runs_message_agent_webui_only",
+    "update_force_active_runs_no_runs",
 )
 
 
@@ -45,25 +47,27 @@ def test_agent_refusal_names_webui_and_gateway_runs(monkeypatch):
     )
 
     result = upd._restart_blocked_response(
-        "agent", {"active_runs": 2, "active_streams": 2}
+        "agent", {"active_runs": 2, "active_streams": 2, "webui_owned_runs": 1, "gateway_runs": 1}
     )
 
     assert result["gateway_restart_managed"] is True
+    assert result["webui_owned_runs"] == 1
+    assert result["gateway_runs"] == 1
     message = result["message"]
     assert "2 agent runs are active" in message
     assert "(WebUI and Gateway)" in message
     for kind in BOTH_RUN_TYPES:
         assert kind in message
     # The user must learn WHY the Gateway runs are part of the count: the
-    # Agent update restarts the Gateway for this profile.
+    # Agent update restarts the Gateway this profile uses.
     assert (
-        "Updating the Agent also restarts the Gateway for this profile and stops the "
-        "Gateway runs it is executing. Gateway runs in other profiles are outside that "
-        "restart, and only WebUI runs are settled as interrupted."
+        "Updating the Agent also restarts the Gateway this profile uses and stops every "
+        "run that Gateway is executing, including runs started from other profiles that "
+        "use the same Gateway endpoint; only the WebUI runs are settled as interrupted."
     ) in message
     # The way out is unchanged.
     assert (
-        "force the update to interrupt the WebUI runs and restart this profile's Gateway."
+        "force the update to interrupt the 1 WebUI run and restart the Gateway this profile uses."
     ) in message
 
 
@@ -75,21 +79,24 @@ def test_agent_refusal_uses_the_singular_form(monkeypatch):
     )
 
     result = upd._restart_blocked_response(
-        "agent", {"active_runs": 1, "active_streams": 0}
+        "agent", {"active_runs": 1, "active_streams": 0, "webui_owned_runs": 0, "gateway_runs": 1}
     )
     assert result["gateway_restart_managed"] is True
+    assert result["webui_owned_runs"] == 0
+    assert result["gateway_runs"] == 1
     message = result["message"]
 
     assert "1 agent run is active" in message
+    assert "(WebUI and Gateway)" in message
     for kind in BOTH_RUN_TYPES:
         assert kind in message
     assert (
-        "Updating the Agent also restarts the Gateway for this profile and stops the "
-        "Gateway runs it is executing. Gateway runs in other profiles are outside that "
-        "restart, and only WebUI runs are settled as interrupted."
+        "Updating the Agent also restarts the Gateway this profile uses and stops every "
+        "run that Gateway is executing, including runs started from other profiles that "
+        "use the same Gateway endpoint; only the WebUI runs are settled as interrupted."
     ) in message
     assert (
-        "force the update to interrupt the WebUI run and restart this profile's Gateway."
+        "force the update to restart the Gateway this profile uses and stop the Gateway runs it is executing."
     ) in message
 
 
@@ -103,14 +110,17 @@ def test_agent_refusal_when_gateway_unmanaged_does_not_promise_restart(monkeypat
     )
 
     result_plural = upd._restart_blocked_response(
-        "agent", {"active_runs": 2, "active_streams": 2}
+        "agent", {"active_runs": 2, "active_streams": 2, "webui_owned_runs": 1, "gateway_runs": 1}
     )
     assert result_plural["gateway_restart_managed"] is False
+    assert result_plural["webui_owned_runs"] == 1
+    assert result_plural["gateway_runs"] == 1
     assert result_plural["message"] == (
         "Cannot update agent while 2 agent runs are active (WebUI and Gateway). "
-        "The Gateway for this profile is managed outside the WebUI, so updating the Agent "
-        "does not restart it and its runs keep running. "
-        "Wait for the response to finish and retry, or force the update to interrupt the WebUI runs."
+        "The Gateway this profile uses is managed outside the WebUI, so updating the Agent "
+        "does not restart it and its Gateway runs keep running. "
+        "Wait for the response to finish and retry, or force the update to interrupt the 1 WebUI run; "
+        "the Gateway runs keep running."
     )
     assert "restarts the Gateway" not in result_plural["message"]
     assert "managed outside the WebUI" in result_plural["message"]
@@ -118,14 +128,16 @@ def test_agent_refusal_when_gateway_unmanaged_does_not_promise_restart(monkeypat
         assert kind in result_plural["message"]
 
     result_singular = upd._restart_blocked_response(
-        "agent", {"active_runs": 1, "active_streams": 0}
+        "agent", {"active_runs": 1, "active_streams": 0, "webui_owned_runs": 0, "gateway_runs": 1}
     )
     assert result_singular["gateway_restart_managed"] is False
+    assert result_singular["webui_owned_runs"] == 0
+    assert result_singular["gateway_runs"] == 1
     assert result_singular["message"] == (
         "Cannot update agent while 1 agent run is active (WebUI and Gateway). "
-        "The Gateway for this profile is managed outside the WebUI, so updating the Agent "
-        "does not restart it and its runs keep running. "
-        "Wait for the response to finish and retry, or force the update to interrupt the WebUI run."
+        "The Gateway this profile uses is managed outside the WebUI, so updating the Agent "
+        "does not restart it and its Gateway runs keep running. "
+        "Wait for the Gateway runs to finish and retry; forcing the update will not stop them."
     )
 
 
@@ -138,18 +150,19 @@ def test_agent_refusal_resolves_unproven_capability_safely_to_unmanaged(monkeypa
     monkeypatch.setattr(upd, "gateway_lifecycle_capability", _broken)
 
     result = upd._restart_blocked_response(
-        "agent", {"active_runs": 2, "active_streams": 2}
+        "agent", {"active_runs": 2, "active_streams": 2, "webui_owned_runs": 1, "gateway_runs": 1}
     )
     assert result["gateway_restart_managed"] is False
-    assert "managed outside the WebUI" in result["message"]
+    assert "The WebUI cannot prove it owns the Gateway" in result["message"]
 
     monkeypatch.setattr(
         upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": "invalid"}
     )
     result_malformed = upd._restart_blocked_response(
-        "agent", {"active_runs": 2, "active_streams": 2}
+        "agent", {"active_runs": 2, "active_streams": 2, "webui_owned_runs": 1, "gateway_runs": 1}
     )
     assert result_malformed["gateway_restart_managed"] is False
+    assert "The WebUI cannot prove it owns the Gateway" in result_malformed["message"]
 
 
 def test_agent_refusal_cross_profile_warning_scope(monkeypatch):
@@ -158,9 +171,8 @@ def test_agent_refusal_cross_profile_warning_scope(monkeypatch):
     When a durable Gateway run belongs to profile 'beta' while the request
     selects 'alpha', the process-wide census counts 1 run, WebUI-owned runs
     are empty, and the restart dispatcher asks only for 'alpha'. The refusal
-    warns that Gateway runs in other profiles are outside that restart and only
-    WebUI runs are settled as interrupted, without promising unconditional
-    stops ('and stops it.' / 'and stops them.').
+    warns that restarting the Gateway used by this profile stops runs from
+    any profile using the same endpoint.
     """
     import api.config as cfg
     import api.gateway_chat as gateway_chat
@@ -186,6 +198,9 @@ def test_agent_refusal_cross_profile_warning_scope(monkeypatch):
         upd, "get_active_profile_gateway_running_pid", lambda profile=None: 1234
     )
 
+    # 1. Endpoints compartilhados: alpha e beta resolvem par idêntico
+    assert gateway_chat._gateway_endpoint_for_profile("alpha") == gateway_chat._gateway_endpoint_for_profile("beta")
+
     with cfg.ACTIVE_RUNS_LOCK:
         old_active = dict(cfg.ACTIVE_RUNS)
         cfg.ACTIVE_RUNS.clear()
@@ -208,36 +223,39 @@ def test_agent_refusal_cross_profile_warning_scope(monkeypatch):
 
         # Oracle assertions on the refusal message
         blocker = upd._update_blocker_snapshot("agent")
+        # #8660 keeps the blocking census free of any durability read; the
+        # per-kind split is built where the copy is, in the refusal.
+        assert blocker["active_runs"] == 1
+        assert "gateway_runs" not in blocker
         result = upd._restart_blocked_response("agent", blocker)
         assert result["gateway_restart_managed"] is True
+        assert result["gateway_runs"] == 1
+        assert result["webui_owned_runs"] == 0
         message = result["message"]
 
-        assert "Gateway runs in other profiles are outside that restart" in message
-        assert "only WebUI runs are settled as interrupted" in message
-        assert "and stops it." not in message
-        assert "and stops them." not in message
+        assert "including runs started from other profiles that use the same Gateway endpoint" in message
+        assert "only the WebUI runs are settled as interrupted" in message
+        assert "Gateway runs in other profiles are outside that restart" not in message
+        assert "outside that restart" not in message
+        assert "outside the restart" not in message
         assert (
-            "restarts the Gateway for this profile and stops the Gateway runs it is executing"
+            "restarts the Gateway this profile uses and stops every run that Gateway is executing"
         ) in message
 
-        # Positive control: run of the active profile itself also receives the qualified scope
-        stream_alpha = "stream-positive-control-alpha"
-        cfg.register_active_run(stream_alpha, backend="gateway", profile="alpha")
-        try:
-            blocker_alpha = upd._update_blocker_snapshot("agent")
-            result_alpha = upd._restart_blocked_response("agent", blocker_alpha)
-            message_alpha = result_alpha["message"]
-            assert (
-                "restarts the Gateway for this profile and stops the Gateway runs it is executing"
-            ) in message_alpha
-            assert (
-                "Gateway runs in other profiles are outside that restart" in message_alpha
-            )
-            assert "only WebUI runs are settled as interrupted" in message_alpha
-            assert "and stops it." not in message_alpha
-            assert "and stops them." not in message_alpha
-        finally:
-            cfg.unregister_active_run(stream_alpha)
+        # 2. Endpoints separados (controle): profile beta com URL própria
+        def _separate_endpoint(p):
+            if p == "beta":
+                return ("http://127.0.0.1:9999", "key-beta")
+            return ("http://127.0.0.1:8642", "")
+
+        monkeypatch.setattr(gateway_chat, "_gateway_endpoint_for_profile", _separate_endpoint)
+        assert gateway_chat._gateway_endpoint_for_profile("alpha") != gateway_chat._gateway_endpoint_for_profile("beta")
+
+        result_sep = upd._restart_blocked_response("agent", blocker)
+        message_sep = result_sep["message"]
+        assert "including runs started from other profiles that use the same Gateway endpoint" in message_sep
+        assert "outside that restart" not in message_sep
+        assert "outside the restart" not in message_sep
     finally:
         cfg.unregister_active_run(stream_beta)
         with cfg.ACTIVE_RUNS_LOCK:
@@ -272,8 +290,9 @@ def test_agent_update_refusal_reaches_the_caller_with_both_run_types(tmp_path, m
 
     import queue
 
+    import api.gateway_chat as gateway_chat
     import api.updates as upd
-    from api.config import STREAMS, STREAMS_LOCK
+    from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
 
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(upd, "REPO_ROOT", tmp_path)
@@ -283,25 +302,42 @@ def test_agent_update_refusal_reaches_the_caller_with_both_run_types(tmp_path, m
         upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": True}
     )
     monkeypatch.setattr(
+        gateway_chat, "gateway_run_durably_resumable", lambda stream_id: True
+    )
+    monkeypatch.setattr(
         upd,
         "_schedule_restart",
         lambda delay=2.0: (_ for _ in ()).throw(AssertionError("must not restart")),
     )
 
     with STREAMS_LOCK:
-        old = dict(STREAMS)
+        old_streams = dict(STREAMS)
         STREAMS.clear()
         STREAMS["stream_active"] = queue.Queue()
+    with ACTIVE_RUNS_LOCK:
+        old_runs = dict(ACTIVE_RUNS)
+        ACTIVE_RUNS.clear()
+        ACTIVE_RUNS["gw_active"] = {
+            "session_id": "s1",
+            "stream_id": "gw_active",
+            "backend": "gateway",
+            "profile": "default",
+        }
     try:
         result = upd.apply_update("agent")
     finally:
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS.clear()
+            ACTIVE_RUNS.update(old_runs)
         with STREAMS_LOCK:
             STREAMS.clear()
-            STREAMS.update(old)
+            STREAMS.update(old_streams)
 
     assert result["ok"] is False
     assert result["restart_blocked"] is True
-    assert result["active_runs"] == 1
+    assert result["active_runs"] == 2
+    assert result["webui_owned_runs"] == 1
+    assert result["gateway_runs"] == 1
     for kind in BOTH_RUN_TYPES:
         assert kind in result["message"], result["message"]
 
@@ -317,6 +353,8 @@ def _forced_update(monkeypatch, target):
         "restart_blocked": True,
         "active_runs": 3,
         "active_streams": 2,
+        "webui_owned_runs": 1,
+        "gateway_runs": 2,
         "blocking_run_ids": [],
         "blocking_stream_ids": [],
     }
@@ -346,8 +384,8 @@ def test_forced_agent_update_log_names_both_run_types(monkeypatch, caplog):
     assert "settled as interrupted" in text
     assert "Gateway cycles" in text
     assert (
-        "the Gateway runs this profile's Gateway is executing end when the Gateway cycles; "
-        "Gateway runs in other profiles are outside the restart"
+        "the Gateway runs this profile's Gateway is executing end when the Gateway cycles, "
+        "including runs started from other profiles that use the same Gateway endpoint"
     ) in text
 
 
@@ -421,9 +459,13 @@ for (const code of codes) {
   for (const key of keys) {
     const value = vm.runInContext(
       'LOCALES[' + JSON.stringify(code) + '][' + JSON.stringify(key) + ']', ctx);
-    out[code][key] = value === undefined
-      ? null
-      : [1, 2].map((n) => String(typeof value === 'function' ? value(n) : value));
+    if (value === undefined) {
+      out[code][key] = null;
+    } else if (key === 'update_force_active_runs_no_runs') {
+      out[code][key] = String(typeof value === 'function' ? value() : value);
+    } else {
+      out[code][key] = [1, 2].map((n) => String(typeof value === 'function' ? value(n, n) : value));
+    }
   }
 }
 console.log(JSON.stringify({ order: codes, messages: out }));
@@ -462,6 +504,32 @@ def test_every_locale_has_the_agent_external_message_key(locale_messages):
     ]
     assert missing == [], f"locales without update_force_active_runs_message_agent_external: {missing}"
     assert len(locale_messages["order"]) == 15
+
+
+def test_every_locale_has_the_agent_webui_only_message_key(locale_messages):
+    missing = [
+        code
+        for code, keys in locale_messages["messages"].items()
+        if keys["update_force_active_runs_message_agent_webui_only"] is None
+    ]
+    assert missing == [], f"locales without update_force_active_runs_message_agent_webui_only: {missing}"
+    assert len(locale_messages["order"]) == 15
+
+
+def test_every_locale_has_the_no_runs_key(locale_messages):
+    missing = [
+        code
+        for code, keys in locale_messages["messages"].items()
+        if keys["update_force_active_runs_no_runs"] is None
+    ]
+    assert missing == [], f"locales without update_force_active_runs_no_runs: {missing}"
+    assert len(locale_messages["order"]) == 15
+
+
+def test_no_runs_returns_a_string(locale_messages):
+    for code, keys in locale_messages["messages"].items():
+        val = keys["update_force_active_runs_no_runs"]
+        assert isinstance(val, str) and len(val) > 0, f"{code}: empty no_runs"
 
 
 def test_agent_confirm_message_names_both_run_types_in_every_locale(locale_messages):
@@ -529,6 +597,16 @@ def test_agent_external_confirm_message_reports_the_run_count(locale_messages):
     for code, keys in locale_messages["messages"].items():
         for index, count in ((0, 1), (1, 2)):
             message = keys["update_force_active_runs_message_agent_external"][index]
+            if str(count) not in message:
+                missing_count.append(f"{code} (n={count}): {message!r}")
+    assert missing_count == [], "\n".join(missing_count)
+
+
+def test_agent_webui_only_reports_the_run_count(locale_messages):
+    missing_count = []
+    for code, keys in locale_messages["messages"].items():
+        for index, count in ((0, 1), (1, 2)):
+            message = keys["update_force_active_runs_message_agent_webui_only"][index]
             if str(count) not in message:
                 missing_count.append(f"{code} (n={count}): {message!r}")
     assert missing_count == [], "\n".join(missing_count)

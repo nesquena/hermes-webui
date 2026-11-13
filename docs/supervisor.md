@@ -85,14 +85,15 @@ Which runs the count covers depends on the target:
   not counted and keeps running across the restart (#7293).
 - **Agent update:** every live run blocks (WebUI and Gateway), but what happens
   to Gateway runs depends on lifecycle ownership. The census is process-wide,
-  while restart is scoped to the active profile: a managed Gateway is cycled
-  for the active profile (``_ensure_gateway_restart_for_agent_update``) and the
-  Gateway runs it is executing end with the cycle, while counted Gateway runs
-  in other profiles are outside that restart; the WebUI runs are settled as
-  interrupted before the re-exec and the worker teardown and watchdog settle the
-  Gateway runs afterwards. An unmanaged Gateway (``managed: false``) is not
-  restarted, nothing is launched, the Agent checkout still updates and its runs
-  keep running; only the WebUI runs are interrupted on a forced update.
+  while restart cycles the Gateway behind the active profile's endpoint:
+  a managed Gateway is cycled (``_ensure_gateway_restart_for_agent_update``)
+  and every run that Gateway is executing ends with the cycle, including runs
+  started from other profiles that use the same Gateway endpoint; runs using
+  other Gateways are unaffected. The WebUI runs are settled as interrupted
+  before the re-exec, and the worker teardown and watchdog settle the Gateway
+  runs afterwards. An unmanaged Gateway (``managed: false``) is not restarted,
+  nothing is launched, the Agent checkout still updates and its runs keep
+  running; only the WebUI runs are interrupted on a forced update.
 
 ### The supervisor's stop timeout must outlast the drain
 
