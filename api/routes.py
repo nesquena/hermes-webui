@@ -13169,11 +13169,11 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             # legacy rows on both sides), so a store never reconciles against
             # itself.
             #
-            # Twins are proven by the state.db row id, never by text. The
-            # gateway writeback stamps each sidecar row with the id of the
-            # Agent row it mirrors (as the in-process path already does), so
-            # one row id on one row per store, with the same text, is the same
-            # message. Every text, order or clock rule tried here paired a
+            # Twins are proven by the Agent's per-row message_uid, never by
+            # text or by a row id (a restored or recreated state.db hands ids
+            # out again). The gateway writeback stamps each sidecar row with
+            # the uid of the Agent row it mirrors, so one uid on one row per
+            # store, with the same text, is the same message. Every text, order or clock rule tried here paired a
             # short repeated reply ("Done.") or prompt ("continue") with its
             # copy in another turn and hid a later Agent-only reply. A row
             # without that proof -- written before stamping, renumbered by a

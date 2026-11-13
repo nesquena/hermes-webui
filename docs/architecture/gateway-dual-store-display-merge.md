@@ -96,8 +96,9 @@ carries one.
    stamped: it replaces the transcript with the Gateway's canonical rows.
 2. **Exact lane.** The display merge's callers read the Agent store through
    `get_cli_session_messages(include_row_identity=True)`, which also asks for
-   each row's `message_uid` (`include_message_uid`). No other reader returns
-   it. The uids are taken aside once;
+   each row's `message_uid` (`include_message_uid`). Besides the writeback's
+   `state_db_session_rows_after()`, which reads it to stamp, no display,
+   export or copy reader returns it. The uids are taken aside once;
    every other lane, and every row that leaves the merge, sees the default
    projection (`without_requested_row_identity()`), exactly as before. One
    uid on exactly one row per store, with the same role and pairing key and
@@ -171,10 +172,9 @@ never to the second-granularity merge key alone:
   sit in that run's window; when it shows no rows of its own yet and the
   prompt and reply repeat the previous turn's text, the next turn would be
   stamped with the previous turn's uids.
-- **Row-id stamps written by earlier builds of this change** sit on some
-  gateway sidecar rows. This merge ignores them; the append-only branch trusts
-  any `_state_db_row_id`, exactly as on master, so a store that reissued those
-  ids behaves there as it does on master.
+- **The append-only branch still trusts any `_state_db_row_id`**, as on
+  master. The gateway therefore stamps no row id, and this branch is
+  unchanged.
 - **In-process rows do not pair here.** That path stamps `_state_db_row_id`
   only, which this merge does not accept as proof; its rows render as on
   master. Stamping the uid there too would let them pair.
