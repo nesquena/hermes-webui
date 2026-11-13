@@ -13,7 +13,12 @@ assert the properties the cache must have to be safe:
 5. the LRU is bounded and evicts oldest-first;
 6. state.db growth invalidates the entry even when the sidecar is untouched;
 7. an unstable state.db read (a commit landing between the bracketing probes)
-   disables caching for that request instead of planting a stale entry.
+   disables caching for that request instead of planting a stale entry;
+8. a sidecar save landing after the session was loaded but before the key is
+   built never caches the older body under the newer signature (a later GET
+   would replay the old transcript);
+9. a same-model config refresh that only changes the resolved context window is
+   not served from an entry keyed under the old values.
 """
 
 from __future__ import annotations
@@ -129,9 +134,12 @@ class _Env:
         self.models.SESSIONS.pop(sid, None)
         return session
 
-    def get(self, sid, extra=""):
+    def get(self, sid, extra="", resolve_model=0):
         handler = _Handler()
-        url = f"/api/session?session_id={sid}&messages=1&resolve_model=0{extra}"
+        url = (
+            f"/api/session?session_id={sid}&messages=1"
+            f"&resolve_model={int(resolve_model)}{extra}"
+        )
         self.routes.handle_get(handler, urlparse(url))
         assert handler.status in (None, 200), f"unexpected status {handler.status}"
         payload = handler.payload()
@@ -284,3 +292,97 @@ def test_cache_is_bounded_and_evicts_oldest_first(env):
     # A recently used entry survives.
     env.get(sids[-1])
     assert env.projection_calls == len(sids) + 1, "the newest entry must still be cached"
+
+
+def test_a_save_after_the_load_never_caches_the_older_body(env, monkeypatch):
+    """#8990 review 1: the entry is bound to the generation actually read.
+
+    ``Session.load`` hands back the two-message transcript; a real ``save()``
+    lands right after it. The request therefore built its body from generation
+    N while the sidecar already holds N+1. Caching under the N+1 signature would
+    make every later GET (which loads N+1) replay the two-message body.
+    """
+    import api.routes as routes
+
+    env.save("proj_race", ["first question", "first reply"])
+    real_get_session = env.models.get_session
+
+    def _racing_get_session(sid, metadata_only=False):
+        session = real_get_session(sid, metadata_only=metadata_only)
+        if sid == "proj_race":
+            # A concurrent writer commits the next two turns while this
+            # request already holds the previous generation in memory.
+            env.save(
+                "proj_race",
+                ["first question", "first reply", "second question", "second reply"],
+            )
+        return session
+
+    monkeypatch.setattr(routes, "get_session", _racing_get_session)
+
+    raced = env.get("proj_race")
+    assert env.contents(raced) == ["first question", "first reply"], (
+        "the raced request may only serve the generation it read"
+    )
+    assert routes._session_projection_cache == {}, (
+        "a body built from a superseded generation must never be published"
+    )
+
+    monkeypatch.setattr(routes, "get_session", real_get_session)
+    later = env.get("proj_race")
+
+    assert env.contents(later) == [
+        "first question", "first reply", "second question", "second reply",
+    ], "the next GET must show the transcript that is now on disk"
+    assert env.projection_calls == 2, "a mismatch must also disable reuse for that request"
+
+
+def test_same_model_config_refresh_is_not_served_from_the_old_window(env, monkeypatch):
+    """#8990 review 2: a cached hit must not freeze the resolved context window.
+
+    Same model, same provider, unchanged sidecar — only the real config's
+    context window moves 200k -> 400k, exactly what a normal config reload
+    does. The uncached path returns the new window, so a hit must too.
+    """
+    import api.routes as routes
+
+    env.save(
+        "proj_window",
+        ["hello"],
+        model="deepseek-v4",
+        model_provider="opencode-go",
+        threshold_tokens=160_000,
+    )
+    window = {"value": 200_000}
+
+    monkeypatch.setattr(
+        routes,
+        "_session_context_length_lookup_state",
+        lambda model, provider: (model, provider, None, None),
+    )
+    monkeypatch.setattr(routes, "_session_context_lookup_uses_chat_route", lambda provider: False)
+    monkeypatch.setattr(
+        routes, "_resolve_effective_session_model_for_display", lambda session: "deepseek-v4"
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_effective_session_model_provider_for_display",
+        lambda session: "opencode-go",
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_context_length_for_session_model",
+        lambda model, provider, **kwargs: window["value"],
+    )
+
+    first = env.get("proj_window", resolve_model=1)
+    assert (first["context_length"], first["threshold_tokens"]) == (200_000, 160_000)
+    assert env.projection_calls == 1
+
+    window["value"] = 400_000
+    second = env.get("proj_window", resolve_model=1)
+
+    assert (second["context_length"], second["threshold_tokens"]) == (400_000, 320_000), (
+        "a config refresh must reach the payload even when the transcript is unchanged"
+    )
+    assert env.projection_calls == 2, "the old window must not be reused"
