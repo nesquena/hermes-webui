@@ -18168,49 +18168,27 @@ function _anchorSceneToolRenderSignature(row, opts){
     typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
 }
 function _liveSceneIncrementalEnabled(){ return window._liveSceneIncremental!==false; }
-function _anchorSceneRenderKeyPart(value, seen){
-  if(value===undefined) return 'undefined';
-  if(value===null) return 'null';
-  if(typeof value==='string'){
-    return value.length>48
-      ? `string:${value.length}:${value.slice(0,16)}:${value.slice(-32)}`
-      : `string:${JSON.stringify(value)}`;
-  }
-  if(typeof value==='number'||typeof value==='boolean') return `${typeof value}:${String(value)}`;
-  if(typeof value!=='object') return `${typeof value}:${String(value)}`;
-  if(value instanceof Date) return `date:${value.getTime()}`;
-  seen=seen||new Set();
-  if(seen.has(value)) return 'circular';
-  seen.add(value);
-  let out;
-  if(Array.isArray(value)) out=`[${value.map(item=>_anchorSceneRenderKeyPart(item,seen)).join(',')}]`;
-  else out=`{${Object.keys(value).sort().map(key=>`${_anchorSceneRenderKeyPart(key)}:${_anchorSceneRenderKeyPart(value[key],seen)}`).join(',')}}`;
-  seen.delete(value);
-  return out;
+function _anchorSceneRenderKeyPart(value){
+  try{
+    return JSON.stringify(value,(_key,item)=>typeof item==='string'&&item.length>48
+      ? `string:${item.length}:${item.slice(0,16)}:${item.slice(-32)}`
+      : item);
+  }catch(_){ return null; }
 }
-function _anchorSceneRowRenderKey(row, opts){
-  opts=opts||{};
-  row=row||{};
-  const tool=row.role==='tool' ? _anchorSceneToolCallFromRow(row,{settled:!!opts.settled}) : null;
-  return _anchorSceneRenderKeyPart({
-    role:row.role, rowId:row.row_id, localId:row.local_id,
-    sourceEventType:row.source_event_type, rowStatus:row.status,
-    kind:row.kind, text:row.text, thinkingText:row.thinking&&row.thinking.text,
-    createdAt:row.created_at, timestamp:row.timestamp, ts:row.ts,
-    startedAt:row.started_at, completedAt:row.completed_at,
-    toolCallId:row.tool_call_id, tool,
-    segmentSeq:row.segment_seq, segmentSeqCamel:row.segmentSeq,
-    activityBurstId:row.activity_burst_id, burstId:row.burst_id, burstIdCamel:row.burstId,
-    settled:opts.settled, live:opts.live, finalAnswer:opts.finalAnswer,
-    liveTokenFinalPrefixEligible:opts.liveTokenFinalPrefixEligible,
-    streamId:opts.streamId, sessionId:opts.sessionId,
-    language:document.documentElement.lang,
-    simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),
-    showThinking:window._showThinking,
-    mode:typeof chatActivityMode==='function'?chatActivityMode():'',
-    detailsExpanded:window._worklogDetailsExpandedByDefault===true,
-    timestamps:window._transparentEventTimestamps,
-  });
+function _anchorSceneRowRenderPrefs(opts){
+  return {opts:opts||{},language:document.documentElement.lang,showThinking:window._showThinking,timestamps:window._transparentEventTimestamps,
+    simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),detailsExpanded:window._worklogDetailsExpandedByDefault===true,mode:typeof chatActivityMode==='function'?chatActivityMode():'',sessionId:S.session&&S.session.session_id,proseIncremental:typeof window.__anchorProseIncrementalNode==='function'};
+}
+function _anchorSceneRowRenderKey(row, prefs){
+  if(!row) return null;
+  try{
+    // Positional reconciliation metadata changes when rows are coalesced. Neither
+    // live renderer reads order_index when constructing the row, so exclude it;
+    // every other row field participates in the key to fail toward a rebuild.
+    const rowForKey=Object.assign({},row);
+    delete rowForKey.order_index;
+    return _anchorSceneRenderKeyPart([rowForKey,prefs]);
+  }catch(_){ return null; }
 }
 function _anchorSceneDataRowKey(row, streamId){
   const id=String(row.row_id||row.local_id||'').trim();
@@ -18237,6 +18215,7 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   });
   const children=[];
   const incremental=typeof _liveSceneIncrementalEnabled==='function'&&_liveSceneIncrementalEnabled();
+  const rowRenderPrefs=incremental?_anchorSceneRowRenderPrefs(opts):null;
   let currentTools=null;
   let toolNodes=[];
   const flushTools=()=>{
@@ -18252,7 +18231,7 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   for(const row of rows){
     const key=_anchorSceneDataRowKey(row,'');
     const previous=key?existing.get(key):null;
-    const renderKey=incremental ? _anchorSceneRowRenderKey(row,opts) : null;
+    const renderKey=incremental ? _anchorSceneRowRenderKey(row,rowRenderPrefs) : null;
     const signature=incremental ? null : _anchorSceneToolRenderSignature(row,opts);
     const node=renderKey&&previous&&previous._anchorSceneRowRenderKey===renderKey
       ? previous : signature&&previous&&previous._anchorToolRenderSignature===signature
@@ -18624,6 +18603,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const liveFooter=blocks.querySelector('#liveRunStatus');
   const renderedRows=[];
   const incremental=typeof _liveSceneIncrementalEnabled==='function'&&_liveSceneIncrementalEnabled();
+  const rowRenderPrefs=incremental?_anchorSceneRowRenderPrefs({live:true,settled:false,streamId:streamId||S.activeStreamId||'',sessionId:S.session&&S.session.session_id}):null;
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
     const rowOpts={
@@ -18632,7 +18612,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
     };
-    const renderKey=incremental ? _anchorSceneRowRenderKey(row,rowOpts) : null;
+    const renderKey=incremental ? _anchorSceneRowRenderKey(row,rowRenderPrefs) : null;
     const signature=incremental ? null : _anchorSceneToolRenderSignature(row,rowOpts);
     const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
     const cached=dataKey?preserveByKey.get(dataKey):null;
