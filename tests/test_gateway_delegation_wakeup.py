@@ -366,6 +366,32 @@ def test_sidecar_of_another_profile_is_not_woken(env, tmp_path):
     assert FakeDB.rows[1]["lease"] is None
 
 
+def test_sidecar_holding_another_sessions_body_is_retried_quietly(env, tmp_path, caplog):
+    """#9019: a sidecar whose body names another session is neither woken nor recorded as
+    unowned, and the poll logs no warning (it would repeat on every poll)."""
+    import logging
+
+    import api.models as models
+
+    calls, _ = env
+    path = tmp_path / "sessions" / "sid1.json"
+    own = path.read_text()
+    victim = json.loads(own)
+    victim["session_id"] = "victim-9019"
+    victim["messages"] = victim["messages"] + [{"role": "user", "content": "the other conversation"}]
+    path.write_text(json.dumps(victim))
+    models.SESSIONS.clear()
+    FakeDB.add("sid1", "deleg_swap")
+    with caplog.at_level(logging.DEBUG, logger=gdw.logger.name):
+        assert gdw.poll_once(0) == 0 and gdw.poll_once(0) == 0
+    assert calls == [] and FakeDB.rows[1]["lease"] is None and FakeDB.rows[1]["consumed"] is False
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "sid1" not in gdw._UNOWNED.get(str(tmp_path / "state.db"), set())
+    path.write_text(own)  # the file is repaired: the pending row is delivered on the next poll
+    models.SESSIONS.clear()
+    assert gdw.poll_once(0) == 1 and len(calls) == 1 and calls[0]["sid"] == "sid1"
+
+
 def test_non_webui_session_is_ignored(env):
     calls, _ = env
     FakeDB.add("other", "deleg_g")

@@ -2680,6 +2680,17 @@ async function newSession(flash, options={}){
   })();
   try{
     return await _newSessionInFlight;
+  }catch(e){
+    // A failed create used to look like a dead button: api() only toasts
+    // timeouts, so a 400 from /api/session/new (an untrusted workspace is the
+    // common one — "Path is outside the user home directory, not in the saved
+    // workspace list, and not under the default workspace") rejected with no
+    // message anywhere on screen. Surface the server's own explanation and
+    // keep propagating, so callers that abort their flow on failure still do.
+    if(typeof showToast==='function'){
+      showToast(t('failed_colon')+((e&&e.message)?e.message:String(e)),5000,'error');
+    }
+    throw e;
   }finally{
     _newSessionInFlight=null;
     _setNewSessionPending(false);
@@ -8173,6 +8184,19 @@ let _deferredActiveSessionExternalRefreshReason = '';
 let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
+// Coalescing for SSE-driven sidebar refreshes. Every `sessions_changed` publish
+// clears the server's session-list cache, so an event-driven refresh always
+// rebuilds: this client-side cap is its only rate limit. It used to be a 300 ms
+// trailing debounce, so a streaming session's burst of events re-fetched
+// `/api/sessions` several times a second. Measured 2026-10-30: 65 `/api/sessions`
+// per minute from one client, gaps of 0-2 s, sidebar p99 1.8 s. The cap holds a
+// continuously-streaming session to 12 event-driven refreshes/min instead of 200;
+// an isolated event still paints after the 300 ms burst window (see
+// `_scheduleSessionEventsRefresh`). (#8694)
+const _SESSION_EVENTS_REFRESH_COALESCE_MS = 5000;
+const _SESSION_EVENTS_REFRESH_BURST_MS = 300;
+let _sessionEventsLastRefreshAt = 0;
+let _sessionEventsRefreshDueAt = 0;
 let _sessionEventsRefreshPendingRequest = null;
 let _sessionEventsReconnectTimer = 0;
 let _sessionEventsNeedsRefreshOnOpen = false;
@@ -8484,22 +8508,52 @@ async function refreshSessionList(reason='manual', opts={}){
     _sessionListRefreshInFlight = false;
     const pendingRequest = _sessionListRefreshPendingRequest;
     _sessionListRefreshPendingRequest = null;
-    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts);
+    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts, {prompt:true});
   }
 }
 
-function _scheduleSessionEventsRefresh(reason, opts={}){
+function _scheduleSessionEventsRefresh(reason, opts={}, schedule={}){
   _sessionEventsRefreshPendingRequest = {
     reason: reason || (_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.reason) || 'event',
     opts:_mergeSessionListRefreshOptions(_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.opts, opts),
   };
-  if(_sessionEventsRefreshTimer) return;
+  // Throttle, not a trailing-only debounce (#8694 senior review): an isolated
+  // event — a rename or delete from another tab, a cron finishing — paints after
+  // the short burst window, and only events arriving within
+  // `_SESSION_EVENTS_REFRESH_COALESCE_MS` of the last refresh this timer fired
+  // (an event-driven one or a parked re-send) wait for that cap. A PARKED request (`schedule.prompt`) arrived
+  // while another refresh was in flight: usually a new chat, a pull or a resume
+  // the user or the UI asked for, but this timer's own event refresh is parked
+  // the same way when it fires mid-flight. It re-sends after the burst window and
+  // is never held behind the cap (at most one extra refresh per in-flight one);
+  // it also pulls an already-pending capped timer forward.
+  // The cap is clamped to its own length: `Date.now()` follows the wall clock,
+  // and after a backward clock step `_sessionEventsLastRefreshAt` lies in the
+  // future, which would otherwise freeze every event refresh for the size of the
+  // step (#8694 senior review r2).
+  const now = Date.now();
+  const delay = (schedule && schedule.prompt)
+    ? _SESSION_EVENTS_REFRESH_BURST_MS
+    : Math.min(
+        _SESSION_EVENTS_REFRESH_COALESCE_MS,
+        Math.max(
+          _SESSION_EVENTS_REFRESH_BURST_MS,
+          _sessionEventsLastRefreshAt + _SESSION_EVENTS_REFRESH_COALESCE_MS - now,
+        ),
+      );
+  if(_sessionEventsRefreshTimer){
+    if(now + delay >= _sessionEventsRefreshDueAt) return;
+    clearTimeout(_sessionEventsRefreshTimer);
+  }
+  _sessionEventsRefreshDueAt = now + delay;
   _sessionEventsRefreshTimer = setTimeout(() => {
     _sessionEventsRefreshTimer = 0;
+    _sessionEventsRefreshDueAt = 0;
+    _sessionEventsLastRefreshAt = Date.now();
     const request = _sessionEventsRefreshPendingRequest || {reason:'event', opts:{}};
     _sessionEventsRefreshPendingRequest = null;
     void refreshSessionList(request.reason||'event', request.opts);
-  }, 300);
+  }, delay);
 }
 
 function _sessionEventTargetsActiveSession(payload){

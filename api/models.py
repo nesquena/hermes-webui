@@ -311,6 +311,28 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
     return total, own
 
 
+def _sidecar_change_marker(session_id):
+    """Write generation and stat signature of ``session_id``'s sidecar, taken before a read."""
+    sid = str(session_id or '')
+    return _sidecar_write_generation(sid), _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
+
+
+def _sidecar_unchanged_since(session_id, marker) -> bool:
+    """True if no other writer replaced the sidecar since ``marker`` (#9017).
+
+    In-process writers bump the write generation around every replace. The
+    stat signature covers writers outside this process; it's only comparable
+    when this thread hasn't written the file since (a load's own self-heal).
+    """
+    (total_before, own_before), sig_before = marker
+    total, own = _sidecar_write_generation(session_id)
+    if total - total_before != own - own_before:
+        return False
+    if own != own_before:
+        return True
+    return sig_before is not None and _sidecar_stat_signature(SESSION_DIR / f'{session_id}.json') == sig_before
+
+
 def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
     _note_sidecar_write(session_id)
     try:
@@ -2580,7 +2602,8 @@ class Session:
         # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
-        _pre_read_sig = _sidecar_stat_signature(p)
+        _read_marker = _sidecar_change_marker(sid)
+        _pre_read_sig = _read_marker[1]
         data = json.loads(p.read_text(encoding='utf-8'))
         # #8830: exp-v0.52.621..630 left a shared legacy sidecar's share fields
         # after ``messages``, where the metadata prefix reader never sees them.
@@ -2618,13 +2641,27 @@ class Session:
                 sid, data.get('session_id'),
             )
         elif _collapsed_partials:
-            try:
-                # Self-heal bloated sessions on first full load without touching
-                # recency/index ordering; save() creates a .bak because this
-                # intentionally shrinks the transcript (#2592).
-                session.save(touch_updated_at=False, skip_index=True)
-            except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+            # #9017: a read (another profile's sidebar poll, a cleanup's reload)
+            # must not save an older copy over a newer turn. Persist the collapse
+            # only under the session lock and only if nobody wrote since this
+            # read; a caller already holding the lock saves it with its own save.
+            # Otherwise it stays in memory and a later save persists it.
+            _lock = _get_session_agent_lock(sid)
+            if _lock.acquire(blocking=False):
+                try:
+                    # save() takes this reentrant lock anyway; taking it before
+                    # the check keeps a save made without the session lock from
+                    # landing between the check and this save.
+                    with _session_persist_lock(sid):
+                        if _sidecar_unchanged_since(sid, _read_marker):
+                            # Self-heal bloated sessions without touching recency/index
+                            # ordering; save() creates a .bak because this
+                            # intentionally shrinks the transcript (#2592).
+                            session.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+                finally:
+                    _lock.release()
         else:
             # #5854: for a LEGACY sidecar (no modern anchor_scene_index key), the
             # cheap metadata-prefix read cannot recover message_count/scenes when
@@ -2634,8 +2671,8 @@ class Session:
             # Keyed by stat signature, so any edit invalidates it; the next
             # save() rewrites the modern layout and the fallback stops firing.
             # expected_sig guards against an atomic replace during the read.
-            # (When _collapsed_partials fired, save() above already rewrote the
-            # modern layout, so no legacy caching is needed.)
+            # (When _collapsed_partials fired, the file is rewritten by the save
+            # above or by a later one, so no legacy caching is needed.)
             #
             # WHY STILL GATED, and not "obviously" broadened to modern files: the
             # cache is only READ from the two sites that reach it when the cheap
@@ -7313,7 +7350,7 @@ def get_session_for_scan(sid):
     insertion, and therefore no scan-triggered eviction.
     """
     try:
-        return _resolve_session(sid, promote_cache=False, cache_on_miss=False)
+        return _refuse_session_from_other_file(sid, _resolve_session(sid, promote_cache=False, cache_on_miss=False))
     except Exception:
         logger.debug("scan load failed for session %s", sid, exc_info=True)
         return None
@@ -7611,9 +7648,32 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             _finish_full_session_resolve(session_id, event)
 
 
-def get_session(sid, metadata_only=False):
-    """Load a session, optionally with metadata only (skipping messages)."""
-    return _resolve_session(sid, metadata_only=metadata_only)
+class SessionFileNamesOtherSession(KeyError):
+    """#9019: ``sid``'s file holds another session's body (the #8852 mark), so ``sid`` is not found."""
+
+
+def _refuse_session_from_other_file(sid, session):
+    if getattr(session, '_sidecar_names_other_session', None):
+        with LOCK:
+            # The resolver drops an entry cached under the wrong id on its next read;
+            # drop it now so direct cache readers never act on it either.
+            if SESSIONS.get(sid) is session:
+                SESSIONS.pop(sid, None)
+        raise SessionFileNamesOtherSession(sid)
+    return session
+
+
+def get_session(sid, metadata_only=False, *, allow_foreign_body=False):
+    """Load a session, optionally with metadata only (skipping messages).
+
+    #9019: an object loaded from a file whose body names another session carries
+    that session's id, profile and path, so it is not found (``KeyError``). Only a
+    caller that must see it to refuse or repair it passes ``allow_foreign_body``.
+    A fallback that treats ``KeyError`` as "no sidecar" and then creates or
+    imports one must re-raise ``SessionFileNamesOtherSession`` first.
+    """
+    session = _resolve_session(sid, metadata_only=metadata_only)
+    return session if allow_foreign_body else _refuse_session_from_other_file(sid, session)
 
 
 def get_session_profile_readonly(sid):
@@ -7887,6 +7947,8 @@ def find_compression_recovery_session(
             continue
         try:
             matches.append(get_session(sid))
+        except SessionFileNamesOtherSession:
+            continue  # #9019: this file holds another session's body
         except Exception:
             matches.append(meta)
 
@@ -8873,6 +8935,8 @@ def get_session_for_file_ops(sid: str):
     """
     try:
         session = get_session(sid, metadata_only=True)
+    except SessionFileNamesOtherSession:
+        raise  # #9019: a file exists for sid; never serve the state.db view instead
     except KeyError:
         if state_db_has_session(sid):
             return _ExternalSessionView(str(sid), str(get_last_workspace()))
@@ -11106,6 +11170,44 @@ def _callable_accepts_keyword(callable_obj, keyword: str) -> bool:
     )
 
 
+class _ContentFingerprintUnreadable:
+    """Sentinel: the fingerprint read for one table FAILED (lock/timeout).
+
+    Distinct from SQLite's own ``NULL`` for an empty table: an unreadable read
+    says nothing about the contents, so it must never equal a genuine empty-table
+    read. Two unreadable reads still compare equal, as master's ``None == None``
+    did; the session-list cache keeps its file-stat slots and TTL for that case,
+    so no consumer gates on ``_content_fingerprint_readable`` (it documents the
+    contract for tests and diagnostics). (#8694, #8986)
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<content-fingerprint-unreadable>"
+
+
+_CONTENT_FINGERPRINT_UNREADABLE = _ContentFingerprintUnreadable()
+
+
+def _content_fingerprint_readable(fingerprint) -> bool:
+    """True when ``fingerprint`` was actually READ, i.e. is safe to compare.
+
+    ``None`` is this module's total-failure value (no DB, unopenable, outer
+    exception) and ``_CONTENT_FINGERPRINT_UNREADABLE`` marks a failed per-table
+    read. Both mean "contents unknown" and must never authorize a caller to
+    conclude "unchanged". A readable fingerprint may still contain ``None`` for a
+    table that is genuinely empty — that is a real observation, not a failure.
+    """
+    if fingerprint is None or fingerprint is _CONTENT_FINGERPRINT_UNREADABLE:
+        return False
+    if isinstance(fingerprint, (tuple, list)):
+        if not fingerprint:
+            return False
+        return all(part is not _CONTENT_FINGERPRINT_UNREADABLE for part in fingerprint)
+    return True
+
+
 def _sqlite_content_fingerprint(db_path: Path):
     """Return a commit-reliable content fingerprint for a state.db.
 
@@ -11164,7 +11266,9 @@ def _sqlite_content_fingerprint(db_path: Path):
                     ).fetchone()
                     parts.append(row[0] if row else None)
                 except Exception:
-                    parts.append(None)
+                    # A failed read is NOT "no rows": mark it unreadable so a
+                    # consumer never treats two unknown stamps as unchanged.
+                    parts.append(_CONTENT_FINGERPRINT_UNREADABLE)
             return tuple(parts)
         finally:
             try:
@@ -11277,8 +11381,29 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
     return hermes_home, db_path, cli_profile, cache_key
 
 
+# Trailing element of the cache key ``_all_profiles_cli_contexts`` returns when
+# it could NOT see every profile: the named-profile directory enumeration failed,
+# a profile's home failed to resolve, or ``api.profiles`` itself failed to import.
+# The contexts it returns are then a SUBSET of the real roster, and a profile it
+# skipped can commit without moving anything the caller compares. A 1-tuple, so
+# it can never be mistaken for a 3-tuple roster entry, and hashable/comparable by
+# value, so two incomplete keys still compare equal exactly as before. (#8694)
+ALL_PROFILES_ROSTER_INCOMPLETE = ('<all-profiles-roster-incomplete>',)
+
+def all_profiles_roster_incomplete(cache_key) -> bool:
+    """True when ``cache_key`` (from ``_all_profiles_cli_contexts``) marks a partial roster."""
+    return isinstance(cache_key, tuple) and ALL_PROFILES_ROSTER_INCOMPLETE in cache_key
+
+
 def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], tuple]:
-    """Return per-profile CLI scan contexts plus a cache key fragment."""
+    """Return per-profile CLI scan contexts plus a cache key fragment.
+
+    Best-effort by design: a profile that cannot be enumerated or resolved is
+    skipped rather than failing the whole sidebar. When that happens the cache
+    key ends with ``ALL_PROFILES_ROSTER_INCOMPLETE`` so a consumer can tell "these
+    are all the profiles" from "these are the profiles I managed to see". Only
+    the former is evidence that nothing outside ``contexts`` changed. (#8694)
+    """
     try:
         from api.profiles import (
             _profiles_root,
@@ -11286,19 +11411,32 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
             get_hermes_home_for_profile,
         )
     except Exception:
-        return [], ()
+        return [], (ALL_PROFILES_ROSTER_INCOMPLETE,)
 
     contexts: list[tuple[Path, Path, str | None]] = []
     cache_entries: list[tuple[str, str, object]] = []
     seen_homes: set[str] = set()
+    complete = True
 
     def _add_context(profile_name) -> None:
+        nonlocal complete
         try:
             hermes_home = Path(get_hermes_home_for_profile(profile_name)).expanduser().resolve()
+        except ValueError:
+            # The resolver's containment refusal (a named profile directory that
+            # resolves outside the profiles root): WebUI deliberately never reads
+            # that home, so excluding it is a policy decision, not lost evidence.
+            logger.debug("All-profiles CLI excluded profile %r", profile_name, exc_info=True)
+            return
         except Exception:
+            complete = False
+            logger.debug("All-profiles CLI home resolution failed for %r", profile_name, exc_info=True)
             return
         home_key = _path_cache_key(hermes_home)
-        if not home_key or home_key in seen_homes:
+        if not home_key:
+            complete = False
+            return
+        if home_key in seen_homes:
             return
         seen_homes.add(home_key)
         db_path = hermes_home / 'state.db'
@@ -11309,19 +11447,28 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
     try:
         _add_context(get_active_profile_name())
     except Exception:
-        pass
+        complete = False
     # The root profile, then one home per directory under the named-profile
     # root. Deliberately not list_profiles_api(): that builds the picker's rows,
     # skill counts included, and this scan needs only the homes (#7940).
     _add_context('default')
     try:
-        for entry in sorted(_profiles_root().iterdir()):
+        try:
+            entries = sorted(_profiles_root().iterdir())
+        except FileNotFoundError:
+            # No named-profile root yet (a fresh install): the roster is just the
+            # profiles added above, and that is a complete observation.
+            entries = []
+        for entry in entries:
             if not entry.is_dir():
                 continue
             _add_context(entry.name)
     except Exception:
+        complete = False
         logger.debug("All-profiles CLI directory enumeration failed", exc_info=True)
 
+    if not complete:
+        cache_entries.append(ALL_PROFILES_ROSTER_INCOMPLETE)
     return contexts, tuple(cache_entries)
 
 
