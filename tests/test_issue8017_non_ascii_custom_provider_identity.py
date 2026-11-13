@@ -38,6 +38,7 @@ import types
 import pytest
 
 import api.config as config
+import api.providers as api_providers
 
 
 # ---------------------------------------------------------------------------
@@ -3065,3 +3066,155 @@ def test_a_save_judges_the_pre_click_route_by_the_expanded_identity(
         assert (key, base_url) == (None, OTHER_URL), (
             "the entry's own endpoint serves, keyless, exactly as its ASCII twin does"
         )
+
+
+# ---------------------------------------------------------------------------
+# Round 12: a shadowed fallback row must not hide the native record that owns the
+# slug, and the card/readiness readers must agree with chat on credentials.
+# ---------------------------------------------------------------------------
+
+_NATIVE_URL = "https://native.invalid/v1"
+_LEGACY_URL = "https://legacy.invalid/v1"
+
+
+def _mixed_store_shape(*, with_legacy=True) -> dict:
+    """A native ``custom:晨光`` record plus, optionally, a keyless bare ``晨光`` row."""
+    shape = {
+        "model": {"provider": "custom:晨光", "default": "native-model"},
+        "providers": {
+            "custom:晨光": {
+                "name": "晨光",
+                "base_url": _NATIVE_URL,
+                "api_key": "test-skNATIVE",
+                "model": "native-model",
+            }
+        },
+    }
+    if with_legacy:
+        shape["custom_providers"] = [
+            {"name": "晨光", "base_url": _LEGACY_URL, "model": "legacy-model"}
+        ]
+    return shape
+
+
+def _install_cfg_shape_everywhere(monkeypatch, cfg_shape):
+    """Point config AND the providers module's imported ``get_config`` at a shape."""
+    _install_cfg_shape(monkeypatch, cfg_shape)
+    monkeypatch.setattr(api_providers, "get_config", lambda: dict(cfg_shape))
+
+
+def _card_rows(cfg_shape, provider_id):
+    return [
+        row
+        for row in api_providers.get_providers().get("providers", [])
+        if row.get("id") == provider_id
+    ]
+
+
+@pytest.mark.parametrize("with_legacy", [True, False])
+def test_a_fallback_entry_never_hides_the_native_record_that_owns_the_slug(
+    monkeypatch, tmp_path, with_legacy,
+):
+    """Native suppression follows the identity a legacy row may OWN (#8164 r12).
+
+    A keyless legacy ``晨光`` row mints nothing while ``providers['custom:晨光']``
+    already owns the slug. Counting its unconstrained produced slug as a legacy
+    winner hid the native row, and the cfg-aware consumers then rejected the
+    fallback row for not owning the identity, so the provider vanished from the
+    card, the catalog and live discovery while chat still resolved it. The
+    native-only run is the control and must be unchanged.
+    """
+    cfg_body = (
+        "model:\n"
+        "  provider: custom:晨光\n"
+        "  default: native-model\n"
+        "providers:\n"
+        '  "custom:晨光":\n'
+        "    name: 晨光\n"
+        f"    base_url: {_NATIVE_URL}\n"
+        "    api_key: test-skNATIVE\n"
+        "    model: native-model\n"
+    )
+    if with_legacy:
+        cfg_body += (
+            "custom_providers:\n"
+            "  - name: 晨光\n"
+            f"    base_url: {_LEGACY_URL}\n"
+            "    model: legacy-model\n"
+        )
+
+    probes, catalog = _catalog_probes(monkeypatch, tmp_path, cfg_body)
+
+    groups = {g["provider_id"]: g for g in catalog["groups"]}
+    assert "custom:晨光" in groups, (
+        "the native record owns the slug, so its catalog group must survive; "
+        f"got {sorted(groups)}"
+    )
+    assert "native-model" in [m["id"] for m in groups["custom:晨光"]["models"]]
+
+    native_probes = [p for p in probes if p["url"].startswith(_NATIVE_URL)]
+    assert [p["authorization"] for p in native_probes] == ["Bearer test-skNATIVE"], (
+        "live discovery must still walk the native record's own endpoint and key"
+    )
+    assert not [p for p in probes if p["url"].startswith(_LEGACY_URL)], (
+        "the shadowed fallback row owns nothing and must not be probed"
+    )
+
+    shape = _mixed_store_shape(with_legacy=with_legacy)
+    _install_cfg_shape_everywhere(monkeypatch, shape)
+    _stub_provider_modules(monkeypatch, [])
+    rows = _card_rows(shape, "custom:晨光")
+    assert len(rows) == 1, f"exactly one card row for the identity; got {rows}"
+    assert rows[0]["has_key"] is True
+    assert "native-model" in [m["id"] for m in rows[0]["models"]], (
+        "the card must list the native record's configured model"
+    )
+
+    assert config.resolve_custom_provider_connection("custom:晨光") == (
+        "test-skNATIVE",
+        _NATIVE_URL,
+    ), "the resolver, the card and the catalog must name the same connection"
+
+
+@pytest.mark.parametrize("name", ["晨光", "custom:晨光"])
+def test_the_card_and_readiness_agree_with_chat_on_a_legacy_entrys_credential(
+    monkeypatch, name,
+):
+    """Card, readiness and chat answer the same key for one entry (#8164 r12).
+
+    The card and the credential helpers resolved the convention name without the
+    record-level refusal chat applies, so a keyless bare ``晨光`` entry reported
+    ``has_key`` and handed back a key chat correctly refuses to send. The
+    ``custom:``-prefixed spelling is the control: that entry owns the variable
+    and every reader must keep it.
+    """
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "test-skSHARED")
+    prefixed = name.startswith("custom:")
+    expected_key = "test-skSHARED" if prefixed else None
+    provider_id = "custom:晨光"
+    shape = {
+        "model": {"provider": "custom", "default": "chat-model"},
+        "custom_providers": [
+            {"name": name, "base_url": _LEGACY_URL, "model": "chat-model"}
+        ],
+    }
+    _install_cfg_shape_everywhere(monkeypatch, shape)
+    _stub_provider_modules(monkeypatch, [])
+
+    assert config.resolve_custom_provider_connection(provider_id) == (
+        expected_key,
+        _LEGACY_URL,
+    ), "the chat resolver is the reference answer"
+    assert api_providers._get_provider_api_key(provider_id) == expected_key, (
+        "the credential helper must return what chat sends"
+    )
+    assert api_providers._provider_has_key(provider_id) is prefixed, (
+        "readiness must not claim a credential chat refuses"
+    )
+
+    rows = _card_rows(shape, provider_id)
+    assert len(rows) == 1, f"one card row for the entry; got {rows}"
+    assert rows[0]["has_key"] is prefixed, (
+        "the card must report the credential chat actually uses"
+    )
+    assert rows[0]["key_source"] == ("config_yaml" if prefixed else "none")
