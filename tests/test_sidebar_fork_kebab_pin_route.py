@@ -114,6 +114,15 @@ def test_pin_from_an_expanded_fork_targets_the_fork(base_url):
 
             page.goto(base_url, wait_until="domcontentloaded")
             page.wait_for_selector("#sessionList", timeout=30000)
+            # The isolated test server can present first-run onboarding. It is a
+            # modal overlay (`aria-modal`, full-viewport) that swallows pointer
+            # events, so a hover or press on a sidebar row times out behind it
+            # with "element is not stable" / "intercepts pointer events".
+            # Dismiss it through the real UI path before any hit test.
+            onboarding = page.locator("#onboardingOverlay")
+            if onboarding.is_visible():
+                page.locator("#onboardingSkipBtn").click()
+                onboarding.wait_for(state="hidden", timeout=15000)
             page.wait_for_function(
                 "() => typeof renderSessionList === 'function'", timeout=30000
             )
