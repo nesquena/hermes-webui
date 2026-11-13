@@ -232,8 +232,10 @@ class TestApprovalModuleExports:
         assert cb_start != -1, "_approval_notify_cb must exist"
         cb_end = STREAMING_SRC.find("_reg_notify(session_id, _approval_notify_cb)", cb_start)
         cb_body = STREAMING_SRC[cb_start:cb_end]
-        assert "head, total = _submit_pending_for_polling(session_id, approval_data)" in cb_body, \
-            "approval notify callback must mirror approval data into polling state"
+        assert "auto_resolved, head, total = _settle_pending_for_polling(" in cb_body, \
+            "approval notify callback must settle admission at the YOLO handoff boundary"
+        assert "if auto_resolved and head is None:" in cb_body, \
+            "an auto-resolved local approval must not publish a stale card"
         assert '"pending_count": total' in cb_body, \
             "approval notify callback must publish the reconciled pending count"
         assert "put('approval', approval_data)" in cb_body, \
@@ -418,13 +420,20 @@ class TestApprovalHTTPEndpoints:
         with _lock:
             r._pending.pop(sid, None)
             r._gateway_queues.pop(sid, None)
-            r._gateway_queues[sid] = [_ApprovalEntry(approval_a)]
+            entry_a = _ApprovalEntry(approval_a)
+            r._gateway_queues[sid] = [entry_a]
         try:
-            ra.submit_gateway_pending_mirror(sid, approval_a)
+            # Production notifies WebUI with a COPY of the entry payload
+            # (core: notify_cb(dict(entry.data))), which carries the entry's
+            # stamped request_id — pass that faithful copy, not the pre-stamp
+            # source dict, so the mirror matches its producer the way it does
+            # in production.
+            ra.submit_gateway_pending_mirror(sid, dict(entry_a.data))
             with _lock:
                 r._gateway_queues.pop(sid, None)
-                r._gateway_queues[sid] = [_ApprovalEntry(approval_b)]
-            ra.submit_gateway_pending_mirror(sid, approval_b)
+                entry_b = _ApprovalEntry(approval_b)
+                r._gateway_queues[sid] = [entry_b]
+            ra.submit_gateway_pending_mirror(sid, dict(entry_b.data))
 
             parsed = urllib.parse.urlparse(f"/api/approval/pending?session_id={urllib.parse.quote(sid)}")
             r._handle_approval_pending(object(), parsed)
@@ -507,7 +516,8 @@ class TestApprovalHTTPEndpoints:
             r._pending.pop(sid, None)
             r._gateway_queues[sid] = [entry_a]
         try:
-            ra.submit_gateway_pending_mirror(sid, approval_a)
+            # Faithful to production: submit the stamped copy (see note above).
+            ra.submit_gateway_pending_mirror(sid, dict(entry_a.data))
             with _lock:
                 mirror_aid_a = r._pending[sid][0]["approval_id"]
 
@@ -516,7 +526,7 @@ class TestApprovalHTTPEndpoints:
             entry_b = _ApprovalEntry(approval_b)
             with _lock:
                 r._gateway_queues[sid] = [entry_b]
-            ra.submit_gateway_pending_mirror(sid, approval_b)
+            ra.submit_gateway_pending_mirror(sid, dict(entry_b.data))
 
             resolved = r._resolve_approval_legacy(sid, mirror_aid_a, "once")
             assert resolved is False, "stale approval_id must not resolve live B"
@@ -591,6 +601,85 @@ class TestApprovalHTTPEndpoints:
                 r._gateway_queues.pop(sid, None)
                 _STREAM_RUN_IDS.pop(stream_id, None)
 
+    def test_identity_v1_non_head_run_approval_settles_exact_producer(self, monkeypatch):
+        """A relayed non-head run approval must wake only its own parked waiter."""
+        from api import route_approvals as ra
+        from api import routes as r
+
+        sid = f"identity-v1-non-head-{uuid.uuid4().hex[:8]}"
+        run_id = f"run-identity-v1-{uuid.uuid4().hex[:8]}"
+        head = {
+            "approval_id": "head-approval",
+            "run_id": run_id,
+            "command": "head command",
+            "_gateway_agent_identity_v1": True,
+        }
+        target = {
+            "approval_id": "target-approval",
+            "run_id": run_id,
+            "command": "target command",
+            "_gateway_agent_identity_v1": True,
+        }
+        head_entry = _ApprovalEntry(dict(head))
+        target_entry = _ApprovalEntry(dict(target))
+        captured = {}
+        relays = []
+
+        def fake_j(_handler, data, status=200, extra_headers=None):
+            captured.update(payload=data, status=status)
+            return data
+
+        def fake_respond(_self, got_run_id, got_approval_id, choice):
+            relays.append((got_run_id, got_approval_id, choice))
+            return {"resolved": 1}
+
+        monkeypatch.setattr(r, "j", fake_j)
+        monkeypatch.setattr("api.runner_client.HttpRunnerClient.respond_approval", fake_respond)
+        monkeypatch.setattr(
+            "api.config.gateway_supports_approval_identity_v1", lambda *_args: True
+        )
+        with _lock:
+            r._pending.pop(sid, None)
+            r._gateway_queues[sid] = [head_entry, target_entry]
+        try:
+            ra.submit_gateway_pending_mirror(sid, dict(target_entry.data))
+            mirror = ra.gateway_pending_mirror(
+                sid, approval_id=target["approval_id"], run_id=run_id
+            )
+            assert mirror is not None
+
+            r._handle_approval_respond(
+                object(),
+                {
+                    "session_id": sid,
+                    "choice": "deny",
+                    "approval_id": target["approval_id"],
+                    "run_id": run_id,
+                    "mirror_token": mirror[ra._GATEWAY_MIRROR_TOKEN],
+                },
+            )
+
+            assert captured == {
+                "payload": {"ok": True, "choice": "deny", "relayed": True},
+                "status": 200,
+            }
+            assert relays == [(run_id, target["approval_id"], "deny")]
+            assert target_entry.event.is_set()
+            assert target_entry.result == "deny"
+            assert not head_entry.event.is_set()
+            with _lock:
+                assert r._gateway_queues[sid] == [head_entry]
+            for _ in range(2):
+                with _lock:
+                    ra.reconcile_gateway_pending_mirror_locked(sid)
+                assert ra.gateway_pending_mirror(
+                    sid, approval_id=target["approval_id"], run_id=run_id
+                ) is None
+        finally:
+            with _lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues.pop(sid, None)
+
     def test_gateway_mirror_without_run_id_with_one_producer_resolves_exactly(self, monkeypatch):
         """A no-run mirror retires only after its exact local producer resolves."""
         from api import routes as r
@@ -617,7 +706,8 @@ class TestApprovalHTTPEndpoints:
             r._pending.pop(sid, None)
             r._gateway_queues[sid] = [entry, sibling_entry]
         try:
-            ra.submit_gateway_pending_mirror(sid, approval)
+            # Faithful to production: submit the stamped copy (see note above).
+            ra.submit_gateway_pending_mirror(sid, dict(entry.data))
             with _lock:
                 approval_id = r._pending[sid][0]["approval_id"]
 
@@ -728,8 +818,9 @@ class TestApprovalHTTPEndpoints:
             r._pending.pop(sid, None)
             r._gateway_queues[sid] = [entry_a, entry_b]
         try:
-            ra.submit_gateway_pending_mirror(sid, approval_a)
-            ra.submit_gateway_pending_mirror(sid, approval_b)
+            # Faithful to production: submit the stamped copies (see note above).
+            ra.submit_gateway_pending_mirror(sid, dict(entry_a.data))
+            ra.submit_gateway_pending_mirror(sid, dict(entry_b.data))
             with _lock:
                 approval_b_id = next(
                     item["approval_id"] for item in r._pending[sid]

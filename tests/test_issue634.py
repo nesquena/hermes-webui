@@ -77,3 +77,74 @@ class TestCliSessionsErrorSurface:
         assert select_pos != -1, "SELECT query not found"
         assert pragma_pos < select_pos, \
             "Schema introspection must run before the main SQL query"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up: the warning must fire once per state.db, not once per poll.
+#
+# get_cli_sessions(all_profiles=True) calls read_importable_agent_session_rows()
+# for every profile on every sidebar poll (behind a 5 s cache). On an install
+# with one pre-``source`` profile DB that produced one identical WARNING line
+# every ~15 s in errors.log. The message is correct; its repetition is not.
+# ---------------------------------------------------------------------------
+import logging
+import sqlite3
+
+import pytest
+
+from api import agent_sessions
+
+
+def _make_pre_source_state_db(path):
+    """Build a state.db whose ``sessions`` table predates the ``source`` column."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, "
+        "message_count INTEGER, started_at REAL)"
+    )
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, timestamp REAL)")
+    conn.commit()
+    conn.close()
+
+
+def _source_column_warnings(caplog):
+    return [
+        rec for rec in caplog.records
+        if rec.levelno == logging.WARNING and "has no 'source' column" in rec.getMessage()
+    ]
+
+
+class TestMissingSourceColumnWarnsOncePerDb:
+    @pytest.fixture(autouse=True)
+    def _fresh_dedupe_state(self, monkeypatch):
+        # The dedupe set is process-lifetime state; give each test its own.
+        monkeypatch.setattr(agent_sessions, "_SOURCE_COLUMN_WARNED_DB_PATHS", set(), raising=False)
+
+    def test_same_db_path_twice_logs_once(self, tmp_path, caplog):
+        db = tmp_path / "state.db"
+        _make_pre_source_state_db(db)
+        with caplog.at_level(logging.WARNING, logger="api.agent_sessions"):
+            first = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)
+            second = agent_sessions.read_importable_agent_session_rows(db, exclude_sources=None)
+        assert first == [] and second == []
+        warnings = _source_column_warnings(caplog)
+        assert len(warnings) == 1, [w.getMessage() for w in warnings]
+        # Message text is unchanged: still names the path and the upgrade hint.
+        assert str(db) in warnings[0].getMessage()
+        assert "Upgrade hermes-agent" in warnings[0].getMessage()
+
+    def test_different_db_path_logs_again(self, tmp_path, caplog):
+        db_a = tmp_path / "planner" / "state.db"
+        db_b = tmp_path / "coder" / "state.db"
+        db_a.parent.mkdir()
+        db_b.parent.mkdir()
+        _make_pre_source_state_db(db_a)
+        _make_pre_source_state_db(db_b)
+        with caplog.at_level(logging.WARNING, logger="api.agent_sessions"):
+            agent_sessions.read_importable_agent_session_rows(db_a, exclude_sources=None)
+            agent_sessions.read_importable_agent_session_rows(db_b, exclude_sources=None)
+            agent_sessions.read_importable_agent_session_rows(db_a, exclude_sources=None)
+        warnings = _source_column_warnings(caplog)
+        assert len(warnings) == 2, [w.getMessage() for w in warnings]
+        assert str(db_a) in warnings[0].getMessage()
+        assert str(db_b) in warnings[1].getMessage()

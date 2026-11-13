@@ -1,15 +1,28 @@
 """Session-list cache helpers extracted from api.routes."""
 
-import os
 import copy
+import os
+import re
 import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
 
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
-from api.models import _active_state_db_path, _active_stream_ids
+from api.models import (
+    ALL_PROFILES_ROSTER_INCOMPLETE,
+    _active_state_db_path,
+    _active_stream_ids,
+)
 from api.profiles import _profiles_match
+
+
+# Cron session ids are ``cron_{job_id}_{run_timestamp}`` where the run
+# timestamp is ``YYYYMMDD_HHMMSS`` (e.g. cron_job6728_20260803_100000). Used to
+# validate that the text after a matched ``cron_{jid}_`` prefix is EXACTLY a run
+# timestamp, so a shorter job id (backup) cannot claim a longer job id's session
+# (backup_full) when the longer job is not itself running (#6728 gate fix).
+_CRON_RUN_TS_RE = re.compile(r"\d{8}_\d{6}")
 
 
 _SESSIONS_CACHE_TTL_SECONDS = 2.5
@@ -24,6 +37,12 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # still invalidate immediately. Keep this strictly greater than
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
+# Statuses `_session_list_cache_probe` reports, so the consumer reads the stale
+# reason from the same stamp read that classified the entry.
+_SESSION_LIST_CACHE_MISSING = "missing"
+_SESSION_LIST_CACHE_FRESH = "fresh"
+_SESSION_LIST_CACHE_STALE_SOURCE = "source"
+_SESSION_LIST_CACHE_STALE_AGE = "age"
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -33,6 +52,189 @@ _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
 _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION: dict[str, int] = {}
+
+
+_SIDEBAR_SESSION_RESPONSE_FIELDS = {
+    "session_id",
+    "title",
+    "display_title",
+    "_state_db_title",
+    "workspace",
+    "model",
+    "model_provider",
+    "message_count",
+    "visible_message_count",
+    "transcript_generation",
+    "transcript_generation_baseline",
+    "user_message_count",
+    "created_at",
+    "updated_at",
+    "last_message_at",
+    "pinned",
+    "archived",
+    "project_id",
+    "profile",
+    "input_tokens",
+    "output_tokens",
+    "estimated_cost",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cache_hit_percent",
+    "personality",
+    "context_length",
+    "config_context_length",
+    "window_usage_percent",
+    "source_tag",
+    "raw_source",
+    "session_source",
+    "source_label",
+    "is_cli_session",
+    "is_messaging_session",
+    "is_streaming",
+    "cron_running",
+    "active_stream_id",
+    "has_pending_user_message",
+    "pending_started_at",
+    "default_hidden",
+    "worktree_path",
+    "worktree_branch",
+    "parent_session_id",
+    "parent_title",
+    "parent_source",
+    "parent_is_cli_session",
+    # #8245: the server's derived sidebar bucket (full scoped payload, before
+    # source filtering and archive pagination); the client trusts it.
+    "sidebar_is_cli_session",
+    # #8791: the row's canonical profile group (renamed-root aliases folded onto
+    # "default"); the client groups rows by it without needing the profile roster.
+    "sidebar_profile_group",
+    "relationship_type",
+    "pre_compression_snapshot",
+    "_lineage_root_id",
+    "_lineage_tip_id",
+    "_compression_segment_count",
+    "_lineage_collapsed_count",
+    "_parent_lineage_root_id",
+    "_parent_lineage_tip_id",
+    "_cross_surface_child_session",
+    "match_type",
+    "match_preview",
+    # Preserved so the sidebar can suppress rename / action-menu / swipe on
+    # read-only sessions and render the detailed gateway model label. Only the
+    # latest bounded routing object is included; routing history stays excluded.
+    "read_only",
+    "is_read_only",
+    "gateway_routing",
+    "last_used_model",
+}
+
+
+def _session_list_cache_sidebar_fields() -> set[str]:
+    """Return the canonical bounded field set used by the list response."""
+    return _SIDEBAR_SESSION_RESPONSE_FIELDS
+
+
+def _session_list_cache_copy_value(value):
+    """Copy only mutable values after the transcript-bearing projection."""
+    if isinstance(value, (dict, list, set)):
+        return copy.deepcopy(value)
+    return value
+
+
+def _session_list_cache_copy_row(row: dict) -> dict:
+    return {
+        key: _session_list_cache_copy_value(value)
+        for key, value in row.items()
+    }
+
+
+def _session_list_cache_bounded_payload(payload: dict) -> dict:
+    """Project a builder payload to data the sidebar can actually consume.
+
+    Builders operate on full session snapshots because they also perform
+    reconciliation and lineage decisions. The cache must not retain those
+    snapshots: a single long transcript can otherwise make every cache set/get
+    allocate hundreds of megabytes via deepcopy().
+    """
+    fields = _session_list_cache_sidebar_fields()
+
+    def project_rows(rows):
+        projected = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                projected.append({})
+                continue
+            item = {key: row[key] for key in fields if key in row}
+            projected.append(_session_list_cache_copy_row(item))
+        return projected
+
+    bounded = {
+        key: _session_list_cache_copy_value(value)
+        for key, value in payload.items()
+        if key not in {"sessions", "sidebar_reference_sessions"}
+    }
+    if "sessions" in payload:
+        bounded["sessions"] = project_rows(payload.get("sessions"))
+    if "sidebar_reference_sessions" in payload:
+        bounded["sidebar_reference_sessions"] = project_rows(
+            payload.get("sidebar_reference_sessions")
+        )
+    return bounded
+
+
+def _session_list_cache_copy_payload(payload: dict) -> dict:
+    """Copy only the already-bounded cache shape for request-local mutation."""
+    copied = {
+        key: _session_list_cache_copy_value(value)
+        for key, value in payload.items()
+        if key not in {"sessions", "sidebar_reference_sessions"}
+    }
+    if "sessions" in payload:
+        copied["sessions"] = [
+            _session_list_cache_copy_row(row)
+            for row in payload.get("sessions", [])
+        ]
+    if "sidebar_reference_sessions" in payload:
+        copied["sidebar_reference_sessions"] = [
+            _session_list_cache_copy_row(row)
+            for row in payload.get("sidebar_reference_sessions", [])
+        ]
+    return copied
+
+
+def get_session_list_cache_snapshot() -> dict[str, object]:
+    """Return scalar cache occupancy without waiting or changing LRU state.
+
+    Held-section discipline: between the nonblocking acquire and the release,
+    only ``len()`` and module-constant reads are permitted. Nothing that can
+    resolve config, resolve a profile, touch the filesystem, import a module, or
+    wait on another lock may be added here. ``_SESSIONS_CACHE_LOCK`` is an
+    ``RLock``, so a nonblocking acquire from a thread already holding it would
+    report available mid-mutation; the health collector is this helper's only
+    caller and never runs nested inside a cache rebuild.
+    """
+    result = {
+        "available": False,
+        "entries": 0,
+        "inflight_rebuilds": 0,
+        "cap": 0,
+    }
+    acquired = False
+    try:
+        acquired = _SESSIONS_CACHE_LOCK.acquire(blocking=False)
+        if not acquired:
+            return result
+        return {
+            "available": True,
+            "entries": max(0, int(len(_SESSIONS_CACHE))),
+            "inflight_rebuilds": max(0, int(len(_SESSIONS_CACHE_INFLIGHT))),
+            "cap": max(0, int(_SESSIONS_CACHE_MAX_ENTRIES)),
+        }
+    except Exception:
+        return result
+    finally:
+        if acquired:
+            _SESSIONS_CACHE_LOCK.release()
 
 
 def _session_list_cache_session_dir() -> Path:
@@ -98,6 +300,27 @@ def _session_list_cache_active_stream_ids():
     return _active_stream_ids()
 
 
+def _session_list_cache_running_cron_jobs() -> dict[str, float]:
+    """Return {job_id: start_epoch} for cron jobs currently tracked as running.
+
+    Cron liveness lives only in the in-memory ``_RUNNING_CRON_JOBS`` dict in
+    api.routes (#6728): the sidebar polls /api/sessions (not /api/crons/status),
+    so without this overlay a still-running cron job's session row looks
+    completed the moment it appends a message. Fail closed to an empty dict.
+    """
+    try:
+        import api.routes as _routes
+
+        jobs = getattr(_routes, "_RUNNING_CRON_JOBS", None)
+        lock = getattr(_routes, "_RUNNING_CRON_LOCK", None)
+        if jobs is None or lock is None:
+            return {}
+        with lock:
+            return dict(jobs)
+    except Exception:
+        return {}
+
+
 def _session_list_cache_resolved_source_stamp(key: tuple):
     try:
         import api.routes as _routes
@@ -127,6 +350,7 @@ def _session_list_cache_key(
     exclude_hidden: bool = False,
     visible_only: bool = False,
     show_webhook_sessions: bool = False,
+    show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
@@ -152,6 +376,7 @@ def _session_list_cache_key(
         bool(exclude_hidden),
         bool(visible_only),
         bool(show_webhook_sessions),
+        bool(show_kanban_sessions),
         source_filter,
         sidebar_source,
         normalized_archived_limit,
@@ -159,67 +384,113 @@ def _session_list_cache_key(
     )
 
 
-def _session_list_cache_get(
+# Appended to an all-profiles state stamp built from a PARTIAL roster: the same
+# marker ``_all_profiles_cli_contexts`` puts in its cache key, so a stamp from a
+# roster that skipped a profile never equals one from the complete roster. Not a
+# 3-tuple, so it can never be read as a profile's (stat, wal-stat, fingerprint)
+# entry. (#8694)
+_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE = ALL_PROFILES_ROSTER_INCOMPLETE
+
+
+def _session_list_cache_probe(
     key: tuple,
     allow_stale: bool = False,
-) -> tuple[dict | None, bool]:
+) -> tuple[dict | None, str]:
+    """Look the entry up and report WHY its payload is (not) directly usable.
+
+    Statuses:
+      ``missing`` — nothing cached (or the entry was dropped as unusable)
+      ``fresh``   — usable as-is, no rebuild needed
+      ``source``  — the source stamp moved: rebuild now
+      ``age``     — stale by TTL only
+    """
     now = time.monotonic()
     current_stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
-            return None, False
+            return None, _SESSION_LIST_CACHE_MISSING
         ts, stamp, payload = entry
         if stamp != current_stamp:
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
-                return copy.deepcopy(payload), False
+                return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_SOURCE
             _SESSIONS_CACHE.pop(key, None)
-            return None, False
+            return None, _SESSION_LIST_CACHE_MISSING
         # #4808: widen the freshness window while a turn is streaming so the fixed
         # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
             ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        fresh = (now - ts) < ttl
-        if fresh:
+        if (now - ts) < ttl:
             _SESSIONS_CACHE.move_to_end(key)
-            return copy.deepcopy(payload), True
+            return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_FRESH
         if allow_stale:
             _SESSIONS_CACHE.move_to_end(key)
-            return copy.deepcopy(payload), False
+            return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_AGE
         _SESSIONS_CACHE.pop(key, None)
-        return None, False
+        return None, _SESSION_LIST_CACHE_MISSING
+
+
+def _session_list_cache_get(
+    key: tuple,
+    allow_stale: bool = False,
+) -> tuple[dict | None, bool]:
+    payload, status = _session_list_cache_probe(key, allow_stale=allow_stale)
+    return payload, status == _SESSION_LIST_CACHE_FRESH
 
 
 def _session_list_cache_stale_reason(key: tuple) -> str | None:
-    """Return why an existing cache entry is stale, if it is stale."""
-    now = time.monotonic()
-    current_stamp = _session_list_cache_resolved_source_stamp(key)
-    with _SESSIONS_CACHE_LOCK:
-        entry = _SESSIONS_CACHE.get(key)
-        if not entry:
-            return None
-        ts, stamp, _payload = entry
-        if stamp != current_stamp:
-            return "source"
-        ttl = _SESSIONS_CACHE_TTL_SECONDS
-        if _session_list_cache_streaming_freeze_marker() is not None:
-            ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        if (now - ts) >= ttl:
-            return "age"
+    """Return why an existing cache entry is stale, if a rebuild is warranted."""
+    payload, status = _session_list_cache_probe(key, allow_stale=True)
+    if payload is None or status == _SESSION_LIST_CACHE_FRESH:
         return None
+    return status
 
 
-def _session_list_cache_set(key: tuple, payload: dict) -> None:
+def _session_list_cache_set(
+    key: tuple,
+    payload: dict,
+    *,
+    expected_invalidation_stamp: tuple[int, int] | None = None,
+    source_stamp=None,
+) -> bool:
+    """Store a built payload under the source stamp it was certified against.
+
+    ``source_stamp`` is the stamp the CALLER read *before* it invoked the
+    builder. Storing the stamp read here instead — after the builder returned —
+    certifies the payload with evidence the builder never saw: a commit that
+    lands between the builder's row read and this insertion is folded into the
+    stored stamp, so the pair "old payload, new stamp" is then served as FRESH
+    for a full TTL, and the reconciliation contract is violated even after the
+    source moves again. Callers that build pass the pre-build stamp; callers
+    that already hold a consistent snapshot (tests, direct seed) may omit it, in
+    which case the current stamp is used. (#8694)
+    """
     if not isinstance(payload, dict):
-        return
-    stamp = _session_list_cache_resolved_source_stamp(key)
+        return False
+    stamp = (
+        _session_list_cache_resolved_source_stamp(key)
+        if source_stamp is None
+        else source_stamp
+    )
+    bounded = _session_list_cache_bounded_payload(payload)
     with _SESSIONS_CACHE_LOCK:
-        _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
+        # Projection intentionally happens outside the lock so large source rows
+        # cannot block cache hits. Re-check the caller's pre-build generation
+        # atomically before insertion, otherwise a rename/archive/delete clear
+        # that lands during projection can be undone by this stale write.
+        if (
+            expected_invalidation_stamp is not None
+            and _session_list_cache_invalidation_stamp(key)
+            != expected_invalidation_stamp
+        ):
+            return False
+        _SESSIONS_CACHE[key] = (time.monotonic(), stamp, bounded)
         _SESSIONS_CACHE.move_to_end(key)
         while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
             _SESSIONS_CACHE.popitem(last=False)
+    return True
 
 
 def _session_list_cache_clear(profile: str | None = None) -> None:
@@ -385,6 +656,27 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         session_index_path = _session_list_cache_session_dir() / "_index.json"
     except Exception:
         session_index_path = None
+    all_profiles_state_stamp = None
+    if _cache_all_profiles:
+        try:
+            from api.models import _all_profiles_cli_contexts, all_profiles_roster_incomplete
+            contexts, roster_key = _all_profiles_cli_contexts()
+            all_profiles_state_stamp = tuple(
+                (
+                    _session_list_cache_path_stamp(ctx_db),
+                    _session_list_cache_path_stamp(ctx_db.with_name(f"{ctx_db.name}-wal") if ctx_db else None),
+                    _session_list_cache_state_db_fingerprint(ctx_db),
+                )
+                for _home, ctx_db, _prof in contexts
+            )
+            if all_profiles_roster_incomplete(roster_key):
+                # A profile the roster could not see can commit without moving
+                # any entry above. Carry the marker so a partial roster's stamp
+                # never equals the complete roster's. (#8694)
+                all_profiles_state_stamp = all_profiles_state_stamp + (_ALL_PROFILES_STAMP_ROSTER_INCOMPLETE,)
+        except Exception:
+            all_profiles_state_stamp = None
+
     return (
         _session_list_cache_path_stamp(state_db_path),
         _session_list_cache_path_stamp(state_db_wal_path),
@@ -396,6 +688,7 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         # frame size), so without this a freshly-committed CLI/gateway session
         # could be served stale for the cache TTL. Mirrors the models-layer fix.
         _session_list_cache_state_db_fingerprint(state_db_path),
+        all_profiles_state_stamp,
         swv,
     )
 
@@ -424,6 +717,11 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
         active_stream_ids = _session_list_cache_active_stream_ids()
     except Exception:
         active_stream_ids = set()
+    try:
+        running_cron_jobs = _session_list_cache_running_cron_jobs()
+    except Exception:
+        running_cron_jobs = {}
+    cron_job_prefixes = [(jid, f"cron_{jid}_", started_at) for jid, started_at in running_cron_jobs.items()]
     session_ids = [
         str(row.get("session_id") or "").strip()
         for row in rows
@@ -455,9 +753,48 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
                     item[key] = raw_live_value
         stream_id = item.get("active_stream_id")
         item["is_streaming"] = bool(stream_id and stream_id in active_stream_ids)
+        # #6728: a still-running cron job's session row must not look completed
+        # in the sidebar. Cron liveness is only exposed via /api/crons/status,
+        # which the sidebar never polls — stamp the flag here so the client can
+        # defer its completion/unread transition until the job actually ends.
+        # Session ids are cron_{job_id}_{run_timestamp}: only the run started at
+        # (or after) the tracked start belongs to the live execution — older runs
+        # of the same job stay completed.
+        item["cron_running"] = _session_list_row_cron_running(
+            sid, item, cron_job_prefixes
+        )
         overlaid.append(item)
     overlaid.sort(key=_session_list_runtime_sort_key, reverse=True)
     return overlaid
+
+
+def _session_list_row_cron_running(
+    sid: str, row: dict, cron_job_prefixes: list[tuple[str, str, float]]
+) -> bool:
+    if not cron_job_prefixes or not sid:
+        return False
+    created_at = _session_list_row_numeric_value(row.get("created_at"))
+    # Longest prefix first, no fall-through: job ids may nest (backup vs
+    # backup_full), and the shorter prefix is a valid prefix of the longer one.
+    # A session belongs to the longest matching job id — first-match in
+    # insertion order, or falling through to a shorter prefix after a time-miss,
+    # would let a running shorter-prefix job claim a completed longer-prefix
+    # session. Mirrors the max(matches, key=len) convention in
+    # api.routes._latest_cron_session_info_for_jobs.
+    #
+    # #6728 (gate fix): prefixes are built ONLY from RUNNING jobs, so if the
+    # true longer owner (backup_full) is not running, longest-prefix sorting
+    # never sees it and a running `backup` would otherwise swallow a
+    # `cron_backup_full_YYYYMMDD_HHMMSS` session (the leftover `full_...` still
+    # starts with nothing it should match). Require the text AFTER the prefix to
+    # be exactly a run-timestamp (YYYYMMDD_HHMMSS) so a shorter job id cannot
+    # claim a longer job id's session regardless of which jobs are running.
+    for _jid, prefix, started_at in sorted(
+        cron_job_prefixes, key=lambda item: len(item[1]), reverse=True
+    ):
+        if sid.startswith(prefix) and _CRON_RUN_TS_RE.fullmatch(sid[len(prefix):]):
+            return created_at >= started_at
+    return False
 
 
 def _session_list_row_numeric_value(value) -> float:
