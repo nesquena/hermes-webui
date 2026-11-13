@@ -48,6 +48,10 @@ def _make_provisional_session(user_text, assistant_text='Here is the answer.'):
     s.llm_title_generated = False
     s.messages = messages
     s.session_id = 'test-2235-session'
+    # A MagicMock auto-creates any attribute, so the #8852/#9019 mark would read as
+    # set and get_session would refuse this session. Real sessions carry it only
+    # when the file names another session.
+    s._sidecar_names_other_session = None
     s.save = MagicMock()
     return s, provisional
 

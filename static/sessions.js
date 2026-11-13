@@ -2647,6 +2647,17 @@ async function newSession(flash, options={}){
   })();
   try{
     return await _newSessionInFlight;
+  }catch(e){
+    // A failed create used to look like a dead button: api() only toasts
+    // timeouts, so a 400 from /api/session/new (an untrusted workspace is the
+    // common one — "Path is outside the user home directory, not in the saved
+    // workspace list, and not under the default workspace") rejected with no
+    // message anywhere on screen. Surface the server's own explanation and
+    // keep propagating, so callers that abort their flow on failure still do.
+    if(typeof showToast==='function'){
+      showToast(t('failed_colon')+((e&&e.message)?e.message:String(e)),5000,'error');
+    }
+    throw e;
   }finally{
     _newSessionInFlight=null;
     _setNewSessionPending(false);
