@@ -68,7 +68,14 @@ restores nothing (#7214).
     confirmed exclusions: they are skipped and wait for their owning process.
   - A row whose session cannot be classified because of a read error is not
     treated as excluded. For an in-process session WebUI is the owning
-    process, so skipping it would strand the result. The classified rows are
+    process, so skipping it would strand the result. That includes the
+    backend choice: the shared config and `.env` readers map an unreadable or
+    malformed file to "no settings", which reads as the local default, so
+    before a row counts as local, replay re-reads the profile `.env` strictly
+    and, unless the backend is set explicitly in the env, parses the same
+    `config.yaml` the backend lookup used. A missing file is the local
+    default; an unreadable, malformed or non-mapping one leaves the row
+    undetermined. The shared readers are unchanged. The classified rows are
     queued, and the ledger then goes through the sweep's failure path: a
     rate-limited warning and a retry on the 5 s interval, until the row
     classifies.

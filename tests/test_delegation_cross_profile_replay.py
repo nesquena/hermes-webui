@@ -258,6 +258,87 @@ def test_confirmed_exclusions_do_not_retry(world, monkeypatch):
     assert named not in armed[1:]  # nothing re-armed for this ledger after the sweep ran
 
 
+def _break_backend_input(home, how):
+    cfg, env = home / "config.yaml", home / ".env"
+    if how == "config_unreadable":
+        cfg.chmod(0)
+    elif how == "config_malformed":
+        cfg.write_text("webui_chat_backend: [gateway\n")
+    elif how == "env_unreadable":
+        cfg.write_text("{}\n")
+        env.write_text("HERMES_WEBUI_CHAT_BACKEND=gateway\n")
+        env.chmod(0)
+
+
+def _make_local(home):
+    for path in (home / "config.yaml", home / ".env"):
+        if path.exists():
+            path.chmod(0o600)
+            path.unlink()
+    (home / "config.yaml").write_text("{}\n")
+
+
+@pytest.mark.parametrize("how", ["config_unreadable", "config_malformed", "env_unreadable"])
+def test_unreadable_backend_inputs_are_undetermined_and_retried(world, monkeypatch, how):
+    import api.config as config
+
+    gwprof = world["homes"]["gwprof"]
+    world["sessions"]["s-gw"] = "gwprof"
+    _row(gwprof, "d-gw", session="s-gw")
+    _break_backend_input(gwprof, how)
+    config._yaml_file_cache.clear()  # cold config read
+    monkeypatch.setattr(peu, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 0.05)
+    real = peu.pending_webui_completions
+    seen = []
+
+    def observed(home):
+        events, undetermined = real(home)
+        if home != gwprof:
+            return events, undetermined  # the sweep visits every ledger, in set order
+        seen.append(([e["delegation_id"] for e in events], undetermined))
+        if len(seen) == 1:
+            _make_local(gwprof)  # the inputs become readable (and say local) before the retry
+        return events, undetermined
+
+    monkeypatch.setattr(peu, "pending_webui_completions", observed)
+    q = queue.Queue()
+    registry = type("Registry", (), {"restore_completions": lambda self: None, "completion_queue": q})()
+
+    peu.restore_durable_process_completions(registry)
+    assert q.get(timeout=10)["delegation_id"] == "d-gw"
+    assert seen[0] == ([], 1)  # nothing queued while the backend was undetermined
+    time.sleep(0.3)
+    assert q.empty()  # delivered once
+    assert _rows(gwprof) == {"d-gw": ("completed", "pending")}
+
+
+@pytest.mark.parametrize("setup, replayed", [
+    ("healthy_gateway", []),
+    ("healthy_local", ["d-1"]),
+    ("no_config", ["d-1"]),
+    ("env_local_over_malformed_config", ["d-1"]),
+    ("process_env_local_over_malformed_config", ["d-1"]),
+    ("process_env_gateway_over_malformed_config", []),
+])
+def test_backend_controls_are_confirmed_without_retry(world, monkeypatch, setup, replayed):
+    import api.config as config
+
+    home = world["homes"]["gwprof" if setup == "healthy_gateway" else "named"]
+    world["sessions"]["s-web"] = home.name
+    _row(home, "d-1")
+    if setup == "no_config":
+        (home / "config.yaml").unlink()
+    elif setup.endswith("malformed_config"):
+        (home / "config.yaml").write_text("webui_chat_backend: [gateway\n")
+        if setup.startswith("env_local"):
+            (home / ".env").write_text("HERMES_WEBUI_CHAT_BACKEND=legacy\n")
+        else:
+            monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "legacy" if "local" in setup else "gateway")
+    config._yaml_file_cache.clear()
+    events, undetermined = owner_mod.pending_webui_completions(home)
+    assert ([e["delegation_id"] for e in events], undetermined) == (replayed, 0)
+
+
 def test_launch_ledger_keeps_the_agents_recovery_and_48h_drop(world):
     root = world["root"]
     _row(root, "d-run", state="running", owner_pid=_dead_pid())

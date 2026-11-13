@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -161,6 +162,60 @@ class LedgerReplayIncomplete(RuntimeError):
     """Some rows could not be classified; the caller should retry the ledger."""
 
 
+def _read_backend_env_strict(env_path: Path) -> dict[str, str]:
+    """The profile ``.env`` values, read the way the runtime env reader parses them.
+
+    A missing file is an empty env. Any other read error raises, unlike the
+    shared reader, which logs and returns no values (and so reads as "local").
+    """
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            if key and value:
+                values[key] = value
+    return values
+
+
+def _require_backend_inputs_read(profile: str) -> None:
+    """Raise unless the inputs that resolved *profile* to the local backend were read.
+
+    The shared config and ``.env`` readers map an unreadable or malformed file
+    to "no settings", which resolves to the local default. That fallback stays
+    as it is for everyone else; replay only needs to tell "the inputs say
+    local" from "a reader swallowed an error", and the latter is undetermined.
+    """
+    from api import profiles
+    from api.config import _get_config_path, _profile_home_config_source
+    from api.gateway_chat import _WEBUI_CHAT_BACKEND_ENV
+    from api import yaml_compat
+
+    home = Path(profiles.get_hermes_home_for_profile(profile))
+    env = _read_backend_env_strict(home / ".env")
+    process_value = "" if _WEBUI_CHAT_BACKEND_ENV in profiles._loaded_profile_env_keys else os.environ.get(
+        _WEBUI_CHAT_BACKEND_ENV, ""
+    )
+    if str(env.get(_WEBUI_CHAT_BACKEND_ENV) or process_value or "").strip():
+        return  # an explicit env choice wins over config.yaml
+    source = _profile_home_config_source(home)
+    if source is None:
+        return  # no profile home: no config, the documented local default
+    path = source if isinstance(source, Path) else _get_config_path()  # else: _AMBIENT_CONFIG
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return  # no config.yaml: the documented local default
+    loaded = yaml_compat.safe_load(text)
+    if loaded is not None and not isinstance(loaded, dict):
+        raise ValueError(f"{path} is not a mapping")
+
+
 def _session_runs_in_process(session_id: str) -> bool:
     """True only for a WebUI session whose turns run in this process.
 
@@ -184,7 +239,10 @@ def _session_runs_in_process(session_id: str) -> bool:
         return False
     if runtime_adapter_runner_enabled():
         return False
-    return not _profile_uses_gateway(name)
+    if _profile_uses_gateway(name):
+        return False
+    _require_backend_inputs_read(name)  # raises: undetermined, retried by the sweep
+    return True
 
 
 def pending_webui_completions(home: Path, *, now: float | None = None) -> tuple[list[dict], int]:
