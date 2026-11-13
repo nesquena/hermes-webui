@@ -198,19 +198,39 @@ async (mode) => {
 """
 
 
-@pytest.fixture(scope="module")
-def browser():
-    playwright_api = pytest.importorskip("playwright.sync_api")
-    with playwright_api.sync_playwright() as playwright:
-        instance = playwright.chromium.launch(
-            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        yield instance
-        instance.close()
+_STATUS_SCENARIO = r"""
+async (mode) => {
+  const stream='oracle-status-stream';
+  Date.now=()=>1700000001000;
+  window._chatActivityDisplayMode=mode;
+  window._showThinking=true;
+  window._simplifiedToolCalling=true;
+  S.session={session_id:'oracle-session',messages:[],pending_started_at:1700000000};
+  S.messages=[]; S.toolCalls=[]; S.activeStreamId=stream;
+  $('msgInner').innerHTML='';
+  const turn=_createAssistantTurn(); turn.id='liveAssistantTurn';
+  $('msgInner').appendChild(turn);
+  const row={row_id:'lifecycle-status',local_id:'lifecycle-status',role:'lifecycle',
+    kind:'lifecycle_status',source_event_type:'custom_status',status:'running',text:'',
+    created_at:1700000000};
+  const scene=()=>({version:'activity_scene_v1',mode,
+    identity:{session_id:'oracle-session',stream_id:stream,run_id:stream},
+    activity_rows:[{...row}]});
+  renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+  const label=()=>turn.querySelector('.agent-activity-status-label').textContent;
+  const before=label();
+  const builder=mode==='compact_worklog'?'_anchorSceneNodeForRow':'_anchorSceneTransparentNodeForRow';
+  const original=window[builder]; let builds=0;
+  window[builder]=function(...args){builds++; return original.apply(this,args);};
+  row.status='completed';
+  renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+  window[builder]=original;
+  return {before,after:label(),builds};
+}
+"""
 
 
-@pytest.mark.parametrize("mode", ["compact_worklog", "transparent_stream"])
-def test_300_step_live_scene_matches_fresh_render(browser, mode):
+def _oracle_page(browser, incremental):
     page = browser.new_page()
     page.set_default_timeout(600_000)
     errors = []
@@ -223,11 +243,30 @@ def test_300_step_live_scene_matches_fresh_render(browser, mode):
             body=HARNESS_HTML if route.request.url == "http://harness.test/" else "",
         ),
     )
+    page.goto("http://harness.test/", wait_until="domcontentloaded")
+    for script in SUPPORT_SCRIPTS:
+        page.add_script_tag(content=script)
+    page.add_script_tag(content=UI_JS)
+    page.evaluate("enabled => { window._liveSceneIncremental=enabled; }", incremental)
+    return page, errors
+
+
+@pytest.fixture(scope="module")
+def browser():
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    with playwright_api.sync_playwright() as playwright:
+        instance = playwright.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        yield instance
+        instance.close()
+
+
+@pytest.mark.parametrize("mode", ["compact_worklog", "transparent_stream"])
+@pytest.mark.parametrize("incremental", [True, False], ids=["incremental", "legacy"])
+def test_300_step_live_scene_matches_fresh_render(browser, mode, incremental):
+    page, errors = _oracle_page(browser, incremental)
     try:
-        page.goto("http://harness.test/", wait_until="domcontentloaded")
-        for script in SUPPORT_SCRIPTS:
-            page.add_script_tag(content=script)
-        page.add_script_tag(content=UI_JS)
         result = page.evaluate(_SCENARIO, mode)
     finally:
         page.close()
@@ -244,3 +283,14 @@ def test_300_step_live_scene_matches_fresh_render(browser, mode):
         "disclosureRetained": True,
     }, result
     assert result["rows"] > 50, result
+
+
+@pytest.mark.parametrize("mode", ["compact_worklog", "transparent_stream"])
+def test_non_tool_status_only_change_renders(browser, mode):
+    page, errors = _oracle_page(browser, True)
+    try:
+        result = page.evaluate(_STATUS_SCENARIO, mode)
+    finally:
+        page.close()
+    assert not errors, errors
+    assert result == {"before": "running", "after": "completed", "builds": 1}, result
