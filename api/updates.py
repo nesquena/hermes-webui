@@ -1381,11 +1381,31 @@ ANCESTRY_DESCENDANT = 'descendant'    # HEAD is an ancestor of ref  -> fast-forw
 ANCESTRY_DIVERGENT = 'divergent'      # PROVEN: shared base reachable and neither direction
 ANCESTRY_UNKNOWN = 'unknown'          # shallow/incomplete history or a Git failure
 
+HISTORY_COMPLETE = 'complete'
+HISTORY_SHALLOW = 'shallow'
+HISTORY_UNKNOWN = 'unknown'
+
+
+def _history_completeness(path):
+    """Return repository history completeness status:
+    - HISTORY_SHALLOW: rev-parse --is-shallow-repository returned 'true'
+    - HISTORY_COMPLETE: rev-parse --is-shallow-repository returned 'false'
+    - HISTORY_UNKNOWN: command failed, timed out, or produced unrecognized output
+    """
+    out, ok = _run_git(['rev-parse', '--is-shallow-repository'], path)
+    if not ok:
+        return HISTORY_UNKNOWN
+    normalized = out.strip().lower()
+    if normalized == 'true':
+        return HISTORY_SHALLOW
+    if normalized == 'false':
+        return HISTORY_COMPLETE
+    return HISTORY_UNKNOWN
+
 
 def _repository_is_shallow(path):
     """Return True if the repository is a shallow clone."""
-    out, ok = _run_git(['rev-parse', '--is-shallow-repository'], path)
-    return bool(ok and out.strip().lower() == 'true')
+    return _history_completeness(path) == HISTORY_SHALLOW
 
 
 def _has_reachable_merge_base(path, ref):
@@ -1409,13 +1429,13 @@ def _ancestry_relation(path, ref, *, allow_deepen=True):
     - ANCESTRY_ANCESTOR: ref is an ancestor of HEAD (applying ref would rewind)
     - ANCESTRY_DESCENDANT: HEAD is an ancestor of ref (fast-forward possible)
     - ANCESTRY_DIVERGENT: proven divergent (shared merge base exists, neither direction,
-      and repository is not shallow)
+      and repository history is complete)
     - ANCESTRY_UNKNOWN: shallow/incomplete history or git failure
 
-    Invariant: ANCESTRY_DIVERGENT requires three conditions together —
-    neither `--is-ancestor` direction holds, `merge-base HEAD <ref>` resolves,
-    and `rev-parse --is-shallow-repository` is `false` at the moment of the decision.
-    Any Git failure keeps collapsing to ANCESTRY_UNKNOWN.
+    Invariant: ANCESTRY_DIVERGENT requires neither `--is-ancestor` direction,
+    a resolvable `merge-base HEAD <ref>`, and an explicit successful `false` from
+    `rev-parse --is-shallow-repository`; an unreadable or unrecognized answer is
+    ANCESTRY_UNKNOWN. Any Git failure keeps collapsing to ANCESTRY_UNKNOWN.
     """
     if not ref:
         return ANCESTRY_UNKNOWN
@@ -1426,16 +1446,20 @@ def _ancestry_relation(path, ref, *, allow_deepen=True):
         return ANCESTRY_ANCESTOR
     if can_ff:
         return ANCESTRY_DESCENDANT
+
     if _has_reachable_merge_base(path, ref):
-        if not _repository_is_shallow(path):
+        completeness = _history_completeness(path)
+        if completeness == HISTORY_COMPLETE:
             return ANCESTRY_DIVERGENT
-        if allow_deepen and _deepen_history_once(path):
-            re_eval = _ancestry_relation(path, ref, allow_deepen=False)
-            if re_eval == ANCESTRY_DIVERGENT and _repository_is_shallow(path):
-                return ANCESTRY_UNKNOWN
-            return re_eval
+        if completeness == HISTORY_SHALLOW and allow_deepen:
+            if _deepen_history_once(path):
+                re_eval = _ancestry_relation(path, ref, allow_deepen=False)
+                if re_eval == ANCESTRY_DIVERGENT:
+                    return ANCESTRY_DIVERGENT
+            return ANCESTRY_UNKNOWN
         return ANCESTRY_UNKNOWN
-    if allow_deepen and _repository_is_shallow(path) and _deepen_history_once(path):
+
+    if allow_deepen and _history_completeness(path) == HISTORY_SHALLOW and _deepen_history_once(path):
         return _ancestry_relation(path, ref, allow_deepen=False)
     return ANCESTRY_UNKNOWN
 
@@ -2800,7 +2824,8 @@ def _apply_force_update_inner(target: str, channel) -> dict:
                 f'Cannot verify ancestry of {compare_ref} for {target} on the {channel} channel; '
                 'the local Git history is incomplete or unreadable. It cannot be proven '
                 'whether this version is older than HEAD or on a different line. '
-                'Fetch the full history (`git fetch --unshallow` / `git fetch --tags`) '
+                'Fetching tags does not remove a shallow boundary; restore complete history '
+                'with `git fetch --unshallow` (or repeated `git fetch --deepen=<n>`) '
                 'before retrying force update.'
             ),
             'target': target,

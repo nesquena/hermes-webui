@@ -409,3 +409,117 @@ def test_two_parent_full_history_is_ancestor(tmp_path, two_parent_origin, monkey
     head_after = _git(repo, 'rev-parse', 'HEAD')
     assert head_after == head_before
 
+
+def test_unreadable_shallow_status_refuses_force(tmp_path, two_parent_origin, monkeypatch):
+    """Failure-path regression: unreadable shallow query must not declare divergence.
+
+    A TimeoutExpired raised for rev-parse --is-shallow-repository must collapse to
+    HISTORY_UNKNOWN, ANCESTRY_UNKNOWN (not ANCESTRY_DIVERGENT), report ancestry_unknown
+    without repair_required, refuse force update without rewinding HEAD, and schedule
+    no restart.
+    """
+    origin_url, m_sha = two_parent_origin
+    repo = tmp_path / 'shallow_clone'
+    subprocess.run(
+        ['git', 'clone', '-q', '--depth', '3', origin_url, str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'fetch', '-q', '--tags')
+
+    orig_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if any('--is-shallow-repository' in str(arg) for arg in cmd):
+            raise subprocess.TimeoutExpired(cmd, timeout=kwargs.get('timeout', 10))
+        return orig_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(updates.subprocess, 'run', fake_run)
+
+    assert updates._history_completeness(repo) == updates.HISTORY_UNKNOWN
+
+    relation = updates._ancestry_relation(repo, 'v1.0.1')
+    assert relation is not updates.ANCESTRY_DIVERGENT
+    assert relation == updates.ANCESTRY_UNKNOWN
+
+    info = updates._check_repo(repo, 'webui', 'stable')
+    assert info is not None
+    assert info.get('ancestry_unknown') is True
+    assert not info.get('repair_required')
+    assert not info.get('divergent')
+
+    restart_calls = []
+    monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: restart_calls.append(1))
+
+    head_before = _git(repo, 'rev-parse', 'HEAD')
+    assert head_before == m_sha
+
+    force_res = updates._apply_force_update_inner('webui', 'stable')
+    assert force_res.get('ok') is False
+    assert force_res.get('refused_rewind') is True
+    assert force_res.get('ancestry_unknown') is True
+
+    head_after = _git(repo, 'rev-parse', 'HEAD')
+    assert head_after == head_before
+    assert restart_calls == []
+
+
+def test_unrecognized_shallow_status_is_unknown(tmp_path, two_parent_origin, monkeypatch):
+    """Control for value half: non-boolean output must not prove complete history.
+
+    A 0 exit with unrecognized output (e.g. 'banana') must map to HISTORY_UNKNOWN,
+    ANCESTRY_UNKNOWN (not ANCESTRY_DIVERGENT), report ancestry_unknown without
+    repair_required, and refuse force update with HEAD preserved.
+    """
+    origin_url, m_sha = two_parent_origin
+    repo = tmp_path / 'shallow_clone'
+    subprocess.run(
+        ['git', 'clone', '-q', '--depth', '3', origin_url, str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'fetch', '-q', '--tags')
+
+    orig_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if any('--is-shallow-repository' in str(arg) for arg in cmd):
+            return subprocess.CompletedProcess(cmd, 0, stdout='banana\n', stderr='')
+        return orig_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(updates.subprocess, 'run', fake_run)
+
+    assert updates._history_completeness(repo) == updates.HISTORY_UNKNOWN
+
+    relation = updates._ancestry_relation(repo, 'v1.0.1')
+    assert relation is not updates.ANCESTRY_DIVERGENT
+    assert relation == updates.ANCESTRY_UNKNOWN
+
+    info = updates._check_repo(repo, 'webui', 'stable')
+    assert info is not None
+    assert info.get('ancestry_unknown') is True
+    assert not info.get('repair_required')
+    assert not info.get('divergent')
+
+    restart_calls = []
+    monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: restart_calls.append(1))
+
+    head_before = _git(repo, 'rev-parse', 'HEAD')
+    assert head_before == m_sha
+
+    force_res = updates._apply_force_update_inner('webui', 'stable')
+    assert force_res.get('ok') is False
+    assert force_res.get('refused_rewind') is True
+    assert force_res.get('ancestry_unknown') is True
+
+    head_after = _git(repo, 'rev-parse', 'HEAD')
+    assert head_after == head_before
+    assert restart_calls == []
+
+
