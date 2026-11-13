@@ -422,3 +422,102 @@ def test_foreign_cli_live_unsaved_resident_with_pending_answers_from_memory(monk
     assert metadata["last_message_at"] == full["last_message_at"] == limited["last_message_at"]
     assert metadata["messages"] == []
 
+
+def test_foreign_cli_bounded_load_reconciles_immediate_parent_lineage(monkeypatch, tmp_path):
+    """D1 (P1): foreign continuation must reconcile immediate parent across all modes.
+
+    Immediate parent sidecar holds parent-only history and is not a snapshot.
+    Child continuation carries parent_session_id to it + child rows in sidecar
+    and in state.db. Metadata (0), bounded (30), and full (1) loads must all
+    agree on message_count (4) and last_message_at (1003.0); metadata still
+    ships messages == [] and _messages_truncated is False.
+    """
+    parent_sid = "cli7050_p1_parent"
+    parent_rows = [
+        {"role": "user", "content": "archived parent q", "timestamp": 1000.0},
+        {"role": "assistant", "content": "archived parent a", "timestamp": 1001.0},
+    ]
+    parent = _install_session(monkeypatch, tmp_path, parent_sid, parent_rows)
+    assert not getattr(parent, "pre_compression_snapshot", False)
+
+    child_sid = "cli7050_p1_child"
+    child_rows = [
+        {"role": "user", "content": "q0", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1003.0},
+    ]
+    child = _install_session(monkeypatch, tmp_path, child_sid, child_rows)
+    child.parent_session_id = parent_sid
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_rows)
+
+    metadata, limited, full = _solution(child_sid)
+
+    assert metadata["message_count"] == full["message_count"] == limited["message_count"] == 4
+    assert metadata["last_message_at"] == full["last_message_at"] == limited["last_message_at"] == 1003.0
+    assert metadata["messages"] == []
+    assert metadata["_messages_truncated"] is False
+    assert len(limited["messages"]) == 4
+    assert len(full["messages"]) == 4
+
+
+def test_foreign_cli_child_without_parent_lineage_control(monkeypatch, tmp_path):
+    """D2 (control): child with no parent_session_id reports 2 / 2 / 2."""
+    child_sid = "cli7050_no_parent_control"
+    child_rows = [
+        {"role": "user", "content": "q0", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1003.0},
+    ]
+    _install_session(monkeypatch, tmp_path, child_sid, child_rows)
+    _make_state_db(tmp_path / "state.db", child_sid, child_rows)
+
+    metadata, limited, full = _solution(child_sid)
+
+    assert metadata["message_count"] == full["message_count"] == limited["message_count"] == 2
+    assert metadata["last_message_at"] == full["last_message_at"] == limited["last_message_at"] == 1003.0
+    assert metadata["messages"] == []
+    assert metadata["_messages_truncated"] is False
+    assert len(limited["messages"]) == 2
+    assert len(full["messages"]) == 2
+
+
+def test_foreign_cli_memoized_bounded_merge_invalidates_on_parent_growth(monkeypatch, tmp_path):
+    """D3: warm memoized bounded merge reflects parent sidecar growth."""
+    import api.models as models
+
+    parent_sid = "cli7050_cache_parent"
+    parent_rows = [
+        {"role": "user", "content": "archived parent q", "timestamp": 1000.0},
+        {"role": "assistant", "content": "archived parent a", "timestamp": 1001.0},
+    ]
+    _install_session(monkeypatch, tmp_path, parent_sid, parent_rows)
+
+    child_sid = "cli7050_cache_child"
+    child_rows = [
+        {"role": "user", "content": "q0", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1003.0},
+    ]
+    child = _install_session(monkeypatch, tmp_path, child_sid, child_rows)
+    child.parent_session_id = parent_sid
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_rows)
+
+    limited_query = "&messages=1&msg_limit=30&expand_renderable=1&resolve_model=0"
+    lim1 = _load(child_sid, limited_query)
+    assert lim1["message_count"] == 4
+    assert len(lim1["messages"]) == 4
+
+    parent = models.Session.load(parent_sid)
+    parent.messages.extend([
+        {"role": "user", "content": "parent q2", "timestamp": 1004.0},
+        {"role": "assistant", "content": "parent a2", "timestamp": 1005.0},
+    ])
+    parent.save(touch_updated_at=False)
+
+    lim2 = _load(child_sid, limited_query)
+    assert lim2["message_count"] == 6
+    assert len(lim2["messages"]) == 6
+    contents = [m["content"] for m in lim2["messages"]]
+    assert "parent q2" in contents
+    assert "parent a2" in contents
+
+

@@ -12722,12 +12722,23 @@ def _limited_webui_messages_for_display_with_sidecar(
         sidecar_messages = list(sidecar_messages or [])
         if not sidecar_owners:
             sidecar_owners = _display_exact_owner_positions(session, sidecar_messages)
+    lineage_parent = _webui_lineage_parent_session_for_display(session)
+    if lineage_parent is not None:
+        projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
+            session,
+            sidecar_messages,
+            parent_session=lineage_parent,
+        )
+    else:
+        projection_sidecar_messages = sidecar_messages
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         if owner_positions is not None:
             owner_positions.clear()
-            owner_positions.update(sidecar_owners)
-        return sidecar_messages
+            owner_positions.update(_display_projected_owner_positions(
+                sidecar_messages, projection_sidecar_messages, sidecar_owners,
+            ))
+        return [dict(m) if isinstance(m, dict) else m for m in projection_sidecar_messages]
     state_db_messages = _suppress_native_image_display_mirrors(
         session,
         state_db_messages,
@@ -12742,8 +12753,10 @@ def _limited_webui_messages_for_display_with_sidecar(
     if not state_db_messages:
         if owner_positions is not None:
             owner_positions.clear()
-            owner_positions.update(sidecar_owners)
-        return sidecar_messages
+            owner_positions.update(_display_projected_owner_positions(
+                sidecar_messages, projection_sidecar_messages, sidecar_owners,
+            ))
+        return [dict(m) if isinstance(m, dict) else m for m in projection_sidecar_messages]
 
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
@@ -12810,8 +12823,14 @@ def _limited_webui_messages_for_display_with_sidecar(
         incoming_provenance="state_db",
         cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
     )
+    if lineage_parent is not None:
+        merged = _merged_webui_lineage_messages_for_display(
+            session,
+            merged,
+            parent_session=lineage_parent,
+        )
     merged = _project_native_image_payload_conflicts_for_display(
-        sidecar_messages,
+        projection_sidecar_messages,
         state_db_messages,
         merged,
     )
@@ -12887,7 +12906,7 @@ def _display_merge_cache_entry_usable(entry, cache_key) -> bool:
 
 
 def _display_merge_requires_lineage_provenance(session) -> bool:
-    """Return whether this sidecar view depends on a stitched snapshot parent."""
+    """Return whether this sidecar view depends on a stitched snapshot parent or immediate parent."""
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
     if not parent_id:
         return False
@@ -12899,13 +12918,20 @@ def _display_merge_requires_lineage_provenance(session) -> bool:
         return True
     if parent is None:
         return True
-    if not getattr(parent, "pre_compression_snapshot", False):
+    if (
+        str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
+        and str(getattr(session, "compression_recovery_action", "") or "").strip()
+    ):
         return False
     source = str(getattr(session, "session_source", "") or "").strip().lower()
+    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+    if source == "fork" or relationship == "child_session":
+        return False
+    is_snapshot = bool(getattr(parent, "pre_compression_snapshot", False))
     parent_source = str(
         getattr(parent, "session_source", "") or ""
     ).strip().lower()
-    if source == "fork" and parent_source != "fork":
+    if is_snapshot and source == "fork" and parent_source != "fork":
         return False
     return not _messages_start_with_visible_prefix(
         list(getattr(session, "messages", []) or []),
@@ -12933,7 +12959,7 @@ def _display_merge_cache_key(
     (missing sidecar signature, unfingerprintable state rows) disables the
     cache for this request rather than risking a stale transcript.
     """
-    from api.models import _sidecar_stat_signature
+    from api.models import SESSION_DIR, _sidecar_stat_signature
 
     sid = str(getattr(session, "session_id", "") or "")
     if not sid or not is_safe_session_id(sid):
@@ -12965,6 +12991,38 @@ def _display_merge_cache_key(
         with _lineage_display_cache_lock:
             if _lineage_display_cache.get(sid) is not lineage_entry:
                 return None
+    immediate_parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if (
+        immediate_parent_id
+        and not (
+            str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
+            and str(getattr(session, "compression_recovery_action", "") or "").strip()
+        )
+    ):
+        source = str(getattr(session, "session_source", "") or "").strip().lower()
+        relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+        if source != "fork" and relationship != "child_session":
+            if not is_safe_session_id(immediate_parent_id):
+                return None
+            try:
+                parent = Session.load(immediate_parent_id)
+            except Exception:
+                return None
+            if parent is None:
+                return None
+            if not getattr(parent, "pre_compression_snapshot", False):
+                parent_path = SESSION_DIR / f"{immediate_parent_id}.json"
+                parent_sig = _sidecar_stat_signature(parent_path)
+                if parent_sig is None:
+                    return None
+                parent_path_str = str(parent_path)
+                if not any(p == parent_path_str for p, _ in parent_sigs):
+                    parent_sigs = parent_sigs + (
+                        (
+                            parent_path_str,
+                            tuple(parent_sig) if isinstance(parent_sig, (list, tuple)) else parent_sig,
+                        ),
+                    )
     if not parent_sigs and _display_merge_requires_lineage_provenance(session):
         return None
     last_ts = None
@@ -13361,7 +13419,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, 
     invalidates naturally. Cache hits return shallow-copied rows so callers can
     attach display metadata without corrupting the cache.
     """
-    from api.models import _sidecar_stat_signature
+    from api.models import SESSION_DIR, _sidecar_stat_signature
 
     cache_allowed = not _display_merge_session_is_active(session)
     sid = str(getattr(session, "session_id", "") or "")
@@ -13550,7 +13608,10 @@ def _webui_lineage_parent_session_for_display(session):
     if source == "fork" or relationship == "child_session":
         return None
     try:
-        return get_session(parent_id, metadata_only=False)
+        parent = get_session(parent_id, metadata_only=False)
+        if parent is None or str(getattr(parent, "session_id", "") or "") != parent_id:
+            return None
+        return parent
     except Exception:
         return None
 
@@ -13643,11 +13704,14 @@ def _merged_sidecar_state_messages_for_display(
         session, owner_positions=lineage_owners,
     )
     lineage_parent = _webui_lineage_parent_session_for_display(session)
-    projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
-        session,
-        sidecar_messages,
-        parent_session=lineage_parent,
-    )
+    if lineage_parent is not None:
+        projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
+            session,
+            sidecar_messages,
+            parent_session=lineage_parent,
+        )
+    else:
+        projection_sidecar_messages = sidecar_messages
     merged = merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
@@ -13660,11 +13724,12 @@ def _merged_sidecar_state_messages_for_display(
             else cancelled_journal_owner_messages
         ),
     )
-    merged = _merged_webui_lineage_messages_for_display(
-        session,
-        merged,
-        parent_session=lineage_parent,
-    )
+    if lineage_parent is not None:
+        merged = _merged_webui_lineage_messages_for_display(
+            session,
+            merged,
+            parent_session=lineage_parent,
+        )
     merged = _project_native_image_payload_conflicts_for_display(
         projection_sidecar_messages,
         state_db_messages,
