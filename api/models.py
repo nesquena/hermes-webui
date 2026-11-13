@@ -2202,7 +2202,11 @@ class Session:
                 self._share_token_saved = self.share_token
                 self._share_created_at_saved = self.share_created_at
             elif not touch_updated_at:
-                if not self.share_token or not _share_snapshot_exists_for_session(self.share_token, self.session_id):
+                # #8950: adopt the durable pair only when the snapshot is definitively
+                # absent. Inconclusive I/O ('unknown') is not proof that the snapshot
+                # was never published; clearing it removed any token that could
+                # revoke a live public link.
+                if _share_snapshot_state_for_session(self.share_token, self.session_id) == "absent":
                     self.share_token, self.share_created_at = on_disk_share
                     self._share_token_saved = self.share_token
                     self._share_created_at_saved = self.share_created_at
@@ -6573,23 +6577,58 @@ def _persisted_share_fields(path):
     )
 
 
-def _share_snapshot_exists_for_session(token: str, session_id: str) -> bool:
-    """Return True if a share snapshot exists for *token* and was created for *session_id*."""
+def _share_snapshot_state_for_session(token: str, session_id: str) -> str:
+    """Return 'present', 'absent', or 'unknown' for *token* and *session_id*.
+
+    - 'present': snapshot was read, parsed, and its source_session_id names this session.
+    - 'absent': definitive: no token/session id, not a regular file, unparseable,
+      not a dict, or names another session.
+    - 'unknown': the read itself failed with an OSError/PermissionError (or the
+      existence check raised), so the outcome cannot be decided.
+    """
     if not token or not session_id:
-        return False
+        return "absent"
     try:
         from api import shares
 
-        path = shares._share_path(token)
-        if not path.is_file():
-            return False
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
+        try:
+            path = shares._share_path(token)
+        except ValueError:
+            return "absent"
+
+        try:
+            if not path.is_file():
+                return "absent"
+        except OSError:
+            return "unknown"
+
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return "unknown"
+        except Exception:
+            return "absent"
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return "absent"
+
         if not isinstance(data, dict):
-            return False
-        return str(data.get("source_session_id") or "").strip() == str(session_id).strip()
+            return "absent"
+
+        if str(data.get("source_session_id") or "").strip() == str(session_id).strip():
+            return "present"
+        return "absent"
+    except OSError:
+        return "unknown"
     except Exception:
-        return False
+        return "absent"
+
+
+def _share_snapshot_exists_for_session(token: str, session_id: str) -> bool:
+    """Return True if a share snapshot exists for *token* and was created for *session_id*."""
+    return _share_snapshot_state_for_session(token, session_id) == "present"
 
 
 # #7881: per-session reentrant persistence locks. Every Session.save() of one
