@@ -1071,6 +1071,26 @@ def _redact_fn_cached(text):
     return _current_redaction_policy()[0](text)
 
 
+def redaction_policy_fingerprint():
+    """Identity of the redaction policy in force, or None when unreadable.
+
+    ``agent.redact.register_redaction_patterns()`` rebinds the two globals the
+    redactor reads on every call, and ``_current_redaction_policy()`` rotates
+    the memo on exactly that change, so the identity of the rotating memo is an
+    O(1) fingerprint of the runtime-mutable policy (#8844). Any cache that
+    stores a MASKED payload must include it in its validity key: an entry
+    primed before a registration would otherwise keep serving the
+    newly-registered secret intact (#8990 review) — the same rule that keeps
+    large strings out of the string memo.
+    """
+    try:
+        state = _current_redaction_policy()
+    except Exception:
+        return None
+    first = state[0] if state else None
+    return first if callable(first) else None
+
+
 _SENSITIVE_CASE_MARKERS = (
     "sk-",
     "ghp_",
@@ -1983,20 +2003,27 @@ def _redact_nested_message_containers(value, *, _enabled: bool):
     return result
 
 
-def public_session_projection(session_dict: dict) -> dict:
-    """Return a public session payload with redaction and alias stripping.
+# The gateway-chat presentation keys derive from process-level configuration
+# (the supported ``HERMES_WEBUI_CHAT_BACKEND`` override, the gateway config
+# files) rather than from the session sidecar, so no sidecar signature can
+# fingerprint them. Any cache of a projected payload must therefore recompute
+# them from the current policy on every response instead of storing them
+# (#8990 review): a store-time exclusion cannot invalidate an entry that was
+# published before the transition, and that entry would keep the old controls.
+GATEWAY_CHAT_CONTROL_KEYS = (
+    "chat_read_only_reason",
+    "chat_read_only_can_connect",
+    "chat_via_gateway_session",
+)
 
-    Callers use this for every response/export/SSE session payload.  It never
-    mutates the in-memory session or the caller's dictionary.
-    """
-    result = redact_session_data(session_dict)
-    from api.gateway_chat import gateway_session_chat_read_only_reason
 
-    result.pop("chat_read_only_reason", None)
-    result.pop("chat_read_only_can_connect", None)
-    result.pop("chat_via_gateway_session", None)
+def apply_gateway_chat_controls(result: dict) -> dict:
+    """Populate the gateway-chat keys from the policy in force right now."""
+    for key in GATEWAY_CHAT_CONTROL_KEYS:
+        result.pop(key, None)
+    from api.gateway_chat import gateway_session_chat_read_only_reason, webui_gateway_chat_enabled
     from api.gateway_sessions import configured, config_for_session, external_session
-    from api.gateway_chat import webui_gateway_chat_enabled
+
     config = config_for_session(result) if external_session(result) else None
     if config is not None and webui_gateway_chat_enabled(config) and configured(result, config):
         result["chat_via_gateway_session"] = True
@@ -2006,6 +2033,15 @@ def public_session_projection(session_dict: dict) -> dict:
         if external_session(result):
             result["chat_read_only_can_connect"] = True
     return result
+
+
+def public_session_projection(session_dict: dict) -> dict:
+    """Return a public session payload with redaction and alias stripping.
+
+    Callers use this for every response/export/SSE session payload.  It never
+    mutates the in-memory session or the caller's dictionary.
+    """
+    return apply_gateway_chat_controls(redact_session_data(session_dict))
 
 
 def strip_public_internal_fields(value, *, message_records: bool = False):

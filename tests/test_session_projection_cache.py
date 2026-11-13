@@ -18,7 +18,14 @@ assert the properties the cache must have to be safe:
    built never caches the older body under the newer signature (a later GET
    would replay the old transcript);
 9. a same-model config refresh that only changes the resolved context window is
-   not served from an entry keyed under the old values.
+   not served from an entry keyed under the old values;
+10. a redaction-policy rotation (the rotate-on-registration path a plugin's
+   ``register_redaction_patterns()`` triggers) is not served the pre-registration
+   mask, and the real installed registry is honoured end to end where available;
+11. a write to a stitched snapshot parent — child sidecar untouched — is not
+   served the parent rows the entry was built from;
+12. a supported backend transition that changes the gateway-chat controls
+   reaches the payload even though the transcript is unchanged.
 """
 
 from __future__ import annotations
@@ -118,9 +125,10 @@ class _Env:
 
     def save(self, sid, contents, **attrs):
         """Persist a session sidecar the way a real save would."""
+        timestamp_base = attrs.pop("_timestamp_base", 1_700_000_000.0)
         messages = [
             {"role": "user" if index % 2 == 0 else "assistant", "content": text,
-             "timestamp": 1_700_000_000.0 + index}
+             "timestamp": timestamp_base + index}
             for index, text in enumerate(contents)
         ]
         session = self.models.Session(
@@ -386,3 +394,162 @@ def test_same_model_config_refresh_is_not_served_from_the_old_window(env, monkey
         "a config refresh must reach the payload even when the transcript is unchanged"
     )
     assert env.projection_calls == 2, "the old window must not be reused"
+
+
+# A token shape the WebUI's fixed redactor patterns do not own, embedded in a
+# string the prefilter trips on (the URL marker), so "masked" can only mean
+# "the policy in force knows it".
+_POLICY_TOKEN = "nvapi-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A7b8C9d0"
+_POLICY_TEXT = f"see https://example.invalid/docs then pasted {_POLICY_TOKEN} into chat"
+
+
+def test_redaction_policy_rotation_invalidates_the_projection(env, monkeypatch):
+    """#8990 review 3.1: a primed payload must not outlive the mask that built it.
+
+    ``register_redaction_patterns()`` rotates the redaction memo to a fresh LRU
+    exactly like the rebind simulated here; the payload an entry was masked
+    under must stop being served the moment the policy in force changes.
+    """
+    import functools
+
+    import api.helpers as helpers
+
+    assert helpers._might_contain_sensitive_text(_POLICY_TEXT), (
+        "the probe text must reach the redactor, or this test proves nothing"
+    )
+    env.save("proj_policy", [_POLICY_TEXT])
+
+    first = env.get("proj_policy")
+    assert _POLICY_TOKEN in env.contents(first)[0], "the priming mask did not know the token"
+    assert env.projection_calls == 1
+
+    def _masking_policy(text):
+        return helpers._redact_fn_uncached(text).replace(_POLICY_TOKEN, "***")
+
+    fresh = functools.lru_cache(maxsize=helpers._REDACT_CACHE_MAXSIZE)(_masking_policy)
+    monkeypatch.setattr(helpers, "_redact_fn_lru", fresh)
+    assert helpers.redaction_policy_fingerprint() is fresh, (
+        "the policy fingerprint must follow the rotated memo"
+    )
+    assert _POLICY_TOKEN not in helpers._redact_fn_cached(_POLICY_TOKEN), (
+        "the new policy is not effective, so the test proves nothing"
+    )
+
+    second = env.get("proj_policy")
+
+    assert env.projection_calls == 2, (
+        "a policy rotation must not be served the pre-rotation projection"
+    )
+    assert _POLICY_TOKEN not in env.contents(second)[0], (
+        "the payload still carries the pre-registration mask"
+    )
+
+
+def test_registered_agent_pattern_reaches_a_primed_payload(env):
+    """#8990 review 3.1, production registry: prime, register, next GET masks.
+
+    Skipped where ``agent.redact`` is not importable; the rotation test above
+    covers the same invalidation without the installed registry.
+    """
+    redact = pytest.importorskip("agent.redact", reason="hermes-agent not installed")
+    register = getattr(redact, "register_redaction_patterns", None)
+    reset = getattr(redact, "_reset_plugin_redaction_patterns", None)
+    if register is None or reset is None:
+        pytest.skip("installed agent.redact has no runtime pattern registry")
+
+    import api.helpers as helpers
+
+    pattern = r"nvapi-[A-Za-z0-9]{60}"
+    assert helpers._might_contain_sensitive_text(_POLICY_TEXT)
+
+    reset()
+    try:
+        env.save("proj_registry", [_POLICY_TEXT])
+        first = env.get("proj_registry")
+        assert _POLICY_TOKEN in env.contents(first)[0]
+        assert env.projection_calls == 1
+
+        assert register([pattern], source="test-8990") == 1
+
+        # Oracle: the registry is effective for this text shape.
+        assert _POLICY_TOKEN not in helpers._redact_fn_uncached(_POLICY_TEXT)
+
+        second = env.get("proj_registry")
+        assert _POLICY_TOKEN not in env.contents(second)[0], (
+            "a registered pattern did not reach a previously primed payload"
+        )
+        assert env.projection_calls == 2
+    finally:
+        reset()
+
+
+def test_parent_only_update_is_not_served_from_the_old_projection(env):
+    """#8990 review 3.2: rows stitched from a snapshot parent are part of the key.
+
+    Only the parent sidecar moves; the child's own signature, its sidecar and
+    the state.db rows are untouched. The uncached path re-reads the parent, so a
+    hit that replays the entry's parent rows is a stale display.
+    """
+    env.save("proj_parent", ["parent question", "parent answer"], pre_compression_snapshot=True)
+    env.save(
+        "proj_child",
+        ["continuation question", "continuation answer"],
+        parent_session_id="proj_parent",
+        _timestamp_base=1_700_000_100.0,
+    )
+
+    first = env.get("proj_child")
+    assert env.contents(first) == [
+        "parent question",
+        "parent answer",
+        "continuation question",
+        "continuation answer",
+    ]
+    assert env.projection_calls == 1
+
+    # A writer updates the archived parent transcript only.
+    env.save("proj_parent", ["parent question", "parent answer, corrected"], pre_compression_snapshot=True)
+
+    second = env.get("proj_child")
+
+    assert env.projection_calls == 2, (
+        "a parent snapshot write must invalidate the child's cached projection"
+    )
+    assert env.contents(second) == [
+        "parent question",
+        "parent answer, corrected",
+        "continuation question",
+        "continuation answer",
+    ], "the payload still carries the parent rows the entry was built from"
+
+
+def test_backend_transition_reaches_a_cached_payload(env, monkeypatch):
+    """#8990 review 3.3: the gateway-chat controls are recomputed, never frozen.
+
+    The supported backend override is process-level configuration no sidecar key
+    can fingerprint, so a payload primed under the legacy backend must not keep
+    its unflagged controls after the switch. The transcript is unchanged: this
+    is deliberately a cache hit.
+    """
+    import api.gateway_chat as gateway_chat
+
+    env.save("proj_backend", ["hello"])
+    monkeypatch.setattr(
+        gateway_chat, "gateway_session_chat_read_only_reason", lambda *a, **k: None
+    )
+
+    first = env.get("proj_backend")
+    assert "chat_read_only_reason" not in first
+    assert env.projection_calls == 1
+
+    reason = "This session is read-only: the gateway backend owns chat"
+    monkeypatch.setattr(
+        gateway_chat, "gateway_session_chat_read_only_reason", lambda *a, **k: reason
+    )
+
+    second = env.get("proj_backend")
+
+    assert second.get("chat_read_only_reason") == reason, (
+        "a backend transition must reach the payload even on a cache hit"
+    )
+    assert env.projection_calls == 1, "the transcript is unchanged: this must be a cache hit"
