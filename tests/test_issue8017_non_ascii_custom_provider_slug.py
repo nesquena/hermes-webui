@@ -3,9 +3,7 @@ from api import config
 from api.config import (
     AmbiguousCustomProviderError,
     _custom_provider_slug_from_name,
-    _named_custom_provider_slug_for_provider,
     _unique_custom_provider_entry,
-    _custom_provider_slug_key,
     resolve_model_provider,
 )
 
