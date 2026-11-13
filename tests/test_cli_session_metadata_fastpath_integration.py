@@ -361,11 +361,18 @@ def test_changed_revision_falls_back_to_the_enumeration(profiles, monkeypatch):
     assert loads == []
 
 
-def test_recency_eviction_is_not_undone(profiles):
-    """A session evicted from the catalog window must stay absent.
+def test_recency_eviction_keeps_the_row_out_of_the_listing(profiles):
+    """A session evicted from the catalog window stays out of the listing.
 
-    The lookup happens BEFORE any re-enumeration on purpose: enumerating first
-    would replace the snapshot and hide the stale-snapshot schedule entirely.
+    The stale snapshot must never answer once the catalog revision moves, and the
+    bounded listing must keep excluding the row (#8412). Resolving it is a
+    different question: an explicit by-id lookup has no recency window, so a user
+    opening an aged-out Desktop/TUI/CLI session gets the row instead of a 404
+    (#8061).
+
+    The snapshot probe happens BEFORE any re-enumeration on purpose: enumerating
+    first would replace the snapshot and hide the stale-snapshot schedule
+    entirely.
     """
     state, homes = profiles
     db = homes["alpha"] / "state.db"
@@ -376,7 +383,8 @@ def test_recency_eviction_is_not_undone(profiles):
 
     _add_newer_sessions(db, prefix="new")
 
-    assert routes._lookup_cli_session_metadata("old-one") == {}
+    assert models.lookup_cli_session_row("old-one") == {}
+    assert routes._lookup_cli_session_metadata("old-one")["session_id"] == "old-one"
     assert "old-one" not in {r["session_id"] for r in models.get_cli_sessions()}
 
 
