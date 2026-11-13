@@ -33340,12 +33340,38 @@ def _handle_cron_delivery_options(handler):
         if _known:
             _KNOWN_DELIVERY_PLATFORMS = frozenset(_known)
             break
+    # #9058: current Agents keep only the core-only rows (webhook,
+    # wecom_callback) in that constant; the messaging platforms (telegram,
+    # discord, slack, feishu, ...) live in the plugin platform registry. The
+    # Agent's validator ``_is_known_delivery_platform`` accepts the constant
+    # plus every registry entry with a ``cron_deliver_env_var``, so enumerate
+    # the registry with the same rule. Older Agents without the registry (or
+    # any failure while enumerating it) degrade to the constant alone.
+    _registry_names = set()
+    _registry_labels = {}
+    try:
+        from hermes_cli.plugins import discover_plugins
+        discover_plugins()  # idempotent, scoped to the active profile home
+        from gateway.platform_registry import platform_registry
+        _names, _labels = set(), {}
+        for _entry in platform_registry.all_entries():
+            _name = getattr(_entry, "name", None)
+            if not isinstance(_name, str) or not _name:
+                continue
+            _label = getattr(_entry, "label", None)
+            if isinstance(_label, str) and _label.strip():
+                _labels[_name] = _label.strip()
+            if getattr(_entry, "cron_deliver_env_var", None):
+                _names.add(_name)
+        _registry_names, _registry_labels = _names, _labels
+    except Exception:
+        logger.debug("cron delivery options: platform registry unavailable", exc_info=True)
     platforms = [
         {"value": "local", "label": "Local (save output only)"},
         {"value": "origin", "label": "Origin (reply to creator)"}
     ]
-    for name in sorted(_KNOWN_DELIVERY_PLATFORMS):
-        platforms.append({"value": name, "label": name.capitalize()})
+    for name in sorted((set(_KNOWN_DELIVERY_PLATFORMS) | _registry_names) - {"local", "origin"}):
+        platforms.append({"value": name, "label": _registry_labels.get(name) or name.capitalize()})
     return j(handler, {"platforms": platforms})
 
 
