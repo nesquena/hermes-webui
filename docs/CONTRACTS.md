@@ -149,6 +149,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   (`STREAMS_LOCK → ACTIVE_RUNS_LOCK`). Start here before changing subscriber liveness, channel
   collection, stream registration, or orphan reclaim (#7302).
 
+- [`docs/architecture/async-delegation-ledger-owner.md`](architecture/async-delegation-ledger-owner.md):
+  owner-ledger resolution and the claim-bound ACK/release/retry/replay scope for
+  async-delegation completions (#7214).
+
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,
 read the relevant RFC before editing. In the PR description, name the state layer
