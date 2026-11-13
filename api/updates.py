@@ -56,6 +56,20 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
+
+# A refresh shells out to `git fetch` in both checkouts. On a host whose Agent
+# clone is large that takes tens of seconds, and the POST used to hold the whole
+# request for it (#9055). Callers now wait at most this long for a refresh and
+# otherwise answer from the cache; the refresh keeps running in a background
+# thread and publishes into _update_cache for the next read. Override with
+# HERMES_WEBUI_UPDATE_CHECK_WAIT (seconds).
+DEFAULT_UPDATE_CHECK_WAIT = 5.0
+
+# One refresh at a time, whatever the channel/include_agent key: the cache can
+# only hold one answer, and two parallel fetches cost twice the wall clock.
+_refresh_lock = threading.Lock()
+_refresh_thread = None
+_refresh_event = None
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
@@ -1940,13 +1954,69 @@ def cached_update_status(*, include_agent=True, channel=None):
     return cached
 
 
-def check_for_updates(force=False, *, include_agent=True, channel=None):
-    """Return cached update status for webui and agent repos."""
+def _update_check_wait_budget():
+    """Seconds a request is willing to wait for a refresh (#9055)."""
+    raw = os.getenv('HERMES_WEBUI_UPDATE_CHECK_WAIT')
+    if raw is None or not str(raw).strip():
+        return DEFAULT_UPDATE_CHECK_WAIT
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_UPDATE_CHECK_WAIT
+
+
+def _publish_update_cache(webui_info, agent_info, include_agent, channel):
+    with _cache_lock:
+        _update_cache['webui'] = webui_info
+        _update_cache['agent'] = agent_info
+        _update_cache['checked_at'] = time.time()
+        _update_cache['include_agent'] = include_agent
+        _update_cache['channel'] = channel
+        return dict(_update_cache)
+
+
+def _refresh_updates_in_background(include_agent, channel, done):
+    """Fetch both repos, publish the answer, and never raise into the caller."""
     global _check_in_progress
+    try:
+        with _refresh_lock:
+            webui_info = _check_repo(REPO_ROOT, 'webui', channel)
+            # The update channel is a WebUI-only concept. The Agent is a separate
+            # project that tags plain v* and legitimately tracks master past its
+            # tags; it must ALWAYS use the default channel regardless of the user's
+            # WebUI channel selection. (Codex gate: passing 'experimental' here made
+            # the Agent ignore its v* tags and fall back to origin/master.)
+            agent_info = (
+                _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL)
+                if include_agent
+                else _ignored_agent_update_info()
+            )
+            _publish_update_cache(webui_info, agent_info, include_agent, channel)
+    except Exception:
+        # The caller answers from the cache either way; the failure belongs in the
+        # log rather than in a stack trace no request can act on.
+        logger.exception('background update check failed')
+    finally:
+        with _cache_lock:
+            _check_in_progress = False
+        done.set()
+
+
+def check_for_updates(force=False, *, include_agent=True, channel=None, wait=None):
+    """Return cached update status for webui and agent repos.
+
+    The git work runs in a background thread: the caller waits at most ``wait``
+    seconds (default ``DEFAULT_UPDATE_CHECK_WAIT``) and otherwise receives the
+    cached payload marked ``pending``, which keeps a slow fetch out of the
+    request path (#9055).
+    """
+    global _check_in_progress, _refresh_thread, _refresh_event
     include_agent = bool(include_agent)
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    budget = _update_check_wait_budget() if wait is None else max(0.0, float(wait))
+
     with _cache_lock:
         # Cache is only valid when BOTH the channel AND include_agent match —
         # a channel switch must not serve the previous channel's answer, and an
@@ -1964,31 +2034,41 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             cached = dict(_update_cache)
             cached['cached'] = True
             return cached
-        if _check_in_progress and cache_matches:
-            cached = dict(_update_cache)
-            cached['cached'] = True
-            return cached  # another thread is already checking this channel
-        _check_in_progress = True
+        # A refresh already in flight answers every key: never start a second one.
+        snapshot = dict(_update_cache)
+        done = _refresh_event
+        owns_refresh = False
+        if not _check_in_progress:
+            _check_in_progress = True
+            owns_refresh = True
+            done = threading.Event()
+            _refresh_event = done
 
-    try:
-        # Run checks outside the lock (network I/O)
-        webui_info = _check_repo(REPO_ROOT, 'webui', channel)
-        # The update channel is a WebUI-only concept. The Agent is a separate
-        # project that tags plain v* and legitimately tracks master past its
-        # tags; it must ALWAYS use the default channel regardless of the user's
-        # WebUI channel selection. (Codex gate: passing 'experimental' here made
-        # the Agent ignore its v* tags and fall back to origin/master.)
-        agent_info = _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL) if include_agent else _ignored_agent_update_info()
+    if owns_refresh:
+        thread = threading.Thread(
+            target=_refresh_updates_in_background,
+            args=(include_agent, channel, done),
+            name='hermes-update-check',
+            daemon=True,
+        )
+        _refresh_thread = thread
+        thread.start()
 
-        with _cache_lock:
-            _update_cache['webui'] = webui_info
-            _update_cache['agent'] = agent_info
-            _update_cache['checked_at'] = time.time()
-            _update_cache['include_agent'] = include_agent
-            _update_cache['channel'] = channel
+    if done is not None:
+        done.wait(budget)
+
+    with _cache_lock:
+        refreshed = (
+            _update_cache.get('include_agent') == include_agent
+            and _update_cache.get('channel') == channel
+            and _update_cache['checked_at'] > float(snapshot.get('checked_at') or 0)
+        )
+        if refreshed:
             return dict(_update_cache)
-    finally:
-        _check_in_progress = False
+        pending = dict(_update_cache)
+        pending['cached'] = True
+        pending['pending'] = True
+        return pending
 
 
 def _repo_path_for_update_target(target: str):
