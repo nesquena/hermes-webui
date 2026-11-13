@@ -7582,7 +7582,8 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
           *raw_list* with that key set, or an additional reference corresponds
           (#8740 CR r5, r6). Plain literals, booleans, and numbers do not corroborate
           ownership. When corroboration fails, score non-reference leaves against other
-          stored rows to decide whether to adopt or write verbatim (#8740 CR r6).
+          stored rows: adopt only on a positive, strictly greater score, write verbatim
+          when outscored, and refuse on a tie or zero score (#8740 CR r6, r7).
           Multiple candidates reject as ambiguous before writing.
     3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
     4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
@@ -7856,7 +7857,9 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
         # A single candidate is adopted only when corroborated (#8740 CR r5, r6):
         # one matching reference expansion does not establish ownership of a row.
         # When corroboration fails, score non-reference leaves against other stored
-        # rows to decide whether to adopt or write verbatim (#8740 CR r6).
+        # rows to decide whether to adopt, write verbatim, or refuse: adopt only
+        # on a positive, strictly greater score, write verbatim when outscored,
+        # and refuse on a tie or zero score (#8740 CR r6, r7).
         cands_2f = _residue_candidates(new_item)
         if len(cands_2f) > 1:
             raise ValueError(ambiguous_err)
@@ -7871,9 +7874,13 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 for other_idx, other_item in enumerate(raw_list)
                 if other_idx != raw_idx
             ]
-            if not any(s > cand_score for s in other_scores):
+            if any(s > cand_score for s in other_scores):
+                matches[new_idx] = None
+                continue
+            if cand_score > 0 and all(cand_score > s for s in other_scores):
                 matches[new_idx] = raw_idx
                 continue
+            raise ValueError(ambiguous_err)
 
         matches[new_idx] = None
 

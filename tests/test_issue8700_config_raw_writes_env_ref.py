@@ -1474,7 +1474,7 @@ def test_auxiliary_extra_body_residue_shared_leaf_does_not_corroborate_wrong_own
 def test_extra_body_residue_keeps_untouched_reference_when_corroboration_fails(
     cfg_path, monkeypatch
 ):
-    """Residue match preserves untouched references when corroboration fails if candidate is not outscored (#8740 CR r6)."""
+    """Residue match rejects when corroboration fails and candidate scores zero, keeping untouched references on disk (#8740 CR r7)."""
     from api import config
 
     monkeypatch.setenv("A", "token-alpha")
@@ -1489,6 +1489,8 @@ def test_extra_body_residue_keeps_untouched_reference_when_corroboration_fails(
         ],
     }
     _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
 
     submitted = {
         "rows": [
@@ -1510,20 +1512,11 @@ def test_extra_body_residue_keeps_untouched_reference_when_corroboration_fails(
             "advanced": {"extra_body": submitted},
         },
     )
-    assert handler.status == 200, handler.json_body()
-
-    written = _raw(cfg_path)["model"]["extra_body"]["rows"]
-    assert written == [
-        {
-            "label": "alpha-edited",
-            "token": "brand-new-literal",
-            "other": "${C}",
-            "temperature": 2,
-            "depth": 2,
-        }
-    ]
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced model options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
     text = cfg_path.read_text(encoding="utf-8")
-    assert "other-alpha" not in text
     assert "${C}" in text
 
     monkeypatch.setenv("C", "rotated-other-alpha-new")
@@ -1531,19 +1524,26 @@ def test_extra_body_residue_keeps_untouched_reference_when_corroboration_fails(
     resolved = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]["rows"]
     assert resolved == [
         {
-            "label": "alpha-edited",
-            "token": "brand-new-literal",
+            "label": "alpha",
+            "token": "token-alpha",
             "other": "rotated-other-alpha-new",
-            "temperature": 2,
-            "depth": 2,
-        }
+            "temperature": 1,
+            "depth": 1,
+        },
+        {
+            "label": "beta",
+            "token": "token-beta",
+            "other": "other-beta",
+            "temperature": 3,
+            "depth": 3,
+        },
     ]
 
 
 def test_auxiliary_extra_body_residue_keeps_untouched_reference_when_corroboration_fails(
     cfg_path, monkeypatch
 ):
-    """Auxiliary residue: preserves untouched references when corroboration fails if candidate is not outscored (#8740 CR r6)."""
+    """Auxiliary residue: rejects when corroboration fails and candidate scores zero, keeping untouched references on disk (#8740 CR r7)."""
     from api import config
 
     monkeypatch.setenv("A", "token-alpha")
@@ -1560,6 +1560,8 @@ def test_auxiliary_extra_body_residue_keeps_untouched_reference_when_corroborati
     _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
         "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
     }))
+
+    before_bytes = cfg_path.read_bytes()
 
     submitted = {
         "rows": [
@@ -1582,20 +1584,11 @@ def test_auxiliary_extra_body_residue_keeps_untouched_reference_when_corroborati
             "advanced": {"extra_body": submitted},
         },
     )
-    assert handler.status == 200, handler.json_body()
-
-    written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
-    assert written == [
-        {
-            "label": "alpha-edited",
-            "token": "brand-new-literal",
-            "other": "${C}",
-            "temperature": 2,
-            "depth": 2,
-        }
-    ]
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced auxiliary options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
     text = cfg_path.read_text(encoding="utf-8")
-    assert "other-alpha" not in text
     assert "${C}" in text
 
     monkeypatch.setenv("C", "rotated-other-alpha-new")
@@ -1603,13 +1596,204 @@ def test_auxiliary_extra_body_residue_keeps_untouched_reference_when_corroborati
     resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
     assert resolved == [
         {
-            "label": "alpha-edited",
-            "token": "brand-new-literal",
+            "label": "alpha",
+            "token": "token-alpha",
             "other": "rotated-other-alpha-new",
-            "temperature": 2,
-            "depth": 2,
-        }
+            "temperature": 1,
+            "depth": 1,
+        },
+        {
+            "label": "beta",
+            "token": "token-beta",
+            "other": "other-beta",
+            "temperature": 3,
+            "depth": 3,
+        },
     ]
+
+
+def test_extra_body_residue_zero_score_rejects_without_writing(cfg_path, monkeypatch):
+    """Residue match rejects when all rows score zero, keeping disk unchanged (#8740 CR r7)."""
+    monkeypatch.setenv("A", "token-alpha")
+    monkeypatch.setenv("C", "other-alpha")
+    monkeypatch.setenv("B", "token-beta")
+    monkeypatch.setenv("D", "other-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${A}", "other": "${C}", "temperature": 1, "depth": 1},
+            {"label": "beta", "token": "${B}", "other": "${D}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha-edited",
+                "token": "token-beta",
+                "other": "new-other-literal",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced model options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
+
+
+def test_auxiliary_extra_body_residue_zero_score_rejects_without_writing(
+    cfg_path, monkeypatch
+):
+    """Auxiliary residue: rejects when all rows score zero, keeping disk unchanged (#8740 CR r7)."""
+    monkeypatch.setenv("A", "token-alpha")
+    monkeypatch.setenv("C", "other-alpha")
+    monkeypatch.setenv("B", "token-beta")
+    monkeypatch.setenv("D", "other-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${A}", "other": "${C}", "temperature": 1, "depth": 1},
+            {"label": "beta", "token": "${B}", "other": "${D}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha-edited",
+                "token": "token-beta",
+                "other": "new-other-literal",
+                "temperature": 2,
+                "depth": 2,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced auxiliary options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
+
+
+def test_extra_body_residue_equal_positive_score_tie_rejects_without_writing(
+    cfg_path, monkeypatch
+):
+    """Residue match rejects on equal positive non-reference scores (tie), keeping disk unchanged (#8740 CR r7)."""
+    monkeypatch.setenv("A", "token-alpha")
+    monkeypatch.setenv("C", "other-alpha")
+    monkeypatch.setenv("B", "token-beta")
+    monkeypatch.setenv("D", "other-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${A}", "other": "${C}", "temperature": 1, "depth": 1},
+            {"label": "beta", "token": "${B}", "other": "${D}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha",
+                "token": "token-beta",
+                "other": "new-other-literal",
+                "temperature": 2,
+                "depth": 3,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced model options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
+
+
+def test_auxiliary_extra_body_residue_equal_positive_score_tie_rejects_without_writing(
+    cfg_path, monkeypatch
+):
+    """Auxiliary residue: rejects on equal positive non-reference scores (tie), keeping disk unchanged (#8740 CR r7)."""
+    monkeypatch.setenv("A", "token-alpha")
+    monkeypatch.setenv("C", "other-alpha")
+    monkeypatch.setenv("B", "token-beta")
+    monkeypatch.setenv("D", "other-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${A}", "other": "${C}", "temperature": 1, "depth": 1},
+            {"label": "beta", "token": "${B}", "other": "${D}", "temperature": 3, "depth": 3},
+        ],
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha",
+                "token": "token-beta",
+                "other": "new-other-literal",
+                "temperature": 2,
+                "depth": 3,
+            }
+        ],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced auxiliary options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
 
 
 def test_extra_body_reordered_rows_follow_reference_valued_identity(
