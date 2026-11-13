@@ -1428,6 +1428,109 @@ def test_ambient_unreadable_config_fails_closed_through_the_cached_path(
         monkeypatch.setattr(config, "_get_config_path", real_get_config_path)
 
 
+def test_repaired_owner_env_recovers_without_an_mtime_change(
+    monkeypatch, tmp_path, captured, captured_route_j
+):
+    """#9024 review round 9: a failed owner ``.env`` read is retried, not cached.
+
+    The unreadable marker used to be cached behind the file's mtime, so a repair
+    that leaves the mtime unchanged (restored read permission, a fixed symlink,
+    a file restored with its original timestamp) kept the profile blocked until
+    the file was edited or WebUI restarted. The repaired file here carries the
+    EXACT mtime the unreadable ``.env`` had, so only a retried read can notice.
+    """
+    owner_home = tmp_path / "home-owner"
+    owner_home.mkdir()
+    (owner_home / "config.yaml").write_text(
+        "webui_chat_backend: local\n", encoding="utf-8"
+    )
+    env_path = owner_home / ".env"
+    env_path.mkdir()  # exists but cannot be read as a file
+    broken_ns = env_path.stat().st_mtime_ns
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _n: owner_home)
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda _sid: "owner")
+    monkeypatch.delenv(_ENV_KEY, raising=False)
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("unreadable owner .env reached the model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+    routes._handle_git_commit_message(object(), {"session_id": "s1"})
+    assert captured["status"] == 409
+    assert calls["model_boundary"] == 0
+
+    # Repair: a readable (empty-rule) .env carrying the SAME mtime.
+    env_path.rmdir()
+    env_path.write_text("UNRELATED=1\n", encoding="utf-8")
+    os.utime(env_path, ns=(broken_ns, broken_ns))
+    assert env_path.stat().st_mtime_ns == broken_ns
+
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+    routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+    assert captured_route_j["status"] == 503
+    assert captured_route_j["payload"]["code"] == "server_draining"
+    assert calls["model_boundary"] == 0
+
+
+def test_repaired_ambient_config_recovers_without_an_mtime_change(
+    monkeypatch, tmp_path, captured, captured_route_j
+):
+    """#9024 review round 9: the ambient ``_cfg_unreadable`` flag is retried too.
+
+    The flag was only cleared by a refresh, and a refresh only ran when the
+    config.yaml mtime moved — so a repair that preserves the mtime left the
+    ambient resolution failing closed forever. While the flag is set, every
+    read re-attempts the load; the repaired file here has the EXACT mtime the
+    broken one had.
+    """
+    import api.config as config
+
+    home = tmp_path / "ambient-home"
+    home.mkdir()
+    config_path = home / "config.yaml"
+    config_path.write_text("webui_chat_backend: [unclosed\n", encoding="utf-8")
+    broken_ns = config_path.stat().st_mtime_ns
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(routes, "get_config_snapshot", config.get_config_snapshot)
+    monkeypatch.delenv(_ENV_KEY, raising=False)
+
+    saved = (
+        dict(config._cfg_cache),
+        config._cfg_mtime,
+        config._cfg_path,
+        config._cfg_unreadable,
+    )
+    try:
+        config._cfg_cache.clear()
+        config._cfg_mtime = 0.0
+        config._cfg_path = None
+        config._cfg_unreadable = False
+        assert isinstance(config.get_config(), config.UnreadableProfileConfig)
+        assert isinstance(config.get_config_snapshot(), config.UnreadableProfileConfig)
+
+        config_path.write_text("webui_chat_backend: local\n", encoding="utf-8")
+        os.utime(config_path, ns=(broken_ns, broken_ns))
+        assert config_path.stat().st_mtime_ns == broken_ns
+
+        assert not isinstance(config.get_config(), config.UnreadableProfileConfig)
+        assert not isinstance(
+            config.get_config_snapshot(), config.UnreadableProfileConfig
+        )
+        assert config.get_config_snapshot().get("webui_chat_backend") == "local"
+    finally:
+        config._cfg_cache.clear()
+        config._cfg_cache.update(saved[0])
+        config._cfg_mtime = saved[1]
+        config._cfg_path = saved[2]
+        config._cfg_unreadable = saved[3]
+
+
 def test_admission_reads_coherently_with_worker_cleanup(
     monkeypatch, tmp_path, captured
 ):

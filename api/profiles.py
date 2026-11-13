@@ -1208,14 +1208,15 @@ def chat_backend_environ_for_profile(profile) -> dict:
                             ).get(CHAT_BACKEND_ENV_KEY)
                         except (OSError, UnicodeError):
                             # Exists but unreadable — unverifiable, fail closed.
-                            _CHAT_BACKEND_ENV_CACHE[str(home)] = (
-                                mtime, UnreadableProfileConfig())
+                            # Deliberately NOT cached: a repair that leaves the
+                            # mtime unchanged (restored read permission, fixed
+                            # symlink) must recover on the next admission, so a
+                            # failed read is always retried.
+                            _CHAT_BACKEND_ENV_CACHE.pop(str(home), None)
                             return UnreadableProfileConfig()
                     _CHAT_BACKEND_ENV_CACHE[str(home)] = (mtime, value)
                 else:
                     value = cached[1]
-                    if isinstance(value, UnreadableProfileConfig):
-                        return value
             except Exception:
                 logger.debug(
                     "chat-backend env unavailable for profile %r", profile, exc_info=True

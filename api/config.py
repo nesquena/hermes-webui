@@ -622,7 +622,7 @@ def reload_config_if_stale() -> None:
             current_mtime = 0.0
         path_changed = _cfg_path != config_path
         mtime_stale = current_mtime != _cfg_mtime
-        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+        if not _cfg_cache or path_changed or ((mtime_stale or _cfg_unreadable) and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
             if path_changed:
                 cfg = _cfg_cache
@@ -637,7 +637,7 @@ def get_config() -> dict:
         current_mtime = 0.0
     path_changed = _cfg_path != config_path
     mtime_stale = current_mtime != _cfg_mtime
-    if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+    if not _cfg_cache or path_changed or ((mtime_stale or _cfg_unreadable) and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # When a test (or runtime caller) has rebound ``cfg`` to a different dict
     # via monkeypatch.setattr(config, "cfg", ...), return that override rather
@@ -667,7 +667,7 @@ def get_config_snapshot() -> dict:
             current_mtime = 0.0
         path_changed = _cfg_path != config_path
         mtime_stale = current_mtime != _cfg_mtime
-        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+        if not _cfg_cache or path_changed or ((mtime_stale or _cfg_unreadable) and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
         try:
             active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
