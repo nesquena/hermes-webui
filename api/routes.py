@@ -14283,7 +14283,6 @@ from api.models import (
     _adopt_agent_semantic_payload,
     _cross_store_pairing_key,
     _message_private_identity_compatible,
-    _state_db_row_identity_details,
     without_requested_row_identity,
     STATE_DB_MESSAGE_UID_KEY,
     _session_message_merge_key,

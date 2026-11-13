@@ -5,10 +5,11 @@ Current contract for the chronological-union branch of
 turn that BOTH stores hold is reconciled into a single displayed row, which
 copy survives, and which payload is allowed to travel between them.
 
-This describes display reconciliation only. It does not change what either
-store persists, and it must not: the rows it reasons about are shared with the
-module-level session cache, and `Session.save()` rewrites the sidecar JSON from
-that same in-memory object.
+The merge itself changes nothing either store persists, and it must not: the
+rows it reasons about are shared with the module-level session cache, and
+`Session.save()` rewrites the sidecar JSON from that same in-memory object.
+The one write is the private stamp the gateway writeback puts on its own
+sidecar rows (see *Which rows are twins*).
 
 ## Why two copies exist
 
@@ -93,9 +94,10 @@ carries one.
    so an unproven row never pairs, and a failure while stamping leaves the
    rows unstamped rather than losing the reply. The session transport is not
    stamped: it replaces the transcript with the Gateway's canonical rows.
-2. **Exact lane.** Callers read the Agent store with row identity
-   (`include_row_identity=True`) for this branch only; with it the reader
-   also returns each row's `message_uid`. The uids are taken aside once;
+2. **Exact lane.** The display merge's callers read the Agent store through
+   `get_cli_session_messages(include_row_identity=True)`, which also asks for
+   each row's `message_uid` (`include_message_uid`). No other reader returns
+   it. The uids are taken aside once;
    every other lane, and every row that leaves the merge, sees the default
    projection (`without_requested_row_identity()`), exactly as before. One
    uid on exactly one row per store, with the same role and pairing key and
@@ -169,6 +171,10 @@ never to the second-granularity merge key alone:
   sit in that run's window; when it shows no rows of its own yet and the
   prompt and reply repeat the previous turn's text, the next turn would be
   stamped with the previous turn's uids.
+- **Row-id stamps written by earlier builds of this change** sit on some
+  gateway sidecar rows. This merge ignores them; the append-only branch trusts
+  any `_state_db_row_id`, exactly as on master, so a store that reissued those
+  ids behaves there as it does on master.
 - **In-process rows do not pair here.** That path stamps `_state_db_row_id`
   only, which this merge does not accept as proof; its rows render as on
   master. Stamping the uid there too would let them pair.
@@ -187,8 +193,9 @@ never to the second-granularity merge key alone:
 
 `tests/test_gateway_dual_store_duplicate_turn.py` is the regression surface for
 all of the above, including the directional lanes, one-to-one pairing, tool
-identity, input immutability, the identity-compatibility guard (each with a
-proven stamp, so the guard itself is what decides), the exact uid lane, the
+identity, input immutability, the identity-compatibility guards (the
+pinned ones carry a proven stamp, so the guard itself is what decides), the
+exact uid lane and its one-row-per-store and both-identified rules, the
 shapes that broke every text-based fallback (an old turn whose Agent copy is
 gone against a later Telegram turn with the same text, a repeated prompt,
 rows before the first prompt), reissued row ids in both merge branches, a
@@ -196,5 +203,7 @@ bare row id never promoted to proof, one stamp on two sidecar rows, proven
 pairs with no stable id on either side, an end-to-end gateway turn written to
 a real state.db (with the Agent's uid trigger, and without the column) and
 reloaded from disk, and the gateway writeback stamping (one-turn window,
-dropped inherited uids on the turn rows and on the eagerly saved display row,
-a failure that keeps the reply, no read for a superseded stream).
+a unique match only, dropped inherited uids on the turn rows and on the
+eagerly saved display row, a failure that keeps the reply and drops the
+stamps, no read for a superseded stream), the uid kept out of other readers
+and out of the public projection.

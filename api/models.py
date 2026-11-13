@@ -12798,7 +12798,9 @@ def without_requested_row_identity(msg):
     return msg
 
 
-def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
+def _project_state_db_message(
+    row, available, id_col, optional, *, include_row_identity=False, include_message_uid=False,
+):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
     Shared by ``get_state_db_session_messages`` and the regeneration
@@ -12827,7 +12829,7 @@ def _project_state_db_message(row, available, id_col, optional, *, include_row_i
         and (include_row_identity or _state_db_projection_keeps_row_identity(msg))
     ):
         msg['_state_db_row_id'] = row['id']
-    if include_row_identity and 'message_uid' in row.keys() and _valid_message_uid(row['message_uid']):
+    if include_message_uid and 'message_uid' in row.keys() and _valid_message_uid(row['message_uid']):
         msg[STATE_DB_MESSAGE_UID_KEY] = row['message_uid']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
         msg['name'] = msg['tool_name']
@@ -12844,6 +12846,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     include_row_identity: bool = False,
+    include_message_uid: bool = False,
     with_revision: Literal[False] = False,
 ) -> list: ...
 
@@ -12858,6 +12861,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     include_row_identity: bool = False,
+    include_message_uid: bool = False,
     with_revision: Literal[True],
 ) -> StateDBSessionMessagesSnapshot: ...
 
@@ -12871,6 +12875,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     include_row_identity: bool = False,
+    include_message_uid: bool = False,
     with_revision: bool = False,
 ):
     """Read messages for a Hermes session from state.db.
@@ -12912,6 +12917,10 @@ def get_state_db_session_messages(
     projected row. Cancelled-journal consumers use this to carry proven SQLite
     successor identity through sidecar persistence; ordinary projections retain
     their historical shape. Public/provider projections strip the private IDs.
+
+    ``include_message_uid=True`` also keeps the Agent's per-occurrence
+    ``message_uid`` (``STATE_DB_MESSAGE_UID_KEY``). Only the messaging display
+    merge asks for it, through ``get_cli_session_messages``.
     """
     try:
         import sqlite3
@@ -12961,7 +12970,7 @@ def get_state_db_session_messages(
                 + ['role', 'content', 'timestamp']
                 + revision_cols
                 + [c for c in optional if c in available]
-                + (['message_uid'] if include_row_identity and 'message_uid' in available else [])
+                + (['message_uid'] if include_message_uid and 'message_uid' in available else [])
             )
 
             session_chain = [str(sid)]
@@ -13104,6 +13113,7 @@ def get_state_db_session_messages(
                     _project_state_db_message(
                         row, available, bool(id_col), optional,
                         include_row_identity=include_row_identity,
+                        include_message_uid=include_message_uid,
                     )
                 )
     except Exception:
@@ -14413,7 +14423,9 @@ def state_db_session_rows_after(sid, floor, *, profile=None) -> list | None:
                 (str(sid), int(floor)),
             ).fetchall()
             return [
-                _project_state_db_message(row, available, True, optional, include_row_identity=True)
+                _project_state_db_message(
+                    row, available, True, optional, include_row_identity=True, include_message_uid=True,
+                )
                 for row in rows
             ]
     except Exception:
@@ -14455,7 +14467,7 @@ def stamp_gateway_turn_message_uids(run_rows, turn_messages) -> None:
 # Every key a message's private state.db row id has been stored under.
 STATE_DB_ROW_ID_ALIASES = ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id")
 # The Agent's own per-occurrence ``message_uid`` for a state.db row, read only
-# with ``include_row_identity`` and stamped on gateway sidecar rows. It is the
+# with ``include_message_uid`` and stamped on gateway sidecar rows. It is the
 # display merge's proof that two rows are one message.
 STATE_DB_MESSAGE_UID_KEY = "_state_db_message_uid"
 
@@ -17246,6 +17258,9 @@ def reconciled_state_db_messages_for_session(
 def get_cli_session_messages(sid, *, profile=None, include_row_identity: bool = False) -> list:
     """Read messages for a single CLI/external-agent session.
 
+    ``include_row_identity=True`` is the messaging display merge's read: it
+    keeps the private row ids and the Agent's ``message_uid``.
+
     Preserve tool-call/result and reasoning metadata from the agent state.db so
     CLI-origin transcripts render with the same tool cards as WebUI-native
     sessions. When the requested session is the tip of a compression/CLI-close
@@ -17255,7 +17270,8 @@ def get_cli_session_messages(sid, *, profile=None, include_row_identity: bool = 
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
     return get_state_db_session_messages(
-        sid, stitch_continuations=True, profile=profile, include_row_identity=include_row_identity,
+        sid, stitch_continuations=True, profile=profile,
+        include_row_identity=include_row_identity, include_message_uid=include_row_identity,
     )
 
 

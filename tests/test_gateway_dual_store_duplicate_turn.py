@@ -1365,7 +1365,7 @@ def test_a_row_id_with_different_text_is_not_a_twin():
 def test_bare_legacy_row_ids_do_not_pair_after_the_store_reissued_them():
     """The maintainer's repro. In-process stamps carry only the row id. A
     restored or recreated state.db hands ids 41/42 out again to a later
-    exchange with the same text; without the stamped timestamp nothing proves
+    exchange with the same text; without a stamped message uid nothing proves
     the rows are one message, so both exchanges render and each keeps its
     own payload, exactly as on master."""
     session = SimpleNamespace(
@@ -1485,6 +1485,19 @@ def test_stamping_takes_only_an_unambiguous_run_row():
         (joined,),
     )
     assert "_state_db_message_uid" not in joined, "a reply the stream joined matches no single row"
+
+    prompt = {"id": "u", "role": "user", "content": "go"}
+    reply = {"id": "a", "role": "assistant", "content": "Done."}
+    models.stamp_gateway_turn_message_uids(
+        [
+            {"role": "assistant", "content": "Done.", "_state_db_message_uid": "previous-turn"},
+            {"role": "user", "content": "go", "_state_db_message_uid": "g"},
+            {"role": "assistant", "content": "Done.", "_state_db_message_uid": "this-turn"},
+        ],
+        (prompt, reply),
+    )
+    assert prompt["_state_db_message_uid"] == "g"
+    assert "_state_db_message_uid" not in reply, "two rows match the reply (a copied earlier one), so neither is proof"
 
     no_uid = {"id": "a", "role": "assistant", "content": "Done."}
     models.stamp_gateway_turn_message_uids(
@@ -1836,7 +1849,8 @@ def test_state_db_run_rows_keep_rows_whose_active_flag_is_null(tmp_path, monkeyp
 def test_failed_stamping_does_not_lose_the_reply(tmp_path, monkeypatch):
     import api.gateway_chat as gateway_chat
 
-    def broken(*_args, **_kwargs):
+    def broken(_run_rows, turn_messages):
+        turn_messages[0]["_state_db_message_uid"] = "half-written"
         raise RuntimeError("boom")
 
     monkeypatch.setattr(gateway_chat, "stamp_gateway_turn_message_uids", broken)
@@ -1848,6 +1862,8 @@ def test_failed_stamping_does_not_lose_the_reply(tmp_path, monkeypatch):
     )
 
     assert [m["content"] for m in saved.messages] == ["continue", "Done."]
+    rows = [*saved.messages, *(getattr(saved, "context_messages", None) or [])]
+    assert all("_state_db_message_uid" not in m for m in rows), "a stamp the failure left half-written is dropped"
 
 
 def test_superseded_stream_does_not_read_the_run_rows(tmp_path, monkeypatch):
@@ -1894,22 +1910,31 @@ def test_a_reissued_row_id_is_not_a_twin():
     assert _replies(merged) == [("a1", "telegram")]
 
 
-def test_one_row_id_on_two_sidecar_rows_pairs_neither():
+def test_one_uid_on_two_rows_of_a_store_pairs_neither():
+    """A uid proves one message only while each store holds it once: a copied
+    sidecar row, or a compaction copy the stitched reader returns twice."""
     session = SimpleNamespace(
         messages=[
-            {"id": "u1", "role": "user", "content": "go", "timestamp": 1.1, "_state_db_row_id": 1},
-            {"id": "u1-copy", "role": "user", "content": "go", "timestamp": 1.2, "_state_db_row_id": 1},
+            {"id": "u1", "role": "user", "content": "go", "timestamp": 1.1, "_state_db_message_uid": "uid-1"},
+            {"id": "u1-copy", "role": "user", "content": "go", "timestamp": 1.2, "_state_db_message_uid": "uid-1"},
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "go", "timestamp": 1.0, "_state_db_row_id": 1},
+        {"role": "user", "content": "go", "timestamp": 1.0, "_state_db_row_id": 1, "_state_db_message_uid": "uid-1"},
         {"role": "tool", "content": "ok", "timestamp": 2.0, "tool_call_id": "c1", "_state_db_row_id": 2},
         {"role": "assistant", "content": "Done.", "timestamp": 3.0, "_state_db_row_id": 3},
     ]
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
-
     assert [m.get("id") for m in merged if m["role"] == "user"] == [None, "u1", "u1-copy"]
+
+    del session.messages[1]["_state_db_message_uid"]
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+    assert [m.get("id") for m in merged if m["role"] == "user"] == ["u1", "u1-copy"], "control: one per store pairs"
+
+    agent_copy = {"role": "user", "content": "go", "timestamp": 1.05, "_state_db_row_id": 9, "_state_db_message_uid": "uid-1"}
+    merged = routes._merged_session_messages_for_display(session, [*cli_messages, agent_copy])
+    assert [m.get("id") for m in merged if m["role"] == "user"] == [None, None, "u1", "u1-copy"]
 
 
 def _stamped_run_rows(sid, floor, profile=None):
@@ -2015,6 +2040,15 @@ def test_real_gateway_turn_renders_once_after_a_reload(tmp_path, monkeypatch, ts
     assert all("_state_db_row_id" not in m for m in session.messages), "the gateway writes no row ids"
     assert all("_state_db_message_uid" not in m for m in merged if m["role"] == "tool")
 
+    other_reader = models.get_state_db_session_messages(session.session_id, include_row_identity=True)
+    assert other_reader and all("_state_db_message_uid" not in m for m in other_reader), (
+        "only the display merge's read returns the uid"
+    )
+    from api.helpers import public_session_projection
+
+    public = public_session_projection({"messages": merged})
+    assert all("_state_db_message_uid" not in m for m in public["messages"])
+
 
 def test_an_agent_without_message_uid_renders_as_on_master(tmp_path, monkeypatch):
     """An older Agent has no message_uid column: nothing is stamped, nothing
@@ -2091,9 +2125,9 @@ def test_a_proven_survivor_is_not_absorbed_by_another_turns_agent_row():
     ]
 
 
-def test_a_row_id_without_a_stamped_timestamp_proves_nothing():
+def test_a_row_id_copied_from_state_db_proves_nothing():
     """A sidecar row copied from state.db carries the row id but no stamped
-    timestamp. It is never folded on the id: a verbatim copy still collapses
+    uid. It is never folded on the id: a verbatim copy still collapses
     through master's coarse same-second key, and a reissued id renders both."""
     cli_messages = [
         {"role": "user", "content": "go", "timestamp": 900.0, "_state_db_row_id": 7},
@@ -2151,15 +2185,21 @@ def test_a_distinct_agent_row_beside_a_folded_twin_survives():
 
 def test_reissued_row_ids_do_not_pair_in_the_append_only_branch():
     """The maintainer's repro where the sidecar is not shorter than the Agent
-    store, so the append-only merge runs. Gateway rows carry only the private
-    message uid, never a row id that branch would trust, so a reissued id and
-    the later exchange's payload stay where they belong, as on master."""
-    session = SimpleNamespace(
-        messages=[
-            {"id": "u1", "role": "user", "content": "continue", "timestamp": 100.1, "_state_db_message_uid": "uid-old-u"},
-            {"id": "a1", "role": "assistant", "content": "Done.", "timestamp": 130.1, "_state_db_message_uid": "uid-old-a"},
-        ]
+    store, so the append-only merge runs. It trusts any row id, so the gateway
+    stamping must give its rows only the private message uid: then a reissued
+    id and the later exchange's payload stay where they belong, as on master."""
+    old_turn = [
+        {"id": "u1", "role": "user", "content": "continue", "timestamp": 100.1},
+        {"id": "a1", "role": "assistant", "content": "Done.", "timestamp": 130.1},
+    ]
+    models.stamp_gateway_turn_message_uids(
+        [
+            {"role": "user", "content": "continue", "_state_db_row_id": 41, "_state_db_message_uid": "uid-old-u"},
+            {"role": "assistant", "content": "Done.", "_state_db_row_id": 42, "_state_db_message_uid": "uid-old-a"},
+        ],
+        old_turn,
     )
+    session = SimpleNamespace(messages=old_turn)
     cli_messages = [
         {"role": "user", "content": "continue", "timestamp": 900.0, "_state_db_row_id": 41,
          "_state_db_message_uid": "uid-new-u"},
