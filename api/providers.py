@@ -43,7 +43,9 @@ from api.config import (
     _configured_model_ids,
     _custom_provider_entries,
     _custom_provider_entry_identity,
+    _custom_provider_record_may_take_convention_key,
     _custom_provider_slug_from_name,
+    _custom_provider_view_source,
     _is_native_custom_provider_key,
     _resolve_configured_provider_id,
     _resolve_custom_record_key,
@@ -1402,6 +1404,27 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             pass
 
 
+def _custom_entry_may_take_convention_key(
+    entry: object, cfg_data: dict | None, provider_id: object,
+) -> bool:
+    """May this row of the custom-provider view read ``CUSTOM_<SLUG>_API_KEY``?
+
+    The card and the credential helpers read the view, which mixes legacy
+    ``custom_providers`` rows and normalized ``providers:`` records. The rule is
+    source-dependent, so the row's own store is resolved through
+    :func:`_custom_provider_view_source` and the decision is the same one the
+    chat resolver makes for the record it selected. Reading the view without it
+    reported ``has_key`` for a keyless bare-CJK entry whose only candidate
+    credential is the shared ``CUSTOM_CUSTOM_API_KEY`` another provider owns.
+    """
+    return _custom_provider_record_may_take_convention_key(
+        entry,
+        _custom_provider_view_source(entry, cfg_data),
+        cfg_data,
+        provider_id,
+    )
+
+
 def _provider_has_key(provider_id: str) -> bool:
     """Check whether a provider has a configured API key.
 
@@ -1472,7 +1495,12 @@ def _provider_has_key(provider_id: str) -> bool:
                 if _custom_provider_entry_matches(
                     provider_id, cp, custom_providers, providers_cfg, cfg.get("model")
                 ):
-                    key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
+                    key = _resolve_custom_record_key(
+                        cp.get("api_key"), cp.get("key_env"), provider_id,
+                        allow_convention_key=_custom_entry_may_take_convention_key(
+                            cp, cfg, provider_id
+                        ),
+                    )
                     if _provider_value_counts_as_api_key(provider_id, key):
                         return True
     return False
@@ -1497,8 +1525,17 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             entry = _unique_custom_provider_entry(
                 _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
             )
+            if entry is not None:
+                # Selection owned nothing, so the row's own store decides whether
+                # it may read the shared convention name.
+                _source = _custom_provider_view_source(entry, cfg)
         if entry is not None:
-            key = _resolve_custom_record_key(entry.get("api_key"), entry.get("key_env"), provider_id)
+            key = _resolve_custom_record_key(
+                entry.get("api_key"), entry.get("key_env"), provider_id,
+                allow_convention_key=_custom_provider_record_may_take_convention_key(
+                    entry, _source, cfg, provider_id
+                ),
+            )
             if key:
                 return key
         # No presentation row does not rule out an explicitly owned pool key.
@@ -1551,7 +1588,12 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if _custom_provider_entry_matches(
                 provider_id, cp, custom_providers, providers_cfg, cfg.get("model")
             ):
-                cp_key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
+                cp_key = _resolve_custom_record_key(
+                    cp.get("api_key"), cp.get("key_env"), provider_id,
+                    allow_convention_key=_custom_entry_may_take_convention_key(
+                        cp, cfg, provider_id
+                    ),
+                )
                 if cp_key and cp_key.startswith("${") and cp_key.endswith("}"):
                     return _thread_local_env_value(cp_key[2:-1]).strip() or None
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
@@ -3286,7 +3328,14 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
-            cp_has_key = bool(_resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), cp_id))
+            cp_has_key = bool(
+                _resolve_custom_record_key(
+                    cp.get("api_key"), cp.get("key_env"), cp_id,
+                    allow_convention_key=_custom_entry_may_take_convention_key(
+                        cp, cfg, cp_id
+                    ),
+                )
+            )
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:
