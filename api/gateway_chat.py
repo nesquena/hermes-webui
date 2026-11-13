@@ -392,6 +392,12 @@ def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = N
         # local-owner {} — fail closed to the gateway/refusal side, never
         # silently authorize an in-process model call.
         return "gateway"
+    if isinstance(source, UnreadableProfileConfig):
+        # #8971 / #9024 review round 8: the owner's .env exists but cannot be
+        # read (permission error, self-referential symlink, a directory at
+        # .env). The env slice deciding the backend is UNVERIFIABLE, not a
+        # valid "no value" — same fail-closed as the config slot above.
+        return "gateway"
     raw = str(
         source.get(_WEBUI_CHAT_BACKEND_ENV)
         or cfg.get("webui_chat_backend")

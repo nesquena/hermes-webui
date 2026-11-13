@@ -1096,3 +1096,429 @@ def test_unreadable_owner_config_fails_closed_to_refusal(
     routes._handle_btw(object(), {"session_id": "s2", "question": "why?"})
     assert captured_route_j["status"] == 503
     assert captured_route_j["payload"]["code"] == "server_draining"
+
+
+_SCRUB_KEY = "OPENAI_API_KEY"
+
+
+def _run_scrub_checkpoints(monkeypatch, exit_first, session_a, session_b, scrub_value):
+    """Real ``_save_streaming_checkpoint()`` workers, opened in order, scrub over.
+
+    Worker A's profile .env SUPPLIES the credential; worker B's home has none,
+    so B's worker scope SCRUBS it from the process env while A is still open.
+    The open order is enforced (A mirrored, then B scrubbed over it) by polling
+    the live env between thread starts; both real ``Session.save`` calls run to
+    completion before either gate opens, so each scope is still open past its
+    persisted checkpoint. ``exit_first`` picks FIFO ("a") or LIFO ("b").
+    """
+    import threading
+
+    import api.models as models
+    import api.streaming as streaming
+
+    real_save = models.Session.save
+    saved_done = {}
+    gates = {}
+    for sess in (session_a, session_b):
+        saved_done[sess.session_id] = threading.Event()
+        gates[sess.session_id] = threading.Event()
+
+    def _gated_save(self, touch_updated_at=True, skip_index=False):
+        real_save(self, touch_updated_at=touch_updated_at, skip_index=skip_index)
+        saved_done[self.session_id].set()
+        assert gates[self.session_id].wait(timeout=30), "checkpoint gate never opened"
+
+    monkeypatch.setattr(models.Session, "save", _gated_save)
+
+    errors = []
+    threads = {}
+
+    def _run(sess):
+        try:
+            streaming._save_streaming_checkpoint(sess)
+        except BaseException as exc:  # pragma: no cover - surfaced by the assert
+            errors.append(exc)
+
+    def _wait_for(fn, what):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if fn():
+                return
+            time.sleep(0.01)
+        raise AssertionError(f"setup never happened: {what}")
+
+    threads[session_a.session_id] = threading.Thread(
+        target=_run, args=(session_a,), daemon=True
+    )
+    threads[session_a.session_id].start()
+    # A's worker scope is open and its credential mirrored into the live env.
+    _wait_for(
+        lambda: os.environ.get(_SCRUB_KEY) == scrub_value,
+        "worker A never mirrored its credential",
+    )
+    threads[session_b.session_id] = threading.Thread(
+        target=_run, args=(session_b,), daemon=True
+    )
+    threads[session_b.session_id].start()
+    # B's worker scope opened OVER A and scrubbed the credential.
+    _wait_for(
+        lambda: os.environ.get(_SCRUB_KEY) is None,
+        "worker B never scrubbed the live credential",
+    )
+    for sess in (session_a, session_b):
+        assert saved_done[sess.session_id].wait(timeout=30), (
+            f"real checkpoint save never finished for {sess.session_id}"
+        )
+    first, second = (
+        (session_a, session_b) if exit_first == "a" else (session_b, session_a)
+    )
+    for sess in (first, second):
+        gates[sess.session_id].set()
+        threads[sess.session_id].join(timeout=30)
+        assert not threads[sess.session_id].is_alive(), "checkpoint worker never exited"
+        yield sess
+    assert not errors, f"checkpoint workers failed: {errors!r}"
+
+
+@pytest.mark.parametrize(("exit_first",), [("a",), ("b",)])
+def test_real_checkpoints_scrub_only_credential_never_resurrects(
+    monkeypatch, tmp_path, exit_first
+):
+    """#9024 review round 8: a scrub-only scope cannot resurrect the credential.
+
+    Two REAL ``_save_streaming_checkpoint()`` workers: A's profile supplies a
+    provider credential in its .env, B's profile has none, so B's worker scope
+    SCRUBS the mirrored credential (the worker CM pops a live secret its own
+    env does not supply). Both real saves complete and only the wrapper
+    returns are gated, so each scope is held open past its persisted
+    checkpoint. FIFO — the SUPPLYING worker exits first: its exit must not
+    reinstall the credential the live scrubber removed, and after both exit
+    the credential is absent with no provenance (never fake launcher
+    authority). LIFO control — the scrubber exits first: the still-live
+    supplier's value is correctly back until its own exit.
+    """
+    import api.models as models
+
+    scrub_value = "sk-scrubbed-9024"
+    _checkpoint_homes(
+        monkeypatch,
+        tmp_path,
+        owner_config="webui_chat_backend: local\n",
+        worker_a_env=f"{_SCRUB_KEY}={scrub_value}\n",
+        worker_b_env="HERMES_WEBUI_CHAT_BACKEND=local\n",
+    )
+    monkeypatch.delenv(_SCRUB_KEY, raising=False)
+
+    directory = tmp_path / "sessions"
+    directory.mkdir()
+    cache = collections.OrderedDict()
+    monkeypatch.setattr(models, "SESSION_DIR", directory)
+    monkeypatch.setattr(models, "SESSIONS", cache)
+    monkeypatch.setattr(routes, "SESSION_DIR", directory)
+    monkeypatch.setattr(routes, "SESSIONS", cache)
+
+    workers = []
+    for name in ("worker-a", "worker-b"):
+        workers.append(
+            models.Session(
+                session_id=f"scrub-{name}",
+                title=f"scrub {name}",
+                workspace=str(tmp_path),
+                messages=[{"role": "user", "content": "hi"}],
+                profile=name,
+            )
+        )
+
+    for join_index, sess in enumerate(
+        _run_scrub_checkpoints(
+            monkeypatch, exit_first, workers[0], workers[1], scrub_value
+        )
+    ):
+        if join_index != 0:
+            continue
+        if exit_first == "a":
+            # FIFO: A (the supplier) left while B's scrub still holds the key.
+            assert os.environ.get(_SCRUB_KEY) is None, (
+                "the exited supplier resurrected the scrubbed credential "
+                "into the live scrubber's scope"
+            )
+        else:
+            # LIFO: B (the scrubber) left while A still supplies the key live.
+            assert os.environ.get(_SCRUB_KEY) == scrub_value, (
+                "the live supplier's credential was lost before its own exit"
+            )
+
+    assert os.environ.get(_SCRUB_KEY) is None, (
+        "an exited writer's credential survived both scopes as fake launcher authority"
+    )
+    assert not profiles.profile_env_writer_owns(_SCRUB_KEY)
+    assert _SCRUB_KEY not in profiles._PROFILE_ENV_BASELINE
+    assert _SCRUB_KEY not in profiles._WORKER_OWNED_ENV_KEYS
+    assert _SCRUB_KEY not in profiles._PROFILE_ENV_SCRUBBED_KEYS
+    assert not [pair for pair in profiles._PROFILE_ENV_VALUES if pair[0] == _SCRUB_KEY]
+
+
+@pytest.mark.parametrize(
+    ("breakage", "control_name"),
+    [
+        ("nondict-config", "empty-config"),
+        ("symlink-loop-config", "dangling-symlink-config"),
+        ("unreadable-owner-env", "absent-owner-env"),
+    ],
+)
+def test_unverifiable_owner_inputs_fail_closed_to_refusal(
+    monkeypatch, tmp_path, captured, captured_route_j, breakage, control_name
+):
+    """#9024 review round 8: unverifiable owner inputs are not valid answers.
+
+    Three inputs the loaders used to collapse to a valid local-owner answer
+    now fail closed with zero in-process model-boundary calls:
+
+    - a config.yaml that parses to a NON-DICT (list/scalar) — only a genuinely
+      empty file (``None``) is the valid {} "no config";
+    - a SELF-REFERENTIAL config.yaml symlink (stat OSError/ELOOP — the file
+      exists but cannot be stated, unlike a dangling symlink = genuine absence);
+    - an owner ``.env`` that exists but cannot be read (a directory at .env).
+
+    Each case's CONTROL is the genuinely valid counterpart, which must keep
+    answering through the next admission gate (503 drain), never 409.
+    """
+    homes = {}
+    for name in ("default", "owner", "control"):
+        home = tmp_path / f"home-{name}"
+        home.mkdir()
+        homes[name] = home
+    owner_home = homes["owner"]
+    control_home = homes["control"]
+    config_path = owner_home / "config.yaml"
+    env_path = owner_home / ".env"
+    if breakage == "nondict-config":
+        config_path.write_text("- just\n- a\n- list\n", encoding="utf-8")
+        # Control: a genuinely EMPTY config.yaml file is the valid {} answer.
+        (control_home / "config.yaml").write_text("", encoding="utf-8")
+    elif breakage == "symlink-loop-config":
+        os.symlink(config_path, config_path)
+        # Control: a DANGLING symlink is genuine absence — valid {} answer.
+        os.symlink(
+            control_home / "config-missing.yaml", control_home / "config.yaml"
+        )
+    else:  # unreadable-owner-env: valid LOCAL config, unreadable .env
+        config_path.write_text("webui_chat_backend: local\n", encoding="utf-8")
+        env_path.mkdir()
+        # Control: a valid local config with NO .env at all.
+        (control_home / "config.yaml").write_text(
+            "webui_chat_backend: local\n", encoding="utf-8"
+        )
+
+    def fake_home(name, _h=homes):
+        return _h.get(str(name or "owner"), _h["owner"])
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", fake_home)
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.delenv(_ENV_KEY, raising=False)
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("unverifiable owner input reached the model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    routes._handle_git_commit_message(object(), {"session_id": "s1"})
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+    assert calls["model_boundary"] == 0
+
+    # The valid counterpart control: the same request against the genuinely
+    # valid input is NOT refused — the next admission gate answers.
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "control"
+    )
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+    routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+    assert captured_route_j["status"] == 503
+    assert captured_route_j["payload"]["code"] == "server_draining"
+    assert calls["model_boundary"] == 0
+
+
+def test_ambient_unreadable_config_fails_closed_through_the_cached_path(
+    monkeypatch, tmp_path, captured, captured_route_j
+):
+    """#9024 review round 8: the ambient/cached resolution keeps the marker.
+
+    ``get_config()``/``get_config_snapshot()`` used to discard an unreadable
+    active config.yaml in ``reload_config`` and serve the defaults-filled
+    cache as if the owner had a valid local config — the marker only failed
+    closed on the direct per-profile read. A session with no owning profile
+    (KeyError) resolves through the REQUEST profile's ambient snapshot: with
+    an unreadable ACTIVE config.yaml the in-process feature must refuse with
+    zero model-boundary calls, and repairing the file recovers without a
+    restart (the marker is never cached).
+    """
+    import api.config as config
+
+    home = tmp_path / "ambient-home"
+    home.mkdir()
+    config_path = home / "config.yaml"
+    config_path.write_text("webui_chat_backend: [unclosed\n", encoding="utf-8")
+    real_get_config_path = config._get_config_path
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+
+    def _missing(_sid):
+        raise KeyError(_sid)
+
+    monkeypatch.setattr(routes, "get_session_profile_readonly", _missing)
+    # Re-point routes.get_config_snapshot at the REAL snapshot: the ambient
+    # cache is the code under test (the captured fixture had patched it).
+    monkeypatch.setattr(routes, "get_config_snapshot", config.get_config_snapshot)
+    monkeypatch.delenv(_ENV_KEY, raising=False)
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("ambient unreadable config reached the model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+
+    saved = (
+        dict(config._cfg_cache),
+        config._cfg_mtime,
+        config._cfg_path,
+        config._cfg_unreadable,
+    )
+    try:
+        config._cfg_cache.clear()
+        config._cfg_mtime = 0.0
+        config._cfg_path = None
+        config._cfg_unreadable = False
+        routes._handle_git_commit_message(object(), {"session_id": "s1"})
+        assert captured["status"] == 409
+        assert captured["payload"]["code"] == "gateway_mode_unsupported"
+        assert calls["model_boundary"] == 0
+        assert isinstance(routes.get_config_snapshot(), config.UnreadableProfileConfig)
+
+        # Repair the file: the marker is never cached, so the same process
+        # recovers and the valid config answers through the next gate. Bump the
+        # mtime deterministically — a same-tick rewrite would look unchanged to
+        # the mtime-staleness check.
+        config_path.write_text("webui_chat_backend: local\n", encoding="utf-8")
+        _st = config_path.stat()
+        os.utime(
+            config_path,
+            ns=(_st.st_atime_ns, _st.st_mtime_ns + 1_000_000_000),
+        )
+        drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+        monkeypatch.setattr(
+            routes, "run_admission_closed_response", lambda: dict(drain)
+        )
+        routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+        assert captured_route_j["status"] == 503
+        assert captured_route_j["payload"]["code"] == "server_draining"
+        assert calls["model_boundary"] == 0
+    finally:
+        config._cfg_cache.clear()
+        config._cfg_cache.update(saved[0])
+        config._cfg_mtime = saved[1]
+        config._cfg_path = saved[2]
+        config._cfg_unreadable = saved[3]
+        monkeypatch.setattr(config, "_get_config_path", real_get_config_path)
+
+
+def test_admission_reads_coherently_with_worker_cleanup(
+    monkeypatch, tmp_path, captured
+):
+    """#9024 review round 8: admission never reads the drop-before-restore window.
+
+    A background worker for profile "other" mirrors
+    HERMES_WEBUI_CHAT_BACKEND=legacy into the live env. Its cleanup drops the
+    mirror provenance BEFORE restoring the env (drop -> restore under
+    _ENV_LOCK). Pausing the worker right after the actual drop used to let a
+    gateway-owned commit-message request read the dead value with no
+    provenance — launcher authority — and return 200 with one in-process
+    model-boundary call. The backend value and its provenance are now read
+    coherently under the same writer lock: the admission blocks until the
+    restore finishes, then sees the true (absent) value and refuses.
+    """
+    import threading
+
+    monkeypatch.setattr(
+        routes, "get_session_profile_readonly", lambda _sid: "owner"
+    )
+    monkeypatch.setattr(
+        gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG)
+    )
+    _profile_homes(
+        monkeypatch,
+        tmp_path,
+        owner_env=None,
+        other_env="HERMES_WEBUI_CHAT_BACKEND=legacy\n",
+    )
+    monkeypatch.delenv(_ENV_KEY, raising=False)
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("cleanup-window admission reached the model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+
+    real_restore = profiles.restore_profile_env_snapshot
+    in_window = threading.Event()
+    exit_body = threading.Event()
+
+    def _paused_restore(old_values):
+        # Runs INSIDE the worker CM's finally, under _ENV_LOCK: ownership has
+        # been dropped, the env still holds the dead value. Hold the window
+        # open for a fixed interval while the main thread makes its admission
+        # call — an event handshake would deadlock against the coherent read
+        # (the admission blocks on _ENV_LOCK until this returns).
+        in_window.set()
+        time.sleep(1.0)
+        return real_restore(old_values)
+
+    monkeypatch.setattr(profiles, "restore_profile_env_snapshot", _paused_restore)
+
+    errors = []
+    worker_open = threading.Event()
+
+    def _worker():
+        try:
+            cm = profiles.profile_env_for_background_worker("other", "cleanup window")
+            cm.__enter__()
+            worker_open.set()
+            exit_body.wait(timeout=30)
+            cm.__exit__(None, None, None)
+        except BaseException as exc:  # pragma: no cover - surfaced by the assert
+            errors.append(exc)
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    try:
+        assert worker_open.wait(timeout=30), "worker scope never opened"
+        assert os.environ.get(_ENV_KEY) == "legacy"
+        # Let the worker leave its body; the paused restore holds the
+        # drop-before-restore window open for a fixed interval.
+        exit_body.set()
+        assert in_window.wait(timeout=30), "cleanup window never opened"
+        assert not profiles.profile_env_writer_owns(_ENV_KEY), (
+            "fixture setup: the drop must have released ownership by now"
+        )
+        # The admission read coherently: with the fix this call BLOCKS on the
+        # writer lock until the paused restore finishes; without it the dead
+        # value read as launcher authority and reached the model boundary.
+        routes._handle_git_commit_message(object(), {"session_id": "s1"})
+    finally:
+        exit_body.set()
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "cleanup-window worker never exited"
+    assert not errors, f"cleanup-window worker failed: {errors!r}"
+
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+    assert calls["model_boundary"] == 0
+    assert os.environ.get(_ENV_KEY) is None
+    assert not profiles.profile_env_writer_owns(_ENV_KEY)

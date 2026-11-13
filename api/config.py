@@ -500,6 +500,12 @@ _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
 _cfg_path: Path | None = None  # active config.yaml path for the disk-loaded cache
 _cfg_fingerprint: str | None = None  # serialized snapshot from the last disk load
+# True when the ACTIVE profile's config.yaml exists but could not be
+# read/parsed (UnreadableProfileConfig from _load_yaml_config_file_raw).
+# get_config()/get_config_snapshot() surface the marker so ambient/cached
+# consumers fail closed instead of silently reading defaults as a valid
+# local-owner config (#8971 / #9024 review round 8).
+_cfg_unreadable: bool = False
 
 
 def _fingerprint_config(data: dict) -> str:
@@ -643,6 +649,11 @@ def get_config() -> dict:
             return cfg
     except NameError:
         pass
+    # #8971 / #9024 review round 8: the active profile's config.yaml exists but
+    # is unreadable/unparseable — fail closed on the marker rather than serve
+    # the defaults-filled cache as if the owner had a valid config.
+    if _cfg_unreadable:
+        return UnreadableProfileConfig()
     return _cfg_cache
 
 
@@ -662,6 +673,11 @@ def get_config_snapshot() -> dict:
             active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
         except NameError:
             active_cfg = _cfg_cache
+        # #8971 / #9024 review round 8: same unreadable-config fail-closed as
+        # get_config(), but the snapshot returns a FRESH marker instance so the
+        # request owns its copy like any other snapshot.
+        if _cfg_unreadable:
+            return UnreadableProfileConfig()
         return copy.deepcopy(active_cfg)
 
 
@@ -706,7 +722,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     Callers must hold _cfg_lock when invoking this helper because it mutates
     shared state.
     """
-    global _cfg_mtime, _cfg_path, _cfg_fingerprint
+    global _cfg_mtime, _cfg_path, _cfg_fingerprint, _cfg_unreadable
     if config_path is None:
         config_path = _get_config_path()
     _cfg_cache.clear()
@@ -716,54 +732,65 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     _old_cfg_path = _cfg_path
     _cfg_path = config_path
     _cfg_mtime = 0.0
+    _cfg_unreadable = False
     try:
-        if config_path.exists():
-            # Route the parse through the mtime-keyed cache (#4652) so an
-            # unchanged config.yaml isn't re-parsed (~125ms+ on a large file)
-            # on every reload_config() on the hot path (profile switch /
-            # load_settings, #4662 Phase 2). We take the RAW cached dict and
-            # run the env expansion HERE, pinned to the unscoped process-env
-            # view (below) — never the helper's per-call expansion — for the
-            # #798 TLS reason documented in the pin block.
-            loaded = _load_yaml_config_file_raw(config_path)
-            if isinstance(loaded, dict):
-                if loaded:
-                    # The process-global _cfg_cache must reflect PROCESS-env
-                    # expansion, never a profile-scoped block_process_env_fallback
-                    # view — otherwise a reload that fires while a readonly/worker
-                    # scope is active (profile alternation resolves _get_config_path
-                    # to the named profile, #798 TLS) would bake under-expanded
-                    # literal ${VAR}s into the shared cache and starve concurrent
-                    # readers of the module-level `cfg` alias. Expansion re-runs
-                    # per-read elsewhere; here we pin the cache to the unscoped view.
-                    _prev_block = getattr(_thread_ctx, "block_process_env_fallback", False)
-                    _prev_env = getattr(_thread_ctx, "env", None)
-                    try:
-                        _thread_ctx.block_process_env_fallback = False
-                        _thread_ctx.env = {}
-                        _cfg_cache.update(_expand_env_vars(loaded))
-                    finally:
-                        _thread_ctx.block_process_env_fallback = _prev_block
-                        if _prev_env is None:
-                            try:
-                                del _thread_ctx.env
-                            except AttributeError:
-                                pass
-                        else:
-                            _thread_ctx.env = _prev_env
-                # Stamp _cfg_mtime whenever the file parsed to a dict — INCLUDING
-                # an empty {} config. The cache-update above is skipped for {} (it's
-                # a no-op), but _cfg_mtime MUST still be set or get_config()'s
-                # `current_mtime != _cfg_mtime` stale check fires on every call and
-                # spins reload_config() under _cfg_lock forever (a `{}` config from a
-                # freshly created/reset profile is reachable on the switch hot path).
-                # This matches master's pre-#4662 behavior (it entered the block for
-                # {} and set the mtime); the inner `if loaded:` only gates the no-op
-                # cache update, not the mtime stamp.
+        # Route the parse through the mtime-keyed cache (#4652) so an
+        # unchanged config.yaml isn't re-parsed (~125ms+ on a large file)
+        # on every reload_config() on the hot path (profile switch /
+        # load_settings, #4662 Phase 2). We take the RAW cached dict and
+        # run the env expansion HERE, pinned to the unscoped process-env
+        # view (below) — never the helper's per-call expansion — for the
+        # #798 TLS reason documented in the pin block. The loader itself
+        # distinguishes genuine absence (valid {}) from an existing but
+        # unstattable/unparseable file — Path.exists() cannot, because it
+        # collapses both to False (e.g. a self-referential config.yaml
+        # symlink, #8971 / #9024 review round 8).
+        loaded = _load_yaml_config_file_raw(config_path)
+        # #8971 / #9024 review round 8: preserve the unreadable marker
+        # through the AMBIENT/cached resolution too. UnreadableProfileConfig
+        # is a dict subclass, so the isinstance(loaded, dict) check below
+        # would silently swallow it and serve defaults as if the owner had
+        # a valid local config. get_config()/get_config_snapshot() fail
+        # closed on this flag (gateway side) instead.
+        _cfg_unreadable = isinstance(loaded, UnreadableProfileConfig)
+        if isinstance(loaded, dict):
+            if loaded:
+                # The process-global _cfg_cache must reflect PROCESS-env
+                # expansion, never a profile-scoped block_process_env_fallback
+                # view — otherwise a reload that fires while a readonly/worker
+                # scope is active (profile alternation resolves _get_config_path
+                # to the named profile, #798 TLS) would bake under-expanded
+                # literal ${VAR}s into the shared cache and starve concurrent
+                # readers of the module-level `cfg` alias. Expansion re-runs
+                # per-read elsewhere; here we pin the cache to the unscoped view.
+                _prev_block = getattr(_thread_ctx, "block_process_env_fallback", False)
+                _prev_env = getattr(_thread_ctx, "env", None)
                 try:
-                    _cfg_mtime = Path(config_path).stat().st_mtime
-                except OSError:
-                    _cfg_mtime = 0.0
+                    _thread_ctx.block_process_env_fallback = False
+                    _thread_ctx.env = {}
+                    _cfg_cache.update(_expand_env_vars(loaded))
+                finally:
+                    _thread_ctx.block_process_env_fallback = _prev_block
+                    if _prev_env is None:
+                        try:
+                            del _thread_ctx.env
+                        except AttributeError:
+                            pass
+                    else:
+                        _thread_ctx.env = _prev_env
+            # Stamp _cfg_mtime whenever the file parsed to a dict — INCLUDING
+            # an empty {} config. The cache-update above is skipped for {} (it's
+            # a no-op), but _cfg_mtime MUST still be set or get_config()'s
+            # `current_mtime != _cfg_mtime` stale check fires on every call and
+            # spins reload_config() under _cfg_lock forever (a `{}` config from a
+            # freshly created/reset profile is reachable on the switch hot path).
+            # This matches master's pre-#4662 behavior (it entered the block for
+            # {} and set the mtime); the inner `if loaded:` only gates the no-op
+            # cache update, not the mtime stamp.
+            try:
+                _cfg_mtime = Path(config_path).stat().st_mtime
+            except OSError:
+                _cfg_mtime = 0.0
     except Exception:
         logger.debug("Failed to load yaml config from %s", config_path)
     _apply_config_defaults(_cfg_cache)
@@ -857,9 +884,16 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
 
     try:
         st = config_path.stat()
-    except OSError:
-        # Missing or unstattable file — preserve the original "no config" contract.
+    except FileNotFoundError:
+        # Genuine absence (including a dangling symlink): the valid "no
+        # config" {} contract — a profile with no config.yaml is not an error.
         return {}
+    except OSError:
+        # The path EXISTS but cannot be stated (self-referential symlink,
+        # permission). #8971 / #9024 review round 8: this is an UNVERIFIABLE
+        # owner config, not a valid no-config {} — the admission decision must
+        # fail closed on the marker, never read this as local-owner {}.
+        return UnreadableProfileConfig()
 
     cache_key = str(config_path)
     stat_key = (st.st_mtime_ns, st.st_size)
@@ -887,7 +921,16 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
         # repaired file is re-read on the next call.
         return UnreadableProfileConfig()
 
-    raw = loaded if isinstance(loaded, dict) else {}
+    # A parse that yields a non-dict (list/scalar) is an unverifiable config,
+    # not a valid empty one (#8971 / #9024 round 8); only a genuinely empty
+    # file (safe_load -> None) stays the valid {} "no config" result. Never
+    # cached, so repairing the file is picked up on the next call.
+    if loaded is None:
+        raw = {}
+    elif not isinstance(loaded, dict):
+        return UnreadableProfileConfig()
+    else:
+        raw = loaded
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
     return _detached_copy(raw) if _copy else raw
