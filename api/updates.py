@@ -264,9 +264,12 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
     # its refusal counts and names both kinds of run. A WebUI update keeps the
     # WebUI-owned wording: the Gateway runs it does not settle keep running
     # (#7293).
-    # #8746: qualify the Agent copy by Gateway lifecycle ownership. When the
-    # Gateway is unmanaged (managed: False), updating the Agent does not cycle it
-    # and its runs keep running; only the WebUI runs are interrupted on force.
+    # #8746: qualify the Agent copy by Gateway lifecycle ownership and
+    # active-profile restart scope. Updating the Agent restarts only the active
+    # profile's Gateway; Gateway runs in other profiles are outside that
+    # restart. When the Gateway is unmanaged (managed: False), updating the
+    # Agent does not cycle it and its runs keep running; only the WebUI runs
+    # are interrupted on force.
     payload_extra: dict = {}
     if target == 'agent':
         gateway_managed = _is_gateway_lifecycle_managed()
@@ -277,12 +280,14 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
         )
         if gateway_managed:
             gateway_note = (
-                ' Updating the Agent also restarts the Gateway and stops '
-                + ('them' if plural else 'it') + '.'
+                ' Updating the Agent also restarts the Gateway for this profile and '
+                'stops the Gateway runs it is executing. Gateway runs in other '
+                'profiles are outside that restart, and only WebUI runs are '
+                'settled as interrupted.'
             )
             force_sentence = (
                 'Wait for the response to finish and retry, or force the update '
-                'to interrupt the active run' + ('s' if plural else '') + '.'
+                "to interrupt the WebUI run" + ('s' if plural else '') + " and restart this profile's Gateway."
             )
         else:
             gateway_note = (
@@ -609,8 +614,10 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
                         logger.warning(
                             "Forced %s update with %s active run(s) (WebUI and "
                             "Gateway); the WebUI runs are settled as interrupted "
-                            "before the restart and the Gateway runs end when the "
-                            "Gateway cycles",
+                            "before the restart, and the Gateway runs this "
+                            "profile's Gateway is executing end when the Gateway "
+                            "cycles; Gateway runs in other profiles are outside "
+                            "the restart",
                             target, blocker_snapshot.get('active_runs'),
                         )
                     else:

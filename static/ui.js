@@ -15032,7 +15032,7 @@ function _renderActiveRunsForceOffer(target,res,resend){
     const confirmMessageFallback=agentExternal
       ? count+' agent run'+(count===1?' is':'s are')+' still working in the WebUI and in the Gateway. The Gateway for this profile is managed outside the WebUI, so updating the Agent does not restart it and those Gateway runs keep running; the WebUI runs are saved as interrupted. Wait for them to finish if you can.'
       : (agentTarget
-        ? count+' agent run'+(count===1?' is':'s are')+' still working in the WebUI and in the Gateway. Updating the Agent also restarts the Gateway and stops '+(count===1?'it':'them')+'; the WebUI runs are saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
+        ? count+' agent run'+(count===1?' is':'s are')+' still working in the WebUI and in the Gateway. Updating the Agent also restarts the Gateway for this profile and stops the Gateway runs it is executing; Gateway runs in other profiles are outside that restart. The WebUI runs are saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
         : count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.');
     const confirmed=await showConfirmDialog({
       title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),

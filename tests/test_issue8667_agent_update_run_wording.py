@@ -55,10 +55,16 @@ def test_agent_refusal_names_webui_and_gateway_runs(monkeypatch):
     for kind in BOTH_RUN_TYPES:
         assert kind in message
     # The user must learn WHY the Gateway runs are part of the count: the
-    # Agent update restarts the Gateway.
-    assert "also restarts the Gateway" in message
+    # Agent update restarts the Gateway for this profile.
+    assert (
+        "Updating the Agent also restarts the Gateway for this profile and stops the "
+        "Gateway runs it is executing. Gateway runs in other profiles are outside that "
+        "restart, and only WebUI runs are settled as interrupted."
+    ) in message
     # The way out is unchanged.
-    assert "force the update to interrupt the active runs" in message
+    assert (
+        "force the update to interrupt the WebUI runs and restart this profile's Gateway."
+    ) in message
 
 
 def test_agent_refusal_uses_the_singular_form(monkeypatch):
@@ -77,7 +83,14 @@ def test_agent_refusal_uses_the_singular_form(monkeypatch):
     assert "1 agent run is active" in message
     for kind in BOTH_RUN_TYPES:
         assert kind in message
-    assert "interrupt the active run." in message
+    assert (
+        "Updating the Agent also restarts the Gateway for this profile and stops the "
+        "Gateway runs it is executing. Gateway runs in other profiles are outside that "
+        "restart, and only WebUI runs are settled as interrupted."
+    ) in message
+    assert (
+        "force the update to interrupt the WebUI run and restart this profile's Gateway."
+    ) in message
 
 
 def test_agent_refusal_when_gateway_unmanaged_does_not_promise_restart(monkeypatch):
@@ -137,6 +150,102 @@ def test_agent_refusal_resolves_unproven_capability_safely_to_unmanaged(monkeypa
         "agent", {"active_runs": 2, "active_streams": 2}
     )
     assert result_malformed["gateway_restart_managed"] is False
+
+
+def test_agent_refusal_cross_profile_warning_scope(monkeypatch):
+    """#8746: cross-profile warning with explicit scope controls.
+
+    When a durable Gateway run belongs to profile 'beta' while the request
+    selects 'alpha', the process-wide census counts 1 run, WebUI-owned runs
+    are empty, and the restart dispatcher asks only for 'alpha'. The refusal
+    warns that Gateway runs in other profiles are outside that restart and only
+    WebUI runs are settled as interrupted, without promising unconditional
+    stops ('and stops it.' / 'and stops them.').
+    """
+    import api.config as cfg
+    import api.gateway_chat as gateway_chat
+    import api.run_drain as run_drain
+    import api.updates as upd
+
+    monkeypatch.setattr(upd, "get_active_profile_name", lambda: "alpha")
+    monkeypatch.setattr(
+        upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": True}
+    )
+    monkeypatch.setattr(
+        gateway_chat, "gateway_run_durably_resumable", lambda stream_id: True
+    )
+
+    restarted_profiles: list[str] = []
+
+    def _fake_restart(*, profile="default"):
+        restarted_profiles.append(profile)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(upd, "restart_active_profile_gateway", _fake_restart)
+    monkeypatch.setattr(
+        upd, "get_active_profile_gateway_running_pid", lambda profile=None: 1234
+    )
+
+    with cfg.ACTIVE_RUNS_LOCK:
+        old_active = dict(cfg.ACTIVE_RUNS)
+        cfg.ACTIVE_RUNS.clear()
+    with cfg.STREAMS_LOCK:
+        old_streams = dict(cfg.STREAMS)
+        cfg.STREAMS.clear()
+
+    stream_beta = "stream-cross-profile-beta"
+    try:
+        cfg.register_active_run(stream_beta, backend="gateway", profile="beta")
+
+        # Pre-oracle assertions
+        all_runs = run_drain.all_active_runs()
+        assert len(all_runs) == 1
+        assert run_drain.webui_owned_active_runs() == []
+
+        ok, restart_payload = upd._ensure_gateway_restart_for_agent_update()
+        assert ok is True
+        assert restarted_profiles == ["alpha"]
+
+        # Oracle assertions on the refusal message
+        blocker = upd._update_blocker_snapshot("agent")
+        result = upd._restart_blocked_response("agent", blocker)
+        assert result["gateway_restart_managed"] is True
+        message = result["message"]
+
+        assert "Gateway runs in other profiles are outside that restart" in message
+        assert "only WebUI runs are settled as interrupted" in message
+        assert "and stops it." not in message
+        assert "and stops them." not in message
+        assert (
+            "restarts the Gateway for this profile and stops the Gateway runs it is executing"
+        ) in message
+
+        # Positive control: run of the active profile itself also receives the qualified scope
+        stream_alpha = "stream-positive-control-alpha"
+        cfg.register_active_run(stream_alpha, backend="gateway", profile="alpha")
+        try:
+            blocker_alpha = upd._update_blocker_snapshot("agent")
+            result_alpha = upd._restart_blocked_response("agent", blocker_alpha)
+            message_alpha = result_alpha["message"]
+            assert (
+                "restarts the Gateway for this profile and stops the Gateway runs it is executing"
+            ) in message_alpha
+            assert (
+                "Gateway runs in other profiles are outside that restart" in message_alpha
+            )
+            assert "only WebUI runs are settled as interrupted" in message_alpha
+            assert "and stops it." not in message_alpha
+            assert "and stops them." not in message_alpha
+        finally:
+            cfg.unregister_active_run(stream_alpha)
+    finally:
+        cfg.unregister_active_run(stream_beta)
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.clear()
+            cfg.ACTIVE_RUNS.update(old_active)
+        with cfg.STREAMS_LOCK:
+            cfg.STREAMS.clear()
+            cfg.STREAMS.update(old_streams)
 
 
 def test_webui_refusal_keeps_its_webui_only_wording():
@@ -236,6 +345,10 @@ def test_forced_agent_update_log_names_both_run_types(monkeypatch, caplog):
     # cycle and are settled afterwards by the worker teardown/watchdog.
     assert "settled as interrupted" in text
     assert "Gateway cycles" in text
+    assert (
+        "the Gateway runs this profile's Gateway is executing end when the Gateway cycles; "
+        "Gateway runs in other profiles are outside the restart"
+    ) in text
 
 
 def test_forced_agent_update_log_when_gateway_unmanaged(monkeypatch, caplog):

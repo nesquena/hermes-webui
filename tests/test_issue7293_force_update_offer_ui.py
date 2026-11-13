@@ -434,8 +434,10 @@ def test_agent_target_confirmation_names_the_gateway_runs_too(tmp_path):
             "title": "Interrupt active runs?",
             "message": (
                 "2 agent runs are still working in the WebUI and in the Gateway. "
-                "Updating the Agent also restarts the Gateway and stops them; the "
-                "WebUI runs are saved as interrupted. Wait for them to finish if you can."
+                "Updating the Agent also restarts the Gateway for this profile and "
+                "stops the Gateway runs it is executing; Gateway runs in other "
+                "profiles are outside that restart. The WebUI runs are saved as "
+                "interrupted. Wait for them to finish if you can."
             ),
             "confirmLabel": "Interrupt and update",
             "danger": True,
