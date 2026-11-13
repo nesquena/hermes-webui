@@ -7191,6 +7191,8 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
                 # WebUI-owned turns.
                 s.messages = list(latest_messages)
         return s
+    except SessionFileNamesOtherSession:
+        raise  # #9019: sid's file exists; never materialize over it
     except KeyError:
         pass
 
@@ -7463,6 +7465,8 @@ def _resolve_share_session_pair(sid: str, handler):
             cli_meta=cli_meta,
         )
         return snapshot_session, stored_session, cli_meta or {}
+    except SessionFileNamesOtherSession:
+        raise  # #9019: never synthesize over sid's file
     except KeyError:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
@@ -11734,13 +11738,23 @@ def _session_is_subagent_view_only(sid: str) -> bool:
     if _is_subagent_child_session_id(sid):
         return True
     try:
-        s = get_session(sid)
+        # #9019: this guard must read a swapped-in body to refuse it (master read the
+        # OTHER session's source tag here and refused a subagent body). Without the
+        # opt-in the boundary's KeyError fell to ``return False`` below, and routes that
+        # never call get_session themselves (delete, handoff-summary) mutated this id.
+        s = get_session(sid, allow_foreign_body=True)
     except Exception:
         return False
     src = (
         str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
             or getattr(s, "session_source", "") or "").strip().lower()
     )
+    if getattr(s, "_sidecar_names_other_session", None):
+        # The opt-in cached the foreign object under ``sid``; drop it again, as
+        # get_session does, so direct cache readers never act on it.
+        with LOCK:
+            if SESSIONS.get(sid) is s:
+                SESSIONS.pop(sid, None)
     return src == "subagent"
 
 
@@ -12070,6 +12084,9 @@ def _load_branch_source_or_refuse(handler, sid: str):
         return None
     try:
         source = get_session(sid)
+    except SessionFileNamesOtherSession:
+        bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
+        return None
     except KeyError:
         _foreign_session, _reason = _claim_or_synthesize_cli_session(sid)
         _source_kind = str((getattr(_foreign_session, "source_tag", None) or getattr(_foreign_session, "raw_source", None) or getattr(_foreign_session, "source", None) or "")).strip().lower() if _foreign_session is not None else ""
@@ -14344,6 +14361,7 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    SessionFileNamesOtherSession,
     get_cli_session_by_id,
     get_session,
     get_session_profile_readonly,
@@ -18042,6 +18060,12 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         if _diag: _diag.finish()
         return resp
+    except SessionFileNamesOtherSession:
+        # #9019: the file names another session, so this id is not found. Never
+        # fall through to the KeyError branch below, which claims or synthesizes
+        # a CLI session over the refused file.
+        if _diag: _diag.finish()
+        return bad(handler, "Session not found", 404)
     except KeyError:
         # perf(webui/session-load-latency) tier2c-followup: fire
         # _diag.finish() in the exception branch too. Greptile flagged
@@ -19068,6 +19092,8 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "session_id required")
         try:
             workspace = get_session(sid).workspace
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
         except KeyError:
             # state.db-only sessions (CLI, delegated subagents): same fallback as /api/list.
             cli_meta = _lookup_cli_session_metadata(sid)
@@ -20546,8 +20572,9 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Subagent sessions are view-only and cannot be duplicated from WebUI", 400)
 
             session = Session.load(sid)
-            if not session:
+            if not session or getattr(session, "_sidecar_names_other_session", None):
                 # 404, not 400 — missing resource, not a malformed request.
+                # #9019: a file that names another session is not this session.
                 return bad(handler, "Session not found", status=404)
 
             copy_messages = session.messages
@@ -20915,6 +20942,7 @@ def handle_post(handler, parsed) -> bool:
         # continues to work (routes.py imported it at module level).
         import api.routes as _routes
         _routes.get_session = _models.get_session
+        _routes.SessionFileNamesOtherSession = _models.SessionFileNamesOtherSession
         _routes.Session = _models.Session
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
@@ -22923,6 +22951,8 @@ def handle_post(handler, parsed) -> bool:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: never import over sid's file
         except KeyError:
             # #7776: reuse the CLI identity captured before the lock — the
             # lock-held reload can drop it. #7549/#7731: cross-profile archive
@@ -24415,6 +24445,8 @@ def _handle_list_dir(handler, parsed):
         s = get_session(sid)
         webui_session = s
         workspace = s.workspace
+    except SessionFileNamesOtherSession:
+        return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory. Resolved through
         # the same lookup as open/pin/rename, so a session outside the default
@@ -32153,6 +32185,8 @@ def _handle_chat_start(handler, body, diag=None):
                 # write of the turn would land there. Refuse before anything
                 # is mutated, with the generic ownership guard's answer.
                 return bad(handler, "Session not found", 404)
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -32642,7 +32676,10 @@ def _handle_chat_sync(handler, body):
         return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
-    s = get_session(body["session_id"])
+    try:
+        s = get_session(body["session_id"])
+    except SessionFileNamesOtherSession:
+        return bad(handler, "Session not found", 404)  # #9019 (an unknown id still raises as before)
     if getattr(s, "_sidecar_names_other_session", None):
         # #9000: the file holds a copy of another session's file, so the loaded
         # object carries that session's id; the turn would run under it.
