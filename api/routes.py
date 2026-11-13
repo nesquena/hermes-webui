@@ -36551,6 +36551,31 @@ def _handle_handoff_summary(handler, body):
             agent.reasoning_config = previous_reasoning
 
         # Call LLM for summary.
+    # Gateway mode owns model execution and the session's credentials: never
+    # build an in-process helper agent here (#8971). That path either fails on
+    # missing WebUI credentials or silently runs an LLM call outside the
+    # gateway. This handler exists specifically for gateway sessions, so use
+    # the deterministic local fallback — the same path taken when no provider
+    # key resolves — instead of refusing the feature with a 409.
+    if webui_gateway_chat_enabled(get_config_snapshot()):
+        summary_text = _fallback_handoff_summary(msgs)
+        try:
+            _persist_handoff_summary(
+                sid,
+                summary_text,
+                _resolve_handoff_channel_label(),
+                rounds,
+                fallback=True,
+            )
+        except Exception:
+            pass
+        return j(handler, {
+            "ok": True,
+            "summary": summary_text,
+            "message_count": len(msgs),
+            "rounds": rounds,
+            "fallback": True,
+        })
     try:
         ensure_agent_runtime_current()
         import api.config as _cfg
