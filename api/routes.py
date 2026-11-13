@@ -29183,12 +29183,18 @@ def _handle_btw(handler, body):
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
-    # Duplicate-stream guard (same pattern as chat/start)
+    # Duplicate-stream guard (same pattern as chat/start): decide under the
+    # lock, respond outside it. ``j`` writes to the client socket, and a client
+    # that stopped reading would otherwise stall every stream start/Stop/steer
+    # waiting on STREAMS_LOCK for the duration of the write.
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
         with STREAMS_LOCK:
-            if current_stream_id in STREAMS:
-                return j(handler, {"error": "session already has an active stream"}, status=409)
+            busy = current_stream_id in STREAMS
+        if busy:
+            return j(handler, {"error": "session already has an active stream"}, status=409)
+        # Only clear the id when the stream is really gone; a live stream keeps
+        # its owner even though this request is refused above.
         s.active_stream_id = None
     # Create ephemeral hidden session inheriting context
     from api.models import new_session as _new_session
