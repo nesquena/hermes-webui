@@ -569,13 +569,16 @@ status banner). Note carefully what force update discards:
 
 If force update refuses with an incomplete history error ("Cannot verify ancestry of ... the local Git
 history is incomplete or unreadable"), the repository was cloned with shallow history (e.g., `--depth 1`)
-or lacks ancestry connection to the remote release tag. Before retrying force update, deepen or unshallow
-the history in the repository directory:
+or lacks ancestry connection to the remote release tag. Note that fetching tags does not remove a shallow
+boundary (`git fetch --tags` on a `--depth` clone leaves `git rev-parse --is-shallow-repository` reporting
+`true`). When a bounded deepening leaves the history incomplete, the updater fails closed instead of
+offering a destructive repair. Before retrying force update, deepen or unshallow the history in the
+repository directory:
 
 ```bash
 git fetch --unshallow
-# or if unshallow is not supported:
-git fetch --tags --force
+# or repeatedly deepen history:
+git fetch --deepen=100
 ```
 
 Once full history is fetched, verify status in **Settings → Updates** and retry the update.

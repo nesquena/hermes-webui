@@ -237,3 +237,175 @@ def test_experimental_channel_still_branch_compares(tmp_path, origin_repo):
 
     assert updates._select_apply_compare_ref(repo, 'experimental', 'webui') == 'origin/master'
     assert updates._select_apply_compare_ref(repo, 'stable', 'agent') == 'origin/master'
+
+
+@pytest.fixture
+def two_parent_origin(tmp_path):
+    """Upstream repo with a two-parent merge:
+    B(v1.0.0) -- S(v1.0.1) -- [intermediate] -- M (installed)
+     \\________________________ T ______________/
+    pushed to bare origin.git.
+    """
+    upstream = tmp_path / 'upstream'
+    upstream.mkdir()
+    _git(upstream, 'init', '-q', '-b', 'master')
+    _git(upstream, 'config', 'user.email', 't@t.co')
+    _git(upstream, 'config', 'user.name', 'Test')
+
+    (upstream / 'f.txt').write_text('B\n', encoding='utf-8')
+    _git(upstream, 'add', 'f.txt')
+    _git(upstream, 'commit', '-q', '-m', 'B')
+    _git(upstream, 'tag', 'v1.0.0')
+
+    _git(upstream, 'checkout', '-q', '-b', 'side')
+    (upstream / 'side.txt').write_text('T\n', encoding='utf-8')
+    _git(upstream, 'add', 'side.txt')
+    _git(upstream, 'commit', '-q', '-m', 'T')
+
+    _git(upstream, 'checkout', '-q', 'master')
+    (upstream / 'f.txt').write_text('S\n', encoding='utf-8')
+    _git(upstream, 'commit', '-q', '-am', 'S')
+    _git(upstream, 'tag', 'v1.0.1')
+
+    # Intermediate commits on master past S so bounded deepening does not expose S
+    tree = _git(upstream, 'write-tree')
+    parent = _git(upstream, 'rev-parse', 'HEAD')
+    for i in range(280):
+        res = subprocess.run(
+            ['git', 'commit-tree', tree, '-p', parent, '-m', f'c{i}'],
+            cwd=str(upstream),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        parent = res.stdout.strip()
+    _git(upstream, 'update-ref', 'refs/heads/master', parent)
+
+    _git(upstream, 'merge', '-q', '--no-ff', '-m', 'M', 'side')
+    m_sha = _git(upstream, 'rev-parse', 'HEAD')
+
+    origin = tmp_path / 'origin.git'
+    subprocess.run(
+        ['git', 'init', '--bare', '-q', '--initial-branch=master', str(origin)],
+        check=True,
+        capture_output=True,
+    )
+    _git(upstream, 'push', '-q', str(origin), 'master')
+    _git(upstream, 'push', '-q', str(origin), '--tags')
+
+    origin_url = f'file://{origin.resolve().as_posix()}'
+    return origin_url, m_sha
+
+
+def test_two_parent_shallow_merge_does_not_rewind(tmp_path, two_parent_origin, monkeypatch):
+    """Review P1 regression:
+    Clone --depth 3 of the two-parent origin, fetch tags.
+    Merge base HEAD v1.0.1 resolves to B through side branch T, but
+    ancestry_relation must not be ANCESTRY_DIVERGENT. Payload carries
+    ancestry_unknown (no repair_required), and force update refuses rewind.
+    """
+    origin_url, m_sha = two_parent_origin
+    repo = tmp_path / 'shallow_clone'
+    subprocess.run(
+        ['git', 'clone', '-q', '--depth', '3', origin_url, str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'fetch', '-q', '--tags')
+
+    assert updates._repository_is_shallow(repo) is True
+    assert updates._head_contains_ref(repo, 'v1.0.1') is False
+    assert updates._can_fast_forward_to(repo, 'v1.0.1') is False
+    assert updates._has_reachable_merge_base(repo, 'v1.0.1') is True
+
+    relation = updates._ancestry_relation(repo, 'v1.0.1')
+    assert relation is not updates.ANCESTRY_DIVERGENT
+    assert relation == updates.ANCESTRY_UNKNOWN
+
+    info = updates._check_repo(repo, 'webui', 'stable')
+    assert info is not None
+    assert info.get('ancestry_unknown') is True
+    assert not info.get('repair_required')
+    assert not info.get('divergent')
+
+    monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+    head_before = _git(repo, 'rev-parse', 'HEAD')
+    assert head_before == m_sha
+
+    force_res = updates._apply_force_update_inner('webui', 'stable')
+    assert force_res.get('ok') is False
+    assert force_res.get('refused_rewind') is True
+    assert force_res.get('ancestry_unknown') is True
+
+    head_after = _git(repo, 'rev-parse', 'HEAD')
+    assert head_after == head_before
+
+
+def test_incomplete_after_bounded_deepening_is_unknown(tmp_path, two_parent_origin, monkeypatch):
+    """Bounded deepening case:
+    Promoted tag v1.0.1 is more than 64 commits behind M on the main path,
+    so a single fetch --deepen=64 cannot expose it. The repository remains
+    shallow after _ancestry_relation ran, relation is ANCESTRY_UNKNOWN (not DIVERGENT),
+    and force update refuses with HEAD preserved.
+    """
+    origin_url, m_sha = two_parent_origin
+    repo = tmp_path / 'shallow_clone'
+    subprocess.run(
+        ['git', 'clone', '-q', '--depth', '3', origin_url, str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'fetch', '-q', '--tags')
+
+    relation = updates._ancestry_relation(repo, 'v1.0.1')
+    assert updates._repository_is_shallow(repo) is True
+    assert relation == updates.ANCESTRY_UNKNOWN
+    assert relation is not updates.ANCESTRY_DIVERGENT
+
+    monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+    head_before = _git(repo, 'rev-parse', 'HEAD')
+    assert head_before == m_sha
+
+    force_res = updates._apply_force_update_inner('webui', 'stable')
+    assert force_res.get('ok') is False
+    assert force_res.get('refused_rewind') is True
+    assert force_res.get('ancestry_unknown') is True
+
+    head_after = _git(repo, 'rev-parse', 'HEAD')
+    assert head_after == head_before
+
+
+def test_two_parent_full_history_is_ancestor(tmp_path, two_parent_origin, monkeypatch):
+    """Control: full clone of the same two-parent origin.
+    History is complete, so v1.0.1 is proven an ancestor of HEAD (ANCESTRY_ANCESTOR),
+    force refuses rewind, and HEAD is preserved.
+    """
+    origin_url, m_sha = two_parent_origin
+    repo = tmp_path / 'full_clone'
+    subprocess.run(
+        ['git', 'clone', '-q', origin_url, str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+
+    relation = updates._ancestry_relation(repo, 'v1.0.1')
+    assert relation == updates.ANCESTRY_ANCESTOR
+
+    monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+    head_before = _git(repo, 'rev-parse', 'HEAD')
+    assert head_before == m_sha
+
+    force_res = updates._apply_force_update_inner('webui', 'stable')
+    assert force_res.get('up_to_date') or force_res.get('refused_rewind')
+    head_after = _git(repo, 'rev-parse', 'HEAD')
+    assert head_after == head_before
+

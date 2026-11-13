@@ -1408,8 +1408,14 @@ def _ancestry_relation(path, ref, *, allow_deepen=True):
     Outcome is one of:
     - ANCESTRY_ANCESTOR: ref is an ancestor of HEAD (applying ref would rewind)
     - ANCESTRY_DESCENDANT: HEAD is an ancestor of ref (fast-forward possible)
-    - ANCESTRY_DIVERGENT: proven divergent (shared merge base exists, neither direction)
+    - ANCESTRY_DIVERGENT: proven divergent (shared merge base exists, neither direction,
+      and repository is not shallow)
     - ANCESTRY_UNKNOWN: shallow/incomplete history or git failure
+
+    Invariant: ANCESTRY_DIVERGENT requires three conditions together —
+    neither `--is-ancestor` direction holds, `merge-base HEAD <ref>` resolves,
+    and `rev-parse --is-shallow-repository` is `false` at the moment of the decision.
+    Any Git failure keeps collapsing to ANCESTRY_UNKNOWN.
     """
     if not ref:
         return ANCESTRY_UNKNOWN
@@ -1421,7 +1427,14 @@ def _ancestry_relation(path, ref, *, allow_deepen=True):
     if can_ff:
         return ANCESTRY_DESCENDANT
     if _has_reachable_merge_base(path, ref):
-        return ANCESTRY_DIVERGENT
+        if not _repository_is_shallow(path):
+            return ANCESTRY_DIVERGENT
+        if allow_deepen and _deepen_history_once(path):
+            re_eval = _ancestry_relation(path, ref, allow_deepen=False)
+            if re_eval == ANCESTRY_DIVERGENT and _repository_is_shallow(path):
+                return ANCESTRY_UNKNOWN
+            return re_eval
+        return ANCESTRY_UNKNOWN
     if allow_deepen and _repository_is_shallow(path) and _deepen_history_once(path):
         return _ancestry_relation(path, ref, allow_deepen=False)
     return ANCESTRY_UNKNOWN
