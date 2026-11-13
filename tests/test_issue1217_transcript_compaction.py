@@ -336,7 +336,7 @@ def test_near_duplicate_session_arc_summary_is_not_replayed_in_context():
         {"role": "user", "content": "next question"},
     ]
 
-    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+    next_context, _protected = _dedupe_replayed_context_messages(previous_context, result_messages)
 
     assert [m["content"] for m in next_context] == [
         summary_a["content"],
@@ -363,7 +363,7 @@ def test_non_adjacent_replayed_context_block_is_not_appended_again():
         {"role": "user", "content": "next question"},
     ]
 
-    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+    next_context, _protected = _dedupe_replayed_context_messages(previous_context, result_messages)
 
     assert [m["content"] for m in next_context] == [
         "older setup",
@@ -703,7 +703,7 @@ def test_non_streaming_chat_writeback_dedupes_full_context_replay():
         {"role": "assistant", "content": "short answer"},
     ]
 
-    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+    next_context, _protected = _dedupe_replayed_context_messages(previous_context, result_messages)
 
     assert next_context == previous_context + [
         {"role": "user", "content": "simple follow-up"},

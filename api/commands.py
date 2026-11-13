@@ -242,10 +242,20 @@ def _run_codex_runtime_command(arg_string: str) -> str:
             active_config = webui_config.get_config()
 
             def _persist_config(config_data: dict) -> None:
-                webui_config._save_yaml_config_file(
-                    webui_config._get_config_path(),
-                    config_data,
-                )
+                # config_data is the env-EXPANDED runtime config (plus applied
+                # defaults). Persist only the key the switch owns onto the RAW
+                # document so ${VAR} references elsewhere survive (#8032).
+                model_cfg = config_data.get("model")
+                runtime = model_cfg.get("openai_runtime") if isinstance(model_cfg, dict) else None
+                config_path = webui_config._get_config_path()
+                with webui_config._cfg_lock:
+                    raw = webui_config._load_yaml_config_file_raw(config_path)
+                    raw_model = raw.get("model")
+                    if not isinstance(raw_model, dict):
+                        raw_model = {}
+                    raw_model["openai_runtime"] = runtime
+                    raw["model"] = raw_model
+                    webui_config._save_yaml_config_file(config_path, raw)
                 webui_config.reload_config()
 
             status = apply(active_config, new_value, persist_callback=_persist_config)
@@ -467,6 +477,21 @@ def _load_config_for_moa_resolution() -> dict:
 
     cfg = load_config()
     return cfg if isinstance(cfg, dict) else {}
+
+
+def agent_has_moa_virtual_provider() -> bool:
+    """Return True when hermes-agent serves the virtual ``moa`` provider itself.
+
+    Such agents run a ``moa`` session's preset through their MoA facade, so the
+    WebUI must not also thread a per-turn ``moa_config``. ``resolve_moa_preset``
+    shipped in the same hermes-agent change as the virtual provider, so it is a
+    cheap, import-only capability probe.
+    """
+    try:
+        from hermes_cli.moa_config import resolve_moa_preset  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def resolve_moa_config(preset: str | None = None) -> dict:

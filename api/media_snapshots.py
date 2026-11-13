@@ -499,6 +499,7 @@ def annotate_media_snapshots(
     Returns the number of new snapshots captured (0 on a repeat settle).
     """
     import re as _re
+    from api.helpers import split_media_token_ref
 
     if resolve_ref is None:
         resolve_ref = resolve_media_ref
@@ -511,7 +512,6 @@ def annotate_media_snapshots(
     # the path. Then the bare class (no backtick in the exclusion
     # set) captures the full filename even when the path itself
     # contains a backtick (e.g. ``report`final.png``).
-    backtick_re = _re.compile(r"`MEDIA:([^`\s]+)`")
     captured = 0
     for msg in messages or []:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
@@ -537,14 +537,20 @@ def annotate_media_snapshots(
         if not text_parts:
             continue
         text = "\n".join(text_parts)
-        text = backtick_re.sub(lambda m: f"MEDIA:{m.group(1)}", text)
-        refs = media_re.findall(text)
-        if not refs:
+        matches = list(media_re.finditer(text))
+        if not matches:
             continue
         existing = msg.get("_media_snapshots")
         snaps = dict(existing) if isinstance(existing, dict) else {}
         changed = False
-        for raw_ref in refs:
+        for match in matches:
+            parts = split_media_token_ref(text, match)
+            if not parts:
+                continue
+            raw_ref, _suffix = parts
+            raw_ref = raw_ref.strip()
+            if not raw_ref:
+                continue
             if resolve_ref is not None:
                 try:
                     path = resolve_ref(raw_ref)

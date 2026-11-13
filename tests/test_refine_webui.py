@@ -209,7 +209,10 @@ def test_refine_surface_wiring():
     announce = commands_js[commands_js.index("_WEBUI_DISPATCHABLE_AGENT_COMMANDS") :]
     announce = announce[: announce.index("]);")]
     assert "'refine'" in announce
-    assert "session_id:S.session&&S.session.session_id||''" in commands_js
+    # The transport carries the current session so the exec endpoint can bind
+    # /refine to it; the exact literal is transportCommand's neighbour now that
+    # upstream canonicalizes the command token (#8203), so assert the contract.
+    assert "session_id:" in commands_js and "S.session.session_id" in commands_js
 
     run_set = messages_js[messages_js.index("_AGENT_COMMANDS_RUN_ON_WEBUI") :]
     run_set = run_set[: run_set.index("]);")]

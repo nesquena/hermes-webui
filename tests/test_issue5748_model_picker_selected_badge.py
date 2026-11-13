@@ -18,12 +18,34 @@ def test_model_dropdown_uses_viewport_height_cap():
     assert "max-height:min(70vh,640px);overflow-y:auto;" in STYLE_CSS
 
 
+def test_composer_picker_search_row_pins_under_the_scope_note():
+    # Opening the picker centres the selected row, so a deep selection scrolls
+    # the list; the composer picker must pin its search row under the sticky
+    # scope note or the search box scrolls out of view. Same idiom as the
+    # Settings picker (.settings-model-dropdown .model-search-row).
+    assert ".model-dropdown .model-search-row{position:sticky;top:var(--model-scope-note-h,34px);background:var(--surface);z-index:1;}" in STYLE_CSS
+
+
 def test_toggle_model_dropdown_scrolls_active_row_after_open():
     body = _body_between(UI_JS, "async function toggleModelDropdown()", "function closeModelDropdown")
 
     assert "_positionModelDropdown();" in body
-    assert "scrollIntoView({block:'nearest'})" in body
-    assert body.index("_positionModelDropdown();") < body.index("scrollIntoView({block:'nearest'})")
+    # The open path centres the selected row (block:'center') so a deep
+    # selection opens with context above and below, instead of being pinned
+    # to the list's edge the way a bare nearest-scroll left it.
+    assert "scrollIntoView({block:'center'})" in body
+    assert body.index("_positionModelDropdown();") < body.index("scrollIntoView({block:'center'})")
+
+
+def test_arrow_key_navigation_keeps_the_nearest_scroll_block():
+    """Keyboard navigation must keep block:'nearest' while the open path
+    centres the selection. Pinned separately so an edit to the open path
+    cannot silently change the arrow-key scroll behaviour.
+    """
+    body = _body_between(UI_JS, "const _highlightRow=(rows,idx)=>{", "_si.addEventListener('keydown',e=>{")
+
+    assert "row.scrollIntoView({block:'nearest'})" in body
+    assert "block:'center'" not in body
 
 
 def test_model_picker_renders_selected_badge_without_replacing_configured_badge():

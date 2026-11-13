@@ -120,10 +120,41 @@ def test_index_html_injection_escapes_urls_and_preserves_disabled_default(tmp_pa
 
     injected = inject_extension_tags(html)
 
-    assert '<link rel="stylesheet" href="/extensions/app.css">' in injected
-    assert '<script src="/extensions/app.js?v=1&amp;mode=dev" defer></script>' in injected
-    assert injected.index("/extensions/app.css") < injected.index("</head>")
-    assert injected.index("/extensions/app.js") < injected.index("</body>")
+    assert '<link rel="stylesheet" href="extensions/app.css">' in injected
+    assert '<script src="extensions/app.js?v=1&amp;mode=dev" defer></script>' in injected
+    assert injected.index("extensions/app.css") < injected.index("</head>")
+    assert injected.index("extensions/app.js") < injected.index("</body>")
+
+
+def test_injected_extension_tags_stay_inside_a_subpath_mount(tmp_path, monkeypatch):
+    """Injected tags must be mount-relative, like the shell's own asset tags.
+
+    ``static/index.html`` injects ``<base href>`` from ``location.pathname`` so
+    the app can be served at a reverse-proxy subpath (``/hermes/``). A tag with
+    a leading slash resolves against the origin root and 404s there — the same
+    failure the ``sw.js`` regression test guards against for the service worker
+    (``tests/test_pwa_manifest_sw.py``).
+
+    Before the fix this test fails: the injected src/href carry the leading
+    slash, so a browser at ``https://host/hermes/`` requests
+    ``https://host/extensions/...`` instead of ``https://host/hermes/extensions/...``.
+    """
+    root = tmp_path / "extensions"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", "/extensions/app.js")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", "/extensions/app.css")
+
+    from api.extensions import inject_extension_tags
+
+    injected = inject_extension_tags("<html><head></head><body></body></html>")
+
+    # Relative form resolves through <base href> on both root and subpath mounts.
+    assert '<script src="extensions/app.js" defer></script>' in injected
+    assert '<link rel="stylesheet" href="extensions/app.css">' in injected
+    # Must NOT carry the origin-root form.
+    assert 'src="/extensions/app.js"' not in injected
+    assert 'href="/extensions/app.css"' not in injected
 
 
 def test_extension_settings_runtime_config_injects_before_extension_scripts(tmp_path, monkeypatch):
@@ -157,7 +188,7 @@ def test_extension_settings_runtime_config_injects_before_extension_scripts(tmp_
     assert "window.HermesExtensionSettings.primeFromStatus(window.__HERMES_EXTENSION_CONFIG__)" in injected
     assert '"storage_owned":true' in injected
     assert '"settings_schema":[{"key":"flag","type":"boolean"' in injected
-    assert injected.index("window.__HERMES_EXTENSION_CONFIG__") < injected.index("/extensions/settings-ok.js")
+    assert injected.index("window.__HERMES_EXTENSION_CONFIG__") < injected.index("extensions/settings-ok.js")
 
 
 def test_extension_settings_only_manifest_still_injects_runtime_config(tmp_path, monkeypatch):
@@ -713,3 +744,49 @@ def test_extension_static_serving_rejects_symlink_escape(tmp_path, monkeypatch):
     escaped = FakeHandler()
     assert serve_extension_static(escaped, SimpleNamespace(path="/extensions/outside-link.txt")) is True
     assert escaped.status == 404
+
+
+def test_session_prefixed_extension_assets_serve_the_asset_not_the_shell(tmp_path, monkeypatch):
+    """Mount-relative tags (#8521): on /session/<id> a speculative preload asks
+    for /session/extensions/<file>. It must get the asset with its real MIME
+    type, not the HTML shell from the /session/ catch-all."""
+    from urllib.parse import urlparse
+
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "app.css").write_text("body{color:red}", encoding="utf-8")
+    (root / "app.js").write_text("window.extensionLoaded = true;", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+
+    from api.routes import handle_get
+
+    css = FakeHandler()
+    assert handle_get(css, urlparse("http://example.com/session/extensions/app.css")) is True
+    assert css.status == 200
+    assert (css.header("Content-Type") or "").startswith("text/css")
+    assert bytes(css.body) == b"body{color:red}"
+
+    js = FakeHandler()
+    assert handle_get(js, urlparse("http://example.com/session/extensions/app.js")) is True
+    assert js.status == 200
+    assert (js.header("Content-Type") or "").startswith("application/javascript")
+
+    traversal = FakeHandler()
+    assert handle_get(traversal, urlparse("http://example.com/session/extensions/%2e%2e/outside.txt")) is True
+    assert traversal.status == 404
+
+
+def test_session_prefixed_extension_assets_stay_behind_webui_auth(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
+
+    from api.auth import check_auth, _invalidate_password_hash_cache
+
+    _invalidate_password_hash_cache()
+    try:
+        handler = FakeHandler()
+        assert check_auth(handler, SimpleNamespace(path="/session/extensions/app.js", query="")) is False
+        assert handler.status == 302
+    finally:
+        _invalidate_password_hash_cache()

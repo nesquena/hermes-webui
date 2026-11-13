@@ -13,13 +13,13 @@ PATH DISCOVERY:
     3. Common install paths (~/.hermes/hermes-agent)
     4. System python3 as a last resort
 """
+import copy
 import json
 import inspect
 import multiprocessing
 import os
 import pathlib
 import shutil
-import stat
 import subprocess
 import sys
 import time
@@ -128,10 +128,31 @@ import tempfile as _tempfile
 _TEST_STATE_ROOT = pathlib.Path(
     os.getenv('HERMES_WEBUI_TEST_STATE_ROOT', _tempfile.gettempdir())
 ) / 'hermes-webui-tests'
-TEST_STATE_DIR = pathlib.Path(os.getenv(
-    'HERMES_WEBUI_TEST_STATE_DIR',
-    str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT, TEST_PORT))
-)).resolve()
+# ``os.getenv(name, default)`` returns "" (not the default) when the variable is
+# exported but empty, and ``Path("").resolve()`` is the CURRENT DIRECTORY — so a
+# bare ``HERMES_WEBUI_TEST_STATE_DIR=`` pointed the test state dir at the checkout
+# and teardown rmtree'd the repo. Treat an empty (or whitespace-only) value as
+# unset; a non-blank value is used exactly as given (a directory name may end in
+# a space, and stripping it would select, then clean, the parent directory).
+_TEST_STATE_DIR_RAW = os.getenv('HERMES_WEBUI_TEST_STATE_DIR') or ''
+TEST_STATE_DIR = pathlib.Path(
+    _TEST_STATE_DIR_RAW if _TEST_STATE_DIR_RAW.strip()
+    else str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT, TEST_PORT))
+).resolve()
+
+# Belt and braces for an explicit value: never let the session fixture (which
+# rmtrees the state dir at setup and teardown) delete the checkout, anything
+# above it, or anything inside it (``tests``, ``static``, a relative path).
+if (TEST_STATE_DIR == REPO_ROOT
+        or TEST_STATE_DIR in REPO_ROOT.parents
+        or REPO_ROOT in TEST_STATE_DIR.parents):
+    raise RuntimeError(
+        f"REFUSING TO RUN: test state dir {TEST_STATE_DIR} is the repo checkout "
+        f"({REPO_ROOT}), one of its parents, or a directory inside it, so the "
+        f"state-dir cleanup would delete repository files. Unset "
+        f"HERMES_WEBUI_TEST_STATE_DIR (defaults to a temp dir) or point it "
+        f"outside the checkout."
+    )
 
 # Production-proximity guard: refuse to run if the resolved test state dir lands
 # inside the REAL Hermes home tree — a misconfigured HERMES_WEBUI_TEST_STATE_DIR
@@ -175,6 +196,9 @@ os.environ['HERMES_WEBUI_TEST_STATE_DIR'] = str(TEST_STATE_DIR)
 os.environ['HERMES_WEBUI_STATE_DIR'] = str(TEST_STATE_DIR)
 os.environ['HERMES_WEBUI_DEFAULT_WORKSPACE'] = str(TEST_WORKSPACE)
 os.environ['HERMES_HOME'] = str(TEST_STATE_DIR)
+# Never let a test process, or a server.py child that copies os.environ, install Agent
+# dependencies into the test home (pm.install.lazy_installs_allowed / venv_sync.prepare_launch).
+os.environ['HERMES_DISABLE_LAZY_INSTALLS'] = '1'
 os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # Hermes Agent sessions may inherit HERMES_CONFIG_PATH pointing at the live
 # ~/.hermes/config.yaml.  Override it before any product modules are imported so
@@ -203,6 +227,127 @@ def _isolate_hermes_config_path():
     os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
     yield
     os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
+
+
+# TEST_STATE_DIR is both the live test server's state dir and the in-process
+# HERMES_HOME of the default profile, so a state.db one test leaves there is
+# inherited by every later test and by the server. A real Agent SessionDB opened
+# there (for example by a fake-Agent streaming worker) creates the Agent schema,
+# whose unique title index made test_gateway_sync's INSERT OR REPLACE fixtures
+# silently delete their own rows. Tests that need a shared state.db create it
+# themselves (see test_gateway_sync._ensure_state_db).
+_SHARED_STATE_DB_FILES = tuple(
+    TEST_STATE_DIR / f"state.db{suffix}" for suffix in ("", "-wal", "-shm", "-journal")
+)
+
+
+def _shared_state_db_identity():
+    identity = []
+    for path in _SHARED_STATE_DB_FILES:
+        try:
+            st = path.stat()
+        except OSError:
+            identity.append(None)
+        else:
+            identity.append((st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns))
+    return tuple(identity)
+
+
+@pytest.fixture(autouse=True)
+def _avoid_leaking_shared_state_db():
+    """Remove a shared state.db that this test created or changed.
+
+    The files are compared by identity (inode, size, mtime) before and after the
+    test. When any of them differs, the whole family is removed: state.db and its
+    -wal/-shm/-journal sidecars only make sense together, so a partial removal
+    could leave a database next to a WAL from another generation. A file that was
+    already there and that the test left untouched is not removed. Removing a file
+    that a connection still holds open is safe on POSIX: SQLite skips the
+    close-time checkpoint and WAL unlink for a database file that was unlinked,
+    so a late close cannot delete the WAL of a database the next test creates.
+    Where the OS refuses to unlink an open file (Windows), the file is left as before.
+
+    The name sorts first among this file's autouse fixtures, and pytest orders
+    same-scope autouse fixtures from one conftest by name, so this one is set up
+    first and torn down last, after cleanup_test_sessions has talked to the server.
+    """
+    before = _shared_state_db_identity()
+    yield
+    # A background cwd sync (api.state_sync.sync_session_cwd_background) that the test started can still be about to
+    # open SessionDB here; deleting first and letting it recreate state.db afterwards would leak the file to the next
+    # test. Drain those threads before comparing. Nothing to drain when the module was never imported.
+    state_sync = sys.modules.get('api.state_sync')
+    if state_sync is not None and not state_sync.drain_cwd_syncs():
+        pytest.fail('background cwd sync did not finish')
+    after = _shared_state_db_identity()
+    if after == before:
+        return
+    for path in _SHARED_STATE_DB_FILES:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+# A test that launches `sys.executable` with an env built from scratch drops the
+# suite's HERMES_DISABLE_LAZY_INSTALLS. On a machine whose Hermes Agent is a
+# PM-managed install, that subprocess then installs a full Agent environment
+# (~1.1 GB) into the test's temp HOME, once per test. A full local suite left
+# ~16 GB behind and filled the disk. CI has no Agent checkout, so it never shows
+# there. Fail the offending test by name instead, so the fix (pass
+# HERMES_DISABLE_LAZY_INSTALLS=1 in the subprocess env) is obvious.
+_AGENT_INSTALL_GLOBS = (
+    "installs/*/environments",
+    "*/installs/*/environments",
+    "*/*/installs/*/environments",
+)
+# Tests that fake a managed install (test_managed_profile_startup) leave a few KB
+# here; a real environment is hundreds of MB. Only flag the real thing.
+_AGENT_INSTALL_FLAG_BYTES = 50 * 1024 * 1024
+
+
+def _tree_exceeds(root, limit):
+    total = 0
+    stack = [str(root)]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+                    if total > limit:
+                        return True
+            except OSError:
+                continue
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _no_agent_environment_installed_into_tmp_path(request):
+    yield
+    tmp = request.node.funcargs.get("tmp_path") if hasattr(request.node, "funcargs") else None
+    if tmp is None:
+        return
+    tmp_root = pathlib.Path(tmp).resolve()
+    hits = [
+        str(p)
+        for pattern in _AGENT_INSTALL_GLOBS
+        for p in pathlib.Path(tmp).glob(pattern)
+        # Only trees that physically live under tmp_path: a test that symlinks an
+        # installs/ or environments/ dir at the real ~/.hermes must not be flagged.
+        if p.resolve().is_relative_to(tmp_root) and _tree_exceeds(p, _AGENT_INSTALL_FLAG_BYTES)
+    ]
+    if hits:
+        pytest.fail(
+            "a subprocess installed a Hermes Agent environment into this test's tmp_path "
+            f"({hits[0]}); pass HERMES_DISABLE_LAZY_INSTALLS=1 in the subprocess env",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -440,6 +585,7 @@ requires_agent_modules = pytest.mark.skipif(
 )
 
 def pytest_configure(config):
+    _repo_git_guard.pytest_configure(config)  # records --basetemp for the guard (see tests/_real_repo_git_guard.py)
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
     config.addinivalue_line("markers", "requires_fcntl: skip when fcntl-backed file-descriptor operations are unavailable")
@@ -518,9 +664,13 @@ os.execv = _pytest_session_safe_execv
 #
 # This module-level monkey-patch wraps socket.create_connection so any
 # non-loopback / non-RFC1918 / non-link-local / non-TEST-NET destination
-# raises OSError("hermes test network isolation").  Tests that deliberately
-# attempt outbound (only test_dns_resolution_failure today) opt back in
-# explicitly via the `allow_outbound_network` fixture below.
+# raises OSError("hermes test network isolation"). It also wraps
+# socket.getaddrinfo: DNS is network, and an unbounded lookup on a slow CI
+# resolver is as harmful as a connect. Only IP literals and localhost resolve;
+# every other name fails at once with socket.gaierror, the way an unresolvable
+# name does. Only the isolation tests themselves (test_conftest_network_isolation.py,
+# test_conftest_dns_isolation.py) opt back in, via the `allow_outbound_network`
+# fixture below; everything else mocks the network.
 #
 # Allowed destinations (silent pass-through):
 #   - 127.0.0.0/8     loopback
@@ -534,12 +684,16 @@ os.execv = _pytest_session_safe_execv
 #   - 203.0.113.0/24  RFC5737 TEST-NET-3 (used as documentation IPs in tests)
 #   - hostnames `localhost`, `*.local`, `*.test`, `*.example`, `*.example.com`
 #     `*.example.net`, `*.example.org`, `*.invalid` (RFC2606/6761 reserved)
+#     at the connect layer. Under the DNS guard only `localhost` and
+#     `*.localhost` (and IP literals) resolve: a test that connects to one of
+#     the other reserved names must stub socket.getaddrinfo itself.
 #
 # A test that opts in via the `allow_outbound_network` fixture sees the real
-# socket.create_connection.
+# socket.create_connection, socket.socket.connect and socket.getaddrinfo.
 import socket as _hermes_test_socket
 _REAL_CREATE_CONNECTION = _hermes_test_socket.create_connection
 _REAL_SOCKET_CONNECT = _hermes_test_socket.socket.connect
+_REAL_GETADDRINFO = _hermes_test_socket.getaddrinfo
 
 
 def _hermes_addr_is_local(host: str) -> bool:
@@ -617,29 +771,129 @@ def _hermes_blocked_socket_connect(self, address):
     )
 
 
+def _hermes_dns_free_host(host) -> bool:
+    """True when getaddrinfo() can answer without a DNS query: no host, an IP literal or localhost."""
+    if host is None:
+        return True
+    if isinstance(host, (bytes, bytearray)):
+        host = bytes(host).decode("ascii", "ignore")
+    h = str(host).strip().strip("[]").lower()
+    if not h or h == "localhost" or h.endswith(".localhost"):
+        return True
+    import ipaddress as _ipaddress
+    try:
+        _ipaddress.ip_address(h.split("%", 1)[0])
+        return True
+    except ValueError:
+        if h.count(".") == 3 and all(c in "0123456789." for c in h):
+            try:
+                _hermes_test_socket.inet_aton(h)
+                return True
+            except OSError:
+                pass
+        return False
+
+
+def _hermes_blocked_getaddrinfo(host, *a, **kw):
+    # DNS is network too. Blocking only connects left real lookups in place: a code path that resolves a
+    # hostname before connecting (the custom-provider SSRF pre-check does) waited on the runner's resolver,
+    # with no timeout, and a slow CI resolver pushed the model-catalog rebuild past its 4 s budget, so
+    # tests saw the budget fallback (test_credential_pool_providers, CI shard 4). Answer at once, the way an
+    # unresolvable name answers; IP literals and localhost need no DNS and pass through.
+    if _hermes_dns_free_host(host):
+        return _REAL_GETADDRINFO(host, *a, **kw)
+    raise _hermes_test_socket.gaierror(
+        _hermes_test_socket.EAI_NONAME,
+        f"hermes test network isolation: DNS lookup of {host!r} is blocked. "
+        f"Mock socket.getaddrinfo, or request the allow_outbound_network fixture.",
+    )
+
+
 _hermes_test_socket.create_connection = _hermes_blocked_create_connection
 _hermes_test_socket.socket.connect = _hermes_blocked_socket_connect
+_hermes_test_socket.getaddrinfo = _hermes_blocked_getaddrinfo
 
 
 @pytest.fixture
 def allow_outbound_network(monkeypatch):
     """Opt-in to real outbound network for the duration of one test.
 
-    Swaps `socket.create_connection` and `socket.socket.connect` back to the
-    real (unwrapped) implementations for this test only, then monkeypatch
+    Swaps `socket.create_connection`, `socket.socket.connect` and
+    `socket.getaddrinfo` back to the real (unwrapped) implementations for this test only, then monkeypatch
     teardown restores the wrapped versions. Direct swap is more reliable
     than a module-global toggle on CI runners where wrapper-closure
     lookup semantics can surprise.
 
-    Use sparingly. Today zero tests in the repo call this — the previous
+    Use sparingly. Only the isolation tests themselves use it; the previous
     test_dns_resolution_failure case was rewritten to mock socket.getaddrinfo
     instead, which is fully hermetic.
     """
     monkeypatch.setattr(_hermes_test_socket, "create_connection", _REAL_CREATE_CONNECTION)
     monkeypatch.setattr(_hermes_test_socket.socket, "connect", _REAL_SOCKET_CONNECT)
+    monkeypatch.setattr(_hermes_test_socket, "getaddrinfo", _REAL_GETADDRINFO)
     yield
 
 
+# ── Real-checkout git guard ─────────────────────────────────────────────────
+# Installed once here, like the network guard above: see tests/_real_repo_git_guard.py.
+from tests import _real_repo_git_guard as _repo_git_guard  # noqa: E402
+
+from api.config import _AGENT_DIR as _PRODUCTION_AGENT_DIR  # noqa: E402  (the runtime's own discovery)
+
+_repo_git_guard.install(REPO_ROOT, HERMES_AGENT, _PRODUCTION_AGENT_DIR)
+pytest_runtest_logstart = _repo_git_guard.pytest_runtest_logstart
+pytest_runtest_makereport = _repo_git_guard.pytest_runtest_makereport
+
+
+@pytest.fixture
+def allow_real_repo_git(monkeypatch):
+    """Opt in to real mutating git against the checkout for one test."""
+    monkeypatch.setattr(subprocess, 'Popen', _repo_git_guard.REAL_POPEN)
+    yield
+
+
+# ── Host git config isolation for the git-credential tests (#8931) ───────────
+# Opt-in through ``pytestmark = pytest.mark.usefixtures("isolated_host_git_config")``
+# (tests/test_update_git_security.py, tests/test_workspace_git.py). Why and how:
+# tests/_git_host_config_isolation.py.
+from tests import _git_host_config_isolation as _host_git_isolation  # noqa: E402
+
+
+@pytest.fixture
+def host_git(request, monkeypatch, tmp_path_factory):
+    """The git a test's children would run without the isolation shim.
+
+    Parametrize indirectly with ``EMULATED_HOST_WITH_SENTINEL_HELPERS`` to run
+    the test on an emulated developer machine whose system and global git config
+    name a sentinel credential helper.
+    """
+    if os.name == "nt":
+        return None
+    if getattr(request, "param", None) == _host_git_isolation.EMULATED_HOST_WITH_SENTINEL_HELPERS:
+        real = _host_git_isolation.resolve_host_git()
+        if real is None or not _host_git_isolation.git_supports_config_redirects(real.executable):
+            pytest.skip("emulating host git config needs Git 2.32+ (GIT_CONFIG_SYSTEM)")
+        return _host_git_isolation.emulate_host_with_sentinel_helpers(
+            monkeypatch, tmp_path_factory.mktemp("emulated-host"),
+        )
+    return _host_git_isolation.resolve_host_git()
+
+
+@pytest.fixture
+def isolated_host_git_config(host_git, monkeypatch, tmp_path_factory):
+    """Run this test's git children without the host's system/global git config.
+
+    POSIX only: the shim is a shell script, which Windows' CreateProcess would not
+    find as ``git``.
+    """
+    if host_git is None:
+        return None
+    # Real host git, even when host_git is the emulated one: its wrapper execs it.
+    real = _host_git_isolation.resolve_host_git()
+    _host_git_isolation.require_config_redirects((real or host_git).executable)
+    return _host_git_isolation.isolate_git_from_host_config(
+        monkeypatch, tmp_path_factory.mktemp("host-git-isolation"), host_git,
+    )
 
 
 # ── Environment isolation for tests ────────────────────────────────────────
@@ -938,24 +1192,6 @@ def _rmtree_retry(path):
     )
 
 
-def _seed_test_skills(real_skills: pathlib.Path, test_skills: pathlib.Path) -> None:
-    if not real_skills.exists() or test_skills.exists():
-        return
-    try:
-        test_skills.symlink_to(real_skills)
-    except OSError as exc:
-        if not WINDOWS or getattr(exc, "winerror", None) != 1314:
-            raise
-        shutil.copytree(real_skills, test_skills, copy_function=_copy2_readonly)
-
-
-def _copy2_readonly(source: str, destination: str) -> str:
-    copied = shutil.copy2(source, destination)
-    path = pathlib.Path(copied)
-    path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-    return copied
-
-
 # ── Session-scoped test server ────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
@@ -982,11 +1218,8 @@ def test_server():
     TEST_STATE_DIR.mkdir(parents=True)
     TEST_WORKSPACE.mkdir(parents=True)
 
-    # Symlink real skills into test home so skill-related tests work,
-    # but all write-heavy state stays isolated.
-    real_skills  = HERMES_HOME / 'skills'
-    test_skills  = TEST_STATE_DIR / 'skills'
-    _seed_test_skills(real_skills, test_skills)
+    # The test home starts with no skills: nothing from the real Hermes home is
+    # linked or copied in, so the test server's skill writes stay in test state.
 
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)
@@ -1184,6 +1417,40 @@ def _invalidate_models_cache_after_test():
         pass
 
 
+# ── Per-test config disk-load state restore ──────────────────────────────────
+# About a hundred tests point config._get_config_path at a temp file and call
+# get_config(). The path-change branch then reloads _cfg_cache from that file
+# and records it in _cfg_path. monkeypatch puts _get_config_path back, but
+# _cfg_path, _cfg_mtime, _cfg_fingerprint and the cache contents are the
+# reload's, so the NEXT test's get_config() sees another path change and
+# reloads from disk over that test's in-memory cfg override (the path-change
+# branch skips the override guard). test_issue1807_codex_provider_card_live_models
+# -> test_issue2513_custom_provider_remote_models fails that way as a pair
+# (`assert 'custom:alpha-proxy' in {}`) and passes in the full run only because
+# the tests between them happen to reset the state.
+
+def _config_load_state_guard():
+    """Snapshot config's disk-load state; when resumed, put it back."""
+    from api import config
+    with config._cfg_lock:
+        saved = (
+            config._cfg_path,
+            config._cfg_mtime,
+            config._cfg_fingerprint,
+            copy.deepcopy(config._cfg_cache),
+        )
+    yield
+    with config._cfg_lock:
+        config._cfg_path, config._cfg_mtime, config._cfg_fingerprint, cache = saved
+        config._cfg_cache.clear()
+        config._cfg_cache.update(cache)
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_load_state():
+    yield from _config_load_state_guard()
+
+
 # ── Per-test hermes_cli module integrity guard ───────────────────────────────
 # Several tests simulate "hermes_cli unavailable / CI without the package" by
 # swapping sys.modules['hermes_cli'] for a stub whose __path__ is [] (e.g.
@@ -1229,6 +1496,11 @@ _REAL_HERMES_STATE = sys.modules.get("hermes_state")
 # real sys.path entries once so the guard below can restore them.
 _AGENT_PATH_ENV_KEYS = ("HERMES_WEBUI_AGENT_DIR", "PYTHONPATH", "HERMES_WEBUI_PYTHON")
 _REAL_AGENT_ENV = {k: os.environ.get(k) for k in _AGENT_PATH_ENV_KEYS}
+# api.config appends the discovered Agent dir to sys.path at import time. Import it
+# BEFORE the snapshot so the per-test restore keeps that entry: a snapshot without it
+# stripped the Agent dir after the first test, and later Agent imports fell back to the
+# venv's editable-install finder, which maps only modules that existed at install time.
+import api.config as _api_config_for_agent_path  # noqa: E402,F401
 _REAL_SYS_PATH = list(sys.path)
 
 # Keep the Windows restart seams inert after the suite isolation snapshots.

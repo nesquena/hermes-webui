@@ -273,13 +273,31 @@ def test_project_delete_rejects_cross_profile():
 
 
 def test_session_move_uses_session_profile():
-    """/api/session/move must use session.profile instead of active_profile for authorization."""
+    """/api/session/move must use session.profile instead of active_profile for authorization.
+
+    #7776 Finding 1: the canonical #1614 cross-profile check is now
+    re-evaluated INSIDE the per-session lock with the lock-resolved
+    ``s.profile`` (not the stale pre-lock session). Search the full
+    move-handler block up to the next top-level ``if parsed.path ==``
+    entry, not just a 2000-char window, because the lock-held re-run
+    is past the original pre-lock check.
+    """
     from pathlib import Path
+    import re
     src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
 
     move_idx = src.find('"/api/session/move"')
     assert move_idx > 0
-    move_block = src[move_idx:move_idx + 2000]
+    # The move block extends until the next sibling route. Grab up to
+    # the next 'if parsed.path ==' at the same indentation level so the
+    # Finding 1 lock-held re-run is included in the search window.
+    rest = src[move_idx:]
+    next_route = re.search(r'\n    if parsed\.path == "', rest[10:])
+    if next_route is not None:
+        end_idx = 10 + next_route.start()
+    else:
+        end_idx = len(rest)
+    move_block = rest[:end_idx]
     assert '_profiles_match(target.get("profile"), _session_profile)' in move_block, (
         "session/move must use session-scoped profile (not active_profile) for authorization"
     )

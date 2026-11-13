@@ -23,8 +23,10 @@ def test_highlight_class_has_style():
 
 
 def test_escape_still_closes_dropdown():
-    # Existing Escape-to-close behavior must not regress.
-    assert "if(e.key==='Escape'){closeDropdown();return;}" in UI_JS
+    # Existing Escape-to-close behavior must not regress. Since #8445 the picker also stops
+    # the key, so the page-level Escape handler does not close the panel behind it.
+    assert ("if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();return;}"
+            in UI_JS)
 
 
 def test_enter_picks_highlighted_row():
