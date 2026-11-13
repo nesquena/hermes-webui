@@ -790,6 +790,9 @@ def test_force_update_clean_failure_preserves_reset_boundary(tmp_path, monkeypat
     )
     monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *args: 'origin/main')
     monkeypatch.setattr(updates, '_head_contains_ref', lambda *args: False)
+    # ancestry probe (#8655): origin/main is ahead of HEAD, i.e. a plain
+    # fast-forward, so the force reset is admitted without any extra git call.
+    monkeypatch.setattr(updates, '_can_fast_forward_to', lambda *args: True)
     monkeypatch.setattr(updates, '_run_git', fake_git)
     restart = MagicMock()
     monkeypatch.setattr(updates, '_schedule_restart', restart)
