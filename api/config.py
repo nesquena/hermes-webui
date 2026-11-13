@@ -2371,7 +2371,18 @@ def _custom_provider_entries(
     native = source.get("providers")
     if not isinstance(native, dict):
         return entries
-    seen = {_custom_provider_slug_from_name(entry.get("name")) for entry in entries}
+    # Native rows are suppressed only by an identity a legacy entry may ACTUALLY
+    # own. A fallback-derived name that an existing record already claims (a
+    # ``custom:``-prefixed sibling owning the slug, say) mints nothing; see
+    # :func:`_custom_provider_entry_identity`. Counting its unconstrained slug
+    # here hid the native row that DOES own the identity, while the cfg-aware
+    # consumers rejected the fallback row for not owning it, so neither row was
+    # visible (#8164).
+    seen = {
+        _custom_provider_entry_identity(entry, entries, native, source.get("model"))
+        for entry in entries
+    }
+    seen.discard("")
     index = _native_identity_index(native)
     for key in native:
         if not _is_native_custom_provider_key(key):
@@ -2418,6 +2429,30 @@ def _custom_provider_entries(
         entry["model"] = model
         entries.append(entry)
     return entries
+
+
+def _custom_provider_view_source(entry: object, config_obj: dict | None = None) -> str:
+    """Which store a :func:`_custom_provider_entries` row came from.
+
+    The view mixes two stores, and the record-level convention-key rule is
+    source-dependent: only a NEWLY ADMITTED ``custom_providers`` fallback entry
+    may not read ``CUSTOM_<SLUG>_API_KEY`` (see
+    :func:`_custom_provider_record_may_take_convention_key`). Consumers that read
+    the view alone therefore had no way to ask that question and answered from
+    the unconstrained name instead, so a keyless bare-CJK entry reported a
+    credential the chat path correctly refuses.
+
+    Legacy rows are returned by REFERENCE and native rows as normalized copies,
+    so membership is decided by identity. A value comparison would also match a
+    legacy row that merely spells a native record's fields.
+    """
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    raw_entries = source.get("custom_providers")
+    if isinstance(raw_entries, list):
+        for raw in raw_entries:
+            if raw is entry:
+                return "custom_providers"
+    return "providers"
 
 
 def _configured_model_ids(raw_models: object) -> list[str]:
