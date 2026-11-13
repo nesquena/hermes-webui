@@ -726,7 +726,6 @@ def test_streaming_turn_scope_cannot_unlock_a_gateway_owner(
 
     session_id = "stream-9024"
     stream_id = f"stream-{session_id}"
-    turn_done = threading.Event()
     release = threading.Event()
 
     class FakeSession:
@@ -1123,8 +1122,6 @@ def test_unreadable_owner_config_fails_closed_to_refusal(
     with zero model-boundary calls. A home with NO config.yaml stays a valid
     local owner ({}) and is not refused.
     """
-    import api.models as models
-
     homes = {}
     for name in ("default", "owner", "noconfig"):
         home = tmp_path / f"home-{name}"
