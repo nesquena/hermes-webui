@@ -258,6 +258,15 @@ function syncComposerTerminalAppearance(forceFontLoad=false){
   }
 }
 
+// Screen reader mode makes xterm.js expose its rows as an accessibility tree
+// and announce new output through a live region. It is off by default because
+// that extra DOM work only helps assistive technology users.
+function applyTerminalScreenReaderMode(){
+  const term=TERMINAL_UI.term;
+  if(!term)return;
+  term.options.screenReaderMode=!!window._screenReaderMode;
+}
+
 function _xtermReady(){
   return typeof window.Terminal==='function';
 }
@@ -278,6 +287,7 @@ function _ensureXterm(){
     fontFamily,
     scrollback:1000,
     convertEol:false,
+    screenReaderMode:!!window._screenReaderMode,
     theme,
   });
   let fitAddon=null;

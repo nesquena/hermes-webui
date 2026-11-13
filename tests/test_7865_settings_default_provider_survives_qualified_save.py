@@ -158,7 +158,7 @@ const fs = require('fs');
 const panelsSrc = fs.readFileSync(process.argv[1], 'utf8');
 const uiSrc = fs.readFileSync(process.argv[2], 'utf8');
 
-for (const name of ['_providerFromModelValue', '_getOptionProviderId', '_modelStateForSelect', '_captureModelDropdownSelection']) {
+for (const name of ['_providerFromModelValue', '_getOptionProviderId', '_modelStateForSelect', '_captureModelDropdownSelection', 'setScreenReaderMode']) {
   eval(extractFunction(uiSrc, name));
 }
 eval(extractAsyncFunction(panelsSrc, 'saveSettings'));

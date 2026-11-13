@@ -7,9 +7,9 @@ WebUI model picker must still surface that provider's configured models.
 Root cause: ``_build_available_models_uncached()`` iterates over
 *canonicalised* provider IDs (lowercase, hyphens) but looked up
 ``cfg["providers"]`` using the canonical key — which doesn't match the
-raw mixed-case/underscore key in the config dict.  The fix adds a
-``_canonical_to_raw_provider_key`` map so the generic-provider branch
-can resolve the original key and load ``provider_cfg`` correctly.
+raw mixed-case/underscore key in the config dict.  Built-in aliases still use the canonical-to-raw key map. Named native
+providers use ``custom:<slug>`` instead, preserving underscores minted by
+the shared custom identity producer through both catalog paths.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import sys
 import types
 
 import pytest
+import yaml
 
 import api.config as config
 
@@ -28,7 +29,13 @@ import api.config as config
 
 @pytest.fixture(autouse=True)
 def _isolate_models_cache(tmp_path, monkeypatch):
-    """Invalidate the models TTL cache before and after every test."""
+    """Use the real loader with owned config/cache/source markers."""
+    cache = {}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    for name, value in (("_cfg_path", None), ("_cfg_mtime", 0.0), ("_cfg_fingerprint", None)):
+        monkeypatch.setattr(config, name, value)
+    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "config.yaml")
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     config.invalidate_models_cache()
     yield
@@ -52,20 +59,17 @@ def _stub_hermes_cli(monkeypatch):
 
 
 def _with_config(cfg_dict: dict):
-    """Replace ``config.cfg`` with *cfg_dict* and return a restore callable."""
+    """Load a real temporary config and return a complete restore callable."""
     old_cfg = dict(config.cfg)
-    old_mtime = config._cfg_mtime
-    config.cfg.clear()
-    config.cfg.update(cfg_dict)
-    try:
-        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
-    except Exception:
-        config._cfg_mtime = 0.0
+    markers = {name: getattr(config, name) for name in ("_cfg_mtime", "_cfg_path", "_cfg_fingerprint")}
+    config._get_config_path().write_text(yaml.safe_dump(cfg_dict), encoding="utf-8")
+    config.reload_config()
 
     def restore():
         config.cfg.clear()
         config.cfg.update(old_cfg)
-        config._cfg_mtime = old_mtime
+        for name, value in markers.items():
+            setattr(config, name, value)
         config.invalidate_models_cache()
 
     return restore
@@ -99,20 +103,20 @@ def test_mixed_case_provider_key_produces_configured_models(monkeypatch):
     finally:
         restore()
 
-    # Find the group for the canonicalised provider id "clippoxy"
+    # Find the group for the canonicalised provider id "custom:clippoxy"
     groups_by_pid = {g["provider_id"]: g for g in result["groups"]}
-    assert "clippoxy" in groups_by_pid, (
-        f"Expected canonical provider id 'clippoxy' in groups, "
+    assert "custom:clippoxy" in groups_by_pid, (
+        f"Expected canonical provider id 'custom:clippoxy' in groups, "
         f"got: {list(groups_by_pid.keys())}"
     )
-    group = groups_by_pid["clippoxy"]
+    group = groups_by_pid["custom:clippoxy"]
     model_ids = [m["id"] for m in group["models"]]
-    # Both configured models must appear (possibly with @clippoxy: prefix)
+    # Both configured models must appear (possibly with @custom:clippoxy: prefix)
     # Strip any @provider: prefix for comparison
     bare_ids = []
     for mid in model_ids:
         if mid.startswith("@"):
-            bare_ids.append(mid.split(":", 1)[-1] if ":" in mid else mid)
+            bare_ids.append(mid.removeprefix(f"@{group['provider_id']}:"))
         else:
             bare_ids.append(mid)
     assert "my-model" in bare_ids, (
@@ -129,7 +133,7 @@ def test_mixed_case_provider_key_produces_configured_models(monkeypatch):
 
 def test_underscore_provider_key_produces_configured_models(monkeypatch):
     """A provider key like ``snake_case_provider`` must canonicalise to
-    ``snake-case-provider`` and still surface its configured models."""
+    ``custom:snake_case_provider`` without changing its storage identity."""
     _stub_hermes_cli(monkeypatch)
     monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
 
@@ -152,7 +156,7 @@ def test_underscore_provider_key_produces_configured_models(monkeypatch):
         restore()
 
     groups_by_pid = {g["provider_id"]: g for g in result["groups"]}
-    canonical_pid = "snake-case-provider"
+    canonical_pid = "custom:snake_case_provider"
     assert canonical_pid in groups_by_pid, (
         f"Expected canonical provider id '{canonical_pid}' in groups, "
         f"got: {list(groups_by_pid.keys())}"
@@ -162,7 +166,7 @@ def test_underscore_provider_key_produces_configured_models(monkeypatch):
     bare_ids = []
     for mid in model_ids:
         if mid.startswith("@"):
-            bare_ids.append(mid.split(":", 1)[-1] if ":" in mid else mid)
+            bare_ids.append(mid.removeprefix(f"@{group['provider_id']}:"))
         else:
             bare_ids.append(mid)
     assert "model-a" in bare_ids, (

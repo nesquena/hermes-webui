@@ -31,6 +31,7 @@ class _RestoreCfg:
         self._snapshot = copy.deepcopy(config.cfg)
         self._cfg_mtime = config._cfg_mtime
         self._cfg_path = getattr(config, "_cfg_path", None)
+        self._cfg_fingerprint = config._cfg_fingerprint
         return self
 
     def __exit__(self, *exc):
@@ -38,6 +39,7 @@ class _RestoreCfg:
         config.cfg.update(self._snapshot)
         config._cfg_mtime = self._cfg_mtime
         config._cfg_path = self._cfg_path
+        config._cfg_fingerprint = self._cfg_fingerprint
 
 
 def _set_cfg(cfg_dict: dict):
@@ -71,9 +73,15 @@ def _stub_hermes_cli(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_models_cache(tmp_path, monkeypatch):
+    snapshot = dict(config.cfg)
+    markers = {name: getattr(config, name) for name in ("_cfg_mtime", "_cfg_path", "_cfg_fingerprint")}
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     config.invalidate_models_cache()
     yield
+    config.cfg.clear()
+    config.cfg.update(snapshot)
+    for name, value in markers.items():
+        setattr(config, name, value)
     config.invalidate_models_cache()
 
 
@@ -411,11 +419,11 @@ def test_provider_catalog_preserves_dict_shaped_raw_key_lookup(monkeypatch):
         result = config.get_available_models()
 
     groups = _groups_by_provider_id(result)
-    assert "clippoxy" in groups, f"Expected clippoxy group, got: {list(groups)}"
+    assert "custom:clippoxy" in groups, f"Expected clippoxy group, got: {list(groups)}"
     model_ids = []
-    for model in groups["clippoxy"]["models"]:
+    for model in groups["custom:clippoxy"]["models"]:
         mid = model["id"]
-        model_ids.append(mid.split(":", 1)[-1] if mid.startswith("@") and ":" in mid else mid)
+        model_ids.append(mid.removeprefix("@custom:clippoxy:"))
     assert "my-model" in model_ids
     assert "another-model" in model_ids
 
@@ -447,8 +455,8 @@ def test_provider_catalog_rejects_non_active_models_only_custom_provider(monkeyp
         result = config.get_available_models()
 
     groups = _groups_by_provider_id(result)
-    assert "clippoxy" in groups, f"Active models-only provider should render, got: {list(groups)}"
-    assert "othercustom" not in groups, (
+    assert "custom:clippoxy" in groups, f"Active models-only provider should render, got: {list(groups)}"
+    assert not {"othercustom", "custom:othercustom"}.intersection(groups), (
         f"Non-active models-only provider must not render as a phantom group, got: {list(groups)}"
     )
 

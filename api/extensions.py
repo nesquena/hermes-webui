@@ -2016,12 +2016,37 @@ def get_extension_registry() -> Dict[str, Any]:
             return {"entries": [], "error": "registry_unavailable"}
 
 
+def _mount_relative_tag_url(url: str) -> str:
+    """Return a same-origin asset URL without its leading slash.
+
+    ``static/index.html`` injects a dynamic ``<base href>`` so the app works at
+    any reverse-proxy subpath mount (e.g. ``https://host/hermes/``), and every
+    asset tag the shell emits itself is relative for exactly that reason — the
+    ``sw.js`` regression test pins that shape so an "absolute is cleaner"
+    rewrite cannot silently break subpath installs.
+
+    An injected tag keeps the leading slash today, which resolves against the
+    *origin root* rather than the mount, so ``/extensions/<id>/app.js`` escapes
+    the subpath and 404s there. Emitting the relative form lets ``<base href>``
+    resolve it correctly in both root and subpath deployments. Only same-origin
+    ``/extensions/`` and ``/static/`` paths are rewritten; anything else
+    (already relative, ``data:``, absolute URL) is passed through untouched.
+    """
+    if not isinstance(url, str):
+        return url
+    for prefix in _ALLOWED_ASSET_PREFIXES:
+        if url.startswith(prefix):
+            return url[1:]
+    return url
+
+
 def inject_extension_tags(index_html: str) -> str:
     """Inject configured extension tags into the app shell.
 
     Tags are inserted only when the extension directory is enabled. URLs are
     escaped even though they are already validated, keeping the renderer robust
-    if validation rules evolve later.
+    if validation rules evolve later. They are also emitted mount-relative so
+    the shell's ``<base href>`` resolves them under a reverse-proxy subpath.
     """
     config = get_extension_config()
     if not config["enabled"]:
@@ -2029,11 +2054,15 @@ def inject_extension_tags(index_html: str) -> str:
 
     result = index_html
     stylesheet_tags = [
-        '<link rel="stylesheet" href="{}">'.format(html.escape(url, quote=True))
+        '<link rel="stylesheet" href="{}">'.format(
+            html.escape(_mount_relative_tag_url(url), quote=True)
+        )
         for url in config["stylesheet_urls"]
     ]
     script_tags = [
-        '<script src="{}" defer></script>'.format(html.escape(url, quote=True))
+        '<script src="{}" defer></script>'.format(
+            html.escape(_mount_relative_tag_url(url), quote=True)
+        )
         for url in config["script_urls"]
     ]
     runtime_config = {
