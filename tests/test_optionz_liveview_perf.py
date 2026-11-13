@@ -35,6 +35,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _function_source(src: str, name: str) -> str:
+    start = src.index(f"def {name}(")
+    end = src.find("\ndef ", start + 1)
+    return src[start:end if end != -1 else len(src)]
+
+
 # ---------------------------------------------------------------------------
 # Defect B — server-initiated turn fans `server_turn_started` to SessionChannel
 # ---------------------------------------------------------------------------
@@ -383,8 +389,7 @@ def test_session_sse_handler_wires_on_subscribe_recovery():
     assert "active_stream_id_for_session" in src
     # The recovery must be inside the session SSE handler and use the
     # recovered marker so the frontend uses the replay attach path.
-    handler_ix = src.index("def _handle_session_sse_stream")
-    handler_src = src[handler_ix:handler_ix + 9000]
+    handler_src = _function_source(src, "_handle_session_sse_stream")
     assert "active_stream_id_for_session" in handler_src
     assert '"recovered": True' in handler_src
     assert "server_turn_started" in handler_src
@@ -869,8 +874,7 @@ def test_session_sse_handler_wires_finished_during_gap_self_heal():
     and (c) emit a `session-updated` frame when the server is ahead — all so a
     turn that finished during the SSE gap still self-heals on a visible tab."""
     src = (REPO_ROOT / "api" / "routes.py").read_text()
-    handler_ix = src.index("def _handle_session_sse_stream")
-    handler_src = src[handler_ix:handler_ix + 9000]
+    handler_src = _function_source(src, "_handle_session_sse_stream")
     # (a) the subscriber reports its last-known count.
     assert "known_count" in handler_src
     assert "subscriber_known_count" in handler_src
@@ -920,8 +924,7 @@ def test_sse_handler_uses_shared_emit_gate_not_inline_comparison():
     tested function (greptile P2 r…: the gate test must exercise the handler,
     not a copy)."""
     src = (REPO_ROOT / "api" / "routes.py").read_text()
-    handler_ix = src.index("def _handle_session_sse_stream")
-    handler_src = src[handler_ix:handler_ix + 9000]
+    handler_src = _function_source(src, "_handle_session_sse_stream")
     # The shared gate is imported and called in the emit branch.
     assert "should_emit_session_updated" in handler_src
     # And the inline form is GONE (the comparison lives only in the gate fn).

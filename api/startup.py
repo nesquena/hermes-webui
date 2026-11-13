@@ -225,6 +225,39 @@ def discover_agent_dir(
     ).agent_dir
 
 
+def discover_runtime_agent_identity(
+    *,
+    repo_root: Path,
+    default_hermes_home: Path | None = None,
+    user_home: Path | None = None,
+) -> _AgentDiscovery:
+    """The Agent this WebUI process runs against, from one argument set.
+
+    ``api.config`` (the runtime) and ``managed_agent_startup`` (which activates
+    the Agent's dependency layer before ``api.config`` may be imported) must
+    resolve the same root: activating one Agent's dependencies and then
+    importing another Agent's code breaks chat (#8355 review, #8529). Both call
+    this helper so the HERMES_HOME / platform-default home / interpreter
+    arguments cannot drift apart again.
+
+    Stdlib-only (``api.paths`` included), so it is safe to call before the
+    Agent's dependencies are on ``sys.path``.
+    """
+    from api import paths as _paths
+
+    if default_hermes_home is None:
+        default_hermes_home = _paths._platform_default_hermes_home()
+    if user_home is None:
+        user_home = _paths.HOME
+    return _discover_agent_identity(
+        repo_root=repo_root,
+        hermes_home=Path(os.getenv("HERMES_HOME", str(default_hermes_home))),
+        default_hermes_home=default_hermes_home,
+        user_home=user_home,
+        python_exe=os.getenv("HERMES_WEBUI_PYTHON") or sys.executable,
+    )
+
+
 def fix_credential_permissions() -> None:
     """Ensure sensitive files in HERMES_HOME have safe permissions.
 
@@ -361,12 +394,46 @@ def _agent_install_dir(agent_dir: Path) -> Path:
     """
     raw = os.environ.get('HERMES_WEBUI_AGENT_STAGE_DIR', '').strip()
     if raw:
-        staged = Path(raw).expanduser()
-        if staged.is_dir() and _trusted_agent_dir(staged):
+        # Resolve once, before any check, and check and return that same
+        # canonical path. Resolving after the checks let a symlink swapped in
+        # between redirect the install to a directory nothing had validated.
+        try:
+            staged = Path(raw).expanduser().resolve(strict=True)
+            # Docker may already run the authorized Agent from this stage.
+            # Its manifest names the original mount, not another copy of itself.
+            if staged == agent_dir.resolve():
+                return agent_dir
+        except (OSError, RuntimeError, ValueError):
+            # Missing, unresolvable or `~unknown-user`: never fatal at startup.
+            return agent_dir
+        if staged.is_dir() and _trusted_agent_dir(staged) and _trusted_ancestry(staged):
             if _stage_matches_agent(staged, agent_dir):
-                return staged.resolve()
+                return staged
             print(f'[!!] Ignoring staged agent copy {staged}: it is not a current copy of {agent_dir}.', flush=True)
     return agent_dir
+
+
+def _trusted_ancestry(path: Path) -> bool:
+    """True when no other user can replace ``path`` through one of its parents.
+
+    Each parent must be owned by root or by the current user, and must not be
+    group- or world-writable unless it is sticky (like ``/tmp`` or the image's
+    ``/app``), where only an entry's owner may rename or remove it. POSIX only:
+    elsewhere ``_trusted_agent_dir`` skips the owner check too.
+    """
+    if not hasattr(os, 'getuid'):
+        return True
+    uid = os.getuid()
+    try:
+        for parent in path.parents:
+            st = parent.stat()
+            if st.st_uid not in (0, uid):
+                return False
+            if stat.S_IMODE(st.st_mode) & 0o022 and not st.st_mode & stat.S_ISVTX:
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def auto_install_agent_deps(expected_agent_dir: Path | None = None) -> bool:

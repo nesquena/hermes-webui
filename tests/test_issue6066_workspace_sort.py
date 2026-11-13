@@ -174,14 +174,14 @@ if(_workspaceEntryRank({type:'file'})!==1||_workspaceEntryRank({type:'file',work
 
 
 def test_no_workspace_render_clears_birthtime_support():
-    start = UI_JS.index("function renderFileTree(){")
+    start = UI_JS.index("function renderFileTree(")
     end = UI_JS.index("let _wsActiveDragPath=", start)
     render_source = UI_JS[start:end]
     sort_start = UI_JS.index("const WORKSPACE_SORT_KEYS=")
     sort_end = UI_JS.index("// ── Workspace preferences kebab menu", sort_start)
     sort_source = UI_JS[sort_start:sort_end]
     script = """
-const box={scrollTop:0,innerHTML:'',style:{}};
+const box={scrollTop:0,innerHTML:'',style:{},removeAttribute(){}};
 const empty={textContent:'',style:{}};
 global.S={session:null,entries:[],currentDir:'.',_dirCache:{},showHiddenWorkspaceFiles:true,workspaceSortKey:'created-desc',_workspaceBirthtimeSeen:true,_workspaceBirthtimeWorkspace:'/old'};
 global.localStorage={getItem(){return null},setItem(){}};
