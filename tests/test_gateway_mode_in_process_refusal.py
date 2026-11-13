@@ -469,6 +469,78 @@ def test_gateway_owned_commit_message_never_reaches_the_model_boundary(
     assert calls["model_boundary"] == 0
 
 
+def test_open_worker_scope_keeps_the_launcher_rule(
+    monkeypatch, tmp_path, captured, captured_route_j
+):
+    """#9024 review round 9: a held-open worker never hides the launcher's rule.
+
+    While a profile-owned writer owns HERMES_WEBUI_CHAT_BACKEND, the live value
+    belongs to that writer — but the value the OPERATOR exported before the
+    first writer displaced it is still the launcher's rule (the mirror keeps it
+    as the launcher baseline). Both directions were wrong when the reader fell
+    straight through to the owner's .env: a genuine launcher "gateway" stopped
+    refusing a local owner while another profile's worker mirrored "legacy",
+    and a genuine launcher "legacy" wrongly refused a gateway owner while
+    another profile's worker mirrored "gateway".
+    """
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda _sid: "owner")
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("launcher rule hidden by a worker scope")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+
+    # A) launcher "gateway", LOCAL owner, another profile's worker mirrors
+    # "legacy". The launcher value still decides: refuse.
+    monkeypatch.setattr(gateway_sessions, "config_for_profile", lambda _profile=None: {})
+    first = tmp_path / "first"
+    first.mkdir()
+    _profile_homes(
+        monkeypatch,
+        first,
+        owner_env=None,
+        other_env="HERMES_WEBUI_CHAT_BACKEND=legacy\n",
+    )
+    monkeypatch.setenv(_ENV_KEY, "gateway")
+    with profiles.profile_env_for_background_worker("other", "launcher test"):
+        assert profiles.profile_env_writer_owns(_ENV_KEY)
+        assert os.environ.get(_ENV_KEY) == "legacy", "fixture setup: worker mirror not live"
+        routes._handle_git_commit_message(object(), {"session_id": "s1"})
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+    assert calls["model_boundary"] == 0
+    # The worker's exit restored the launcher value, which keeps deciding.
+    assert os.environ.get(_ENV_KEY) == "gateway", "worker exit must restore the launcher value"
+    routes._handle_git_commit_message(object(), {"session_id": "s1"})
+    assert captured["status"] == 409
+    assert calls["model_boundary"] == 0
+
+    # B) launcher "legacy", GATEWAY owner, another profile's worker mirrors
+    # "gateway". The launcher value still decides: do NOT refuse.
+    monkeypatch.setattr(
+        gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG)
+    )
+    second = tmp_path / "second"
+    second.mkdir()
+    _profile_homes(
+        monkeypatch,
+        second,
+        owner_env=None,
+        other_env="HERMES_WEBUI_CHAT_BACKEND=gateway\n",
+    )
+    monkeypatch.setenv(_ENV_KEY, "legacy")
+    with profiles.profile_env_for_background_worker("other", "launcher test"):
+        assert os.environ.get(_ENV_KEY) == "gateway", "fixture setup: worker mirror not live"
+        routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+    assert captured_route_j["status"] == 503
+    assert captured_route_j["payload"]["code"] == "server_draining"
+
+
 def _two_writer_homes(monkeypatch, tmp_path, *, first_env, second_env):
     """Homes for two distinct profile writers with different .env values."""
     homes = {}

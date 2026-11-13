@@ -1159,8 +1159,11 @@ def chat_backend_environ_for_profile(profile) -> dict:
     (``_loaded_profile_env_keys``, #8432) or a held-open
     ``profile_env_for_background_worker`` mirror (``_WORKER_OWNED_ENV_KEYS``,
     #9024 review round 3). A value written by either must not decide another
-    profile's session, so only the owner's own ``.env`` applies then
-    (mtime-cached: the read runs on every session payload projection).
+    profile's session. While a writer owns the key, the launcher baseline that
+    writer displaced decides if one existed (``_PROFILE_ENV_BASELINE``,
+    #9024 review round 9) — only with no launcher value does the owner's own
+    ``.env`` apply (mtime-cached: the read runs on every session payload
+    projection).
 
     #9024 review round 8:
 
@@ -1183,9 +1186,16 @@ def chat_backend_environ_for_profile(profile) -> dict:
 
     with _ENV_LOCK:
         value = os.environ.get(CHAT_BACKEND_ENV_KEY)
-        if value and profile_env_writer_owns(CHAT_BACKEND_ENV_KEY):
-            # A profile-owned writer's value — not this profile's rule.
-            value = None
+        if profile_env_writer_owns(CHAT_BACKEND_ENV_KEY):
+            # A profile-owned writer owns the key — even the launcher-looking
+            # value it mirrored, and even a scrub that emptied it. The value
+            # that decides is the one the OPERATOR exported before the first
+            # writer displaced it (the launcher baseline, #9024 review round
+            # 9); only when there was none does the owner's .env apply. Using
+            # the writer's value here would let another profile's turn decide
+            # this session; using only the .env would drop a genuine launcher
+            # override for as long as any worker holds the key.
+            value = _PROFILE_ENV_BASELINE.get(CHAT_BACKEND_ENV_KEY)
         if not value:
             try:
                 home = get_hermes_home_for_profile(profile)
