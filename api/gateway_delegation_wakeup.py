@@ -155,9 +155,15 @@ def _live_webui_sid(webui_sid: str, profile: str) -> str | None:
     A sealed parent is never reopened by a wake (the rows stay for the next turn's fold)."""
     from api.compression_continuation import durable_compression_continuation
     from api.config import SESSION_DIR
-    from api.models import get_session
+    from api.models import SessionFileNamesOtherSession, get_session
 
-    sealed, tip = durable_compression_continuation(get_session(webui_sid))
+    try:
+        session = get_session(webui_sid)
+    except SessionFileNamesOtherSession:
+        # #9019: the sidecar holds another session's body, so its owner can't be verified.
+        # Retry next poll without a warning; never wake it or record it as another profile's.
+        raise OwnershipUnknown(webui_sid) from None
+    sealed, tip = durable_compression_continuation(session)
     if not sealed:
         return webui_sid
     sidecar = Path(SESSION_DIR) / f"{tip}.json" if tip else None
