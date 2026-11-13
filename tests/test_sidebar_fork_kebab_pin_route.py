@@ -90,6 +90,18 @@ def test_pin_from_an_expanded_fork_targets_the_fork(base_url):
     fork1_sid = _branch(base_url, parent_sid, "Route-level fork one")
     fork2_sid = _branch(base_url, parent_sid, "Route-level fork two")
 
+    # The isolated test server legitimately presents first-run onboarding, and
+    # its wizard is a modal overlay that covers the viewport and swallows
+    # pointer events: a hover or press on a sidebar row then times out with
+    # "element is not stable" / "#onboardingOverlay intercepts pointer events"
+    # (it failed this way in CI on every Python version).
+    #
+    # Complete it through the real route BEFORE the page boots, so
+    # /api/onboarding/status reports completed and the wizard never opens.
+    # Dismissing the overlay after boot is a race: the wizard fetches that
+    # status asynchronously and can therefore appear after any one-shot check.
+    _post(base_url, "/api/onboarding/complete", {})
+
     pin_requests = []
     pin_statuses = []
     page_errors = []
@@ -114,15 +126,26 @@ def test_pin_from_an_expanded_fork_targets_the_fork(base_url):
 
             page.goto(base_url, wait_until="domcontentloaded")
             page.wait_for_selector("#sessionList", timeout=30000)
-            # The isolated test server can present first-run onboarding. It is a
-            # modal overlay (`aria-modal`, full-viewport) that swallows pointer
-            # events, so a hover or press on a sidebar row times out behind it
-            # with "element is not stable" / "intercepts pointer events".
-            # Dismiss it through the real UI path before any hit test.
-            onboarding = page.locator("#onboardingOverlay")
-            if onboarding.is_visible():
-                page.locator("#onboardingSkipBtn").click()
-                onboarding.wait_for(state="hidden", timeout=15000)
+            # Belt and braces on top of the pre-boot completion above: if the
+            # wizard still opens (a slow /api/onboarding/status), dismiss it
+            # through the app's own path, then require it to be gone before any
+            # hit test.
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                showing = page.evaluate(
+                    "() => { const o = document.getElementById('onboardingOverlay');"
+                    " if (!o) return false; const s = getComputedStyle(o);"
+                    " return s.display !== 'none' && s.visibility !== 'hidden'; }"
+                )
+                if not showing:
+                    break
+                page.evaluate("() => { if (typeof skipOnboarding === 'function') skipOnboarding(); }")
+                page.wait_for_timeout(250)
+            assert not page.evaluate(
+                "() => { const o = document.getElementById('onboardingOverlay');"
+                " if (!o) return false; const s = getComputedStyle(o);"
+                " return s.display !== 'none' && s.visibility !== 'hidden'; }"
+            ), "the onboarding overlay still covers the viewport: the hit test would be blocked"
             page.wait_for_function(
                 "() => typeof renderSessionList === 'function'", timeout=30000
             )
