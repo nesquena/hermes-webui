@@ -49,17 +49,27 @@ const production = [
   extractFunc('_initComposerFooterFit'),
 ].join('\n');
 
-function makeWorld(contentWidth) {
+function makeWorld(initialContentWidth, collapseHidesLabel) {
+  let contentWidth = initialContentWidth;
   const raf = [];
   const mutationObservers = [];
   let measurements = 0;
   let boundaryCalls = 0;
   const classes = new Set();
+  const label = {
+    hidden: false,
+    className: 'composer-model-label',
+    style: {cssText: ''},
+    textContent: 'model',
+    get display() { return collapseHidesLabel && classes.has('cf-icons') ? 'none' : 'inline-flex'; },
+  };
   const left = {
     name: 'left',
     clientWidth: 400,
     get scrollWidth() { return contentWidth; },
-    children: [{hidden: false}, {hidden: true}, {display: 'none'}],
+    textContent: label.textContent,
+    children: [label, {hidden: false}, {hidden: true}, {display: 'none'}],
+    querySelectorAll(sel) { return sel === '*' ? Array.from(this.children) : []; },
   };
   const footer = {
     name: 'footer',
@@ -122,9 +132,15 @@ function makeWorld(contentWidth) {
   flush();
   return {
     ctx, footer, left, messages, raf, mutationObservers, flush, notify,
+    setIntrinsic(width, text) {
+      contentWidth = width;
+      label.textContent = text;
+      left.textContent = text;
+    },
     measurements() { return measurements; },
     boundaryCalls() { return boundaryCalls; },
     burger() { return classes.has('cf-burger'); },
+    icons() { return classes.has('cf-icons'); },
   };
 }
 
@@ -146,9 +162,29 @@ unchanged.ctx._fitComposerFooter(false);
 const explicit = makeWorld(300);
 explicit.ctx._fitComposerFooter(true);
 
+const longerLabel = makeWorld(300);
+longerLabel.setIntrinsic(900, 'a much longer selected model label');
+longerLabel.notify(longerLabel.left);
+longerLabel.flush();
+const longerScheduled = longerLabel.icons();
+longerLabel.ctx._fitComposerFooter(true);
+const longerForced = longerLabel.icons();
+
+const shorterLabel = makeWorld(900);
+shorterLabel.setIntrinsic(300, 'short');
+shorterLabel.notify(shorterLabel.left);
+shorterLabel.flush();
+const shorterScheduled = shorterLabel.icons();
+shorterLabel.ctx._fitComposerFooter(true);
+const shorterForced = shorterLabel.icons();
+
 const burger = makeWorld(900);
 burger.ctx._fitComposerFooter(false);
 burger.ctx._fitComposerFooter(false);
+
+const selfObserved = makeWorld(900, true);
+selfObserved.notify(selfObserved.footer);
+selfObserved.flush();
 
 process.stdout.write(JSON.stringify({
   transcript: {
@@ -158,7 +194,10 @@ process.stdout.write(JSON.stringify({
   leftChange: {scheduled: leftScheduled, measurements: leftChange.measurements()},
   unchanged: {measurements: unchanged.measurements()},
   explicit: {measurements: explicit.measurements()},
+  longerLabel: {scheduled: longerScheduled, forced: longerForced},
+  shorterLabel: {scheduled: shorterScheduled, forced: shorterForced},
   burger: {calls: burger.boundaryCalls(), active: burger.burger()},
+  selfObserved: {measurements: selfObserved.measurements()},
 }));
 """
 
@@ -196,5 +235,17 @@ def test_explicit_caller_forces_fit_even_with_unchanged_key(outcome):
     assert body and "_fitComposerFooter(true)" in body.group("body")
 
 
+def test_unchanged_width_longer_label_collapses_through_scheduled_path(outcome):
+    assert outcome["longerLabel"] == {"scheduled": True, "forced": True}
+
+
+def test_unchanged_width_shorter_label_expands_through_scheduled_path(outcome):
+    assert outcome["shorterLabel"] == {"scheduled": False, "forced": False}
+
+
 def test_burger_transition_still_closes_composer_menus_once(outcome):
     assert outcome["burger"] == {"calls": 1, "active": True}
+
+
+def test_fitters_own_mutation_notification_hits_restored_layout_key(outcome):
+    assert outcome["selfObserved"]["measurements"] == 1

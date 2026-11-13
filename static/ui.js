@@ -7719,10 +7719,17 @@ function _fitComposerFooter(force){
   if(!left) return;
   const leftWidth=left.clientWidth;
   if(!leftWidth) return;
-  const visibleCount=left.children ? Array.from(left.children).filter(function(el){
-    return !el.hidden && getComputedStyle(el).display!=='none';
-  }).length : 0;
-  const key=footer.clientWidth+':'+leftWidth+':'+visibleCount;
+  // Distinguish available space from the content that needs it. Include
+  // fit-relevant descendant state, so label, visibility and inline/class
+  // geometry changes invalidate a scheduled fit without probing layout early.
+  const fitKey=function(){
+    const descendants=left.querySelectorAll ? Array.from(left.querySelectorAll('*')).map(function(el){
+      return (el.hidden?'1':'0')+getComputedStyle(el).display+'|'+(el.className||'')+
+        '|'+(el.style?el.style.cssText:'');
+    }).join(',') : '';
+    return footer.clientWidth+':'+left.clientWidth+':'+left.textContent+':'+descendants;
+  };
+  const key=fitKey();
   if(arguments[0]===false && footer===_composerFitLastFooter && key===_composerFitLastKey) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
   // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
@@ -7789,7 +7796,9 @@ function _fitComposerFooter(force){
     try{ _onPhoneBoundaryChange(); }catch(_){ }
   }
   _composerFitLastFooter=footer;
-  _composerFitLastKey=key;
+  // Cache the restored geometry, not the expanded pre-fit geometry: the
+  // fitter's own class/style mutations then hit the memo on the next frame.
+  _composerFitLastKey=fitKey();
 }
 window._fitComposerFooter=_fitComposerFooter;
 
