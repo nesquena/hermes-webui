@@ -55,7 +55,7 @@ _SKILLS = [
 ]
 
 
-def _run(script_body: str) -> dict:
+def _run(script_body: str, skills=None) -> dict:
     """Run the REAL static/commands.js in a Node VM and return the JSON the
     body produces. ``script_body`` runs inside an async IIFE with every
     commands.js binding in scope."""
@@ -116,7 +116,7 @@ def _run(script_body: str) -> dict:
         """
     )
     script = (
-        script.replace("__SKILLS__", json.dumps(_SKILLS))
+        script.replace("__SKILLS__", json.dumps(_SKILLS if skills is None else skills))
         .replace("__COMMANDS_JS__", json.dumps(COMMANDS_JS))
         .replace("__BODY__", textwrap.dedent(script_body))
     )
@@ -265,3 +265,71 @@ def test_separator_alias_literal_spelling_still_owns_row_zero():
     )
     assert out["underscore_typed"] == ["plugin_review", "plugin-review"]
     assert out["hyphen_typed"] == ["plugin-review", "plugin_review"]
+
+
+def test_builtin_short_prefix_keeps_registration_order():
+    """Equal-strength rows must keep the order they were assembled in.
+
+    Regression from the first version of this fix (#9049 review): a global
+    ``localeCompare`` tie-break re-sorted rows whose match band was identical,
+    so typing a short builtin prefix filled in a *different* command without
+    improving the match — `/st` accepted `status` instead of `stop`, purely
+    because ``status`` is alphabetically earlier. No skill is installed here.
+    """
+    out = _run(
+        """
+        return { names: getMatchingCommands('st').map(m => m.name) };
+        """,
+        skills=[],
+    )
+    assert out["names"][:3] == ["stop", "steer", "status"], (
+        "a short builtin prefix must keep the registration order; got "
+        f"{out['names']!r} (#9049 review)"
+    )
+
+
+def test_same_band_skill_does_not_outrank_an_earlier_builtin():
+    """A skill in the SAME match band must not jump ahead of a builtin row.
+
+    `/c` matches the builtin `clear` (name prefix) and the skill
+    `canvas-notes` (name prefix) with equal strength. Sorting the tie by name
+    moved the skill to row zero, so Enter inserted `/canvas-notes` where the
+    user used to get `/clear`.
+    """
+    out = _run(
+        _PRELUDE
+        + """
+        return { names: getMatchingCommands('c').map(m => m.name) };
+        """,
+        skills=[{"name": "canvas-notes", "description": "Draw on a shared canvas"}],
+    )
+    assert out["names"][0] == "clear", (
+        "a same-band skill must not outrank the earlier builtin row; got "
+        f"{out['names']!r} (#9049 review)"
+    )
+    assert "canvas-notes" in out["names"], "the skill must stay in the list"
+
+
+def test_partial_separator_spelling_keeps_typed_spelling_in_both_orders():
+    """#8203 rule survives: for a PARTIAL prefix, the spelling the user typed
+    still owns row zero, in both registration orders."""
+    out = _run(
+        """
+        _skillCommandCache = [];
+        _bundleCommandCacheReady = true;
+        _bundleCommandCache = [];
+        _agentCommandCache = [
+          { name: 'plugin-review', description: 'Review A', cli_only: false, category: 'Plugin' },
+          { name: 'plugin_review', description: 'Review B', cli_only: false, category: 'Plugin' },
+        ];
+        const reversed = getMatchingCommands('plugin-rev').map(m => m.name);
+        _agentCommandCache = [
+          { name: 'plugin_review', description: 'Review B', cli_only: false, category: 'Plugin' },
+          { name: 'plugin-review', description: 'Review A', cli_only: false, category: 'Plugin' },
+        ];
+        const reversedUnderscore = getMatchingCommands('plugin_rev').map(m => m.name);
+        return { reversed, reversedUnderscore };
+        """
+    )
+    assert out["reversed"][0] == "plugin-review", out["reversed"]
+    assert out["reversedUnderscore"][0] == "plugin_review", out["reversedUnderscore"]

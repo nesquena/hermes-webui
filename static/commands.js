@@ -269,10 +269,12 @@ function _slashCommandNameIncludes(name,q){
 // it at row zero: `/next` ran context7-mcp ("Next.js docs") instead of the
 // `next` skill (#9035).
 // Bands, best first: 0 exact name, 1 name prefix, 2 name substring, 3
-// description-only. localeCompare keeps the alphabetical order inside a band
-// (an index tiebreak keeps the sort stable). The literal as-typed prefix check
-// on top preserves #8203: with both `_` and `-` spellings registered, row zero
-// must be the spelling the user typed, in either registration order.
+// description-only. Inside a band the assembled order is kept: sorting equal
+// strength rows by name moves row zero for a short prefix (`/st` accepted
+// `status` instead of `stop`, `/c` a skill instead of the builtin `clear`)
+// without any gain in match quality. The literal as-typed prefix check on top
+// preserves #8203: with both `_` and `-` spellings registered, row zero must be
+// the spelling the user typed, in either registration order.
 function _slashCommandMatchBand(row,q){
   const needle=String(q||'').toLowerCase();
   const name=String(row&&row.name||'').toLowerCase();
@@ -293,8 +295,6 @@ function _rankSlashCommandMatches(matches,q){
       const bn=String(b.row&&b.row.name||'').toLowerCase();
       const literal=(an.startsWith(needle)?0:1)-(bn.startsWith(needle)?0:1);
       if(literal)return literal;
-      const byName=an.localeCompare(bn);
-      if(byName)return byName;
       return a.index-b.index;
     })
     .map(entry=>entry.row);
