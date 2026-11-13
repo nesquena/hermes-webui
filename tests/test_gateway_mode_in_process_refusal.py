@@ -254,4 +254,3 @@ def test_handoff_summary_reaches_the_model_path_off_gateway(
     # then fails inside it and the handler degrades to the fallback, which is
     # fine — the assertion is that construction was attempted at all.
     assert built, "gateway gate skipped agent construction off gateway"
-
