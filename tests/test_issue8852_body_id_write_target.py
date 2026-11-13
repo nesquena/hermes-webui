@@ -23,6 +23,7 @@ sidecar it saves carries its own id.
 import io
 import json
 import logging
+import threading
 import urllib.parse
 from collections import OrderedDict
 from pathlib import Path
@@ -170,7 +171,7 @@ def test_a_later_save_of_a_loaded_copy_is_refused(store, partials):
     _copy(store, partials=partials)
     before = _files(store)
 
-    session = models.get_session(COPY)
+    session = models.get_session(COPY, allow_foreign_body=True)
     session.title = "Mutated"
     with pytest.raises(RuntimeError, match="8852"):
         session.save()
@@ -301,7 +302,8 @@ def test_file_operations_on_a_copy_never_write_the_session_it_names(store, monke
     assert getattr(stub, "_loaded_metadata_only", False) and stub.session_id == VICTIM
     assert getattr(stub, "_sidecar_names_other_session", None) == COPY
     models.SESSIONS.clear()
-    with pytest.raises(models.WorkspaceBindingPersistenceError):
+    # #9019: the copy is not found at all now (before: the workspace writer refused it).
+    with pytest.raises(models.SessionFileNamesOtherSession):
         models.get_session_for_file_ops(COPY)
 
     _unchanged_victim(store, before)
@@ -360,11 +362,11 @@ def test_a_copy_taken_mid_turn_loads_quietly(store, caplog, entry):
         for _ in range(2):
             models.SESSIONS.clear()
             if entry == "get_session":
-                session = models.get_session(COPY)
+                session = models.get_session(COPY, allow_foreign_body=True)
                 state = (session.pending_user_message, session.active_stream_id)
                 expected = ("half-sent", "dead-stream")
             elif entry == "clear_stale_stream_state":
-                session = models.get_session(COPY)
+                session = models.get_session(COPY, allow_foreign_body=True)
                 assert routes._clear_stale_stream_state(session) is False
                 state = (session.pending_user_message, session.active_stream_id)
                 expected = (None, None)
@@ -396,7 +398,7 @@ def test_a_copy_of_a_turn_that_is_still_running_keeps_showing_it(store):
     with config.STREAMS_LOCK:
         config.STREAMS["dead-stream"] = object()
     try:
-        session = models.get_session(COPY)
+        session = models.get_session(COPY, allow_foreign_body=True)
         assert routes._clear_stale_stream_state(session) is False
         state = (session.pending_user_message, session.active_stream_id)
     finally:
@@ -418,7 +420,7 @@ def test_the_reasoning_writer_refuses_a_session_loaded_from_a_copy(store):
     before = _files(store)
 
     with pytest.raises(RuntimeError, match="8852"):
-        models.set_session_reasoning_effort(models.get_session(COPY), "high")
+        models.set_session_reasoning_effort(models.get_session(COPY, allow_foreign_body=True), "high")
 
     _unchanged_victim(store, before)
     assert _files(store) == before
@@ -437,12 +439,127 @@ def test_the_title_writer_refuses_a_session_loaded_from_a_copy(store):
 
     with pytest.raises(RuntimeError, match="8852"):
         routes._persist_generated_session_title(
-            models.get_session(COPY), "Hijacked by copy", event_reason="test"
+            models.get_session(COPY, allow_foreign_body=True), "Hijacked by copy", event_reason="test"
         )
 
     _unchanged_victim(store, before)
     assert _files(store) == before
     assert json.loads(before[f"{VICTIM}.json"])["title"] == "Victim"
+
+
+def test_the_import_title_queue_refuses_a_session_loaded_from_a_copy(store, monkeypatch):
+    """#8869: ``_queue_generated_title_for_imported_session`` reloads on its thread by the object's
+    id, so a copy object would retitle the session its body names. The CLI import passes the object
+    it just built and saved, whose id is its own file's; this covers a direct caller."""
+    from api import models, routes
+
+    monkeypatch.setattr(routes, "generate_session_title_for_session", lambda session: ("Generated title", "llm", "raw"))
+    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda session: None)
+    monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *a, **k: None)
+    _victim(store)
+    victim = models.Session.load(VICTIM)
+    victim.title = "CLI Session"
+    victim.save(touch_updated_at=False)
+    _copy(store, partials=False)
+    before = _files(store)
+
+    def queue_and_wait(session):
+        running = set(threading.enumerate())
+        routes._queue_generated_title_for_imported_session(session, {"title": "CLI Session", "source_tag": "cli"})
+        for thread in set(threading.enumerate()) - running:
+            thread.join(timeout=10)
+
+    queue_and_wait(models.Session.load(COPY))
+
+    written = json.loads(_files(store)[f"{VICTIM}.json"])
+    assert (written["title"], written["llm_title_generated"]) == ("CLI Session", False)
+    assert _files(store) == before
+
+    # The owner's own import still gets its title, so the refusal above isn't a broken setup.
+    queue_and_wait(models.Session.load(VICTIM))
+    written = json.loads(_files(store)[f"{VICTIM}.json"])
+    assert (written["title"], written["llm_title_generated"]) == ("Generated title", True)
+
+
+def test_the_wakeup_pause_merge_refuses_a_session_loaded_from_a_copy(store):
+    """#8869: ``_merge_process_wakeup_pause_into_current_session`` resolves the session the object's
+    id names and saves the pause there. It runs inside a turn, and turn admission 404s a copy; this
+    covers a direct caller."""
+    from api import models, streaming
+
+    _victim(store)
+    _copy(store, partials=False)
+    before = _files(store)
+
+    recorded = streaming._merge_process_wakeup_pause_into_current_session(
+        models.Session.load(COPY), classification="credential_pool_empty"
+    )
+
+    assert recorded is None
+    _unchanged_victim(store, before)
+    assert _files(store) == before
+
+    # The owner's own turn still records its pause.
+    streaming._merge_process_wakeup_pause_into_current_session(
+        models.Session.load(VICTIM), classification="credential_pool_empty"
+    )
+    assert json.loads(_files(store)[f"{VICTIM}.json"])["process_wakeup_pause"]["paused"] is True
+
+
+def test_the_cancel_finalizer_refuses_a_session_loaded_from_a_copy(store):
+    """#8869: the pause merge's resolver has two more callers. ``_finalize_cancelled_turn`` would
+    append its cancel marker to the session the object's id names, and the turn-end cwd mirror would
+    read that session. Both run inside a turn, like the pause merge."""
+    import api.config as config
+    from api import models, streaming
+
+    _victim(store)
+    _copy(store, partials=False)
+    before = _files(store)
+    config.register_session_writeback_owner(VICTIM, "stream-8869")
+    try:
+        streaming._finalize_cancelled_turn(models.Session.load(COPY), stream_id="stream-8869")
+
+        _unchanged_victim(store, before)
+        assert _files(store) == before
+        assert streaming._resolve_current_session_for_write(models.Session.load(COPY)) is None
+
+        # The owner's own cancelled turn still gets its marker.
+        streaming._finalize_cancelled_turn(models.Session.load(VICTIM), stream_id="stream-8869")
+    finally:
+        config.clear_session_writeback_owner_if_owned(VICTIM, "stream-8869")
+    assert streaming._session_has_cancel_marker(models.Session.load(VICTIM)) is True
+
+
+def test_the_compression_snapshot_refuses_a_session_loaded_from_a_copy(store, monkeypatch):
+    """#8869: ``_preserve_pre_compression_snapshot`` reloads ``old_sid`` and stamps it as a compression
+    snapshot. Its caller first requires the object to be the one cached under that id, and a copy is
+    cached under its file name; this covers a direct caller."""
+    from api import models, streaming
+
+    monkeypatch.setattr(streaming, "SESSION_DIR", store)
+    _victim(store)
+    _copy(store, partials=False)
+    before = _files(store)
+
+    preserved = streaming._preserve_pre_compression_snapshot(models.Session.load(COPY), VICTIM, "continuation-8869")
+
+    written = json.loads(_files(store)[f"{VICTIM}.json"])
+    assert (preserved, written["pre_compression_snapshot"], written.get("pre_compression_continuation_session_id")) == (
+        False,
+        False,
+        None,
+    )
+    _unchanged_victim(store, before)
+    assert _files(store) == before
+
+    # The owner's own compression still stamps it.
+    assert streaming._preserve_pre_compression_snapshot(models.Session.load(VICTIM), VICTIM, "continuation-8869") is True
+    written = json.loads(_files(store)[f"{VICTIM}.json"])
+    assert (written["pre_compression_snapshot"], written["pre_compression_continuation_session_id"]) == (
+        True,
+        "continuation-8869",
+    )
 
 
 def test_gateway_reattach_at_startup_skips_a_copy(store, monkeypatch):

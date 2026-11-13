@@ -203,6 +203,10 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
         cli_meta = dict(cli_meta or {})
         if not session or cli_meta.get("read_only") or not _looks_like_default_cli_title(cli_meta):
             return
+        if getattr(session, "_sidecar_names_other_session", None):
+            # #8852: the thread below reloads the session the object's id
+            # names; the id came from a file whose body names another session.
+            return
         sid = str(getattr(session, "session_id", "") or "")
         if not sid:
             return
@@ -2827,6 +2831,14 @@ _session_list_cache_clear = _route_session_list_cache._session_list_cache_clear
 _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cache_claim_rebuild
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
+_SESSION_LIST_CACHE_MISSING = _route_session_list_cache._SESSION_LIST_CACHE_MISSING
+_SESSION_LIST_CACHE_FRESH = _route_session_list_cache._SESSION_LIST_CACHE_FRESH
+_SESSION_LIST_CACHE_STALE_SOURCE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_SOURCE
+_SESSION_LIST_CACHE_STALE_AGE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_AGE
+_session_list_cache_probe = _route_session_list_cache._session_list_cache_probe
+_session_list_cache_resolved_source_stamp = (
+    _route_session_list_cache._session_list_cache_resolved_source_stamp
+)
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
 _route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
@@ -3833,6 +3845,55 @@ def _hidden_archived_sidebar_reference_sessions(
     return references
 
 
+def _session_list_cache_source_stamp_snapshot(key: tuple):
+    """Stamp read BEFORE a build, so the payload is certified by what it saw.
+
+    A cache entry is a (stamp, payload) pair, and the pair is only meaningful if
+    the stamp was taken no later than the rows the payload was built from. With
+    the stamp taken after the builder returns, a commit that lands mid-build is
+    folded into the stored stamp: the old payload is then certified against a
+    NEWER snapshot, served as FRESH for a full TTL, and stays wrong even once
+    the source moves again. Taking the snapshot first makes that commit visible
+    on the next request instead. ``None`` means the producer itself failed —
+    unknown evidence, so the payload is returned to this caller uncached rather
+    than certified with a later stamp. (#8694)
+    """
+    try:
+        return _session_list_cache_resolved_source_stamp(key)
+    except Exception:
+        logger.debug("session list source stamp snapshot failed", exc_info=True)
+        return None
+
+
+# Source-stamp slots the session-list BUILDER itself can move: the session index
+# (slot 3). all_sessions() re-adds on-disk sidecars missing from the index and the
+# Desktop/CLI orphan passes prune them again, so certifying that slot with its
+# pre-build value would leave every entry source-stale at birth and turn every
+# GET into a blocking rebuild. Master read the whole stamp after the build; the
+# state.db/WAL/fingerprint/all-profiles slots stay pre-build (#8694), the index
+# slot is read after the build, as on master. (#8986)
+_SESSION_LIST_STAMP_BUILDER_WRITTEN_SLOTS = frozenset({3})
+
+
+def _session_list_cache_certified_stamp(key: tuple, pre_build_stamp):
+    """The stamp to store with a payload built after ``pre_build_stamp`` was read."""
+    if pre_build_stamp is None:
+        return None
+    post = _session_list_cache_source_stamp_snapshot(key)
+    if (
+        post is None
+        or not isinstance(pre_build_stamp, tuple)
+        or not isinstance(post, tuple)
+        or len(pre_build_stamp) != 8
+        or len(post) != 8
+    ):
+        return pre_build_stamp
+    return tuple(
+        post[i] if i in _SESSION_LIST_STAMP_BUILDER_WRITTEN_SLOTS else pre_build_stamp[i]
+        for i in range(8)
+    )
+
+
 def _get_cached_session_list_payload(
     *,
     key: tuple,
@@ -3845,8 +3906,8 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
 
-    cached, is_fresh = _session_list_cache_get(key, allow_stale=True)
-    if cached is not None and is_fresh:
+    cached, cache_status = _session_list_cache_probe(key, allow_stale=True)
+    if cache_status == _SESSION_LIST_CACHE_FRESH:
         if diag is not None:
             try:
                 diag.stage("session_list_cache_hit")
@@ -3854,8 +3915,15 @@ def _get_cached_session_list_payload(
                 pass
         return cached
 
-    stale = cached  # now actually a stale payload when one exists, else None
-    stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
+    stale = cached  # a stale payload when one exists, else None
+    stale_reason = (
+        cache_status
+        if cache_status in (
+            _SESSION_LIST_CACHE_STALE_AGE,
+            _SESSION_LIST_CACHE_STALE_SOURCE,
+        )
+        else None
+    )
     if stale is not None and stale_reason != "source":
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
@@ -3870,8 +3938,17 @@ def _get_cached_session_list_payload(
                     rebuild_attempts = 0
                     while True:
                         invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                        source_stamp = _session_list_cache_source_stamp_snapshot(key)
+                        if source_stamp is None:
+                            # Unknown pre-build evidence: build and certify nothing.
+                            # The request that started this background rebuild was
+                            # already served the stale payload, and the next request
+                            # revalidates. Retrying cannot produce a snapshot the
+                            # producer just failed to read.
+                            return
                         try:
                             payload = builder()
+                            source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
                         except Exception:
                             logger.exception(
                                 "session list stale-cache background rebuild failed"
@@ -3883,6 +3960,7 @@ def _get_cached_session_list_payload(
                                 key,
                                 payload,
                                 expected_invalidation_stamp=invalidation_stamp,
+                                source_stamp=source_stamp,
                             )
                         ):
                             return
@@ -3919,13 +3997,21 @@ def _get_cached_session_list_payload(
             rebuild_attempts = 0
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                source_stamp = _session_list_cache_source_stamp_snapshot(key)
                 payload = builder()
+                source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
+                if source_stamp is None:
+                    # Unknown pre-build evidence: correct for this request, never
+                    # certified. Retrying cannot produce a snapshot the producer
+                    # just failed to read.
+                    return payload
                 if (
                     _session_list_cache_invalidation_stamp(key) == invalidation_stamp
                     and _session_list_cache_set(
                         key,
                         payload,
                         expected_invalidation_stamp=invalidation_stamp,
+                        source_stamp=source_stamp,
                     )
                 ):
                     if diag is not None:
@@ -3984,12 +4070,18 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+    source_stamp = _session_list_cache_source_stamp_snapshot(key)
     payload = builder()
-    if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
+    source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
+    if (
+        source_stamp is not None
+        and _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+    ):
         _session_list_cache_set(
             key,
             payload,
             expected_invalidation_stamp=invalidation_stamp,
+            source_stamp=source_stamp,
         )
     return payload
 
@@ -4372,9 +4464,15 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
                              # patch the caller's in-memory copy after a
                              # successful clear, avoiding one ghost SSE
                              # reconnect on the very next /api/session GET.
+    reload_marker = None
     if getattr(session, "_loaded_metadata_only", False):
         try:
+            from api.models import _sidecar_change_marker
             from api.models import get_session as _get_session
+            # #9017: the reload stays outside the lock so its own self-heals
+            # (the state.db sync, the pending repair) can take it; the marker
+            # lets the locked section below see a writer that saved meanwhile.
+            reload_marker = _sidecar_change_marker(session.session_id)
             session = _get_session(session.session_id, metadata_only=False)
         except Exception:
             # If we cannot upgrade to a full load (file gone, decode error,
@@ -4414,9 +4512,22 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
+    persist_lock = _session_persist_lock(original_stub.session_id)
     if not session_lock.acquire(blocking=wait_for_writer):
         return False
+    # #9017: hold the persist lock from the changed-since check through the
+    # save. A save made without the session lock (journal recovery on another
+    # thread's cache hit) takes only the persist lock, so it can't land between
+    # the check and this save. Order: session -> persist, as save() nests it.
+    persist_lock.acquire()
     try:
+        if reload_marker is not None:
+            from api.models import _sidecar_unchanged_since
+            if not _sidecar_unchanged_since(original_stub.session_id, reload_marker):
+                # Another writer saved after the reload: its turn is newer than
+                # this copy, so clearing and saving it would drop that turn.
+                # Skip this time; the next read retries on the current file.
+                return False
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
         if getattr(session, "pending_user_message", None):
@@ -4475,6 +4586,7 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
                 getattr(session, "session_id", "?"),
             )
     finally:
+        persist_lock.release()
         session_lock.release()
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
@@ -7079,6 +7191,8 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
                 # WebUI-owned turns.
                 s.messages = list(latest_messages)
         return s
+    except SessionFileNamesOtherSession:
+        raise  # #9019: sid's file exists; never materialize over it
     except KeyError:
         pass
 
@@ -7351,6 +7465,8 @@ def _resolve_share_session_pair(sid: str, handler):
             cli_meta=cli_meta,
         )
         return snapshot_session, stored_session, cli_meta or {}
+    except SessionFileNamesOtherSession:
+        raise  # #9019: never synthesize over sid's file
     except KeyError:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
@@ -11622,13 +11738,23 @@ def _session_is_subagent_view_only(sid: str) -> bool:
     if _is_subagent_child_session_id(sid):
         return True
     try:
-        s = get_session(sid)
+        # #9019: this guard must read a swapped-in body to refuse it (master read the
+        # OTHER session's source tag here and refused a subagent body). Without the
+        # opt-in the boundary's KeyError fell to ``return False`` below, and routes that
+        # never call get_session themselves (delete, handoff-summary) mutated this id.
+        s = get_session(sid, allow_foreign_body=True)
     except Exception:
         return False
     src = (
         str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
             or getattr(s, "session_source", "") or "").strip().lower()
     )
+    if getattr(s, "_sidecar_names_other_session", None):
+        # The opt-in cached the foreign object under ``sid``; drop it again, as
+        # get_session does, so direct cache readers never act on it.
+        with LOCK:
+            if SESSIONS.get(sid) is s:
+                SESSIONS.pop(sid, None)
     return src == "subagent"
 
 
@@ -11958,6 +12084,9 @@ def _load_branch_source_or_refuse(handler, sid: str):
         return None
     try:
         source = get_session(sid)
+    except SessionFileNamesOtherSession:
+        bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
+        return None
     except KeyError:
         _foreign_session, _reason = _claim_or_synthesize_cli_session(sid)
         _source_kind = str((getattr(_foreign_session, "source_tag", None) or getattr(_foreign_session, "raw_source", None) or getattr(_foreign_session, "source", None) or "")).strip().lower() if _foreign_session is not None else ""
@@ -14395,6 +14524,7 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    SessionFileNamesOtherSession,
     get_cli_session_by_id,
     get_session,
     get_session_profile_readonly,
@@ -18064,6 +18194,12 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         if _diag: _diag.finish()
         return resp
+    except SessionFileNamesOtherSession:
+        # #9019: the file names another session, so this id is not found. Never
+        # fall through to the KeyError branch below, which claims or synthesizes
+        # a CLI session over the refused file.
+        if _diag: _diag.finish()
+        return bad(handler, "Session not found", 404)
     except KeyError:
         # perf(webui/session-load-latency) tier2c-followup: fire
         # _diag.finish() in the exception branch too. Greptile flagged
@@ -19090,6 +19226,8 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "session_id required")
         try:
             workspace = get_session(sid).workspace
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
         except KeyError:
             # state.db-only sessions (CLI, delegated subagents): same fallback as /api/list.
             cli_meta = _lookup_cli_session_metadata(sid)
@@ -20568,8 +20706,9 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Subagent sessions are view-only and cannot be duplicated from WebUI", 400)
 
             session = Session.load(sid)
-            if not session:
+            if not session or getattr(session, "_sidecar_names_other_session", None):
                 # 404, not 400 — missing resource, not a malformed request.
+                # #9019: a file that names another session is not this session.
                 return bad(handler, "Session not found", status=404)
 
             copy_messages = session.messages
@@ -20937,6 +21076,7 @@ def handle_post(handler, parsed) -> bool:
         # continues to work (routes.py imported it at module level).
         import api.routes as _routes
         _routes.get_session = _models.get_session
+        _routes.SessionFileNamesOtherSession = _models.SessionFileNamesOtherSession
         _routes.Session = _models.Session
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
@@ -22945,6 +23085,8 @@ def handle_post(handler, parsed) -> bool:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: never import over sid's file
         except KeyError:
             # #7776: reuse the CLI identity captured before the lock — the
             # lock-held reload can drop it. #7549/#7731: cross-profile archive
@@ -24435,6 +24577,8 @@ def _handle_list_dir(handler, parsed):
         s = get_session(sid)
         webui_session = s
         workspace = s.workspace
+    except SessionFileNamesOtherSession:
+        return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory. Resolved through
         # the same lookup as open/pin/rename, so a session outside the default
@@ -32147,6 +32291,8 @@ def _handle_chat_start(handler, body, diag=None):
                 # write of the turn would land there. Refuse before anything
                 # is mutated, with the generic ownership guard's answer.
                 return bad(handler, "Session not found", 404)
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -32630,7 +32776,10 @@ def _handle_chat_sync(handler, body):
         return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
-    s = get_session(body["session_id"])
+    try:
+        s = get_session(body["session_id"])
+    except SessionFileNamesOtherSession:
+        return bad(handler, "Session not found", 404)  # #9019 (an unknown id still raises as before)
     if getattr(s, "_sidecar_names_other_session", None):
         # #9000: the file holds a copy of another session's file, so the loaded
         # object carries that session's id; the turn would run under it.
