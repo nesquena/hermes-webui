@@ -12722,7 +12722,12 @@ def _limited_webui_messages_for_display_with_sidecar(
         sidecar_messages = list(sidecar_messages or [])
         if not sidecar_owners:
             sidecar_owners = _display_exact_owner_positions(session, sidecar_messages)
-    lineage_parent = _webui_lineage_parent_session_for_display(session)
+    (
+        lineage_parent,
+        parent_prov_pair,
+        parent_proven,
+    ) = _webui_lineage_parent_session_with_provenance_for_display(session)
+    immediate_parent_provenance = (lineage_parent, parent_prov_pair, parent_proven)
     if lineage_parent is not None:
         projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
             session,
@@ -12803,6 +12808,7 @@ def _limited_webui_messages_for_display_with_sidecar(
                 sidecar_messages,
                 state_db_messages,
                 state_db_signature=_state_key,
+                immediate_parent_provenance=immediate_parent_provenance,
             )
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
@@ -12855,6 +12861,12 @@ def _limited_webui_messages_for_display_with_sidecar(
             != state_db_signature
         ):
             cache_key = None
+        elif parent_prov_pair is not None:
+            from api.models import _sidecar_stat_signature
+
+            parent_path_str, parent_sig = parent_prov_pair
+            if _sidecar_stat_signature(Path(parent_path_str)) != parent_sig:
+                cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
@@ -12952,6 +12964,7 @@ def _display_merge_cache_key(
     state_db_messages,
     *,
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
+    immediate_parent_provenance=None,
 ):
     """Return a fail-closed validity key for the display-merge cache, or None.
 
@@ -12991,38 +13004,48 @@ def _display_merge_cache_key(
         with _lineage_display_cache_lock:
             if _lineage_display_cache.get(sid) is not lineage_entry:
                 return None
-    immediate_parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
-    if (
-        immediate_parent_id
-        and not (
-            str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
-            and str(getattr(session, "compression_recovery_action", "") or "").strip()
-        )
-    ):
-        source = str(getattr(session, "session_source", "") or "").strip().lower()
-        relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
-        if source != "fork" and relationship != "child_session":
-            if not is_safe_session_id(immediate_parent_id):
-                return None
-            try:
-                parent = Session.load(immediate_parent_id)
-            except Exception:
-                return None
-            if parent is None:
-                return None
-            if not getattr(parent, "pre_compression_snapshot", False):
-                parent_path = SESSION_DIR / f"{immediate_parent_id}.json"
-                parent_sig = _sidecar_stat_signature(parent_path)
-                if parent_sig is None:
-                    return None
-                parent_path_str = str(parent_path)
+    if immediate_parent_provenance is not None:
+        parent, parent_pair, proven = immediate_parent_provenance
+        if not proven:
+            return None
+        if parent is not None and not getattr(parent, "pre_compression_snapshot", False):
+            if parent_pair is not None:
+                parent_path_str, parent_sig = parent_pair
                 if not any(p == parent_path_str for p, _ in parent_sigs):
-                    parent_sigs = parent_sigs + (
-                        (
-                            parent_path_str,
-                            tuple(parent_sig) if isinstance(parent_sig, (list, tuple)) else parent_sig,
-                        ),
-                    )
+                    parent_sigs = parent_sigs + ((parent_path_str, parent_sig),)
+    else:
+        immediate_parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+        if (
+            immediate_parent_id
+            and not (
+                str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
+                and str(getattr(session, "compression_recovery_action", "") or "").strip()
+            )
+        ):
+            source = str(getattr(session, "session_source", "") or "").strip().lower()
+            relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+            if source != "fork" and relationship != "child_session":
+                if not is_safe_session_id(immediate_parent_id):
+                    return None
+                try:
+                    parent = Session.load(immediate_parent_id)
+                except Exception:
+                    return None
+                if parent is None:
+                    return None
+                if not getattr(parent, "pre_compression_snapshot", False):
+                    parent_path = SESSION_DIR / f"{immediate_parent_id}.json"
+                    parent_sig = _sidecar_stat_signature(parent_path)
+                    if parent_sig is None:
+                        return None
+                    parent_path_str = str(parent_path)
+                    if not any(p == parent_path_str for p, _ in parent_sigs):
+                        parent_sigs = parent_sigs + (
+                            (
+                                parent_path_str,
+                                tuple(parent_sig) if isinstance(parent_sig, (list, tuple)) else parent_sig,
+                            ),
+                        )
     if not parent_sigs and _display_merge_requires_lineage_provenance(session):
         return None
     last_ts = None
@@ -13593,27 +13616,57 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
 _LINEAGE_PARENT_SESSION_UNSET = object()
 
 
-def _webui_lineage_parent_session_for_display(session):
-    """Load the immediate parent only for display-eligible continuations."""
+def _webui_lineage_parent_session_with_provenance_for_display(session):
+    """Resolve the immediate parent and bind its stat signature across the read.
+
+    Returns (parent, (path, signature) or None, proven).
+    Provenance is proven only when both signatures are readable and equal.
+    If no immediate parent is eligible, returns (None, None, True).
+    """
+    from api.models import SESSION_DIR, _sidecar_stat_signature
+
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
     if not parent_id:
-        return None
+        return None, None, True
     if (
         str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
         and str(getattr(session, "compression_recovery_action", "") or "").strip()
     ):
-        return None
+        return None, None, True
     source = str(getattr(session, "session_source", "") or "").strip().lower()
     relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
     if source == "fork" or relationship == "child_session":
-        return None
+        return None, None, True
+    if not is_safe_session_id(parent_id):
+        return None, None, False
+
+    parent_path = SESSION_DIR / f"{parent_id}.json"
+    parent_sig_before = _sidecar_stat_signature(parent_path)
     try:
         parent = get_session(parent_id, metadata_only=False)
         if parent is None or str(getattr(parent, "session_id", "") or "") != parent_id:
-            return None
-        return parent
+            return None, None, False
     except Exception:
-        return None
+        return None, None, False
+    parent_sig_after = _sidecar_stat_signature(parent_path)
+    if (
+        parent_sig_before is None
+        or parent_sig_after is None
+        or parent_sig_before != parent_sig_after
+    ):
+        return parent, None, False
+    normalized_sig = (
+        tuple(parent_sig_after)
+        if isinstance(parent_sig_after, (list, tuple))
+        else parent_sig_after
+    )
+    return parent, (str(parent_path), normalized_sig), True
+
+
+def _webui_lineage_parent_session_for_display(session):
+    """Load the immediate parent only for display-eligible continuations."""
+    parent, _pair, _proven = _webui_lineage_parent_session_with_provenance_for_display(session)
+    return parent
 
 
 def _merged_webui_lineage_messages_for_display(

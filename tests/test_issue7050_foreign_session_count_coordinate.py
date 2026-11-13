@@ -521,3 +521,132 @@ def test_foreign_cli_memoized_bounded_merge_invalidates_on_parent_growth(monkeyp
     assert "parent a2" in contents
 
 
+def test_foreign_cli_memoized_bounded_merge_declines_cache_on_parent_read_race(monkeypatch, tmp_path):
+    """D1 race: parent save during initial read declines cache publication.
+
+    Immediate parent sidecar starts with 2 rows; child has 2 rows in sidecar
+    and state.db. A wrapper around api.routes.get_session saves 2 extra parent rows
+    immediately after the parent is loaded. Provenance validation fails,
+    declining cache publication. Initial bounded load returns 4; subsequent
+    metadata and bounded loads consistently report 6 (4 parent + 2 child)
+    rather than serving a stale 4-row cache entry.
+    Sequence: bounded (4) / metadata (6) / bounded (6) / bounded (6) / full (6) /
+    uncached-bounded (6).
+    """
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "cli7050_race_parent"
+    parent_rows = [
+        {"role": "user", "content": "archived parent q", "timestamp": 1000.0},
+        {"role": "assistant", "content": "archived parent a", "timestamp": 1001.0},
+    ]
+    parent = _install_session(monkeypatch, tmp_path, parent_sid, parent_rows)
+    assert not getattr(parent, "pre_compression_snapshot", False)
+
+    child_sid = "cli7050_race_child"
+    child_rows = [
+        {"role": "user", "content": "q0", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1003.0},
+    ]
+    child = _install_session(monkeypatch, tmp_path, child_sid, child_rows)
+    child.parent_session_id = parent_sid
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_rows)
+
+    real_get_session = routes.get_session
+    parent_growth_saved = False
+
+    def wrapping_get_session(sid, *args, **kwargs):
+        nonlocal parent_growth_saved
+        res = real_get_session(sid, *args, **kwargs)
+        if sid == parent_sid and not parent_growth_saved:
+            parent_growth_saved = True
+            p = models.Session.load(parent_sid)
+            p.messages.extend([
+                {"role": "user", "content": "parent q2", "timestamp": 1004.0},
+                {"role": "assistant", "content": "parent a2", "timestamp": 1005.0},
+            ])
+            p.save(touch_updated_at=False)
+        return res
+
+    monkeypatch.setattr(routes, "get_session", wrapping_get_session)
+
+    limited_query = "&messages=1&msg_limit=30&expand_renderable=1&resolve_model=0"
+    lim1 = _load(child_sid, limited_query)
+    meta = _load(child_sid, "&messages=0&resolve_model=0")
+    lim2 = _load(child_sid, limited_query)
+    lim3 = _load(child_sid, limited_query)
+    full = _load(child_sid, "&messages=1&resolve_model=0")
+    routes._display_merge_cache.clear()
+    lim4 = _load(child_sid, limited_query)
+
+    assert lim1["message_count"] == 4
+    assert meta["message_count"] == 6
+    assert lim2["message_count"] == 6
+    assert lim3["message_count"] == 6
+    assert full["message_count"] == 6
+    assert lim4["message_count"] == 6
+
+    assert len(lim1["messages"]) == 4
+    assert len(lim2["messages"]) == 6
+    assert len(lim3["messages"]) == 6
+    assert len(full["messages"]) == 6
+    assert len(lim4["messages"]) == 6
+    assert meta["messages"] == []
+
+
+def test_foreign_cli_stable_parent_control(monkeypatch, tmp_path):
+    """Control: stable immediate parent with 4 rows reports 6 across all modes.
+
+    Parent sidecar already carries 4 rows and no save occurs during the read.
+    Bounded, metadata, and full loads all consistently report 6 messages.
+    Sequence: 6 / 6 / 6 / 6 / 6 / 6.
+    """
+    import api.routes as routes
+
+    parent_sid = "cli7050_stable_parent"
+    parent_rows = [
+        {"role": "user", "content": "archived parent q", "timestamp": 1000.0},
+        {"role": "assistant", "content": "archived parent a", "timestamp": 1001.0},
+        {"role": "user", "content": "parent q2", "timestamp": 1004.0},
+        {"role": "assistant", "content": "parent a2", "timestamp": 1005.0},
+    ]
+    parent = _install_session(monkeypatch, tmp_path, parent_sid, parent_rows)
+    assert not getattr(parent, "pre_compression_snapshot", False)
+
+    child_sid = "cli7050_stable_child"
+    child_rows = [
+        {"role": "user", "content": "q0", "timestamp": 1002.0},
+        {"role": "assistant", "content": "a0", "timestamp": 1003.0},
+    ]
+    child = _install_session(monkeypatch, tmp_path, child_sid, child_rows)
+    child.parent_session_id = parent_sid
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_rows)
+
+    limited_query = "&messages=1&msg_limit=30&expand_renderable=1&resolve_model=0"
+    lim1 = _load(child_sid, limited_query)
+    meta = _load(child_sid, "&messages=0&resolve_model=0")
+    lim2 = _load(child_sid, limited_query)
+    lim3 = _load(child_sid, limited_query)
+    full = _load(child_sid, "&messages=1&resolve_model=0")
+    routes._display_merge_cache.clear()
+    lim4 = _load(child_sid, limited_query)
+
+    assert lim1["message_count"] == 6
+    assert meta["message_count"] == 6
+    assert lim2["message_count"] == 6
+    assert lim3["message_count"] == 6
+    assert full["message_count"] == 6
+    assert lim4["message_count"] == 6
+
+    assert len(lim1["messages"]) == 6
+    assert len(lim2["messages"]) == 6
+    assert len(lim3["messages"]) == 6
+    assert len(full["messages"]) == 6
+    assert len(lim4["messages"]) == 6
+    assert meta["messages"] == []
+
+
+
