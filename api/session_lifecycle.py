@@ -302,13 +302,15 @@ def release_in_flight(session_id: str) -> bool:
 def forget_released_agent(session_id: str, agent) -> bool:
     """Drop the ledger's strong reference to a SOFT-RELEASED agent handle.
 
-    A pressure shed pops the entry out of ``SESSION_AGENT_CACHE`` and calls
-    ``release_clients()``, which deliberately KEEPS the memory provider (the
-    session may resume).  The ledger's ``agent`` slot is a second, independent
-    strong reference to that same handle, so without this the provider stays
-    alive for the life of the process: nothing can reach the handle again (the
-    idle sweep only walks the cache) and the next turn builds a DIFFERENT agent
-    regardless.  The entry itself is kept — ``generation`` /
+    A pressure shed pops the entry out of ``SESSION_AGENT_CACHE`` and releases
+    its clients.  On an Agent newer than 2026-10-19 that release also tears the
+    memory provider down when the agent is its last holder, and leaves it with
+    its holders otherwise; either way the handle itself is finished.  The
+    ledger's ``agent`` slot is a second, independent strong reference to it, so
+    without this the handle (and any provider this agent still held, plus its
+    tool state) stays alive for the life of the process: nothing can reach the
+    handle again (the idle sweep only walks the cache) and the next turn builds a
+    DIFFERENT agent regardless.  The entry itself is kept — ``generation`` /
     ``committed_generation`` / ``profile_home`` are what make the next turn's
     re-registration cheap and correct.
 

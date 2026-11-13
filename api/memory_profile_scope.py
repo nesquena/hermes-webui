@@ -2266,6 +2266,257 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
     )
 
 
+# ── an agent shed by the pressure valve: clients now, provider only if last ──
+
+def _detach_active_children(agent: Any) -> list:
+    """Detach the per-turn child agents the native ``release_clients`` fans out to.
+
+    The native method calls ``child.release_clients()`` for each of them, and on
+    an Agent newer than 2026-10-19 that call releases the child's memory provider
+    too — without the last-holder proof.  The children are therefore detached
+    here and released through the same ownership-aware adapter as the parent, so
+    a child that shares a provider instance with a live agent cannot close it.
+    """
+    children = getattr(agent, "_active_children", None)
+    if not isinstance(children, list):
+        return []
+    lock = getattr(agent, "_active_children_lock", None)
+    try:
+        if lock is not None:
+            with lock:
+                detached = list(children)
+                children.clear()
+        else:
+            detached = list(children)
+            children.clear()
+        return detached
+    except Exception:
+        logger.debug("could not detach the active children of a shed agent", exc_info=True)
+        return []
+
+
+def _release_llm_client_phases(agent: Any) -> bool:
+    """Run the LLM-client phases of ``AIAgent.release_clients()``, without the
+    memory release that follows them.
+
+    The phases are the native ones (the caller has already detached the child
+    agents): retire the shared client, close the per-request clients, close the
+    Codex child.  An Agent shape that exposes none of them cannot be split —
+    nothing runs and False is returned, because falling back to
+    ``release_clients()`` would tear down a provider a live peer still uses.
+    """
+    ran = False
+    drop = getattr(agent, "_drop_shared_client", None)
+    retire = getattr(agent, "_retire_shared_openai_client", None)
+    if callable(drop) and callable(retire):
+        try:
+            drop(lambda client: retire(client, reason="cache_evict"))
+            ran = True
+        except Exception:
+            logger.debug("retiring a shed agent's shared client failed", exc_info=True)
+    close_request_clients = getattr(agent, "_close_request_clients", None)
+    if callable(close_request_clients):
+        try:
+            close_request_clients("cache_evict")
+            ran = True
+        except Exception:
+            logger.debug("closing a shed agent's request clients failed", exc_info=True)
+    close_codex = getattr(agent, "_close_codex_session", None)
+    if callable(close_codex):
+        try:
+            close_codex()
+            ran = True
+        except Exception:
+            logger.debug("closing a shed agent's Codex child failed", exc_info=True)
+    return ran
+
+
+def release_shed_agent_clients(agent: Any, *, session_id: str = "",
+                               release_provider: bool = True) -> bool:
+    """Release an agent the cache shed, WITHOUT closing a provider a live agent
+    still uses (#8810).
+
+    Native ``AIAgent.release_clients()`` (Agent 2026-10-19+) ends with
+    ``MemoryManager.release_soft()``, a manager-level teardown that runs
+    ``shutdown_all()`` on every provider instance the manager serves.  A provider
+    that hands one instance to every agent of a profile (mnemosyne-hermes 0.7.1)
+    is therefore closed under a peer that is still cached: the peer's next save
+    fails with ``memory provider client is closed``.  The full eviction path
+    already protects that case (``release_unowned_memory_provider`` -> last-holder
+    proof); the pressure valve called ``release_clients()`` directly and did not.
+
+    The release is split along the instance-lifetime protocol:
+
+    * no provider / an Agent older than ``release_soft`` -> ``release_clients()``
+      cannot reach a provider, so it runs unchanged;
+    * every provider instance is held by THIS agent alone -> the teardown is
+      claimed atomically (``_claim_last_held_teardown``), ``release_clients()``
+      runs in the provider's own profile home (its memory release included), and
+      the claim is settled.  A torn-down instance is re-initialised by the next
+      construction, exactly as after an owned session-end teardown;
+    * another holder, a construction acquiring the instance, or queued memory
+      work -> only the LLM-client phases run; the provider keeps its client.  A
+      refusal that is ONLY queued work keeps the release (``_ReleaseIntent``), so
+      it runs once that work drains instead of waiting for a session boundary a
+      shed session never reaches.
+
+    Provider I/O never runs under ``_provider_holders_lock`` or the agent-cache
+    lock: the claim returns before the release starts, and the caller (the
+    pressure release worker) holds no cache lock at all.  Returns True when the
+    native full release ran, False when only the LLM clients were released.
+    """
+    if agent is None:
+        return False
+    native = getattr(agent, "release_clients", None)
+    if not callable(native):
+        return False
+    manager = getattr(agent, "_memory_manager", None)
+    release_soft = getattr(manager, "release_soft", None)
+    if manager is None or not callable(release_soft) or not callable(
+        getattr(manager, "claim_teardown", None)
+    ):
+        # Nothing in this Agent's release_clients() can reach a provider.
+        try:
+            native()
+        except Exception:
+            logger.debug("releasing a shed agent's clients failed", exc_info=True)
+            return False
+        return True
+
+    if not release_provider:
+        # The caller keeps this handle: a pending memory extraction is still
+        # delivered through its provider on a later boundary, so only the LLM
+        # clients go — here and on the children alike.
+        for child in _detach_active_children(agent):
+            try:
+                release_shed_agent_clients(
+                    child, session_id=session_id, release_provider=False
+                )
+            except Exception:
+                logger.debug("releasing a detached child of a shed agent failed", exc_info=True)
+        if not _release_llm_client_phases(agent):
+            _log_once(
+                "shed-clients-unavailable",
+                "[webui] #8810: this Hermes Agent's release_clients() cannot be split into "
+                "LLM clients vs memory provider, so a shed agent keeps its LLM clients "
+                "rather than closing a provider a live agent may still use.",
+            )
+        return False
+
+    state, bound_key = _bound_memory_home_key(agent)
+    bound = getattr(manager, "_bound_scope", None)
+    bound_home = str(bound.get("hermes_home") or "") if isinstance(bound, dict) else ""
+    scoped = state == "bound" and bool(bound_home) and profile_home_key(bound_home) == bound_key
+
+    intent = _ReleaseIntent(manager, bound_home, bound_key, session_id) if scoped else None
+    ok, why, claimed = _claim_last_held_teardown(agent, retain=intent)
+
+    # The native method would hand each child to ``child.release_clients()``;
+    # route them through this same adapter instead, so a child holding a shared
+    # instance is refused the teardown it would otherwise run unchecked.
+    for child in _detach_active_children(agent):
+        try:
+            release_shed_agent_clients(child, session_id=session_id)
+        except Exception:
+            logger.debug("releasing a detached child of a shed agent failed", exc_info=True)
+
+    if ok:
+        claimed_teardown = False
+        if not scoped:
+            _settle_last_held_teardown(agent, claimed)
+            _log_once(
+                f"shed-unscoped:{session_id}",
+                "[webui] #8810: the memory provider of shed session %s was not released: "
+                "the provider's own profile home could not be resolved, so the release "
+                "would have run in another profile.",
+                session_id,
+            )
+        elif getattr(manager, "_teardown_claim", None):
+            _settle_last_held_teardown(agent, claimed)
+            _log_once(
+                f"shed-claimed:{session_id}",
+                "[webui] #8810: the memory provider of shed session %s was not released: a "
+                "teardown of its memory manager was already claimed, so the release would "
+                "have done nothing. It keeps its worker until the WebUI restarts.",
+                session_id,
+            )
+        else:
+            restore, reason = _enter_profile_home(bound_home, bound_key)
+            if reason is None:
+                released = False
+                try:
+                    native()
+                    released = True
+                except Exception:
+                    logger.debug("releasing a shed agent's clients failed", exc_info=True)
+                finally:
+                    restore()
+                    raced = _settle_last_held_teardown(agent, claimed, released=released)
+                if raced:
+                    logger.warning(
+                        "[webui] #8810: provider(s) %s gained a holder while the release of "
+                        "shed session %s was running; that holder may have been shut down "
+                        "with them.",
+                        raced, session_id,
+                    )
+                claimed_teardown = released
+            else:
+                _settle_last_held_teardown(agent, claimed)
+                _log_once(
+                    f"shed-scope:{session_id}",
+                    "[webui] #8810: the memory provider of shed session %s was not released "
+                    "(%s); it keeps its worker until the WebUI restarts.",
+                    session_id, reason,
+                )
+        if claimed_teardown:
+            return True
+        if not _release_llm_client_phases(agent):
+            _log_once(
+                "shed-clients-unavailable",
+                "[webui] #8810: this Hermes Agent's release_clients() cannot be split into "
+                "LLM clients vs memory provider, so a shed agent keeps its LLM clients "
+                "rather than closing a provider a live agent may still use.",
+            )
+        return False
+
+    # Not the last holder: the provider stays with the agents that hold it.
+    if intent is not None:
+        armed = _arm_release_intent(intent)
+        if armed == "unhookable":
+            _start_intent_retry(intent, poll=True)
+        if armed != "unretained":
+            _log_once(
+                f"shed-deferred:{session_id}",
+                "[webui] #8810: the memory provider of shed session %s was NOT released yet: "
+                "%s. The release is kept and runs on its own once that memory work has "
+                "drained.",
+                session_id, why,
+            )
+        else:
+            _log_once(
+                f"shed-shared:{session_id}",
+                "[webui] #8810: the memory provider of shed session %s was NOT released: %s. "
+                "It keeps its client for the agents still holding it.",
+                session_id, why,
+            )
+    else:
+        _log_once(
+            f"shed-unscoped-refused:{session_id}",
+            "[webui] #8810: the memory provider of shed session %s was NOT released: %s. "
+            "It keeps its client; its own profile home could not be resolved for a "
+            "retained release.",
+            session_id, why,
+        )
+    if not _release_llm_client_phases(agent):
+        _log_once(
+            "shed-clients-unavailable",
+            "[webui] #8810: this Hermes Agent's release_clients() cannot be split into "
+            "LLM clients vs memory provider, so a shed agent keeps its LLM clients "
+            "rather than closing a provider a live agent may still use.",
+        )
+    return False
+
+
 def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home: str,
                          bound_key: Optional[str], session_id: str, deferred: bool = False) -> bool:
     """Run a release whose teardown ``claimed`` (``_claim_last_held_teardown`` or

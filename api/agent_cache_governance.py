@@ -462,31 +462,49 @@ def _legacy_full_close(agent: Any) -> None:
             logger.debug("legacy %s failed on soft release", name, exc_info=True)
 
 
-def _release_agent_clients(agent: Any) -> None:
-    """Drop an evicted agent's LLM clients (gateway/run_agent_cache.py:911).
+def _release_agent_clients(agent: Any, *, session_id: str = "",
+                          release_provider: bool = True) -> None:
+    """Release an evicted agent's LLM clients (gateway/run_agent_cache.py:911).
 
     ``AIAgent.release_clients()`` is the gateway's soft-release primitive: it
     retires the shared client and closes the per-request clients / codex child,
     is idempotent, and deliberately keeps session tool state (sandbox, browser,
-    background processes, memory provider) so the session can resume — the next
-    turn builds fresh clients.  Without this call every shed session keeps its
-    provider client open for the life of the process, and because the entry has
-    left the cache the idle-TTL teardown can never reach the handle to close it
-    (measured: 0 provider shutdowns / 0 client releases for shed agents).
+    background processes) so the session can resume — the next turn builds fresh
+    clients.  Without this call every shed session keeps its provider client open
+    for the life of the process, and because the entry has left the cache the
+    idle-TTL teardown can never reach the handle to close it (measured: 0
+    provider shutdowns / 0 client releases for shed agents).
+
+    On an Agent newer than 2026-10-19 the native method ALSO calls
+    ``MemoryManager.release_soft()``, which shuts down every memory provider
+    instance the manager serves — including one a live agent of the same profile
+    still holds.  The release therefore goes through
+    ``memory_profile_scope.release_shed_agent_clients``: the LLM clients always
+    go, the provider only when this agent is its last holder (claimed through the
+    #8613 protocol).  If that adapter cannot run, nothing is released: closing a
+    peer's provider loses its saves, while a lingering client costs memory.
     """
     if agent is None:
         return
     release = getattr(agent, "release_clients", None)
     if callable(release):
         try:
-            release()
+            from api.memory_profile_scope import release_shed_agent_clients
+
+            release_shed_agent_clients(
+                agent, session_id=session_id, release_provider=release_provider
+            )
         except Exception:
-            logger.debug("soft-release release_clients failed", exc_info=True)
+            logger.warning(
+                "Agent cache: could not release the clients of shed session=%s; its LLM "
+                "clients stay open rather than risk closing a shared memory provider.",
+                session_id, exc_info=True,
+            )
         return
     _legacy_full_close(agent)
 
 
-def soft_release_transcript(agent: Any) -> None:
+def soft_release_transcript(agent: Any, *, session_id: str = "") -> None:
     """Drop the live transcript from an evicted agent without tearing it down.
 
     Mirrors gateway/run_agent_cache.py:911 ``_release_evicted_agent_soft``, in
@@ -502,10 +520,15 @@ def soft_release_transcript(agent: Any) -> None:
     Only safe once the transcript is fully on disk: clearing the sole complete
     in-memory copy while persistence lags loses history on the next rebuild.
     Callers must check ``transcript_persistence_caught_up(agent)`` first.
+
+    The clients are released through ``_release_agent_clients``, which on an
+    Agent newer than 2026-10-19 also has to decide whether this agent may tear
+    down the memory provider it serves (only as its last holder).  A batch that
+    keeps the handle for a pending extraction passes ``release_provider=False``.
     """
     if agent is None:
         return
-    _release_agent_clients(agent)
+    _release_agent_clients(agent, session_id=session_id)
     try:
         if hasattr(agent, "_session_messages"):
             agent._session_messages = []
@@ -615,11 +638,12 @@ def _abandon_aborted_release(session_id: str, agent: Any, exc: BaseException) ->
     the transcript.  It is kept because the ledger still reports the extraction
     as pending and the transcript is the only payload a later boundary can give
     it — dropping it is precisely the silent data loss this valve avoids.
-    Releasing the clients does not disable that retry: ``release_clients()``
-    keeps the memory provider (gateway parity), so ``commit_memory_session``
-    still works on the next boundary.  A legacy agent shape with no
-    ``release_clients()`` only has the full close, which takes the transcript
-    with it; the log says that instead of pretending the payload survived.
+    Releasing the clients does not disable that retry: the release is
+    CLIENTS-ONLY here (``release_provider=False``), so the provider its
+    ``commit_memory_session`` still writes through stays open.  A legacy agent
+    shape with no ``release_clients()`` only has the full close, which takes the
+    transcript with it; the log says that instead of pretending the payload
+    survived.
     """
     released = False
     try:
@@ -634,7 +658,7 @@ def _abandon_aborted_release(session_id: str, agent: Any, exc: BaseException) ->
     # also drops the transcript — report what actually happened to the payload
     # instead of claiming it survived.
     soft = callable(getattr(agent, "release_clients", None))
-    _release_agent_clients(agent)
+    _release_agent_clients(agent, session_id=session_id, release_provider=False)
     kept = bool(getattr(agent, "_session_messages", None))
     if not kept:
         fate = (
@@ -665,12 +689,12 @@ def _abandon_aborted_release(session_id: str, agent: Any, exc: BaseException) ->
 def _forget_released_agent(session_id: str, agent: Any) -> bool:
     """Drop the lifecycle ledger's strong reference to a released handle.
 
-    ``release_clients()`` keeps the memory provider on purpose (the session may
-    resume), and the claim already popped the entry out of the cache — so after
-    a shed the ledger's ``agent`` slot is the ONLY reference that can still reach
-    the handle.  Nothing else ever will: the idle sweep walks the cache, and the
-    next turn builds a different agent.  Leaving it there pins the provider for
-    the life of the process.
+    The claim already popped the entry out of the cache, so after a shed the
+    ledger's ``agent`` slot is the ONLY reference that can still reach the
+    handle.  Nothing else ever will: the idle sweep walks the cache, and the next
+    turn builds a different agent.  Leaving it there pins the handle — and
+    whatever its release left with it (the memory provider when this agent was
+    not its last holder, tool state, sandbox) — for the life of the process.
 
     The ENTRY stays: its ``generation`` / ``committed_generation`` is what the
     next turn's registration continues from, and an uncommitted segment keeps
@@ -699,9 +723,9 @@ def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
       payload to deliver);
     * transcript released -> the lifecycle ledger's reference to the handle is
       dropped as well (``_forget_released_agent``): the entry and its
-      generation ledger stay for the next turn, but the released agent — and the
-      memory provider ``release_clients()`` keeps — becomes collectable instead
-      of living for the rest of the process;
+      generation ledger stay for the next turn, but the released agent — and,
+      when it was the provider's last holder, the torn-down instance — becomes
+      collectable instead of living for the rest of the process;
     * commit refused (Exception) -> KEEP the transcript for the next session
       boundary instead of shedding it; no pass re-delivers to a hook that is
       refusing, and an empty-payload commit never happens;
@@ -732,7 +756,7 @@ def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
                     key,
                 )
             else:
-                soft_release_transcript(agent)
+                soft_release_transcript(agent, session_id=key)
                 _forget_released_agent(key, agent)
         except Exception:
             logger.debug("pressure soft-release failed for %s", key, exc_info=True)
