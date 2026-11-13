@@ -15,6 +15,7 @@ decides alongside its config (#9024 review round 2): launcher export first,
 then the owner's own .env, then its config.yaml — never the live process env,
 which after a profile switch holds the active profile's .env.
 """
+import collections
 import os
 import sys
 import time
@@ -826,3 +827,272 @@ def test_unverifiable_sidecar_fails_closed_but_a_missing_session_does_not(
     routes._handle_btw(object(), {"session_id": "broken", "question": "why?"})
     assert captured["status"] == 409, "unverifiable sidecar: must fail closed"
     assert captured["payload"]["code"] == "gateway_mode_unsupported"
+
+
+# ── #9024 review round 5: real checkpoint workers over a genuine launcher ───
+
+
+def _checkpoint_homes(monkeypatch, tmp_path, *, owner_config, worker_a_env, worker_b_env):
+    """Real profile homes: an owner with a REAL config.yaml, two worker profiles
+    with REAL .env files, plus the root/default home config_for_profile
+    compares against. Nothing is monkeypatched at the resolver level —
+    config_for_profile/get_config_for_profile_home read the real files.
+    """
+    homes = {}
+    for name in ("default", "owner", "worker-a", "worker-b"):
+        home = tmp_path / f"home-{name}"
+        home.mkdir()
+        homes[name] = home
+    (homes["owner"] / "config.yaml").write_text(owner_config, encoding="utf-8")
+    (homes["worker-a"] / ".env").write_text(worker_a_env, encoding="utf-8")
+    (homes["worker-b"] / ".env").write_text(worker_b_env, encoding="utf-8")
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name, _h=homes: _h.get(str(name or "default"), _h["default"]),
+    )
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+    return homes
+
+
+def _run_real_checkpoints(monkeypatch, exit_first, sessions):
+    """Two real ``_save_streaming_checkpoint()`` workers, released in order.
+
+    Each worker's ``Session.save(skip_index=True)`` runs for REAL and only its
+    wrapper's return is gated (a class-level ``Session.save`` patch that
+    finishes the real save, then waits on a per-session gate — an instance
+    attribute would leak into the persisted payload), so the profile env
+    mirror stays open past the persisted checkpoint. ``exit_first`` picks FIFO
+    ("a": the first-opened scope exits first) or LIFO ("b") release order;
+    both real saves complete before either gate opens.
+    """
+    import threading
+
+    import api.models as models
+    import api.streaming as streaming
+
+    real_save = models.Session.save
+    saved_done = {}
+    gates = {}
+    for sess in sessions:
+        saved_done[sess.session_id] = threading.Event()
+        gates[sess.session_id] = threading.Event()
+
+    def _gated_save(self, touch_updated_at=True, skip_index=False):
+        real_save(self, touch_updated_at=touch_updated_at, skip_index=skip_index)
+        saved_done[self.session_id].set()
+        assert gates[self.session_id].wait(timeout=30), "checkpoint gate never opened"
+
+    monkeypatch.setattr(models.Session, "save", _gated_save)
+
+    errors = []
+    threads = {}
+
+    def _run(sess):
+        try:
+            streaming._save_streaming_checkpoint(sess)
+        except BaseException as exc:  # pragma: no cover - surfaced by the assert
+            errors.append(exc)
+
+    for sess in sessions:
+        threads[sess.session_id] = threading.Thread(
+            target=_run, args=(sess,), daemon=True
+        )
+        threads[sess.session_id].start()
+    # Both real Session.save(skip_index=True) calls must finish before release.
+    for sess in sessions:
+        assert saved_done[sess.session_id].wait(timeout=30), (
+            f"real checkpoint save never finished for {sess.session_id}"
+        )
+    first, second = (
+        (sessions[0], sessions[1]) if exit_first == "a" else (sessions[1], sessions[0])
+    )
+    for sess in (first, second):
+        gates[sess.session_id].set()
+        threads[sess.session_id].join(timeout=30)
+        assert not threads[sess.session_id].is_alive(), "checkpoint worker never exited"
+    assert not errors, f"checkpoint workers failed: {errors!r}"
+
+
+@pytest.mark.parametrize(
+    ("launcher_backend", "owner_config", "expected_env_after"),
+    [
+        # Direction 1: the launcher override is GATEWAY while the owner's own
+        # config says local — launcher authority must win, so the in-process
+        # features refuse.
+        ("gateway", "webui_chat_backend: local\n", "gateway"),
+        # Direction 2: the launcher override is LEGACY while the owner's own
+        # config says gateway — the owner must NOT be refused.
+        ("legacy", "webui_chat_backend: gateway\n", "legacy"),
+    ],
+)
+@pytest.mark.parametrize(("exit_first",), [("a",), ("b",)])
+def test_real_checkpoints_preserve_the_launcher_baseline(
+    monkeypatch, tmp_path, captured, captured_route_j, exit_first,
+    launcher_backend, owner_config, expected_env_after,
+):
+    """#9024 review round 5: FIFO/LIFO checkpoint exits keep the launcher value.
+
+    Two REAL ``_save_streaming_checkpoint()`` workers (the supported
+    ``scope_skill_modules=False`` path) for two different profiles run over a
+    genuine launcher ``HERMES_WEBUI_CHAT_BACKEND`` export and a REAL saved
+    owner session; both real ``Session.save(skip_index=True)`` calls complete
+    and only the wrapper returns are gated. Whatever the exit order, the final
+    process-env value is the ORIGINAL launcher export — the previous restore
+    deleted it after a FIFO exit, reversing admission in both mixed-backend
+    directions. The actual owner-scoped handlers then decide by the launcher
+    value with ZERO in-process model-boundary calls, and the refused request
+    leaves the saved owner session untouched.
+    """
+    import json
+
+    import api.models as models
+
+    _checkpoint_homes(
+        monkeypatch,
+        tmp_path,
+        owner_config=owner_config,
+        worker_a_env="HERMES_WEBUI_CHAT_BACKEND=legacy\n",
+        worker_b_env="HERMES_WEBUI_CHAT_BACKEND=local\n",
+    )
+    monkeypatch.delenv(_ENV_KEY, raising=False)
+    monkeypatch.setenv(_ENV_KEY, launcher_backend)
+
+    directory = tmp_path / "sessions"
+    directory.mkdir()
+    owner_sid = "owner-9024"
+    sidecar = directory / f"{owner_sid}.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "session_id": owner_sid,
+                "title": "Owner",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "profile": "owner",
+                "messages": [{"role": "user", "content": "hello"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = sidecar.read_bytes()
+    cache = collections.OrderedDict()
+    monkeypatch.setattr(models, "SESSION_DIR", directory)
+    monkeypatch.setattr(models, "SESSIONS", cache)
+    monkeypatch.setattr(routes, "SESSION_DIR", directory)
+    monkeypatch.setattr(routes, "SESSIONS", cache)
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+
+    workers = []
+    for name in ("worker-a", "worker-b"):
+        workers.append(
+            models.Session(
+                session_id=f"ck-{name}",
+                title=f"checkpoint {name}",
+                workspace=str(tmp_path),
+                messages=[{"role": "user", "content": "hi"}],
+                profile=name,
+            )
+        )
+
+    _run_real_checkpoints(monkeypatch, exit_first, workers)
+
+    assert os.environ.get(_ENV_KEY) == expected_env_after, (
+        "checkpoint restore did not return the genuine launcher baseline"
+    )
+    assert not profiles.profile_env_writer_owns(_ENV_KEY)
+    assert _ENV_KEY not in profiles._PROFILE_ENV_BASELINE
+
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("reached the in-process model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+    routes._handle_git_commit_message(object(), {"session_id": owner_sid})
+    assert calls["model_boundary"] == 0
+
+    if launcher_backend == "gateway":
+        # Launcher gateway + local owner config: refused before the model,
+        # before any session load — the sidecar bytes, backup set and cache
+        # membership are all untouched by the refused request.
+        assert captured["status"] == 409
+        assert captured["payload"]["code"] == "gateway_mode_unsupported"
+        assert owner_sid not in cache, "the refused request loaded (and cached) the owner session"
+    else:
+        # Launcher legacy + gateway owner config: NOT refused — the next
+        # admission gate answers (drain control), never a model call. The
+        # request is legitimate here, so it may load the session; the saved
+        # conversation must still not be rewritten by it.
+        drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+        monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+        routes._handle_btw(object(), {"session_id": owner_sid, "question": "why?"})
+        assert captured_route_j["status"] == 503
+        assert captured_route_j["payload"]["code"] == "server_draining"
+        assert calls["model_boundary"] == 0
+
+    assert sidecar.read_bytes() == before, "the request rewrote the owner sidecar"
+    assert list(directory.glob("*.bak")) == [], "the request wrote a backup"
+
+
+@pytest.mark.parametrize(
+    ("breakage",), [("directory",), ("malformed",)],
+)
+def test_unreadable_owner_config_fails_closed_to_refusal(
+    monkeypatch, tmp_path, captured, captured_route_j, breakage
+):
+    """#9024 review round 5: an unreadable owner config is not a valid {}.
+
+    The owner's config.yaml EXISTS but cannot be read or parsed — a directory
+    at the path, or malformed YAML. The loader used to collapse that to a
+    valid local-owner {}, silently authorizing in-process model calls. The
+    unreadable marker now fails closed: the in-process feature refuses 409
+    with zero model-boundary calls. A home with NO config.yaml stays a valid
+    local owner ({}) and is not refused.
+    """
+    import api.models as models
+
+    homes = {}
+    for name in ("default", "owner", "noconfig"):
+        home = tmp_path / f"home-{name}"
+        home.mkdir()
+        homes[name] = home
+    config_path = homes["owner"] / "config.yaml"
+    if breakage == "directory":
+        config_path.mkdir()
+    else:
+        config_path.write_text("webui_chat_backend: [unclosed\n", encoding="utf-8")
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name, _h=homes: _h.get(str(name or "default"), _h["default"]),
+    )
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.delenv(_ENV_KEY, raising=False)
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("unreadable owner config reached the model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+
+    def _owner_profile(_sid):
+        return "owner"
+
+    monkeypatch.setattr(routes, "get_session_profile_readonly", _owner_profile)
+    routes._handle_git_commit_message(object(), {"session_id": "s1"})
+    assert captured["status"] == 409
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+    assert calls["model_boundary"] == 0
+
+    # Control: a profile home with NO config.yaml is a valid local owner —
+    # the refusal is skipped and the next admission gate answers.
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda _sid: "noconfig")
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+    routes._handle_btw(object(), {"session_id": "s2", "question": "why?"})
+    assert captured_route_j["status"] == 503
+    assert captured_route_j["payload"]["code"] == "server_draining"

@@ -27,6 +27,7 @@ from api.config import (
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
+    UnreadableProfileConfig,
     clear_session_writeback_owner_if_owned,
     resolve_session_reasoning_effort,
     gateway_approval_unavailable_reason,
@@ -385,6 +386,12 @@ def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = N
     """
     source = os.environ if environ is None else environ
     cfg = config_data if isinstance(config_data, dict) else {}
+    if isinstance(cfg, UnreadableProfileConfig):
+        # #8971 / #9024 review round 5: the owner's config.yaml exists but
+        # cannot be read or parsed. An unreadable config is not a valid
+        # local-owner {} — fail closed to the gateway/refusal side, never
+        # silently authorize an in-process model call.
+        return "gateway"
     raw = str(
         source.get(_WEBUI_CHAT_BACKEND_ENV)
         or cfg.get("webui_chat_backend")
@@ -415,9 +422,12 @@ def _owning_profile_rule(resolver, profile, config_data) -> tuple:
     """Resolve the owning profile's (config, environ), or fail closed.
 
     An empty dict is a valid, fully-local owning-profile answer — only a
-    resolution failure (exception / non-dict) is unverifiable. That never
-    silently authorizes an in-process turn: the decision fails closed to the
-    gateway/refusal side (#9024 review round 4, #8971).
+    resolution failure (exception / non-dict) is unverifiable, and so is an
+    owner config that exists but cannot be read or parsed
+    (``UnreadableProfileConfig``: a real directory at config.yaml, malformed
+    YAML — #9024 review round 5). Neither ever silently authorizes an
+    in-process turn: the decision fails closed to the gateway/refusal side
+    (#8971).
     """
     try:
         resolved = resolver()
@@ -426,7 +436,9 @@ def _owning_profile_rule(resolver, profile, config_data) -> tuple:
             "owning-profile config resolution failed; refusing in-process use"
         )
         resolved = None
-    if not isinstance(resolved, dict):
+    if not isinstance(resolved, dict) or isinstance(
+        resolved, UnreadableProfileConfig
+    ):
         return unverifiable_chat_backend_rule()
     from api.profiles import chat_backend_environ_for_profile
 

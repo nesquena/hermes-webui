@@ -100,11 +100,18 @@ _DOTENV_OWNED_ENV_VALUES: set = set()
 
 # (key, value) pairs a profile-owned env writer has written, with a count per
 # live writer (#9024 review round 4). Pair-level on top of the key-level set
-# so restore can tell three cases apart: a value still owned by a LIVE writer
-# (restore it; the checker keeps ignoring it), a value whose writer already
-# exited (never resurrect it as a launcher export), and a genuine
-# launcher/operator value (restore it; the checker honors it).
+# so restore can tell a value still owned by a LIVE writer (restore it; the
+# checker keeps ignoring it) from anything else.
 _PROFILE_ENV_VALUES: collections.Counter = collections.Counter()
+
+# The pre-writer value each key carried before the FIRST profile-owned env
+# writer displaced it (#9024 review round 5): the genuine launcher/operator
+# baseline, possibly ``None`` (absent). The outermost writer records it under
+# the writer's env lock; the last writer to leave the key restores it. This is
+# what keeps a real launcher override alive across overlapping worker/streaming
+# scopes that exit in FIFO order, while a writer's dead value still never
+# survives as fake launcher authority (absent baseline stays absent).
+_PROFILE_ENV_BASELINE: dict = {}
 
 # Per-thread open-scope ordering for profile_env_for_background_worker's
 # thread-local env channel (#9024 review round 4). ``stack`` holds one opaque
@@ -126,11 +133,22 @@ def profile_env_writer_owns(key, value=None) -> bool:
     return value is not None and (key, value) in _PROFILE_ENV_VALUES
 
 
+def _profile_env_key_owned(key) -> bool:
+    """True when ANY profile-owned writer (dotenv or a mirror) still owns *key*."""
+    return key in _loaded_profile_env_keys or key in _WORKER_OWNED_ENV_KEYS
+
+
 def note_profile_env_mirror(env: dict) -> None:
     """Count *env*'s keys and (key, value) pairs as profile-writer-owned.
 
     Call under the writer's env lock BEFORE writing *env* into os.environ.
+    For keys this writer is the first to claim, the pre-write live value is
+    recorded as the launcher baseline :func:`restore_profile_env_snapshot`
+    returns to when the last writer leaves the key.
     """
+    for key in env:
+        if not _profile_env_key_owned(key) and key not in _PROFILE_ENV_BASELINE:
+            _PROFILE_ENV_BASELINE[key] = os.environ.get(key)
     _WORKER_OWNED_ENV_KEYS.update(env.keys())
     _PROFILE_ENV_VALUES.update(env.items())
 
@@ -154,34 +172,32 @@ def drop_profile_env_mirror(env: dict) -> None:
             _PROFILE_ENV_VALUES.pop(pair, None)
 
 
-def profile_env_mirror_owned_before(old_values: dict) -> dict:
-    """For a writer's pre-write snapshot: which old values were profile-owned.
-
-    The result is passed to :func:`restore_profile_env_snapshot` so a restore
-    never resurrects a profile-written value whose writer already exited.
-    """
-    return {
-        key: (key, value) in _PROFILE_ENV_VALUES
-        for key, value in old_values.items()
-    }
-
-
-def restore_profile_env_snapshot(old_values: dict, owned_before: dict) -> None:
+def restore_profile_env_snapshot(old_values: dict) -> None:
     """Provenance-correct restore of a profile env mirror's snapshot.
 
-    Call under the writer's env lock. ``None`` restores as absent. A value
-    still owned by a live writer is restored and stays ignored by the
-    checker. A value that was profile-owned at snapshot time but whose writer
-    has exited is dropped — it must not survive as a fake launcher export
-    (FIFO scope exits, #9024 review round 4). Everything else was a genuine
-    launcher/operator value: restore it.
+    Call under the writer's env lock, AFTER :func:`drop_profile_env_mirror`
+    for the exiting writer. Per key:
+
+    - A writer still owns the key → restore the snapshot value (``None``
+      restores as absent). The live writer's values keep deciding, and the
+      checker keeps ignoring them.
+    - No writer owns the key anymore and a launcher baseline exists → restore
+      the baseline: the genuine launcher/operator value the FIRST writer
+      displaced (#9024 review round 5). A FIFO exit therefore returns the real
+      launcher override instead of deleting it, and a baseline of ``None``
+      keeps the no-launcher protection (a dead writer's value never survives
+      as fake launcher authority). The baseline entry is consumed.
+    - No writer, no baseline (the pre-writer value came from the dotenv
+      writer's own key set) → plain snapshot restore.
     """
     for key, old_value in old_values.items():
-        if old_value is None:
-            os.environ.pop(key, None)
-        elif (key, old_value) in _PROFILE_ENV_VALUES:
-            os.environ[key] = old_value
-        elif owned_before.get(key):
+        if not _profile_env_key_owned(key) and key in _PROFILE_ENV_BASELINE:
+            baseline = _PROFILE_ENV_BASELINE.pop(key)
+            if baseline is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = baseline
+        elif old_value is None:
             os.environ.pop(key, None)
         else:
             os.environ[key] = old_value
@@ -1758,26 +1774,20 @@ def profile_env_for_background_worker(
             )
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
-            # #9024 review round 4: capture which previous values were written
-            # by a still-live profile writer BEFORE recording this scope, so
-            # restore can tell a live writer's value from a launcher export.
-            old_runtime_env_owned_before = profile_env_mirror_owned_before(
-                old_runtime_env
-            )
+            # #9024 review rounds 3-5: record the mirror BEFORE writing it so
+            # the pre-write live value is captured as the launcher baseline —
+            # a live value held by this scope is never mistaken for a
+            # launcher export, and the last writer restores the real launcher
+            # value (FIFO) instead of resurrecting or deleting it.
+            note_profile_env_mirror(safe_runtime_env)
             os.environ.update(safe_runtime_env)
             os.environ["HERMES_HOME"] = str(profile_home_path)
-            # #9024 review rounds 3-4: record the mirror so a live value held
-            # by this scope is never mistaken for a launcher export, and a
-            # later restore never resurrects it once this scope exits.
-            note_profile_env_mirror(safe_runtime_env)
         yield
     finally:
         try:
             with _ENV_LOCK:
                 drop_profile_env_mirror(safe_runtime_env)
-                restore_profile_env_snapshot(
-                    old_runtime_env, old_runtime_env_owned_before
-                )
+                restore_profile_env_snapshot(old_runtime_env)
                 if had_hermes_home:
                     os.environ["HERMES_HOME"] = old_hermes_home or ""
                 else:

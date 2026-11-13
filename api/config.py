@@ -823,6 +823,17 @@ def _detached_copy(value, _active=None):
         _active.discard(key)
 
 
+class UnreadableProfileConfig(dict):
+    """Marker: a profile's config.yaml EXISTS but could not be read or parsed.
+
+    An unreadable owner config must not silently authorize an in-process model
+    call (#8971, #9024 review round 5): the chat-backend admission decision
+    fails closed on this marker (gateway side). It is deliberately
+    empty-dict-shaped and falsy, so every ordinary consumer keeps the same
+    defaults it saw when parse failures collapsed to ``{}``.
+    """
+
+
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
     """Return the RAW (un-env-expanded) parsed config dict, memoized on
     (resolved path, st_mtime_ns, st_size). Shared parse core for
@@ -861,12 +872,20 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
             return _detached_copy(raw) if _copy else raw
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
-    # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
+    # doesn't serialize unrelated profiles; a concurrent duplicate parse is harmless.
     try:
         loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except Exception:
         logger.debug("Failed to parse yaml config from %s", config_path)
-        return {}
+        # #8971 / #9024 review round 5: the file EXISTS but cannot be read or
+        # parsed (malformed YAML, a directory at config.yaml, permission
+        # error). A mere missing file stays the valid "no config" {} below;
+        # this failure must not silently read as a valid local-owner {}.
+        # Empty-dict-shaped so ordinary consumers keep their defaults; the
+        # admission decision fails closed on the marker
+        # (webui_chat_backend_mode / _owning_profile_rule). Never cached, so a
+        # repaired file is re-read on the next call.
+        return UnreadableProfileConfig()
 
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
@@ -879,6 +898,8 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     # its input, so the env-expanded result is already cache-safe — no need to
     # deep-copy the raw dict first (keeps the /api/reasoning hot path cheap).
     raw = _load_yaml_config_file_raw(config_path, _copy=False)
+    if isinstance(raw, UnreadableProfileConfig):
+        return raw
     if not raw:
         return {}
     expanded = _expand_env_vars(raw)
@@ -1007,6 +1028,10 @@ def get_config_for_profile_home(
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
     profile_cfg = _load_yaml_config_file(source)
+    if isinstance(profile_cfg, UnreadableProfileConfig):
+        # #8971 / #9024 round 5: an unreadable config is not a valid {}
+        # — carry the failure status to the caller's admission decision.
+        return profile_cfg
     _apply_config_defaults(profile_cfg)
     return profile_cfg
 
