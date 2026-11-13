@@ -3,13 +3,9 @@ import json
 import sqlite3
 import time
 from types import SimpleNamespace
-from pathlib import Path
-import pytest
 from api import agent_sessions, models, routes
-from api.models import SESSIONS, Session
 from tests.test_pr7555_cli_session_availability import (
     _configure_real_single_profile,
-    _insert_session,
     _make_state_db,
 )
 
@@ -167,7 +163,7 @@ def test_authenticated_write_consumer_regressions(tmp_path, monkeypatch):
 
     # 1. Foreign-source aged rows in state.db
     foreign_sids = ["aged_rename_unknown", "aged_rename_gateway", "aged_rename_ext_agent"]
-    for sid, src in zip(foreign_sids, ["unknown", "gateway", "external_agent"]):
+    for sid, src in zip(foreign_sids, ["unknown", "gateway", "external_agent"], strict=True):
         conn.execute(
             "INSERT INTO sessions (id, source, session_source, title, model, started_at, message_count) "
             "VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 1)",
@@ -193,7 +189,7 @@ def test_authenticated_write_consumer_regressions(tmp_path, monkeypatch):
 
     # 3. Local-source aged rows in state.db (positive controls)
     local_sids = ["aged_rename_desktop", "aged_rename_cli", "aged_rename_tui"]
-    for sid, src in zip(local_sids, ["desktop", "cli", "tui"]):
+    for sid, src in zip(local_sids, ["desktop", "cli", "tui"], strict=True):
         conn.execute(
             "INSERT INTO sessions (id, source, session_source, title, model, started_at, message_count) "
             "VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 1)",
