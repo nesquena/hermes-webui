@@ -5,6 +5,7 @@ from http.server import ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import threading
@@ -519,6 +520,9 @@ def test_real_cron_editor_survives_branding_change(http, png, width):
 
 
 def test_notification_uses_shared_icon_but_native_badge(state):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node required for notification behavior test")
     source = (Path(__file__).resolve().parents[1] / "static/messages.js").read_text()
     function = source[source.index("function _notificationOptions("):source.index("function _showPwaNotification(")]
     driver = """
@@ -529,7 +533,7 @@ const _appRootPath=()=>'/demo/';
 """ + function + """
 console.log(JSON.stringify(_notificationOptions('body',{sessionless:true})));
 """
-    result = subprocess.run(["node", "-e", driver], capture_output=True, text=True, timeout=10)
+    result = subprocess.run([node, "-e", driver], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     options = json.loads(result.stdout)
     assert options["icon"] == "branding/revision/icon-192.png"
