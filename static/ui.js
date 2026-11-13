@@ -20302,7 +20302,7 @@ function _compactionSummarySegment(text){
   const low=s.toLowerCase();
   if(low.startsWith('[context compaction')||low.startsWith('context compaction')) return s;
   if(!low.startsWith('[prior context')) return null;
-  const delim=low.indexOf('[end of prior context');
+  const delim=s.search(/\[end of prior context/i);
   if(delim===-1) return null;
   const after=s.slice(delim);
   const close=after.indexOf(']');

@@ -33,6 +33,10 @@ an automatic/compression-aware pipeline, and ``False`` (default) for manual
 compression contexts.
 """
 
+from __future__ import annotations
+
+import re
+
 
 def _content_text(content, *, part_types):
     if isinstance(content, list):
@@ -152,6 +156,12 @@ def is_compaction_handoff_carrier(message):
     return text.startswith("context compaction") or COMPACTION_HANDOFF_DELIMITER_PREFIX in text
 
 
+def _find_ascii_case_insensitive(needle: str, text: str) -> int:
+    """Return the start index of needle in text using ASCII case-insensitive matching, or -1."""
+    match = re.search(re.escape(needle), text, flags=re.IGNORECASE | re.ASCII)
+    return match.start() if match else -1
+
+
 def compaction_handoff_remainder(message):
     """Return the authentic retained text of a merged handoff carrier.
 
@@ -168,7 +178,7 @@ def compaction_handoff_remainder(message):
     low = text.lower()
     if low.startswith(COMPACTION_PROMPT_CARD_PREFIX) or low.startswith("context compaction"):
         return ""
-    delimiter = low.find(COMPACTION_HANDOFF_DELIMITER_PREFIX)
+    delimiter = _find_ascii_case_insensitive(COMPACTION_HANDOFF_DELIMITER_PREFIX, text)
     if delimiter < 0:
         return ""
     head = text[:delimiter].lstrip()
@@ -212,9 +222,8 @@ def _compaction_carrier_envelope_decision(content_text: str) -> tuple[str, str]:
 
     after_close = text[close + 1:]
     rest = after_close.strip()
-    low_after = after_close.lower()
 
-    delimiter_idx = low_after.find(COMPACTION_HANDOFF_DELIMITER_PREFIX)
+    delimiter_idx = _find_ascii_case_insensitive(COMPACTION_HANDOFF_DELIMITER_PREFIX, after_close)
     if delimiter_idx >= 0:
         head = after_close[:delimiter_idx].strip()
         if not head:
@@ -229,6 +238,26 @@ def _compaction_carrier_envelope_decision(content_text: str) -> tuple[str, str]:
         return _CARRIER_PROVEN_SYNTHETIC, ""
 
     return _CARRIER_NOT_A_CARRIER, ""
+
+
+def _projected_content_has_surviving_text(content) -> bool:
+    """Return True if content contains any non-empty surviving text."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, str):
+                if part.strip():
+                    return True
+            elif isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type in {"text", "input_text", "output_text"} or (
+                    part_type is None and ("text" in part or "content" in part)
+                ):
+                    val = part.get("text") or part.get("content")
+                    if isinstance(val, str) and val.strip():
+                        return True
+    return False
 
 
 def project_compaction_carrier_for_display(message):
@@ -303,9 +332,7 @@ def project_compaction_carrier_for_display(message):
         projected = dict(message)
         projected["content"] = new_content
         projected.pop("_compressed_summary", None)
-        if proven_synthetic_only and not _content_text(
-            new_content, part_types={"text", "input_text", "output_text"}
-        ):
+        if proven_synthetic_only and not _projected_content_has_surviving_text(new_content):
             projected[PURE_CARRIER_DISPLAY_FLAG] = True
         return projected
 
