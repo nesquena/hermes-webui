@@ -1,6 +1,8 @@
 /* Use Case Studio (8 Nov 2026). Builds on the om-* layer in orgmgmt.css. */
-main.main.showing-studio>#mainChat{display:none!important}
+html[data-workspace-entry] :is(#mainChat,#panelChat,#chatModeHeader){display:none!important}
+html[data-workspace-entry="overview"] main.main>#mainStudio,
 main.main.showing-studio>#mainStudio{display:flex;flex-direction:column;overflow:hidden}
+main.main.showing-studio>#mainChat{display:none!important}
 #mainStudio .main-view-body{overflow:auto;flex:1;min-height:0}
 .st-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
 .st-card{all:unset;box-sizing:border-box;cursor:pointer;display:flex;flex-direction:column;gap:6px;padding:16px;border:1px solid var(--border);border-radius:var(--sp-radius-lg);background:var(--surface);box-shadow:var(--sp-shadow-xs);transition:border-color .15s var(--sp-ease),box-shadow .15s var(--sp-ease)}

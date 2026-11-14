@@ -381,6 +381,7 @@ async function switchPanel(name, opts = {}) {
   const gated = document.querySelector('[data-module-gated][data-panel="'+String(name).replace(/[^a-z_]/g,'')+'"][hidden]');
   const nextPanel = gated || (window.SynthPulseModules && !window.SynthPulseModules.canOpen(name)) ? 'chat' : (name || 'chat');
   const prevPanel = _currentPanel;
+  const pendingEntry = document.documentElement.dataset.workspaceEntry;
   // ── Desktop sidebar collapse toggle (rail-click only) ──
   // If the click came from a rail icon AND we're on desktop, the rail icon
   // does double duty: clicking the already-active panel collapses the sidebar;
@@ -393,7 +394,7 @@ async function switchPanel(name, opts = {}) {
       // Expand first, then continue to the normal panel switch below so
       // the clicked panel becomes (or stays) active in the same gesture.
       expandSidebar();
-    } else if (prevPanel === nextPanel) {
+    } else if (prevPanel === nextPanel && !pendingEntry) {
       // Same panel clicked while sidebar is open → collapse and short-circuit.
       // Skip the guard/cleanup work below; nothing about the active panel
       // is changing, only the visibility of the panel container.
@@ -410,6 +411,7 @@ async function switchPanel(name, opts = {}) {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
   _currentPanel = nextPanel;
+  if (pendingEntry) window.SynthPulseWorkspace?.finishEntry();
   if(window.SynthPulseSkillActivity) window.SynthPulseSkillActivity.sync();
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   const navPanel = PANEL_NAV_HOME[nextPanel] || nextPanel;
@@ -428,6 +430,7 @@ async function switchPanel(name, opts = {}) {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
+  if (nextPanel === 'conversations') window.ConversationWorkbench.enter();
   if (nextPanel === 'msp' && window.SynthPulseMSP) await window.SynthPulseMSP.load();
   if (nextPanel === 'studio' && window.SPStudio) await window.SPStudio.load();
   if (nextPanel === 'organisation' && window.SPOrg) await window.SPOrg.load();
@@ -460,7 +463,7 @@ async function switchPanel(name, opts = {}) {
   }
   if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
     const sidebar = document.querySelector('.sidebar');
-    if (['chat', 'governance', 'integrations', 'approvals', 'modules', 'apps', 'msp'].includes(nextPanel)) {
+    if (['chat', 'conversations', 'governance', 'integrations', 'approvals', 'modules', 'apps', 'msp'].includes(nextPanel)) {
       _closeMobileSidebarAfterPanelSelection();
     } else if (sidebar) {
       sidebar.classList.remove('mobile-session-page');
@@ -9982,11 +9985,14 @@ async function loadGovernanceNavVisibility(){
       _applyTabVisibility(_getHiddenTabs());
     }
   }catch(_){ _applyNavigationAudience(null); /* backend authorization remains authoritative */ }
+  finally {
+    if(!Array.isArray(window.__GOV_ME__?.hidden_nav)) window.SynthPulseWorkspace?.finishEntry();
+  }
 }
 window.loadGovernanceNavVisibility=loadGovernanceNavVisibility;
 
 function _applyTabVisibility(hidden){
-  hidden=_sanitizeTabPanelList(hidden);
+  hidden=_sanitizeTabPanelList(hidden).filter(panel=>panel!=='studio');
   const govHidden=(Array.isArray(window._govHiddenNav)?window._govHiddenNav:[]).concat(window._moduleHiddenNav||[]);
   if(govHidden.length) hidden=hidden.concat(govHidden.filter(p=>hidden.indexOf(p)===-1));
   _applyTabOrder(window._navAudience==='member'&&!window._capabilityNavigation?_MEMBER_NAV_ORDER:_getTabOrder());
@@ -10019,7 +10025,7 @@ function _renderTabVisibilityChips(){
   panels.forEach(function(panel){
     var tab=document.querySelector('.rail .rail-btn.nav-tab[data-panel="'+panel+'"]')
       ||document.querySelector('.sidebar-nav .nav-tab[data-panel="'+panel+'"]');
-    if(tab && tab.hasAttribute('data-module-gated'))return;
+    if(panel==='studio' || (tab && tab.hasAttribute('data-module-gated')))return;
     var label=(tab&&(tab.dataset.tooltip||tab.dataset.label))||panel;
     // Capitalize first letter
     label=label.charAt(0).toUpperCase()+label.slice(1);

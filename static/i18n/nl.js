@@ -123,8 +123,6 @@ window.__registerHermesLocale('nl', {
   "workspace_kind_operator": "Operatie",
   "workspace_kind_engineer": "Techniek",
   "workspace_kind_admin": "Beheer",
-  "workspace_start": "Startpagina op dit apparaat",
-  "workspace_start_failed": "Startvoorkeur opslaan is niet gelukt.",
   "workspace_overview": "Overzicht",
   "agenda_times": "Tijdstippen",
   "agenda_month_hint": "Het getal bij een dag toont het aantal geplande uitvoeringen. Open een dag voor de tijdstippen.",

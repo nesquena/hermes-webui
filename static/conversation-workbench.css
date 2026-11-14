@@ -1,4 +1,5 @@
 main.main > #mainConversations{display:none;}
+html[data-workspace-entry="conversations"] main.main > #mainConversations,
 main.main.showing-conversations > #mainConversations{display:flex;}
 #mainConversations{padding:clamp(16px,3vw,40px);gap:20px;overflow:auto;}
 .conversation-board-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;}

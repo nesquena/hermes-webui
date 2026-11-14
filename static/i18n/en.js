@@ -122,8 +122,6 @@ window.__registerHermesLocale('en', {
   "workspace_kind_operator": "Operations",
   "workspace_kind_engineer": "Engineering",
   "workspace_kind_admin": "Administration",
-  "workspace_start": "Start page on this device",
-  "workspace_start_failed": "Could not save the start preference.",
   "workspace_overview": "Overview",
   "agenda_times": "Scheduled times",
   "agenda_month_hint": "Each date shows its number of scheduled runs. Open a day to see the times.",

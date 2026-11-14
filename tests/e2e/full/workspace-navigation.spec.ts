@@ -78,6 +78,8 @@ test('WORKSPACE NAVIGATION keyboard search preserves drafts and unifies Projects
   await expect(page.locator('#botDirectorySearch')).toBeFocused();
   await page.keyboard.press('Control+Shift+P');await page.locator('#workspaceNavigatorSearch').fill('chat');
   await page.keyboard.press('ArrowDown');await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
+  await expect(page.locator('#conversationBoardSearch')).toBeVisible();
+  await page.locator('#conversationBoardBack').click();
   await expect(page.locator('#msg')).toHaveValue('Keep this navigation draft');
   await page.setViewportSize({width:390,height:844});
   await expect(page.locator('#btnWorkspaceNavigator')).toBeInViewport();

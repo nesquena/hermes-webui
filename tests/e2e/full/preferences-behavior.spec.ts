@@ -54,6 +54,7 @@ test('US-SP-PREF-BEHAVIOR-EMPTY suggestions and entire welcome panel hide indepe
   for(const hidden of [true,false]){
     await toggle(page,'settingsHideSuggestions','hide_empty_state_suggestions',hidden);
     await page.locator('.rail-btn[data-panel="chat"]').click();
+    await page.locator('#conversationBoardBack').click();
     await expect(page.locator('#emptyState')).toBeVisible();
     if(hidden) await expect(page.locator('#emptyState .suggestion-grid')).toBeHidden();
     else await expect(page.locator('#emptyState .suggestion-grid')).toBeVisible();
@@ -61,12 +62,14 @@ test('US-SP-PREF-BEHAVIOR-EMPTY suggestions and entire welcome panel hide indepe
   }
   await toggle(page,'settingsHideEmptyStatePanel','hide_empty_state_panel',true);
   await page.locator('.rail-btn[data-panel="chat"]').click();
+  await page.locator('#conversationBoardBack').click();
   await expect(page.locator('#emptyState')).toBeHidden();
   await page.reload();await expect(page.locator('#msg')).toBeVisible();
   await expect(page.locator('#emptyState')).toBeHidden();
   await preferences(page);
   await toggle(page,'settingsHideEmptyStatePanel','hide_empty_state_panel',false);
   await page.locator('.rail-btn[data-panel="chat"]').click();
+  await page.locator('#conversationBoardBack').click();
   await expect(page.locator('#emptyState')).toBeVisible();
   await expect(page.locator('#emptyState .suggestion-grid')).toBeVisible();
 });
@@ -76,6 +79,7 @@ test('US-SP-PREF-BEHAVIOR-TODOS workspace preference controls the contextual tas
   for(const enabled of [true,false]){
     await toggle(page,'settingsWorkspaceTodosTab','workspace_todos_tab',enabled);
     await page.locator('.rail-btn[data-panel="chat"]').click();
+    await page.locator('#conversationBoardBack').click();
     if(await page.locator('html').getAttribute('data-workspace-panel')==='closed') await page.locator('#btnWorkspacePanelToggle').click();
     await expect(page.locator('html')).not.toHaveAttribute('data-workspace-panel','closed');
     if(enabled){

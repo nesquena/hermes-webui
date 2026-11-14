@@ -7,26 +7,27 @@
   function preferenceKey() {
     return 'synthpulse-workspace-more:' + String((window.__GOV_ME__ || {}).email || 'local');
   }
-  const entry = new URL(location.href);
-  let pendingHome = entry.pathname === new URL(document.baseURI).pathname && !entry.search && !entry.hash && window === window.top;
   function allowed(panel) {
     const nav = document.querySelector('.rail .nav-tab[data-panel="' + panel + '"]');
     return Array.isArray(window.__GOV_ME__?.hidden_nav) && nav && !nav.hidden && !nav.disabled &&
       !nav.classList.contains('nav-tab-hidden') && !window.__GOV_ME__.hidden_nav.includes(panel) &&
       (!window.SynthPulseModules || window.SynthPulseModules.canOpen(panel));
   }
-  function startKey() { return 'synthpulse-start:' + String(window.__GOV_ME__?.email || 'local'); }
-  function startChoice() {
-    try { return localStorage.getItem(startKey()) === 'chat' ? 'chat' : 'overview'; } catch (_) { return 'overview'; }
-  }
+  function finishEntry() { delete document.documentElement.dataset.workspaceEntry; }
   function applyStart() {
-    if (!pendingHome || typeof S === 'undefined' || !S._bootReady || !Array.isArray(window._govHiddenNav)) return;
-    pendingHome = false;
-    const draft = S.session?.composer_draft;
-    if (!allowed('studio') || startChoice() === 'chat' || _currentPanel !== 'chat' || S.busy || S.activeStreamId ||
-        S.session?.active_stream_id || S.session?.pending_user_message || draft?.text || draft?.files?.length ||
-        document.getElementById('msg')?.value.trim() || window.__HERMES_PANE_MODE) return;
-    switchPanel('studio');
+    const target = document.documentElement.dataset.workspaceEntry;
+    if (!target || !Array.isArray(window.__GOV_ME__?.hidden_nav) || !window.SPStudio) return;
+    if (target === 'conversations' && allowed('chat')) switchPanel('conversations');
+    else if (target === 'overview' && allowed('studio')) switchPanel('studio');
+    else finishEntry();
+  }
+  async function openHome() {
+    if (!allowed('studio')) return;
+    if (_currentPanel !== 'studio' && !(await switchPanel('studio'))) return;
+    if (_currentPanel !== 'studio') return;
+    window.SPStudio.setTab('home');
+    closeMobileSidebar();
+    if (window.HermesPWA.workspaceView() !== 'overview') history.pushState(null, '', document.baseURI);
   }
   function expanded() {
     try { return localStorage.getItem(preferenceKey()) === '1'; } catch (_) { return false; }
@@ -63,11 +64,6 @@
       badge.textContent = text('workspace_kind_' + kind);
       badge.title = text('workspace_role_hint');
     }
-    const field = document.getElementById('workspaceStartField');
-    if (field) {
-      field.hidden = !allowed('studio');
-      document.getElementById('settingsStartPage').value = startChoice();
-    }
     const home = document.getElementById('workspaceHome');
     if (home) home.disabled = !allowed('studio');
     applyStart();
@@ -91,18 +87,8 @@
     });
     new MutationObserver(() => sync()).observe(document.documentElement, {attributes: true, attributeFilter: ['lang']});
   }
-  document.addEventListener('pointerdown', () => { pendingHome = false; }, {once:true, capture:true});
-  document.addEventListener('keydown', () => { pendingHome = false; }, {once:true, capture:true});
-  document.getElementById('settingsStartPage')?.addEventListener('change', event => {
-    try { localStorage.setItem(startKey(), event.target.value); } catch (_) { showToast(text('workspace_start_failed')); }
-  });
-  document.getElementById('workspaceHome')?.addEventListener('click', async () => {
-    if (!allowed('studio')) return;
-    if (_currentPanel !== 'studio' && !(await switchPanel('studio'))) return;
-    if (_currentPanel === 'studio') { window.SPStudio.setTab('home'); closeMobileSidebar(); }
-  });
-  window.addEventListener('synpulse:boot-ready', applyStart);
-  window.SynthPulseWorkspace = {sync, allowed};
+  document.getElementById('workspaceHome')?.addEventListener('click', openHome);
+  window.SynthPulseWorkspace = {sync, allowed, openHome, finishEntry};
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
 })();

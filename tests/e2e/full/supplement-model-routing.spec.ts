@@ -48,6 +48,7 @@ test('SUPPLEMENT MODEL ROUTING visible custom composer model reaches the provide
   await page.locator('#btnApplyAuxModels').click();await expect(page.locator('#btnApplyAuxModels')).toBeHidden();
   expect((await api(page,'/api/model/auxiliary')).body.tasks.find((t:any)=>t.task==='title_generation')).toMatchObject({provider:'custom:qa',model:'qa-title-alternate'});
   await page.locator('.rail-btn[data-panel="chat"]').click();
+  await page.locator('#conversationBoardBack').click();
   const before=providerRows(marker).length;
   const row=page.locator('.session-item[data-sid="'+sid+'"]');await row.hover();await row.locator('.session-actions-trigger').click();
   const regenerated=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/session/title/regenerate');
@@ -77,14 +78,14 @@ test('SUPPLEMENT AUX SAVE navigation Save applies pending auxiliary choices and 
   await preferences();await pick('qa-title-global-save');
   await page.locator('.rail-btn[data-panel="chat"]').click();await expect(page.locator('#settingsUnsavedBar')).toBeVisible();
   await page.locator('#settingsUnsavedBar').getByRole('button',{name:'Save',exact:true}).click();
-  await expect(page.locator('#msg')).toBeVisible();expect(await saved()).toMatchObject({provider:'custom:qa',model:'qa-title-global-save'});
+  await expect(page.locator('#conversationBoardSearch')).toBeVisible();expect(await saved()).toMatchObject({provider:'custom:qa',model:'qa-title-global-save'});
   expect((await api(page,'/api/model/auxiliary')).body.main).toEqual(initial.main);
   await preferences();await page.locator('#settingsMaxTokens').fill('789');await pick('qa-title-applied');
   await page.locator('#btnApplyAuxModels').click();await expect(page.locator('#btnApplyAuxModels')).toBeHidden();
   await page.locator('.rail-btn[data-panel="chat"]').click();await expect(page.locator('#settingsUnsavedBar')).toBeVisible();
   expect((await api(page,'/api/settings')).body.max_tokens).toEqual(settingsBefore.max_tokens);
   expect(await saved()).toMatchObject({model:'qa-title-applied'});
-  await page.locator('#settingsUnsavedBar').getByRole('button',{name:'Discard',exact:true}).click();await expect(page.locator('#msg')).toBeVisible();
+  await page.locator('#settingsUnsavedBar').getByRole('button',{name:'Discard',exact:true}).click();await expect(page.locator('#conversationBoardSearch')).toBeVisible();
   await preferences();await expect(page.locator('#settingsMaxTokens')).not.toHaveValue('789');await pick('qa-title-refused');
   await page.route('**/api/model/set',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:'QA controlled save failure'})}));
   await page.locator('.rail-btn[data-panel="chat"]').click();await page.locator('#settingsUnsavedBar').getByRole('button',{name:'Save',exact:true}).click();
