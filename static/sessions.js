@@ -255,9 +255,13 @@ async function _restoreRememberedNewChatDraftSession() {
   }
 }
 
+let _newChatDraftSaveGeneration = 0;
+
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  const claimGeneration = ++_newChatDraftSaveGeneration;
+  const draftSession = S.session && S.session.session_id === sid ? S.session : null;
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -290,7 +294,16 @@ function _saveComposerDraft(sid, text, files) {
         && String(_restoredCont.text || '').trim() === String(normalizedText || '').trim()) {
       _autosaveContId = _restoredCont.id;
     }
-    _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).catch((error) => {
+    _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).then(() => {
+      // Publish only server-confirmed drafts. A newer edit/clear invalidates an
+      // older completion; switching sessions alone does not lose its owner.
+      try {
+        if (claimGeneration === _newChatDraftSaveGeneration && draftSession
+            && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
+          _rememberNewChatDraftSession(draftSession);
+        }
+      } catch (_) { /* the pointer is best-effort; a failed claim must not fail the save */ }
+    }).catch((error) => {
       _handleComposerDraftPostFailure(error, sid, normalizedText, liveFiles, intent);
     });
   }, _DRAFT_SAVE_DELAY_MS);
@@ -480,6 +493,8 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
+  const claimGeneration = ++_newChatDraftSaveGeneration;
+  const draftSession = S.session && S.session.session_id === sid ? S.session : null;
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -511,7 +526,14 @@ function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
     return Promise.resolve();
   }
   const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
-  return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId);
+  return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId).then(() => {
+    try {
+      if (claimGeneration === _newChatDraftSaveGeneration && draftSession
+          && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
+        _rememberNewChatDraftSession(draftSession);
+      }
+    } catch (_) { /* the pointer is best-effort; a failed claim must not fail the save */ }
+  });
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -602,6 +624,7 @@ function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
   // The pending debounced save may belong to another session (e.g. after New Chat).
   if (_draftSaveTimerSid === sid) clearTimeout(_draftSaveTimer);
+  ++_newChatDraftSaveGeneration;
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
@@ -2330,7 +2353,14 @@ function _setNewSessionPending(pending){
   for (let i=0;i<ids.length;i++){
     const btn=$(ids[i]);
     if(!btn) continue;
-    btn.disabled=!!pending;
+    if(btn.tagName==='A'){
+      // A link has no native disabled property. Keep its pending behavior in
+      // sync with the titlebar button while creation is in flight.
+      btn.setAttribute('aria-disabled',pending?'true':'false');
+      btn.tabIndex=pending?-1:0;
+    }else{
+      btn.disabled=!!pending;
+    }
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
   const statusEl=$('composerStatus');
@@ -2559,7 +2589,6 @@ async function newSession(flash, options={}){
         if(typeof _applyReasoningChip==='function') _applyReasoningChip((st&&st.reasoning_effort)||boundEffort, st||{});
       }catch(_){ /* effort is a preference; a failed apply must not fail the session */ }
     }
-    if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);

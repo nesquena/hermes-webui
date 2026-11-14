@@ -439,6 +439,7 @@ const _composerDraftLocalFallbackBySid = new Map();
 const _composerDraftLatestIntentSequenceBySid = new Map();
 const _composerDraftPostPromisesBySid = new Map();
 let _composerDraftIntentSequence = 0;
+let _newChatDraftSaveGeneration = 0;
 __COMPOSER_DRAFT_HELPERS_SRC__
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
