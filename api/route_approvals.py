@@ -184,6 +184,31 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
     return head, total, changed
 
 
+def has_local_pending_approval(session_key: str, approval_id: str = "") -> bool:
+    """Match a local callback or a mirror backed by the live in-process producer.
+
+    The engine's `_gateway_queues` also holds local agent approvals. Its name,
+    a mirror flag, or an active remote stream is not proof of remote ownership.
+    Reconcile first so an orphan mirror cannot capture an unrelated approval.
+    Explicit ids never fall back to the head; no-id legacy callers use the head.
+    """
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(session_key)
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else ([queue] if queue else [])
+        live_queue = _gateway_queues.get(session_key) or []
+        live_token = _gateway_mirror_entry_token(live_queue[0]) if live_queue else None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if approval_id and entry.get("approval_id") != approval_id:
+                continue
+            return not _is_gateway_mirror_entry(entry) or bool(
+                live_token and entry.get(_GATEWAY_MIRROR_TOKEN) == live_token
+            )
+        return False
+
+
 def approval_required_approver(session_key: str, approval_id: str = "") -> str:
     """Return the required approver for a pending governance approval.
 

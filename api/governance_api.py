@@ -1451,42 +1451,49 @@ def _handle_approvals_revoke(handler, parsed, policy, subject, access) -> bool:
 
 
 def decide_grant_request(key: str, decision: str, subject: GovernanceSubject, reason: str = "", *,
-                         path: str = "/api/governance/approvals/decide", source: str = "manual") -> tuple[int, dict]:
+                         path: str = "/api/governance/approvals/decide", source: str = "manual",
+                         expected_policy_revision: str = "", expected_request_revision: str = "") -> tuple[int, dict]:
     """Apply one decision on a pending access request; shared by the admin
     handler and the automatic reviewer (14-09-2026). Returns (status, body).
 
-    Approve applies the grant to the USER entry in the policy document (under
-    the policy mutation lock, audited as a policy_change) and then marks the
-    registry row approved; reject only marks the row. The role/deny bounds
-    check stays in this path, so an automatic approval can never exceed what
-    an administrator could grant from the queue.
+    The pending check, policy mutation and registry decision share one lock
+    boundary (policy first, registry second). A competing decision cannot
+    overwrite the winner. Automatic verdicts additionally require the exact
+    policy and request revisions seen before the model wait. Slow review,
+    notifications and continuation signalling never hold these locks.
     """
     from types import SimpleNamespace
     from api import approvals, grant_requests
 
     parsed = SimpleNamespace(path=path)
-    entry = approvals.get(approvals.KIND_GRANT, key)
-    if entry is None:
-        return 404, {"error": "not_found", "message": f"unknown grant request: {key}"}
-    if str(entry.get("status") or "pending") != "pending":
-        return 409, {"error": "invalid_payload", "message": "request already decided"}
+    if decision not in ("approve", "reject"):
+        return 400, {"error": "invalid_payload", "message": "decision must be approve or reject"}
     decided_by = subject.normalized_email or str(subject.email or "").strip().lower()
-    payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
-    # Composed before the decision, from the row the approver was looking at.
-    digest = _approval_digest(entry)
-    try:
-        current_policy = get_policy()
-    except GovernancePolicyError as exc:
-        return 500, {"error": "policy_error", "message": str(exc)}
-
-    if decision == "approve":
-        with policy_mutation_lock():
-            try:
-                current_policy = get_policy()
-            except GovernancePolicyError as exc:
-                return 500, {"error": "policy_error", "message": str(exc)}
-            raw = deepcopy(_policy_raw(current_policy))
-            old_etag = policy_etag(raw)
+    with policy_mutation_lock(), approvals._REGISTRY_LOCK:
+        entry = approvals.get(approvals.KIND_GRANT, key)
+        if entry is None:
+            return 404, {"error": "not_found", "message": f"unknown grant request: {key}"}
+        if str(entry.get("status") or "pending") != "pending":
+            return 409, {"error": "invalid_payload", "message": "request already decided"}
+        try:
+            current_policy = get_policy()
+        except GovernancePolicyError as exc:
+            return 500, {"error": "policy_error", "message": str(exc)}
+        original_raw = deepcopy(_policy_raw(current_policy))
+        old_etag = policy_etag(original_raw)
+        if source == "automatic":
+            if not expected_policy_revision or expected_policy_revision != old_etag:
+                return 409, {"error": "stale_review", "message": "Policy changed during automatic review; manual review required"}
+            if not expected_request_revision or expected_request_revision != approvals.request_revision(entry):
+                return 409, {"error": "stale_review", "message": "Request changed during automatic review; manual review required"}
+            owner = str(entry.get("owner_email") or "").strip().lower()
+            access = resolve_effective_access(current_policy, GovernanceSubject(email=owner))
+            if not (access.approval_configured and access.approval_mode == "automatic" and access.approval_prompt):
+                return 409, {"error": "stale_review", "message": "Automatic review is no longer enabled"}
+        payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+        digest = _approval_digest(entry)
+        if decision == "approve":
+            raw = deepcopy(original_raw)
             result = grant_requests.apply_grant_to_policy(raw, payload)
             if result is None:
                 return 400, {"error": "invalid_payload", "message": "request does not describe an applicable grant"}
@@ -1499,6 +1506,16 @@ def decide_grant_request(key: str, decision: str, subject: GovernanceSubject, re
             except GovernancePolicyError as exc:
                 return 400, {"error": "invalid_policy", "message": str(exc)}
             new_etag = policy_etag(raw)
+        try:
+            updated = approvals.decide(approvals.KIND_GRANT, key, decision, decided_by, reason=reason or None)
+        except (ValueError, KeyError, OSError):
+            # A failed queue write must not leave a newly granted capability
+            # behind. Keep competing policy edits excluded during rollback.
+            if decision == "approve":
+                save_governance_policy(original_raw)
+            return 500, {"error": "decision_write_failed", "message": "The decision could not be saved; retry after checking the request"}
+
+    if decision == "approve":
         _audit_policy_change(
             subject,
             current_policy.mode,
@@ -1512,11 +1529,6 @@ def decide_grant_request(key: str, decision: str, subject: GovernanceSubject, re
         )
         trigger_profile_sync(str(payload.get("email") or "") or None, reason="grant_request_approve")
         grant_requests.drop_from_spool(key)
-
-    try:
-        updated = approvals.decide(approvals.KIND_GRANT, key, decision, decided_by, reason=reason or None)
-    except (ValueError, KeyError) as exc:
-        return 400, {"error": "invalid_payload", "message": str(exc)}
     # Both decisions are audited like every other kind (28 Aug 2026 ticket);
     # the policy_change event on approve is unchanged. `source` says whether
     # a person or the automatic reviewer decided.
@@ -1550,7 +1562,7 @@ def _handle_grant_request_decide(handler, parsed, policy, subject, body) -> bool
     denials of the same item from re-nagging the queue. No If-Match here:
     the approvals tab holds no policy etag and the mutation is additive.
     """
-    from api import approvals, grant_requests
+    from api import approvals
 
     key = str(body.get("key") or "").strip()
     decision = str(body.get("decision") or "").strip().lower()

@@ -3,7 +3,7 @@
 Realtime voice provides a native spoken conversation while the regular SynPulse
 engine works in separate visible chats. Short conversational answers come from
 the realtime model. Requested actions and longer work use the authenticated chat
-engine, including its tools, per-user governance, manual/automatic approval, bot
+engine, including its tools, per-user governance, mandatory command approval, bot
 scope and actual `delegate_task` execution when available. The user can keep
 speaking and ask additional questions while multiple jobs run.
 
@@ -52,8 +52,9 @@ response first. Duplicate provider call IDs execute once per connection.
 Manual approval appears alongside the child chat in the voice panel. It uses the
 existing authenticated approval endpoint and stable one-shot approval ID. The
 voice model cannot approve actions on the user's behalf or expand a permission
-envelope. AI approval, if configured for that user by an administrator, happens
-inside the existing governed engine. Unknown/denied voice tool requests return a
+envelope. Per-user automatic review applies to requests for additional access
+in Governance → Approvals, not to ordinary tool calls. Mandatory command
+approvals still require a human decision. Unknown/denied voice tool requests return a
 failure while the conversation continues; revocation of the voice identity or
 parent access closes the call.
 

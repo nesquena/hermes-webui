@@ -124,3 +124,29 @@ def test_membership_of_a_child_workspace_survives_a_broader_excluding_one(acl, m
     acl.registry.write_text(json.dumps([broad, specific]))
     with pytest.raises(PermissionError, match="^Workspace membership required$"):
         workspace_access.ensure_scope_access("stranger@example.test", target)
+
+
+def test_retargeted_workspace_alias_is_checked_again_before_authorizing(acl):
+    other = acl.root.parent / 'other-private'
+    other.mkdir()
+    evidence = other / 'evidence.txt'
+    evidence.write_text('must stay private')
+    alias = acl.root.parent / 'workspace-alias'
+    alias.symlink_to(acl.root, target_is_directory=True)
+    acl.rows[0]['path'] = str(alias)
+    acl.registry.write_text(json.dumps(acl.rows))
+    workspace_access.ensure_scope_access('owner@example.test', acl.target)
+    alias.unlink()
+    alias.symlink_to(other, target_is_directory=True)
+    with pytest.raises(PermissionError, match='^Workspace membership required$'):
+        workspace_access.ensure_scope_access('member@example.test', evidence)
+    workspace_access.ensure_scope_access('owner@example.test', evidence)
+    assert evidence.read_text() == 'must stay private'
+
+
+def test_missing_child_of_an_owned_workspace_still_requires_membership(acl):
+    target = acl.root / 'not-created-yet' / 'report.md'
+    with pytest.raises(PermissionError, match='^Workspace membership required$'):
+        workspace_access.ensure_scope_access('member@example.test', target)
+    workspace_access.ensure_scope_access('owner@example.test', target)
+    assert not target.exists()

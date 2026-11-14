@@ -476,6 +476,13 @@ def ingest_spool(owner_scope: str | None = None) -> int:
                     # row; network delivery must not hold the registry lock.
                     notification = dict(registry[rk])
                 elif str(entry.get("status") or "pending") == "pending":
+                    # Polling the queue must not erase why automatic review
+                    # deferred to a person. Advice belongs only to the exact
+                    # request reviewed; changed context needs a fresh review.
+                    prior_payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+                    if (isinstance(prior_payload.get("auto_review"), dict)
+                            and approvals.request_revision(entry) == approvals.request_revision({**entry, "payload": payload})):
+                        payload["auto_review"] = prior_payload["auto_review"]
                     entry["payload"] = payload
                     approvals.save(registry)
                     pending += 1

@@ -1,13 +1,11 @@
 """Live workspace membership ceiling, independent of resource grants.
 
-All explicitly owned ancestor roots must authorize the actor. A shared parent
-or a symlink cannot bypass a private child; an unowned child cannot erase a
-parent's ACL. Legacy unowned roots and existing admin recovery stay compatible.
+Membership in any containing owned workspace permits the actor. Symlink
+resolution must be current and verifiable; stale aliases cannot erase an ACL.
+Legacy unowned roots and existing admin recovery stay compatible.
 This is application authorization, not an OS sandbox for host execution.
 """
 import json
-import time
-import threading
 from pathlib import Path
 
 
@@ -32,29 +30,19 @@ def load_acl_entries():
         raise PermissionError('Workspace membership unavailable') from None
 
 
-# Registry roots resolved through the filesystem, remembered for a short
-# window. The picker filter and the governance check both resolved every
-# registry entry for every candidate workspace (56 x 56 realpath walks per
-# /api/workspaces on the VPS); a workspace root's symlink chain does not
-# change from one request to the next.
-_RESOLVED_ROOT_CACHE: dict = {}
-_RESOLVED_ROOT_CACHE_LOCK = threading.Lock()
-_RESOLVED_ROOT_TTL_SECONDS = 30.0
-
-
 def _resolved_root(raw_path) -> Path:
-    key = str(raw_path)
-    now = time.monotonic()
-    with _RESOLVED_ROOT_CACHE_LOCK:
-        hit = _RESOLVED_ROOT_CACHE.get(key)
-        if hit is not None and hit[0] > now:
-            return hit[1]
-    resolved = Path(key).expanduser().resolve()
-    with _RESOLVED_ROOT_CACHE_LOCK:
-        if len(_RESOLVED_ROOT_CACHE) > 4096:
-            _RESOLVED_ROOT_CACHE.clear()
-        _RESOLVED_ROOT_CACHE[key] = (now + _RESOLVED_ROOT_TTL_SECONDS, resolved)
-    return resolved
+    """Resolve current aliases for authorization, allowing not-yet-created files.
+
+    Non-strict pathlib resolution can suppress symlink-loop errors on newer
+    Python versions. Probe strictly first so loops/permission errors fail
+    closed; only a genuinely missing path uses the existing creation behavior.
+    Never cache filesystem aliases across authorization decisions.
+    """
+    path = Path(raw_path).expanduser()
+    try:
+        return path.resolve(strict=True)
+    except FileNotFoundError:
+        return path.resolve()
 
 
 def ensure_scope_access(scope, path, *, entries=None):
@@ -63,7 +51,7 @@ def ensure_scope_access(scope, path, *, entries=None):
     inside_any = False
     member_of_any = False
     try:
-        target = Path(path).expanduser().resolve()
+        target = _resolved_root(path)
         for entry in load_acl_entries() if entries is None else entries:
             emails = entry_emails(entry)
             if not emails:
@@ -139,7 +127,7 @@ def _ensure_governance_selection(identity, path, *, entries=None):
         if not policy.enabled or policy.mode == 'report_only':
             return
         access = resolve_effective_access(policy, subject_from_identity(identity))
-        target = Path(path).expanduser().resolve()
+        target = _resolved_root(path)
         rows = load_acl_entries() if entries is None else entries
         names = [str(row.get('name') or '') for row in rows
                  if target.is_relative_to(_resolved_root(row['path']))]

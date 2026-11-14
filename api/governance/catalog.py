@@ -66,7 +66,7 @@ _SELF_ROUTES: frozenset[str] = frozenset({
     "/api/apps",
     "/api/bot-screen", "/api/bot-screen/ws", "/api/bot-screen/status",
     "/api/msp/invoice", "/api/msp/order", "/api/msp/job-cost", "/api/msp/package", "/api/msp/overview", "/api/msp/tickets", "/api/msp/ticket", "/api/msp/comment",
-    "/api/msp/app-state", "/api/msp/app-request", "/api/msp/app-support",
+    "/api/msp/app-state", "/api/msp/app-request", "/api/msp/app-intake", "/api/msp/app-support",
     # Team structure, organisation chart and Management (8 Nov 2026): every
     # handler decides from org_structure.request_scope itself.
     "/api/org/structure", "/api/org/structure/me", "/api/org/chart",
@@ -185,6 +185,8 @@ ROUTE_CATALOG: tuple[RouteRule, ...] = (
     RouteRule("/api/commands",            "config:read", "config:read"),
 
     # files and workspace
+    # Artifact handlers additionally enforce the authenticated artifact owner.
+    RouteRule("/api/artifacts",           "files:read", "files:write"),
     RouteRule("/api/escape",              "files:read", "files:write"),
     RouteRule("/api/list",                "files:read", match="exact"),
     RouteRule("/api/file",                "files:read", "files:write"),
@@ -223,6 +225,8 @@ ROUTE_CATALOG: tuple[RouteRule, ...] = (
     RouteRule("/api/personalities",       "config:read", match="exact"),
     RouteRule("/api/personality",         "config:write", "config:write"),
     RouteRule("/api/prompts",             "config:read", "config:write", match="exact"),
+    # Personal context belongs to the authenticated person, independent of the
+    # selected bot. Shared company memory retains its handler-level admin gate.
     RouteRule("/api/memory/write",        "chat:use", "chat:use", match="exact"),
     RouteRule("/api/memory",              "chat:use", match="exact"),
     RouteRule("/api/admin",               "config:write", "config:write"),
