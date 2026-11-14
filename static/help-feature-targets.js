@@ -22,6 +22,7 @@
   "webui.bots.org_chart": {
     "panel": "profiles",
     "targets": [
+      ".bot-directory-chart",
       "#btnBotOrgChart"
     ],
     "entryTargets": [

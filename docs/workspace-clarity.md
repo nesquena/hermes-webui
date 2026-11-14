@@ -8,6 +8,8 @@ there is no new framework, runtime dependency or animation library.
 
 ## Finding and configuring bots
 
+From the bot library, **Org chart** opens the reporting lines for the bots you can see, even when the library list is filtered. Select a bot to inspect it, or choose **All bots** to return to the library with its search and layout intact.
+
 The bot sidebar searches the already loaded, access-filtered profile list by
 display name, internal name, description and category. It reports matching and
 total counts and offers a clear-search action when empty. Search temporarily

@@ -5079,6 +5079,7 @@ window.SynthPulseFeatureCatalog = {
       "conditions": [],
       "anchors": [
         "?help_feature=webui.bots.org_chart",
+        ".bot-directory-chart",
         "#btnBotOrgChart",
         "#botReportsTo",
         "#botRole",

@@ -89,3 +89,34 @@ test('BOT WORKBENCH searchable switcher preserves query across refresh and resto
   await expect(page.locator('#profileChip')).toBeFocused();
   await expect(page.locator('#msg')).toHaveValue('Keep my chat draft');
 });
+
+test.describe('Bot reporting lines',()=>{
+  test.use({user:'alice'});
+  test('BOT ORG CHART opens from the library and returns to its filters at every width',async({page},info)=>{
+    await ready(page);
+    await page.locator('.rail [data-panel="profiles"]').click();
+    const library=page.locator('#botDirectory');
+    await expect(library.locator('[data-bot-open="qa-research"]')).toBeVisible();
+    await library.locator('#botDirectorySearch').fill('Research');
+    for(const width of [1440,900,390]){
+      await page.setViewportSize({width,height:900});
+      await page.evaluate(()=>closeMobileSidebar());
+      const chart=library.getByRole('button',{name:'Org chart',exact:true});
+      if(width===1440) await page.screenshot({path:info.outputPath('library-start.png')});
+      await expect(chart).toBeInViewport();
+      await chart.focus();await chart.press('Enter');
+      const view=page.locator('.bot-org-view');
+      await expect(view).toBeVisible();
+      await expect(view.locator('.bot-org-chip[data-name="qa-research"]')).toBeVisible();
+      await expect(view.locator('.bot-org-chip[data-name="default"]')).toBeAttached();
+      expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+      await page.screenshot({path:info.outputPath('chart-'+width+'.png')});
+      await view.getByRole('button',{name:'All bots',exact:true}).click();
+      await expect(chart).toBeFocused();await expect(library.locator('#botDirectorySearch')).toHaveValue('Research');
+    }
+    await library.getByRole('button',{name:'Org chart',exact:true}).click();
+    await page.locator('#botOrgSearch').fill('Research');
+    await page.locator('.bot-org-chip[data-name="qa-research"]').click();
+    await expect(page.locator('#profileDetailTitle')).toContainText('Research');
+  });
+});
