@@ -41,6 +41,8 @@
 
 ### Fixed
 
+- **In Gateway chat mode, the handoff summary no longer builds an in-process agent (#9016 by @samikrc, item 2 of #8971).** `POST /api/session/handoff-summary` constructed a WebUI-side helper agent even when chats run through the Gateway, so it either failed on missing WebUI credentials or ran a model call outside the Gateway. In Gateway mode it now returns the deterministic local summary (`"fallback": true`), the same one used when no provider key resolves; outside Gateway mode nothing changes. Thanks @samikrc!
+
 - **Removing a provider's API key no longer leaves an empty provider entry behind in `config.yaml` (#9026 by @webtecnica, related to #6335).** When the key was the entry's only setting, removing it left `providers: {<id>: {}}`, and an empty `providers:` block when it was the last one. Both are now removed. This is one narrow part of #6335 (the model picker showing providers that are not configured), and that issue stays open. Thanks @webtecnica!
 
 - **`/api/btw` no longer sends its "session already has an active stream" error while holding the stream registry lock (#9051 by @webtecnica, #9031).** The handler decided that the session already had a stream and wrote the 409 response inside `STREAMS_LOCK`, so a client that had stopped reading could hold up every session's stream start, Stop, steer and live-update registration until the write finished. It now decides under the lock and responds after releasing it. Thanks @webtecnica!
