@@ -3515,6 +3515,34 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
+def _raw_custom_provider_endpoint(raw_cfg: dict, provider: str, url: str) -> str | None:
+    """Recover the raw text behind the selected custom provider's endpoint (#8700).
+
+    ``set_hermes_default_model`` derives ``model.base_url`` from the provider
+    RECORD's resolved URL. When that record stores ``base_url: ${URL}`` the
+    derived value is the expansion, so writing it baked a token-carrying URL
+    into config.yaml. Returns the record's raw field when the reference is the
+    source of *url*, else ``None`` so the caller keeps the master behaviour.
+
+    Reads only the in-scope raw + expanded dicts, so it is lock-safe. An
+    ambiguous slug or a non-custom provider resolves to ``None`` (unchanged
+    write) rather than failing a save master would accept.
+    """
+    if not (isinstance(provider, str) and provider.startswith("custom:") and isinstance(raw_cfg, dict)):
+        return None
+    try:
+        exp_cfg = _expand_env_vars(raw_cfg)
+        match = _unique_custom_provider_entry(
+            _custom_provider_entries(exp_cfg), _custom_provider_slug_key(provider)
+        )
+        if match is None:
+            return None
+        raw_url = _raw_custom_provider_url(raw_cfg, exp_cfg, match, url)
+    except Exception:
+        return None
+    return raw_url if _has_env_ref(raw_url) else None
+
+
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -7519,6 +7547,388 @@ def _same_json_value(a, b) -> bool:
         return a == b
 
 
+def _object_has_env_ref(obj) -> bool:
+    """True when *obj* contains at least one ``${...}`` reference anywhere in its structure."""
+    if isinstance(obj, str):
+        return _ENV_REF_PATTERN.search(obj) is not None
+    if isinstance(obj, dict):
+        return any(_object_has_env_ref(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_object_has_env_ref(item) for item in obj)
+    return False
+
+
+def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
+    """Match rows between *raw_list* and *new_list* using the correspondence ladder (#8740 CR).
+
+    Ladder order:
+    1. Scan: if *raw_list* contains no ``${...}`` references anywhere, return *new_list* as given.
+    2. Ladder for lists with references (each submitted row matches at most one raw row):
+       a. Identity: unique scalar key present across all rows on both sides, checked
+          in fixed order ('id', 'name', 'key').
+       b. Unique expanded value: submitted row is JSON-equal to the expansion of exactly
+          one raw row (_expand_env_vars + _same_json_value).
+       c. Unique shape: dict against dict with identical key sets and all non-reference
+          leaves equal, matching exactly one raw row.
+       d. Edited row: dict against dict with identical key sets differing at exactly one
+          leaf, matching exactly one raw row, so a row made only of references still
+          keeps the siblings the edit did not touch.
+       e. Preserved references: dict against dict where every ``${...}`` leaf the raw row
+          holds expands to the submitted value at the same path, requiring at least one
+          preserved reference.
+       f. Residue: dict against dict with identical key sets where at least one ``${...}``
+          leaf the raw row holds expands to the submitted value at the same path (#8740 CR r4),
+          adopted only when corroborated: either the raw candidate is the sole row in
+          *raw_list* with that key set, or an additional reference corresponds
+          (#8740 CR r5, r6). Plain literals, booleans, and numbers do not corroborate
+          ownership. When corroboration fails, score non-reference leaves against other
+          stored rows: adopt only on a positive, strictly greater score, write verbatim
+          when outscored, and refuse on a tie or zero score (#8740 CR r6, r7).
+          Multiple candidates reject as ambiguous before writing.
+    3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
+    4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
+       rows disputing the same raw row, or non-unique match in a list with references) raises
+       ValueError before writing so the on-disk config remains intact.
+    5. Leaves within a matched row are resolved via _preserve_env_refs_in_object.
+    """
+    if not _object_has_env_ref(raw_list):
+        return new_list
+
+    if not isinstance(new_list, list) or not raw_list:
+        return new_list
+    if not new_list:
+        return []
+
+    ambiguous_err = (
+        "advanced model options: extra_body list rows could not be matched unambiguously; "
+        "structural edit rejected to avoid assigning an environment reference to the wrong row"
+    )
+
+    # Ladder step 2.a: Identity
+    chosen_key = None
+    for cand in ("id", "name", "key"):
+        raw_ok = all(
+            isinstance(r, dict) and cand in r and type(r[cand]) in (str, int, bool)
+            for r in raw_list
+        )
+        new_ok = all(
+            isinstance(n, dict) and cand in n and type(n[cand]) in (str, int, bool)
+            for n in new_list
+        )
+        if raw_ok and new_ok:
+            raw_vals = [_expand_env_vars(r[cand]) for r in raw_list]
+            new_vals = [_expand_env_vars(n[cand]) for n in new_list]
+            raw_unique = len(raw_vals) == len({json.dumps(v, sort_keys=True) for v in raw_vals})
+            new_unique = len(new_vals) == len({json.dumps(v, sort_keys=True) for v in new_vals})
+            if raw_unique and new_unique:
+                chosen_key = cand
+                break
+
+    if chosen_key is not None:
+        raw_by_key = {}
+        for idx, r in enumerate(raw_list):
+            k_json = json.dumps(_expand_env_vars(r[chosen_key]), sort_keys=True)
+            if k_json in raw_by_key:
+                raise ValueError(ambiguous_err)
+            raw_by_key[k_json] = idx
+
+        claimed = set()
+        result = []
+        for new_item in new_list:
+            k_json = json.dumps(_expand_env_vars(new_item[chosen_key]), sort_keys=True)
+            if k_json in raw_by_key:
+                raw_idx = raw_by_key[k_json]
+                if raw_idx in claimed:
+                    raise ValueError(ambiguous_err)
+                claimed.add(raw_idx)
+                result.append(_preserve_env_refs_in_object(raw_list[raw_idx], new_item))
+            else:
+                result.append(new_item)
+        return result
+
+    # Ladder step 2.b & 2.c: Row-level matching
+    def _matches_shape(raw_item, new_item) -> bool:
+        if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
+            return False
+        if set(raw_item.keys()) != set(new_item.keys()):
+            return False
+        has_non_ref_leaf = False
+        for k in raw_item:
+            if not _object_has_env_ref(raw_item[k]):
+                has_non_ref_leaf = True
+                if not _same_json_value(raw_item[k], new_item[k]):
+                    return False
+        return has_non_ref_leaf
+
+    def _edited_row_candidates(new_item) -> list[int]:
+        """Raw rows identical to *new_item* except at exactly one leaf (#8740 CR)."""
+        if not isinstance(new_item, dict):
+            return []
+        out = []
+        for raw_idx, raw_item in enumerate(raw_list):
+            if not isinstance(raw_item, dict) or set(raw_item.keys()) != set(new_item.keys()):
+                continue
+            differing = 0
+            for key in raw_item:
+                if not _same_json_value(new_item[key], _expand_env_vars(raw_item[key])):
+                    differing += 1
+                    if differing > 1:
+                        break
+            if differing == 1:
+                out.append(raw_idx)
+        return out
+
+    def _iter_env_ref_leaves(obj, path=()):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                yield from _iter_env_ref_leaves(v, path + (k,))
+        elif isinstance(obj, list):
+            for idx, item in enumerate(obj):
+                yield from _iter_env_ref_leaves(item, path + (idx,))
+        elif _has_env_ref(obj):
+            yield path, obj
+
+    def _get_at_path(obj, path):
+        curr = obj
+        for p in path:
+            if isinstance(curr, dict):
+                if p in curr:
+                    curr = curr[p]
+                elif isinstance(p, int) and str(p) in curr:
+                    curr = curr[str(p)]
+                else:
+                    return False, None
+            elif isinstance(curr, list):
+                if isinstance(p, int) and 0 <= p < len(curr):
+                    curr = curr[p]
+                else:
+                    return False, None
+            else:
+                return False, None
+        return True, curr
+
+    def _ref_preserved_candidates(new_item) -> list[int]:
+        """Raw rows where every ${...} leaf expands to the submitted value at the same path."""
+        if not isinstance(new_item, dict):
+            return []
+        out = []
+        for raw_idx, raw_item in enumerate(raw_list):
+            if not isinstance(raw_item, dict):
+                continue
+            ref_leaves = list(_iter_env_ref_leaves(raw_item))
+            if not ref_leaves:
+                continue
+            all_match = True
+            for path, raw_val in ref_leaves:
+                exists, new_val = _get_at_path(new_item, path)
+                if not exists or not (
+                    _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+                ):
+                    all_match = False
+                    break
+            if all_match:
+                out.append(raw_idx)
+        return out
+
+    def _residue_candidates(new_item) -> list[int]:
+        """Raw rows with the same key set and at least one preserved ${...} leaf (#8740 CR r4)."""
+        if not isinstance(new_item, dict):
+            return []
+        out = []
+        for raw_idx, raw_item in enumerate(raw_list):
+            if not isinstance(raw_item, dict) or set(raw_item.keys()) != set(new_item.keys()):
+                continue
+            ref_leaves = list(_iter_env_ref_leaves(raw_item))
+            if not ref_leaves:
+                continue
+            has_matching_ref = False
+            for path, raw_val in ref_leaves:
+                exists, new_val = _get_at_path(new_item, path)
+                if exists and (
+                    _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+                ):
+                    has_matching_ref = True
+                    break
+            if has_matching_ref:
+                out.append(raw_idx)
+        return out
+
+    def _iter_all_leaves(obj, path=()):
+        if isinstance(obj, dict) and obj:
+            for k, v in obj.items():
+                yield from _iter_all_leaves(v, path + (k,))
+        elif isinstance(obj, list) and obj:
+            for idx, item in enumerate(obj):
+                yield from _iter_all_leaves(item, path + (idx,))
+        else:
+            yield path, obj
+
+    def _corroborated_residue_match(raw_item, new_item) -> bool:
+        """True if *raw_item* has ownership evidence beyond a single ${...} leaf (#8740 CR r6).
+
+        Adoption requires either that *raw_item* is the sole row in *raw_list*
+        with this key set (no other row could own or dispute the bindings), or
+        that at least one additional reference corresponds (>= 2 matching
+        reference leaves total). Equal plain literals, booleans, and numbers
+        must not corroborate anything.
+        """
+        if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
+            return False
+        same_keys_count = sum(
+            1
+            for r in raw_list
+            if isinstance(r, dict) and set(r.keys()) == set(new_item.keys())
+        )
+        if same_keys_count == 1:
+            return True
+        matching_refs = 0
+        for path, raw_val in _iter_env_ref_leaves(raw_item):
+            exists, new_val = _get_at_path(new_item, path)
+            if exists and (
+                _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+            ):
+                matching_refs += 1
+                if matching_refs >= 2:
+                    return True
+        return False
+
+    def _non_ref_score(raw_item, new_item) -> int:
+        """Count non-reference leaves whose expanded value equals the submitted value at the same path."""
+        if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
+            return 0
+        score = 0
+        for path, raw_val in _iter_all_leaves(raw_item):
+            if _has_env_ref(raw_val):
+                continue
+            exists, new_val = _get_at_path(new_item, path)
+            if exists and (
+                _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+            ):
+                score += 1
+        return score
+
+    matches: dict[int, int | None] = {}
+    for new_idx, new_item in enumerate(new_list):
+        # 2.b: Expanded value
+        cands_2b = [
+            raw_idx
+            for raw_idx, raw_item in enumerate(raw_list)
+            if _same_json_value(new_item, _expand_env_vars(raw_item))
+        ]
+        if len(cands_2b) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2b) == 1:
+            matches[new_idx] = cands_2b[0]
+            continue
+
+        # 2.c: Shape
+        cands_2c = [
+            raw_idx
+            for raw_idx, raw_item in enumerate(raw_list)
+            if _matches_shape(raw_item, new_item)
+        ]
+        if len(cands_2c) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2c) == 1:
+            matches[new_idx] = cands_2c[0]
+            continue
+
+        # 2.d: a row edited at exactly one leaf, so a row made only of
+        # references still keeps the siblings the edit did not touch.
+        cands_2d = _edited_row_candidates(new_item)
+        if len(cands_2d) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2d) == 1:
+            matches[new_idx] = cands_2d[0]
+            continue
+
+        # 2.e: Preserved references: every ${...} leaf the raw row holds
+        # expands to the submitted value at the same path (#8740 CR r3).
+        cands_2e = _ref_preserved_candidates(new_item)
+        if len(cands_2e) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2e) == 1:
+            matches[new_idx] = cands_2e[0]
+            continue
+
+        # 2.f: Residue: dict against dict with identical key sets where at least
+        # one ${...} leaf the raw row holds expands to the submitted value at the
+        # same path (#8740 CR r4).
+        # A single candidate is adopted only when corroborated (#8740 CR r5, r6):
+        # one matching reference expansion does not establish ownership of a row.
+        # When corroboration fails, score non-reference leaves against other stored
+        # rows to decide whether to adopt, write verbatim, or refuse: adopt only
+        # on a positive, strictly greater score, write verbatim when outscored,
+        # and refuse on a tie or zero score (#8740 CR r6, r7).
+        cands_2f = _residue_candidates(new_item)
+        if len(cands_2f) > 1:
+            raise ValueError(ambiguous_err)
+        if len(cands_2f) == 1:
+            raw_idx = cands_2f[0]
+            if _corroborated_residue_match(raw_list[raw_idx], new_item):
+                matches[new_idx] = raw_idx
+                continue
+            cand_score = _non_ref_score(raw_list[raw_idx], new_item)
+            other_scores = [
+                _non_ref_score(other_item, new_item)
+                for other_idx, other_item in enumerate(raw_list)
+                if other_idx != raw_idx
+            ]
+            if any(s > cand_score for s in other_scores):
+                matches[new_idx] = None
+                continue
+            if cand_score > 0 and all(cand_score > s for s in other_scores):
+                matches[new_idx] = raw_idx
+                continue
+            raise ValueError(ambiguous_err)
+
+        matches[new_idx] = None
+
+    # Check for two submitted rows disputing the same raw row
+    claimed_raw = [r for r in matches.values() if r is not None]
+    if len(claimed_raw) != len(set(claimed_raw)):
+        raise ValueError(ambiguous_err)
+
+    result = []
+    for new_idx, new_item in enumerate(new_list):
+        raw_idx = matches[new_idx]
+        if raw_idx is not None:
+            result.append(_preserve_env_refs_in_object(raw_list[raw_idx], new_item))
+        else:
+            result.append(new_item)
+    return result
+
+
+def _preserve_env_refs_in_object(raw_value, new_value):
+    """Return *new_value* with every ``${VAR}`` leaf the edit left unchanged restored (#8700).
+
+    ``extra_body`` is edited as the EXPANDED object the advanced dialog displays,
+    so a user changing one leaf submits an object where every other reference
+    arrived resolved. #8129 only kept the raw block when the WHOLE object came
+    back equal; this compares leaf by leaf instead, against the expanded
+    original, so an unrelated edit no longer bakes the referenced values in.
+
+    Structure follows *new_value* — a key the edit removed stays removed, a list
+    the edit resized is matched via the ladder in ``_preserve_env_refs_in_list``
+    (#8740 CR) — and a leaf is kept only through ``_preserve_env_ref``, i.e. when
+    its reference still expands to the submitted value.
+    """
+    if isinstance(raw_value, dict) and isinstance(new_value, dict):
+        return {
+            key: (
+                _preserve_env_refs_in_object(raw_value[key], value)
+                if key in raw_value
+                else value
+            )
+            for key, value in new_value.items()
+        }
+    if isinstance(raw_value, list) and isinstance(new_value, list):
+        return _preserve_env_refs_in_list(raw_value, new_value)
+    if isinstance(raw_value, str) and isinstance(new_value, str):
+        return _preserve_env_ref(raw_value, new_value)
+    return new_value
+
+
 def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
     """Apply supported advanced model options to a config block in-place."""
     if advanced is None:
@@ -7559,10 +7969,14 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
             if not extra_body:
                 model_cfg.pop("extra_body", None)
             elif not _same_json_value(_expand_env_vars(model_cfg.get("extra_body")), extra_body):
-                # Only a changed object is written: re-submitting the displayed
-                # (resolved) one unchanged keeps the raw block and its ${VAR}
-                # references (#8032).
-                model_cfg["extra_body"] = extra_body
+                # An edited object is written, but the reference leaves the edit
+                # did not touch stay references: the dialog re-posts the object
+                # EXPANDED, so writing it wholesale baked sibling values in
+                # (#8700). An unchanged object keeps its raw block via the
+                # branch above (#8032).
+                model_cfg["extra_body"] = _preserve_env_refs_in_object(
+                    model_cfg.get("extra_body"), extra_body
+                )
         else:
             raise ValueError("extra_body must be a JSON object")
     if "service_tier" in advanced:
@@ -7643,11 +8057,23 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if resolved_base_url and not provider_override_won:
             # Same value as master writes; only a ${VAR} already in model.base_url
             # that resolves to it is kept instead of its expansion (#8032).
-            model_cfg["base_url"] = _preserve_env_ref(
+            _resolved_url = str(resolved_base_url).strip().rstrip("/")
+            _stored_url = _preserve_env_ref(
                 raw_model_cfg.get("base_url"),
-                str(resolved_base_url).strip().rstrip("/"),
+                _resolved_url,
                 normalize=_normalize_base_url_for_compare,
             )
+            if _stored_url == _resolved_url:
+                # The endpoint is DERIVED from the selected provider's record,
+                # which may hold a ${VAR} of its own; recover that raw text
+                # instead of baking its expansion, token included (#8700).
+                _stored_url = (
+                    _raw_custom_provider_endpoint(
+                        config_data, str(persisted_provider or resolved_provider or ""), _resolved_url
+                    )
+                    or _stored_url
+                )
+            model_cfg["base_url"] = _stored_url
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
