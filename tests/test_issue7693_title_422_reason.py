@@ -86,6 +86,7 @@ def test_human_reason_covers_reachable_manual_statuses():
     reachable = {
         "llm_language_mismatch_aux",
         "llm_invalid_aux",
+        "llm_invalid_trace_aux",
         "llm_empty_aux",
         "llm_error_aux",
         "llm_empty_reasoning",
