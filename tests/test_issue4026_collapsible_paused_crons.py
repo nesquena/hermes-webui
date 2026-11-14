@@ -52,8 +52,9 @@ def test_paused_section_defaults_collapsed():
     # The read uses `!== '0'` so an absent key (first visit) yields `collapsed=true`,
     # and only an explicit '0' opens it. That's the default-collapsed contract.
     assert "localStorage.getItem('cron-paused-collapsed') !== '0'" in src
-    # And the `<details>` element is only made open=true when collapsed===false.
-    assert "if (!collapsed) details.open = true;" in src
+    # And the `<details>` element is only made open=true when collapsed===false,
+    # or temporarily while a name filter is active (#6724).
+    assert "if (!collapsed || query) details.open = true;" in src
 
 
 def test_paused_section_skipped_when_no_paused_jobs():
