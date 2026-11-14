@@ -13,6 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 requires-python = ">=3.11"
 dynamic = ["version", "dependencies"]
@@ -52,7 +53,7 @@ version_file = "api/_scm_version.py"
 # scripts/ruff_lint.py and TESTING.md > "Python lint gate (ruff)".
 
 [tool.ruff]
-# Match the Python versions exercised in CI (tests.yml matrix: 3.11–3.13).
+# Match the Python versions exercised in CI (tests.yml matrix: 3.11–3.14).
 target-version = "py311"
 # Keep the linter scoped to the application + tests; never crawl vendored or
 # generated trees. (These are belt-and-suspenders; the gate passes explicit files.)
