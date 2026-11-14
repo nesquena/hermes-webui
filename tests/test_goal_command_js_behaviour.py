@@ -202,6 +202,22 @@ const S = {
     };
     await cmdGoal('gate add uv run pytest');
     out.lastMessage = S.messages[S.messages.length - 1];
+  } else if (scenario === 'kickoff_failed_shows_error') {
+    // Goal set succeeded, the kickoff was refused and rolled back: the body still
+    // carries the goal-set `message`, and api() throws with `error` as e.message.
+    _nextResponse = () => {
+      const body = JSON.stringify({
+        ok: false, action: 'set', message: 'Goal set (20-turn budget)', kickoff_prompt: 'ship it',
+        error: 'This model alias needs the in-process backend', type: 'provider_unroutable',
+      });
+      const parsed = JSON.parse(body);
+      const err = new Error(parsed.error || parsed.message || body);
+      err.status = 400;
+      err.body = body;
+      throw err;
+    };
+    await cmdGoal('ship it');
+    out.lastMessage = S.messages[S.messages.length - 1];
   } else if (scenario === 'parse_multiline_goal') {
     out.parsed = parseCommand('/goal  Ship it\noutcome: CSV\n\nstop when:  a migration');
     out.singleLine = parseCommand('/goal   ship   the feature ');
@@ -286,6 +302,14 @@ def test_goal_refusal_shows_server_message_not_error_code(driver_path):
     """A refused /goal gate shows the server's explanation, not the bare error code."""
     out = _run_scenario(driver_path, "gate_refused_shows_message")
     assert out["lastMessage"]["content"] == "**Goal command failed:** gate refused, goal unchanged"
+
+
+def test_goal_failed_kickoff_shows_error_not_goal_set_message(driver_path):
+    """A failed kickoff shows the runtime's error, not the stale goal-set message."""
+    out = _run_scenario(driver_path, "kickoff_failed_shows_error")
+    assert out["lastMessage"]["content"] == (
+        "**Goal command failed:** This model alias needs the in-process backend"
+    )
 
 
 def test_parse_command_keeps_line_boundaries_for_goal_contract_lines(driver_path):

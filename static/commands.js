@@ -1678,9 +1678,10 @@ async function cmdGoal(args){
     if(typeof renderSessionList==='function')void renderSessionList();
   }catch(e){
     let err=String((e&&e.message)||e||'Goal command failed');
-    // A refused /goal (e.g. the unsupported /goal gate) explains itself in
-    // `message`; `error` is only the machine-readable code.
-    try{const body=JSON.parse((e&&e.body)||'');if(body&&body.message)err=String(body.message);}catch(_){}
+    // The /goal gate refusal explains itself in `message`; `error` is only its
+    // code. Other failures keep `error`: a failed kickoff's `message` is still
+    // the goal-set text from the step that succeeded.
+    try{const body=JSON.parse((e&&e.body)||'');if(body&&body.error==='unsupported_gate'&&body.message)err=String(body.message);}catch(_){}
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});
     showToast(err,3000);
