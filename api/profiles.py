@@ -18,11 +18,12 @@ import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from types import MappingProxyType
 from typing import Optional
 
 from api import yaml_compat as yaml
 
-from api.paths import _atomic_write_text
+from api.paths import STARTUP_ENV, _atomic_write_text
 from api.session_events import publish_session_list_changed
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,28 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+# The process env as WebUI itself sets it for the profile this process serves (#8981):
+# the launch env plus what _reload_dotenv() applied for that profile's home (at startup,
+# on a process-wide switch, or when a save for that profile reloads its .env), minus what
+# it cleared. A reload of another profile's home (a save routed to it by the request's
+# profile) and a chat worker's temporary mirror of its own profile's .env never reach it,
+# so a reader that must not see another profile's values (the private config read's
+# Agent-global names) reads this, not os.environ.
+_process_env_baseline = MappingProxyType(dict(STARTUP_ENV))
+# The keys the last published reload put into the baseline, tracked apart from
+# _loaded_profile_env_keys (which a reload for another profile replaces): the next
+# reload of the process profile's home clears exactly these from the baseline.
+_baseline_loaded_keys: set[str] = set()
+# Serializes _reload_dotenv's copy, apply and publish (#8981 gate r2): two concurrent
+# reloads (two provider saves, onboarding and a switch) would each publish their own
+# copy, and the older one could drop what the newer one applied. A dedicated leaf lock:
+# switch_profile() already holds the non-reentrant _profile_lock when it reloads.
+_dotenv_reload_lock = threading.Lock()
+
+
+def process_env_baseline() -> MappingProxyType:
+    """The process env as WebUI set it, without any worker's mirror (#8981)."""
+    return _process_env_baseline
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -1938,6 +1961,45 @@ def _reload_dotenv(home: Path):
     applying the current profile's .env. This prevents API keys and other
     profile-scoped secrets from leaking across profile switches.
     """
+    global _loaded_profile_env_keys, _process_env_baseline, _baseline_loaded_keys
+
+    # The process baseline (#8981) follows only reloads of the process profile's own
+    # home: such a reload clears what the previous one put there and adds what it
+    # applies, published as one new mapping, so readers never see a worker's mirror. A
+    # save routed to another profile still reloads that profile's .env into os.environ
+    # (unchanged), but neither its values nor its key bookkeeping reach the baseline.
+    with _dotenv_reload_lock:
+        owned = _is_process_profile_home(home)
+        applied: dict[str, str] = {}
+        try:
+            _apply_profile_dotenv(home, applied)
+        finally:
+            if owned:
+                baseline = dict(_process_env_baseline)
+                for key in _baseline_loaded_keys:
+                    baseline.pop(key, None)
+                baseline.update(applied)
+                _process_env_baseline = MappingProxyType(baseline)
+                _baseline_loaded_keys = set(applied)
+
+
+def _is_process_profile_home(home) -> bool:
+    """True when *home* is the profile home this process serves (#8981).
+
+    Startup and a process-wide switch pin that home (``_set_hermes_home``) before they
+    reload, so their reloads qualify; a reload for a profile a request is routed to does
+    not. Fails closed: if either path can't be resolved, the reload isn't published.
+    """
+    try:
+        return Path(home).resolve() == Path(get_process_profile_home()).resolve()
+    except Exception:
+        logger.debug("Failed to compare %s with the process profile home", home, exc_info=True)
+        return False
+
+
+def _apply_profile_dotenv(home: Path, applied: dict) -> None:
+    """The body of :func:`_reload_dotenv`; every value it sets in ``os.environ`` is also
+    recorded in *applied*."""
     global _loaded_profile_env_keys
 
     # Remove keys loaded from the previous profile first.
@@ -1968,6 +2030,7 @@ def _reload_dotenv(home: Path):
                         )
                         continue
                     os.environ[k] = v
+                    applied[k] = v
                     loaded_keys.add(k)
         _loaded_profile_env_keys = loaded_keys
     except Exception:

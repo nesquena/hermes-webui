@@ -415,6 +415,7 @@ _ALLOWED = {
     ("yaml_compat.py", "safe_load"): _LOADER,
     ("profiles.py", "load_profile_config"): "THE helper",
     ("routes.py", "_read_profile_model_config"): "value reader: expands via expand_profile_config",
+    ("config.py", "thread_private_config"): "value reader: expands via expand_profile_config (#8970)",
     ("profiles.py", "_profile_secret_env_names"): "reads ${NAME} reference NAMES; expanding destroys them",
     ("config.py", "_declares_model_provider_kind"): "plugin.yaml, not config.yaml",
     ("profiles.py", "_profile_visible_from_meta"): "profile.yaml, not config.yaml",
