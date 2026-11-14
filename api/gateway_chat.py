@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import logging
@@ -2402,15 +2403,60 @@ def _session_is_process_profile(session_home) -> bool:
         return False
 
 
+@contextlib.contextmanager
+def _profile_dotenv_overlay(home):
+    """Let a profile's own ``.env`` win for the ``${VAR}`` names it defines, on this thread (#8737).
+
+    Its assignments (operator-protected and gateway-parity-blocked keys skipped, as in
+    ``_gateway_endpoint_for_profile``) are merged OVER the calling thread's env for the body,
+    never replacing it. Every other name resolves exactly as before: the thread's own keys,
+    ``block_process_env_fallback`` (untouched) and the ``os.environ`` fallback; an undefined
+    one stays the literal ``${VAR}``. A ``.env`` that cannot be read means no overlay. The
+    previous thread env is restored on exit, so nested and raising bodies leave it as found.
+    """
+    from api import profiles as _profiles
+    from api.config import _thread_ctx
+
+    try:
+        overlay = _profiles.filter_runtime_env_for_gateway_parity(_profiles._read_profile_dotenv(Path(home)))
+    except Exception:
+        overlay = {}
+    if not overlay:
+        yield
+        return
+    missing = object()
+    previous = getattr(_thread_ctx, "env", missing)
+    merged = dict(previous) if isinstance(previous, dict) else {}
+    merged.update(overlay)
+    _thread_ctx.env = merged
+    try:
+        yield
+    finally:
+        if previous is missing:
+            try:
+                del _thread_ctx.env
+            except AttributeError:
+                pass
+        else:
+            _thread_ctx.env = previous
+
+
 def _gateway_config_for_profile(profile_name) -> dict | None:
-    """Config of a named non-root profile; None means the process default applies."""
+    """Config of a named non-root profile; None means the process default applies.
+
+    The worker thread carries no request profile env, so ``${VAR}`` would resolve from the
+    process env only; a name the profile's own ``.env`` defines resolves from that ``.env``
+    (#8737). Everything else, including the cached ambient ``get_config()``, is unchanged.
+    """
     from api import profiles as _profiles
     from api.config import get_config_for_profile_home
 
     name = str(profile_name or "").strip()
     if not name or _profiles._is_root_profile(name):
         return None
-    return get_config_for_profile_home(_profiles.get_hermes_home_for_profile(name))
+    home = _profiles.get_hermes_home_for_profile(name)
+    with _profile_dotenv_overlay(home):
+        return get_config_for_profile_home(home)
 
 
 def _settle_delegation_reservation(session_id, stream_id, accepted: bool) -> None:
