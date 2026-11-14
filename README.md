@@ -113,11 +113,21 @@ ecosystem. See [docs/why-hermes.md](docs/why-hermes.md) for the full side-by-sid
 
 ## Quick start
 
-Run the repo bootstrap:
+### One-Click Universal Installer (macOS, Windows, Linux)
+
+- **macOS:** Double-click `HermesWebUI.command` in Finder
+- **Windows:** Double-click `HermesWebUI.bat` in File Explorer
+- **Linux / Terminal:** Run `./install.sh`
 
 ```bash
 git clone https://github.com/nesquena/hermes-webui.git hermes-webui
 cd hermes-webui
+./install.sh
+```
+
+Or run the repo bootstrap directly:
+
+```bash
 python3 bootstrap.py
 ```
 
