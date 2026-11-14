@@ -37,7 +37,7 @@ def _run_i18n_case(script_expr: str, *, navigator_obj: object | None = None) -> 
             setItem: (k, v) => {{ storage[k] = String(v); }},
           }},
           document: {{
-            documentElement: {{ lang: '' }},
+            documentElement: {{ lang: '', dir: '', setAttribute: () => {{}} }},
             querySelectorAll: () => [],
           }},
           navigator: {navigator_src},
