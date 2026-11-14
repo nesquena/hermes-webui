@@ -14075,6 +14075,12 @@ def _agent_durable_multimodal_content(msg: dict) -> str | None:
             return None
     if not image_parts:
         return None
+    # Deliberately the LEGACY blob collapse: unlike the content/visible keys,
+    # this mirror key must KEEP the ``[screenshot]`` annotation, because it is
+    # the evidence that pairs a rich image row with the Agent's scalar
+    # projection of it (#6460 only concerns the content key). Both sides of the
+    # pairing collapse identically, so the line boundary is not load-bearing
+    # here.
     return " ".join("\n".join(normalized_parts).split())
 
 
@@ -14109,7 +14115,9 @@ def _session_message_multimodal_mirror_key(
     if content is None:
         if not isinstance(raw_content, str):
             return None
-        content = _normalized_session_message_content(msg)
+        # Same legacy projection as the rich side above: the annotation stays,
+        # because it is what identifies an Agent image projection.
+        content = " ".join(str(raw_content or "").split())
     timestamp, timestamp_valid = _message_exact_timestamp_details(msg)
     if not timestamp_valid or timestamp is None:
         return None
@@ -15175,10 +15183,241 @@ def _session_message_dedup_key(msg: dict):
     ), msg)
 
 
+# The agent's durable projection of a native image part is a marker on a LINE OF
+# ITS OWN (``agent/session_persistence.py``: ``_image_marker`` returns
+# ``[screenshot]``, or ``[screenshot detail=<level>]`` when a detail rode along,
+# and ``_durable_content`` joins the parts with newlines). Only a line that IS
+# the marker is that annotation -- the same text inside a sentence is user prose.
+_GENERATED_IMAGE_MARKER_LINE = re.compile(
+    r"[ \t\r]*\[screenshot(?:[ \t]+detail=(?:low|high|auto))?\][ \t\r]*"
+)
+
+
+def _strip_generated_image_marker_lines(text: str) -> str:
+    """Drop the agent's whole-line ``[screenshot]`` annotations from a body.
+
+    This helper is called solely by the proven image marker projection pass
+    (``_proven_image_marker_projection``). Universal scalar identity preserves
+    all lines literally so ordinary prose and assistant code blocks are never
+    corrupted when image provenance is absent.
+    """
+    if "[screenshot" not in text:
+        return text
+    return "\n".join(
+        line
+        for line in text.split("\n")
+        if not _GENERATED_IMAGE_MARKER_LINE.fullmatch(line)
+    )
+
+
+_ATTACHMENT_COMPOSER_SUFFIX_RE = re.compile(
+    r"(?:^|\r?\n|\r?\n\r?\n|\s)\[Attached files(?: for this steer)?: [^\]]+\]\s*$"
+)
+
+
+def _row_declares_attachment_provenance(msg: dict | None) -> bool:
+    """Return True only when a user message declares image attachment provenance.
+
+    Provenance requires either a non-empty ``attachments`` list or a content
+    string ending in the WebUI composer attachment declaration
+    (``[Attached files: ...]`` or ``[Attached files for this steer: ...]``).
+    Nothing else qualifies as provenance.
+    """
+    if not isinstance(msg, dict):
+        return False
+    if str(msg.get("role") or "").strip().lower() != "user":
+        return False
+    attachments = msg.get("attachments")
+    if isinstance(attachments, list) and len(attachments) > 0:
+        return True
+    content = msg.get("content")
+    if isinstance(content, str) and bool(_ATTACHMENT_COMPOSER_SUFFIX_RE.search(content)):
+        return True
+    return False
+
+
+def _proven_image_marker_projection(
+    state_row: dict | None,
+    sidecar_rows: list | None,
+    state_rows: list | None = None,
+) -> str | None:
+    """Return sidecar display text only when supported by trustworthy image provenance.
+
+    Conditions required for projection:
+    1. state_row is a dict, role 'user', content str, containing at least one whole
+       marker line (after stripping marker lines, non-marker text is non-empty and
+       differs from original);
+    2. A sidecar user row with _row_declares_attachment_provenance is present,
+       whose normalized content (whitespace-collapsed after stripping workspace
+       prefix) equals the state row's stripped non-marker text;
+    3. Exact timestamps are valid and equal on both rows (turn linkage);
+    4. _message_private_identity_compatible(state_row, sidecar_row) is True (protects
+       provider api_content);
+    5. tool_call_id and tool_name are equal;
+    6. Two-way uniqueness: exactly one candidate sidecar row and exactly one state
+       row match this non-marker turn bucket. Any ambiguity returns None (fail closed).
+    """
+    if not isinstance(state_row, dict):
+        return None
+    if str(state_row.get("role") or "").strip().lower() != "user":
+        return None
+    state_content = state_row.get("content")
+    if not isinstance(state_content, str):
+        return None
+    stripped_state = _strip_generated_image_marker_lines(state_content)
+    if stripped_state == state_content:
+        return None
+    if not stripped_state.strip():
+        return None
+
+    from api.streaming import _strip_workspace_prefix
+
+    state_norm = " ".join(
+        _strip_workspace_prefix(stripped_state, include_legacy=True).split()
+    )
+    if not state_norm:
+        return None
+
+    state_ts, state_ts_valid = _message_exact_timestamp_details(state_row)
+    if not state_ts_valid or state_ts is None:
+        return None
+
+    state_tc_id = str(state_row.get("tool_call_id") or "")
+    state_tool_name = str(state_row.get("tool_name") or state_row.get("name") or "")
+
+    candidates = []
+    for sidecar_row in sidecar_rows or []:
+        if not isinstance(sidecar_row, dict):
+            continue
+        if str(sidecar_row.get("role") or "").strip().lower() != "user":
+            continue
+        if not _row_declares_attachment_provenance(sidecar_row):
+            continue
+        sidecar_content = sidecar_row.get("content")
+        if not isinstance(sidecar_content, str):
+            continue
+        sidecar_norm = " ".join(
+            _strip_workspace_prefix(sidecar_content, include_legacy=True).split()
+        )
+        if sidecar_norm != state_norm:
+            continue
+        sidecar_ts, sidecar_ts_valid = _message_exact_timestamp_details(sidecar_row)
+        if not sidecar_ts_valid or sidecar_ts is None or sidecar_ts != state_ts:
+            continue
+        if not _message_private_identity_compatible(state_row, sidecar_row):
+            continue
+        sidecar_tc_id = str(sidecar_row.get("tool_call_id") or "")
+        sidecar_tool_name = str(sidecar_row.get("tool_name") or sidecar_row.get("name") or "")
+        if sidecar_tc_id != state_tc_id or sidecar_tool_name != state_tool_name:
+            continue
+        candidates.append(sidecar_row)
+
+    if len(candidates) != 1:
+        return None
+
+    matched_sidecar = candidates[0]
+
+    if state_rows is not None:
+        state_matches = []
+        for other_state in state_rows:
+            if not isinstance(other_state, dict):
+                continue
+            if str(other_state.get("role") or "").strip().lower() != "user":
+                continue
+            other_content = other_state.get("content")
+            if not isinstance(other_content, str):
+                continue
+            other_stripped = _strip_generated_image_marker_lines(other_content)
+            if other_stripped == other_content or not other_stripped.strip():
+                continue
+            other_norm = " ".join(
+                _strip_workspace_prefix(other_stripped, include_legacy=True).split()
+            )
+            if other_norm != state_norm:
+                continue
+            other_ts, other_ts_valid = _message_exact_timestamp_details(other_state)
+            if not other_ts_valid or other_ts is None or other_ts != state_ts:
+                continue
+            if not _message_private_identity_compatible(other_state, matched_sidecar):
+                continue
+            other_tc_id = str(other_state.get("tool_call_id") or "")
+            other_tool_name = str(other_state.get("tool_name") or other_state.get("name") or "")
+            if other_tc_id != state_tc_id or other_tool_name != state_tool_name:
+                continue
+            state_matches.append(other_state)
+
+        if len(state_matches) != 1:
+            return None
+
+    return str(matched_sidecar.get("content") or "")
+
+
+def _project_proven_image_marker_rows(sidecar_rows: list, state_rows: list) -> list:
+    """Project proven image-marker state rows to sidecar display form.
+
+    Returns a new list of state rows where each proven image turn is a shallow
+    copy with its content replaced by the sidecar display text, preserving any
+    workspace prefix from the original state row. Original state rows are never
+    mutated. Rows pairing with a rich multimodal mirror key in sidecar are left
+    unprojected so rich-to-scalar mirror suppression remains intact.
+    """
+    if not state_rows:
+        return []
+    if not sidecar_rows:
+        return list(state_rows)
+
+    rich_mirror_keys = {
+        key
+        for row in sidecar_rows
+        if (key := _session_message_multimodal_mirror_key(row, require_image_parts=True)) is not None
+    }
+
+    projected = []
+    for row in state_rows:
+        if not isinstance(row, dict):
+            projected.append(row)
+            continue
+
+        scalar_mirror_key = _session_message_multimodal_mirror_key(
+            row, require_scalar_mirror=True
+        )
+        if scalar_mirror_key is not None and scalar_mirror_key in rich_mirror_keys:
+            projected.append(row)
+            continue
+
+        display_text = _proven_image_marker_projection(
+            row, sidecar_rows, state_rows=state_rows
+        )
+        if display_text is None:
+            projected.append(row)
+            continue
+
+        copy_row = dict(row)
+        original_content = str(row.get("content") or "")
+        prefix_match = re.match(
+            r"^\s*\[Workspace(?:::v1)?:\s*(?:\\.|[^\]\\])+\][\r\n]*",
+            original_content,
+        )
+        if prefix_match:
+            prefix = prefix_match.group(0)
+            clean_display = re.sub(
+                r"^\s*\[Workspace(?:::v1)?:\s*(?:\\.|[^\]\\])+\][\r\n]*",
+                "",
+                display_text,
+            )
+            copy_row["content"] = prefix + clean_display
+        else:
+            copy_row["content"] = display_text
+
+        projected.append(copy_row)
+
+    return projected
+
+
 def _normalized_session_message_content(msg: dict):
     """Visible identity for a message's content.
 
-    Scalars normalise whitespace as before. Structured content returns the same
+    Scalars normalise whitespace. Structured content returns the same
     out-of-band tuple as the merge/dedup keys, so content and visible keys can
     never place a list and a string in the same identity space.
     """
@@ -15873,6 +16112,9 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     # duplicate/prefix decision below and distinct provider bytes remain
     # distinct rows.
     _reconcile_api_content_sidecars(sidecar_context, state_messages)
+    projected_state_messages = _project_proven_image_marker_rows(
+        sidecar_context, state_messages
+    )
 
     # Recovered interrupted turns are special: the visible interruption marker
     # is synthetic, so the recovered user turn should still count as a mirrored
@@ -15889,7 +16131,7 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     ]
     state_keys = [
         _session_message_content_key(m, normalize_workspace_prefix=True)
-        for m in state_messages
+        for m in projected_state_messages
     ]
     max_offset = min(len(sidecar_keys), len(state_keys))
     best_len = 0
@@ -16327,6 +16569,7 @@ def _merge_session_messages_append_only_impl(
             state_messages = [row for row in state_messages if id(row) in suffix_row_ids]
         post_cancel_state = bool(state_messages)
     _reconcile_api_content_sidecars(sidecar_messages, state_messages)
+    state_messages = _project_proven_image_marker_rows(sidecar_messages, state_messages)
     # Rows admitted from state.db in this invocation stay individually
     # addressable for the #7237 [False] stopped-context splice (see the
     # `_stopped_db_successor` stamp below). Capture their object ids now,
