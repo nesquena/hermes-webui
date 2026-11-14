@@ -161,6 +161,11 @@ that slice.
 
 ## UI, UX, and theme contracts
 
+- [`docs/instance-branding.md`](instance-branding.md): installation identity API v1,
+  provider handshake, owner authority, normalized image storage, initial HTML,
+  PWA identity preservation and restoration. Start here before changing shared
+  names/icons, public branding resources or their extension integration.
+
 - [`DESIGN.md`](../DESIGN.md): design tokens and the current calm-console
   direction: conversation first, quiet metadata, restrained accents, and
   progressive disclosure for debugging detail.

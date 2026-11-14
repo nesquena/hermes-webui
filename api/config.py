@@ -14669,6 +14669,10 @@ _SETTINGS_DEFAULTS = {
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
+    # #7611: optional deployment label (e.g. "Production") decorated onto the
+    # browser/desktop window title and app titlebar so side-by-side instances
+    # are distinguishable. Empty by default -> title behaves exactly as before.
+    "instance_name": str(os.getenv("HERMES_WEBUI_INSTANCE_NAME", "") or "").strip()[:80],
     "sound_enabled": False,  # play notification sound when assistant finishes
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
@@ -15028,7 +15032,18 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 _SETTINGS_TTS_ENGINE_RE = __import__("re").compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 _SETTINGS_WRITE_VERSION = 0
-_SETTINGS_WRITE_LOCK = __import__("threading").Lock()
+_SETTINGS_WRITE_LOCK = __import__("threading").RLock()
+
+
+def _is_valid_instance_name(value: object) -> bool:
+    """Require plain UTF-8 text; callers retain their own length policies."""
+    if not isinstance(value, str) or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _atomic_write_settings_text(path: Path, text: str) -> None:
@@ -15100,11 +15115,23 @@ def _coerce_provider_cost_budget(value: Any) -> float | None:
     return rounded
 
 
-def save_settings(settings: dict) -> dict:
+def save_settings(settings: dict, *, _branding=None) -> dict:
+    # Serialize the entire read/modify/write, shared with branding transactions.
+    with _SETTINGS_WRITE_LOCK:
+        return _save_settings_locked(dict(settings), _branding=_branding)
+
+
+def _save_settings_locked(settings: dict, *, _branding=None) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     raw_settings = _read_raw_settings_file()
     persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)
     current = load_settings()
+    if _branding is None and "instance_name" in settings:
+        branding = current.get("instance_branding")
+        if isinstance(branding, dict) and branding.get("manages_instance_name") is True:
+            raise ValueError("Use the instance-branding API to change its managed name")
+    if _branding is not None:
+        current["instance_branding"] = _branding
     applied_speech_keys: set[str] = set()
     if (
         "worklog_details_expanded_default" not in settings
@@ -15192,6 +15219,15 @@ def save_settings(settings: dict) -> dict:
             if k == "tts_voice":
                 if not isinstance(v, str) or len(v) > 200 or "\x00" in v:
                     continue
+            # #7611: instance name is operator-supplied and lands in
+            # document.title / the app titlebar. Accept only a plain short
+            # string: reject non-strings, control characters (NUL truncates
+            # the value in C-level consumers) and over-long values. An empty
+            # string is VALID and clears the label.
+            if k == "instance_name":
+                if not _is_valid_instance_name(v):
+                    continue
+                v = v.strip()[:80]
             # Validate language codes (BCP-47-like: 'en', 'zh', 'fr', 'zh-CN')
             if k == "language" and (
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)

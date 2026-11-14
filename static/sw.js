@@ -24,6 +24,7 @@ const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
   './static/style.css' + VQ,
   './static/pwa-startup.js' + VQ,
+  './static/instance-branding.js' + VQ,
   './static/boot.js' + VQ,
   './static/assistant_turn_anchors.js' + VQ,
   './static/a11y-helpers.js' + VQ,
@@ -42,7 +43,6 @@ const SHELL_ASSETS = [
   './static/vendor/katex/0.16.22/katex.min.js' + VQ,
   './static/favicon.svg',
   './static/favicon-32.png',
-  './manifest.json',
 ];
 
 function deleteOldShellCaches() {
@@ -92,6 +92,9 @@ self.addEventListener('fetch', (event) => {
   // Never intercept the service worker script itself. Returning a cached sw.js
   // prevents the browser from seeing a new cache version after local patches.
   if (url.pathname.endsWith('/sw.js')) return;
+
+  // Mutable identity must never fall back to an old manifest or app shell.
+  if (/\/manifest\.(json|webmanifest)$/.test(url.pathname) || url.pathname.includes('/branding/')) return;
 
   // Login assets must always hit the network. Older login.js builds have had
   // subpath-sensitive auth POST paths; if the service worker caches one, the

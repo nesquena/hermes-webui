@@ -5,6 +5,7 @@
 
 const LOCALES = {
   en: {
+    instance_branding_reload_confirm: 'The installation name or icons changed. Reload now? Unsaved changes will be lost. Cancel to keep editing and reload manually after saving.',
     composer_placeholder_read_only: 'Read-only in WebUI',
     composer_read_only_connection: 'How to connect',
     offline_title: 'Connection lost',
@@ -1933,6 +1934,7 @@ const LOCALES = {
   },
 
   it: {
+    instance_branding_reload_confirm: 'Il nome o le icone dell’installazione sono cambiati. Ricaricare ora? Le modifiche non salvate andranno perse. Annulla per continuare a modificare e ricarica manualmente dopo aver salvato.',
     composer_placeholder_read_only: 'Sola lettura in WebUI',
     composer_read_only_connection: 'Come connettersi',
     offline_title: 'Connessione persa',
@@ -3839,6 +3841,7 @@ const LOCALES = {
   },
 
   ja: {
+    instance_branding_reload_confirm: 'このインストールの名前またはアイコンが変更されました。今すぐ再読み込みしますか？ 未保存の変更は失われます。編集を続けるにはキャンセルし、保存後に手動で再読み込みしてください。',
     composer_placeholder_read_only: 'WebUIでは読み取り専用',
     composer_read_only_connection: '接続方法',
     offline_title: '接続が切断されました',
@@ -5750,6 +5753,7 @@ const LOCALES = {
   },
 
   ru: {
+    instance_branding_reload_confirm: 'Название или значки установки изменились. Перезагрузить сейчас? Несохранённые изменения будут потеряны. Отмените действие, чтобы продолжить редактирование, и перезагрузите страницу вручную после сохранения.',
     composer_placeholder_read_only: 'Только чтение в WebUI',
     composer_read_only_connection: 'Как подключиться',
     offline_title: 'Соединение потеряно',
@@ -7643,6 +7647,7 @@ const LOCALES = {
   },
 
   es: {
+    instance_branding_reload_confirm: 'El nombre o los iconos de la instalación han cambiado. ¿Recargar ahora? Los cambios sin guardar se perderán. Cancela para seguir editando y recarga manualmente después de guardar.',
     composer_placeholder_read_only: 'Solo lectura en WebUI',
     composer_read_only_connection: 'Cómo conectarse',
     offline_title: 'Conexión perdida',
@@ -9494,6 +9499,7 @@ const LOCALES = {
   },
 
   de: {
+    instance_branding_reload_confirm: 'Der Name oder die Symbole der Installation haben sich geändert. Jetzt neu laden? Nicht gespeicherte Änderungen gehen verloren. Abbrechen, um weiterzubearbeiten, und nach dem Speichern manuell neu laden.',
     composer_placeholder_read_only: 'In WebUI nur lesbar',
     composer_read_only_connection: 'So stellst du eine Verbindung her',
     offline_title: 'Verbindung verloren',
@@ -11399,6 +11405,7 @@ const LOCALES = {
   },
 
   zh: {
+    instance_branding_reload_confirm: '此安装的名称或图标已更改。现在重新加载吗？未保存的更改将丢失。请选择取消以继续编辑，保存后再手动重新加载。',
     composer_placeholder_read_only: '在 WebUI 中只读',
     composer_read_only_connection: '如何连接',
     offline_title: '连接已断开',
@@ -13240,6 +13247,7 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
+    instance_branding_reload_confirm: '此安裝的名稱或圖示已變更。現在重新載入嗎？未儲存的變更將會遺失。請選擇取消以繼續編輯，儲存後再手動重新載入。',
     composer_placeholder_read_only: '在 WebUI 中唯讀',
     composer_read_only_connection: '如何連線',
 
@@ -15149,6 +15157,7 @@ const LOCALES = {
   },
 
   pt: {
+    instance_branding_reload_confirm: 'O nome ou os ícones da instalação mudaram. Recarregar agora? As alterações não salvas serão perdidas. Cancele para continuar editando e recarregue manualmente após salvar.',
     composer_placeholder_read_only: 'Somente leitura no WebUI',
     composer_read_only_connection: 'Como conectar',
     offline_title: 'Conexão perdida',
@@ -16866,6 +16875,7 @@ const LOCALES = {
     pb_update_failed: 'Não foi possível salvar as configurações do projeto: ',
   },
   ko: {
+    instance_branding_reload_confirm: '이 설치의 이름 또는 아이콘이 변경되었습니다. 지금 새로고침하시겠습니까? 저장하지 않은 변경 사항은 사라집니다. 계속 편집하려면 취소하고 저장한 후 수동으로 새로고침하세요.',
     composer_placeholder_read_only: 'WebUI에서 읽기 전용',
     composer_read_only_connection: '연결 방법',
     offline_title: '연결이 끊겼습니다',
@@ -18762,6 +18772,7 @@ const LOCALES = {
   },
 
   fr: {
+    instance_branding_reload_confirm: 'Le nom ou les icônes de cette installation ont changé. Recharger maintenant ? Les modifications non enregistrées seront perdues. Annulez pour continuer à modifier, puis rechargez manuellement après avoir enregistré.',
     composer_placeholder_read_only: 'Lecture seule dans WebUI',
     composer_read_only_connection: 'Comment se connecter',
     offline_title: 'Connexion perdue',
@@ -20638,6 +20649,7 @@ const LOCALES = {
   },
 
   cs: {
+    instance_branding_reload_confirm: 'Název nebo ikony instalace se změnily. Načíst znovu nyní? Neuložené změny budou ztraceny. Zvolte Zrušit, chcete-li pokračovat v úpravách, a po uložení stránku znovu načtěte ručně.',
     composer_placeholder_read_only: 'Ve WebUI pouze ke čtení',
     composer_read_only_connection: 'Jak se připojit',
     _label: 'Čeština',
@@ -22503,6 +22515,7 @@ const LOCALES = {
     pb_update_failed: 'Nastavení projektu se nepodařilo uložit: ',
   },
   tr: {
+    instance_branding_reload_confirm: 'Kurulumun adı veya simgeleri değişti. Şimdi yeniden yüklensin mi? Kaydedilmemiş değişiklikler kaybolacak. Düzenlemeye devam etmek için iptal edin ve kaydettikten sonra sayfayı elle yeniden yükleyin.',
     composer_placeholder_read_only: 'WebUI’de salt okunur',
     composer_read_only_connection: 'Nasıl bağlanılır',
 
@@ -24404,6 +24417,7 @@ const LOCALES = {
     pb_update_failed: 'Proje ayarları kaydedilemedi: ',
   },
   pl: {
+    instance_branding_reload_confirm: 'Nazwa lub ikony instalacji uległy zmianie. Odświeżyć teraz? Niezapisane zmiany zostaną utracone. Anuluj, aby kontynuować edycję, a po zapisaniu odśwież stronę ręcznie.',
     composer_placeholder_read_only: 'Tylko do odczytu w WebUI',
     composer_read_only_connection: 'Jak się połączyć',
     offline_title: 'Połączenie utracone',
@@ -26305,6 +26319,7 @@ const LOCALES = {
     pb_update_failed: 'Nie udało się zapisać ustawień projektu: ',
   },
   vi: {
+    instance_branding_reload_confirm: 'Tên hoặc biểu tượng của bản cài đặt đã thay đổi. Tải lại ngay? Các thay đổi chưa lưu sẽ bị mất. Hủy để tiếp tục chỉnh sửa, rồi tải lại thủ công sau khi lưu.',
     composer_placeholder_read_only: 'Chỉ đọc trong WebUI',
     composer_read_only_connection: 'Cách kết nối',
     offline_title: 'Mất kết nối',

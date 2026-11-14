@@ -41,9 +41,11 @@ function extract(source, name) {
 }
 
 // Stub the globals `_notificationOptions` touches so the extracted function
-// runs standalone: S (session state), location, and _sessionUrlForSid.
+// runs standalone: S (session state), window (optional branding), location,
+// and _sessionUrlForSid.
 let S = { session: { session_id: 'sess-6673' } };
 global.S = S;
+global.window = {};
 global.location = { origin: 'http://localhost:8080', href: 'http://localhost:8080/' };
 global._sessionUrlForSid = (sid) => '/#/s/' + sid;
 global._appRootPath = () => '/';
@@ -58,7 +60,7 @@ const withoutSid = _notificationOptions('Turn done', {});
 // session's URL/tag — it routes to the app root with its own tag.
 const sessionless = _notificationOptions('Turn done', { sid: null, sessionless: true });
 console.log(JSON.stringify({
-  withSid: { renotify: withSid.renotify, tag: withSid.tag, body: withSid.body, url: withSid.data.url },
+  withSid: { renotify: withSid.renotify, tag: withSid.tag, body: withSid.body, url: withSid.data.url, icon: withSid.icon },
   withoutSid: { renotify: withoutSid.renotify, tag: withoutSid.tag, url: withoutSid.data.url },
   sessionless: { renotify: sessionless.renotify, tag: sessionless.tag, url: sessionless.data.url },
 }));
@@ -84,6 +86,7 @@ def test_same_session_notification_renotifies(tmp_path):
     out = _run_driver(tmp_path)
     assert out["withSid"]["renotify"] is True
     assert out["withSid"]["body"] == "Turn done"
+    assert out["withSid"]["icon"] == "static/favicon-192.png"
 
 
 def test_session_scoped_tag_is_preserved(tmp_path):

@@ -28,6 +28,11 @@ panels that should not live in core Hermes WebUI.
 
 ## What extensions can do
 
+Custom Branding can also use the [shared installation identity API v1](instance-branding.md)
+when its enabled server-side manifest advertises `instance_branding_api: 1`.
+Core supplies persistent names, validated images and initial/PWA metadata;
+the extension supplies its editor. This is separate from browser-local settings.
+
 Extensions can:
 
 - serve files from one configured local directory at `/extensions/...`
