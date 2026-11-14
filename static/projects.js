@@ -166,7 +166,7 @@ function _projFold(key, title, content, options = {}) {
     '" data-project-section="' + _projEsc(key) + '"' + (open ? ' open' : '') + '><summary class="proj-card-title">' +
     _projEsc(title) + count + '</summary><div class="proj-fold-body">' + content + '</div></details>';
 }
-document.addEventListener('toggle', event => {
+document.addEventListener?.('toggle', event => {
   const el = event.target;
   if (el.isConnected && el.matches?.('details[data-project-scope]')) _projDisclosures.set(el.dataset.projectScope, el.open);
 }, true);

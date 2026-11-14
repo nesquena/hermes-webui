@@ -4,7 +4,13 @@
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   const dateKey = d => [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');
   const local = (d, shift=0) => new Date(d.getFullYear(),d.getMonth(),d.getDate()+shift,12);
-  const format = (date, options) => new Intl.DateTimeFormat(document.documentElement.lang || undefined, options).format(date);
+  const formats = new Map();
+  function format(date, options) {
+    const lang = document.documentElement.lang || undefined;
+    const key = JSON.stringify([lang, options]);
+    if (!formats.has(key)) formats.set(key, new Intl.DateTimeFormat(lang, options));
+    return formats.get(key).format(date);
+  }
   const tx = key => t('agenda_' + key);
   const button = (label, act) => {
     const b=document.createElement('button'); b.type='button'; b.className='sm-btn'; b.textContent=label; b.onclick=act; return b;
@@ -55,7 +61,7 @@
       for(let n=0;n<7;n++) { const label=document.createElement('span'); label.className='agenda-weekday'; label.textContent=format(local(monday,n),{weekday:'short'}); grid.append(label); }
     }
     for(let i=0;i<size;i++) {
-      const date=local(first,i), day=dateKey(date), rows=(byDay.get(day)||[]).sort((a,b)=>a.first-b.first || a.job.name.localeCompare(b.job.name));
+      const date=local(first,i), day=dateKey(date), rows=(byDay.get(day)||[]).sort((a,b)=>a.first-b.first || String(a.job.name || '').localeCompare(String(b.job.name || '')));
       const count=rows.reduce((sum,r)=>sum+r.count,0);
       if(view==='month') {
         const b=button('',()=>{selected=date;view='day';reload('day');}); b.className='agenda-date';

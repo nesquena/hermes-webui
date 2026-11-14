@@ -367,7 +367,8 @@
       <div class="wp-kpis">${KINDS.filter(k => k === 'task' ? allowed('tasks') : k !== 'bot' || allowed('profiles')).map(k => `<button type="button" class="wp-kpi ${n[k] ? '' : 'zero'}" title="${H(w('kpi_hint', { k: w('k_' + k) }))}" data-wp-go="${k}"${k === 'usecase' ? ' data-tour="studio-usecases"' : ''}><span class="wp-kpi-label"><span class="wp-kind-dot k-${k}" aria-hidden="true"></span>${H(short(k))}</span><span class="wp-kpi-value">${n[k]}</span></button>`).join('')}</div>
       ${shortcuts()}
       <details class="wp-card wp-destinations"><summary>${H(w('navigate'))}</summary><div class="wp-shortcuts">${(window.WorkspaceDestinations?.destinations() || []).map(d=>
-        `<button type="button" class="sm-btn" data-wp-destination="${H(d.panel)}">${H(d.label)}</button>`).join('')}</div></details>
+        `<button type="button" class="sm-btn" data-wp-destination="${H(d.panel)}">${H(d.label)}</button>`).join('')}${[...document.querySelectorAll('#studioHubNav [data-st-hub]')].filter(b=>['me','profile','teams','chart','mgmt'].includes(b.dataset.stHub)).map(b=>
+        `<button type="button" class="sm-btn" data-wp-studio="${H(b.dataset.stHub)}">${H(b.textContent)}</button>`).join('')}</div></details>
       ${activity(rows)}${main}</div>`;
   }
   async function render(body, opts){
@@ -426,6 +427,7 @@
     if (b.dataset.wpGroup) { Wp.group = b.dataset.wpGroup; store.set('sp-wp-group', Wp.group); paint(); return; }
     if (b.dataset.wpToggle) { const k = b.dataset.wpToggle; if (Wp.open.has(k)) Wp.open.delete(k); else Wp.open.add(k); paint(); return; }
     if (b.dataset.wpMore) { const k = b.dataset.wpMore; if (Wp.more.has(k)) Wp.more.delete(k); else Wp.more.add(k); paint(); return; }
+    if (b.dataset.wpStudio) { document.querySelector('#studioHubNav [data-st-hub="'+CSS.escape(b.dataset.wpStudio)+'"]')?.click(); return; }
     if (b.dataset.wpDestination) { window.WorkspaceDestinations.open(b.dataset.wpDestination); return; }
     if (b.dataset.wpGo) { go(b.dataset.wpGo); return; }
     if (b.dataset.wpOpen) { openItem(b); return; }

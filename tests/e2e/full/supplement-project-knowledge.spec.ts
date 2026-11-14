@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import type {Browser, Page, TestInfo} from '@playwright/test';
-import {test, expect, open, api, auth, capture} from './fixtures';
+import {test, expect, open, api, auth, capture, selectPicker} from './fixtures';
 
 const unique = (label: string) => `qa-supp-${label}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
 const response = (page: Page, endpoint: string, method = 'POST') => page.waitForResponse(r =>
@@ -60,8 +60,7 @@ async function grantProjectWorkspace(page: Page, workspace: string) {
   await page.locator('#govPaneUsers tr').filter({hasText: 'bob@example.test'}).getByRole('button', {name: 'Edit', exact: true}).click();
   await page.locator('details.gov-access-details').first().locator('summary').click();
   for (const field of ['govUserGrantWorkspaces', 'govUserGrantFilesRead', 'govUserGrantFilesWrite']) {
-    const input = page.locator('#' + field + 'Input');
-    await input.fill(workspace); await input.press('Enter'); await input.press('Escape');
+    await selectPicker(page, field + 'Input', workspace);
   }
   const saved = response(page, '/api/governance/users/update'); await page.locator('#govUserSave').click();
   expect((await saved).status()).toBe(200);

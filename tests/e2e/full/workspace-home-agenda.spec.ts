@@ -16,6 +16,7 @@ test('WORK VIEWS Overview opens on a plain visit and respects the personal Chat 
   const sections = page.locator('.wp-destinations');
   await sections.locator('summary').click();
   await expect(sections.locator('[data-wp-destination="settings"]')).toBeVisible();
+  await expect(sections.locator('[data-wp-studio="me"]')).toBeVisible();
   await sections.locator('[data-wp-destination="projects"]').click();
   await expect(page.locator('#mainProjects')).toBeVisible();
   await page.locator('#workspaceHome').click();
