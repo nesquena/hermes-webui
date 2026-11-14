@@ -2180,16 +2180,14 @@ class Session:
                 # return) or failed (raise) save below cannot leave the
                 # adopted value looking like this object's own change.
                 self._reasoning_effort_saved = on_disk
-        # #8399: the share pair carries the same stale-snapshot class, and a
-        # writer that resolved its copy before a share create/revoke and saves
-        # after it puts its own older pair back -- orphaning a live snapshot on
-        # create, or restoring a revoked token on revoke. The durable pair is
-        # owned by the share lifecycle (update_session_share_fields, under this
-        # same lock), so adopt it unless this object changed the pair itself
-        # AND the durable pair is still the one it last loaded or saved. A pair
-        # the lifecycle moved since that baseline always wins: a stale copy (a
-        # paused rename, an evicted resident) can never put a revoked token
-        # back over a newer link that a later revoke then cannot reach.
+        # ── #8735 single-writer share pair ─────────────────────────────
+        # ``update_session_share_fields`` is the only writer of
+        # share_token/share_created_at. Every other whole-session save (rename,
+        # append, an after-turn save from an object that outlived the LRU cache)
+        # re-reads the pair from the FILE under the persistence lock and adopts
+        # it. Comparing the disk and not the in-memory baseline is what stops a
+        # stale copy from writing an old token back over a newer one that revoke
+        # could then no longer reach.
         on_disk_share = _persisted_share_fields(self.path)
         if on_disk_share is not _SHARE_FIELDS_ABSENT:
             share_baseline = (
@@ -2203,6 +2201,15 @@ class Session:
                 self.share_token, self.share_created_at = on_disk_share
                 self._share_token_saved = self.share_token
                 self._share_created_at_saved = self.share_created_at
+            elif not touch_updated_at:
+                # #8950: adopt the durable pair only when the snapshot is definitively
+                # absent. Inconclusive I/O ('unknown') is not proof that the snapshot
+                # was never published; clearing it removed any token that could
+                # revoke a live public link.
+                if _share_snapshot_state_for_session(self.share_token, self.session_id) == "absent":
+                    self.share_token, self.share_created_at = on_disk_share
+                    self._share_token_saved = self.share_token
+                    self._share_created_at_saved = self.share_created_at
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
@@ -6570,6 +6577,60 @@ def _persisted_share_fields(path):
     )
 
 
+def _share_snapshot_state_for_session(token: str, session_id: str) -> str:
+    """Return 'present', 'absent', or 'unknown' for *token* and *session_id*.
+
+    - 'present': snapshot was read, parsed, and its source_session_id names this session.
+    - 'absent': definitive: no token/session id, not a regular file, unparseable,
+      not a dict, or names another session.
+    - 'unknown': the read itself failed with an OSError/PermissionError (or the
+      existence check raised), so the outcome cannot be decided.
+    """
+    if not token or not session_id:
+        return "absent"
+    try:
+        from api import shares
+
+        try:
+            path = shares._share_path(token)
+        except ValueError:
+            return "absent"
+
+        try:
+            if not path.is_file():
+                return "absent"
+        except OSError:
+            return "unknown"
+
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return "unknown"
+        except Exception:
+            return "absent"
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return "absent"
+
+        if not isinstance(data, dict):
+            return "absent"
+
+        if str(data.get("source_session_id") or "").strip() == str(session_id).strip():
+            return "present"
+        return "absent"
+    except OSError:
+        return "unknown"
+    except Exception:
+        return "absent"
+
+
+def _share_snapshot_exists_for_session(token: str, session_id: str) -> bool:
+    """Return True if a share snapshot exists for *token* and was created for *session_id*."""
+    return _share_snapshot_state_for_session(token, session_id) == "present"
+
+
 # #7881: per-session reentrant persistence locks. Every Session.save() of one
 # session id -- skip_index=True included -- holds the same lock across its
 # persisted-effort read, payload construction and atomic replacement; the
@@ -7167,6 +7228,28 @@ def _persisted_session_meta_prefix(sid) -> dict | None:
         return json.loads(prefix)
     except Exception:
         return None
+
+
+def _persisted_share_pair(sid):
+    """Return the share pair the sidecar currently names, or None (#8735).
+
+    ``(share_token, share_created_at)`` read from the metadata prefix, which
+    ``_read_metadata_json_prefix`` keeps bounded (no messages parse). Returns
+    None when the sidecar is absent or unreadable, or when it predates the share
+    fields entirely — a caller adopting None would erase a pair it legitimately
+    holds, so "no answer" stays distinct from "persisted as empty".
+    """
+    prefix = _persisted_session_meta_prefix(sid)
+    if not isinstance(prefix, dict):
+        return None
+    if 'share_token' not in prefix and 'share_created_at' not in prefix:
+        disk_fields = _persisted_share_fields(SESSION_DIR / f"{sid}.json")
+        if disk_fields is not _SHARE_FIELDS_ABSENT:
+            return disk_fields
+        return None
+    token = prefix.get('share_token')
+    token = str(token).strip() if token else None
+    return (token or None), prefix.get('share_created_at')
 
 
 def _session_sidecar_exists(sid) -> bool | None:
