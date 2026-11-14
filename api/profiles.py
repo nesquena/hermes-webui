@@ -1144,10 +1144,11 @@ def get_hermes_home_for_profile(name: str) -> Path:
 # resolvers transitively (gateway_chat -> gateway_sessions -> profiles).
 CHAT_BACKEND_ENV_KEY = 'HERMES_WEBUI_CHAT_BACKEND'
 
-# (home, mtime) -> value read from that home's .env for CHAT_BACKEND_ENV_KEY
+# home -> (mtime, value) read from that home's .env for CHAT_BACKEND_ENV_KEY
 # (#9024 review round 2). chat_backend_environ_for_profile runs on every
-# session payload projection (via gateway_session_chat_read_only_reason), so
-# the .env read is cached and re-validated by mtime only.
+# session payload projection (via gateway_session_chat_read_only_reason), so a
+# successful .env read is cached and re-validated by mtime. A FAILED read is
+# never cached: a repair can leave the mtime untouched (#9024 review round 9).
 _CHAT_BACKEND_ENV_CACHE: dict = {}
 
 
@@ -1161,7 +1162,7 @@ def chat_backend_environ_for_profile(profile) -> dict:
     #9024 review round 3). A value written by either must not decide another
     profile's session. While a writer owns the key, the launcher baseline that
     writer displaced decides if one existed (``_PROFILE_ENV_BASELINE``,
-    #9024 review round 9) — only with no launcher value does the owner's own
+    #9024 review round 10) — only with no launcher value does the owner's own
     ``.env`` apply (mtime-cached: the read runs on every session payload
     projection).
 
@@ -1187,11 +1188,11 @@ def chat_backend_environ_for_profile(profile) -> dict:
     with _ENV_LOCK:
         value = os.environ.get(CHAT_BACKEND_ENV_KEY)
         if profile_env_writer_owns(CHAT_BACKEND_ENV_KEY):
-            # A profile-owned writer owns the key — even the launcher-looking
-            # value it mirrored, and even a scrub that emptied it. The value
-            # that decides is the one the OPERATOR exported before the first
+            # A profile-owned writer owns the live value — even one that
+            # looks like a launcher export, and even a scrub that emptied it.
+            # What decides is the value the OPERATOR exported before the first
             # writer displaced it (the launcher baseline, #9024 review round
-            # 9); only when there was none does the owner's .env apply. Using
+            # 10); only when there was none does the owner's .env apply. Using
             # the writer's value here would let another profile's turn decide
             # this session; using only the .env would drop a genuine launcher
             # override for as long as any worker holds the key.

@@ -479,7 +479,7 @@ def chat_backend_rule_for_session(session, config_data=None) -> tuple:
     ``os.environ`` (``_reload_dotenv`` #8432, or a held-open
     ``profile_env_for_background_worker`` mirror) never decides another
     profile's session. While such a writer owns the key, the launcher value
-    its first claim displaced is the launcher's rule (#9024 review round 9).
+    its first claim displaced is the launcher's rule (#9024 review round 10).
     ``config_data`` is the fallback for callers with no session context (the
     request snapshot). A resolution failure is unverifiable ownership and
     fails closed to the gateway/refusal side (#9024 review round 4, #8971):

@@ -472,7 +472,7 @@ def test_gateway_owned_commit_message_never_reaches_the_model_boundary(
 def test_open_worker_scope_keeps_the_launcher_rule(
     monkeypatch, tmp_path, captured, captured_route_j
 ):
-    """#9024 review round 9: a held-open worker never hides the launcher's rule.
+    """#9024 review round 10: a held-open worker never hides the launcher's rule.
 
     While a profile-owned writer owns HERMES_WEBUI_CHAT_BACKEND, the live value
     belongs to that writer — but the value the OPERATOR exported before the
