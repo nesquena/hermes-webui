@@ -29,8 +29,8 @@ test('workspace clarity: page help is short and keeps the complete guide optiona
 test('workspace clarity: bot search is local and preserves the selected editor draft', async({page})=>{
   await ready(page);
   await page.locator('.rail [data-panel="profiles"]').click();
-  await expect(page.locator('.profile-card[data-name="qa-research"]')).toBeVisible();
-  await page.locator('.profile-card[data-name="qa-research"]').click();
+  await expect(page.locator('[data-bot-open="qa-research"]')).toBeVisible();
+  await page.locator('[data-bot-open="qa-research"]').click();
   await page.evaluate(()=>openBotConfiguration('identity'));
   await expect(page.locator('#builderTitle')).toBeVisible();
   await page.locator('#builderTitle').fill('Unsent bot name');
@@ -67,7 +67,7 @@ test('workspace clarity: mobile guide has separate results and detail views', as
 test('workspace clarity: bot editor stays usable with keyboard at desktop, laptop and mobile sizes', async({page},info)=>{
   await ready(page);
   await page.locator('.rail [data-panel="profiles"]').click();
-  await page.locator('.profile-card[data-name="qa-research"]').click();
+  await page.locator('[data-bot-open="qa-research"]').click();
   await page.evaluate(()=>openBotConfiguration('identity'));
   await page.locator('#builderTitle').fill('Keep this bot draft');
   for(const width of [1440,900,390]){

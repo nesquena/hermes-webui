@@ -2633,7 +2633,22 @@ $('msg').addEventListener('paste',e=>{
   _attachLargePastedText(pastedTextFile);
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
-  btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
+  btn.onclick=()=>{
+    const composer=$('msg');
+    if(!composer||composer.disabled||composer.readOnly) return;
+    const key=btn.dataset.promptI18n;
+    const translated=key&&typeof t==='function'?t(key):'';
+    const prompt=(translated&&translated!==key?translated:btn.dataset.msg||'').trim();
+    if(!prompt) return;
+    // A starter prepares a draft. The normal input path owns resizing,
+    // persistence and Send state; it must not replace text or start a run.
+    if(!composer.value.trimEnd().endsWith(prompt)){
+      composer.value+=(composer.value.trim()?'\n\n':'')+prompt;
+      composer.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+    composer.focus();
+    composer.setSelectionRange(composer.value.length,composer.value.length);
+  };
 });
 
 function applyEmptyStateSuggestionPref(){

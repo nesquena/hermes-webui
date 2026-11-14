@@ -127,6 +127,7 @@
 <link rel="stylesheet" href="static/bot-workbench.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/conversation-workbench.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/workspace-navigation.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/chat-workspace.css?v=__WEBUI_VERSION__">
 </head>
 <body>
 <header class="app-titlebar" role="banner">
@@ -520,11 +521,11 @@
       <div class="empty-state" id="emptyState">
         <div class="empty-logo synthpulse-empty-logo"><img src="static/synthwave-symbol.png" alt="Synthwave Solutions" width="80" height="80"></div>
         <h2 data-i18n="empty_title">What can I help with?</h2>
-        <p data-i18n="empty_subtitle">💡 Ask a question, get a text drafted, look something up or plan your work. Just type below.</p>
-        <div class="suggestion-grid">
-          <button class="suggestion" data-msg="What files are in this workspace?"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> <span data-i18n="suggest_files">What files are in this workspace?</span></button>
-          <button class="suggestion" data-msg="What's on my schedule today?"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="12" y2="16"/></svg> <span data-i18n="suggest_schedule">What's on my schedule today?</span></button>
-          <button class="suggestion" data-msg="Help me plan a small project."><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg> <span data-i18n="suggest_plan">Help me plan a small project.</span></button>
+        <p data-i18n="empty_subtitle">A question, an idea, a task. Start here.</p>
+        <div class="suggestion-grid" role="group" aria-label="Add a starting point to your draft" data-i18n-aria-label="chat_starter_hint">
+          <button class="suggestion" data-prompt-i18n="suggest_files" data-i18n-title="chat_starter_hint" title="Add a starting point to your draft" data-msg="What files are in this workspace?"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> <span data-i18n="chat_starter_files">Explore files</span></button>
+          <button class="suggestion" data-prompt-i18n="suggest_schedule" data-i18n-title="chat_starter_hint" title="Add a starting point to your draft" data-msg="What's on my schedule today?"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="12" y2="16"/></svg> <span data-i18n="chat_starter_schedule">Plan my day</span></button>
+          <button class="suggestion" data-prompt-i18n="suggest_plan" data-i18n-title="chat_starter_hint" title="Add a starting point to your draft" data-msg="Help me plan a small project."><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg> <span data-i18n="chat_starter_plan">Start a project</span></button>
         </div>
       </div>
       <div class="messages-inner" id="msgInner"></div>

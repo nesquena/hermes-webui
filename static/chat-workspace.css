@@ -1,0 +1,83 @@
+/* Herm-inspired reading surface. Presentation stays on the existing mounted
+   transcript/composer; messages.js remains the owner of empty/live state. */
+:root:is(:not([data-skin]), [data-skin="synthpulse"]),
+:root.dark:is(:not([data-skin]), [data-skin="synthpulse"]) {
+  --code-bg: var(--surface-subtle);
+  --pre-text: var(--text);
+  --em: var(--muted);
+}
+:root:not([data-font-size]):is(:not([data-skin]), [data-skin="synthpulse"]) {
+  --message-body-font-size: 15px;
+  --message-table-font-size: 13px;
+}
+#mainChat { background: var(--surface); }
+.chat-mode-header { border: 0; background: var(--surface-subtle); border-radius: 10px; padding: 3px; margin: 12px auto 4px; }
+.chat-mode-header button { font-size: 12px; border-radius: 7px; padding: 6px 16px; }
+.chat-mode-header button[aria-pressed="true"] { box-shadow: 0 1px 3px color-mix(in srgb,var(--text) 8%,transparent); }
+
+/* Match the prose and input edges. Long code/tables keep their own scrolling. */
+#mainChat .messages-inner { max-width: 820px; padding: 28px 28px 36px; }
+#mainChat .composer-box { max-width: 764px; }
+.msg-body { line-height: var(--message-body-line-height); }
+.msg-body table { font-family: var(--font-ui); }
+.msg-body :is(h1,h2,h3,h4) { letter-spacing: -.02em; }
+.msg-body h2 { border-bottom: 0; padding-bottom: 0; }
+.msg-body pre { border: 1px solid var(--border); border-radius: 10px; box-shadow: none; }
+.msg-row[data-role="user"]:not([data-editing="1"]) { width: fit-content; }
+.msg-row[data-role="user"] .msg-body { border-radius: 16px 16px 5px 16px; }
+.msg-role, .msg-role.assistant { opacity: 1; color: var(--muted); }
+.msg-role-name { font-size: 12px; font-weight: 600; }
+.assistant-turn .msg-foot, .msg-row[data-role="assistant"] .msg-foot { opacity: 1; }
+.assistant-turn .msg-foot .msg-actions, .msg-row[data-role="assistant"] .msg-foot .msg-actions { opacity: 1; }
+.msg-foot .msg-time { font-size: 11px; }
+.msg-row:focus-within .msg-foot .msg-time, .msg-row:hover .msg-foot .msg-time { opacity: 1; }
+
+.empty-state { gap: 14px; padding: 32px 24px 18px; }
+.empty-state h2 { font-size: clamp(24px,2.3vw,30px); font-weight: 600; letter-spacing: -.035em; text-align: center; }
+.empty-state p { max-width: 440px; font-size: 14px; line-height: 1.6; }
+.empty-logo.synthpulse-empty-logo { width: 54px; height: 54px; margin-bottom: 6px; }
+.empty-logo.synthpulse-empty-logo img { width: 54px; height: 54px; }
+.suggestion-grid { max-width: 650px; flex-direction: row; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.suggestion { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 9px 12px; border-radius: 9px; background: var(--surface); font: 12px/1.5 var(--font-ui); color: var(--muted); text-align: start; }
+.suggestion svg { flex: 0 0 auto; }
+.suggestion:hover { transform: none; color: var(--text); background: var(--surface-subtle); border-color: var(--border2); }
+.suggestion:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#mainChat .composer-box { background: var(--surface-subtle); border-radius: 16px !important; }
+.chat-bot-roster, .chat-mention-hint { max-width: 764px; margin-inline: auto; }
+.chat-bot-roster { padding-top: 0; }
+.chat-bot-recipient { border-color: transparent; min-height: 36px; gap: 6px; border-radius: 8px; }
+.chat-bot-recipient:hover { background: var(--surface-subtle); }
+.chat-bot-recipient[aria-pressed="true"] { border-color: var(--border2); background: var(--surface-subtle); }
+.chat-bot-recipient :is(img,svg) { width: 24px; height: 24px; }
+.chat-bot-toggle { color: var(--muted); }
+.composer-box textarea::placeholder { color: var(--muted); opacity: 1; }
+
+/* Only roomy viewports center the welcome/input group. Short windows and
+   phones retain the bottom input while the introduction can scroll away.
+   Welcome-off and the first optimistic message both restore normal geometry. */
+@media (min-width: 641px) and (min-height: 700px) {
+  #mainChat:has(#emptyState:not(.no-welcome):not([style*="display: none"]):not([style*="display:none"])) { overflow-y: auto; }
+  #mainChat:has(#emptyState:not(.no-welcome):not([style*="display: none"]):not([style*="display:none"])) .messages-shell { flex: 0 0 auto; margin-top: auto; min-height: auto; }
+  #mainChat:has(#emptyState:not(.no-welcome):not([style*="display: none"]):not([style*="display:none"])) .messages { overflow: visible; flex: 0 0 auto; }
+  #mainChat:has(#emptyState:not(.no-welcome):not([style*="display: none"]):not([style*="display:none"])) .empty-state { flex: 0 0 auto; }
+  #mainChat:has(#emptyState:not(.no-welcome):not([style*="display: none"]):not([style*="display:none"])) .messages-inner { padding: 0; }
+  #mainChat:has(#emptyState:not(.no-welcome):not([style*="display: none"]):not([style*="display:none"])) .composer-wrap { margin-bottom: auto; padding-top: 8px; }
+  #mainChat:has(#emptyState:not(.no-welcome):not([style*="display: none"]):not([style*="display:none"])) .composer-wrap::before { display: none; }
+}
+
+.selection-context-card { box-shadow: none; }
+
+@media (max-width: 640px) {
+  #mainChat .messages-inner { padding: 16px max(16px,env(safe-area-inset-left)) 28px; }
+  .empty-state { padding: 24px 20px; gap: 12px; }
+  .empty-state h2 { font-size: 24px; }
+  .suggestion-grid { gap: 8px; }
+  .suggestion { width: 100%; min-height: 44px; font-size: 13px; }
+  .chat-bot-recipient { min-height: 44px; }
+}
+@media (hover: none) {
+  .msg-foot .msg-time { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .suggestion { transition: none; }
+}

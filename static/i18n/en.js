@@ -2285,7 +2285,11 @@ window.__registerHermesLocale('en', {
     editing: 'Editing',
     // Empty state
     empty_title: 'What can I help with?',
-    empty_subtitle: '💡 Ask a question, get a text drafted, look something up or plan your work. Just type below.',
+    empty_subtitle: 'A question, an idea, a task. Start here.',
+    chat_starter_files: 'Explore files',
+    chat_starter_schedule: 'Plan my day',
+    chat_starter_plan: 'Start a project',
+    chat_starter_hint: 'Add a starting point to your draft',
     suggest_files: 'What files are in this workspace?',
     suggest_schedule: "What's on my schedule today?",
     suggest_plan: 'Help me plan a small project.',

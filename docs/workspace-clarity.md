@@ -61,3 +61,24 @@ Synthetic fixture data only; no real accounts, chats or credentials appear.
 | --- | --- | --- |
 | Bot editor, desktop | ![Before bot editor](ui-ux/evidence/20261101-bots-before.png) | ![After bot editor](ui-ux/evidence/20261101-bots-after.png) |
 | Feature guide, phone | ![Before mobile guide](ui-ux/evidence/20261101-guide-before.png) | ![After mobile guide](ui-ux/evidence/20261101-guide-after.png) |
+
+## Chat welcome and reading surface
+
+The welcome and existing composer form one group on desktop windows at least
+641px wide and 700px high. Short windows and phones retain the bottom composer.
+Hiding the welcome or suggestions still follows the existing appearance settings.
+Starting or loading a conversation returns to the normal transcript layout without
+replacing the input, attachments or session controls.
+
+The three starter actions add a localized question to the current draft, preserve
+existing text and focus the input. They do not send automatically. Repeating the
+same last starter does not append it again. Draft saving and input resizing use
+the existing input handler, including after a reload.
+
+Answers, the composer and bot roster share a readable width. The default skin
+uses slightly larger body text, neutral code surfaces and proportional table
+text, while explicit text-size preferences remain effective. Bot identity text
+uses full opacity for legibility; message actions remain available with keyboard
+focus. The bot roster disclosure follows language changes without refetching its
+catalog. See [chat workspace QA](qa/chat-workspace/README.md) for evidence and
+validation limits.

@@ -225,6 +225,28 @@ class Handler(BaseHTTPRequestHandler):
                 if write: arguments['content']='QA_GOVERNANCE_EXECUTED'
                 tool_calls=[{'id':'qa-gov-action-'+str(time.time_ns()),'type':'function','function':{'name':'write_file' if write else 'read_file','arguments':json.dumps(arguments)}}]
                 answer=None
+        elif 'QA_READING_SURFACE' in last:
+            answer="""## A clear place to start
+
+Keep the launch focused on **one useful outcome**. Bring the people, files and next steps together in the same project.
+
+### Your next steps
+1. Confirm the audience and the result you want to deliver.
+2. Ask the research bot to gather the relevant material.
+3. Review the draft together before sharing it.
+
+| Step | Owner | Status |
+| --- | --- | --- |
+| Gather context | Research bot | Ready |
+| Review the draft | Project team | Next |
+
+```text
+project: Customer onboarding
+next_step: Review the welcome guide
+```
+
+You can ask a follow-up here, or open the project to continue with your team.
+"""
         else:
             markers=re.findall(r'(?:ALICE_GROUP_QA|BOB_GROUP_QA|QA_[A-Z_]+)',last)
             if any('QA_ACTUAL_STEER' in str(m.get('content','')) for m in messages):
