@@ -3,6 +3,8 @@
 #profileDetailEmpty[data-bot-directory="1"] > :not(#botDirectory) { display:none !important; }
 .bot-directory-head { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:24px; }
 .bot-directory-head h2 { color:var(--strong,var(--text)); font-size:24px; letter-spacing:-.03em; margin:0 0 8px; }
+.bot-directory-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.bot-directory-chart:focus-visible, .bot-org-back:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .bot-directory-create { margin-top:0; }
 .bot-directory-head p { color:var(--muted); font-size:13px; line-height:1.6; margin:0; max-width:55ch; }
 .bot-layout-controls, .bot-catalog-filters { display:flex; gap:4px; flex-shrink:0; }

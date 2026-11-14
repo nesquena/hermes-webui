@@ -8145,7 +8145,9 @@ async function openBotOrgChart(){
   if(!_profilesCache){try{_profilesCache=await api('/api/profiles?fast=1');}catch(e){showToast(e.message);return;}}
   title.textContent=t('bot_org_chart');
   const list=_botOrgList();
-  body.innerHTML=`<div class="main-view-content bot-org-view"><div class="bot-org-toolbar"><p class="bot-field-hint">${esc(t('bot_org_chart_intro'))}</p><input type="search" id="botOrgSearch" placeholder="${esc(t('bot_org_chart_search'))}" aria-label="${esc(t('bot_org_chart_search'))}"></div><div class="bot-org-scroll"></div></div>`;
+  body.innerHTML=`<div class="main-view-content bot-org-view"><div class="bot-org-toolbar"><button type="button" class="sm-btn bot-org-back">${esc(t('bot_workspace_all'))}</button><p class="bot-field-hint">${esc(t('bot_org_chart_intro'))}</p><input type="search" id="botOrgSearch" placeholder="${esc(t('bot_org_chart_search'))}" aria-label="${esc(t('bot_org_chart_search'))}"></div><div class="bot-org-scroll"></div></div>`;
+  const back=body.querySelector('.bot-org-back');
+  back.onclick=()=>{_clearProfileDetail();document.querySelector('#botDirectory .bot-directory-chart')?.focus();};
   const scroll=body.querySelector('.bot-org-scroll');
   if(!list.length){scroll.innerHTML=`<p class="bot-field-hint">${esc(t('bot_org_chart_empty'))}</p>`;}
   else{
@@ -8186,6 +8188,7 @@ async function openBotOrgChart(){
   _currentProfileDetail=null;
   _setProfileHeaderButtons('help');
   _closeMobileSidebarAfterPanelSelection();
+  back.focus({preventScroll:true});
 }
 async function saveBotAppearance(){
   const p=_currentProfileDetail;if(!p)return;
