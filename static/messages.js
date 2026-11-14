@@ -2061,7 +2061,10 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{
+    _sendInProgress=false; _sendInProgressSid=null;
+    if(typeof _resumeQueueAfterSend==='function') _resumeQueueAfterSend();
+  }
 }
 
 const LIVE_STREAMS={};

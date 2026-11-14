@@ -454,6 +454,12 @@ function getQueuedSessionCount(sid){
 // once), failed → keep visible as 'failed', busy-conflict → revert to 'queued'
 // IN PLACE (order preserved; the old path re-queued at the back).
 let _drainingQueueEntry=null;
+let _queueWaitingForSendSid=null;
+function _resumeQueueAfterSend(){
+  const sid=_queueWaitingForSendSid;
+  _queueWaitingForSendSid=null;
+  if(sid&&!S.busy&&S.session&&S.session.session_id===sid) drainQueuedSessionMessage(sid);
+}
 // One pending re-check timer while a foreign claim blocks this tab's drain
 // (D3 recovery: pick the entry up after the claiming tab dies).
 let _queueDrainRetryTimer=null;
@@ -9020,6 +9026,14 @@ function drainQueuedSessionMessage(sid){
     // A terminal event can reload this same chat in the settle window. send()
     // rejects during hydration; leave the item queued for loadSession to drain.
     if((S.session&&S.session.session_id!==sid)||(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)){
+      _setQueueEntryState(sid,next._qid,'queued');
+      updateQueueBadge(sid);
+      return;
+    }
+    // The cancel SSE can finish before the interrupt command's HTTP response.
+    // Keep this exact entry until the previous send has released the composer.
+    if(typeof _sendInProgress!=='undefined'&&_sendInProgress){
+      _queueWaitingForSendSid=sid;
       _setQueueEntryState(sid,next._qid,'queued');
       updateQueueBadge(sid);
       return;

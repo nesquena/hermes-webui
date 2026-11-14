@@ -23,6 +23,14 @@ test('US-SP-CHAT-008 startup interrupt leaves the cached successor able to answe
   await page.locator('#msg').fill('QA_STARTUP_CANCEL_ORIGINAL');
   await page.locator('#btnSend').click();
   await expect.poll(() => evidence(sid).some(r => r.phase === 'initialization_held')).toBe(true);
+  // A real cancel SSE may settle before the matching HTTP acknowledgement.
+  // Hold only that response until the queued successor has had its first
+  // opportunity to drain while the interrupt command still owns the composer.
+  await page.route('**/api/chat/cancel?*', async route => {
+    const response=await route.fetch();
+    await page.waitForFunction(sid=>!S.busy&&_getSessionQueue(sid,false).some(entry=>entry._state==='queued'),sid);
+    await route.fulfill({response});
+  });
   await page.locator('#msg').fill('/interrupt QA_STARTUP_CANCEL_SUCCESSOR');
   await page.locator('#btnSend').click();
   await expect.poll(() => evidence(sid).some(r => r.phase === 'interrupt' && r.reason === 'Cancelled before start')).toBe(true);
