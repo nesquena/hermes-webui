@@ -32903,6 +32903,17 @@ def _handle_chat_sync(handler, body):
             _sync_turn_scope_reason = _sync_turn_scope.enter_context(
                 profile_home_turn_scope(_sync_profile_home)
             )
+            # #8254: this session's profile may declare shell hooks (hooks:) and/or
+            # outbound webhooks (hooks.outbound) in config.yaml; register them for
+            # the turn the way the native CLI, Desktop and messaging gateway do at
+            # their own startup. It runs after the turn home is resolved and before
+            # the agent is built, and reuses _sync_profile_home -- one home source
+            # for the agent and its hooks, never a second resolution here.
+            try:
+                from api.config import register_profile_hooks as _sync_register_profile_hooks
+                _sync_register_profile_hooks(_pp_cfg, profile_home=_sync_profile_home)
+            except Exception:
+                logger.debug("#8254: shell/outbound hook registration failed", exc_info=True)
             agent, _ = construct_profile_scoped_agent(
                 AIAgent,
                 dict(
