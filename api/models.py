@@ -13472,6 +13472,7 @@ def get_state_db_session_message_keys_before_timestamp(
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
+                    timestamp,
                     tool_calls{api_content_select}
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
@@ -13488,6 +13489,12 @@ def get_state_db_session_message_keys_before_timestamp(
                         # prefix/tail collision proof can miss a genuine
                         # repeated recovered turn.
                         "content": _decode_state_db_content(row["content"]),
+                        # Occurrence discriminator (#7587): without the
+                        # timestamp the prefix/tail keys would still collapse
+                        # two occurrences of the same prompt into one identity,
+                        # so the projection below could not tell a replayed row
+                        # from a genuinely repeated turn.
+                        "timestamp": row["timestamp"],
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                         "api_content": row["api_content"] if "api_content" in available else None,
                     },
@@ -13577,7 +13584,9 @@ def get_state_db_regeneration_tail_snapshot(
                 "null_timestamp_count": int(row["null_timestamp_count"]) if row else 0,
             }
             # 2) ordered prefix keys (rows < floor) in durable order
-            prefix_key_cols = "COALESCE(role,'') AS role, COALESCE(content,'') AS content"
+            prefix_key_cols = (
+                "COALESCE(role,'') AS role, COALESCE(content,'') AS content, timestamp"
+            )
             if 'tool_calls' in available:
                 prefix_key_cols += ", tool_calls"
             if 'api_content' in available:
@@ -13596,6 +13605,12 @@ def get_state_db_regeneration_tail_snapshot(
                 _session_message_visible_key({
                     "role": r["role"],
                     "content": _decode_state_db_content(r["content"]),
+                    # Occurrence discriminator (#7587): the prefix keys must be
+                    # built from the same occurrence-sensitive identity the
+                    # sidecar proof uses, otherwise a repeated prompt below and
+                    # above the floor still collapses into one key and the
+                    # prefix/tail collision proof cannot see it.
+                    "timestamp": r["timestamp"],
                     "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
                     "api_content": r["api_content"] if "api_content" in r.keys() else None,
                 }, normalize_workspace_prefix=True)
@@ -13626,6 +13641,12 @@ def get_state_db_regeneration_tail_snapshot(
                     {
                         "role": r.get("role"),
                         "content": r.get("content"),
+                        # Occurrence discriminator (#7587): the prefix and tail
+                        # key builders must select the SAME fields, otherwise a
+                        # row that sits below one floor and above another keys
+                        # with two different occurrences and the prefix/tail
+                        # collision proof silently stops matching.
+                        "timestamp": r.get("timestamp"),
                         "tool_calls": r.get("tool_calls"),
                         "api_content": r.get("api_content"),
                     },
@@ -14011,6 +14032,36 @@ def _normalized_message_timestamp_for_key(value):
     # the sidecar JSON write and the state.db created_at write does not cause
     # the legacy dedup key to differ for the same logical message.
     return str(int(timestamp))
+
+
+# The clock fields a transcript row can carry, in authority order.  ``timestamp``
+# is the ordinary representation; ``_ts`` is the legacy one the real
+# missing-timestamp stamper (``streaming._stamp_missing_message_timestamps``)
+# preserves INSTEAD of adding a ``timestamp``.  ``_message_exact_timestamp_details``
+# already treats both as supported, so the occurrence discriminator has to read
+# them the same way or a saved ``_ts`` row reads as clock-less and stops
+# distinguishing two occurrences of the same prompt (#8672 gate C67-F1).
+_MESSAGE_CLOCK_FIELDS = ("timestamp", "_ts")
+
+
+def _message_occurrence_clock_value(msg):
+    """Return the raw clock value the occurrence discriminator normalises.
+
+    ``timestamp`` wins when the row carries one; otherwise the legacy ``_ts``
+    clock is the same row's time and is honoured.  A row with neither keeps
+    answering ``None`` so the discriminator's clock-less fallback (private
+    identity, then the wildcard) still applies.
+    """
+    if not isinstance(msg, dict):
+        return None
+    for field in _MESSAGE_CLOCK_FIELDS:
+        if field not in msg:
+            continue
+        value = msg.get(field)
+        if value in (None, ""):
+            continue
+        return value
+    return None
 
 
 def _message_timestamp_as_float(msg):
@@ -14529,33 +14580,67 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
             target[key] = copy.deepcopy(value)
 
 
+# Every private alias that names the SAME durable state.db row.  The owning
+# helper accepts all four, so every consumer of the durable provenance must
+# accept all four too -- reading a subset makes an identity invisible to the
+# comparison and lets a distinct row collapse onto the row that owns it
+# (#8672 review, alias completion).
+_STATE_DB_ROW_IDENTITY_FIELDS = (
+    "_row_id",
+    "_state_db_row_id",
+    "_db_row_id",
+    "state_db_row_id",
+)
+
+
+def _canonical_state_db_row_id_value(value) -> str | None:
+    """Return the canonical durable row id for ONE alias value.
+
+    This is the single value rule the durable provenance aliases share:
+    ``_row_id`` / ``_state_db_row_id`` / ``_db_row_id`` / ``state_db_row_id``
+    all name the same durable row, so their values must canonicalise the
+    same way before they are compared.
+
+    A row id is a non-negative integer.  An ``int`` and an integral
+    ``float`` canonicalise to their decimal form, and a decimal string
+    canonicalises to the same digits, so ``7``, ``7.0``, ``"7"`` and ``"007"``
+    all name the SAME row.  Anything else -- a bool, a negative number, a
+    non-integral float, a non-numeric string -- is NOT a row id and returns
+    ``None``.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if value >= 0 else None
+    if isinstance(value, float):
+        if math.isfinite(value) and value >= 0 and value.is_integer():
+            return str(int(value))
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return str(int(text)) if text.isdigit() else None
+    return None
+
+
 def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:
     """Return ``(row_id, valid)`` for private state.db provenance aliases.
 
     A message carrying two different aliases is contradictory provenance.  It
     must not silently fall through to timestamp/sequence matching, because that
     would turn an identity conflict into a guessed provider-side payload.
+
+    Every alias this helper accepts (``_row_id`` / ``_state_db_row_id`` /
+    ``_db_row_id`` / ``state_db_row_id``) names the SAME durable row, so a
+    value is only accepted when it canonicalises to a row id under the shared
+    value rule, and two aliases that disagree are contradictory provenance.
     """
     if not isinstance(message, dict):
         return None, True
     values = set()
-    for key in ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+    for key in _STATE_DB_ROW_IDENTITY_FIELDS:
         if key not in message or message.get(key) in (None, ""):
             continue
-        value = message.get(key)
-        if isinstance(value, bool):
-            return None, False
-        if isinstance(value, int):
-            normalized = str(value) if value >= 0 else None
-        elif isinstance(value, float):
-            normalized = str(int(value)) if math.isfinite(value) and value >= 0 and value.is_integer() else None
-        elif isinstance(value, str):
-            text = value.strip()
-            normalized = text if text.isdigit() else None
-            if normalized is not None:
-                normalized = str(int(normalized))
-        else:
-            normalized = None
+        normalized = _canonical_state_db_row_id_value(message.get(key))
         if normalized is None:
             return None, False
         values.add(normalized)
@@ -15194,10 +15279,193 @@ def _loose_session_message_content(value: str) -> str:
     return " ".join(re.findall(r"\w+", str(value or "").casefold()))
 
 
+_OCCURRENCE_STABLE_IDENTITY_FIELDS = ("id", "message_id")
+
+# The canonical field the durable namespace is emitted under.  All four
+# aliases name the SAME durable row, so they must produce the SAME identity
+# string: the comparison looks a namespace up by identity string, and two
+# spellings of one durable row would otherwise read as a conflict.
+_OCCURRENCE_DURABLE_IDENTITY_FIELD = "_state_db_row_id"
+
+# Prefix for the durable identity of a row whose durable provenance is
+# CONTRADICTORY (two aliases disagree) or malformed (a value that is not a row
+# id).  The owning helper reports such a row as invalid, so its durable
+# identity must not name a row -- but it must also not become "no identity":
+# that would let the row collapse onto a DIFFERENT durable row and silently
+# drop a real turn.  A token that can never equal a canonical row id keeps the
+# refusal (it conflicts with every valid durable identity) without guessing
+# which row the row meant.
+_OCCURRENCE_INVALID_DURABLE_PREFIX = "!raw:"
+
+
+def _established_occurrence_identities(msg: dict) -> tuple[str, ...]:
+    """Return every established private identity a row carries.
+
+    A settled row can carry a stable WebUI ``id`` AND a durable
+    ``_state_db_row_id`` simultaneously.  Keeping only the first field let a
+    stable identity mask a comparable durable conflict: the sidecar row
+    (stable 2 + durable 7) then read as identity-less on the durable side, so
+    a genuinely distinct SQLite row 8 collapsed onto it and the restored turn
+    was suppressed (#8672 review P2, round 3).  All established namespaces
+    are emitted, in field order, so the comparison checks each of them.
+
+    Two aliases of ONE namespace carrying the same value (``id`` and
+    ``message_id`` both ``7``) are a single identity, deduped here by
+    canonical ``(namespace, value)`` -- the same rule
+    ``_stable_message_identity_details`` applies.  Two aliases carrying
+    DIFFERENT values are contradictory provenance and both stay, so the row
+    remains distinct from either.
+
+    The durable namespace is consumed through the owning helper's rules
+    (``_state_db_row_identity_details`` and the shared value rule), so every
+    durable alias is honoured and every one of them canonicalises the same
+    way:
+
+    * ``7``, ``7.0``, ``"7"`` and ``"007"`` name the SAME durable row, so they
+      must not contradict each other;
+    * a value that is not a row id at all (a bool, a negative number, a
+      non-numeric string) and two durable aliases that disagree are
+      contradictory provenance, so the row names NO durable row -- exactly
+      what the owning helper reports for the same row.  It still refuses to
+      collapse onto one (see below).
+    """
+    identities: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(identity: str) -> None:
+        canonical = (
+            _occurrence_identity_namespace(identity),
+            _occurrence_identity_value(identity),
+        )
+        if canonical in seen:
+            return
+        seen.add(canonical)
+        identities.append(identity)
+
+    for field in _OCCURRENCE_STABLE_IDENTITY_FIELDS:
+        value = msg.get(field)
+        if value in (None, ""):
+            continue
+        _add(f"id:{field}:{value}")
+
+    # The durable namespace follows the owning helper: it is established only
+    # when its aliases agree on ONE canonical row id.  The identity is emitted
+    # under the canonical field name so that every alias spelling of that row
+    # produces the same identity string.
+    durable_row_id, durable_valid = _state_db_row_identity_details(msg)
+    if durable_valid:
+        if durable_row_id is not None:
+            _add(f"id:{_OCCURRENCE_DURABLE_IDENTITY_FIELD}:{durable_row_id}")
+        return tuple(identities)
+
+    # Contradictory or malformed durable provenance establishes no durable
+    # identity -- but it must NOT read as "no durable identity at all": that
+    # would let the row collapse onto a DIFFERENT durable row and silently
+    # drop a real turn (#7587 fails closed: keep two rows that are provably
+    # different rather than suppressing one).  The token below names no row
+    # (it can never equal a canonical row id) while still refusing to collapse
+    # onto one, and it is stable, so two rows carrying the SAME broken
+    # provenance still agree with each other.
+    _add(
+        f"id:{_OCCURRENCE_DURABLE_IDENTITY_FIELD}:"
+        f"{_OCCURRENCE_INVALID_DURABLE_PREFIX}"
+        f"{_invalid_durable_provenance_fingerprint(msg)}"
+    )
+    return tuple(identities)
+
+
+def _invalid_durable_provenance_fingerprint(msg: dict) -> str:
+    """Return a stable fingerprint of a row's broken durable provenance.
+
+    Two rows carrying the SAME contradictory or malformed durable aliases must
+    agree with each other, so the fingerprint is derived from the raw values
+    actually present.  It is a hex digest, so it can never collide with a
+    canonical row id (which is always decimal digits).
+    """
+    values = set()
+    for key in _STATE_DB_ROW_IDENTITY_FIELDS:
+        if key not in msg:
+            continue
+        value = msg.get(key)
+        if value in (None, ""):
+            continue
+        values.add(repr(value))
+    payload = "\x00".join(sorted(values)).encode("utf-8", "replace")
+    return hashlib.sha1(payload).hexdigest()
+
+
+def _session_message_occurrence_for_key(
+    msg: dict, *, include_private_identity: bool = True
+) -> str:
+    """Occurrence discriminator shared by the visible/content keys (#7587).
+
+    ``_session_message_merge_key()`` already carries the second-truncated
+    timestamp, so it can tell two occurrences of the same content apart.  The
+    visible/content keys did not, which meant two genuinely distinct user
+    turns carrying identical text (or an identical image payload) collapsed
+    into ONE visible identity; the later one was then suppressed as an
+    "already visible duplicate" on the restore / context-reconstruction path
+    and lost from the projection.
+
+    The second-level truncation is deliberate and unchanged: it is what makes
+    the discriminator tolerant of the sub-second drift between the sidecar
+    JSON write and the state.db created_at write for the SAME logical row, so
+    a replayed durable record still collapses.
+
+    A missing/empty clock yields ``""`` and an unparseable one yields its
+    own string, so rows without usable clock data still key stably against
+    each other (they never become permanently unmatchable) and never raise.
+    The clock is read through the shared representation helper, so a legacy
+    ``_ts`` row is the SAME clock a ``timestamp`` row would carry: the real
+    missing-timestamp stamper keeps such a row without adding a ``timestamp``,
+    and reading only one field made every saved ``_ts`` occurrence read as
+    clock-less (#8672 gate C67-F1).
+
+    When the clock is missing entirely the discriminator falls back to the
+    private identities the row carries (``id`` / ``message_id`` /
+    ``_state_db_row_id``).  That direction is deliberate: it fails **closed**,
+    preserving two rows that are provably different rather than suppressing
+    one of them -- over-dedup deletes real user turns, whereas under-dedup at
+    worst shows a duplicate row.  Only a row with neither a usable clock nor
+    any identity at all stays indistinguishable, and those key together
+    because the information to tell them apart simply is not there.
+
+    EVERY established identity is kept, not just the first one (#8672 review
+    P2, round 3): a settled row carries a stable WebUI ``id`` AND a durable
+    ``_state_db_row_id`` at the same time, and keeping only the stable one
+    let it MASK a comparable durable conflict -- a distinct SQLite row 8
+    collapsed onto a sidecar row that already owned durable 7 and the
+    restored turn was suppressed.  The comparison therefore sees all
+    namespaces the row establishes, using the same alias rules as
+    ``_stable_message_identity_details`` (``id``/``message_id`` are one
+    namespace; every row-id alias is another).
+
+    ``include_private_identity`` is True for the VISIBLE key: a clocked row
+    may still carry a durable id, and two conflicting ids are evidence of two
+    distinct rows even when only one side has a clock (Greptile r4).  The
+    CONTENT key keeps the historical clock-only form unless the clock itself
+    is missing, because its callers (cancelled-journal owner probes) pair the
+    same logical row across stores where the id is legitimately one-sided and
+    they already require an exact clock match.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    stamp = _normalized_message_timestamp_for_key(
+        _message_occurrence_clock_value(msg)
+    )
+    identity = ""
+    if include_private_identity or not stamp:
+        identity = ",".join(_established_occurrence_identities(msg))
+    if stamp:
+        return f"{stamp}|{identity}" if identity else stamp
+    return identity
+
+
 def _session_message_content_key(
     msg: dict,
     *,
     normalize_workspace_prefix: bool = True,
+    include_occurrence: bool = True,
 ):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
@@ -15228,6 +15496,21 @@ def _session_message_content_key(
         content,
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
+        # Occurrence discriminator (#7587): two independent turns carrying the
+        # same content must not collapse into one identity.  Callers that
+        # deliberately align a mirrored prefix across restamped timestamps
+        # (state_db_delta_after_context) opt out explicitly.  The content key
+        # keeps the clock-only form (see
+        # _session_message_occurrence_for_key): cancelled-journal owner probes
+        # pair the same logical row across stores where the durable id is
+        # legitimately one-sided and already require an exact clock match.
+        (
+            _session_message_occurrence_for_key(
+                msg, include_private_identity=False
+            )
+            if include_occurrence
+            else ""
+        ),
     ), msg)
 
 
@@ -15260,6 +15543,12 @@ def _session_message_visible_key(
         role,
         content,
         _tc_key,
+        # Occurrence discriminator (#7587).  Exact-identity matching is
+        # authoritative in _matching_visible_duplicate(), so without it two
+        # independent same-content turns were indistinguishable and the later
+        # one was suppressed as a duplicate.  Index 3 is reserved for this
+        # field; the provider sidecar, when present, stays at index 4.
+        _session_message_occurrence_for_key(msg),
     ), msg)
 
 
@@ -15276,21 +15565,866 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
         if not content or not isinstance(content, str):
             continue
         by_role.setdefault(role, []).append(key)
+    # Clock-free exact-identity index (#8672 gate r2): maps an identity with
+    # the #7587 occurrence discriminator stripped back to the original keys.
+    # _matching_visible_duplicate probes it BEFORE the bounded fuzzy fallback
+    # short-circuits, so a row whose clock is missing can still collapse onto
+    # an exact identity replay on transcripts over the fuzzy bound, without
+    # merging two established different occurrences.  Structural (non-string)
+    # content rows are included: this probe is exact identity only and can
+    # never fuzzy-match a scalar.
+    #
+    # The probe is the prebuilt lookup's bounded-work contract: it resolves a
+    # candidate with dict lookups keyed by clock and canonical identity
+    # namespace ONLY, so a group holding thousands of same-clock occurrences
+    # of one repeated prompt never rescans its bucket per incoming row
+    # (#8672 review P2, round 3).  The single build pass below stays linear
+    # in the key count; every per-clock sub-index is filled inside it.
+    by_clockfree = {}
+    for key in visible_keys:
+        if not isinstance(key, tuple) or not key:
+            continue
+        group = by_clockfree.setdefault(
+            _visible_key_without_occurrence(key),
+            {
+                "any": key,
+                # Every member of the group in build order.  The O(1) probes
+                # below answer the common shapes; this list is the bounded
+                # fallback that lets an EXHAUSTED representative hand the
+                # replay to another compatible occurrence instead of
+                # appending it as a second row (#8672 gate C67-F1).
+                "members": [],
+                # Exact occurrence string -> key (never the "" sentinel).
+                "by_occurrence": {},
+                # Rows that ESTABLISH a clock, bucketed per clock.  Inside one
+                # clock bucket the identities are indexed per canonical
+                # namespace, and one representative is kept, so the probe can
+                # answer "same clock, same namespace, different value" and
+                # "same clock, our namespace absent" without iterating.
+                "by_clock": {},
+                # Rows whose clock is UNESTABLISHED.  They cannot prove they
+                # are a different occurrence, so they stay compatible with an
+                # incoming clock the buckets do not carry (Greptile P1: two
+                # identical image turns, one clocked and one clockless, made
+                # the merge append the image a second time).  ``anonymous`` is
+                # the first such row carrying no identity at all -- a pure
+                # wildcard that can never contradict anything.
+                "clockless": {
+                    "by_identity": {},
+                    "by_namespace": {},
+                    "representative": None,
+                    "anonymous": None,
+                },
+                "by_identity": {},
+                "by_namespace": {},
+                "identity_values": set(),
+            },
+        )
+        occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        clock, identity_text = _occurrence_parts(occurrence)
+        identities = _occurrence_identities(identity_text)
+        if occurrence:
+            group["by_occurrence"].setdefault(occurrence, key)
+        if clock:
+            bucket = group["by_clock"].get(clock)
+            if bucket is None:
+                bucket = {"by_identity": {}, "by_namespace": {}, "representative": key}
+                group["by_clock"][clock] = bucket
+            # Index the two dimensions separately.  A clock and a private id
+            # are not interchangeable, and a conflicting id must stay visible
+            # to the probe even when one side also carries a clock
+            # (Greptile r4).  A row that establishes SEVERAL namespaces is
+            # indexed under every one of them, so the reconciled replay of
+            # one logical row still resolves by its durable half.
+            for identity in identities:
+                bucket["by_identity"].setdefault(identity, key)
+                bucket["by_namespace"].setdefault(
+                    _occurrence_identity_namespace(identity), {}
+                ).setdefault(identity, key)
+        else:
+            # A row with no usable clock is a wildcard for every incoming
+            # occurrence, so one representative is enough for the whole group.
+            clockless = group["clockless"]
+            if clockless["representative"] is None:
+                clockless["representative"] = key
+            if not identities and clockless["anonymous"] is None:
+                clockless["anonymous"] = key
+            for identity in identities:
+                clockless["by_identity"].setdefault(identity, key)
+                clockless["by_namespace"].setdefault(
+                    _occurrence_identity_namespace(identity), {}
+                ).setdefault(identity, key)
+        for identity in identities:
+            group["by_identity"].setdefault(identity, key)
+            group["identity_values"].add(identity)
+            # Index the identities PER NAMESPACE as well (#8672 review P2):
+            # a stable WebUI id and a SQLite row id describe different
+            # things, so only ids inside ONE namespace can contradict each
+            # other.
+            group["by_namespace"].setdefault(
+                _occurrence_identity_namespace(identity), {}
+            ).setdefault(identity, key)
+        group["members"].append(key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
-    return {"keys": visible_keys, "by_role": by_role, "loose_by_key": {}}
+    return {
+        "keys": visible_keys,
+        "by_role": by_role,
+        "loose_by_key": {},
+        "by_clockfree": by_clockfree,
+    }
 
 
 _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
 
+# Layout of a visible key: (role, content, tool_calls, occurrence[, sidecar]).
+# ``occurrence`` is the second-truncated timestamp added by #7587; the provider
+# sidecar, when present, is appended after it by
+# ``_session_message_key_with_sidecar``.
+_VISIBLE_KEY_OCCURRENCE_INDEX = 3
+_VISIBLE_KEY_SIDECAR_INDEX = 4
 
-def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
+
+def _visible_key_field(key: tuple, index: int, default):
+    """Read a positional field of a visible key without assuming its arity."""
+    try:
+        return key[index]
+    except (TypeError, IndexError):
+        return default
+
+
+def _visible_key_without_occurrence(key) -> tuple:
+    """Return ``key`` with the #7587 occurrence discriminator removed.
+
+    Used by the probes that pair a sidecar row with a state.db row across a
+    clock the two stores do not share:
+
+    * the positional sidecar-prefix replay probe in
+      ``merge_session_messages_append_only`` -- a compressed/tip sidecar can
+      persist coarse second-level timestamps while state.db keeps the very same
+      rows with sub-second (or restamped) floats, and an index-aligned replay
+      must still collapse;
+    * the cancelled-journal gap-filling probes -- the model-facing context
+      legitimately carries NO timestamps at all, so requiring clock agreement
+      there would make those rows permanently unmatchable and silently drop the
+      restored prefix.
+
+    Occurrence sensitivity is applied at the content-already-visible skip in
+    ``_matching_visible_duplicate`` instead, which is where #7587's data loss
+    actually happens.
+
+    The result is NORMALISED to the full five-slot shape with the occurrence
+    slot emptied, so a stripped key can be handed straight back to
+    ``_matching_visible_duplicate``: slot 3 then reads as the "not established"
+    sentinel rather than as a provider sidecar leaking in from slot 4.
+    """
+    role = key[0] if isinstance(key, tuple) and key else ""
+    content = key[1] if isinstance(key, tuple) and len(key) > 1 else ""
+    tool_calls = key[2] if isinstance(key, tuple) and len(key) > 2 else ""
+    sidecar = (
+        key[_VISIBLE_KEY_SIDECAR_INDEX]
+        if isinstance(key, tuple) and len(key) > _VISIBLE_KEY_SIDECAR_INDEX
+        else None
+    )
+    return (role, content, tool_calls, "", sidecar)
+
+
+def _visible_key_without_private_identity(key) -> tuple:
+    """Return ``key`` with the PRIVATE identity removed from the occurrence slot.
+
+    The occurrence discriminator is ``"<clock>|<identity>"``.  The identity half
+    is PRIVATE to one store: the WebUI sidecar carries a stable message ``id``
+    while the SQLite projection carries a ``_state_db_row_id``.  They describe
+    DIFFERENT things about the SAME logical row, so the ordered prefix proof in
+    ``api.session_ops._bounded_tail_snapshot_if_safe`` must not compare them
+    (#8672 review P2).  Comparing them literally made the proof fail for every
+    settled row, which refused the bounded regeneration path and forced a
+    full-history read.
+
+    The CLOCK half is kept, so the representation stays clock-sensitive: a
+    repeated turn below and above the read floor remains distinguishable, and
+    the real clock-disagreement fallback keeps working.
+
+    The provider sidecar (slot 4) and the tool-call identity (slot 2) are
+    untouched -- tool/provider identity must keep separating rows.
+    """
+    role = key[0] if isinstance(key, tuple) and key else ""
+    content = key[1] if isinstance(key, tuple) and len(key) > 1 else ""
+    tool_calls = key[2] if isinstance(key, tuple) and len(key) > 2 else ""
+    occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+    clock, _identity = _occurrence_parts(occurrence)
+    sidecar = (
+        key[_VISIBLE_KEY_SIDECAR_INDEX]
+        if isinstance(key, tuple) and len(key) > _VISIBLE_KEY_SIDECAR_INDEX
+        else None
+    )
+    return (role, content, tool_calls, clock, sidecar)
+
+
+# Layout of a content key:
+# (role, content, tool_call_id, tool_name, occurrence[, sidecar]).
+# ``occurrence`` is the second-truncated timestamp added by #7587; the
+# provider sidecar, when present, is appended after it by
+# ``_session_message_key_with_sidecar``.
+_CONTENT_KEY_OCCURRENCE_INDEX = 4
+_CONTENT_KEY_SIDECAR_INDEX = 5
+
+
+def _content_key_without_occurrence(key) -> tuple:
+    """Return ``key`` with the #7587 occurrence discriminator removed.
+
+    Content keys already carry an occurrence-free variant
+    (``_session_message_content_key(..., include_occurrence=False)``); this
+    helper derives that SAME identity from an already-computed content key by
+    clearing the occurrence slot, so the occurrence-free membership set can be
+    seeded for every row without a second normalisation pass.
+
+    Seeding every row matters (#8672 review P2): the in-window
+    distinct-tool-call exception pairs an incoming durable tool row with ANY
+    content-equivalent sidecar assistant row, and journal recovery
+    deliberately anchors recovered tool cards on an EMPTY assistant row that
+    carries no inline tool_calls.  Excluding such anchors from the set made
+    the membership test fail and silently dropped the incoming tool call.
+
+    Re-running the key builder per row instead would add a third content-key
+    derivation per message and break the bounded-normalisation invariant
+    (test_merge_append_only_normalization_cache).  Like
+    :func:`_visible_key_without_occurrence`, the result keeps the full
+    six-slot shape when a provider sidecar is present so the two stores keep
+    comparing like with like.
+    """
+    if not isinstance(key, tuple) or not key:
+        return key
+    stripped = list(key[:_CONTENT_KEY_SIDECAR_INDEX])
+    while len(stripped) <= _CONTENT_KEY_OCCURRENCE_INDEX:
+        stripped.append("")
+    stripped[_CONTENT_KEY_OCCURRENCE_INDEX] = ""
+    if len(key) > _CONTENT_KEY_SIDECAR_INDEX:
+        stripped.append(key[_CONTENT_KEY_SIDECAR_INDEX])
+    return tuple(stripped)
+
+
+def _session_message_replay_visible_key(msg, *, normalize_workspace_prefix: bool = False) -> tuple:
+    """Visible key with the #7587 occurrence discriminator removed.
+
+    See :func:`_visible_key_without_occurrence` for why the cross-store replay
+    and gap-filling probes are deliberately clock-tolerant.  Clock exactness is
+    enforced separately, by ``_message_exact_timestamp_details``.
+    """
+    return _visible_key_without_occurrence(
+        _session_message_visible_key(
+            msg, normalize_workspace_prefix=normalize_workspace_prefix
+        )
+    )
+
+
+def _occurrence_parts(value) -> tuple[str, str]:
+    """Split an occurrence discriminator into ``(clock, private_identity)``.
+
+    ``_session_message_occurrence_for_key`` emits ``"<clock>|<identity>"`` when
+    both are available, ``"<clock>"`` for a clock-only row, and
+    ``"id:<field>:<value>"`` when the clock is missing.  Keeping the two
+    dimensions separable lets the comparison distinguish a contradictory
+    private identity from a merely one-sided clock (Greptile r4).
+
+    The identity half may itself carry SEVERAL identities, one per
+    established namespace, joined by :func:`_occurrence_identities`.
+    """
+    if value is None:
+        return "", ""
+    text = str(value)
+    if not text:
+        return "", ""
+    clock, separator, identity = text.partition("|")
+    if separator:
+        return clock, identity
+    if text.startswith("id:"):
+        return "", text
+    return text, ""
+
+
+def _occurrence_identities(identity) -> tuple[str, ...]:
+    """Split an occurrence identity half into its individual identities.
+
+    ``_established_occurrence_identities`` emits one identity per
+    established namespace, joined so the discriminator stays a single string
+    (``"id:id:2,id:_state_db_row_id:7"``).  The split is anchored on the
+    ``id:`` prefix every identity carries, so a separator inside a value
+    cannot silently forge an extra identity.
+    """
+    if not identity:
+        return ()
+    pieces = str(identity).split(",id:")
+    identities = (pieces[0], *(f"id:{piece}" for piece in pieces[1:]))
+    return tuple(part for part in identities if part)
+
+
+def _occurrence_identity_value(identity) -> str:
+    """Return the canonical VALUE half of a private identity.
+
+    ``id`` and ``message_id`` are aliases of one stable identity, so
+    ``id:id:7`` and ``id:message_id:7`` carry the SAME value in the SAME
+    namespace and must not contradict each other: the namespace helper maps
+    both to ``"stable"`` and this helper returns ``"7"`` for both.  An
+    unrecognised identity falls back to its own literal text, so two
+    unrecognised identities only conflict when they are literally equal.
+    """
+    if not identity:
+        return ""
+    text = str(identity)
+    if not text.startswith("id:"):
+        return text
+    _prefix, _separator, remainder = text.partition(":")
+    _field, _separator, value = remainder.partition(":")
+    return value or text
+
+
+def _occurrence_identity_namespace(identity) -> str:
+    """Return the NAMESPACE a private identity belongs to.
+
+    ``_session_message_occurrence_for_key`` encodes a private identity as
+    ``"id:<field>:<value>"``.  The ``<field>`` part IS the namespace: a
+    stable WebUI ``id`` and a SQLite ``_state_db_row_id`` describe different
+    things and must never be compared against each other (#8672 review P2).
+
+    ``id`` and ``message_id`` are the SAME namespace -- they are two aliases of
+    one stable message identity, and ``_stable_message_identity_details``
+    already treats two different values across those aliases as contradictory
+    provenance.  Every SQLite row-id alias (``_row_id`` / ``_state_db_row_id``
+    / ``_db_row_id`` / ``state_db_row_id``) is likewise one namespace.
+
+    Anything that is not a recognised ``id:<field>:<value>`` shape falls back
+    to its own literal value, so two unrecognised identities only conflict when
+    they are literally equal.
+    """
+    if not identity:
+        return ""
+    text = str(identity)
+    if not text.startswith("id:"):
+        return text
+    _prefix, _separator, remainder = text.partition(":")
+    field, _separator, _value = remainder.partition(":")
+    if not field:
+        return text
+    if field in ("id", "message_id"):
+        return "stable"
+    if field in ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+        return "state_db_row"
+    return field
+
+
+def _occurrence_identity_conflict(left_identity, right_identity) -> bool:
+    """True when two private identities CONTRADICT each other.
+
+    Two identities contradict only when they live in the SAME namespace and
+    carry different VALUES.  A stable WebUI id and a SQLite row id are
+    different namespaces, so they cannot contradict each other (#8672 review
+    P2) -- the reconciled replay of one logical row carries the stable id on
+    the sidecar side and the row id on the SQLite side.
+
+    Either side may establish SEVERAL namespaces at once, and every pair is
+    compared: a stable id must not mask a comparable durable conflict on the
+    same row (#8672 review P2, round 3), and two aliases of one namespace
+    carrying the same value are still one identity rather than a
+    contradiction.
+    """
+    return _occurrence_identity_lists_conflict(
+        _occurrence_identities(left_identity),
+        _occurrence_identities(right_identity),
+    )
+
+
+def _occurrence_identity_lists_conflict(
+    left: tuple[str, ...], right: tuple[str, ...]
+) -> bool:
+    """True when two lists of private identities contradict each other.
+
+    The pair-wise core of :func:`_occurrence_identity_conflict`, kept separate
+    so a caller that already holds the split identities does not have to
+    re-join and re-split them for every candidate it inspects.
+    """
+    for left_part in left:
+        for right_part in right:
+            if not left_part or not right_part or left_part == right_part:
+                continue
+            if _occurrence_identity_namespace(left_part) != _occurrence_identity_namespace(
+                right_part
+            ):
+                continue
+            if _occurrence_identity_value(left_part) != _occurrence_identity_value(
+                right_part
+            ):
+                return True
+    return False
+
+
+def _visible_keys_share_occurrence(left, right) -> bool:
+    """True when two occurrences are the same, or neither proves difference.
+
+    A row with no usable timestamp cannot prove it is a DIFFERENT occurrence,
+    so it must not be distinguished from a row that has one.  Without this rule
+    the model-facing context (which legitimately carries no timestamps) would
+    stop matching its state.db mirrors and become permanently unmatchable --
+    the exact failure mode #7587 must not introduce.
+
+    A one-sided private-identity fallback is likewise NOT a second clock: the
+    real SQLite reader can return the same payload with a NULL timestamp while
+    the sidecar copy carries the clock, and comparing those as two known clocks
+    appended the replay as a duplicate (#8672 gate r3 D2).
+
+    Conflicting private ids, however, ARE evidence of distinct rows even when
+    only one side carries a clock (Greptile r4): a sidecar row with durable id
+    7 must not swallow a clockless durable row with id 8.  That conflict is
+    only meaningful WITHIN one identity namespace (#8672 review P2): the
+    stable WebUI ``id`` and the SQLite ``_state_db_row_id`` are different
+    namespaces, so they never contradict each other.
+    """
+    left_clock, left_identity = _occurrence_parts(left)
+    right_clock, right_identity = _occurrence_parts(right)
+    if _occurrence_identity_conflict(left_identity, right_identity):
+        return False
+    if left_clock and right_clock:
+        return left_clock == right_clock
+    return True
+
+
+def _visible_key_capacity_remaining(key, remaining) -> bool:
+    """True when a saved occurrence can still absorb one more replay.
+
+    ``remaining`` maps a visible key to the number of replays it may still
+    consume (``sidecar_visible_counts`` minus what the merge already skipped).
+    ``None`` means the caller does not track capacity, so every candidate
+    stays available and the historical behaviour is preserved exactly.
+    """
+    if remaining is None:
+        return True
+    return remaining.get(key, 1) > 0
+
+
+def _visible_key_occurrence_compatible(key, identities) -> bool:
+    """True when a candidate key's private identities do not contradict ours.
+
+    The check is applied to the CANDIDATE, not to the whole group (#8672 gate
+    C67-F2): one occurrence's durable id must not veto a compatible sibling
+    that establishes no such id, so the sibling can consume its own replay.
+    A candidate that carries no private identity at all contradicts nothing.
+    """
+    if not identities:
+        return True
+    occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+    _clock, identity_text = _occurrence_parts(occurrence)
+    candidate_identities = _occurrence_identities(identity_text)
+    if not candidate_identities:
+        return True
+    # Routed through the shared comparison (not its list core) so every
+    # identity comparison in this module stays observable in one place.
+    return not _occurrence_identity_conflict(
+        ",".join(candidate_identities), ",".join(identities)
+    )
+
+
+def _consumption_cursor(container: dict, slot, remaining) -> dict:
+    """Return the merge-local consumption cursor stored at ``container[slot]``.
+
+    The cursor is the amortized-linear contract of the duplicate probes
+    (#8672 review P2, round 5).  It remembers how far an ordered candidate
+    list has already been consumed, so a replay never restarts the walk at
+    the beginning and re-inspects every candidate whose replay capacity is
+    gone -- that restart is the deterministic quadratic the review
+    reproduced: N NULL-clock replays of one repeated prompt cost N(N+1)/2
+    candidate visits (501501 at N=1001, 2003001 at N=2001).
+
+    The cursor is keyed on the caller's live capacity map and keeps a strong
+    reference to it, so a recycled ``id()`` can never alias a stale cursor
+    and a different merge starts from the beginning.  Capacity-blind callers
+    (``remaining is None``) never consume anything, so their cursor never
+    advances and the historical first-match walk is preserved byte for byte.
+    """
+    cursor = container.get(slot)
+    if cursor is None or cursor.get("remaining") is not remaining:
+        cursor = {"remaining": remaining, "position": 0}
+        container[slot] = cursor
+    return cursor
+
+
+def _unconsumed_candidates(ordered, cursor: dict, remaining):
+    """Yield ``ordered`` from the cursor, past the consumed prefix.
+
+    The cursor advances past the candidates at the FRONT of the list whose
+    replay capacity is gone.  Their capacity is monotone (the merge only ever
+    decrements it), so an exhausted candidate stays exhausted for the rest of
+    the merge and re-inspecting it on every incoming row is pure waste: that
+    restart is the deterministic quadratic the review reproduced -- N
+    NULL-clock replays of one repeated prompt cost N(N+1)/2 candidate visits
+    (501501 at N=1001, 2003001 at N=2001).  The position never moves back, so
+    each index is crossed at most once and the advancement stays amortized
+    linear in the length of the list.
+
+    Only the PREFIX is skipped.  A consumed candidate that sits BEHIND an
+    unconsumed one stays reachable: the caller's own filters decide per row
+    which candidate it needs (a clocked replay needs a different same-clock
+    candidate every row, in an order the build order does not follow), so it
+    is offered again and rejected by the caller exactly as before.  Every
+    candidate is still offered in build order with all of the caller's gates
+    applied in their historical order, so the candidate a caller picks -- and
+    therefore every merged row -- is unchanged; only the repeated work goes
+    away.
+
+    Capacity-blind callers (``remaining is None``) never consume anything, so
+    their cursor never advances and the historical walk is preserved byte for
+    byte.
+    """
+    if remaining is None:
+        yield from ordered
+        return
+    position = cursor["position"]
+    total = len(ordered)
+    while position < total and not _visible_key_capacity_remaining(
+        ordered[position], remaining
+    ):
+        position += 1
+    cursor["position"] = position
+    for index in range(position, total):
+        yield ordered[index]
+
+
+def _available_candidate(ordered, container, slot, remaining, identities):
+    """Return the first unconsumed, compatible candidate of ``ordered``.
+
+    ``ordered`` is a merge-stable candidate list (materialised once, never
+    mutated afterwards) and ``container[slot]`` owns the merge-local
+    consumption cursor for it -- see :func:`_consumption_cursor` and
+    :func:`_unconsumed_candidates` for why that cursor keeps the consumption
+    amortized linear.  The gates keep their historical order (capacity, then
+    identity compatibility), so the candidate returned is the one the
+    uncached walk would have returned.
+    """
+    if not ordered:
+        return None
+    cursor = _consumption_cursor(container, slot, remaining)
+    for candidate in _unconsumed_candidates(ordered, cursor, remaining):
+        if not _visible_key_capacity_remaining(candidate, remaining):
+            continue
+        if _visible_key_occurrence_compatible(candidate, identities):
+            return candidate
+    return None
+
+
+def _identity_candidates(container: dict) -> list:
+    """Return the merge-stable identity-bearing candidates of a group/bucket.
+
+    ``by_identity`` is complete once the lookup is built and is never mutated
+    afterwards, so its values are materialised into a list on first use: the
+    duplicate probes then walk it BY INDEX from the merge-local cursor instead
+    of restarting ``.values()`` on every incoming row (#8672 review P2, round
+    5).  A group and a clock bucket share this shape, so both use it.
+    """
+    ordered = container.get("identity_order")
+    if ordered is None:
+        ordered = list((container.get("by_identity") or {}).values())
+        container["identity_order"] = ordered
+    return ordered
+
+
+def _fallback_candidates(group: dict) -> list:
+    """Return the group's last-resort candidate order, materialised once.
+
+    ``_first_compatible_member``'s historical order is the clock-less
+    anonymous row, the clock-less representative and then every member.
+    Expanding that tuple per call rebuilt the whole member list every time --
+    the same repeated-prefix shape the review flagged -- so it is built once
+    here and walked through the merge-local cursor instead.
+    """
+    ordered = group.get("fallback_order")
+    if ordered is None:
+        clockless = group.get("clockless") or {}
+        ordered = [
+            candidate
+            for candidate in (
+                clockless.get("anonymous"),
+                clockless.get("representative"),
+                *(group.get("members") or []),
+            )
+            if candidate is not None
+        ]
+        group["fallback_order"] = ordered
+    return ordered
+
+
+def _clockless_duplicate_candidate(group: dict, identities, remaining=None):
+    """Return a clock-unestablished representative compatible with ``identities``.
+
+    A row without a usable clock cannot prove it is a DIFFERENT occurrence,
+    so it stays a wildcard for an incoming clock the group's buckets do not
+    carry.  Compatibility is checked against the candidate's OWN identities,
+    because the group-level namespace veto no longer runs before this probe
+    (#8672 gate C67-F2): an exhausted or contradictory representative must not
+    hide another compatible saved occurrence.
+    """
+    clockless = group.get("clockless") or {}
+    if clockless.get("representative") is None:
+        return None
+    by_identity = clockless.get("by_identity") or {}
+    for identity in identities:
+        match = by_identity.get(identity)
+        if match is not None:
+            return match
+    for candidate in (clockless.get("anonymous"), clockless.get("representative")):
+        if candidate is None:
+            continue
+        if not _visible_key_occurrence_compatible(candidate, identities):
+            continue
+        if not _visible_key_capacity_remaining(candidate, remaining):
+            continue
+        return candidate
+    return None
+
+
+def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
+    """Pick a clock-free duplicate representative consistent with ``occurrence``.
+
+    Exact occurrence equality is authoritative.  Beyond that, a one-sided
+    private-identity fallback must not be read as a contradictory clock: it
+    cannot establish difference, so it collapses onto the other store's row
+    (#8672 gate r3 D2).  Two established different clocks remain genuinely
+    distinct, and so do two conflicting private identities even when only one
+    side also carries a clock (Greptile r4).
+
+    A private identity only contradicts another one WITHIN its own namespace
+    (#8672 review P2): a stable WebUI ``id`` and a SQLite ``_state_db_row_id``
+    describe different things, so they never conflict and the reconciled
+    replay of one logical row still collapses.  A row that establishes
+    SEVERAL namespaces is compared in ALL of them, so a stable id cannot mask
+    a comparable durable conflict on the same row (round 3).
+
+    The durable conflict is a property of the CANDIDATE, never a group-wide
+    veto (#8672 gate C67-F2): the earlier saved occurrence of a repeated
+    prompt owns durable row 7 while the later one is unbound, and an incoming
+    durable row 8 conflicts with the first but not with the second, so the
+    unbound sibling still has to absorb its own replay.
+
+    Every preferred step below is a dict lookup keyed by clock and canonical
+    identity namespace -- never a scan over the group's members (#8672 review
+    P2, round 3): the prebuilt index is the bounded-work contract, and a
+    bucket holding a thousand same-clock occurrences of one repeated prompt
+    must not be rescanned per incoming row.  The ordered member list is only
+    walked once the preferred candidate is EXHAUSTED, so replay capacity is
+    consumed one occurrence at a time (C67-F1).
+
+    Those remaining ordered walks -- the group's identity index and a
+    same-clock bucket's -- start at a MERGE-LOCAL cursor instead of at the
+    beginning (#8672 review P2, round 5).  Restarting them per incoming row
+    made every NULL-clock replay re-inspect every candidate whose replay
+    capacity had already been consumed: N replays of one repeated prompt cost
+    N(N+1)/2 candidate visits (501501 at N=1001, 2003001 at N=2001) with the
+    real producer, the real SQLite reader and the real merge.  The cursor
+    skips an exhausted candidate once for the whole merge, which keeps the
+    consumption amortized linear while the candidate-specific namespace
+    conflicts, the clock separation and the one-to-one occurrence capacities
+    stay exactly as they were.
+    """
+    exact = group.get("by_occurrence", {}).get(occurrence)
+    if exact is not None and _visible_key_capacity_remaining(exact, remaining):
+        return exact
+    clock, identity_text = _occurrence_parts(occurrence)
+    identities = _occurrence_identities(identity_text)
+    if clock:
+        bucket = (group.get("by_clock") or {}).get(clock)
+        if bucket is not None:
+            bucket_by_identity = bucket.get("by_identity") or {}
+            for identity in identities:
+                match = bucket_by_identity.get(identity)
+                if match is not None and _visible_key_capacity_remaining(
+                    match, remaining
+                ):
+                    return match
+            bucket_by_namespace = bucket.get("by_namespace") or {}
+            for identity in identities:
+                if _occurrence_identity_namespace(identity) in bucket_by_namespace:
+                    # Same clock, same namespace, different value: another row
+                    # already owns this occurrence at this clock, so the rows
+                    # are genuinely distinct.  An id from a DIFFERENT namespace
+                    # at the same clock (stable WebUI id vs SQLite row id) is
+                    # merely one-sided and collapses onto the bucket's
+                    # compatible representative.
+                    return None
+            representative = bucket.get("representative")
+            if representative is not None and _visible_key_capacity_remaining(
+                representative, remaining
+            ):
+                return representative
+            # The bucket's representative already absorbed its replay.  Another
+            # occurrence at the SAME clock is still a compatible saved row, so
+            # the replay must land on it instead of being appended (C67-F1).
+            # The walk starts at the bucket's merge-local cursor, so a
+            # candidate whose capacity is gone is skipped once for the whole
+            # merge instead of once per incoming row (#8672 review P2, round 5).
+            return _available_candidate(
+                _identity_candidates(bucket),
+                bucket,
+                "identity_cursor",
+                remaining,
+                identities,
+            )
+        # No row establishes this clock.  A different ESTABLISHED clock stays
+        # distinct, but a clock-unestablished copy of the same turn is still
+        # compatible and must be checked BEFORE the incoming clock is
+        # rejected: two identical image turns, one at a known clock and one
+        # without any timestamp, replayed the second one from state.db at a
+        # new clock and the merge appended the image again (Greptile P1).
+        clockless = _clockless_duplicate_candidate(group, identities, remaining)
+        if clockless is not None:
+            return clockless
+        if group.get("by_clock"):
+            return None
+        return _first_compatible_member(group, identities, remaining)
+    if identities:
+        by_identity = group.get("by_identity") or {}
+        for identity in identities:
+            match = by_identity.get(identity)
+            if match is not None and _visible_key_capacity_remaining(
+                match, remaining
+            ):
+                return match
+        # A row with no clock cannot prove it is a different occurrence, so a
+        # same-namespace conflict anywhere in the group stays a refusal HERE:
+        # the row has no clock to narrow the candidate set, and refusing keeps
+        # two provably different turns apart (fail closed, #7587).
+        by_namespace = group.get("by_namespace") or {}
+        for identity in identities:
+            namespace_values = by_namespace.get(
+                _occurrence_identity_namespace(identity)
+            )
+            if namespace_values and identity not in namespace_values:
+                return None
+        # The namespace check above proved no group identity contradicts
+        # ours, so the first identity-bearing row is a compatible
+        # representative -- resolved without scanning the bucket.  The walk
+        # runs from the group's merge-local cursor, so a candidate whose
+        # replay capacity is already consumed is skipped once for the whole
+        # merge rather than once per incoming NULL-clock replay (#8672 review
+        # P2, round 5: that restart was the N(N+1)/2 work bound).
+        candidate = _available_candidate(
+            _identity_candidates(group),
+            group,
+            "identity_cursor",
+            remaining,
+            identities,
+        )
+        if candidate is not None:
+            return candidate
+        return _first_compatible_member(group, identities, remaining)
+    # Neither a clock nor a private identity: a pure wildcard, so the first
+    # member that can still absorb a replay wins.
+    return _first_compatible_member(group, (), remaining)
+
+
+def _first_compatible_member(group: dict, identities, remaining=None):
+    """Return the first group member that is compatible and unconsumed.
+
+    The fallback of last resort for the shapes the O(1) probes cannot answer
+    (an exhausted representative, or a group whose only members are
+    clock-less).  Its historical order -- the clock-less anonymous row, the
+    clock-less representative, then every member in build order -- is
+    materialised once (:func:`_fallback_candidates`) and walked through the
+    merge-local cursor (:func:`_available_candidate`).
+
+    That is the same repair the group's identity index got (#8672 review P2,
+    round 5): expanding the member tuple per call rebuilt the whole list every
+    time, and restarting the walk re-inspected every member whose replay
+    capacity was already consumed.  Skipping an exhausted member once per
+    merge keeps the consumption one-to-one without rescanning a consumed
+    prefix, so a group with many members stays amortized linear.
+    """
+    return _available_candidate(
+        _fallback_candidates(group),
+        group,
+        "fallback_cursor",
+        remaining,
+        identities,
+    )
+
+
+def _matching_visible_duplicate(
+    visible_key: tuple,
+    visible_keys: set[tuple],
+    lookup: dict | None = None,
+    *,
+    remaining: dict | None = None,
+):
+    """Return the saved visible key a replay collapses onto, or ``None``.
+
+    ``remaining`` is the caller's live replay-capacity map (visible key ->
+    replays it may still absorb).  When supplied, an EXHAUSTED representative
+    no longer wins: the probes below hand the replay to another compatible
+    saved occurrence instead, so capacity is consumed one occurrence at a time
+    (#8672 gate C67-F1).  ``None`` keeps the historical capacity-blind
+    behaviour for every caller that does not track it.
+    """
     if visible_key in visible_keys:
         return visible_key
     role = visible_key[0]
     content = visible_key[1] if len(visible_key) > 1 else ""
-    sidecar = visible_key[3] if len(visible_key) > 3 else None
+    sidecar = _visible_key_field(visible_key, _VISIBLE_KEY_SIDECAR_INDEX, None)
+    occurrence = _visible_key_field(visible_key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+    # Clock-optional EXACT replay match (#8672 gate r2/r3).  The #7587
+    # occurrence discriminator separates two distinct-clock occurrences, but a
+    # row whose clock is missing cannot prove it is a different occurrence (see
+    # _visible_keys_share_occurrence): it must still collapse onto an exact
+    # identity replay.  The fuzzy loop below carries that rule, but it cannot
+    # reach several shapes: transcripts over the fuzzy bound short-circuit
+    # before the loop; structural content has no fuzzy fallback at all; empty
+    # content returns before the loop; and payloads over the 200k exact-only
+    # cutoff are skipped inside the loop.  Each of those appended a replay as a
+    # second row (#8672 gate r3 D3/D4).  This index probe (constant time, fed
+    # by the prebuilt clock-free index in _build_visible_duplicate_lookup)
+    # restores the collapse at every size without removing the fuzzy work
+    # bound, and without merging two established different occurrences.
+    #
+    # Scalar text under the bound still goes through the existing fuzzy loop
+    # below, which applies the same wildcard rule, keeping its first-match
+    # bookkeeping (metadata-merge target / skipped-count bucket)
+    # byte-identical.
+    oversized = isinstance(content, str) and len(content) > 200_000
+    if (
+        not content
+        or not isinstance(content, str)
+        or oversized
+        or len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS
+    ):
+        by_clockfree = (lookup or {}).get("by_clockfree")
+        if by_clockfree:
+            group = by_clockfree.get(_visible_key_without_occurrence(visible_key))
+            if group:
+                # Constant work per incoming row: the group pre-buckets its
+                # occurrences, so a repeated prompt with thousands of
+                # occurrences never rescans the whole list (Greptile: "Repeated
+                # prompts slow loading").  A clock-less row is a wildcard.
+                candidate = _clockfree_duplicate_candidate(
+                    group, occurrence, remaining
+                )
+                if candidate is not None:
+                    return candidate
+        elif lookup is None and len(visible_keys) <= _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS:
+            # No prebuilt index on a small set: exact clock-free comparison
+            # only (never fuzzy).  This is the same set the fuzzy loop would
+            # scan below for text, and the only path for empty/structural rows
+            # when callers pass the key set without a lookup.
+            stripped = _visible_key_without_occurrence(visible_key)
+            for existing_key in visible_keys:
+                if _visible_key_without_occurrence(existing_key) != stripped:
+                    continue
+                if _visible_keys_share_occurrence(
+                    occurrence,
+                    _visible_key_field(
+                        existing_key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""
+                    ),
+                ):
+                    return existing_key
+    # Empty content has no fuzzy identity: the probes above are the only safe
+    # way to match it (an empty string is a substring of EVERY text, so the
+    # fuzzy loop would pair it with an arbitrary final answer).
     if not content:
         return None
     # Structured content is matched by exact identity only (checked above).
@@ -15308,16 +16442,53 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         lookup = _build_visible_duplicate_lookup(visible_keys)
     loose_content = None
     loose_by_key = lookup.setdefault("loose_by_key", {})
-    for existing_key in lookup.get("by_role", {}).get(role, []):
+    # Merge-local cursor per role (#8672 review P2, round 5).  The role's
+    # candidate list is built once with the lookup and never mutated, so the
+    # walk starts where the previous replay stopped instead of re-inspecting
+    # every candidate whose replay capacity is already consumed -- the same
+    # restart that made the clock-free index probe quadratic (N(N+1)/2
+    # candidate visits for N replays of one repeated prompt).  Only the
+    # capacity filter is permanent, so every other gate below still runs for
+    # every candidate exactly as before.
+    role_candidates = lookup.get("by_role", {}).get(role) or []
+    role_cursor = _consumption_cursor(lookup, ("role_cursor", role), remaining)
+    for existing_key in _unconsumed_candidates(
+        role_candidates, role_cursor, remaining
+    ):
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
-        existing_sidecar = existing_key[3] if len(existing_key) > 3 else None
+        existing_sidecar = _visible_key_field(
+            existing_key, _VISIBLE_KEY_SIDECAR_INDEX, None
+        )
         if (
             role != existing_role
             or sidecar != existing_sidecar
             or not existing_content
             or not isinstance(existing_content, str)
         ):
+            continue
+        # Occurrence must agree before any fuzzy logic (#7587).  Without this
+        # gate the substring/token fallback below would still pair two
+        # independent same-content turns, re-introducing the collapse through
+        # the back door even though the exact-identity check now rejects them.
+        # An unestablished occurrence on either side is a wildcard: a row with
+        # no usable clock cannot prove it is a different occurrence.
+        if not _visible_keys_share_occurrence(
+            occurrence,
+            _visible_key_field(existing_key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""),
+        ):
+            continue
+        # This saved occurrence already absorbed its own replay.  The #7587
+        # occurrence discriminator gives every occurrence of a repeated prompt
+        # its own visible identity, so a second replay of the same repeated
+        # turn must land on the NEXT compatible occurrence rather than on an
+        # exhausted representative -- otherwise the merge refuses the skip and
+        # appends the turn a second time (#8672 gate C67-F1).  The cursor
+        # above has already stepped past the exhausted PREFIX, so this gate
+        # only ever fires for an exhausted candidate that sits behind an
+        # unconsumed one; callers that do not track capacity (``remaining is
+        # None``) keep the historical first-match behaviour byte for byte.
+        if not _visible_key_capacity_remaining(existing_key, remaining):
             continue
         # Exact visible-key equality was checked above. For very large payloads
         # (tool logs / request dumps), Python-in substring and fuzzy-token
@@ -15601,11 +16772,11 @@ def _restore_cancelled_journal_prefix(selected, prefix, owner_messages, *, verif
     local_owner_by_row = {id(row): turn for row, turn in zip(selected, local_owners_all, strict=True)}
     source_owner_by_row = {id(row): turn for row, turn in zip(prefix, source_owners, strict=True)}
     local_occurrences = collections.Counter(
-        (id(turn), _session_message_visible_key(row))
+        (id(turn), _session_message_replay_visible_key(row))
         for row, turn in zip(selected, local_owners_all, strict=True)
     )
     source_occurrences = collections.Counter(
-        (id(turn), _session_message_visible_key(row, normalize_workspace_prefix=True))
+        (id(turn), _session_message_replay_visible_key(row, normalize_workspace_prefix=True))
         for row, turn in zip(prefix, source_owners, strict=True)
     )
 
@@ -15617,9 +16788,9 @@ def _restore_cancelled_journal_prefix(selected, prefix, owner_messages, *, verif
             return False
         left_time, left_valid = _message_exact_timestamp_details(local)
         right_time, right_valid = _message_exact_timestamp_details(saved)
-        key = _session_message_visible_key(local, normalize_workspace_prefix=False)
+        key = _session_message_replay_visible_key(local, normalize_workspace_prefix=False)
         if (not left_valid or not right_valid or right_time is None
-                or key != _session_message_visible_key(saved, normalize_workspace_prefix=True)):
+                or key != _session_message_replay_visible_key(saved, normalize_workspace_prefix=True)):
             return False
         for identity in (_state_db_row_identity_details, _stable_message_identity_details):
             local_id, local_valid = identity(local)
@@ -15665,24 +16836,24 @@ def _restore_cancelled_journal_prefix(selected, prefix, owner_messages, *, verif
     local_call_clocks = collections.defaultdict(set)
     for row in local_prefix:
         if row.get('tool_calls'):
-            local_call_clocks[_message_exact_timestamp_details(row)].add(_session_message_visible_key(row))
+            local_call_clocks[_message_exact_timestamp_details(row)].add(_session_message_replay_visible_key(row))
     for row in prefix:
         key = _message_exact_timestamp_details(row)
         if row.get('tool_calls') and key in local_call_clocks:
-            if _session_message_visible_key(row, normalize_workspace_prefix=True) not in local_call_clocks[key]:
+            if _session_message_replay_visible_key(row, normalize_workspace_prefix=True) not in local_call_clocks[key]:
                 return selected
     def anchor_key(row, *, source=False):
         clock, valid = _message_exact_timestamp_details(row)
         if not valid or clock is None:
             return None
-        return clock, _session_message_visible_key(row, normalize_workspace_prefix=source)
+        return clock, _session_message_replay_visible_key(row, normalize_workspace_prefix=source)
 
     source_keys = collections.defaultdict(list)
     for index, row in enumerate(prefix):
-        source_keys[_session_message_visible_key(row, normalize_workspace_prefix=True)].append(index)
+        source_keys[_session_message_replay_visible_key(row, normalize_workspace_prefix=True)].append(index)
     anchors = []
     for local_idx, row in enumerate(local_prefix):
-        candidates = source_keys.get(_session_message_visible_key(row), [])
+        candidates = source_keys.get(_session_message_replay_visible_key(row), [])
         compatible = [index for index in candidates if matches(row, prefix[index])]
         # A clock/content mirror with contradictory private/provider identity
         # is quarantined, never inserted as a second authoritative occurrence.
@@ -15884,11 +17055,16 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     )
 
     sidecar_keys = [
-        _session_message_content_key(m, normalize_workspace_prefix=False)
+        # Occurrence is deliberately excluded here: state.db mirrors the
+        # model-facing context prefix with FRESH timestamps (LCM/continuation
+        # sessions), and this alignment must recognise that mirror across a
+        # restamped clock.  Making it occurrence-sensitive would break the
+        # alignment and replay the whole state transcript into the next prompt.
+        _session_message_content_key(m, normalize_workspace_prefix=False, include_occurrence=False)
         for m in sidecar_context
     ]
     state_keys = [
-        _session_message_content_key(m, normalize_workspace_prefix=True)
+        _session_message_content_key(m, normalize_workspace_prefix=True, include_occurrence=False)
         for m in state_messages
     ]
     max_offset = min(len(sidecar_keys), len(state_keys))
@@ -16389,6 +17565,10 @@ def _merge_session_messages_append_only_impl(
         "content_state": lambda msg: _session_message_content_key(
             msg, normalize_workspace_prefix=True
         ),
+        # The occurrence-free content identity the in-window
+        # distinct-tool-call exception needs is derived from these keys via
+        # _content_key_without_occurrence instead of a second builder pass
+        # (see its docstring and the #8672 P2 fix in the state loop).
         "visible_sidecar": lambda msg: _session_message_visible_key(
             msg, normalize_workspace_prefix=False
         ),
@@ -16532,6 +17712,19 @@ def _merge_session_messages_append_only_impl(
     seen_message_keys = set()
     seen_dedup_keys = set()
     seen_content_keys = set()
+    # Content identity WITHOUT the #7587 occurrence discriminator, kept in
+    # lockstep with seen_content_keys and seeded from EVERY row.  Only the
+    # in-window distinct-tool-call exception reads it: that probe pairs the
+    # durable row of a DIFFERENT tool call with ANY content-equivalent sidecar
+    # assistant row -- including the EMPTY anchor journal recovery stores
+    # recovered tool cards against -- and the two rows carry identical (often
+    # empty) content but legitimately different second-level clocks.  Requiring
+    # clock agreement there dropped the incoming tool call (#8672 review P2).
+    # Everything else stays occurrence-sensitive.  The keys are derived by
+    # clearing the occurrence slot of the already-computed content keys
+    # (_content_key_without_occurrence), so seeding every row costs no extra
+    # normalisation pass.
+    seen_content_only_keys = set()
     seen_visible_keys = set()
     sidecar_visible_sequence = []
     sidecar_visible_messages = []
@@ -16570,6 +17763,16 @@ def _merge_session_messages_append_only_impl(
         seen_dedup_keys.add(_cached_message_key(msg, "dedup"))
         content_key = _cached_message_key(msg, "content_sidecar")
         seen_content_keys.add(content_key)
+        # #8672: every row feeds the content-only set.  The in-window
+        # distinct-tool-call exception pairs an incoming durable tool row with
+        # ANY content-equivalent sidecar assistant row, and journal recovery
+        # deliberately anchors recovered tool cards on an EMPTY assistant row
+        # that carries no inline tool_calls -- excluding such anchors (or any
+        # other row) drops the incoming tool call.  The key is derived from
+        # the already-computed content key by clearing the occurrence slot,
+        # so no extra normalisation pass runs and the bounded-normalisation
+        # invariant (test_merge_append_only_normalization_cache) holds.
+        seen_content_only_keys.add(_content_key_without_occurrence(content_key))
         visible_key = _cached_message_key(msg, "visible_sidecar")
         seen_visible_keys.add(visible_key)
         sidecar_visible_keys.add(visible_key)
@@ -16588,6 +17791,12 @@ def _merge_session_messages_append_only_impl(
         merged_messages.append(msg)
         _remember_merged_message(msg, source="sidecar")
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
+    # Live replay capacity per saved occurrence (#8672 gate C67-F1).  Every
+    # occurrence of a repeated prompt owns its own visible identity, so each
+    # one may absorb exactly one replay; the merge decrements this map wherever
+    # it records a skip, and the duplicate probes below prefer a candidate that
+    # still has capacity instead of an exhausted representative.
+    sidecar_visible_remaining = dict(sidecar_visible_counts)
     state_multimodal_mirror_keys = {}
     ambiguous_state_multimodal_mirrors = set()
     if sidecar_multimodal_mirrors:
@@ -16745,6 +17954,22 @@ def _merge_session_messages_append_only_impl(
         )
         message_key_seen = key in seen_message_keys
         content_key_seen = content_key in seen_content_keys
+        if (
+            not content_key_seen
+            and msg.get("tool_calls")
+            and _content_key_without_occurrence(content_key) in seen_content_only_keys
+        ):
+            # Occurrence-free exemption, LIMITED to the tool-call recovery case
+            # (#8672 gate r3 D1 + Greptile r4).  A distinct authorized tool call
+            # legitimately shares the empty assistant content identity with the
+            # sidecar anchor, and the later in-window exception must get the
+            # chance to preserve it.  User turns get no exemption: after a
+            # retry/edit advances the truncation watermark, a removed prompt
+            # whose text also exists earlier must stay removed, otherwise the
+            # occurrence-sensitive user path re-inserts it into display and the
+            # next model conversation.  Non-tool assistant rows likewise keep
+            # the occurrence-sensitive behaviour.
+            content_key_seen = True
         if retained_native_image_row is not None:
             # A marked image mirror needs durable row proof; an equal scalar
             # projection from another row cannot exempt it from the watermark.
@@ -16910,6 +18135,7 @@ def _merge_session_messages_append_only_impl(
             seen_message_keys.add(key)
             seen_dedup_keys.add(dedup_key)
             seen_content_keys.add(content_key)
+            seen_content_only_keys.add(_content_key_without_occurrence(content_key))
             seen_visible_keys.add(visible_key)
             _remember_merged_message(msg, source="state")
             continue
@@ -16945,8 +18171,16 @@ def _merge_session_messages_append_only_impl(
         replay_target = None
         if not post_cancel_state and state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
+            # Positional replay is deliberately clock-tolerant (see
+            # _visible_key_without_occurrence): the sidecar may carry coarse
+            # second-level clocks for rows state.db stores with sub-second
+            # floats, and an index-aligned replay must still collapse.
+            replay_visible_key = _visible_key_without_occurrence(visible_key)
+            expected_replay_visible_key = _visible_key_without_occurrence(
+                expected_visible_key
+            )
+            if replay_visible_key == expected_replay_visible_key or _has_visible_duplicate(
+                replay_visible_key, {expected_replay_visible_key}
             ):
                 replays_sidecar_prefix = True
                 replay_target = sidecar_visible_messages[state_replay_idx]
@@ -16957,10 +18191,14 @@ def _merge_session_messages_append_only_impl(
                 visible_key,
                 sidecar_visible_keys,
                 sidecar_visible_lookup,
+                remaining=sidecar_visible_remaining,
             )
             if matched_visible_key is not None:
                 skipped_state_visible_counts[matched_visible_key] = (
                     skipped_state_visible_counts.get(matched_visible_key, 0) + 1
+                )
+                sidecar_visible_remaining[matched_visible_key] = (
+                    sidecar_visible_remaining.get(matched_visible_key, 1) - 1
                 )
             # Record dedup key so later duplicates of this replayed message
             # are caught by the dedup guard (#3346).
@@ -17029,12 +18267,16 @@ def _merge_session_messages_append_only_impl(
             visible_key,
             sidecar_visible_keys,
             sidecar_visible_lookup,
+            remaining=sidecar_visible_remaining,
         )
         if matched_visible_key is not None and not post_cancel_state:
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
             if skipped_count < sidecar_count:
                 skipped_state_visible_counts[matched_visible_key] = skipped_count + 1
+                sidecar_visible_remaining[matched_visible_key] = (
+                    sidecar_visible_remaining.get(matched_visible_key, 1) - 1
+                )
                 _merge_session_display_metadata(merged_by_visible_key.get(matched_visible_key), msg)
                 continue
         # State rows at or before the newest sidecar timestamp are normally
@@ -17078,12 +18320,26 @@ def _merge_session_messages_append_only_impl(
                 # Legacy key within sidecar timestamp range.  Normally skip — the
                 # sidecar already has this message.  Exception: if the state.db
                 # message has tool_calls that DIFFER from the sidecar version
-                # (same content_key but different dedup_key because tool_calls
+                # (same content but different dedup_key because tool_calls
                 # differ), preserve it — distinct tool_calls must not be collapsed.
                 _tc = msg.get("tool_calls")
                 if _tc:
-                    _ck = content_key
-                    if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
+                    # This exception deliberately compares CONTENT identity
+                    # only, without the #7587 occurrence discriminator
+                    # (#8672 review P2): the matching sidecar row and the
+                    # durable row for a DIFFERENT tool call of the same turn
+                    # are the same content (typically empty) one second
+                    # apart, so an occurrence-sensitive membership test never
+                    # matches and the incoming distinct tool call is dropped.
+                    # The matching sidecar row is NOT required to carry inline
+                    # tool_calls -- journal recovery anchors recovered tool
+                    # cards on an empty assistant row -- so the content-only
+                    # set is seeded from every row (see the seeding sites).
+                    # The different-dedup_key requirement below still keeps
+                    # genuinely distinct turns apart, so #7587's collapse fix
+                    # for ordinary repeated rows is untouched.
+                    _ck = _content_key_without_occurrence(content_key)
+                    if _ck in seen_content_only_keys and dedup_key not in seen_dedup_keys:
                         # Different tool_calls from sidecar — preserve, but keep
                         # the row in timestamp order. Falling through to the
                         # generic append path would move older tool-call-only
@@ -17092,6 +18348,7 @@ def _merge_session_messages_append_only_impl(
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
+                            seen_content_only_keys.add(_ck)
                             seen_visible_keys.add(visible_key)
                             _remember_merged_message(msg, source="state")
                         continue
@@ -17112,6 +18369,7 @@ def _merge_session_messages_append_only_impl(
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(content_key)
+        seen_content_only_keys.add(_content_key_without_occurrence(content_key))
         seen_visible_keys.add(visible_key)
         # This terminal path is shared by state.db reconciliation and by ordered
         # sidecar stitching (notably compression continuations). Only the caller
