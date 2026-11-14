@@ -4626,7 +4626,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(body&&body.classList) body.classList.toggle('stream-fade-active',fade);
       const delta=value.slice(st.writtenText.length);
       if(delta){
-        window.smd.parser_write(st.parser,delta);
+        const fed=(typeof _smdMediaProtectSpaceRuns==='function')
+          ?_smdMediaProtectSpaceRuns(st.parser,value,st.writtenText.length)
+          :delta;
+        window.smd.parser_write(st.parser,fed);
         st.writtenText=value;
       }
       // Rewind rebuild: mute the rendered common prefix (old node text vs new
@@ -5135,7 +5138,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     const delta=displayText.slice(_smdWrittenText.length);
     if(!delta) return;
-    try{window.smd.parser_write(_smdParser,delta);}catch(_){}
+    const fed=(typeof _smdMediaProtectSpaceRuns==='function')
+      ?_smdMediaProtectSpaceRuns(_smdParser,displayText,_smdWrittenText.length)
+      :delta;
+    try{window.smd.parser_write(_smdParser,fed);}catch(_){}
     _smdWrittenLen=displayText.length;
     _smdWrittenText=displayText;
     // Rebuild after a rewind: strip is-new from spans covered by the
@@ -5316,7 +5322,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
-      if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
+      if(!parent||_streamFadeSkipNode(parent)){
+        // Skip nodes bypass the media interceptor; still restore any
+        // protected run spacing so displayed bytes match the raw source.
+        baseAddText(data,_smdMediaRestoreRaw(text));
+        return;
+      }
       // MEDIA-in-stream: if this chunk carries a MEDIA:<ref> token, defer to
       // the shared interceptor so the token becomes a real media element
       // instead of plain text. The fade renderer would otherwise wrap every
@@ -5334,13 +5345,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const reduceMotion=_streamFadeReduceMotionEnabled();
       const appendStartedAt=performance.now();
       let last=0, match, changed=false;
+      // Plain prose: restore protected run spacing (a stray protected byte can
+      // only appear when a token lost its MEDIA: context to an owner flush).
+      const plainValue=_smdMediaRestoreRaw(value);
       // Silent-prefix window: after a rebuild caused by a REWIND (tool-call
       // XML stripping), words that were already visible before the rewind
       // point must NOT replay their fade animation. They are appended as
       // plain text; only the tail beyond _streamFadeSilentPrefixChars fades.
       let silentLeft=_streamFadeSilentPrefixChars||0;
-      while((match=wordRe.exec(value))){
-        if(match.index>last) frag.appendChild(document.createTextNode(value.slice(last,match.index)));
+      while((match=wordRe.exec(plainValue))){
+        if(match.index>last) frag.appendChild(document.createTextNode(plainValue.slice(last,match.index)));
         if(reduceMotion){
           frag.appendChild(document.createTextNode(match[1]));
           if(match[2]) frag.appendChild(document.createTextNode(match[2]));
@@ -5369,11 +5383,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(silentLeft>0) _streamFadeSilentPrefixChars=silentLeft;
       else _streamFadeSilentPrefixChars=0;
-      if(!changed){baseAddText(data,text);return;}
-      if(last<value.length) frag.appendChild(document.createTextNode(value.slice(last)));
+      if(!changed){baseAddText(data,plainValue);return;}
+      if(last<plainValue.length) frag.appendChild(document.createTextNode(plainValue.slice(last)));
       parent.appendChild(frag);
     };
     renderer.set_attr=(data,attr,value)=>{
+      // Protection can reach Markdown destinations and fence-info strings;
+      // attributes must carry raw bytes, never generated markers.
+      value=_smdMediaRestoreRaw(value);
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;
       const allowed=isSrc?_smdImgSrcAllowed(value):_SMD_SAFE_URL_RE.test(String(value||''));
@@ -5416,6 +5433,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   //      on the next add_text call.
   const _MEDIA_TAIL_MAX = 4096; // bytes; defensive cap on per-parser buffer
   const _SMD_MEDIA_PREFIX = 'MEDIA:';
+  // Raw-space protection state, per parser. The smd tokenizer collapses runs
+  // of spaces in prose before add_text sees them, so a raw ``MEDIA:  <ref>``
+  // (two spaces) arrives as a single-spaced token the relaxed streaming
+  // grammar accepts — while the settled renderMd (raw text) keeps it prose,
+  // making the live preview vanish when the answer settles. Instead of
+  // recovering the lost information downstream (impossible: the collapse is
+  // destructive), _smdMediaProtectSpaceRuns rewrites the 2nd+ space of every
+  // ``MEDIA:``-prefixed run to U+0001 before the tokenizer sees it, so no
+  // collapse can happen inside a token region. Each token then carries its
+  // own raw-run evidence inline: the interceptor suppresses exactly the
+  // marked tokens (writing them literally, with _smdMediaWriteText restoring
+  // the raw spacing for display) and no cross-token state exists.
+  const _SMD_MEDIA_PROTECTED_SPACE='\u0001';
+  const _SMD_MEDIA_DEAD_MARK='\u0002';
+  const _SMD_MEDIA_RAW_SPACE_STATE=(typeof WeakMap!=='undefined') ? new WeakMap() : new Map();
   function _smdMediaPrefixTail(value){
     const text=String(value||'');
     const max=Math.min(_SMD_MEDIA_PREFIX.length,text.length);
@@ -5425,8 +5457,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return '';
   }
+  // Restore generated markers to the exact raw bytes: a protected space was
+  // a raw space (restores to one space); a dead-mark was generated for a
+  // structural break and has no raw counterpart (restores to nothing).
+  function _smdMediaRestoreRaw(text){
+    return String(text||'')
+      .split(_SMD_MEDIA_PROTECTED_SPACE).join(' ')
+      .split(_SMD_MEDIA_DEAD_MARK).join('');
+  }
   function _smdAppendPlainText(parent, data, text, baseAddText){
-    const value=String(text||'');
+    const value=_smdMediaRestoreRaw(text);
     if(parent&&parent.appendChild&&typeof document!=='undefined'&&document.createTextNode){
       parent.appendChild(document.createTextNode(value));
       return;
@@ -5434,11 +5474,72 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(baseAddText) baseAddText(data,value);
   }
   function _smdMediaWriteText(parent, data, baseAddText, writeText, text){
+    // Every literal write out of the media interceptor restores the protected
+    // spacing, so displayed text always matches the raw source byte-for-
+    // byte (including fenced-code and skip-node paths that bypass the walk).
+    const value=_smdMediaRestoreRaw(text);
     if(writeText){
-      writeText(parent, data, String(text||''));
+      writeText(parent, data, value);
       return;
     }
-    if(baseAddText) baseAddText(data,String(text||''));
+    if(baseAddText) baseAddText(data,value);
+  }
+  // Char state machine over the accumulated RAW source a parser is being
+  // fed. Emits the substitution for source.slice(fedLen): inside every
+  // ``MEDIA:``-prefixed space run, the 2nd+ space becomes _SMD_MEDIA_PROTECTED_SPACE
+  // (U+0001), which the tokenizer treats as a plain word byte — so it never
+  // collapses a token region and the interceptor can see, per token, that the
+  // raw form had 2+ spaces (and restore the raw bytes on literal display).
+  // Exactly-once: the per-parser cursor (scanned) tracks how much raw source
+  // has already been processed; callers pass the raw length already fed, and
+  // production always calls this immediately before parser_write with
+  // fedLen === previous source length, so scanned === fedLen holds.
+  function _smdMediaProtectSpaceRuns(parser, source, fedLen){
+    if(!parser) return String(source||'').slice(Number(fedLen)||0);
+    const raw=String(source||'');
+    const fed=(Number(fedLen)||0);
+    let state=_SMD_MEDIA_RAW_SPACE_STATE.get(parser);
+    if(!state||raw.length<state.scanned||fed!==state.scanned){
+      state={scanned:fed,tail:'',inRun:false};
+      _SMD_MEDIA_RAW_SPACE_STATE.set(parser,state);
+    }
+    let out='';
+    for(let i=state.scanned;i<raw.length;i+=1){
+      const c=raw.charAt(i);
+      if((state.inRun||state.tail===_SMD_MEDIA_PREFIX)&&(c==='\n'||c==='\t')){
+        // Dead-mark: the settled grammar never joins a ref across a newline
+        // (or tab), but smd emits a structural break here and the buffered
+        // 'MEDIA: ' tail would otherwise join the next chunk's ref into a
+        // live card. Inject one marker so every ref class rejects this
+        // region; display removes it entirely (raw byte-exact).
+        state.inRun=false;
+        out+=_SMD_MEDIA_DEAD_MARK;
+        out+=c;
+        state.tail=(state.tail+c).slice(-_SMD_MEDIA_PREFIX.length);
+        continue;
+      }
+      if(state.inRun){
+        state.tail=(state.tail+c).slice(-_SMD_MEDIA_PREFIX.length);
+        if(c===' '){
+          out+=_SMD_MEDIA_PROTECTED_SPACE;
+          continue;
+        }
+        state.inRun=false;
+        out+=c;
+        continue;
+      }
+      if(c===' '&&state.tail===_SMD_MEDIA_PREFIX){
+        // First space after the prefix: kept verbatim, arms the run so any
+        // FURTHER space in this run is protected from the tokenizer collapse.
+        state.inRun=true;
+        out+=c;
+        continue;
+      }
+      state.tail=(state.tail+c).slice(-_SMD_MEDIA_PREFIX.length);
+      out+=c;
+    }
+    state.scanned=raw.length;
+    return out;
   }
   function _smdMediaTailSet(tailMap, parser, chunk, parent, baseAddText, data, writeText){
     if(!tailMap||!parser) return;
@@ -5479,8 +5580,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    const m=/^MEDIA: ?([^\s\)\]\u0001\u0002]+)$/.exec(String(chunk));
     const parts=m&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(String(chunk),0,m[1],entry&&entry.parent):null;
+    // U+0001 is excluded from the ref class, so a protected (raw 2+-space)
+    // tail completion can never match here and falls to the literal branch.
     const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
     if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
     else if(!emitted&&entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
@@ -5529,7 +5632,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a grammar delimiter or
     // authoritative parser finalization proves the ref is complete.
-    const re=/MEDIA:([^\s\)\]]+)/g;
+    const re=/MEDIA: ?([^\s\)\]\u0001\u0002]+)/g;
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
@@ -5554,6 +5657,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         last = combined.length;
         break;
       }
+      // A protected region can never match: U+0001 is excluded from the ref
+      // class, so raw 2+-space runs fall through to the literal prose path
+      // (restored to raw spacing by _smdMediaWriteText) and any INNER valid
+      // token is still matched by the continued scan — matching settlement.
       if(parts&&_smdAppendMediaNode(parent,parts[0])){
         if(parts[1]) writeCurrent(parts[1]);
       }else{
@@ -5565,7 +5672,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      const tailMatch = /MEDIA: ?[^\s\)\]\u0001\u0002]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
       if(tailValue && rest.length < _MEDIA_TAIL_MAX){
@@ -5657,6 +5764,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parserFor(data), writePlainText);
     };
     renderer.set_attr=(data,attr,value)=>{
+      // Protection can reach Markdown destinations and fence-info strings;
+      // attributes must carry raw bytes, never generated markers.
+      value=_smdMediaRestoreRaw(value);
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;
       const allowed=isSrc?_smdImgSrcAllowed(value):_SMD_SAFE_URL_RE.test(String(value||''));

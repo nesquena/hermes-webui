@@ -64,6 +64,9 @@ eval(fn(ui, '_inlineMediaHtmlForRef'));
 eval(fn(ui, '_mdImageHtml'));
 eval(constLine(messages, '_SMD_SAFE_URL_RE').replace(/^const /, 'var '));
 eval(constLine(messages, '_SMD_SAFE_IMG_URL_RE').replace(/^const /, 'var '));
+eval(constLine(messages, '_SMD_MEDIA_PROTECTED_SPACE').replace(/^const /, 'var '));
+eval(constLine(messages, '_SMD_MEDIA_DEAD_MARK').replace(/^const /, 'var '));
+eval(fn(messages, '_smdMediaRestoreRaw'));
 eval(fn(messages, '_smdImgSrcAllowed'));
 function _smdLinkHref(value) { return String(value || ''); }
 function _streamFadeBindCleanup() {}
