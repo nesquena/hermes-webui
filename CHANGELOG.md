@@ -41,6 +41,8 @@
 
 ### Fixed
 
+- **The model picker's Configured rows show the model's role (Primary, Fallback 1) instead of the raw routing key (#8739, #8733).** A configured model matched by an `@provider:` routing key showed that key in its chip, e.g. `@CUSTOM:MAGPIE:CODEX/GPT-6.1-SOL (MAGPIE)`, which wrapped onto its own line on desktop and broke mid-string on narrow phones. The chip now shows the same role label as the group rows, and the matched key stays in the chip's tooltip; the row's subtitle still shows the model id. Thanks @webtecnica.
+
 - **External memory providers keep working with Hermes Agent v0.23.2 and later (#9063, #9060).** WebUI's shared-instance guard wraps the Agent's `claim_instance(provider, home)`. Agent `c9de60702c0d` (on Agent main and the v0.23.2 release candidates) also passes `manager=`, so every claim raised `TypeError` and honcho, mem0 and the other external providers were silently dropped while chat kept working. The guard now passes every argument after `home` through to the Agent unchanged, and its own first three parameters are positional-only so a future Agent keyword can't collide with them. Older Agents are unaffected.
 
 - **`tests/test_approval_unblock.py` runs again (#9042 by @webtecnica, #9008).** Its 28 gateway-approval tests were skipped on every Agent because `_ApprovalEntry` moved from `tools.approval` to `tools.approval_gateway_wait`; the file now imports it from the new home, falling back to the old one. Test-only. Thanks @webtecnica!
