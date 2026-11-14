@@ -2140,15 +2140,15 @@ async function _populateCronDeliverOptions(selectedValue, isEdit) {
       if (p.value === selectedValue) opt.selected = true;
       sel.appendChild(opt);
     }
-    if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
-      var opt = document.createElement('option');
-      opt.value = selectedValue;
-      opt.textContent = selectedValue + ' *';
-      opt.selected = true;
-      sel.prepend(opt);
-    }
   } catch (e) {
     sel.innerHTML = '<option value="local">Local (save output only)</option>';
+  }
+  if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
+    var opt = document.createElement('option');
+    opt.value = selectedValue;
+    opt.textContent = selectedValue + ' *';
+    opt.selected = true;
+    sel.prepend(opt);
   }
   sel.disabled = false;
 }

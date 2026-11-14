@@ -302,3 +302,15 @@ def test_cron_picker_does_not_cache_delivery_options_across_profiles():
     assert "api('/api/crons/delivery-options')" in body
     assert "requestedProfile" in body and "S.activeProfile" in body
     assert "return _populateCronDeliverOptions(selectedValue, isEdit)" in body
+
+
+def test_failed_delivery_options_load_keeps_the_saved_delivery_value():
+    """If the options fetch fails, the fallback list must still carry the job's saved
+    value, or saving the edit silently retargets the job to ``local``."""
+    src = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    start = src.index("async function _populateCronDeliverOptions(")
+    body = src[start:src.index("\nasync function ", start + 10)]
+    fallback = body.index("} catch (e) {")
+    restore = body.index("selectedValue + ' *'")
+    assert restore > fallback, "the saved-value restore must run after the catch fallback too"
+    assert body.index("sel.disabled = false", restore) > restore
