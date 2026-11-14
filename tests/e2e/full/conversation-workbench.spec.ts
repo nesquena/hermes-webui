@@ -154,3 +154,123 @@ test('CONVERSATION WORKBENCH files filter locally, preview the selected file and
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await page.locator('.rightpanel').screenshot({path:info.outputPath('artifacts-mobile.png')});
 });
+
+test('BOARD SECTIONS filters existing chats and starts a fresh chat inside an empty subsection', async ({page}, info) => {
+  await ready(page);
+  const original = await session(page);
+  await send(page, 'QA_SECTION_ORIGINAL');
+  const endpoint = '/api/me/sidebar-organization';
+  async function change(body: object) {
+    const {revision} = (await api(page, endpoint)).body;
+    const result = await api(page, endpoint, {revision, ...body});
+    expect(result.status).toBe(200);
+    return result.body;
+  }
+  const name = 'Delivery';
+  const parent = (await change({action:'create', name})).sections.at(-1).id;
+  const child = (await change({action:'create', parent, name:'Kick-off'})).sections.at(-1).id;
+  await change({action:'assign', session_id:original, section:parent});
+  await page.reload();
+  await expect(page.locator('#msg')).toBeVisible();
+  await page.locator('#msg').fill('Keep the delivery draft');
+  await page.locator('#btnConversationBoard').click();
+  const panel = page.locator('#mainConversations');
+  const pick = (id:string) => panel.locator('[data-board-section="'+id+'"]');
+  const create = panel.getByRole('button', {name:'New conversation in Delivery / Kick-off', exact:true});
+  for (const width of [1440,900,390]) {
+    await page.setViewportSize({width, height:900});
+    await expect(panel.locator('#conversationBoardSearch')).toBeVisible();
+    await page.screenshot({path:info.outputPath('sections-'+width+'.png')});
+  }
+  await expect(create).toBeVisible({timeout:3000});
+  await pick(parent).click();
+  await expect(panel.locator('[data-conversation-open="'+original+'"]')).toContainText(name);
+  await pick(child).click();
+  await expect(panel.locator('.conversation-board-card')).toHaveCount(0);
+  await expect(create).toBeInViewport();
+  await create.focus();
+  await page.evaluate(()=>renderSessionListFromCache());
+  await expect(create).toBeFocused();
+  // A concurrent personal edit forces a real revision conflict on assignment.
+  await change({action:'create', name:'Personal'});
+  let creations = 0;
+  page.on('request', req=>{ if(req.method()==='POST' && new URL(req.url()).pathname==='/api/session/new') creations++; });
+  await create.press('Enter');
+  await expect(page).toHaveURL(/\/session\//);
+  const fresh = page.url().split('/session/')[1];
+  expect(fresh).not.toBe(original);
+  await expect(page.locator('#msg')).toBeFocused();
+  await expect(page.locator('#msg')).toHaveValue('');
+  await expect.poll(async()=>(await api(page,endpoint)).body.assignments[fresh]).toBe(child);
+  expect((await api(page,endpoint)).body.assignments[original]).toBe(parent);
+  expect(creations).toBe(1);
+  await send(page,'QA_SECTION_NEW');
+  await page.goto('/?view=conversations');
+  await pick(child).click();
+  await expect(panel.locator('.conversation-board-card')).toHaveCount(1);
+  await expect(panel.locator('[data-conversation-open="'+fresh+'"]')).toContainText('Delivery / Kick-off');
+  await pick(parent).click();
+  await panel.locator('[data-conversation-open="'+original+'"]').click();
+  await expect(page.locator('#msg')).toHaveValue('Keep the delivery draft');
+});
+
+test('BOARD SECTIONS recovers the same new chat when the selected section was removed in another tab', async ({page}) => {
+  await ready(page);
+  const endpoint='/api/me/sidebar-organization';
+  async function change(body:object){
+    const {revision}=(await api(page,endpoint)).body;
+    const result=await api(page,endpoint,{revision,...body});
+    expect(result.status).toBe(200);
+    return result.body;
+  }
+  const removed=(await change({action:'create',name:'Archive later'})).sections.at(-1).id;
+  const fallback=(await change({action:'create',name:'Follow-up'})).sections.at(-1).id;
+  await page.goto('/?view=conversations');
+  const section=page.locator('[data-board-section="'+removed+'"]');
+  await section.click();
+  await change({action:'delete',id:removed});
+  let creations=0;
+  page.on('request', req=>{if(req.method()==='POST' && new URL(req.url()).pathname==='/api/session/new') creations++;});
+  await page.locator('#conversationBoardNew').evaluate((el:HTMLButtonElement)=>{el.click();el.click();});
+  await expect(page).toHaveURL(/\/session\//);
+  const sid=page.url().split('/session/')[1];
+  const recovery=page.locator('dialog.sidebar-org-dialog');
+  await expect(recovery).toBeVisible();
+  await recovery.locator('select').selectOption(fallback);
+  await recovery.getByRole('button',{name:'Save'}).click();
+  await expect(recovery).toHaveCount(0);
+  expect((await api(page,endpoint)).body.assignments[sid]).toBe(fallback);
+  expect(creations).toBe(1);
+});
+
+test('BOARD SECTIONS keeps shared project membership and leaves private draft attachments behind', async ({page}) => {
+  await ready(page);
+  const original=await session(page);
+  const endpoint='/api/me/sidebar-organization';
+  const {revision}=(await api(page,endpoint)).body;
+  const org=await api(page,endpoint,{revision,action:'create',name:'Team handover'});
+  expect(org.status).toBe(200);
+  const id=org.body.sections.at(-1).id;
+  const project=await api(page,'/api/projects/team',{name:'Support team',members:[],bot_participants:['default'],profile:'default'});
+  expect(project.status).toBe(200);
+  await page.reload();
+  await expect(page.locator('#msg')).toBeVisible();
+  await page.locator('#msg').fill('Private note for the previous conversation');
+  await page.locator('#fileInput').setInputFiles({name:'personal-note.txt',mimeType:'text/plain',buffer:Buffer.from('Private QA example')});
+  await expect.poll(()=>page.evaluate(()=>S.pendingFiles.length)).toBe(1);
+  await page.locator('#btnConversationBoard').click();
+  const chip=page.locator('.project-chip').filter({hasText:'Support team'});
+  await chip.click();
+  await expect(chip).toHaveClass(/active/);
+  await page.locator('[data-create-in-section="'+id+'"]').click();
+  await expect(page).toHaveURL(/\/session\//);
+  const fresh=page.url().split('/session/')[1];
+  expect(fresh).not.toBe(original);
+  await expect.poll(async()=>(await api(page,endpoint)).body.assignments[fresh]).toBe(id);
+  expect((await api(page,'/api/session?session_id='+fresh)).body.session.project_id).toBe(project.body.project.project_id);
+  await expect(page.locator('#msg')).toHaveValue('');
+  expect(await page.evaluate(()=>S.pendingFiles.length)).toBe(0);
+  const draft=(await api(page,'/api/session?session_id='+original)).body.session.composer_draft;
+  expect(draft.text).toBe('Private note for the previous conversation');
+  expect(draft.files[0].name).toBe('personal-note.txt');
+});

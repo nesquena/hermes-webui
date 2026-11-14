@@ -2,7 +2,7 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm'), crypto=require('node:crypto');
 const source=fs.readFileSync('static/projects.js','utf8');
 function scene(storage=new Map()){
- const x={storage,posts:[],loads:[],switches:[],_loadSessionGeneration:0,_currentPanel:'projects',console,Map,Promise,crypto,
+ const x={storage,posts:[],loads:[],switches:[],document:{},_loadSessionGeneration:0,_currentPanel:'projects',console,Map,Promise,crypto,
   sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)}};
  x.api=async(url,options)=>{
   if(url.includes('hub/detail'))return {project:{project_id:'team',collaboration:true,bot_participants:x.bots||['writer']}};

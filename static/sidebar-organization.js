@@ -28,6 +28,30 @@
     }
     return result;
   }
+  // The board reads the same personal organization as the sidebar. Rebuild
+  // the flattened tree only when a successful read/write replaces the state.
+  let indexedState, sectionIndex;
+  function boardSections(){
+    if(state!==indexedState){
+      indexedState=state;
+      const sections=state?orderedSections(state):[];
+      sectionIndex={available:!!state, sections, paths:new Map(sections.map(row=>[row.s.id,row.path]))};
+    }
+    return sectionIndex;
+  }
+  function sectionFor(session){
+    return (!job(session) && state?.assignments[session.session_id]) || '';
+  }
+  async function assignNewChat(sessionId,section){
+    const edit={action:'assign',session_id:sessionId,section};
+    try{await save(edit);}
+    catch(error){
+      // save() refreshed the revision. Never overwrite a concurrent move.
+      if(state?.assignments[sessionId]===section)return;
+      if(error.status!==409 || state?.assignments[sessionId] || !boardSections().paths.has(section))throw error;
+      await save(edit);
+    }
+  }
   function taskCategory(s,data){
     if(data.task_categories[s.session_id])return data.task_categories[s.session_id];
     if(s.cron_job&&typeof s.cron_job.category==='string'&&s.cron_job.category.trim())return s.cron_job.category;
@@ -141,15 +165,15 @@
     }
     d.el.showModal();input.focus();
   }
-  async function moveChat(session){
+  async function moveChat(session,preferredSection){
     await ensure();if(!state)return showToast(tx('unavailable'));
     const isTask=job(session),d=dialog(tx(isTask?'change_category':'move'));
     let input;
     if(isTask){input=document.createElement('input');input.maxLength=100;input.value=state.task_categories[session.session_id]||'';input.placeholder=taskCategory(session,{...state,task_categories:{}});}
-    else input=selectSection(state.assignments[session.session_id]);
+    else input=selectSection(state.assignments[session.session_id] || (boardSections().paths.has(preferredSection) ? preferredSection : null));
     d.add(field(tx(isTask?'category':'section'),input));
     d.submit(tx('save'),()=>save(isTask?{action:'category',session_id:session.session_id,category:input.value}:{action:'assign',session_id:session.session_id,section:input.value||null}));
     d.el.showModal();input.focus();
   }
-  root.SynthPulseSidebarOrg={ensure,groups,controls,decorate,moveChat,orderedSections,taskGroups};
+  root.SynthPulseSidebarOrg={ensure,groups,controls,decorate,moveChat,orderedSections,taskGroups,boardSections,sectionFor,assignNewChat,newSection:()=>edit(null,null)};
 })(window);
