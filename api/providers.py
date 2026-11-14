@@ -3441,6 +3441,10 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                 if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
                     del provider_cfg["api_key"]
                     changed = True
+                    if not provider_cfg:
+                        del providers_cfg[provider_id]
+                        if not providers_cfg:
+                            del cfg["providers"]
 
             # 2. Clean model.api_key — only if this provider is the active one
             model_cfg = cfg.get("model", {})
