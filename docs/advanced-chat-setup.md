@@ -347,9 +347,20 @@ deployments remain read-only for these sessions. WebUI discovers an already
 running Gateway; it does not start one.
 
 For eligible Desktop, CLI/TUI and messaging sessions, text follow-ups then resume
-the **same conversation** through native authorization. The Gateway owns admission,
-model/tool configuration, execution and history. WebUI translates its events and
-controls into the existing browser stream and approval/clarification cards. Stop
+the **same conversation** through native authorization. Email sessions are excluded
+by default: a WebUI turn in an email conversation causes the Gateway to send its
+answer to the original sender over SMTP, not just to the browser. To allow that
+outbound delivery for a profile, explicitly set `webui_gateway_email_delivery: true`
+in that profile's `config.yaml` in addition to the two settings above. Other
+messaging sources do not require this extra opt-in. Removing the email setting
+returns email conversations to read-only in WebUI; let any pending turn settle
+first. Email threading depends on the Agent's email adapter retaining the last
+received subject and Message-ID, so a Gateway restart may start a new email
+thread even though the canonical conversation continues.
+
+The Gateway owns admission, model/tool configuration, execution and history.
+WebUI translates its events and controls into the existing browser stream and
+approval/clarification cards. Stop
 targets only the WebUI admission or its execution generation. The existing WebUI
 session-YOLO switch answers individual approvals while enabled; it does not change
 the Gateway's own persisted YOLO setting.
