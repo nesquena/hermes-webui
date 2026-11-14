@@ -1021,12 +1021,14 @@ def _prune_dead_owners() -> None:
 
 
 def _claim_for_profile(
-    original: Callable[..., bool], provider: Any, home: Any, *args: Any, **kwargs: Any
+    original: Callable[..., bool], provider: Any, home: Any, /, *args: Any, **kwargs: Any
 ) -> bool:
     """``claim_instance`` that also refuses a cross-profile rebind without multiplexing.
 
     Arguments after ``home`` are the Agent's own and go to ``original`` unchanged
-    (#9060: Agent c9de6070+ passes ``manager=``; an Agent before it passes none)."""
+    (#9060: Agent c9de6070+ passes ``manager=``; an Agent before it passes none). The
+    first three parameters are positional-only so a future Agent keyword can never
+    collide with them (an Agent ``original=`` would otherwise raise TypeError)."""
     key = profile_home_key(home) or str(home or "")
     pid = id(provider)
     # #8613: the acquisition half of the instance-lifetime protocol. An instance a

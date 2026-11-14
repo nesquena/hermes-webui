@@ -94,3 +94,24 @@ def test_the_cross_profile_refusal_still_runs_with_manager(scope, monkeypatch, t
     assert mod.claim_instance(shared, beta, manager=m2) is False  # refused before the Agent sees it
     assert mod.claim_instance(shared, alpha, manager=m2) is True  # its owner may claim again
     assert calls == [(alpha, m1), (alpha, m2)]
+
+
+def test_positional_extras_and_any_keyword_name_reach_the_agent_claim(scope, monkeypatch, tmp_path):
+    """Whatever a future Agent adds after ``home`` reaches its claim unchanged: positional extras, and
+    keywords that share a name with the guard's own internals (``original``, ``provider``-like names)."""
+    calls = []
+
+    def claim_instance(provider, home, *extra, **kw):
+        calls.append((provider, home, extra, kw))
+        return True
+
+    mod = _install_stand_in(monkeypatch, claim_instance)
+    assert scope.install_shared_provider_instance_guard() is True
+
+    provider, home = _Provider(), str(tmp_path / "alpha")
+    assert mod.claim_instance(provider, home, "x", 2) is True
+    assert mod.claim_instance(provider, home, original="o", manager="m") is True
+    assert calls == [
+        (provider, home, ("x", 2), {}),
+        (provider, home, (), {"original": "o", "manager": "m"}),
+    ]
