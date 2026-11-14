@@ -209,7 +209,8 @@ test('SUPPLEMENT PROJECT KNOWLEDGE retained project pages lose files conversatio
     const deniedUpload = response(retained, '/api/projects/files');
     await retained.locator('#projUpload').setInputFiles({name: 'forbidden-after-revoke.txt', mimeType: 'text/plain', buffer: Buffer.from('FORBIDDEN')});
     expect((await deniedUpload).status()).toBe(404);
-    const deniedStart = response(retained, '/api/projects/chat'); await retained.locator('#projStartChat').click();
+    // The project launch rechecks visibility before offering to create a chat.
+    const deniedStart = response(retained, '/api/projects/hub/detail', 'GET'); await retained.locator('#projStartChat').click();
     expect((await deniedStart).status()).toBe(404);
     // The composer rejects the stale group in mention preparation, before a
     // chat run can start. Also check the direct start boundary independently.
