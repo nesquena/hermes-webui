@@ -23,10 +23,8 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
   <link rel="shortcut icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" sizes="512x512" href="/apple-touch-icon.png" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <style>
+<link rel="stylesheet" href="/chrome.css"><script src="/site.js"></script>
+<style>
     :root {
       --bg-primary: #0d1117;
       --bg-secondary: #161b22;
@@ -72,151 +70,113 @@
       --purple: #7c3aed;
       --shadow: 0 1px 3px rgba(0,0,0,0.1),0 4px 16px rgba(0,0,0,0.06);
     }
-    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    html{scroll-behavior:smooth;font-size:16px;overflow-x:hidden}
-    body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg-primary);color:var(--text-primary);line-height:1.6;transition:background 0.2s,color 0.2s;-webkit-font-smoothing:antialiased}
-    a{color:var(--accent);text-decoration:none;transition:color 0.15s}
-    a:hover{color:var(--accent-dim)}
-    ::-webkit-scrollbar{width:6px;height:6px}
-    ::-webkit-scrollbar-track{background:var(--bg-secondary)}
-    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-
-    /* Nav */
-    #nav{position:fixed;top:0;left:0;right:0;height:var(--nav-height);background:rgba(13,17,23,0.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);z-index:1000}
-    [data-theme="light"] #nav{background:rgba(255,255,255,0.92)}
-    .nav-inner{max-width:1100px;margin:0 auto;padding:0 24px;height:100%;display:flex;align-items:center;justify-content:space-between;gap:16px}
-    .nav-logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.1rem;color:var(--text-primary);text-decoration:none;flex-shrink:0}
-    .nav-logo-icon{width:32px;height:32px;background:linear-gradient(135deg,var(--accent),var(--accent-dim));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;line-height:1}
-    .nav-back{display:flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:0.875rem;font-weight:500;padding:6px 12px;border-radius:6px;transition:color 0.15s,background 0.15s;text-decoration:none}
-    .nav-back:hover{color:var(--text-primary);background:var(--bg-tertiary)}
-    .btn-theme{background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;padding:7px 10px;border-radius:6px;font-size:15px;line-height:1;transition:border-color 0.15s,color 0.15s,background 0.15s}
-    .btn-theme:hover{border-color:var(--border-hover);color:var(--text-primary);background:var(--bg-tertiary)}
-    .hamburger{display:none;flex-direction:column;gap:5px;cursor:pointer;padding:6px;border:1px solid var(--border);border-radius:6px;background:none;transition:border-color 0.15s;flex-shrink:0}
-    .hamburger:hover{border-color:var(--border-hover)}
-    .hamburger span{display:block;width:20px;height:2px;background:var(--text-secondary);border-radius:2px;transition:transform 0.2s,opacity 0.2s}
-    .hamburger.open span:nth-child(1){transform:translateY(7px) rotate(45deg)}
-    .hamburger.open span:nth-child(2){opacity:0}
-    .hamburger.open span:nth-child(3){transform:translateY(-7px) rotate(-45deg)}
-    #community-mobile-menu{display:none;position:fixed;top:var(--nav-height);left:0;right:0;background:var(--bg-secondary);border-bottom:1px solid var(--border);padding:16px 24px;z-index:999;flex-direction:column;gap:4px}
-    #community-mobile-menu.open{display:flex}
-    #community-mobile-menu a{color:var(--text-secondary);font-size:0.95rem;font-weight:500;padding:10px 12px;border-radius:6px;transition:color 0.15s,background 0.15s;text-decoration:none}
-    #community-mobile-menu a:hover{color:var(--text-primary);background:var(--bg-tertiary)}
-    .btn-cta{background:var(--accent);color:#000;font-size:0.8rem;font-weight:600;padding:7px 14px;border-radius:6px;border:none;cursor:pointer;text-decoration:none;display:inline-block;transition:background 0.15s,transform 0.1s;white-space:nowrap}
-    .btn-cta:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
+    *,*::before,*::after {box-sizing:border-box;margin:0;padding:0}
+    html {scroll-behavior:smooth;font-size:16px;overflow-x:hidden}
+    body {font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg-primary);color:var(--text-primary);line-height:1.6;transition:background 0.2s,color 0.2s;-webkit-font-smoothing:antialiased}
+    a {color:var(--accent);text-decoration:none;transition:color 0.15s}
+    a:hover {color:var(--accent-dim)}
+    .btn-theme {background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;padding:7px 10px;border-radius:6px;font-size:15px;line-height:1;transition:border-color 0.15s,color 0.15s,background 0.15s}
+    .btn-theme:hover {border-color:var(--border-hover);color:var(--text-primary);background:var(--bg-tertiary)}
 
     /* Layout */
-    main{padding-top:var(--nav-height)}
-    .hero{padding:60px 24px 48px;background:var(--bg-primary);position:relative;overflow:hidden}
-    .hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:400px;background:radial-gradient(ellipse at center,var(--accent-glow) 0%,transparent 70%);pointer-events:none}
-    .container{max-width:1100px;margin:0 auto;position:relative}
-    .section{padding:64px 24px}
-    .section-alt{background:var(--bg-secondary)}
+    main {padding-top: 0}
+    .hero {padding:60px 24px 48px;background:var(--bg-primary);position:relative;overflow:hidden}
+    .hero::before {content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:400px;background:radial-gradient(ellipse at center,var(--accent-glow) 0%,transparent 70%);pointer-events:none}
+    .container {max-width:1100px;margin:0 auto;position:relative}
+    .section {padding:64px 24px}
+    .section-alt {background:var(--bg-secondary)}
 
     /* Breadcrumb */
-    .breadcrumb{display:flex;align-items:center;gap:8px;font-size:0.8rem;color:var(--text-muted);margin-bottom:24px;flex-wrap:wrap}
-    .breadcrumb a{color:var(--text-muted)}
-    .breadcrumb a:hover{color:var(--accent)}
-    .breadcrumb-sep{opacity:0.4}
+    .breadcrumb {display:flex;align-items:center;gap:8px;font-size:0.8rem;color:var(--text-muted);margin-bottom:24px;flex-wrap:wrap}
+    .breadcrumb a {color:var(--text-muted)}
+    .breadcrumb a:hover {color:var(--accent)}
+    .breadcrumb-sep {opacity:0.4}
 
     /* Hero content */
-    .page-label{font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
-    .page-title{font-size:clamp(2rem,5vw,3.2rem);font-weight:800;line-height:1.1;letter-spacing:-0.02em;margin-bottom:16px}
-    .page-sub{font-size:1.05rem;color:var(--text-secondary);max-width:680px;line-height:1.7;margin-bottom:32px}
+    .page-label {font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+    .page-title {font-size:clamp(2rem,5vw,3.2rem);font-weight:800;line-height:1.1;letter-spacing:-0.02em;margin-bottom:16px}
+    .page-sub {font-size:1.05rem;color:var(--text-secondary);max-width:680px;line-height:1.7;margin-bottom:32px}
 
     /* Stats bar */
-    .stats-bar{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:32px}
-    .stat-pill{display:inline-flex;align-items:center;gap:6px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary);font-size:0.825rem;font-weight:500;padding:6px 14px;border-radius:100px}
-    .stat-pill .dot{width:6px;height:6px;background:var(--accent);border-radius:50%;flex-shrink:0}
+    .stats-bar {display:flex;flex-wrap:wrap;gap:12px;margin-bottom:32px}
+    .stat-pill {display:inline-flex;align-items:center;gap:6px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary);font-size:0.825rem;font-weight:500;padding:6px 14px;border-radius:100px}
+    .stat-pill .dot {width:6px;height:6px;background:var(--accent);border-radius:50%;flex-shrink:0}
 
     /* Category sections */
-    .cat-label{font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
-    .cat-title{font-size:clamp(1.4rem,3vw,1.9rem);font-weight:700;margin-bottom:8px;color:var(--text-primary)}
-    .cat-desc{font-size:0.95rem;color:var(--text-secondary);max-width:680px;line-height:1.65;margin-bottom:28px}
+    .cat-label {font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+    .cat-title {font-size:clamp(1.4rem,3vw,1.9rem);font-weight:700;margin-bottom:8px;color:var(--text-primary)}
+    .cat-desc {font-size:0.95rem;color:var(--text-secondary);max-width:680px;line-height:1.65;margin-bottom:28px}
 
     /* Project cards */
-    .project-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:0}
-    .project-grid > *{min-width:0}
-    .project-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;display:flex;flex-direction:column;gap:10px;transition:border-color 0.2s,transform 0.15s,background 0.2s;text-decoration:none;color:inherit}
-    .project-card:hover{border-color:var(--accent);transform:translateY(-3px);background:var(--bg-card-hover);color:inherit}
-    .project-header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
-    .project-name{font-size:0.95rem;font-weight:700;color:var(--text-primary);line-height:1.3;word-break:break-word;min-width:0;flex:1}
-    .project-stars{display:inline-flex;align-items:center;gap:4px;font-size:0.78rem;font-weight:600;color:var(--accent);white-space:nowrap;flex-shrink:0}
-    .project-stars svg{width:14px;height:14px;fill:var(--accent)}
-    .project-desc{font-size:0.84rem;color:var(--text-secondary);line-height:1.55;flex:1}
-    .project-meta{display:flex;align-items:center;gap:10px;font-size:0.75rem;color:var(--text-muted);margin-top:auto;padding-top:4px}
-    .lang-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-    .lang-python{background:#3572A5}
-    .lang-ts{background:#3178c6}
-    .lang-js{background:#f1e05a}
-    .lang-swift{background:#F05138}
-    .lang-shell{background:#89e051}
-    .lang-html{background:#e34c26}
-    .lang-go{background:#00ADD8}
-    .lang-rust{background:#dea584}
-    .lang-makefile{background:#427819}
-    .lang-docs{background:var(--text-muted)}
+    .project-grid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:0}
+    .project-grid > * {min-width:0}
+    .project-card {background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;display:flex;flex-direction:column;gap:10px;transition:border-color 0.2s,transform 0.15s,background 0.2s;text-decoration:none;color:inherit}
+    .project-card:hover {border-color:var(--accent);transform:translateY(-3px);background:var(--bg-card-hover);color:inherit}
+    .project-header {display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+    .project-name {font-size:0.95rem;font-weight:700;color:var(--text-primary);line-height:1.3;word-break:break-word;min-width:0;flex:1}
+    .project-stars {display:inline-flex;align-items:center;gap:4px;font-size:0.78rem;font-weight:600;color:var(--accent);white-space:nowrap;flex-shrink:0}
+    .project-stars svg {width:14px;height:14px;fill:var(--accent)}
+    .project-desc {font-size:0.84rem;color:var(--text-secondary);line-height:1.55;flex:1}
+    .project-meta {display:flex;align-items:center;gap:10px;font-size:0.75rem;color:var(--text-muted);margin-top:auto;padding-top:4px}
+    .lang-dot {width:8px;height:8px;border-radius:50%;flex-shrink:0}
+    .lang-python {background:#3572A5}
+    .lang-ts {background:#3178c6}
+    .lang-js {background:#f1e05a}
+    .lang-swift {background:#F05138}
+    .lang-shell {background:#89e051}
+    .lang-html {background:#e34c26}
+    .lang-go {background:#00ADD8}
+    .lang-rust {background:#dea584}
+    .lang-makefile {background:#427819}
+    .lang-docs {background:var(--text-muted)}
 
     /* Featured card (wider) */
-    .project-card.featured{border-color:rgba(240,165,0,0.3);background:var(--accent-subtle)}
-    .project-card.featured:hover{border-color:var(--accent)}
-    .featured-badge{font-size:0.65rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--accent);color:#000;padding:2px 8px;border-radius:100px;flex-shrink:0}
+    .project-card.featured {border-color:rgba(240,165,0,0.3);background:var(--accent-subtle)}
+    .project-card.featured:hover {border-color:var(--accent)}
+    .featured-badge {font-size:0.65rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--accent);color:#000;padding:2px 8px;border-radius:100px;flex-shrink:0}
 
     /* CTA footer */
-    .cta-strip{background:var(--bg-secondary);border-top:1px solid var(--border);padding:40px 24px;text-align:center}
-    .cta-strip h2{font-size:1.4rem;font-weight:700;margin-bottom:8px}
-    .cta-strip p{color:var(--text-secondary);margin-bottom:24px;font-size:0.975rem}
-    .cta-btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
-    .btn-primary{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#000;font-weight:600;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:background 0.15s,transform 0.1s}
-    .btn-primary:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
-    .btn-secondary{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-primary);font-weight:500;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:border-color 0.15s,background 0.15s}
-    .btn-secondary:hover{border-color:var(--border-hover);background:var(--bg-card-hover);color:var(--text-primary)}
+    .cta-strip {background:var(--bg-secondary);border-top:1px solid var(--border);padding:40px 24px;text-align:center}
+    .cta-strip h2 {font-size:1.4rem;font-weight:700;margin-bottom:8px}
+    .cta-strip p {color:var(--text-secondary);margin-bottom:24px;font-size:0.975rem}
+    .cta-btns {display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+    .btn-primary {display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#000;font-weight:600;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:background 0.15s,transform 0.1s}
+    .btn-primary:hover {background:var(--accent-dim);color:#000;transform:translateY(-1px)}
+    .btn-secondary {display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-primary);font-weight:500;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:border-color 0.15s,background 0.15s}
+    .btn-secondary:hover {border-color:var(--border-hover);background:var(--bg-card-hover);color:var(--text-primary)}
 
     /* Responsive */
-    @media(max-width:900px){.project-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:900px){.project-grid {grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:640px){
-      .project-grid{grid-template-columns:1fr}
-      .nav-back{display:none}
-      .btn-cta{display:none}
-      .hamburger{display:flex}
-      .nav-inner{gap:8px}
-      .hero{padding:48px 16px 36px}
-      .section{padding:48px 16px}
+      .project-grid {grid-template-columns:1fr}
+      .hero {padding:48px 16px 36px}
+      .section {padding:48px 16px}
     }
   </style>
+<style>/* site-wide tokens and type over this page's own variables (unify.py) */
+:root, :root[data-theme="dark"] { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-2: #9198a1; --gold: #f0a500; --gold-text: #f0a500; --bg-primary: #0d1117; --bg-secondary: #161b22; --bg-card: #161b22; --text-primary: #e6edf3; --text-secondary: #9198a1; --text-muted: #9198a1; --accent: #f0a500; --ink: #e6edf3; --muted: #9198a1; --line: #30363d; --nav-height: var(--header); }
+:root[data-theme="light"] { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --text-2: #59636e; --gold: #c07800; --gold-text: #8a5800; --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-card: #f6f8fa; --text-primary: #1f2328; --text-secondary: #59636e; --text-muted: #59636e; --accent: #8a5800; --ink: #1f2328; --muted: #59636e; --line: #d0d7de; --nav-height: var(--header); }
+:root[data-theme="light"] :is(.btn-primary, .featured-badge) { background-color: var(--gold); }
+main p a:not([class]) { text-decoration: underline; text-underline-offset: 2px; }
+body { font-family: var(--font); }
+code, pre, kbd, samp { font-family: var(--mono); }
+</style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header"><div class="container">
+<a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28"><span class="brand-name">Hermes WebUI</span></a>
+<nav class="site-nav" aria-label="Main"><ul class="nav"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/" aria-current="page">Community</a></li><li><a href="/api-docs/">API</a></li></ul>
+<details class="menu"><summary>Menu</summary><ul><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/" aria-current="page">Community</a></li><li><a href="/api-docs/">API</a></li><li><a href="/setup/">Get started</a></li><li><button class="theme-toggle" type="button">Light</button></li></ul></details></nav>
+<div class="header-actions">
+<button type="button" class="theme-toggle">Light</button>
+<a class="site-cta" href="/setup/">Get started</a>
+</div></div></header>
+<div class="legacy-hooks" hidden aria-hidden="true"><button id="community-hamburger" type="button" tabindex="-1"></button><div id="community-mobile-menu"></div><button id="theme-toggle" type="button" tabindex="-1"></button></div>
 
-<nav id="nav">
-  <div class="nav-inner">
-    <a href="../index.html" class="nav-logo">
-      <div class="nav-logo-icon">&#9889;</div>
-      Hermes
-    </a>
-    <a href="../index.html#resources" class="nav-back"><span>&larr; Back to Hermes</span></a>
-    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme">🌙</button>
-      <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-cta" target="_blank" rel="noopener">Get started &rarr;</a>
-    </div>
-    <button class="hamburger" id="community-hamburger" aria-label="Open menu">
-      <span></span><span></span><span></span>
-    </button>
-  </div>
-</nav>
 
-<div id="community-mobile-menu">
-  <a href="../index.html">⚡ Hermes Home</a>
-  <a href="../index.html#why">Why Hermes</a>
-  <a href="../index.html#features">Features</a>
-  <a href="../index.html#compare">Compare</a>
-  <a href="../index.html#install">Install</a>
-  <a href="../index.html#resources">Resources</a>
-  <a href="../eli5/" style="color:var(--accent)">🧠 ELI5 — What is Hermes?</a>
-  <a href="../models/" style="color:var(--accent)">🤖 Best Models 2026</a>
-  <a href="../index.html#resources" style="color:var(--accent)">🌎 Community &amp; Ecosystem</a>
-  <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" style="color:var(--accent);margin-top:4px">Get started →</a>
-</div>
 
-<main>
+<main id="main">
   <div class="hero">
     <div class="container">
       <nav class="breadcrumb" aria-label="Breadcrumb">
@@ -640,6 +600,10 @@
   </div>
 </div>
 
+<footer class="site-footer"><div class="container">
+<ul class="footer-links"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/api-docs/">Bridge API</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/hidden-features/">Hidden features</a></li><li><a href="/eli5/">What is Hermes?</a></li><li><a href="https://github.com/nesquena/hermes-webui">GitHub</a></li><li><a href="https://hermes-agent.nousresearch.com/">Official Hermes Agent site</a></li></ul>
+<p class="footer-note">Community project. Not affiliated with Nous Research.</p>
+</div></footer>
 <script>
   var themeToggle = document.getElementById('theme-toggle');
   var html = document.documentElement;

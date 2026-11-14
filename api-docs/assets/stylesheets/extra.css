@@ -8,7 +8,7 @@
   --md-default-fg-color--lightest: #d0d7de;
   --md-code-bg-color: #f6f8fa;
   --md-code-fg-color: #1f2328;
-  --md-typeset-a-color: #946000;
+  --md-typeset-a-color: #8a5800;
   --md-footer-bg-color: #f6f8fa;
   --md-footer-bg-color--dark: #f6f8fa;
   --md-footer-fg-color: #1f2328;
@@ -91,3 +91,46 @@ body .md-nav .md-nav__title { color: var(--md-default-fg-color); background-colo
 .md-content .md-typeset a:not(.headerlink):not(.md-button):not(.md-annotation__index) { text-decoration: underline; text-underline-offset: 2px; }
 /* Focusable scrolling tables: a visible focus ring */
 .md-typeset__scrollwrap[role="region"]:focus-visible { outline: 2px solid var(--md-accent-fg-color); outline-offset: 2px; border-radius: 8px; }
+/* Site-wide header row: Credentials and Get started (same links as every site page) */
+.hermes-sitenav .hermes-sitecta { margin-left: 4px; padding: 0 .6rem; height: 1.7rem; display: inline-flex; align-items: center; border-radius: 6px; background: var(--hermes-gold); color: #0d1117; font-weight: 600; }
+.hermes-sitenav .hermes-sitecta:hover { color: #0d1117; filter: brightness(1.06); }
+.hermes-sitenav a { white-space: nowrap; }
+/* Drawer "Site" block: only where the header row is hidden (Material's drawer breakpoint) */
+.hermes-drawer-site { list-style: none; margin: 0; padding: .4rem .6rem .6rem; border-bottom: 1px solid var(--hermes-border); }
+.hermes-drawer-site a { display: block; padding: .3rem .6rem; color: var(--md-default-fg-color); font-size: .75rem; }
+.hermes-drawer-site a[aria-current] { color: var(--md-typeset-a-color); }
+@media (min-width: 76.25em) { .hermes-drawer-site { display: none; } }
+/* Footer link row */
+.hermes-footer-links { list-style: none; display: flex; flex-wrap: wrap; gap: .4rem 1rem; margin: 0 0 .5rem; padding: 0; }
+.hermes-footer-links a { color: var(--md-default-fg-color--light); }
+.hermes-footer-links a:hover { color: var(--md-default-fg-color); }
+
+/* Drawer and search openers are real buttons (see overrides/partials/header.html); keep Material's icon-button look */
+.md-header__button.site-toggle { cursor: pointer; color: inherit; }
+.md-header__button.site-toggle:focus-visible { outline: 2px solid var(--md-accent-fg-color); outline-offset: 2px; }
+.no-js .md-header__button.site-toggle { display: none; }
+
+/* Wide header row: keep "Hermes WebUI" whole next to the site links and search (>=1220px) */
+/* Sizes in px (what they are at 1440): Material grows rem above 1600px, which would push search off the grid */
+@media (min-width: 76.25em) {
+  .md-header__title { flex: 0 0 148px; margin-right: 8px; font-size: 18px; }
+  .hermes-sitenav { gap: 16px; margin-right: 8px; flex: 1; align-items: center; }
+  .hermes-sitenav a { font-size: 15px; }
+  .hermes-sitenav .hermes-sitecta { font-size: 14px; height: 34px; padding: 0 12px; }
+  .md-search__inner { width: 160px; }
+}
+/* Material hides its label openers by [for=...]; the buttons need the same breakpoints */
+@media (min-width: 60em) { .md-header__button[data-site-toggle="__search"] { display: none; } }
+@media (min-width: 76.25em) { .md-header__button[data-site-toggle="__drawer"] { display: none; } }
+
+/* Drawer mode (<1220px): only the panel on screen takes keyboard focus, and none while the drawer is closed. Material keeps closed panels and the
+   panels a child covers focusable, so Tab could land on invisible links and scroll the drawer blank.
+   A closed panel hides once its slide-out ends; a level with an open child hides its own links, title and
+   (at the root) the Site list. Browsers without :has() keep Material's behaviour. */
+@media screen and (max-width: 76.234375em) {
+  [data-md-toggle="drawer"]:not(:checked) ~ .md-container .md-sidebar--primary { visibility: hidden; transition: visibility 0s linear .25s; }
+  [data-md-toggle="drawer"]:checked ~ .md-container .md-sidebar--primary { visibility: visible; transition: none; }
+  .md-nav--primary .md-nav__toggle:not(:checked) ~ .md-nav { visibility: hidden; transition: visibility 0s linear .25s; }
+  :is(.md-nav--primary, .md-nav--primary .md-nav):has(> .md-nav__list > .md-nav__item > .md-nav__toggle:checked) > :is(.md-nav__title, .hermes-drawer-site),
+  :is(.md-nav--primary, .md-nav--primary .md-nav):has(> .md-nav__list > .md-nav__item > .md-nav__toggle:checked) > .md-nav__list > .md-nav__item > :is(a, label.md-nav__link) { visibility: hidden; }
+}

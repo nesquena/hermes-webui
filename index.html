@@ -35,13 +35,11 @@
   <link rel="shortcut icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" sizes="512x512" href="/apple-touch-icon.png" />
   <link rel="canonical" href="https://get-hermes.ai/" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-theme" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-theme" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
-  <style>
+  <link rel="stylesheet" href="/chrome.css"><script src="/site.js"></script>
+<style>
     /* ===== CSS VARIABLES ===== */
     :root {
       --bg-primary: #0d1117;
@@ -108,184 +106,6 @@
     a { color: var(--accent); text-decoration: none; transition: color 0.15s; }
     a:hover { color: var(--accent-dim); }
     img { max-width: 100%; }
-
-    /* ===== SCROLLBAR ===== */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: var(--bg-secondary); }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
-
-    /* ===== NAVIGATION ===== */
-    #nav {
-      position: fixed;
-      top: 0; left: 0; right: 0;
-      height: var(--nav-height);
-      background: rgba(13, 17, 23, 0.92);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border-bottom: 1px solid var(--border);
-      z-index: 1000;
-      transition: background 0.2s;
-    }
-    [data-theme="light"] #nav {
-      background: rgba(255,255,255,0.92);
-    }
-    .nav-inner {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 0 24px;
-      height: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-    }
-    .nav-logo {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-weight: 700;
-      font-size: 1.1rem;
-      color: var(--text-primary);
-      text-decoration: none;
-      flex-shrink: 0;
-    }
-    .nav-logo-icon {
-      width: 32px; height: 32px;
-      background: linear-gradient(135deg, var(--accent), var(--accent-dim));
-      border-radius: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 18px;
-      line-height: 1;
-    }
-    .nav-links {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      list-style: none;
-    }
-    .nav-links a {
-      color: var(--text-secondary);
-      font-size: 0.875rem;
-      font-weight: 500;
-      padding: 6px 12px;
-      border-radius: 6px;
-      transition: color 0.15s, background 0.15s;
-      white-space: nowrap;
-    }
-    .nav-links a:hover {
-      color: var(--text-primary);
-      background: var(--bg-tertiary);
-    }
-    /* ===== DROPDOWN NAV ===== */
-    .nav-links .has-dropdown { position: relative; }
-
-    .nav-trigger {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: none;
-      border: none;
-      color: var(--text-secondary);
-      font: inherit;
-      font-size: 0.875rem;
-      font-weight: 500;
-      padding: 6px 12px;
-      border-radius: 6px;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: color 0.15s, background 0.15s;
-    }
-    .nav-trigger .caret {
-      font-size: 0.7rem;
-      opacity: 0.7;
-      transition: transform 0.15s;
-    }
-    .nav-trigger:hover,
-    .has-dropdown:focus-within .nav-trigger,
-    .has-dropdown:hover .nav-trigger {
-      color: var(--text-primary);
-      background: var(--bg-tertiary);
-    }
-    .has-dropdown:hover .caret,
-    .has-dropdown:focus-within .caret { transform: rotate(180deg); }
-
-    .dropdown {
-      position: absolute;
-      top: calc(100% + 6px);
-      left: 0;
-      min-width: 200px;
-      padding: 6px;
-      list-style: none;
-      background: var(--bg-secondary);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow-lg);
-      opacity: 0;
-      visibility: hidden;
-      transform: translateY(-4px);
-      transition: opacity 0.15s ease, transform 0.15s ease, visibility 0s linear 0.15s;
-      z-index: 1001;
-    }
-    .has-dropdown:hover > .dropdown,
-    .has-dropdown:focus-within > .dropdown {
-      opacity: 1;
-      visibility: visible;
-      transform: translateY(0);
-      transition: opacity 0.15s ease, transform 0.15s ease, visibility 0s;
-    }
-    .dropdown--right > .dropdown { left: auto; right: 0; }
-    .has-dropdown::after {
-      content: "";
-      position: absolute;
-      top: 100%; left: 0; right: 0;
-      height: 10px;
-    }
-    .dropdown a {
-      display: block;
-      padding: 8px 12px;
-      border-radius: 6px;
-      color: var(--text-secondary);
-      font-size: 0.875rem;
-      font-weight: 500;
-      white-space: nowrap;
-      transition: color 0.15s, background 0.15s;
-    }
-    .dropdown a:hover,
-    .dropdown a:focus-visible {
-      color: var(--text-primary);
-      background: var(--bg-tertiary);
-      outline: none;
-    }
-    .nav-trigger:focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
-    }
-    @media (prefers-reduced-motion: reduce) {
-      .dropdown, .nav-trigger .caret { transition: none; }
-    }
-    .dropdown .dropdown-section-label {
-      font-size: 0.68rem;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-      padding: 6px 12px 2px;
-    }
-    .dropdown .dropdown-divider {
-      height: 1px;
-      background: var(--border);
-      margin: 6px 8px;
-    }
-
-    .nav-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-shrink: 0;
-    }
     .btn-theme {
       background: none;
       border: 1px solid var(--border);
@@ -302,75 +122,9 @@
       color: var(--text-primary);
       background: var(--bg-tertiary);
     }
-    .btn-nav-cta {
-      background: var(--accent);
-      color: #000;
-      font-size: 0.8rem;
-      font-weight: 600;
-      padding: 7px 14px;
-      border-radius: 6px;
-      border: none;
-      cursor: pointer;
-      text-decoration: none;
-      display: inline-block;
-      transition: background 0.15s, transform 0.1s;
-      white-space: nowrap;
-    }
-    .btn-nav-cta:hover { background: var(--accent-dim); color: #000; transform: translateY(-1px); }
-
-    /* Hamburger */
-    .hamburger {
-      display: none;
-      flex-direction: column;
-      gap: 5px;
-      cursor: pointer;
-      padding: 6px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: none;
-      transition: border-color 0.15s;
-    }
-    .hamburger:hover { border-color: var(--border-hover); }
-    .hamburger span {
-      display: block;
-      width: 20px; height: 2px;
-      background: var(--text-secondary);
-      border-radius: 2px;
-      transition: transform 0.2s, opacity 0.2s;
-    }
-    .hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
-    .hamburger.open span:nth-child(2) { opacity: 0; }
-    .hamburger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
-
-    /* Mobile menu */
-    #mobile-menu {
-      display: none;
-      position: fixed;
-      top: var(--nav-height);
-      left: 0; right: 0;
-      background: var(--bg-secondary);
-      border-bottom: 1px solid var(--border);
-      padding: 16px 24px;
-      z-index: 999;
-      flex-direction: column;
-      gap: 4px;
-    }
-    #mobile-menu.open { display: flex; }
-    #mobile-menu a {
-      color: var(--text-secondary);
-      font-size: 0.95rem;
-      font-weight: 500;
-      padding: 10px 12px;
-      border-radius: 6px;
-      transition: color 0.15s, background 0.15s;
-    }
-    #mobile-menu a:hover {
-      color: var(--text-primary);
-      background: var(--bg-tertiary);
-    }
 
     /* ===== LAYOUT ===== */
-    main { padding-top: var(--nav-height); }
+    main { padding-top: 0; }
     .section {
       padding: 80px 24px;
     }
@@ -1175,39 +929,6 @@
       word-break: break-all;
     }
 
-    /* ===== FOOTER ===== */
-    footer {
-      background: var(--bg-secondary);
-      border-top: 1px solid var(--border);
-      padding: 40px 24px;
-    }
-    .footer-inner {
-      max-width: 1100px;
-      margin: 0 auto;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 16px;
-    }
-    .footer-left {
-      font-size: 0.875rem;
-      color: var(--text-muted);
-    }
-    .footer-left a { color: var(--text-muted); text-decoration: underline; text-underline-offset: 3px; }
-    .footer-left a:hover { color: var(--text-secondary); }
-    .footer-links {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 16px;
-    }
-    .footer-links a {
-      font-size: 0.825rem;
-      color: var(--text-muted);
-      transition: color 0.15s;
-    }
-    .footer-links a:hover { color: var(--text-secondary); }
-
     /* ===== UTILITY ===== */
     .mt-8 { margin-top: 8px; }
     .mt-16 { margin-top: 16px; }
@@ -1257,15 +978,15 @@
 
     /* ===== RESPONSIVE ===== */
     /* ===== COMMUNITY BANNER ===== */
-    .community-banner{display:flex;align-items:center;gap:16px;background:var(--accent-subtle);border:1px solid rgba(240,165,0,0.25);border-radius:var(--radius-lg);padding:16px 20px;margin-bottom:36px;text-decoration:none;color:inherit;transition:border-color 0.15s,background 0.15s}
-    [data-theme="light"] .community-banner{border-color:rgba(192,120,0,0.2)}
-    .community-banner:hover{border-color:var(--accent);background:var(--accent-glow);color:inherit}
-    .community-banner-icon{font-size:1.8rem;flex-shrink:0;line-height:1}
-    .community-banner-text{flex:1;display:flex;flex-direction:column;gap:2px}
-    .community-banner-text strong{color:var(--text-primary);font-size:0.95rem}
-    .community-banner-text span{color:var(--text-secondary);font-size:0.85rem}
-    .community-banner-arrow{color:var(--accent);font-size:1.2rem;flex-shrink:0;transition:transform 0.15s}
-    .community-banner:hover .community-banner-arrow{transform:translateX(4px)}
+    .community-banner {display:flex;align-items:center;gap:16px;background:var(--accent-subtle);border:1px solid rgba(240,165,0,0.25);border-radius:var(--radius-lg);padding:16px 20px;margin-bottom:36px;text-decoration:none;color:inherit;transition:border-color 0.15s,background 0.15s}
+    [data-theme="light"] .community-banner {border-color:rgba(192,120,0,0.2)}
+    .community-banner:hover {border-color:var(--accent);background:var(--accent-glow);color:inherit}
+    .community-banner-icon {font-size:1.8rem;flex-shrink:0;line-height:1}
+    .community-banner-text {flex:1;display:flex;flex-direction:column;gap:2px}
+    .community-banner-text strong {color:var(--text-primary);font-size:0.95rem}
+    .community-banner-text span {color:var(--text-secondary);font-size:0.85rem}
+    .community-banner-arrow {color:var(--accent);font-size:1.2rem;flex-shrink:0;transition:transform 0.15s}
+    .community-banner:hover .community-banner-arrow {transform:translateX(4px)}
 
     @media (max-width: 1024px) {
       .feature-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1283,9 +1004,6 @@
       .persona-grid { grid-template-columns: repeat(2, 1fr); }
     }
     @media (max-width: 768px) {
-      .nav-links { display: none; }
-      .btn-nav-cta { display: none; }
-      .hamburger { display: flex; }
       .section { padding: 56px 16px; }
       #hero { padding: 72px 16px 56px; }
       .feature-grid { grid-template-columns: 1fr 1fr; }
@@ -1488,14 +1206,12 @@
     .demo-shot:focus-visible { outline:3px solid var(--accent); outline-offset:5px; }
     .demo-mobile .demo-shot { border:7px solid var(--bg-tertiary); border-radius:26px; }
     .showcase-pair figcaption { text-align:center; color:var(--text-secondary); font-size:.8rem; line-height:1.5; margin:13px 0 0; }
-    [data-theme="light"] .section-label, [data-theme="light"] .pillar-link, [data-theme="light"] .feature-link, [data-theme="light"] .docs-link, [data-theme="light"] .compare-pill, [data-theme="light"] .step-note a { color:#946000; }
+    [data-theme="light"] .section-label, [data-theme="light"] .pillar-link, [data-theme="light"] .feature-link, [data-theme="light"] .docs-link, [data-theme="light"] .compare-pill, [data-theme="light"] .step-note a { color:var(--gold-text); }
     @media(max-width:760px) { .showcase-pair { grid-template-columns:1fr; } .demo-mobile { width:min(240px,80%); justify-self:center; } }
     @media(prefers-reduced-motion:reduce) { html { scroll-behavior:auto !important; } *,*::before,*::after { animation:none !important; transition:none !important; } }
   
     html { scroll-padding-top:calc(var(--nav-height) + 16px); }
     .caption-narrow { display:none; }
-    .nav-logo-icon { background:none; }
-    .nav-logo-icon svg { width:32px; height:32px; display:block; }
     .lightbox-close { position:absolute; top:20px; right:20px; width:44px; height:44px; border:1px solid #888; border-radius:50%; background:#161b22; color:#fff; font-size:30px; cursor:pointer; }
     .lightbox-close:focus-visible { outline:3px solid #f0a500; outline-offset:3px; }
     @media(max-width:760px) { .demo-mobile { order:-1; } .caption-wide { display:none; } .caption-narrow { display:inline; } }
@@ -1535,108 +1251,34 @@
       .cmp-k { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
     }
     /* light-theme overrides after the media query, so they win over .cmp-head .cmp-head-hermes */
-    [data-theme="light"] .cmp-hermes .cmp-k, [data-theme="light"] .cmp-head .cmp-head-hermes, [data-theme="light"] .cmp-note a { color: #946000; }
+    [data-theme="light"] .cmp-hermes .cmp-k, [data-theme="light"] .cmp-head .cmp-head-hermes, [data-theme="light"] .cmp-note a { color: var(--gold-text); }
   </style>
+<style>/* site-wide tokens and type over this page's own variables (unify.py) */
+:root, :root[data-theme="dark"] { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-2: #9198a1; --gold: #f0a500; --gold-text: #f0a500; --bg-primary: #0d1117; --bg-secondary: #161b22; --bg-card: #161b22; --text-primary: #e6edf3; --text-secondary: #9198a1; --text-muted: #9198a1; --accent: #f0a500; --ink: #e6edf3; --muted: #9198a1; --line: #30363d; --nav-height: var(--header); }
+:root[data-theme="light"] { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --text-2: #59636e; --gold: #c07800; --gold-text: #8a5800; --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-card: #f6f8fa; --text-primary: #1f2328; --text-secondary: #59636e; --text-muted: #59636e; --accent: #8a5800; --ink: #1f2328; --muted: #59636e; --line: #d0d7de; --nav-height: var(--header); }
+:root[data-theme="light"] :is(.btn-primary, .step-num) { background-color: var(--gold); }
+:root[data-theme="light"] .why-diagram .bracket, :root[data-theme="light"] .provider-badge.badge-key { color: #0550ae; }
+:root[data-theme="light"] .provider-badge.badge-oauth { color: #116329; }
+main p a:not([class]) { text-decoration: underline; text-underline-offset: 2px; }
+body { font-family: var(--font); }
+code, pre, kbd, samp { font-family: var(--mono); }
+</style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header"><div class="container">
+<a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28"><span class="brand-name">Hermes WebUI</span></a>
+<nav class="site-nav" aria-label="Main"><ul class="nav"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/api-docs/">API</a></li></ul>
+<details class="menu"><summary>Menu</summary><ul><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/api-docs/">API</a></li><li><a href="/setup/">Get started</a></li><li><button class="theme-toggle" type="button">Light</button></li></ul></details></nav>
+<div class="header-actions">
+<button type="button" class="theme-toggle">Light</button>
+<a class="site-cta" href="/setup/">Get started</a>
+</div></div></header>
+<div class="legacy-hooks" hidden aria-hidden="true"><button id="hamburger" type="button" tabindex="-1"></button><div id="mobile-menu"></div><button id="theme-toggle" type="button" tabindex="-1"></button></div>
 
 <!-- ===== NAV ===== -->
-<nav id="nav">
-  <div class="nav-inner">
-    <a href="#hero" class="nav-logo">
-      <div class="nav-logo-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
-  <rect width="64" height="64" rx="12" fill="#1a1a1a"/>
-  <defs>
-    <linearGradient id="nav-caduceus-grad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" style="stop-color:#F5C542;stop-opacity:1"/>
-      <stop offset="100%" style="stop-color:#D4961C;stop-opacity:1"/>
-    </linearGradient>
-  </defs>
-  <rect x="30" y="10" width="4" height="46" rx="2" fill="url(#nav-caduceus-grad)"/>
-  <path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/>
-  <path d="M30 22 C26 19, 18 19, 14 22 C18 20, 24 20, 28 24" fill="#D4961C" opacity="0.8"/>
-  <path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/>
-  <path d="M34 22 C38 19, 46 19, 50 22 C46 20, 40 20, 36 24" fill="#D4961C" opacity="0.8"/>
-  <path d="M32 48 C22 44, 20 38, 26 34 C20 36, 18 42, 24 46 C18 40, 22 30, 30 28 C24 32, 22 38, 28 42"
-        fill="none" stroke="#F5C542" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M32 48 C42 44, 44 38, 38 34 C44 36, 46 42, 40 46 C46 40, 42 30, 34 28 C40 32, 42 38, 36 42"
-        fill="none" stroke="#D4961C" stroke-width="2.5" stroke-linecap="round"/>
-  <circle cx="32" cy="10" r="4" fill="#F5C542"/>
-  <circle cx="32" cy="10" r="2" fill="#FFF8E1" opacity="0.7"/>
-</svg></div>
-      Hermes
-    </a>
-    <ul class="nav-links">
-      <li class="has-dropdown">
-        <button type="button" class="nav-trigger" aria-haspopup="true" aria-expanded="false">
-          Product <span class="caret" aria-hidden="true">▾</span>
-        </button>
-        <ul class="dropdown" role="menu">
-          <li role="none"><a role="menuitem" href="#why">Why Hermes</a></li>
-          <li role="none"><a role="menuitem" href="#features">Features</a></li>
-          <li role="none"><a role="menuitem" href="#webui">Web UI</a></li>
-          <li role="none"><a role="menuitem" href="#who">Who it's for</a></li>
-          <li role="none"><a role="menuitem" href="models/">&#129302; Models</a></li>
-          <li role="none"><a role="menuitem" href="memory/">&#129761; Memory</a></li>
-        </ul>
-      </li>
-      <li><a href="#compare">Compare</a></li>
-      <li class="has-dropdown">
-        <button type="button" class="nav-trigger" aria-haspopup="true" aria-expanded="false">
-          Install <span class="caret" aria-hidden="true">▾</span>
-        </button>
-        <ul class="dropdown" role="menu">
-          <li role="none"><a role="menuitem" href="setup/">&#11088; Setup guide &mdash; all platforms</a></li>
-          <li role="none"><a role="menuitem" href="#install">Install</a></li>
-          <li role="none"><a role="menuitem" href="#hosting">Hosting</a></li>
-        </ul>
-      </li>
-      <li class="has-dropdown dropdown--right">
-        <button type="button" class="nav-trigger" aria-haspopup="true" aria-expanded="false">
-          Learn <span class="caret" aria-hidden="true">▾</span>
-        </button>
-        <ul class="dropdown" role="menu">
-          <li role="none"><a role="menuitem" href="eli5/">&#129300; ELI5</a></li>
-          <li role="none"><a role="menuitem" href="hidden-features/">&#129718; Hidden Features</a></li>
-          <li role="none"><a role="menuitem" href="#resources">Resources</a></li>
-        </ul>
-      </li>
-      <li><a href="community/">Community</a></li>
-    </ul>
-    <div class="nav-actions">
-      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark mode">🌙</button>
-      <a href="setup/" class="btn-nav-cta">Get started &#8594;</a>
-    </div>
-    <button class="hamburger" id="hamburger" aria-label="Open menu">
-      <span></span><span></span><span></span>
-    </button>
-  </div>
-</nav>
 
 <!-- Mobile menu -->
-<div id="mobile-menu">
-  <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);padding:8px 0 2px;">Product</div>
-  <a href="#why" onclick="closeMobileMenu()">Why Hermes</a>
-  <a href="#features" onclick="closeMobileMenu()">Features</a>
-  <a href="#webui" onclick="closeMobileMenu()">Web UI</a>
-  <a href="#who" onclick="closeMobileMenu()">Who it's for</a>
-  <a href="models/" onclick="closeMobileMenu()">&#129302; Models</a>
-  <a href="memory/" onclick="closeMobileMenu()">&#129761; Memory</a>
-  <div style="height:1px;background:var(--border);margin:8px 0;"></div>
-  <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);padding:4px 0 2px;">Install</div>
-  <a href="setup/" onclick="closeMobileMenu()" style="color:var(--accent)">&#11088; Setup guide &mdash; all platforms</a>
-  <a href="#install" onclick="closeMobileMenu()">Install</a>
-  <a href="#hosting" onclick="closeMobileMenu()">Hosting</a>
-  <div style="height:1px;background:var(--border);margin:8px 0;"></div>
-  <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);padding:4px 0 2px;">Learn</div>
-  <a href="eli5/" onclick="closeMobileMenu()">&#129300; ELI5</a>
-  <a href="hidden-features/" onclick="closeMobileMenu()">&#129718; Hidden Features</a>
-  <a href="#resources" onclick="closeMobileMenu()">Resources</a>
-  <a href="#compare" onclick="closeMobileMenu()">Compare</a>
-  <div style="height:1px;background:var(--border);margin:8px 0;"></div>
-  <a href="community/" onclick="closeMobileMenu()" style="color:var(--accent)">&#127758; Community</a>
-  <a href="setup/" onclick="closeMobileMenu()" style="color: var(--accent); margin-top: 4px;">Get started &#8594;</a>
-</div>
 
 <!-- Lightbox -->
 <div class="lightbox-overlay" id="lightbox" role="dialog" aria-modal="true" aria-label="Screenshot preview" aria-hidden="true" onclick="closeLightbox()">
@@ -1644,7 +1286,7 @@
   <img id="lightbox-img" alt="" />
 </div>
 
-<main>
+<main id="main">
 
   <!-- ===== SECTION 1: HERO ===== -->
   <section id="hero">
@@ -2136,10 +1778,11 @@ docker run -d \
         <span style="font-size:1.6rem;line-height:1;">&#11088;</span>
         <span style="flex:1;min-width:220px;">
           <span style="display:block;font-weight:700;font-size:1.02rem;">Want it on your phone, desktop, or every device?</span>
-          <span style="display:block;color:var(--text-secondary);font-size:0.9rem;">Read the full cross-platform setup guide &mdash; run the server once, then get a native app on Web, Windows, Linux, macOS, iOS &amp; Android.</span>
+          <span style="display:block;color:var(--text-primary);font-size:0.9rem;">Read the full cross-platform setup guide &mdash; run the server once, then get a native app on Web, Windows, Linux, macOS, iOS &amp; Android.</span>
         </span>
         <span style="color:var(--accent);font-weight:700;white-space:nowrap;">Open setup guide &#8594;</span>
       </a>
+      <p class="next-steps" style="margin:0 0 28px;color:var(--text-secondary);font-size:0.95rem;">Next: <a href="/guides/agent-credentials/" style="color:var(--accent);">let your agent sign in</a> &middot; <a href="/api-docs/" style="color:var(--accent);">build on the Bridge API</a></p>
 
       <div class="install-layout">
         <div>
@@ -2388,11 +2031,23 @@ hermes doctor         # diagnose any issues</code></pre>
         <span class="community-banner-icon">&#127758;</span>
         <span class="community-banner-text">
           <strong>Community &amp; Ecosystem</strong>
-          <span>25 third-party projects, tools, and integrations built around Hermes</span>
+          <span>Third-party projects, tools and integrations built around Hermes</span>
         </span>
         <span class="community-banner-arrow">&#8594;</span>
       </a>
       <div class="resources-grid">
+        <a href="/api-docs/" class="resource-card">
+          <div class="resource-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></svg></div>
+          <div class="resource-title">Bridge API</div>
+          <div class="resource-url">One HTTP API. Every client.</div>
+        </a>
+
+        <a href="/guides/agent-credentials/" class="resource-card">
+          <div class="resource-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 8.8-8.8M16 7l3 3M14 9l2 2"/></svg></div>
+          <div class="resource-title">Agent credentials</div>
+          <div class="resource-url">Let your agent sign in.</div>
+        </a>
+
 
         <a href="https://hermes-agent.nousresearch.com/docs/" target="_blank" rel="noopener" class="resource-card">
           <div class="resource-icon">&#128214;</div>
@@ -2481,7 +2136,7 @@ hermes doctor         # diagnose any issues</code></pre>
         <a href="community/" class="resource-card">
           <div class="resource-icon">&#127758;</div>
           <div class="resource-title">Community &amp; Ecosystem</div>
-          <div class="resource-url">30+ third-party projects</div>
+          <div class="resource-url">Built by the community</div>
         </a>
 
       </div>
@@ -2491,23 +2146,10 @@ hermes doctor         # diagnose any issues</code></pre>
 </main>
 
 <!-- ===== FOOTER ===== -->
-<footer>
-  <div class="footer-inner">
-    <div class="footer-left">
-      Hermes is <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener">open source</a> and MIT licensed.
-      Built by <a href="https://nousresearch.com" target="_blank" rel="noopener">Nous Research</a>.
-      This community Web UI (<a href="https://github.com/nesquena/hermes-webui" target="_blank" rel="noopener">nesquena/hermes-webui</a>) is an independent project, not affiliated with or endorsed by Nous Research.
-      For the official product, visit <a href="https://hermes-agent.nousresearch.com" target="_blank" rel="noopener">hermes-agent.nousresearch.com</a>.
-    </div>
-    <div class="footer-links">
-      <a href="https://hermes-agent.nousresearch.com/docs/" target="_blank" rel="noopener">Docs</a>
-      <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener">GitHub</a>
-      <a href="https://discord.gg/NousResearch" target="_blank" rel="noopener">Discord</a>
-      <a href="https://agentskills.io" target="_blank" rel="noopener">agentskills.io</a>
-      <a href="https://nousresearch.com" target="_blank" rel="noopener">Nous Research</a>
-    </div>
-  </div>
-</footer>
+<footer class="site-footer"><div class="container">
+<ul class="footer-links"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/api-docs/">Bridge API</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/hidden-features/">Hidden features</a></li><li><a href="/eli5/">What is Hermes?</a></li><li><a href="https://github.com/nesquena/hermes-webui">GitHub</a></li><li><a href="https://hermes-agent.nousresearch.com/">Official Hermes Agent site</a></li></ul>
+<p class="footer-note">Community project. Not affiliated with Nous Research.</p>
+</div></footer>
 
 <script>
   // ===== HIGHLIGHT.JS =====

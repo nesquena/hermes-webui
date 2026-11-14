@@ -117,15 +117,20 @@
   <img src="assets/favicon.svg" alt="logo">
 
     </a>
-    <label class="md-header__button md-icon" for="__drawer">
-      
+    
+    <button type="button" class="md-header__button md-icon site-toggle" data-site-toggle="__drawer" aria-expanded="false" aria-label="Open navigation">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
-    </label>
+    </button>
+    <noscript>
+      <label class="md-header__button md-icon" for="__drawer" aria-label="Open navigation">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+      </label>
+    </noscript>
     <div class="md-header__title" data-md-component="header-title">
       <div class="md-header__ellipsis">
         <div class="md-header__topic">
           <span class="md-ellipsis">
-            Hermes Bridge API
+            Hermes WebUI
           </span>
         </div>
         <div class="md-header__topic" data-md-component="header-topic">
@@ -141,9 +146,11 @@
   <a href="/setup/">Setup</a>
   <a href="/models/">Models</a>
   <a href="/memory/">Memory</a>
+  <a href="/guides/agent-credentials/">Credentials</a>
   <a href="/#compare">Compare</a>
   <a href="/community/">Community</a>
-  <a href="/api-docs/" aria-current="true">API</a>
+  <a href="/api-docs/" aria-current="page">API</a>
+  <a class="hermes-sitecta" href="/setup/">Get started</a>
 </nav>
     
       
@@ -179,10 +186,10 @@
     
       
       
-        <label class="md-header__button md-icon" for="__search">
-          
+        
+        <button type="button" class="md-header__button md-icon site-toggle" data-site-toggle="__search" aria-expanded="false" aria-label="Search">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
-        </label>
+        </button>
         <div class="md-search" data-md-component="search" role="dialog" aria-label="Search documentation">
   <label class="md-search__overlay" for="__search"></label>
   <div class="md-search__inner" role="search">
@@ -252,7 +259,16 @@
     </a>
     Hermes Bridge API
   </label>
-  
+  <ul class="hermes-drawer-site" aria-label="Site">
+    <li><a href="/setup/">Setup</a></li>
+    <li><a href="/models/">Models</a></li>
+    <li><a href="/memory/">Memory</a></li>
+    <li><a href="/guides/agent-credentials/">Credentials</a></li>
+    <li><a href="/#compare">Compare</a></li>
+    <li><a href="/community/">Community</a></li>
+    <li><a href="/api-docs/" aria-current="page">API</a></li>
+    <li><a href="/setup/">Get started</a></li>
+  </ul>
   <ul class="md-nav__list" data-md-scrollfix>
     
       
@@ -1222,11 +1238,23 @@
   <div class="md-footer-meta md-typeset">
     <div class="md-footer-meta__inner md-grid">
       <div class="md-copyright">
+  <ul class="hermes-footer-links">
+    <li><a href="/setup/">Setup</a></li>
+    <li><a href="/models/">Models</a></li>
+    <li><a href="/memory/">Memory</a></li>
+    <li><a href="/guides/agent-credentials/">Credentials</a></li>
+    <li><a href="/api-docs/">Bridge API</a></li>
+    <li><a href="/#compare">Compare</a></li>
+    <li><a href="/community/">Community</a></li>
+    <li><a href="/hidden-features/">Hidden features</a></li>
+    <li><a href="/eli5/">What is Hermes?</a></li>
+    <li><a href="https://github.com/nesquena/hermes-webui">GitHub</a></li>
+    <li><a href="https://hermes-agent.nousresearch.com/">Official Hermes Agent site</a></li>
+  </ul>
   
     <div class="md-copyright__highlight">
       Community project. Not affiliated with Nous Research.
     </div>
-  
   
 </div>
       

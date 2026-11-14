@@ -1,0 +1,31 @@
+/* Scoped model-guide content. Global chrome, fonts, tokens and theme come from shared site assets. */
+.model-guide{max-width:1100px;margin:0 auto;padding:0 24px 64px;color:var(--text);font:400 16px/1.65 var(--font)}
+.model-guide *{box-sizing:border-box}
+.model-guide .mg-hero{padding:64px 0 32px;max-width:820px}
+.model-guide .mg-eyebrow{font-size:14px;font-weight:600;color:var(--gold-text);margin:0 0 12px}
+.model-guide h1,.model-guide h2,.model-guide h3{color:var(--text);font-weight:700;line-height:1.2;letter-spacing:-.02em;margin:0 0 16px}
+.model-guide h1{font-size:48px}.model-guide h2{font-size:30px}.model-guide h3{font-size:22px;font-weight:600}
+.model-guide p{margin:0 0 16px}.model-guide .mg-lead{font-size:18px;color:var(--text-2)}
+.model-guide .mg-meta,.model-guide .mg-note,.model-guide .mg-small{font-size:14px;color:var(--text-2)}
+.model-guide a{color:var(--gold-text);text-decoration:underline;text-underline-offset:3px;overflow-wrap:break-word}
+.model-guide a:focus-visible,.model-guide [tabindex]:focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+.model-guide .mg-jumps{display:flex;flex-wrap:wrap;gap:4px 24px;border-block:1px solid var(--border);padding:16px 0;font-size:14px}
+.model-guide .mg-jumps a{padding-block:6px}
+.model-guide .mg-section{padding:64px 0 0}
+.model-guide .mg-section>p,.model-guide .mg-task,.model-guide .mg-section>ol,.model-guide .mg-section>pre,.model-guide .mg-sources{max-width:760px}
+.model-guide .mg-decisions{margin:24px 0}.model-guide .mg-decisions>div{display:grid;grid-template-columns:180px minmax(0,1fr);gap:24px;padding:20px 0;border-top:1px solid var(--border)}
+.model-guide dt{font-weight:600}.model-guide dd{margin:0}.model-guide .mg-task{padding-top:24px}
+.model-guide code,.model-guide pre{font:400 14px/1.6 var(--mono)}
+.model-guide code{overflow-wrap:anywhere;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 4px}
+.model-guide pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow:auto}
+.model-guide pre code{padding:0;border:0;overflow-wrap:normal}
+.model-guide .mg-table-scroll{overflow-x:auto;border:1px solid var(--border);border-radius:8px;margin:24px 0}
+.model-guide table{border-collapse:collapse;min-width:660px;width:100%;text-align:left;font-size:14px;background:var(--bg)}
+.model-guide caption{text-align:left;font-weight:600;padding:16px;background:var(--surface);color:var(--text);position:sticky;left:0;max-width:calc(100vw - 34px)}
+.model-guide th,.model-guide td{padding:14px 16px;vertical-align:top;border-top:1px solid var(--border);color:var(--text);line-height:1.6}
+.model-guide thead th{background:var(--surface);font-weight:600}.model-guide tbody th{width:37%;font-weight:600}
+.model-guide tbody th code{display:block;width:fit-content;margin-top:4px;font-weight:400}.model-guide td .mg-small{display:block;max-width:220px}
+.model-guide li{margin-bottom:12px}.model-guide ol,.model-guide ul{padding-left:24px}
+.model-guide .mg-endpoints{margin:24px 0;max-width:760px}.model-guide .mg-endpoints>div{margin:0 0 16px}.model-guide .mg-endpoints dd{margin-top:4px}
+@media(max-width:760px){.model-guide{padding-inline:16px}.model-guide .mg-hero{padding-top:40px}.model-guide h1{font-size:36px}.model-guide h2{font-size:26px}.model-guide h3{font-size:20px}.model-guide .mg-lead{font-size:18px}.model-guide .mg-decisions>div{grid-template-columns:minmax(0,1fr);gap:8px}.model-guide .mg-section{padding-top:48px}}
+@media(max-width:480px){.model-guide table{min-width:500px}.model-guide tbody th{width:auto}.model-guide tbody th code{font-size:12px}.model-guide th,.model-guide td{padding:12px 10px}.model-guide tbody td:nth-child(2){white-space:nowrap}.model-guide td .mg-small{white-space:normal;max-width:120px}}

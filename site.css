@@ -1,49 +1,6 @@
-/* get-hermes.ai shared stylesheet (prototype). One sheet for every hand-written page.
-   Tokens: GitHub-style neutrals, one gold. Gold = Hermes and the primary action only.
+/* get-hermes.ai components for the new-style pages (memory, compare/claude-code, specimen). Load after /chrome.css,
+   which provides the tokens, fonts, header, Menu and footer. Gold = Hermes and the primary action only.
    Green/red = yes/no cells only. Two radii. One container (1100) and one prose measure (720). */
-
-:root, :root[data-theme="dark"] {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --border: #30363d;
-  --text: #e6edf3;
-  --text-2: #9198a1;
-  --gold: #f0a500;
-  --gold-text: #f0a500;
-  --gold-soft: rgba(240,165,0,.10);
-  --on-gold: #0d1117;
-  --yes: #3fb950;
-  --no: #f85149;
-  color-scheme: dark;
-}
-:root[data-theme="light"] {
-  --bg: #ffffff;
-  --surface: #f6f8fa;
-  --border: #d0d7de;
-  --text: #1f2328;
-  --text-2: #59636e;
-  --gold: #c07800;
-  --gold-text: #946000;
-  --gold-soft: rgba(192,120,0,.08);
-  --on-gold: #0d1117;
-  --yes: #1a7f37;
-  --no: #cf222e;
-  color-scheme: light;
-}
-
-:root {
-  --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  --r-card: 8px;
-  --r-ctl: 6px;
-  --container: 1100px;
-  --measure: 720px;
-  --gutter: 24px;
-  --section: 64px;
-  --header: 64px;
-}
-@media (max-width: 760px) { :root { --gutter: 16px; --section: 48px; } }
-
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; scroll-padding-top: calc(var(--header) + 16px); }
 body {
@@ -61,9 +18,6 @@ small, .small { font-size: 14px; }
 
 /* Gold stays for prose links and the main button; links inside data take the text colour */
 td a, th a, .card h3 a, .card .meta a, .callout a, a code { color: inherit; }
-
-.skip { position: absolute; left: 8px; top: -48px; z-index: 100; background: var(--gold); color: var(--on-gold); padding: 8px 12px; border-radius: var(--r-ctl); font-weight: 600; text-decoration: none; }
-.skip:focus { top: 8px; }
 
 /* Type scale: 14 / 16 / 18 / 22 / 30 / 48 (64 home only). Weights 400 600 700. */
 h1, h2, h3 { color: var(--text); font-weight: 700; line-height: 1.15; margin: 0 0 16px; }
@@ -91,34 +45,8 @@ pre code { background: none; border: 0; padding: 0; overflow-wrap: normal; }
 @media (max-width: 760px) { .grid-2 { grid-template-columns: minmax(0, 1fr); } }
 .grid + *, .grid-2 + *, .table-wrap + *, .shot + * { margin-top: 24px; }
 
-/* Header (one for every page) */
-.site-header { position: sticky; top: 0; z-index: 50; background: var(--bg); border-bottom: 1px solid var(--border); }
-.site-header .container { display: flex; align-items: center; gap: 24px; height: var(--header); }
-.brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; font-size: 18px; text-decoration: none; }
-.brand img { width: 28px; height: 28px; border-radius: 6px; }
-.site-nav { display: flex; align-items: center; gap: 24px; flex: 1; }
-.nav { display: flex; gap: 20px; margin: 0; padding: 0; list-style: none; }
-.nav a { display: flex; align-items: center; height: var(--header); color: var(--text-2); text-decoration: none; font-size: 15px; font-weight: 500; }
-.nav a:hover, .nav a[aria-current] { color: var(--text); }
-.nav a[aria-current] { box-shadow: inset 0 -2px 0 var(--gold); }
-.header-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.theme-toggle { background: none; border: 1px solid var(--border); color: var(--text-2); border-radius: var(--r-ctl); height: 34px; padding: 0 10px; font: 500 14px var(--font); cursor: pointer; }
-.theme-toggle:hover { color: var(--text); }
-.menu { display: none; position: relative; }
-.menu summary { list-style: none; cursor: pointer; border: 1px solid var(--border); border-radius: var(--r-ctl); height: 34px; padding: 0 10px; display: flex; align-items: center; color: var(--text); font-size: 14px; font-weight: 500; }
-.menu summary::-webkit-details-marker { display: none; }
-.menu ul { position: absolute; right: 0; top: 42px; min-width: 200px; margin: 0; padding: 8px; list-style: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); }
-.menu li a { display: block; padding: 10px 12px; color: var(--text); text-decoration: none; border-radius: var(--r-ctl); }
-.menu li a:hover { background: var(--bg); }
-@media (max-width: 900px) {
-  .nav { display: none; }
-  .menu { display: block; margin-left: auto; }
-  .header-actions .btn { display: none; }
-}
-
 /* Buttons */
 .btn { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: var(--r-ctl); font: 600 15px var(--font); text-decoration: none; border: 1px solid transparent; }
-.site-header .btn { height: 34px; padding: 0 12px; font-size: 14px; }
 .btn-primary { background: var(--gold); color: var(--on-gold); }
 .btn-primary:hover { filter: brightness(1.06); }
 .btn-secondary { border-color: var(--border); color: var(--text); background: var(--surface); }
@@ -197,19 +125,5 @@ thead th.is-hermes { color: var(--gold-text); }
 /* Link list (replaces card grids of links) */
 .link-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 24px; }
 
-/* Footer (one line for every page) */
-.site-footer { border-top: 1px solid var(--border); padding: 32px 0 48px; font-size: 14px; color: var(--text-2); }
-.site-footer .container { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
-.site-footer a { color: var(--text-2); }
-.site-footer .footer-links { margin-left: auto; display: flex; gap: 20px; }
-@media (max-width: 760px) { .site-footer .footer-links { margin-left: 0; } }
-
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
 
-/* Header name "Hermes WebUI"; at phone widths the theme toggle moves into the Menu so the name fits */
-.brand-name { white-space: nowrap; }
-.menu .theme-toggle { display: none; width: 100%; height: 40px; padding: 0 12px; border: 0; text-align: left; font-size: 16px; color: var(--text); }
-@media (max-width: 480px) {
-  .header-actions .theme-toggle { display: none; }
-  .menu .theme-toggle { display: block; }
-}

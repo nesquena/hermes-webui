@@ -9,11 +9,9 @@
   <link rel="shortcut icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" sizes="512x512" href="/apple-touch-icon.png" />
   <title>Hermes vs. Cursor | Comparison</title>
-  <meta name="description" content="Cursor has per-project Memories, cloud Automations (March 2026), Slack integration, and v3.0 agent-first with 30+ marketplace plugins. It's not a narrow editor anymore." />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <style>
+  <meta name="description" content="Cursor is an AI code editor with background agents. Hermes is an agent you run yourself and reach from a browser or your chat apps." />
+<link rel="stylesheet" href="/chrome.css"><script src="/site.js"></script>
+<style>
     :root {
       --bg-primary: #0d1117;
       --bg-secondary: #161b22;
@@ -59,338 +57,175 @@
       --purple: #7c3aed;
       --shadow: 0 1px 3px rgba(0,0,0,0.1),0 4px 16px rgba(0,0,0,0.06);
     }
-    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    html{scroll-behavior:smooth;font-size:16px;overflow-x:hidden}
-    body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg-primary);color:var(--text-primary);line-height:1.6;transition:background 0.2s,color 0.2s;-webkit-font-smoothing:antialiased}
-    a{color:var(--accent);text-decoration:none;transition:color 0.15s}
-    a:hover{color:var(--accent-dim)}
-    img{max-width:100%}
-    ::-webkit-scrollbar{width:6px;height:6px}
-    ::-webkit-scrollbar-track{background:var(--bg-secondary)}
-    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-    #nav{position:fixed;top:0;left:0;right:0;height:var(--nav-height);background:rgba(13,17,23,0.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);z-index:1000}
-    [data-theme="light"] #nav{background:rgba(255,255,255,0.92)}
-    .nav-inner{max-width:1100px;margin:0 auto;padding:0 24px;height:100%;display:flex;align-items:center;justify-content:space-between;gap:16px}
-    .nav-logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.1rem;color:var(--text-primary);text-decoration:none;flex-shrink:0}
-    .nav-logo-icon{width:32px;height:32px;background:linear-gradient(135deg,var(--accent),var(--accent-dim));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;line-height:1}
-    .nav-back{display:flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:0.875rem;font-weight:500;padding:6px 12px;border-radius:6px;transition:color 0.15s,background 0.15s;text-decoration:none}
-    .nav-back:hover{color:var(--text-primary);background:var(--bg-tertiary)}
-    .btn-theme{background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;padding:7px 10px;border-radius:6px;font-size:15px;line-height:1;transition:border-color 0.15s,color 0.15s,background 0.15s}
-    .btn-theme:hover{border-color:var(--border-hover);color:var(--text-primary);background:var(--bg-tertiary)}
-    .btn-cta{background:var(--accent);color:#000;font-size:0.8rem;font-weight:600;padding:7px 14px;border-radius:6px;border:none;cursor:pointer;text-decoration:none;display:inline-block;transition:background 0.15s,transform 0.1s;white-space:nowrap}
-    .btn-cta:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
-    main{padding-top:var(--nav-height)}
-    .hero{padding:60px 24px 48px;background:var(--bg-primary);position:relative;overflow:hidden}
-    .hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:400px;background:radial-gradient(ellipse at center,var(--accent-glow) 0%,transparent 70%);pointer-events:none}
-    .container{max-width:1100px;margin:0 auto;position:relative}
-    .section{padding:64px 24px}
-    .section-alt{background:var(--bg-secondary)}
-    .breadcrumb{display:flex;align-items:center;gap:8px;font-size:0.8rem;color:var(--text-muted);margin-bottom:24px;flex-wrap:wrap}
-    .breadcrumb a{color:var(--text-muted)}
-    .breadcrumb a:hover{color:var(--accent)}
-    .breadcrumb-sep{opacity:0.4}
-    .page-label{font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
-    .page-title{font-size:clamp(2rem,5vw,3.2rem);font-weight:800;line-height:1.1;letter-spacing:-0.02em;margin-bottom:16px}
-    .page-sub{font-size:1.05rem;color:var(--text-secondary);max-width:680px;line-height:1.7;margin-bottom:32px}
-    .verdict{display:flex;align-items:flex-start;gap:16px;background:var(--accent-subtle);border:1px solid rgba(240,165,0,0.2);border-radius:var(--radius-lg);padding:20px 24px;margin-bottom:48px}
-    [data-theme="light"] .verdict{border-color:rgba(192,120,0,0.2)}
-    .verdict-icon{font-size:1.6rem;flex-shrink:0;line-height:1}
-    .verdict-text strong{color:var(--text-primary);display:block;margin-bottom:4px;font-size:1rem}
-    .verdict-text p{color:var(--text-secondary);font-size:0.9rem;line-height:1.6;margin:0}
-    .section-title{font-size:clamp(1.4rem,3vw,1.9rem);font-weight:700;margin-bottom:8px;color:var(--text-primary)}
-    .section-body{font-size:1rem;color:var(--text-secondary);max-width:720px;line-height:1.7;margin-bottom:32px}
-    .feature-compare{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:40px}
-    @media(max-width:700px){.feature-compare{grid-template-columns:1fr}}
-    .fc-col{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px}
-    .fc-col.hermes{border-color:var(--accent);border-width:2px}
-    .fc-col-label{font-size:0.75rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:16px;color:var(--text-muted)}
-    .fc-col.hermes .fc-col-label{color:var(--accent)}
-    .fc-col-name{font-size:1.1rem;font-weight:700;color:var(--text-primary);margin-bottom:20px}
-    .fc-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)}
-    .fc-row:last-child{border-bottom:none}
-    .fc-key{flex:1;font-size:0.875rem;color:var(--text-secondary)}
-    .fc-val{font-size:0.875rem;font-weight:500;text-align:right;min-width:60px}
-    .fc-val.yes{color:var(--green)}
-    .fc-val.no{color:var(--text-muted)}
-    .fc-val.partial{color:var(--accent)}
-    .fc-val.preview{color:var(--purple)}
-    .fc-val.cloud{color:var(--blue)}
-    .narrative{max-width:780px;min-width:0;word-break:break-word}
-    .narrative h3{font-size:1.1rem;font-weight:700;color:var(--text-primary);margin:32px 0 10px}
-    .narrative h3:first-child{margin-top:0}
-    .narrative p{font-size:0.975rem;color:var(--text-secondary);line-height:1.75;margin-bottom:16px}
-    .narrative ul{padding-left:20px;margin-bottom:16px}
-    .narrative li{font-size:0.975rem;color:var(--text-secondary);line-height:1.7;margin-bottom:6px}
-    .narrative strong{color:var(--text-primary)}
-    .narrative a{color:var(--accent)}
-    .table-wrap{overflow-x:auto;border-radius:var(--radius-lg);border:1px solid var(--border);margin:24px 0 40px}
-    table{width:100%;border-collapse:collapse;font-size:0.875rem}
-    thead th{background:var(--bg-tertiary);color:var(--text-secondary);font-weight:600;font-size:0.78rem;letter-spacing:0.04em;text-transform:uppercase;padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
-    thead th:first-child{color:var(--text-primary)}
-    tbody tr{border-bottom:1px solid var(--border);transition:background 0.1s}
-    tbody tr:last-child{border-bottom:none}
-    tbody tr:hover{background:var(--bg-card-hover)}
-    tbody tr.hl{background:var(--accent-subtle)}
-    tbody tr.hl:hover{background:rgba(240,165,0,0.12)}
-    tbody td{padding:12px 16px;color:var(--text-secondary);vertical-align:middle}
-    tbody td:first-child{font-weight:600;color:var(--text-primary);white-space:nowrap}
-    .c-yes{color:var(--green);font-weight:600}
-    .c-no{color:var(--text-muted);font-size:0.82rem}
-    .c-partial{color:var(--accent);font-size:0.82rem}
-    .c-cloud{color:var(--blue);font-size:0.82rem}
-    .c-prev{color:var(--purple);font-size:0.82rem}
-    .who-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}
-    @media(max-width:600px){.who-grid{grid-template-columns:1fr}}
-    .who-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px}
-    .who-card.choose-hermes{border-color:var(--green)}
-    .who-card.choose-other{border-color:var(--border)}
-    .who-card-label{font-size:0.72rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;color:var(--text-muted)}
-    .who-card.choose-hermes .who-card-label{color:var(--green)}
-    .who-card ul{padding-left:18px}
-    .who-card li{font-size:0.9rem;color:var(--text-secondary);line-height:1.65;margin-bottom:6px}
-    .who-card strong{color:var(--text-primary)}
-    .cta-strip{background:var(--bg-secondary);border-top:1px solid var(--border);padding:40px 24px;text-align:center}
-    .cta-strip h2{font-size:1.4rem;font-weight:700;margin-bottom:8px}
-    .cta-strip p{color:var(--text-secondary);margin-bottom:24px;font-size:0.975rem}
-    .cta-btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
-    .btn-primary{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#000;font-weight:600;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:background 0.15s,transform 0.1s}
-    .btn-primary:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
-    .btn-secondary{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-primary);font-weight:500;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:border-color 0.15s,background 0.15s}
-    .btn-secondary:hover{border-color:var(--border-hover);background:var(--bg-card-hover);color:var(--text-primary)}
-    .compare-nav{display:flex;flex-wrap:wrap;gap:8px;margin-top:40px;padding-top:32px;border-top:1px solid var(--border)}
-    .compare-nav-label{width:100%;font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px}
-    .cpill{display:inline-block;padding:6px 14px;border:1px solid var(--border);border-radius:100px;font-size:0.82rem;font-weight:500;color:var(--text-secondary);transition:border-color 0.15s,color 0.15s,background 0.15s}
-    .cpill:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-subtle)}
-    .cpill.active{border-color:var(--accent);color:var(--accent);background:var(--accent-subtle)}
-    /* ── Mobile nav: prevent 3-item nav overflow ── */
-    @media(max-width:640px){
-      .nav-back{display:none}
-      .btn-cta{display:none}
-      .nav-inner{gap:8px}
-    }
+    *,*::before,*::after {box-sizing:border-box;margin:0;padding:0}
+    html {scroll-behavior:smooth;font-size:16px;overflow-x:hidden}
+    body {font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg-primary);color:var(--text-primary);line-height:1.6;transition:background 0.2s,color 0.2s;-webkit-font-smoothing:antialiased}
+    a {color:var(--accent);text-decoration:none;transition:color 0.15s}
+    a:hover {color:var(--accent-dim)}
+    img {max-width:100%}
+    .btn-theme {background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;padding:7px 10px;border-radius:6px;font-size:15px;line-height:1;transition:border-color 0.15s,color 0.15s,background 0.15s}
+    .btn-theme:hover {border-color:var(--border-hover);color:var(--text-primary);background:var(--bg-tertiary)}
+    main {padding-top: 0}
+    .hero {padding:60px 24px 48px;background:var(--bg-primary);position:relative;overflow:hidden}
+    .hero::before {content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:400px;background:radial-gradient(ellipse at center,var(--accent-glow) 0%,transparent 70%);pointer-events:none}
+    .container {max-width:1100px;margin:0 auto;position:relative}
+    .section {padding:64px 24px}
+    .section-alt {background:var(--bg-secondary)}
+    .breadcrumb {display:flex;align-items:center;gap:8px;font-size:0.8rem;color:var(--text-muted);margin-bottom:24px;flex-wrap:wrap}
+    .breadcrumb a {color:var(--text-muted)}
+    .breadcrumb a:hover {color:var(--accent)}
+    .breadcrumb-sep {opacity:0.4}
+    .page-label {font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+    .page-title {font-size:clamp(2rem,5vw,3.2rem);font-weight:800;line-height:1.1;letter-spacing:-0.02em;margin-bottom:16px}
+    .page-sub {font-size:1.05rem;color:var(--text-secondary);max-width:680px;line-height:1.7;margin-bottom:32px}
+    .verdict {display:flex;align-items:flex-start;gap:16px;background:var(--accent-subtle);border:1px solid rgba(240,165,0,0.2);border-radius:var(--radius-lg);padding:20px 24px;margin-bottom:48px}
+    [data-theme="light"] .verdict {border-color:rgba(192,120,0,0.2)}
+    .verdict-icon {font-size:1.6rem;flex-shrink:0;line-height:1}
+    .verdict-text strong {color:var(--text-primary);display:block;margin-bottom:4px;font-size:1rem}
+    .verdict-text p {color:var(--text-secondary);font-size:0.9rem;line-height:1.6;margin:0}
+    .section-title {font-size:clamp(1.4rem,3vw,1.9rem);font-weight:700;margin-bottom:8px;color:var(--text-primary)}
+    .section-body {font-size:1rem;color:var(--text-secondary);max-width:720px;line-height:1.7;margin-bottom:32px}
+    .feature-compare {display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:40px}
+    @media(max-width:700px){.feature-compare {grid-template-columns:1fr}}
+    .fc-col {background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px}
+    .fc-col.hermes {border-color:var(--accent);border-width:2px}
+    .fc-col-label {font-size:0.75rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:16px;color:var(--text-muted)}
+    .fc-col.hermes .fc-col-label {color:var(--accent)}
+    .fc-col-name {font-size:1.1rem;font-weight:700;color:var(--text-primary);margin-bottom:20px}
+    .fc-row {display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)}
+    .fc-row:last-child {border-bottom:none}
+    .fc-key {flex:1;font-size:0.875rem;color:var(--text-secondary)}
+    .fc-val {font-size:0.875rem;font-weight:500;text-align:right;min-width:60px}
+    .fc-val.yes {color:var(--green)}
+    .fc-val.no {color:var(--text-muted)}
+    .fc-val.partial {color:var(--accent)}
+    .fc-val.preview {color:var(--purple)}
+    .fc-val.cloud {color:var(--blue)}
+    .narrative {max-width:780px;min-width:0;word-break:break-word}
+    .narrative h3 {font-size:1.1rem;font-weight:700;color:var(--text-primary);margin:32px 0 10px}
+    .narrative h3:first-child {margin-top:0}
+    .narrative p {font-size:0.975rem;color:var(--text-secondary);line-height:1.75;margin-bottom:16px}
+    .narrative ul {padding-left:20px;margin-bottom:16px}
+    .narrative li {font-size:0.975rem;color:var(--text-secondary);line-height:1.7;margin-bottom:6px}
+    .narrative strong {color:var(--text-primary)}
+    .narrative a {color:var(--accent)}
+    .table-wrap {overflow-x:auto;border-radius:var(--radius-lg);border:1px solid var(--border);margin:24px 0 40px}
+    table {width:100%;border-collapse:collapse;font-size:0.875rem}
+    thead th {background:var(--bg-tertiary);color:var(--text-secondary);font-weight:600;font-size:0.78rem;letter-spacing:0.04em;text-transform:uppercase;padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+    thead th:first-child {color:var(--text-primary)}
+    tbody tr {border-bottom:1px solid var(--border);transition:background 0.1s}
+    tbody tr:last-child {border-bottom:none}
+    tbody tr:hover {background:var(--bg-card-hover)}
+    tbody tr.hl {background:var(--accent-subtle)}
+    tbody tr.hl:hover {background:rgba(240,165,0,0.12)}
+    tbody td {padding:12px 16px;color:var(--text-secondary);vertical-align:middle}
+    tbody td:first-child {font-weight:600;color:var(--text-primary);white-space:nowrap}
+    .c-yes {color:var(--green);font-weight:600}
+    .c-no {color:var(--text-muted);font-size:0.82rem}
+    .c-partial {color:var(--accent);font-size:0.82rem}
+    .c-cloud {color:var(--blue);font-size:0.82rem}
+    .c-prev {color:var(--purple);font-size:0.82rem}
+    .who-grid {display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}
+    @media(max-width:600px){.who-grid {grid-template-columns:1fr}}
+    .who-card {background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px}
+    .who-card.choose-hermes {border-color:var(--green)}
+    .who-card.choose-other {border-color:var(--border)}
+    .who-card-label {font-size:0.72rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;color:var(--text-muted)}
+    .who-card.choose-hermes .who-card-label {color:var(--green)}
+    .who-card ul {padding-left:18px}
+    .who-card li {font-size:0.9rem;color:var(--text-secondary);line-height:1.65;margin-bottom:6px}
+    .who-card strong {color:var(--text-primary)}
+    .cta-strip {background:var(--bg-secondary);border-top:1px solid var(--border);padding:40px 24px;text-align:center}
+    .cta-strip h2 {font-size:1.4rem;font-weight:700;margin-bottom:8px}
+    .cta-strip p {color:var(--text-secondary);margin-bottom:24px;font-size:0.975rem}
+    .cta-btns {display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+    .btn-primary {display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#000;font-weight:600;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:background 0.15s,transform 0.1s}
+    .btn-primary:hover {background:var(--accent-dim);color:#000;transform:translateY(-1px)}
+    .btn-secondary {display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-primary);font-weight:500;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:border-color 0.15s,background 0.15s}
+    .btn-secondary:hover {border-color:var(--border-hover);background:var(--bg-card-hover);color:var(--text-primary)}
+    .compare-nav {display:flex;flex-wrap:wrap;gap:8px;margin-top:40px;padding-top:32px;border-top:1px solid var(--border)}
+    .compare-nav-label {width:100%;font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px}
+    .cpill {display:inline-block;padding:6px 14px;border:1px solid var(--border);border-radius:100px;font-size:0.82rem;font-weight:500;color:var(--text-secondary);transition:border-color 0.15s,color 0.15s,background 0.15s}
+    .cpill:hover {border-color:var(--accent);color:var(--accent);background:var(--accent-subtle)}
+    .cpill.active {border-color:var(--accent);color:var(--accent);background:var(--accent-subtle)}
     @media(max-width:768px){
-      .section{padding:48px 16px}
-      .hero{padding:48px 16px 36px}
-      .feature-compare{grid-template-columns:1fr}
-    }
-  
-    /* HAMBURGER */
-    .hamburger{display:none;flex-direction:column;gap:5px;cursor:pointer;padding:6px;border:1px solid var(--border);border-radius:6px;background:none;transition:border-color 0.15s;flex-shrink:0}
-    .hamburger:hover{border-color:var(--accent)}
-    .hamburger span{display:block;width:20px;height:2px;background:var(--text-secondary);border-radius:2px;transition:transform 0.2s,opacity 0.2s}
-    .hamburger.open span:nth-child(1){transform:translateY(7px) rotate(45deg)}
-    .hamburger.open span:nth-child(2){opacity:0}
-    .hamburger.open span:nth-child(3){transform:translateY(-7px) rotate(-45deg)}
-    #compare-mobile-menu{display:none;position:fixed;top:var(--nav-height,64px);left:0;right:0;background:var(--bg-secondary,#161b22);border-bottom:1px solid var(--border,#30363d);padding:16px 24px;z-index:999;flex-direction:column;gap:4px}
-    #compare-mobile-menu.open{display:flex}
-    #compare-mobile-menu a{color:var(--text-secondary,#8b949e);font-size:0.95rem;font-weight:500;padding:10px 12px;border-radius:6px;text-decoration:none;transition:color 0.15s,background 0.15s}
-    #compare-mobile-menu a:hover{color:var(--text-primary,#e6edf3);background:var(--bg-tertiary,#21262d)}
-    #compare-mobile-menu a.accent{color:var(--accent,#f0a500)}
-    #compare-mobile-menu .menu-divider{height:1px;background:var(--border,#30363d);margin:4px 0}
-    @media(max-width:640px){
-      .hamburger{display:flex}
-      .btn-cta{display:none}
-      .nav-back{display:none}
+      .section {padding:48px 16px}
+      .hero {padding:48px 16px 36px}
+      .feature-compare {grid-template-columns:1fr}
     }
     </style>
+<style>/* site-wide tokens and type over this page's own variables (unify.py) */
+:root, :root[data-theme="dark"] { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-2: #9198a1; --gold: #f0a500; --gold-text: #f0a500; --bg-primary: #0d1117; --bg-secondary: #161b22; --bg-card: #161b22; --text-primary: #e6edf3; --text-secondary: #9198a1; --text-muted: #9198a1; --accent: #f0a500; --ink: #e6edf3; --muted: #9198a1; --line: #30363d; --nav-height: var(--header); }
+:root[data-theme="light"] { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --text-2: #59636e; --gold: #c07800; --gold-text: #8a5800; --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-card: #f6f8fa; --text-primary: #1f2328; --text-secondary: #59636e; --text-muted: #59636e; --accent: #8a5800; --ink: #1f2328; --muted: #59636e; --line: #d0d7de; --nav-height: var(--header); }
+:root[data-theme="light"] :is(.btn-primary) { background-color: var(--gold); }
+:root[data-theme="light"] .c-yes { color: #116329; }
+.table-wrap caption { text-align: left; padding: 12px 16px; color: var(--text-2); font-size: .85rem; }
+.table-wrap tbody th[scope=row] { text-align: left; padding-left: 16px; }
+.hero + .section { padding-top: 32px; }
+@media (max-width: 600px) {
+  .table-wrap thead { display: none; }
+  .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: 100%; }
+  .table-wrap table { min-width: 0; }
+  .table-wrap caption { display: block; max-width: none; }
+  .table-wrap tr { border-top: 1px solid var(--border); padding: 12px 16px; }
+  .table-wrap tbody th[scope=row] { padding: 0 0 6px; border: 0; }
+  .table-wrap td { border: 0; padding: 4px 0 4px 12px; border-left: 2px solid var(--border); text-align: left; }
+  .table-wrap td + td { margin-top: 6px; }
+  .table-wrap td.is-hermes { border-left-color: var(--gold); }
+  .table-wrap td::before { content: attr(data-label); display: block; font-size: 14px; font-weight: 600; color: var(--text-2); }
+  .table-wrap td.is-hermes::before { color: var(--gold-text); }
+}
+main p a:not([class]) { text-decoration: underline; text-underline-offset: 2px; }
+body { font-family: var(--font); }
+code, pre, kbd, samp { font-family: var(--mono); }
+</style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header"><div class="container">
+<a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28"><span class="brand-name">Hermes WebUI</span></a>
+<nav class="site-nav" aria-label="Main"><ul class="nav"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/#compare" aria-current="true">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/api-docs/">API</a></li></ul>
+<details class="menu"><summary>Menu</summary><ul><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/#compare" aria-current="true">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/api-docs/">API</a></li><li><a href="/setup/">Get started</a></li><li><button class="theme-toggle" type="button">Light</button></li></ul></details></nav>
+<div class="header-actions">
+<button type="button" class="theme-toggle">Light</button>
+<a class="site-cta" href="/setup/">Get started</a>
+</div></div></header>
+<div class="legacy-hooks" hidden aria-hidden="true"><button id="compare-hamburger" type="button" tabindex="-1"></button><div id="compare-mobile-menu"></div><button id="theme-toggle" type="button" tabindex="-1"></button></div>
 
-<nav id="nav">
-  <div class="nav-inner">
-    <a href="../index.html" class="nav-logo">
-      <div class="nav-logo-icon">⚡</div>
-      Hermes
-    </a>
-    <a href="../index.html#compare" class="nav-back"><span>← All comparisons</span></a>
-    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme">🌙</button>
-      <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-cta" target="_blank" rel="noopener">Get started →</a>
-    </div>
-  </div>
-  <button class="hamburger" id="compare-hamburger" aria-label="Open menu" aria-expanded="false"><span></span><span></span><span></span></button>
-</nav>
 
-<div id="compare-mobile-menu">
-  <a href="../index.html">⚡ Hermes Home</a>
-  <a href="../index.html#compare">← All comparisons</a>
-  <div class="menu-divider"></div>
-  <a href="../eli5/" class="accent">🧠 ELI5</a>
-  <a href="../models/" class="accent">🤖 Best Models</a>
-  <a href="../community/" class="accent">🌎 Community</a>
-  <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" class="accent">Get started →</a>
+
+<main id="main">
+<div class="hero"><div class="container">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Hermes WebUI</a><span class="breadcrumb-sep">/</span><a href="/#compare">Comparisons</a><span class="breadcrumb-sep">/</span><span aria-current="page">Cursor</span></nav>
+<div class="page-label">Comparison</div>
+<h1 class="page-title">Hermes vs. Cursor</h1>
+<p class="page-sub">Cursor is an AI code editor with background agents. Hermes is an agent you run yourself and reach from a browser or your chat apps.</p>
+</div></div>
+<section class="section"><div class="container">
+<h2 class="section-title">At a glance</h2>
+<div class="table-wrap" role="region" tabindex="0" aria-label="Hermes and Cursor comparison; scroll horizontally on small screens">
+<table><caption>Checked November 14, 2026</caption><thead><tr><th scope="col">Feature</th><th scope="col">Hermes Agent + WebUI</th><th scope="col">Cursor</th></tr></thead><tbody><tr><th scope="row">Main workflow</th><td class="is-hermes" data-label="Hermes">General agent, messaging and browser workspace</td><td data-label="Cursor">Coding editor plus local and background agent work</td></tr>
+<tr><th scope="row">Editor assistance</th><td class="is-hermes" data-label="Hermes">No autocomplete; the agent edits files for you</td><td data-label="Cursor">Inline completion, editing and review inside the editor</td></tr>
+<tr><th scope="row">Persistent context</th><td class="is-hermes" data-label="Hermes">Profile-scoped local memory; optional backends</td><td data-label="Cursor">Rules, plus notes each automation keeps between runs</td></tr>
+<tr><th scope="row">Scheduled work</th><td class="is-hermes" data-label="Hermes">Self-hosted cron and event hooks</td><td data-label="Cursor">Automations with schedule and event triggers</td></tr>
+<tr><th scope="row">Execution options</th><td class="is-hermes" data-label="Hermes">Your own machine or server</td><td data-label="Cursor">Cursor&rsquo;s cloud or your own machines</td></tr>
+<tr><th scope="row">Open source</th><td class="is-hermes" data-label="Hermes">Agent and WebUI are MIT licensed</td><td data-label="Cursor">Proprietary</td></tr></tbody></table>
 </div>
-
-<main>
-  <div class="hero">
-    <div class="container">
-      <div class="breadcrumb">
-        <a href="../index.html">Hermes</a>
-        <span class="breadcrumb-sep">/</span>
-        <a href="../index.html#compare">Comparisons</a>
-        <span class="breadcrumb-sep">/</span>
-        <span>vs. Cursor</span>
-      </div>
-      <div class="page-label">Comparison</div>
-      <h1 class="page-title">Hermes vs. Cursor</h1>
-      <p class="page-sub">Cursor has per-project Memories, cloud Automations (March 2026), Slack integration, and v3.0 agent-first with 30+ marketplace plugins. It's not a narrow editor anymore.</p>
-
-      <div class="verdict">
-        <div class="verdict-icon">✏️</div>
-        <div class="verdict-text">
-          <strong>Different primary use case.</strong>
-          <p>Cursor is exceptional for in-editor coding. Hermes is a persistent server agent. Most devs use both: Cursor in the editor, Hermes for continuity and automation across everything else.</p>
-        </div>
-      </div>
-
-      <div class="feature-compare">
-        <div class="fc-col hermes">
-          <div class="fc-col-label">You're here</div>
-          <div class="fc-col-name">Hermes</div>
-          <div class="fc-row"><span class="fc-key">In-editor autocomplete</span><span class="fc-val no">No</span></div>
-          <div class="fc-row"><span class="fc-key">Inline diff/refactor</span><span class="fc-val partial">Via shell</span></div>
-          <div class="fc-row"><span class="fc-key">Cross-session memory</span><span class="fc-val yes">Yes, all projects</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled background jobs</span><span class="fc-val yes">Yes, self-hosted cron</span></div>
-          <div class="fc-row"><span class="fc-key">Messaging/multi-surface</span><span class="fc-val yes">Yes, many platforms</span></div>
-          <div class="fc-row"><span class="fc-key">Self-hosted</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Data sovereignty</span><span class="fc-val yes">Yes, your hardware</span></div>
-          <div class="fc-row"><span class="fc-key">Provider-agnostic</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val yes">Yes, MIT</span></div>
-          <div class="fc-row"><span class="fc-key">Always-on server process</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val yes">Yes, markdown</span></div>
-          <div class="fc-row"><span class="fc-key">Agent marketplace</span><span class="fc-val no">N/A</span></div>
-        </div>
-        <div class="fc-col">
-          <div class="fc-col-label">Comparing</div>
-          <div class="fc-col-name">Cursor</div>
-          <div class="fc-row"><span class="fc-key">In-editor autocomplete</span><span class="fc-val yes">Excellent (Supermaven)</span></div>
-          <div class="fc-row"><span class="fc-key">Inline diff/refactor</span><span class="fc-val yes">Yes, first-class</span></div>
-          <div class="fc-row"><span class="fc-key">Cross-session memory</span><span class="fc-val partial">Yes, per-project (since June 2025)</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled background jobs</span><span class="fc-val cloud">Yes, Automations on cloud VMs (March 2026)</span></div>
-          <div class="fc-row"><span class="fc-key">Messaging/multi-surface</span><span class="fc-val partial">Slack bot, web app, mobile</span></div>
-          <div class="fc-row"><span class="fc-key">Self-hosted</span><span class="fc-val no">No</span></div>
-          <div class="fc-row"><span class="fc-key">Data sovereignty</span><span class="fc-val no">No, cloud VMs</span></div>
-          <div class="fc-row"><span class="fc-key">Provider-agnostic</span><span class="fc-val partial">Partial (Claude/GPT mainly)</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val no">No</span></div>
-          <div class="fc-row"><span class="fc-key">Always-on server process</span><span class="fc-val no">No (app or cloud-scheduled)</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val partial">Partial (local but less accessible)</span></div>
-          <div class="fc-row"><span class="fc-key">Agent marketplace</span><span class="fc-val yes">30+ plugins (v3.0)</span></div>
-        </div>
-      </div>
-
-      <!-- Compare nav pills -->
-      <div class="compare-nav">
-        <div class="compare-nav-label">More comparisons</div>
-        <a href="openclaw.html" class="cpill">vs. OpenClaw</a>
-        <a href="claude-code.html" class="cpill">vs. Claude Code</a>
-        <a href="codex.html" class="cpill">vs. Codex</a>
-        <a href="opencode.html" class="cpill">vs. OpenCode</a>
-        <a href="cursor.html" class="cpill active">vs. Cursor</a>
-        <a href="copilot.html" class="cpill">vs. Copilot</a>
-        <a href="claude-ai.html" class="cpill">vs. Claude.ai</a>
-        <a href="chatgpt.html" class="cpill">vs. ChatGPT</a>
-        <a href="perplexity-computer.html" class="cpill">vs. Perplexity Computer</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Narrative -->
-  <div class="section section-alt">
-    <div class="container">
-      <h2 class="section-title">The details</h2>
-      <p class="section-body">Cursor has evolved far beyond a code editor. But its core identity and its strongest features remain IDE-first.</p>
-      <div class="narrative">
-
-        <h3>Cursor in 2026 is not Cursor in 2024</h3>
-        <p>Cursor has moved fast. <strong>Memories</strong> launched in June 2025, giving per-project context persistence. <strong>Automations</strong> launched in March 2026, enabling scheduled cloud-executed agent tasks. <strong>Cursor v3.0</strong> (April 2026) repositioned it as agent-first with a 30+ plugin marketplace. The company is <strong>valued at over $29B</strong> with $2B ARR, and the Supermaven acquisition brought one of the fastest autocomplete engines in the industry. This is a serious, well-funded product moving quickly.</p>
-
-        <h3>What Cursor is really for</h3>
-        <p>Cursor's strongest features are fundamentally IDE features: <strong>autocomplete as you type</strong> with Supermaven-powered latency, <strong>inline diffs</strong> that let you accept or reject changes line-by-line, and <strong>refactoring with full file context</strong> visible in the editor. No terminal-based agent replicates the inline diff experience. If you spend most of your coding time in an editor and want AI that integrates deeply into that workflow, Cursor is the category leader.</p>
-
-        <h3>Memory and scheduling: per-project cloud vs. cross-project self-hosted</h3>
-        <p>Cursor Memories are <strong>per-project</strong> and stored on Cursor's cloud infrastructure — they persist as long as your subscription is active. Cursor Automations run on <strong>Cursor cloud VMs</strong>, not on your own server. Hermes runs on your hardware: memory accumulates <strong>cross-project</strong> indefinitely, and scheduled jobs run on whatever server you choose. The architectural difference matters for teams that need to keep code off external infrastructure, or who want memory that spans multiple projects and codebases.</p>
-
-        <h3>Data sovereignty</h3>
-        <p>When Cursor Automations execute your code on cloud VMs, your code passes through Cursor's infrastructure. For open-source side projects this is often fine. For proprietary business logic, regulated data, or security-sensitive codebases, the question of <strong>where your code runs</strong> is non-trivial. Hermes runs the agent and scheduler on your hardware. Model requests and connected services still have their own data flows; self-hosting does not make every task local.</p>
-
-        <h3>The combination pattern</h3>
-        <p>These tools work well together. Use <strong>Cursor in the editor</strong> for autocomplete, inline diffs, and active coding sessions. Use <strong>Hermes in the background</strong> for cross-project memory, headless scheduled tasks, messaging integrations, and continuity between sessions. Many teams run both: Cursor for the creative act of writing code, Hermes for everything that needs to persist and run when no one is watching.</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Full table -->
-  <div class="section">
-    <div class="container">
-      <h2 class="section-title">Full feature comparison</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Feature</th>
-              <th>Cursor</th>
-              <th>Hermes</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td>In-editor autocomplete</td><td class="c-yes">Excellent (Supermaven)</td><td class="c-no">No</td></tr>
-            <tr><td>Inline diff/refactor</td><td class="c-yes">Yes, first-class</td><td class="c-partial">Via shell tools</td></tr>
-            <tr class="hl"><td>Memory scope</td><td class="c-partial">Per-project</td><td class="c-yes">Cross-project, all time</td></tr>
-            <tr class="hl"><td>Memory location</td><td class="c-partial">Cursor cloud</td><td class="c-yes">Your server</td></tr>
-            <tr class="hl"><td>Scheduled jobs</td><td class="c-cloud">Yes, Automations (cloud VMs)</td><td class="c-yes">Yes, self-hosted cron</td></tr>
-            <tr><td>Agent execution location</td><td class="c-cloud">Cursor cloud VMs</td><td class="c-yes">Your hardware</td></tr>
-            <tr><td>Messaging</td><td class="c-partial">Slack bot, web, mobile</td><td class="c-yes">Yes, 15+ platforms</td></tr>
-            <tr><td>Self-hosted</td><td class="c-no">No</td><td class="c-yes">Yes</td></tr>
-            <tr class="hl"><td>Data sovereignty</td><td class="c-no">No (cloud VMs)</td><td class="c-yes">Yes, your hardware</td></tr>
-            <tr><td>Provider-agnostic</td><td class="c-partial">Partial (Claude/GPT mainly)</td><td class="c-yes">Yes</td></tr>
-            <tr><td>Open source</td><td class="c-no">No</td><td class="c-yes">Yes, MIT</td></tr>
-            <tr><td>Always-on process</td><td class="c-no">No</td><td class="c-yes">Yes, server daemon</td></tr>
-            <tr><td>Agent marketplace</td><td class="c-yes">30+ plugins (v3.0)</td><td class="c-no">N/A</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Who section -->
-      <h2 class="section-title" style="margin-top:48px">Which should you choose?</h2>
-      <div class="who-grid">
-        <div class="who-card choose-hermes">
-          <div class="who-card-label">Choose Hermes for</div>
-          <ul>
-            <li><strong>Self-hosted execution</strong> — control where the agent runs</li>
-            <li><strong>Data sovereignty</strong> for proprietary or regulated code</li>
-            <li><strong>Cross-project memory</strong> that accumulates indefinitely</li>
-            <li><strong>Headless scheduling</strong> with no GUI required</li>
-            <li><strong>Messaging integrations</strong> across 15+ platforms</li>
-            <li>Open source, MIT licensed</li>
-          </ul>
-        </div>
-        <div class="who-card choose-other">
-          <div class="who-card-label">Choose Cursor (or both) for</div>
-          <ul>
-            <li><strong>Best-in-class in-editor autocomplete</strong> and inline diffs</li>
-            <li><strong>Slack automations</strong> and cloud-scheduled agent tasks</li>
-            <li>Access to the <strong>30+ plugin marketplace</strong> (v3.0)</li>
-            <li>Deep <strong>IDE integration</strong> with full-file refactoring context</li>
-            <li>Managed infrastructure — no server to maintain</li>
-          </ul>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- CTA -->
-  <div class="cta-strip">
-    <div class="container">
-      <h2>Try Hermes for free</h2>
-      <p>Self-hosted, open source, and running in minutes. No cloud account required.</p>
-      <div class="cta-btns">
-        <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-primary" target="_blank" rel="noopener">Get started →</a>
-        <a href="https://github.com/nesquena/hermes-webui" class="btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
-      </div>
-    </div>
-  </div>
+<h2 class="section-title">Which should you choose?</h2><div class="narrative"><ul><li><strong>Pick Hermes</strong> if you want a general agent with browser access and messaging connections.</li>
+<li><strong>Pick Hermes</strong> if you want memory and scheduled jobs on your own server.</li>
+<li><strong>Pick Cursor</strong> if you want AI assistance inside your code editor, with inline edits and review.</li>
+<li><strong>Pick Cursor</strong> if you want background agents and automations next to your editor.</li></ul></div>
+<p class="section-body">Explore <a href="/models/">models</a>, <a href="/guides/agent-credentials/">credentials</a> and the <a href="/api-docs/">Bridge API</a>.</p>
+</div></section>
+<section class="section section-alt"><div class="container"><h2 class="section-title">Sources</h2><p class="section-body"><a href="https://cursor.com/docs/cloud-agent/automations">Cursor Automations and memories</a> · <a href="https://cursor.com/docs/cloud-agent/capabilities">Cursor agent capabilities and Self-Hosted Machines</a> · <a href="https://cursor.com/docs">Cursor editor and agent documentation</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory">Hermes memory</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/cron">Hermes scheduling</a> · <a href="https://hermes-agent.nousresearch.com/docs/integrations/providers">Hermes providers</a> · <a href="https://github.com/nesquena/hermes-webui">Hermes WebUI source</a></p>
+<nav class="compare-nav" aria-label="More comparisons"><div class="compare-nav-label">More comparisons</div><a class="cpill" href="/compare/openclaw.html">vs. OpenClaw</a><a class="cpill" href="/compare/claude-code.html">vs. Claude Code</a><a class="cpill" href="/compare/codex.html">vs. Codex</a><a class="cpill" href="/compare/opencode.html">vs. OpenCode</a><a class="cpill active" href="/compare/cursor.html" aria-current="page">vs. Cursor</a><a class="cpill" href="/compare/copilot.html">vs. Copilot</a><a class="cpill" href="/compare/claude-ai.html">vs. Claude.ai</a><a class="cpill" href="/compare/chatgpt.html">vs. ChatGPT</a><a class="cpill" href="/compare/perplexity-computer.html">vs. Perplexity Computer</a></nav></div></section>
+<div class="cta-strip"><div class="container"><h2>Run Hermes WebUI</h2><div class="cta-btns"><a href="/setup/" class="btn-primary">Get started</a><a href="https://github.com/nesquena/hermes-webui" class="btn-secondary">View on GitHub</a></div></div></div>
 </main>
 
+<footer class="site-footer"><div class="container">
+<ul class="footer-links"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/api-docs/">Bridge API</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/hidden-features/">Hidden features</a></li><li><a href="/eli5/">What is Hermes?</a></li><li><a href="https://github.com/nesquena/hermes-webui">GitHub</a></li><li><a href="https://hermes-agent.nousresearch.com/">Official Hermes Agent site</a></li></ul>
+<p class="footer-note">Community project. Not affiliated with Nous Research.</p>
+</div></footer>
 <script>
   const html = document.documentElement;
   const toggle = document.getElementById('theme-toggle');
@@ -400,9 +235,7 @@
     toggle.textContent = t === 'light' ? '🌙' : '☀️';
   }
   const saved = localStorage.getItem('theme');
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
   if (saved) setTheme(saved);
-  else if (!prefersDark) setTheme('light');
   else setTheme('dark');
   toggle.addEventListener('click', () => setTheme(html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'));
   // Hamburger
