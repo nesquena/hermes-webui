@@ -402,7 +402,7 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 }
 
 // Immediate save used before session switches.
-function _saveComposerDraftNow(sid, text, files) {
+function _saveComposerDraftNow(sid, text, files, {throwOnError=false}={}) {
   if (!sid) return false;
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
@@ -423,7 +423,7 @@ function _saveComposerDraftNow(sid, text, files) {
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
     return true;
-  }).catch(() => false);
+  }).catch(error => { if (throwOnError) throw error; return false; });
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -1545,6 +1545,7 @@ async function newSession(flash, options={}){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
   }
+  const entryPanel=options.freshComposer ? _currentPanel : null;
   const requestedProject=Object.prototype.hasOwnProperty.call(options,'project_id')
     ? options.project_id : (_activeProject!==NO_PROJECT_FILTER ? _activeProject : null);
   const sharedProject=typeof _allProjects!=='undefined' && _allProjects.find(p=>p.project_id===requestedProject && p.collaboration);
@@ -1670,17 +1671,27 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
-    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    if(options.freshComposer && S.session?.session_id){
+      await _saveComposerDraftNow(S.session.session_id,$('msg').value,S.pendingFiles || [],{throwOnError:true});
+    }
+    const request={method:'POST',body:JSON.stringify(reqBody)};
+    if(options.freshComposer) request.retries=0;
+    const data=await api('/api/session/new',request);
     // The record was created successfully, but a later sidebar/navigation
     // choice owns the screen. Retain the record without activating it.
-    if(activationGeneration!==null&&_loadSessionGeneration!==activationGeneration){
+    if((activationGeneration!==null && _loadSessionGeneration!==activationGeneration) || (entryPanel!==null && entryPanel!==_currentPanel)){
       if(typeof refreshSessionList==='function') Promise.resolve(refreshSessionList('new-session')).catch(()=>{});
-      return;
+      return data.session;
     }
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
+    if(options.freshComposer){
+      S.pendingFiles=[];
+      renderTray();
+      _restoreComposerDraft(null,S.session.session_id);
+    }
     S._pendingSessionToolsets=null;
     S._pendingChatMode=null;S._pendingParticipants=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
@@ -1756,6 +1767,7 @@ async function newSession(flash, options={}){
     }
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    return data.session;
   })();
   try{
     return await _newSessionInFlight;
@@ -2212,6 +2224,12 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  // The outgoing draft has been saved. A new project chat must open with its
+  // own attachments, including when reached through a personal section.
+  if(opts.freshComposer && currentSid!==sid && S.pendingFiles?.length){
+    S.pendingFiles=[];
+    renderTray();
+  }
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.

@@ -368,7 +368,7 @@ function _projStartSharedConversation(projectId, preferredBot = null) {
     // A later navigation owns the screen. Creation still succeeded and the
     // server record remains discoverable in the project after a refresh.
     if (stillInPanel() && (generation === null || generation === _loadSessionGeneration)) {
-      const loading = loadSession(sid);
+      const loading = loadSession(sid, {freshComposer:true});
       const loadGeneration = typeof _loadSessionGeneration === 'number' ? _loadSessionGeneration : null;
       await loading;
       if (stillInPanel() && (loadGeneration === null || loadGeneration === _loadSessionGeneration)) switchPanel('chat');

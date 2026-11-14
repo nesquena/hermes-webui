@@ -286,7 +286,10 @@ protects the delegation listing; authority records are never included in it.
 Opening SynthPulse in the browser or as an installed app starts on the Studio
 Overview for every role. The title-bar symbol returns to that same homepage.
 Studio is first in desktop and mobile navigation. Chats is directly below it
-and opens the searchable conversation overview.
+and opens the searchable conversation overview. Its collapsible Sections list mirrors
+the personal sidebar hierarchy. Choosing a section filters the cards and status
+counts. Each section, including an empty subsection, has its own New conversation
+button. The new chat uses the current bot and project and is filed in that section.
 Selecting a card or a recent conversation opens its original chat, including saved drafts and
 in-progress runs. Direct conversation links and the New Chat shortcut open Chat.
 
