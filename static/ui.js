@@ -18284,6 +18284,11 @@ function _projectLiveAnchorActivitySceneForStream(streamId, mode){
   const registry=map&&streamId?map.get(streamId):null;
   if(!api||!registry||typeof api.projectAssistantTurnAnchorActivityScene!=='function') return null;
   try{
+    const sid=registry.anchor&&registry.anchor.identity&&registry.anchor.identity.session_id;
+    const live=typeof LIVE_STREAMS!=='undefined'&&sid?LIVE_STREAMS[sid]:null;
+    if(live&&live.streamId===streamId&&live.anchorRegistry===registry&&typeof live.projectActivityScene==='function'){
+      return live.projectActivityScene({mode:mode||'compact_worklog'});
+    }
     return api.projectAssistantTurnAnchorActivityScene(registry,{mode:mode||'compact_worklog'});
   }catch(err){
     if(typeof console!=='undefined'&&console.warn) console.warn('assistant turn anchor scene projection failed',err);
