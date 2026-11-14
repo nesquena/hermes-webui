@@ -69,6 +69,15 @@ on every read. Organisation/platform administrators can see their organisation's
 shared entries; other users see only their selected departments or organisation
 entries. Unknown users, tenants, departments, scopes and hosts fail closed.
 Platform-only app restrictions and managed app availability continue to apply.
+A dedicated customer Twenty CRM or RAGFlow workspace can be made discoverable
+to its organisation or selected departments after the operator verifies tenant
+isolation and individual app access. Set `customer_workspace: true` on that
+specific shared binding. This is allowed only on an explicitly managed `client`
+installation whose signed central organisation matches the local policy, if the
+app is centrally enabled. A regular local app link, an unmarked shared entry,
+an HQ installation or a shared admin console never acquires this permission.
+Use a separate tenant destination, never the HQ CRM, knowledge base or owner
+account. This is a launcher shortcut, not app authentication or data sharing.
 A shared external app needs no second local module installation. The directory
 does not activate local routes or modules. The UI labels these entries as the
 **Gedeelde organisatieruimte / Shared organisation space**, with a workspace filter.

@@ -14,6 +14,7 @@ class AppSpec:
     category: str = 'creative'
     access: str = 'member'
     requestable: bool = True
+    dedicated_customer_workspace: bool = False
 
 
 _ROWS = (
@@ -46,7 +47,7 @@ _ROWS = (
     AppSpec('openseo', 'OpenSEO', 'Doe zoekwoordonderzoek, volg posities en audit websites voor SEO en AI-zichtbaarheid.',
             'Research keywords, track rankings and audit websites for SEO and AI visibility.', 'workspace', 'marketing', 'platform'),
     AppSpec('twenty', 'Twenty CRM', 'Beheer contacten, bedrijven, deals, notities en taken in het CRM.',
-            'Manage contacts, companies, deals, notes and tasks in the CRM.', 'workspace', 'sales', 'platform'),
+            'Manage contacts, companies, deals, notes and tasks in the CRM.', 'workspace', 'sales', 'platform', dedicated_customer_workspace=True),
     AppSpec('n8n', 'n8n', 'Bouw en beheer geautomatiseerde workflows.',
             'Build and manage automated workflows.', 'workflows', 'automation', 'platform'),
     AppSpec('omniroute', 'OmniRoute', 'Beheer modelroutes en verbindingen met AI-aanbieders.',
@@ -56,7 +57,7 @@ _ROWS = (
     AppSpec('docuseal', 'DocuSeal', 'Bereid documenten voor en volg digitale ondertekening.',
             'Prepare documents and follow digital signing.', 'e_signing', 'productivity'),
     AppSpec('ragflow', 'RAGFlow', 'Beheer kennisbanken, verwerk documenten en test antwoorden met bronverwijzingen.',
-            'Manage knowledge bases, process documents and test answers with source references.', 'knowledge_base', 'productivity', 'platform'),
+            'Manage knowledge bases, process documents and test answers with source references.', 'knowledge_base', 'productivity', 'platform', dedicated_customer_workspace=True),
     AppSpec('langfuse', 'Langfuse', 'Bekijk AI-traces, gebruik, kosten en evaluaties van gekoppelde toepassingen.',
             'Inspect AI traces, usage, costs and evaluations from connected applications.', 'workspace', 'platform', 'platform', requestable=False),
     AppSpec('hermes_docs', 'SynthPulse Office Docs (Word)', 'Schrijf en bewerk Word-documenten met opmaak, tabellen en AI-hulp.',

@@ -90,6 +90,34 @@ def test_one_shared_app_filters_departments_and_never_activates_local_modules(wr
     assert get(caller, 'stranger@elsewhere.example').body == {'apps': []}
 
 
+def test_managed_dedicated_customer_workspace_exposes_only_scoped_customer_app(write_policy, caller, monkeypatch):
+    from api import control_plane_client, msp_service
+    monkeypatch.setattr(control_plane_client, 'configured', lambda: True)
+    row = {'enabled': True, 'support_levels': [], 'support': None}
+    customer = {'org': {'id': 'org_acme'}, 'apps': [{'id': key, **row} for key in ('twenty', 'ragflow', 'omniroute')]}
+    monkeypatch.setattr(msp_service, 'overview', lambda h: (200, customer))
+    monkeypatch.setenv('SP_SHARED_APP_HOSTS', '["shared.acme.example"]')
+    binding = {'org_id': 'org_acme', 'scope': 'departments', 'departments': ['sales'],
+               'customer_workspace': True, 'url': 'https://shared.acme.example/crm'}
+    def configured(**overrides):
+        monkeypatch.setenv('SP_SHARED_APPS', json.dumps({key: {**binding, **overrides} for key in ('twenty', 'ragflow', 'omniroute')}))
+    def shared(email):
+        return {r['id']: r['url'] for r in get(caller, email).body['apps'] if r.get('placement') == 'shared' and r.get('url')}
+    configured()
+    assert shared('rep.sales@acme.example') == {'twenty': binding['url'], 'ragflow': binding['url']}
+    assert not shared('clerk.finance@acme.example')
+    assert not shared('stranger@elsewhere.example')
+    configured(customer_workspace=False)
+    assert not shared('rep.sales@acme.example')
+    configured();customer['org']['id'] = 'other'
+    assert not shared('rep.sales@acme.example')
+    customer['org']['id'] = 'org_acme';customer['apps'][0]['enabled'] = False
+    assert set(shared('rep.sales@acme.example')) == {'ragflow'}
+    customer['apps'] = []
+    assert not shared('rep.sales@acme.example')
+    assert 'knowledge_base' not in modules.current_state().active
+
+
 @pytest.mark.parametrize('change', [
     {'org_id': 'other'}, {'scope': 'unknown'}, {'departments': ['unknown']},
     {'url': 'https://shared.acme.example.evil.test'}, {'url': 'https://shared.acme.example:9443'},

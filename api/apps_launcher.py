@@ -116,6 +116,14 @@ def handle_get(handler, parsed):
         if app_id not in named_links and not managed and not shared:
             continue
         access = 'member' if app_id == 'n8n' and editor else spec.access
+        if shared and shared_apps[app_id].get('customer_workspace') is True:
+            # Only a separately provisioned tenant workspace can relax launcher
+            # visibility. Ordinary links and local module permissions stay as before.
+            if (not managed or policy.installation_kind != 'client' or not spec.dedicated_customer_workspace
+                    or customer.get('org', {}).get('id') != shared_apps[app_id]['org_id']
+                    or customer_apps.get(app_id, {}).get('enabled') is not True):
+                continue
+            access = 'member'
         if not platform and (access == 'platform' or (spec.module not in state.active and not managed and not shared)):
             continue
         value = shared['url'] if shared else named_links.get(app_id)
