@@ -210,6 +210,7 @@ def test_moa_gateway_chat_start_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "_start_run", start_run)
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"chat_backend": "gateway"})
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: True)
     monkeypatch.setattr(commands, "resolve_moa_config", resolve_moa_config)
 
     handler = _Handler()
@@ -276,6 +277,7 @@ def test_moa_gateway_configured_default_reaches_start_run(monkeypatch, tmp_path)
     }
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: config_snapshot)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: True)
 
     routes._handle_chat_start(
         _Handler(),
@@ -337,6 +339,7 @@ def test_moa_gateway_string_model_config_reaches_start_run(monkeypatch, tmp_path
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"chat_backend": "gateway", "model": "@moa:moa-configured"})
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: True)
 
     routes._handle_chat_start(
         _Handler(),
@@ -425,6 +428,7 @@ def test_moa_gateway_authorization_uses_request_owned_config(
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: routes.copy.deepcopy(config_snapshot))
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: True)
 
     handler = _Handler()
     routes._handle_chat_start(
@@ -490,6 +494,7 @@ def test_moa_gateway_explicit_configured_default_fails_closed(monkeypatch, tmp_p
     }
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: config_snapshot)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: True)
 
     handler = _Handler()
     routes._handle_chat_start(
@@ -554,6 +559,7 @@ def test_moa_gateway_spoofed_provider_fails_closed(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: config_snapshot)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: True)
 
     handler = _Handler()
     routes._handle_chat_start(
@@ -620,6 +626,7 @@ def test_gateway_non_moa_model_reaches_start_run(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: config_snapshot)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: True)
 
     routes._handle_chat_start(
         _Handler(),

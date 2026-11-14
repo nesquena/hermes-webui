@@ -254,6 +254,11 @@ def test_sync_chat_refuses_a_session_swapped_for_another(store, tmp_path, monkey
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda ws, **_k: ws)
     monkeypatch.setattr(routes, "j", lambda _h, obj, *a, **k: replies.append(("j", k.get("status", 200), obj)) or True)
     monkeypatch.setattr(routes, "bad", lambda _h, msg, code=400: replies.append(("bad", code, msg)) or True)
+    # This test is about the #9000 swapped-session guard. The gateway-backend gate in front of it
+    # fails CLOSED when a sidecar's ownership is unverifiable (a swapped file is exactly that, #9024:
+    # tests/test_gateway_mode_in_process_refusal.py covers it), so pin the gate to a local rule to
+    # reach the guard under test.
+    monkeypatch.setattr(routes, "_session_chat_backend_rule", lambda _sid: ({}, None))
 
     class _Handler:
         headers = {"Content-Type": "application/json"}

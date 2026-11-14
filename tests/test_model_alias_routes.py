@@ -760,6 +760,7 @@ def test_chat_alias_refusal_precedes_model_and_recovery_mutation(monkeypatch, ba
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", lambda *_a, **_k: (session.model, session.model_provider, False))
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _c: backend == "gateway")
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: backend == "gateway")
     monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: backend == "runner")
     monkeypatch.setattr(routes.api_config, "resolve_model_alias_runtime", lambda *_a, **_k: _canonical_runtime_route())
     monkeypatch.setattr(routes, "j", lambda _h, payload, status=200: {"status": status, "payload": payload})
@@ -1707,6 +1708,7 @@ def _stub_goal_kickoff(monkeypatch, *, provider, gateway_owned, model="shared-mo
     )
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: gateway_owned)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled_for_session", lambda *_a, **_k: gateway_owned)
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",

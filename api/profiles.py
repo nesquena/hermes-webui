@@ -8,6 +8,8 @@ Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
 cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
+import collections
+import contextlib
 import copy
 import json
 import logging
@@ -47,12 +49,19 @@ _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
 _INITIAL_PROCESS_ENV = dict(os.environ)
 
 
-def _read_dotenv_values(env_path) -> dict[str, str]:
-    """KEY=VALUE pairs of a .env file as the launchers read it (``export`` prefix and quotes stripped); {} on error."""
+def _read_dotenv_values(env_path, _raise_errors: bool = False) -> dict[str, str]:
+    """KEY=VALUE pairs of a .env file as the launchers read it (``export`` prefix and quotes stripped); {} on error.
+
+    With ``_raise_errors`` the READ failure is re-raised instead of collapsed to
+    ``{}``, so #9024 round 8 callers can tell an unreadable ``.env`` (fail
+    closed) from a genuinely empty/absent one (valid ``{}``).
+    """
     values: dict[str, str] = {}
     try:
         text = Path(env_path).expanduser().read_text(encoding="utf-8")
     except Exception:
+        if _raise_errors:
+            raise
         return values
     for line in text.splitlines():
         line = line.strip()
@@ -81,6 +90,194 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+
+# Keys currently owned in os.environ by a held-open profile env MIRROR
+# (#9024 review round 3): profile_env_for_background_worker and the streaming
+# turn write the profile's .env/runtime values into process env (snapshot +
+# restore under api.streaming._ENV_LOCK) without going through
+# _reload_dotenv, so _loaded_profile_env_keys alone cannot prove a live
+# value's provenance. A counted set because scopes may hold overlapping keys;
+# every mutation runs under the writer's env lock, so the counters are
+# race-free.
+_WORKER_OWNED_ENV_KEYS: collections.Counter = collections.Counter()
+
+# (key, value) pairs the singleton dotenv writer (#8432) currently owns in
+# os.environ; tracked separately so a profile switch can drop exactly its
+# pairs from _PROFILE_ENV_VALUES.
+_DOTENV_OWNED_ENV_VALUES: set = set()
+
+# (key, value) pairs a profile-owned env writer has written, with a count per
+# live writer (#9024 review round 4). Pair-level on top of the key-level set
+# so restore can tell a value still owned by a LIVE writer (restore it; the
+# checker keeps ignoring it) from anything else.
+_PROFILE_ENV_VALUES: collections.Counter = collections.Counter()
+
+# The pre-writer value each key carried before the FIRST profile-owned env
+# writer displaced it (#9024 review round 5): the genuine launcher/operator
+# baseline, possibly ``None`` (absent). The outermost writer records it under
+# the writer's env lock; the last writer to leave the key restores it. This is
+# what keeps a real launcher override alive across overlapping worker/streaming
+# scopes that exit in FIFO order, while a writer's dead value still never
+# survives as fake launcher authority (absent baseline stays absent).
+_PROFILE_ENV_BASELINE: dict = {}
+
+# Keys a still-open scope has SCRUBBED from os.environ without writing a
+# replacement (#9024 review round 8). A counted set because overlapping scopes
+# may scrub the same key. While a scrub count is live, that scope's removal is
+# the live decision for the key: another writer's FIFO exit must not restore
+# its own snapshot over the scrubber's removal (that would resurrect the
+# scrubbed credential into the scrubbing scope's body). The scrubber's own
+# exit takes the normal baseline/snapshot path.
+_PROFILE_ENV_SCRUBBED_KEYS: collections.Counter = collections.Counter()
+
+# Per-thread open-scope ordering for profile_env_for_background_worker's
+# thread-local env channel (#9024 review round 4). ``stack`` holds one opaque
+# token per still-open scope on the current thread; ``base`` holds the thread
+# state the OUTERMOST open displaced, restored when the stack empties.
+_WORKER_ENV_SCOPE_STACK = threading.local()
+
+
+def profile_env_writer_owns(key, value=None) -> bool:
+    """True when the given (default: live) value under *key* was written by a
+    PROFILE-owned env writer — ``_reload_dotenv``, the background-worker
+    mirror, or the streaming-turn mirror — rather than by the launcher
+    (#9024 review rounds 3-4).
+    """
+    if value is None:
+        value = os.environ.get(key)
+    if key in _loaded_profile_env_keys or key in _WORKER_OWNED_ENV_KEYS:
+        return True
+    return value is not None and (key, value) in _PROFILE_ENV_VALUES
+
+
+def _profile_env_key_owned(key) -> bool:
+    """True when ANY profile-owned writer (dotenv or a mirror) still owns *key*."""
+    return key in _loaded_profile_env_keys or key in _WORKER_OWNED_ENV_KEYS
+
+
+def note_profile_env_mirror(env: dict, scrub_only=()) -> None:
+    """Count *env*'s keys and (key, value) pairs as profile-writer-owned.
+
+    Call under the writer's env lock BEFORE writing *env* into os.environ.
+    For keys this writer is the first to claim, the pre-write live value is
+    recorded as the launcher baseline :func:`restore_profile_env_snapshot`
+    returns to when the last writer leaves the key.
+
+    *scrub_only* names keys this scope will REMOVE from os.environ without
+    writing a replacement (the worker CM scrubs another profile's secret the
+    scope's own ``safe_runtime_env`` does not supply, #9024 review round 8).
+    They get the same key-level ownership and baseline capture so an
+    overlapping scrub can never resurrect an exited writer's value: the last
+    scope to leave the key restores the ORIGINAL launcher baseline, never the
+    snapshot of the writer whose value the scrub removed.
+    """
+    for key in tuple(env) + tuple(scrub_only):
+        if not _profile_env_key_owned(key) and key not in _PROFILE_ENV_BASELINE:
+            _PROFILE_ENV_BASELINE[key] = os.environ.get(key)
+    _WORKER_OWNED_ENV_KEYS.update(env.keys())
+    _WORKER_OWNED_ENV_KEYS.update(scrub_only)
+    _PROFILE_ENV_SCRUBBED_KEYS.update(scrub_only)
+    _PROFILE_ENV_VALUES.update(env.items())
+
+
+def drop_profile_env_mirror(env: dict, scrub_only=()) -> None:
+    """Decrement a writer's mirror counts — its scope is exiting.
+
+    Call under the writer's env lock BEFORE restoring the snapshot.
+    *scrub_only* must repeat the same keys passed to
+    :func:`note_profile_env_mirror` for this scope (#9024 review round 8).
+    """
+    for key in tuple(env) + tuple(scrub_only):
+        remaining = _WORKER_OWNED_ENV_KEYS.get(key, 0) - 1
+        if remaining > 0:
+            _WORKER_OWNED_ENV_KEYS[key] = remaining
+        else:
+            _WORKER_OWNED_ENV_KEYS.pop(key, None)
+    for key in tuple(scrub_only):
+        remaining = _PROFILE_ENV_SCRUBBED_KEYS.get(key, 0) - 1
+        if remaining > 0:
+            _PROFILE_ENV_SCRUBBED_KEYS[key] = remaining
+        else:
+            _PROFILE_ENV_SCRUBBED_KEYS.pop(key, None)
+    for pair in env.items():
+        remaining = _PROFILE_ENV_VALUES.get(pair, 0) - 1
+        if remaining > 0:
+            _PROFILE_ENV_VALUES[pair] = remaining
+        else:
+            _PROFILE_ENV_VALUES.pop(pair, None)
+
+
+def restore_profile_env_snapshot(old_values: dict) -> None:
+    """Provenance-correct restore of a profile env mirror's snapshot.
+
+    Call under the writer's env lock, AFTER :func:`drop_profile_env_mirror`
+    for the exiting writer. Per key:
+
+    - A writer still owns the key → restore the snapshot value (``None``
+      restores as absent). The live writer's values keep deciding, and the
+      checker keeps ignoring them.
+    - No writer owns the key anymore and a launcher baseline exists → restore
+      the baseline: the genuine launcher/operator value the FIRST writer
+      displaced (#9024 review round 5). A FIFO exit therefore returns the real
+      launcher override instead of deleting it, and a baseline of ``None``
+      keeps the no-launcher protection (a dead writer's value never survives
+      as fake launcher authority). The baseline entry is consumed.
+    - No writer, no baseline (the pre-writer value came from the dotenv
+      writer's own key set) → plain snapshot restore.
+    - A still-open scrubber holds the key (#9024 review round 8) → keep it
+      absent: the scrubber's removal is the live decision, and the exiting
+      writer's snapshot must not resurrect the scrubbed credential.
+    """
+    for key, old_value in old_values.items():
+        if not _profile_env_key_owned(key) and key in _PROFILE_ENV_BASELINE:
+            baseline = _PROFILE_ENV_BASELINE.pop(key)
+            if baseline is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = baseline
+        elif _PROFILE_ENV_SCRUBBED_KEYS.get(key, 0) > 0:
+            # A still-open scope scrubbed this key (#9024 review round 8): its
+            # removal is the live decision for the key, so this exiting
+            # writer's snapshot must not resurrect the scrubbed value into the
+            # scrubbing scope's body. The scrubber's own exit takes the
+            # baseline path above.
+            os.environ.pop(key, None)
+        elif old_value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old_value
+
+
+def claim_profile_env_write(env: dict) -> None:
+    """Claim keys a profile-scoped ``.env`` writer wrote into ``os.environ``.
+
+    Provider setup (``_write_env_file``) writes a credential into the active
+    profile's ``.env`` and into ``os.environ`` BEFORE ``_reload_dotenv()``
+    claims the key. Without this claim the loader's baseline capture read the
+    just-written credential as the launcher's value, so releasing the key
+    after a profile switch restored it — the credential outlived the profile
+    that owned it (#9024 review round 13).
+
+    The key is recorded as dotenv-owned, so the loader keeps the pre-save
+    value as the baseline (and a worker/stream exit while the key is live
+    restores its snapshot, not the baseline). Call under
+    ``api.streaming._ENV_LOCK``, BEFORE writing the process env.
+    """
+    for raw_key, raw_value in (env or {}).items():
+        key = str(raw_key)
+        if key in _PROTECTED_ENV_KEYS:
+            # The dotenv loader never claims these (#4589); a baseline nobody
+            # releases would outlive the write.
+            continue
+        value = str(raw_value)
+        if not _profile_env_key_owned(key) and key not in _PROFILE_ENV_BASELINE:
+            _PROFILE_ENV_BASELINE[key] = os.environ.get(key)
+        _loaded_profile_env_keys.add(key)
+        pair = (key, value)
+        if pair not in _DOTENV_OWNED_ENV_VALUES:
+            _DOTENV_OWNED_ENV_VALUES.add(pair)
+            _PROFILE_ENV_VALUES[pair] += 1
+
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -974,6 +1171,104 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+# The env key that selects the browser chat backend (api/gateway_chat.py
+# webui_chat_backend_mode reads it first, then the profile config.yaml).
+# Defined as a literal here because gateway_chat imports this module's
+# resolvers transitively (gateway_chat -> gateway_sessions -> profiles).
+CHAT_BACKEND_ENV_KEY = 'HERMES_WEBUI_CHAT_BACKEND'
+
+# home -> (mtime, value) read from that home's .env for CHAT_BACKEND_ENV_KEY
+# (#9024 review round 2). chat_backend_environ_for_profile runs on every
+# session payload projection (via gateway_session_chat_read_only_reason), so a
+# successful .env read is cached and re-validated by mtime. A FAILED read is
+# never cached: a repair can leave the mtime untouched (#9024 review round 9).
+_CHAT_BACKEND_ENV_CACHE: dict = {}
+
+
+def chat_backend_environ_for_profile(profile) -> dict:
+    """The env slice deciding a profile's browser chat backend (#9024 review).
+
+    A live ``os.environ`` value counts as a launcher/operator export only when
+    no PROFILE-owned env writer owns it — ``_reload_dotenv``
+    (``_loaded_profile_env_keys``, #8432) or a held-open
+    ``profile_env_for_background_worker`` mirror (``_WORKER_OWNED_ENV_KEYS``,
+    #9024 review round 3). A value written by either must not decide another
+    profile's session. While a writer owns the key, the launcher baseline that
+    writer displaced decides if one existed (``_PROFILE_ENV_BASELINE``,
+    #9024 review round 10) — only with no launcher value does the owner's own
+    ``.env`` apply (mtime-cached: the read runs on every session payload
+    projection).
+
+    #9024 review round 8:
+
+    - The live value AND its provenance are read under the same
+      ``api.streaming._ENV_LOCK`` the mirror setup/restore takes, so an
+      admission read can never land in the drop-before-restore window of an
+      exiting worker and mistake a dead profile value for a launcher export.
+      The lock is non-reentrant, but it is held only during mirror
+      setup/restore — never on an admission path — so taking it here cannot
+      recurse.
+    - An owner ``.env`` that EXISTS but cannot be read (permission error,
+      self-referential symlink, a directory at .env) is an UNVERIFIABLE input,
+      not a valid "no value": the ``UnreadableProfileConfig`` marker is
+      returned in the environ slot and admission fails closed on it. A
+      genuinely absent ``.env`` (stat FileNotFoundError, incl. a dangling
+      symlink) stays the valid empty slice.
+    """
+    from api.config import UnreadableProfileConfig
+    from api.streaming import _ENV_LOCK  # lazy: streaming imports this module
+
+    with _ENV_LOCK:
+        value = os.environ.get(CHAT_BACKEND_ENV_KEY)
+        if profile_env_writer_owns(CHAT_BACKEND_ENV_KEY):
+            # A profile-owned writer owns the live value — even one that
+            # looks like a launcher export, and even a scrub that emptied it.
+            # What decides is the value the OPERATOR exported before the first
+            # writer displaced it (the launcher baseline, #9024 review round
+            # 10); only when there was none does the owner's .env apply. Using
+            # the writer's value here would let another profile's turn decide
+            # this session; using only the .env would drop a genuine launcher
+            # override for as long as any worker holds the key.
+            value = _PROFILE_ENV_BASELINE.get(CHAT_BACKEND_ENV_KEY)
+        if not value:
+            try:
+                home = get_hermes_home_for_profile(profile)
+                env_path = Path(home) / '.env'
+                try:
+                    mtime = env_path.stat().st_mtime_ns
+                except FileNotFoundError:
+                    mtime = None
+                except OSError:
+                    # Exists but unstattable — unverifiable, fail closed.
+                    return UnreadableProfileConfig()
+                cached = _CHAT_BACKEND_ENV_CACHE.get(str(home))
+                if cached is None or cached[0] != mtime:
+                    if mtime is None:
+                        value = None
+                    else:
+                        try:
+                            value = _read_dotenv_values(
+                                env_path, _raise_errors=True
+                            ).get(CHAT_BACKEND_ENV_KEY)
+                        except (OSError, UnicodeError):
+                            # Exists but unreadable — unverifiable, fail closed.
+                            # Deliberately NOT cached: a repair that leaves the
+                            # mtime unchanged (restored read permission, fixed
+                            # symlink) must recover on the next admission, so a
+                            # failed read is always retried.
+                            _CHAT_BACKEND_ENV_CACHE.pop(str(home), None)
+                            return UnreadableProfileConfig()
+                    _CHAT_BACKEND_ENV_CACHE[str(home)] = (mtime, value)
+                else:
+                    value = cached[1]
+            except Exception:
+                logger.debug(
+                    "chat-backend env unavailable for profile %r", profile, exc_info=True
+                )
+                value = None
+    return {CHAT_BACKEND_ENV_KEY: value} if value else {}
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',
@@ -1137,6 +1432,45 @@ def profile_env_binding(home) -> dict[str, str]:
     return _profile_env_binding(home, _read_profile_dotenv(Path(home).expanduser()))
 
 
+@contextmanager
+def profile_config_env_binding(home, *, env: Optional[dict] = None):
+    """Bind the calling thread's ``${VAR}`` expansion to *home*'s profile env.
+
+    ``api.config._expand_env_vars`` resolves a reference against the thread env
+    first and the live process env second — whichever profile is active, or
+    whatever a streaming turn / background worker mirrors there while it runs.
+    Any read of a profile's config VALUES must run inside this scope:
+
+    * ``expand_profile_config`` for raw-document value readers (#8032);
+    * ``api.gateway_sessions.config_for_profile``, whose owner may be another
+      profile than the request's, so an owner's
+      ``webui_chat_backend: ${CHAT_MODE}`` is decided by the owner's own
+      ``CHAT_MODE`` (#9024 review round 13).
+
+    Pass *env* to reuse a binding computed earlier. The caller's thread env and
+    process-fallback flag are restored on exit.
+    """
+    from api.config import _thread_ctx
+
+    if env is None:
+        env = profile_env_binding(home)
+    previous_env = getattr(_thread_ctx, 'env', None)
+    previous_block = getattr(_thread_ctx, 'block_process_env_fallback', False)
+    _thread_ctx.env = dict(env)
+    _thread_ctx.block_process_env_fallback = True
+    try:
+        yield env
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_env is None:
+            try:
+                del _thread_ctx.env
+            except AttributeError:
+                pass
+        else:
+            _thread_ctx.env = previous_env
+
+
 def expand_profile_config(home, raw, *, env: Optional[dict] = None):
     """Expand ``${VAR}`` in a RAW config document (or any subtree of it) that
     belongs to the profile at *home*, under ``profile_env_binding(home)``.
@@ -1147,15 +1481,9 @@ def expand_profile_config(home, raw, *, env: Optional[dict] = None):
     Pass *env* to reuse a binding computed earlier (e.g. before taking a lock).
     The binding is applied to the calling thread only, for the expansion.
     """
-    from api.config import _expand_env_vars, _thread_ctx
+    from api.config import _expand_env_vars
 
-    if env is None:
-        env = profile_env_binding(home)
-    previous_env = getattr(_thread_ctx, 'env', None)
-    previous_block = getattr(_thread_ctx, 'block_process_env_fallback', False)
-    _thread_ctx.env = dict(env)
-    _thread_ctx.block_process_env_fallback = True
-    try:
+    with profile_config_env_binding(home, env=env):
         try:
             return _expand_env_vars(raw)
         except RecursionError:
@@ -1164,12 +1492,6 @@ def expand_profile_config(home, raw, *, env: Optional[dict] = None):
             # literals read as absent via _has_env_ref) instead of {}.
             logger.debug("profile config at %s has a recursive alias; served unexpanded", home)
             return copy.deepcopy(raw)
-    finally:
-        _thread_ctx.block_process_env_fallback = previous_block
-        if previous_env is None:
-            del _thread_ctx.env
-        else:
-            _thread_ctx.env = previous_env
 
 
 def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
@@ -1506,6 +1828,25 @@ def profile_env_for_background_worker(
     previous_block_process_env = bool(
         getattr(_thread_ctx, "block_process_env_fallback", False)
     )
+    # #9024 review round 4: FIFO-aware thread-state restore. Nested snapshot
+    # restores resurrect an exited writer's thread env when scopes exit in
+    # FIFO order (the inner scope's snapshot holds the OUTER writer's values,
+    # so its exit put them back after the outer scope had already left).
+    # Track scope order per thread: the innermost exit (LIFO) restores its own
+    # snapshot; a non-innermost (FIFO) exit restores nothing while inner
+    # scopes are still open; the exit that empties the stack restores the
+    # state the OUTERMOST open saw. Thread-local, so no lock is needed.
+    _scope_stack = getattr(_WORKER_ENV_SCOPE_STACK, "stack", None)
+    if _scope_stack is None:
+        _scope_stack = []
+        _WORKER_ENV_SCOPE_STACK.stack = _scope_stack
+    _scope_order_token = object()
+    if len(_scope_stack) == 0:
+        _WORKER_ENV_SCOPE_STACK.base = (
+            previous_thread_env,
+            previous_block_process_env,
+        )
+    _scope_stack.append(_scope_order_token)
     _scope_token = None
     _has_scope = False
     _secret_scope_mod = None
@@ -1517,6 +1858,7 @@ def profile_env_for_background_worker(
     has_profile_skill_home = False
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
+    scrub_env_keys: tuple = ()
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1578,6 +1920,31 @@ def profile_env_for_background_worker(
                 skill_home_snapshot = snapshot_skill_home_modules()
                 patch_skill_home_modules(profile_home_path)
 
+            # #9024 review round 8: keys this scope will SCRUB — a secret the
+            # process currently holds (e.g. another profile's live writer
+            # mirrored its credential, or a launcher export) that this
+            # scope's own env does NOT supply — get the same key-level
+            # ownership and baseline capture as written keys. Without this,
+            # an overlapping scrub drops its counts using only
+            # safe_runtime_env, so a FIFO exit of the SUPPLYING writer would
+            # restore its snapshot and resurrect the credential with no live
+            # provenance. The last scope to leave such a key restores the
+            # ORIGINAL launcher baseline instead.
+            scrub_env_keys = tuple(
+                key
+                for key in sorted(secret_env_names)
+                if key not in safe_runtime_env and key in os.environ
+            )
+            # #9024 review rounds 3-5: record the mirror BEFORE writing it so
+            # the pre-write live value is captured as the launcher baseline —
+            # a live value held by this scope is never mistaken for a
+            # launcher export, and the last writer restores the real launcher
+            # value (FIFO) instead of resurrecting or deleting it. Round 8 adds
+            # the scrubbed keys; note must run BEFORE
+            # _apply_profile_env_to_process, which POPS them — a note after
+            # the apply would record a None baseline and the scrubbed
+            # launcher/process value would never come back (#3957).
+            note_profile_env_mirror(safe_runtime_env, scrub_only=scrub_env_keys)
             old_runtime_env = _apply_profile_env_to_process(
                 os.environ,
                 safe_runtime_env,
@@ -1591,11 +1958,8 @@ def profile_env_for_background_worker(
     finally:
         try:
             with _ENV_LOCK:
-                for key, old_value in old_runtime_env.items():
-                    if old_value is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = old_value
+                drop_profile_env_mirror(safe_runtime_env, scrub_only=scrub_env_keys)
+                restore_profile_env_snapshot(old_runtime_env)
                 if had_hermes_home:
                     os.environ["HERMES_HOME"] = old_hermes_home or ""
                 else:
@@ -1617,11 +1981,33 @@ def profile_env_for_background_worker(
                     _secret_scope_mod.reset_secret_scope(_scope_token)
                 except Exception:
                     pass
-            _thread_ctx.block_process_env_fallback = previous_block_process_env
-            if previous_thread_env:
-                _set_thread_env(**previous_thread_env)
-            else:
-                _clear_thread_env()
+            # #9024 review round 4: FIFO-aware restore of the thread-local env
+            # (see the stack setup above). Restoring this scope's own snapshot
+            # unconditionally would resurrect the OUTER writer's values after
+            # a FIFO exit — the same bug the pair-level provenance fix removes
+            # for the os.environ mirror.
+            _was_innermost = bool(_scope_stack) and _scope_stack[-1] is _scope_order_token
+            if _scope_order_token in _scope_stack:
+                _scope_stack.remove(_scope_order_token)
+            if not _scope_stack:
+                _base_thread_env, _base_block = _WORKER_ENV_SCOPE_STACK.base
+                _WORKER_ENV_SCOPE_STACK.base = None
+                _thread_ctx.block_process_env_fallback = _base_block
+                if _base_thread_env:
+                    _set_thread_env(**_base_thread_env)
+                else:
+                    _clear_thread_env()
+            elif _was_innermost:
+                # LIFO exit over a still-open outer scope: restore what THIS
+                # scope displaced, so the outer writer's values stay live.
+                _thread_ctx.block_process_env_fallback = previous_block_process_env
+                if previous_thread_env:
+                    _set_thread_env(**previous_thread_env)
+                else:
+                    _clear_thread_env()
+            # else: FIFO exit with a still-open inner scope — the inner scope's
+            # live values own the thread env; a restore here would resurrect
+            # this exited writer's state when the inner scope later exits.
 
 
 @contextmanager
@@ -1931,6 +2317,22 @@ def _set_hermes_home(home: Path):
         logger.debug("Failed to patch cron.scheduler module")
 
 
+def _dotenv_env_lock():
+    """The process-env lock the worker/streaming mirrors take, or a no-op.
+
+    ``api.streaming._ENV_LOCK`` is what every other writer of the provenance
+    state holds; ``_reload_dotenv`` must hold it too (#9024 review round 12).
+    ``init_profile_state()`` runs while ``api.config`` is still importing, and
+    ``api.streaming`` imports config, so the lock is looked up in
+    ``sys.modules`` instead of imported. If the module is absent no worker or
+    stream can exist yet (each takes the lock from that module before its first
+    env write), so there is nothing to serialise against.
+    """
+    module = sys.modules.get("api.streaming")
+    lock = getattr(module, "_ENV_LOCK", None) if module is not None else None
+    return lock if lock is not None else contextlib.nullcontext()
+
+
 def _reload_dotenv(home: Path):
     """Load .env from the profile dir into os.environ with profile isolation.
 
@@ -1938,41 +2340,88 @@ def _reload_dotenv(home: Path):
     applying the current profile's .env. This prevents API keys and other
     profile-scoped secrets from leaking across profile switches.
     """
-    global _loaded_profile_env_keys
+    global _loaded_profile_env_keys, _DOTENV_OWNED_ENV_VALUES
 
-    # Remove keys loaded from the previous profile first.
-    for key in list(_loaded_profile_env_keys):
-        os.environ.pop(key, None)
-    _loaded_profile_env_keys = set()
-
+    # Parse before taking the env lock: file I/O does not belong in a critical
+    # section every concurrent stream setup waits behind. ``pending`` stays
+    # ``None`` when there is no (readable) .env, which releases the previous
+    # profile's keys and loads nothing.
     env_path = home / '.env'
-    if not env_path.exists():
-        return
-    try:
-        loaded_keys: set[str] = set()
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                k, v = line.split('=', 1)
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if k and v:
-                    # Operator/deployment-level keys are never overridable by a
-                    # profile's own .env (#4589 — prevents a contained user from
-                    # disabling their isolation via HERMES_WEBUI_ISOLATED_PROFILE=0).
-                    if k in _PROTECTED_ENV_KEYS:
-                        logger.warning(
-                            "Ignoring protected key %s in profile .env %s; "
-                            "operator/deployment env takes precedence",
-                            k, env_path,
-                        )
-                        continue
-                    os.environ[k] = v
-                    loaded_keys.add(k)
-        _loaded_profile_env_keys = loaded_keys
-    except Exception:
+    pending: Optional[list[tuple[str, str]]] = None
+    if env_path.exists():
+        try:
+            parsed: list[tuple[str, str]] = []
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k and v:
+                        # Operator/deployment-level keys are never overridable by a
+                        # profile's own .env (#4589 — prevents a contained user from
+                        # disabling their isolation via HERMES_WEBUI_ISOLATED_PROFILE=0).
+                        if k in _PROTECTED_ENV_KEYS:
+                            logger.warning(
+                                "Ignoring protected key %s in profile .env %s; "
+                                "operator/deployment env takes precedence",
+                                k, env_path,
+                            )
+                            continue
+                        parsed.append((k, v))
+            pending = parsed
+        except Exception:
+            logger.debug("Failed to reload dotenv from %s", env_path)
+
+    # One critical section for release, baseline capture, writes and ownership
+    # updates (#9024 review round 12). Without the lock, a worker finishing
+    # between "drop ownership", "pop its baseline" and "restore os.environ"
+    # let the baseline capture below read the worker's TEMPORARY value and
+    # record it as the operator's launcher setting.
+    with _dotenv_env_lock():
+        # Remove keys loaded from the previous profile first, including their
+        # pair-level provenance (#9024 review round 4). A key a launcher
+        # exported before the dotenv writer displaced it gets that value back,
+        # so a profile switch cannot erase the operator's setting (#9024
+        # review round 11); a key a live worker/stream mirror still owns is
+        # left to that mirror, whose own exit restores the launcher baseline.
+        for key in list(_loaded_profile_env_keys):
+            if _WORKER_OWNED_ENV_KEYS.get(key, 0) > 0:
+                continue
+            if key in _PROFILE_ENV_BASELINE:
+                baseline = _PROFILE_ENV_BASELINE.pop(key)
+                if baseline is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = baseline
+            else:
+                os.environ.pop(key, None)
+        for pair in _DOTENV_OWNED_ENV_VALUES:
+            _PROFILE_ENV_VALUES.pop(pair, None)
+        _DOTENV_OWNED_ENV_VALUES = set()
         _loaded_profile_env_keys = set()
-        logger.debug("Failed to reload dotenv from %s", env_path)
+
+        if not pending:
+            return
+        try:
+            # #9024 review round 11: the dotenv writer records the launcher
+            # baseline it displaces, like the worker/streaming mirrors do. A
+            # live value loaded from this profile's .env must not be read as
+            # the operator's export — and with no baseline the admission
+            # reader would drop the operator's setting entirely while the key
+            # stays owned.
+            for key, _value in pending:
+                if not _profile_env_key_owned(key) and key not in _PROFILE_ENV_BASELINE:
+                    _PROFILE_ENV_BASELINE[key] = os.environ.get(key)
+            for key, value in pending:
+                os.environ[key] = value
+            _loaded_profile_env_keys = {key for key, _value in pending}
+            _DOTENV_OWNED_ENV_VALUES = set(pending)
+            _PROFILE_ENV_VALUES.update(pending)
+        except Exception:
+            _loaded_profile_env_keys = set()
+            _DOTENV_OWNED_ENV_VALUES = set()
+            logger.debug("Failed to reload dotenv from %s", env_path)
 
 
 def init_profile_state() -> None:

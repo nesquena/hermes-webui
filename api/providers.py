@@ -1286,7 +1286,14 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
     write cycle to prevent TOCTOU races between concurrent POST /api/providers
     calls (each reading the same file baseline and overwriting the other's key).
     Also serialises os.environ mutations with streaming sessions.
+
+    Each written key is claimed as profile-owned
+    (:func:`api.profiles.claim_profile_env_write`) before it reaches the
+    process env, so a later release restores the pre-save value rather than
+    treating this profile's credential as the operator's export (#9024 review
+    round 13).
     """
+    from api.profiles import claim_profile_env_write
     from api.streaming import _ENV_LOCK
     import stat as _stat
 
@@ -1323,6 +1330,12 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             # Reject embedded newlines/carriage returns to prevent .env injection
             if "\n" in clean or "\r" in clean:
                 raise ValueError("API key must not contain newline characters.")
+            # #9024 review round 13: claim the key as profile-owned BEFORE the
+            # process env changes. This credential belongs to the profile's
+            # .env, not to the operator's launcher export, so the dotenv
+            # loader must keep the pre-save value as the baseline it restores
+            # when the key is released after a profile switch.
+            claim_profile_env_write({key: clean})
             os.environ[key] = clean
 
             if key in existing_key_indices:

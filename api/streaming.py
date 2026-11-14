@@ -14237,6 +14237,7 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    _safe_profile_runtime_env = {}
     result = None
     _result_partial_pre_call_context = []
 
@@ -14877,6 +14878,9 @@ def _run_agent_streaming(
                 get_profile_runtime_env,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
+                note_profile_env_mirror,
+                drop_profile_env_mirror,
+                restore_profile_env_snapshot,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -14893,6 +14897,17 @@ def _run_agent_streaming(
             snapshot_skill_home_modules = None
             restore_skill_home_modules = None
             _skill_modules_support_profile_home = None
+
+            def _no_env_mirror_op(*_args, **_kwargs):
+                return {}
+
+            # #8517 + #9024 round 4: the provenance helpers come from the same
+            # failed import; the fallback keeps an EMPTY mirror
+            # (_safe_profile_runtime_env = {}), so their no-op shape leaves
+            # nothing to note, drop, or restore on this path.
+            note_profile_env_mirror = _no_env_mirror_op
+            drop_profile_env_mirror = _no_env_mirror_op
+            restore_profile_env_snapshot = _no_env_mirror_op
             _SKILL_HOME_MODULE_PATCH_LOCK = None
 
         # Profile-aware provider/model enrichment: when the session belongs
@@ -15018,6 +15033,12 @@ def _run_agent_streaming(
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
+            # #9024 review rounds 3-5: record the mirror BEFORE writing it so
+            # the pre-write live value is captured as the launcher baseline —
+            # a live value held by this stream is never mistaken for a
+            # launcher export, and the last writer restores the real launcher
+            # value (FIFO) instead of resurrecting or deleting it.
+            note_profile_env_mirror(_safe_profile_runtime_env)
             os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
@@ -18480,9 +18501,25 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
             with _ENV_LOCK:
-                for _key, _old_value in old_profile_env.items():
-                    if _old_value is None: os.environ.pop(_key, None)
-                    else: os.environ[_key] = _old_value
+                # #9024 review rounds 4-5: provenance-correct restore — a
+                # value whose writer already exited (FIFO scope ordering) is
+                # never resurrected as a fake launcher export, and the last
+                # writer returns the genuine launcher baseline. Mirrors the
+                # setup block's ImportError fallback (#8517): with the empty
+                # env the drop/restore calls are no-ops, and the plain loop
+                # preserves the historical behavior if the import itself is
+                # unavailable.
+                try:
+                    from api.profiles import (
+                        drop_profile_env_mirror,
+                        restore_profile_env_snapshot,
+                    )
+                    drop_profile_env_mirror(_safe_profile_runtime_env)
+                    restore_profile_env_snapshot(old_profile_env)
+                except ImportError:
+                    for _key, _old_value in old_profile_env.items():
+                        if _old_value is None: os.environ.pop(_key, None)
+                        else: os.environ[_key] = _old_value
                 if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
                 else: os.environ['TERMINAL_CWD'] = old_cwd
                 if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
