@@ -55,6 +55,7 @@ def _install(
     registry=None,
     registry_module_missing=False,
     plugins_module_missing=False,
+    per_home_plugin_managers=True,
     discover=None,
     legacy_constant=None,
 ):
@@ -86,10 +87,14 @@ def _install(
     if plugins_module_missing:
         monkeypatch.setitem(sys.modules, "hermes_cli.plugins", None)
     else:
+        plugin_attrs = {"discover_plugins": _discover_plugins}
+        if per_home_plugin_managers:
+            # Agents from 2026-08-12 key plugin managers by profile home.
+            plugin_attrs["_plugin_managers_by_home"] = {}
         monkeypatch.setitem(
             sys.modules,
             "hermes_cli.plugins",
-            _module("hermes_cli.plugins", discover_plugins=_discover_plugins),
+            _module("hermes_cli.plugins", **plugin_attrs),
         )
 
     if registry_module_missing:
@@ -211,6 +216,18 @@ def test_older_agent_without_plugins_module_keeps_legacy_behaviour(monkeypatch):
     platforms = _call(monkeypatch)
     assert _values(platforms) == ["local", "origin", "discord", "feishu", "slack", "telegram"]
     assert {p["value"]: p["label"] for p in platforms}["telegram"] == "Telegram"
+
+
+def test_agent_without_per_home_plugin_managers_keeps_constant_only(monkeypatch):
+    """Agents before 2026-08-12 share one process-wide plugin manager (and some run
+    discovery under the cron env lock): never enumerate the registry there."""
+    calls = _install(
+        monkeypatch,
+        registry=_FakeRegistry(_PLUGIN_ENTRIES),
+        per_home_plugin_managers=False,
+    )
+    assert _values(_call(monkeypatch)) == ["local", "origin", "webhook", "wecom_callback"]
+    assert calls["discover"] == 0, "discover_plugins() must not run on a process-wide plugin manager"
 
 
 def test_registry_enumeration_raising_degrades_to_constant_only(monkeypatch):

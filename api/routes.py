@@ -33347,23 +33347,32 @@ def _handle_cron_delivery_options(handler):
     # plus every registry entry with a ``cron_deliver_env_var``, so enumerate
     # the registry with the same rule. Older Agents without the registry (or
     # any failure while enumerating it) degrade to the constant alone.
+    #
+    # Only Agents that key plugin managers by profile home (from 2026-08-12,
+    # ``hermes_cli.plugins._plugin_managers_by_home``) are enumerated. Older
+    # Agents share one process-wide plugin manager, so the first profile to
+    # open the picker would leak its user plugin platforms into every other
+    # profile's picker; some of them also run discovery under the cron env
+    # lock. Those Agents keep today's constant-only list.
     _registry_names = set()
     _registry_labels = {}
     try:
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()  # idempotent, scoped to the active profile home
-        from gateway.platform_registry import platform_registry
-        _names, _labels = set(), {}
-        for _entry in platform_registry.all_entries():
-            _name = getattr(_entry, "name", None)
-            if not isinstance(_name, str) or not _name:
-                continue
-            _label = getattr(_entry, "label", None)
-            if isinstance(_label, str) and _label.strip():
-                _labels[_name] = _label.strip()
-            if getattr(_entry, "cron_deliver_env_var", None):
-                _names.add(_name)
-        _registry_names, _registry_labels = _names, _labels
+        # import_module returns the exact registered module (tests replace it in sys.modules).
+        _agent_plugins = importlib.import_module("hermes_cli.plugins")
+        if hasattr(_agent_plugins, "_plugin_managers_by_home"):
+            _agent_plugins.discover_plugins()  # idempotent, scoped to the active profile home
+            from gateway.platform_registry import platform_registry
+            _names, _labels = set(), {}
+            for _entry in platform_registry.all_entries():
+                _name = getattr(_entry, "name", None)
+                if not isinstance(_name, str) or not _name:
+                    continue
+                _label = getattr(_entry, "label", None)
+                if isinstance(_label, str) and _label.strip():
+                    _labels[_name] = _label.strip()
+                if getattr(_entry, "cron_deliver_env_var", None):
+                    _names.add(_name)
+            _registry_names, _registry_labels = _names, _labels
     except Exception:
         logger.debug("cron delivery options: platform registry unavailable", exc_info=True)
     platforms = [
