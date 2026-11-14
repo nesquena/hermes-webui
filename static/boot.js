@@ -4631,7 +4631,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         if(savedSidebarOnlyState.archived){
           try{localStorage.removeItem('hermes-webui-session');}catch(_){}
         }
-        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false; try{_updateActiveRunDot();}catch(_){}
         _syncQuotaForBootContext();
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
@@ -4641,7 +4641,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         return;
       }
       if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
-        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false; try{_updateActiveRunDot();}catch(_){}
         S._bootReady=true;
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
