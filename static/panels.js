@@ -7889,12 +7889,48 @@ async function switchToProfile(name) {
     // Apply the profile defaults returned by /api/profile/switch immediately.
     // Refreshing the full model/workspace catalogs is useful, but it should not
     // hold the visible switch animation open.
+    //
+    // #8576 catalog-owner fence: a /api/models reply started on the PREVIOUS
+    // profile may still be in flight — the canonical switch auto-creates its
+    // new session and awaits the sidebar render BEFORE the destination catalog
+    // hydration at the bottom of this function, and a reply landing in that
+    // window would publish the old profile's defaults/options and release the
+    // one-shot reset under the new profile. Invalidate the catalog generation
+    // FIRST, before ANY stale defaults/options/reset write below: the delayed
+    // reply's requestSeq is then stale by the time it arrives, and only the
+    // destination hydration that follows can publish.
+    if (typeof _invalidateModelDropdownRequests === 'function') _invalidateModelDropdownRequests();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
+    // #8576 (greptile P1, 2026-11-08): an explicit-picker marker is session-
+    // scoped evidence authored under the profile that owned the pick. This
+    // writer has NOT replaced S.session yet, and newSession() below reads that
+    // still-loaded session's marker — so drop it at the profile boundary,
+    // exactly like the persisted pair above. Without this, a pick made on the
+    // old conversation would pass the armed reset gate and send its model +
+    // provider in the destination profile's automatic New Chat.
+    if (S.session && S.session.session_id && typeof _clearExplicitPickerPick === 'function') {
+      _clearExplicitPickerPick(S.session.session_id);
+    }
     _skillsData = null;
     _workspaceList = null;
-    if (data.default_model) window._defaultModel = data.default_model;
-    if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    // The destination profile's defaults are a PAIR: adopting its default model
+    // also (re)binds the provider from the SAME switch response — replace or
+    // clear, never keep the previous profile's pair when the destination has
+    // none configured (#8527 profile-switch review). A successful per-client
+    // switch can legitimately return a null/absent/empty default model
+    // (api/profiles.py reads the destination's raw config), and a model-less
+    // destination still OWNS the default state: the previous profile's pair is
+    // cleared outright so the session auto-created below cannot inherit it, and
+    // the one-shot reset gate keeps the still-pre-refresh picker/persisted pair
+    // from becoming newSession()'s fallback until the catalog rehydrates.
+    // (typeof-guarded like the slash-skill cache drop above: bare-eval
+    // harnesses run this writer without a window.)
+    if (typeof window !== 'undefined') {
+      window._defaultModel = data.default_model || null;
+      window._activeProvider = data.default_model ? (data.default_model_provider || null) : null;
+    }
+    S._profileSwitchModelReset = !data.default_model;
 
     // ── Apply model ────────────────────────────────────────────────────────
     if (data.default_model) {

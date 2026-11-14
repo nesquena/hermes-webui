@@ -1658,13 +1658,34 @@ class TestFrontendModelProviderState:
         assert "_fallbackProvider" in provider_assignment
         assert "window._activeProvider" in body
         assert "S.session&&S.session.model_provider" in body
-        pos_explicit = body.index("newModelState.model_provider")
-        pos_active = body.index("window._activeProvider")
-        pos_prev = body.index("S.session&&S.session.model_provider")
-        assert pos_explicit < pos_active < pos_prev, (
-            "Fallback chain order broken: explicit > _activeProvider > "
-            "prev-session must hold so /api/session/new hits the fast "
-            "path whenever a usable default exists (#2518 follow-up)."
+        # Scope the ordering assertion to the real fallback block: the
+        # _bareModel guard through the reqBody.model_provider assignment.
+        # A whole-body first-occurrence index used to be satisfied by a
+        # COMMENT literal above the chain (the #2518 note mentioning
+        # ``newModelState.model_provider``) — the change-detector shape
+        # AGENTS.md warns against, which any new use above the chain
+        # (e.g. #8527's configured pair) would trip.
+        chain_start = body.index("const _bareModel=")
+        chain_end = body.index("reqBody.model_provider=")
+        chain = body[chain_start:chain_end]
+        assert "const _fallbackProvider=" in chain, (
+            "the fallback chain definition must stay between the _bareModel "
+            "guard and the reqBody.model_provider assignment"
+        )
+        pos_active = chain.index("window._activeProvider")
+        pos_prev = chain.index("S.session&&S.session.model_provider")
+        assert pos_active < pos_prev, (
+            "Fallback chain order broken: _activeProvider must be consulted "
+            "before the prev-session provider so /api/session/new hits the "
+            "fast path whenever a usable default exists (#2518 follow-up)."
+        )
+        # The assignment itself must source the explicit pair first, with the
+        # fallback wired in after the ``||``.
+        assert provider_assignment.index("newModelState.model_provider") < provider_assignment.index(
+            "_fallbackProvider"
+        ), (
+            "reqBody.model_provider must source newModelState.model_provider "
+            "first, with the fallback chain after it"
         )
 
     def test_ui_has_json_model_state_storage(self):

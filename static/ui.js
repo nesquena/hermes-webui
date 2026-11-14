@@ -5645,6 +5645,26 @@ function _persistSessionModelCorrection(model, provider, opts){
 let _modelDropdownRequestSeq=0;
 let _modelCatalogFallbackRetried=false;
 
+// #8576 catalog-owner fence: retires every in-flight /api/models publication.
+// Both profile-transition writers (switchToProfile in panels.js and
+// _switchProfileForSessionLoad in sessions.js) call this on a SUCCESSFUL
+// switch, BEFORE adopting the destination's defaults/options/reset, so a
+// delayed catalog reply that was started on the PREVIOUS profile can no
+// longer pass the requestSeq check inside populateModelDropdown — it can
+// neither restore the old profile's globals (newSession()'s configured-default
+// arm reads window._defaultModel FIRST, ahead of any reset gate) nor release
+// the one-shot profile-switch model reset. There is no profile-name
+// comparison: ANY pre-transition request is stale once its generation was
+// invalidated — which is what makes A→B→A (a reply started while the same
+// profile was previously active) safe too. The destination hydration that
+// follows the fence captures a fresh requestSeq and owns the picker from
+// there on.
+function _invalidateModelDropdownRequests(){
+  if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
+  _modelDropdownRequestSeq++;
+  return _modelDropdownRequestSeq;
+}
+
 function _applySessionModelFallback(sel){
   if(!sel) return null;
   const configuredDefault=String(window._defaultModel||'').trim();
@@ -5686,6 +5706,14 @@ async function populateModelDropdown(opts={}){
     if(requestSeq!==_modelDropdownRequestSeq) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
+    // #8527 re-gate: a pending profile-switch model reset is deliberately NOT
+    // released here. This payload is the ACTIVE profile's own defaults, but the
+    // picker below can still fail to rebuild — an empty catalog (no groups and
+    // no configured fallback) or a failed hydration leaves the PREVIOUS
+    // profile's option selected, and a gate released at this point would let
+    // newSession() fall back to that stale pair. The release happens after the
+    // rebuild/reconcile below; the empty-result branch keeps the gate armed and
+    // quarantines the stale options.
     window._configuredModelBadges=data.configured_model_badges||{};
     window._modelEndpointErrors={};
     const _sortModelEntries=(items,providerId)=>{
@@ -5782,10 +5810,58 @@ async function populateModelDropdown(opts={}){
       if(willRetry){
         _modelCatalogFallbackRetried=true;
         populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
+        // A fresher retry owns the picker: keep BOTH the gate and the current
+        // options until it settles (clearing here would only flicker, and the
+        // armed gate already blocks the stale fallback in the meantime).
+        return;
       }
+      // #8527 re-gate: no server groups and no configured fallback — this
+      // profile has nothing to pick. The <select> still holds the PREVIOUS
+      // profile's options (the clear below never ran), so a reset gate released
+      // on this path would let newSession() adopt that stale pair
+      // ({model:'old/model',model_provider:'old-route'}) under this profile's
+      // name. Keep the one-shot gate armed AND drop the stale options so an
+      // empty catalog can never be picked from. (The hardcoded-HTML fallback
+      // only applies to a FAILED fetch — the catch below — never to a
+      // successful empty response.)
+      //
+      // #8576 P2: that quarantine is a DESTINATION-PROFILE isolation, so it
+      // may only run while a profile-switch model reset is actually pending
+      // (S._profileSwitchModelReset — armed by the switch writers in
+      // panels.js/sessions.js and released only after a successful rebuild).
+      // On an ORDINARY refresh (freshness:'session_visit', no pending switch)
+      // the <select> holds THIS profile's OWN legal catalog, and an empty or
+      // degraded catalog response means "nothing right now", not "this profile
+      // owns nothing". Clearing it there dropped the model/provider pair the
+      // next New Chat had to send — the only legal source of that pair when
+      // the profile configures no default model and no picker preference was
+      // persisted (#8576 P2: ordinary catalog refresh loses the next New Chat
+      // model choice).
+      if((typeof S!=='undefined'&&S&&S._profileSwitchModelReset)){
+        sel.innerHTML='';
+        if(typeof syncModelChip==='function') syncModelChip();
+        return; // no server groups and no configured fallback
+      }
+      // Ordinary refresh with an empty or degraded catalog: KEEP the current
+      // profile's own options and the selection inside them. Only the chip is
+      // re-synced — the picker itself must survive, because newSession()'s
+      // picker fallback reads this selection together with the option's own
+      // provider (sessions.js), and that pair is the only legal source of the
+      // new session's model when no default model is configured.
+      if(typeof syncModelChip==='function') syncModelChip();
       return; // no server groups and no configured fallback
     }
-    const previousSelection=_captureModelDropdownSelection(sel);
+    // #8527 re-gate: while a profile-switch model reset is still pending, the
+    // dropdown's current selection belongs to the PREVIOUS profile — it is
+    // exactly the foreign state the one-shot gate exists to quarantine. Do not
+    // let the rebuild reconcile it back in: _reconcileModelDropdownSelection
+    // would re-apply it (re-injecting the old provider as a custom option and
+    // selecting it), re-opening the very fallback the gate just closed. A fresh
+    // explicit/project choice never flows through here — newSession() consults
+    // those ahead of the picker/persisted fallbacks.
+    const previousSelection=(typeof S!=='undefined'&&S&&S._profileSwitchModelReset)
+      ?null
+      :_captureModelDropdownSelection(sel);
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -5833,6 +5909,15 @@ async function populateModelDropdown(opts={}){
     }
     _reconcileModelDropdownSelection(sel,data,previousSelection,opts);
     if(typeof syncModelChip==='function') syncModelChip();
+    // #8527 re-gate: the picker now holds the ACTIVE profile's own catalog
+    // (rebuilt above and reconciled — with the previous profile's selection
+    // quarantined while the reset was pending), so a pending profile-switch
+    // model reset is complete: release the one-shot gate and let newSession()
+    // use the refreshed picker again. The switch's auto-created session already
+    // went out model-less while the picker was still the previous profile's.
+    // typeof-guarded for the bare single-function eval harnesses that lack
+    // module scope.
+    if(typeof S!=='undefined'&&S)S._profileSwitchModelReset=false;
     const dd=$('composerModelDropdown');
     if(dd&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
       renderModelDropdown();
