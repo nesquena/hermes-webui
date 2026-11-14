@@ -20272,10 +20272,28 @@ function _collectHandoffSummaryStates(messages){
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
-  return _isContextCompactionText(text);
+  return _isContextCompactionText(text, m);
 }
-function _isContextCompactionText(text){
-  return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
+function _isContextCompactionText(text, m){
+  // Prefix vocabulary is owned by api/compression_anchor.py
+  // (COMPACTION_PROMPT_CARD_PREFIX / COMPACTION_HANDOFF_HEADER_PREFIX); this is
+  // the browser mirror, not a second source of truth. A `[prior context ...]`
+  // header needs positive envelope evidence (#8748): a closing `]` plus either
+  // the delimiter, a [context compaction segment, or a truthy
+  // _compressed_summary. Authored notes that merely start with the header stay
+  // ordinary transcript text.
+  const s=String(text||'').replace(/^\s+/,'');
+  const low=s.toLowerCase();
+  const hasFlag=!!(m&&m._compressed_summary);
+  if(low.startsWith('[context compaction')||low.startsWith('context compaction')) return true;
+  if(!low.startsWith('[prior context')) return false;
+  const close=s.indexOf(']');
+  if(close===-1) return false;
+  const after=s.slice(close+1).replace(/^\s+/,'').toLowerCase();
+  return low.includes('[end of prior context')
+    || after.startsWith('[context compaction')
+    || after.startsWith('context compaction')
+    || hasFlag;
 }
 function _compactionSummarySegment(text){
   // Mirror of api/compression_anchor.py compaction_summary_segment(). The
@@ -20284,7 +20302,7 @@ function _compactionSummarySegment(text){
   const low=s.toLowerCase();
   if(low.startsWith('[context compaction')||low.startsWith('context compaction')) return s;
   if(!low.startsWith('[prior context')) return null;
-  const delim=low.indexOf('[end of prior context');
+  const delim=s.search(/\[end of prior context/i);
   if(delim===-1) return null;
   const after=s.slice(delim);
   const close=after.indexOf(']');
