@@ -33,11 +33,11 @@ REPO = Path(__file__).resolve().parents[1]
 UI_JS_PATH = REPO / "static" / "ui.js"
 
 
-def _function_source(name: str) -> str:
-    """Extract a top-level ``function name(...)`` body from static/ui.js."""
-    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+def _function_source(name: str, path: Path = UI_JS_PATH) -> str:
+    """Extract a top-level ``function name(...)`` body from a static script."""
+    ui_js = path.read_text(encoding="utf-8")
     start = ui_js.find(f"function {name}(")
-    assert start != -1, f"function {name}() not found in static/ui.js"
+    assert start != -1, f"function {name}() not found in {path.name}"
     brace = ui_js.index("{", start)
     depth = 0
     for i in range(brace, len(ui_js)):
@@ -283,7 +283,6 @@ function _deferClearProgrammaticScroll() { return null; }
 function _extractInlineThinkingFromContentForRender() { return null; }
 function _fixMobileScrollJank() { return null; }
 function _flush() { return null; }
-function _fmtDateSep() { return ''; }
 function _fmtSv() { return ''; }
 function _formatFirstToken() { return ''; }
 function _hydrateIdLinkedHistoricalToolScenes() { return null; }
@@ -434,6 +433,7 @@ function _fmtTokens(value) { return String(value); }
 /*RAW_TURN_BOUNDARY*/
 /*INSERT_SEGMENT_BLOCK*/
 /*ASSISTANT_SEGMENT_IS_TURN_FINAL*/
+/*DATE_SEP_HELPERS*/
 /*RENDER_MESSAGES*/
 
 function footCounts(foot) {
@@ -483,6 +483,24 @@ console.log(JSON.stringify(result));
 """
 
 
+def _date_sep_prelude() -> str:
+    """Real date-separator chain renderMessages() now calls on every row."""
+    sessions = REPO / "static" / "sessions.js"
+    names = (
+        "_recoveredAnchorText",
+        "_isEmptyRecoveredJournalAnchor",
+        "_fmtDateSep",
+        "_messageDateSepDayKey",
+        "_nextDateSepText",
+    )
+    parts = [
+        "let _serverTimeDelta = 0;",
+        _function_source("_serverNowMs", sessions),
+    ]
+    parts.extend(_function_source(name) for name in names)
+    return "\n".join(parts)
+
+
 def _run_footer_scenario() -> dict:
     node = shutil.which("node")
     if not node:
@@ -495,6 +513,7 @@ def _run_footer_scenario() -> dict:
             "/*ASSISTANT_SEGMENT_IS_TURN_FINAL*/",
             _function_source("_assistantSegmentIsTurnFinal"),
         )
+        .replace("/*DATE_SEP_HELPERS*/", _date_sep_prelude())
         .replace("/*RENDER_MESSAGES*/", _function_source("renderMessages"))
     )
     # The harness embeds renderMessages(), which is ~110 KB of source. Passing
