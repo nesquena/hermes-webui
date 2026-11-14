@@ -23,6 +23,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/architecture/session-display-message-count.md`](architecture/session-display-message-count.md):
+  implemented contract for `GET /api/session` display coordinate reconciliation across
+  metadata (`messages=0`), bounded (`messages=1&msg_limit=...`), and full (`messages=1`)
+  response modes, immediate-parent display reconciliation, and lineage cache invalidation.
 - [`docs/architecture/model-picker-routing.md`](architecture/model-picker-routing.md):
   current contract for provider-scoped model identity, exact OpenRouter route
   matching, overflow promotion, routed fallback, and selected-row rendering.
