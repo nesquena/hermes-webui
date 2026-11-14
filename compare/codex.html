@@ -9,7 +9,7 @@
   <link rel="shortcut icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" sizes="512x512" href="/apple-touch-icon.png" />
   <title>Hermes vs. Codex CLI | Comparison</title>
-  <meta name="description" content="Codex was rewritten in Rust, now spans CLI, IDE extension, desktop app with Automations, and Codex Cloud. Here's how it compares to Hermes." />
+  <meta name="description" content="Codex CLI is a coding agent for your terminal. Hermes is a general agent you run yourself, with a browser workspace." />
 <link rel="stylesheet" href="/chrome.css"><script src="/site.js"></script>
 <style>
     :root {
@@ -159,6 +159,23 @@
 :root[data-theme="light"] { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --text-2: #59636e; --gold: #c07800; --gold-text: #8a5800; --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-card: #f6f8fa; --text-primary: #1f2328; --text-secondary: #59636e; --text-muted: #59636e; --accent: #8a5800; --ink: #1f2328; --muted: #59636e; --line: #d0d7de; --nav-height: var(--header); }
 :root[data-theme="light"] :is(.btn-primary) { background-color: var(--gold); }
 :root[data-theme="light"] .c-yes { color: #116329; }
+.table-wrap caption { text-align: left; padding: 12px 16px; color: var(--text-2); font-size: .85rem; }
+.table-wrap tbody th[scope=row] { text-align: left; padding-left: 16px; }
+.hero + .section { padding-top: 32px; }
+.hero { position: relative; overflow: hidden; }
+@media (max-width: 600px) {
+  .table-wrap thead { display: none; }
+  .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: 100%; }
+  .table-wrap table { min-width: 0; }
+  .table-wrap caption { display: block; max-width: none; }
+  .table-wrap tr { border-top: 1px solid var(--border); padding: 12px 16px; }
+  .table-wrap tbody th[scope=row] { padding: 0 0 6px; border: 0; }
+  .table-wrap td { border: 0; padding: 4px 0 4px 12px; border-left: 2px solid var(--border); text-align: left; }
+  .table-wrap td + td { margin-top: 6px; }
+  .table-wrap td.is-hermes { border-left-color: var(--gold); }
+  .table-wrap td::before { content: attr(data-label); display: block; font-size: 14px; font-weight: 600; color: var(--text-2); }
+  .table-wrap td.is-hermes::before { color: var(--gold-text); }
+}
 main p a:not([class]) { text-decoration: underline; text-underline-offset: 2px; }
 body { font-family: var(--font); }
 code, pre, kbd, samp { font-family: var(--mono); }
@@ -179,172 +196,24 @@ code, pre, kbd, samp { font-family: var(--mono); }
 
 
 <main id="main">
-  <div class="hero">
-    <div class="container">
-      <div class="breadcrumb">
-        <a href="../index.html">Hermes</a>
-        <span class="breadcrumb-sep">/</span>
-        <a href="../index.html#compare">Comparisons</a>
-        <span class="breadcrumb-sep">/</span>
-        <span>vs. Codex CLI</span>
-      </div>
-      <div class="page-label">Comparison</div>
-      <h1 class="page-title">Hermes vs. Codex CLI</h1>
-      <p class="page-sub">Codex was rewritten in Rust, now spans CLI, IDE extension, desktop app with Automations, and Codex Cloud. Here's how it compares to Hermes.</p>
-
-      <div class="verdict">
-        <div class="verdict-icon">🖥️</div>
-        <div class="verdict-text">
-          <strong>Different scope.</strong>
-          <p>Codex CLI is a capable multi-provider coding agent. Hermes is a persistent server agent with self-hosted scheduling, messaging, and automatic memory. Complementary tools.</p>
-        </div>
-      </div>
-
-      <div class="feature-compare">
-        <div class="fc-col hermes">
-          <div class="fc-col-label">You're here</div>
-          <div class="fc-col-name">Hermes</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory</span><span class="fc-val yes">Yes, layered</span></div>
-          <div class="fc-row"><span class="fc-key">Self-improving skills</span><span class="fc-val yes">Yes, automatic</span></div>
-          <div class="fc-row"><span class="fc-key">Self-hosted CLI scheduling</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Desktop app scheduling</span><span class="fc-val partial">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">Cloud execution</span><span class="fc-val partial">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">Messaging integration</span><span class="fc-val yes">Yes, 15+ first-party</span></div>
-          <div class="fc-row"><span class="fc-key">Web UI</span><span class="fc-val yes">Yes, self-hosted</span></div>
-          <div class="fc-row"><span class="fc-key">Provider support</span><span class="fc-val yes">Yes, many</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val yes">Yes, MIT</span></div>
-          <div class="fc-row"><span class="fc-key">Language/runtime</span><span class="fc-val yes">Python</span></div>
-          <div class="fc-row"><span class="fc-key">AGENTS.md support</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val yes">Yes, markdown</span></div>
-        </div>
-        <div class="fc-col">
-          <div class="fc-col-label">Comparing</div>
-          <div class="fc-col-name">Codex CLI</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory</span><span class="fc-val partial">Partial (session history + AGENTS.md)</span></div>
-          <div class="fc-row"><span class="fc-key">Self-improving skills</span><span class="fc-val no">No</span></div>
-          <div class="fc-row"><span class="fc-key">Self-hosted CLI scheduling</span><span class="fc-val no">No (CLI has none)</span></div>
-          <div class="fc-row"><span class="fc-key">Desktop app scheduling</span><span class="fc-val partial">Yes (Automations feature)</span></div>
-          <div class="fc-row"><span class="fc-key">Cloud execution</span><span class="fc-val yes">Yes (Codex Cloud)</span></div>
-          <div class="fc-row"><span class="fc-key">Messaging integration</span><span class="fc-val no">None first-party</span></div>
-          <div class="fc-row"><span class="fc-key">Web UI</span><span class="fc-val no">No (CLI + desktop app)</span></div>
-          <div class="fc-row"><span class="fc-key">Provider support</span><span class="fc-val yes">Yes, 12+ providers</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val yes">Yes, Apache 2.0</span></div>
-          <div class="fc-row"><span class="fc-key">Language/runtime</span><span class="fc-val partial">Rust (rewritten 2025)</span></div>
-          <div class="fc-row"><span class="fc-key">AGENTS.md support</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val partial">Partial (session history)</span></div>
-        </div>
-      </div>
-
-      <!-- Compare nav pills -->
-      <div class="compare-nav">
-        <div class="compare-nav-label">More comparisons</div>
-        <a href="openclaw.html" class="cpill">vs. OpenClaw</a>
-        <a href="claude-code.html" class="cpill">vs. Claude Code</a>
-        <a href="codex.html" class="cpill active">vs. Codex</a>
-        <a href="opencode.html" class="cpill">vs. OpenCode</a>
-        <a href="cursor.html" class="cpill">vs. Cursor</a>
-        <a href="copilot.html" class="cpill">vs. Copilot</a>
-        <a href="claude-ai.html" class="cpill">vs. Claude.ai</a>
-        <a href="chatgpt.html" class="cpill">vs. ChatGPT</a>
-        <a href="perplexity-computer.html" class="cpill">vs. Perplexity Computer</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Narrative -->
-  <div class="section section-alt">
-    <div class="container">
-      <h2 class="section-title">The details</h2>
-      <p class="section-body">Both tools are open source and coding-focused. But they serve different runtime contexts.</p>
-      <div class="narrative">
-
-        <h3>What Codex is now</h3>
-        <p>Codex CLI was rewritten in <strong>Rust in 2025</strong>, giving it a zero-dependency install and a noticeably faster startup. It now spans multiple surfaces: the command-line tool, an IDE extension, a desktop application, and <strong>Codex Cloud</strong> for managed execution. Provider support is genuinely broad — 12+ providers including Groq, Ollama, LM Studio, DeepSeek, xAI, and Azure OpenAI. If you want a coding agent that runs everywhere and touches every provider, Codex has made serious progress.</p>
-
-        <h3>Scheduling: Automations vs. cron</h3>
-        <p>The Codex <strong>desktop app includes an Automations feature</strong> that can run recurring tasks — but this is not the same as a headless server cron. The CLI itself has no scheduling capability. Hermes runs as a persistent server process and integrates directly with system-level scheduling, meaning jobs keep firing whether or not any GUI is open. For unattended background automation on a server, Hermes is designed for that; Codex's desktop Automations are designed for interactive desktop use.</p>
-
-        <h3>Memory model</h3>
-        <p>Codex supports <strong>session resumption and AGENTS.md</strong> — both genuinely useful for continuity within a project. But memory resets between separate sessions unless you explicitly resume. Hermes builds a <strong>living cross-project knowledge graph</strong>: facts, preferences, and learned context accumulate automatically across every project and conversation, and the agent can write new skill modules to extend its own capabilities. The difference is between remembering a conversation and permanently learning from it.</p>
-
-        <h3>Provider support: a genuine Codex advantage</h3>
-        <p>Codex's 12+ provider list — including Groq for speed, Ollama for local inference, LM Studio, DeepSeek, xAI, and Azure — is one of the widest in the CLI agent space. Hermes also supports multiple providers but the breadth here genuinely favors Codex for teams with complex provider requirements or budget constraints that push toward faster/cheaper models.</p>
-
-        <h3>Using Hermes and Codex together</h3>
-        <p>Because Hermes can spawn arbitrary subprocesses, it can orchestrate Codex as a sub-agent. A Hermes scheduled job can invoke <code>codex</code> for a specific coding subtask, collect the output, and incorporate results into Hermes's memory. This makes the two tools genuinely complementary rather than mutually exclusive: Hermes handles persistence, scheduling, and messaging; Codex handles the coding task with its provider of choice.</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Full table -->
-  <div class="section">
-    <div class="container">
-      <h2 class="section-title">Full feature comparison</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Feature</th>
-              <th>Codex CLI</th>
-              <th>Hermes</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr class="hl"><td>Persistent memory</td><td class="c-partial">Partial (session history + AGENTS.md)</td><td class="c-yes">Yes, layered</td></tr>
-            <tr><td>Self-improving skills</td><td class="c-no">No</td><td class="c-yes">Yes, automatic</td></tr>
-            <tr><td>CLI scheduling</td><td class="c-no">No</td><td class="c-yes">Yes, self-hosted cron</td></tr>
-            <tr><td>Desktop app Automations</td><td class="c-partial">Yes (desktop app)</td><td class="c-no">N/A</td></tr>
-            <tr><td>Cloud execution (Codex Cloud)</td><td class="c-yes">Yes</td><td class="c-no">N/A</td></tr>
-            <tr class="hl"><td>Messaging</td><td class="c-no">None first-party</td><td class="c-yes">Yes, 15+ platforms</td></tr>
-            <tr><td>Web UI</td><td class="c-no">No (CLI + desktop)</td><td class="c-yes">Yes, self-hosted</td></tr>
-            <tr><td>Provider support</td><td class="c-yes">12+ providers</td><td class="c-yes">Yes, many</td></tr>
-            <tr><td>Open source</td><td class="c-yes">Yes, Apache 2.0</td><td class="c-yes">Yes, MIT</td></tr>
-            <tr><td>AGENTS.md</td><td class="c-yes">Yes</td><td class="c-yes">Yes</td></tr>
-            <tr><td>Memory inspectability</td><td class="c-partial">Partial (session history)</td><td class="c-yes">Yes, markdown</td></tr>
-            <tr><td>Runtime</td><td class="c-partial">Rust (rewritten 2025)</td><td class="c-yes">Python</td></tr>
-            <tr class="hl"><td>Orchestratable from Hermes</td><td class="c-yes">Yes</td><td class="c-no">N/A</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Who section -->
-      <h2 class="section-title" style="margin-top:48px">Which should you choose?</h2>
-      <div class="who-grid">
-        <div class="who-card choose-hermes">
-          <div class="who-card-label">Choose Hermes if you need</div>
-          <ul>
-            <li><strong>Persistent cross-session memory</strong> that accumulates automatically</li>
-            <li><strong>Self-hosted scheduling</strong> with headless cron jobs</li>
-            <li><strong>Messaging integrations</strong> — Slack, Telegram, Discord, and 12+ more</li>
-            <li>Python and ML-ecosystem compatibility</li>
-            <li>An agent that <strong>improves its own skills</strong> over time</li>
-          </ul>
-        </div>
-        <div class="who-card choose-other">
-          <div class="who-card-label">Choose Codex if you need</div>
-          <ul>
-            <li>The <strong>widest provider coverage</strong> (12+ including Groq, Ollama, xAI)</li>
-            <li>A <strong>zero-dependency Rust CLI</strong> with no Node.js or Python required</li>
-            <li><strong>Codex Cloud</strong> for managed remote execution</li>
-            <li>Desktop Automations for recurring tasks in a GUI workflow</li>
-            <li>OpenAI-primary workflows with broad fallback options</li>
-          </ul>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- CTA -->
-  <div class="cta-strip">
-    <div class="container">
-      <h2>Try Hermes for free</h2>
-      <p>Self-hosted, open source, and running in minutes. No cloud account required.</p>
-      <div class="cta-btns">
-        <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-primary" target="_blank" rel="noopener">Get started →</a>
-        <a href="https://github.com/nesquena/hermes-webui" class="btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
-      </div>
-    </div>
-  </div>
+<div class="hero"><div class="container">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Hermes WebUI</a><span class="breadcrumb-sep">/</span><a href="/#compare">Comparisons</a><span class="breadcrumb-sep">/</span><span aria-current="page">Codex CLI</span></nav>
+<div class="page-label">Comparison</div><h1 class="page-title">Hermes vs. Codex CLI</h1>
+<p class="page-sub">Codex CLI is a coding agent for your terminal. Hermes is a general agent you run yourself, with a browser workspace.</p></div></div>
+<section class="section"><div class="container"><h2 class="section-title">At a glance</h2>
+<div class="table-wrap"><table><caption>Checked November 14, 2026</caption><thead><tr><th scope="col">Feature</th><th scope="col">Hermes Agent + WebUI</th><th scope="col">Codex CLI</th></tr></thead><tbody><tr><th scope="row">Main workflow</th><td class="is-hermes" data-label="Hermes">General agent, messaging and browser workspace</td><td data-label="Codex CLI">Inspect, edit and run code in a local repository</td></tr>
+<tr><th scope="row">Persistent memory</th><td class="is-hermes" data-label="Hermes">Bounded, curated local memory; optional backends</td><td data-label="Codex CLI">Optional local memories, separate from ChatGPT account memory</td></tr>
+<tr><th scope="row">Project rules</th><td class="is-hermes" data-label="Hermes">Context files and reusable skills</td><td data-label="Codex CLI">AGENTS.md for required project guidance; skills and plugins</td></tr>
+<tr><th scope="row">Scheduled work</th><td class="is-hermes" data-label="Hermes">Self-hosted cron and event hooks</td><td data-label="Codex CLI">Set up in ChatGPT web or desktop, not the CLI</td></tr>
+<tr><th scope="row">Execution location</th><td class="is-hermes" data-label="Hermes">Your machine or server</td><td data-label="Codex CLI">Local CLI; separate Codex Cloud execution</td></tr>
+<tr><th scope="row">Access</th><td class="is-hermes" data-label="Hermes">Browser workspace and configured chat platforms</td><td data-label="Codex CLI">Terminal, with separate IDE, desktop and cloud interfaces</td></tr></tbody></table></div>
+<h2 class="section-title">Which should you choose?</h2><div class="narrative"><ul><li><strong>Pick Hermes</strong> if you want a general agent in your browser and chat apps.</li>
+<li><strong>Pick Hermes</strong> if you want recurring jobs on a server you operate.</li>
+<li><strong>Pick Codex</strong> if you want to edit, test and review code from your terminal.</li>
+<li><strong>Pick Codex</strong> if you want to move coding work between your machine and Codex Cloud.</li></ul></div>
+<p class="section-body">Explore <a href="/models/">models</a>, <a href="/guides/agent-credentials/">credentials</a> and the <a href="/api-docs/">Bridge API</a>.</p></div></section>
+<section class="section section-alt"><div class="container"><h2 class="section-title">Sources</h2><p class="section-body"><a href="https://learn.chatgpt.com/docs/codex/cli">Codex CLI</a> · <a href="https://learn.chatgpt.com/docs/customization/memories">Codex and ChatGPT memory</a> · <a href="https://learn.chatgpt.com/docs/automations">Scheduling by surface</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory">Hermes memory</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/cron">Hermes scheduling</a> · <a href="https://hermes-agent.nousresearch.com/docs/integrations/providers">Hermes providers</a> · <a href="https://github.com/nesquena/hermes-webui">Hermes WebUI source</a></p><nav class="compare-nav" aria-label="More comparisons"><div class="compare-nav-label">More comparisons</div><a class="cpill" href="/compare/openclaw.html">vs. OpenClaw</a><a class="cpill" href="/compare/claude-code.html">vs. Claude Code</a><a class="cpill active" href="/compare/codex.html" aria-current="page">vs. Codex</a><a class="cpill" href="/compare/opencode.html">vs. OpenCode</a><a class="cpill" href="/compare/cursor.html">vs. Cursor</a><a class="cpill" href="/compare/copilot.html">vs. Copilot</a><a class="cpill" href="/compare/claude-ai.html">vs. Claude.ai</a><a class="cpill" href="/compare/chatgpt.html">vs. ChatGPT</a><a class="cpill" href="/compare/perplexity-computer.html">vs. Perplexity Computer</a></nav></div></section>
+<div class="cta-strip"><div class="container"><h2>Run Hermes WebUI</h2><div class="cta-btns"><a href="/setup/" class="btn-primary">Get started</a><a href="https://github.com/nesquena/hermes-webui" class="btn-secondary">View on GitHub</a></div></div></div>
 </main>
 
 <footer class="site-footer"><div class="container">

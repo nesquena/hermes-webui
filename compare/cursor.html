@@ -162,6 +162,7 @@
 .table-wrap caption { text-align: left; padding: 12px 16px; color: var(--text-2); font-size: .85rem; }
 .table-wrap tbody th[scope=row] { text-align: left; padding-left: 16px; }
 .hero + .section { padding-top: 32px; }
+.hero { position: relative; overflow: hidden; }
 @media (max-width: 600px) {
   .table-wrap thead { display: none; }
   .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: 100%; }
@@ -203,10 +204,10 @@ code, pre, kbd, samp { font-family: var(--mono); }
 </div></div>
 <section class="section"><div class="container">
 <h2 class="section-title">At a glance</h2>
-<div class="table-wrap" role="region" tabindex="0" aria-label="Hermes and Cursor comparison; scroll horizontally on small screens">
+<div class="table-wrap">
 <table><caption>Checked November 14, 2026</caption><thead><tr><th scope="col">Feature</th><th scope="col">Hermes Agent + WebUI</th><th scope="col">Cursor</th></tr></thead><tbody><tr><th scope="row">Main workflow</th><td class="is-hermes" data-label="Hermes">General agent, messaging and browser workspace</td><td data-label="Cursor">Coding editor plus local and background agent work</td></tr>
 <tr><th scope="row">Editor assistance</th><td class="is-hermes" data-label="Hermes">No autocomplete; the agent edits files for you</td><td data-label="Cursor">Inline completion, editing and review inside the editor</td></tr>
-<tr><th scope="row">Persistent context</th><td class="is-hermes" data-label="Hermes">Profile-scoped local memory; optional backends</td><td data-label="Cursor">Rules, plus notes each automation keeps between runs</td></tr>
+<tr><th scope="row">Persistent memory</th><td class="is-hermes" data-label="Hermes">Profile-scoped local memory; optional backends</td><td data-label="Cursor">Rules, plus notes each automation keeps between runs</td></tr>
 <tr><th scope="row">Scheduled work</th><td class="is-hermes" data-label="Hermes">Self-hosted cron and event hooks</td><td data-label="Cursor">Automations with schedule and event triggers</td></tr>
 <tr><th scope="row">Execution options</th><td class="is-hermes" data-label="Hermes">Your own machine or server</td><td data-label="Cursor">Cursor&rsquo;s cloud or your own machines</td></tr>
 <tr><th scope="row">Open source</th><td class="is-hermes" data-label="Hermes">Agent and WebUI are MIT licensed</td><td data-label="Cursor">Proprietary</td></tr></tbody></table>

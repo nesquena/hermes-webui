@@ -164,12 +164,29 @@
     }
     </style>
   <title>Hermes vs. ChatGPT | Comparison</title>
-  <meta name="description" content="Hermes vs. ChatGPT — how Hermes compares to ChatGPT Agent Mode, Scheduled Tasks, CUA, and dual-mode memory in 2025-2026." />
+  <meta name="description" content="ChatGPT pairs chat with Work for longer tasks. Hermes is an agent you run yourself, with a browser workspace." />
 <style>/* site-wide tokens and type over this page's own variables (unify.py) */
 :root, :root[data-theme="dark"] { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-2: #9198a1; --gold: #f0a500; --gold-text: #f0a500; --bg-primary: #0d1117; --bg-secondary: #161b22; --bg-card: #161b22; --text-primary: #e6edf3; --text-secondary: #9198a1; --text-muted: #9198a1; --accent: #f0a500; --ink: #e6edf3; --muted: #9198a1; --line: #30363d; --nav-height: var(--header); }
 :root[data-theme="light"] { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --text-2: #59636e; --gold: #c07800; --gold-text: #8a5800; --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-card: #f6f8fa; --text-primary: #1f2328; --text-secondary: #59636e; --text-muted: #59636e; --accent: #8a5800; --ink: #1f2328; --muted: #59636e; --line: #d0d7de; --nav-height: var(--header); }
 :root[data-theme="light"] :is(.btn-primary) { background-color: var(--gold); }
 :root[data-theme="light"] .c-yes { color: #116329; }
+.table-wrap caption { text-align: left; padding: 12px 16px; color: var(--text-2); font-size: .85rem; }
+.table-wrap tbody th[scope=row] { text-align: left; padding-left: 16px; }
+.hero + .section { padding-top: 32px; }
+.hero { position: relative; overflow: hidden; }
+@media (max-width: 600px) {
+  .table-wrap thead { display: none; }
+  .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: 100%; }
+  .table-wrap table { min-width: 0; }
+  .table-wrap caption { display: block; max-width: none; }
+  .table-wrap tr { border-top: 1px solid var(--border); padding: 12px 16px; }
+  .table-wrap tbody th[scope=row] { padding: 0 0 6px; border: 0; }
+  .table-wrap td { border: 0; padding: 4px 0 4px 12px; border-left: 2px solid var(--border); text-align: left; }
+  .table-wrap td + td { margin-top: 6px; }
+  .table-wrap td.is-hermes { border-left-color: var(--gold); }
+  .table-wrap td::before { content: attr(data-label); display: block; font-size: 14px; font-weight: 600; color: var(--text-2); }
+  .table-wrap td.is-hermes::before { color: var(--gold-text); }
+}
 main p a:not([class]) { text-decoration: underline; text-underline-offset: 2px; }
 body { font-family: var(--font); }
 code, pre, kbd, samp { font-family: var(--mono); }
@@ -188,249 +205,24 @@ code, pre, kbd, samp { font-family: var(--mono); }
 <div class="legacy-hooks" hidden aria-hidden="true"><button id="compare-hamburger" type="button" tabindex="-1"></button><div id="compare-mobile-menu"></div><button id="theme-toggle" type="button" tabindex="-1"></button></div>
 
 <main id="main">
-  <!-- HERO -->
-  <section class="hero" style="position:relative;overflow:hidden">
-    <div class="container">
-      <div class="breadcrumb">
-        <a href="../index.html">Hermes</a>
-        <span class="breadcrumb-sep">/</span>
-        <a href="../index.html#compare">Comparisons</a>
-        <span class="breadcrumb-sep">/</span>
-        <span>vs. ChatGPT</span>
-      </div>
-      <div class="page-label">Comparison</div>
-      <h1 class="page-title">Hermes vs. ChatGPT</h1>
-      <p class="page-sub">ChatGPT has Agent Mode (July 2025), Scheduled Tasks (January 2025), a computer-using agent, Projects, 50+ connectors, and dual-mode memory. It's not a passive Q&amp;A tool.</p>
-      <div class="verdict">
-        <div class="verdict-icon">💬</div>
-        <div class="verdict-text">
-          <strong>Bottom line</strong>
-          <p>ChatGPT is one of the most capable cloud AI platforms. Hermes gives you comparable capabilities plus full shell access, any model, and execution on hardware you own. The core choice is data sovereignty and control vs. managed convenience.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- FEATURE COMPARE GRID -->
-  <section class="section">
-    <div class="container">
-      <h2 class="section-title">Quick comparison</h2>
-      <p class="section-body">Side-by-side feature snapshot. Scroll down for the full comparison table and narrative.</p>
-      <div class="feature-compare">
-        <!-- Hermes col -->
-        <div class="fc-col hermes">
-          <div class="fc-col-label">Self-hosted</div>
-          <div class="fc-col-name">Hermes</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory</span><span class="fc-val yes">Yes, layered, permanent</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled tasks</span><span class="fc-val yes">Yes, self-hosted, any interval</span></div>
-          <div class="fc-row"><span class="fc-key">Agent Mode</span><span class="fc-val yes">Yes (always on)</span></div>
-          <div class="fc-row"><span class="fc-key">Computer use</span><span class="fc-val partial">Via shell tools</span></div>
-          <div class="fc-row"><span class="fc-key">Service connectors</span><span class="fc-val partial">Via agent tool use</span></div>
-          <div class="fc-row"><span class="fc-key">Shell access</span><span class="fc-val yes">Full, your server</span></div>
-          <div class="fc-row"><span class="fc-key">Self-hosted</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Provider-agnostic</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val yes">Yes, MIT</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val yes">Yes, editable markdown</span></div>
-          <div class="fc-row"><span class="fc-key">Data sovereignty</span><span class="fc-val yes">Yes, your hardware</span></div>
-          <div class="fc-row"><span class="fc-key">Projects / conversation org</span><span class="fc-val no">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">ChatGPT Pulse</span><span class="fc-val no">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">Mobile access</span><span class="fc-val yes">Yes (messaging apps)</span></div>
-        </div>
-        <!-- ChatGPT col -->
-        <div class="fc-col">
-          <div class="fc-col-label">Cloud managed</div>
-          <div class="fc-col-name">ChatGPT</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory</span><span class="fc-val yes">Yes, dual-mode (auto + manual)</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled tasks</span><span class="fc-val yes">Yes, since January 2025</span></div>
-          <div class="fc-row"><span class="fc-key">Agent Mode</span><span class="fc-val yes">Yes, launched July 17 2025</span></div>
-          <div class="fc-row"><span class="fc-key">Computer use</span><span class="fc-val yes">Yes (CUA - computer-using agent)</span></div>
-          <div class="fc-row"><span class="fc-key">Service connectors</span><span class="fc-val yes">50+ (Gmail, GitHub, Google Drive, etc.)</span></div>
-          <div class="fc-row"><span class="fc-key">Shell access</span><span class="fc-val partial">Sandboxed</span></div>
-          <div class="fc-row"><span class="fc-key">Self-hosted</span><span class="fc-val no">No (OpenAI infrastructure)</span></div>
-          <div class="fc-row"><span class="fc-key">Provider-agnostic</span><span class="fc-val no">No (OpenAI models only)</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val no">No</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val partial">View/delete but opaque process</span></div>
-          <div class="fc-row"><span class="fc-key">Data sovereignty</span><span class="fc-val no">No (OpenAI servers)</span></div>
-          <div class="fc-row"><span class="fc-key">Projects / conversation org</span><span class="fc-val yes">Yes (Projects with shared context)</span></div>
-          <div class="fc-row"><span class="fc-key">ChatGPT Pulse</span><span class="fc-val partial">Yes (Pro: daily research briefings)</span></div>
-          <div class="fc-row"><span class="fc-key">Mobile access</span><span class="fc-val yes">Yes (ChatGPT app)</span></div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- NARRATIVE -->
-  <section class="section section-alt">
-    <div class="container">
-      <h2 class="section-title">ChatGPT in 2025–2026</h2>
-      <div class="narrative">
-        <h3>ChatGPT is not passive Q&amp;A</h3>
-        <p><strong>Agent Mode</strong> launched July 17, 2025 — autonomous multi-step task execution with web browsing, code execution, and file operations. <strong>Scheduled Tasks</strong> arrived January 2025 for recurring prompts. The <strong>computer-using agent (CUA)</strong> adds visual browser control for web-based workflows. <strong>Projects</strong> provide shared persistent context across conversations. <strong>Pulse</strong> (Pro plan) delivers daily research briefings. Dual-mode memory — background auto-extraction plus manual pins — and 50+ connectors including Gmail, GitHub, Google Drive, and Notion make this a substantial autonomous platform.</p>
-
-        <h3>Memory: dual-mode vs. inspectable files</h3>
-        <p>ChatGPT's memory works in two modes: background auto-extraction where the model decides what's worth remembering, plus manual memory pins you add yourself. You can view and delete stored memories, but the extraction logic is opaque — you don't see the raw files or control the process. Critically, switching between different model versions can affect memory state.</p>
-        <p>Hermes stores all memory as <strong>plain markdown files</strong> on your filesystem. You can open them in any editor, modify them, version-control them with git, and they persist regardless of which model backend you use. Eight optional external memory providers (vector databases, graph stores) are available for more advanced retrieval patterns.</p>
-
-        <h3>Scheduled tasks: cloud vs. self-hosted execution</h3>
-        <p>ChatGPT Scheduled Tasks run on OpenAI's servers in a sandboxed environment. They can call web APIs and trigger connected services, but they cannot touch your internal databases, local network resources, private code repositories, or any system behind your firewall. Hermes scheduled tasks run on your server with full shell access: local PostgreSQL, Redis, private Git repos, internal APIs, network hardware — anything reachable from your machine is in scope.</p>
-        <p>For tasks that only need public web access, ChatGPT's scheduling is convenient. For tasks that need to touch private infrastructure, there is no substitution.</p>
-
-        <h3>Computer use (CUA) vs. shell access</h3>
-        <p>ChatGPT's CUA is genuinely impressive for <strong>visual web tasks</strong>: filling forms, navigating GUIs, scraping dynamic pages, operating cloud dashboards. It controls a hosted browser and sees screenshots. Hermes shell access is better for <strong>server-side automation</strong>: running scripts, managing files, querying databases, calling CLIs, deploying code. These are complementary tools for different jobs — CUA for the visual web layer, shell for the server layer.</p>
-
-        <h3>The data question</h3>
-        <p>Every message, file, and tool result you send to ChatGPT transits OpenAI's servers. For personal productivity tasks, this is a non-issue. For <strong>proprietary source code</strong>, regulated personal data (HIPAA, GDPR), credentials, financial data, or workflows that by policy must stay on-premises, it is a hard boundary. Hermes runs the agent on hardware you control. Your chosen model provider and connected tools, messaging services, or memory providers may receive data from the work you ask it to do.</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- FULL COMPARISON TABLE -->
-  <section class="section">
-    <div class="container">
-      <h2 class="section-title">Full comparison table</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Feature</th>
-              <th>ChatGPT</th>
-              <th>Hermes</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr class="hl">
-              <td>Persistent memory</td>
-              <td class="c-yes">✓ Dual-mode (auto + manual)</td>
-              <td class="c-yes">✓ Layered, permanent</td>
-            </tr>
-            <tr>
-              <td>Memory inspectability</td>
-              <td class="c-partial">View/delete — opaque process</td>
-              <td class="c-yes">✓ Editable markdown files</td>
-            </tr>
-            <tr class="hl">
-              <td>Scheduled tasks</td>
-              <td class="c-yes">✓ Since January 2025</td>
-              <td class="c-yes">✓ Self-hosted, always-on</td>
-            </tr>
-            <tr>
-              <td>Agent Mode</td>
-              <td class="c-yes">✓ Since July 17 2025</td>
-              <td class="c-yes">✓ Always on</td>
-            </tr>
-            <tr>
-              <td>Computer use (CUA)</td>
-              <td class="c-yes">✓ Visual browser agent</td>
-              <td class="c-partial">Via shell tools</td>
-            </tr>
-            <tr>
-              <td>Shell / code execution</td>
-              <td class="c-partial">Sandboxed</td>
-              <td class="c-yes">✓ Full shell, your server</td>
-            </tr>
-            <tr>
-              <td>Service connectors</td>
-              <td class="c-yes">✓ 50+ (Gmail, GitHub, Drive…)</td>
-              <td class="c-partial">Via agent tool use</td>
-            </tr>
-            <tr class="hl">
-              <td>Self-hosted</td>
-              <td class="c-no">No (OpenAI infra)</td>
-              <td class="c-yes">✓ Yes</td>
-            </tr>
-            <tr class="hl">
-              <td>Data sovereignty</td>
-              <td class="c-no">No (OpenAI servers)</td>
-              <td class="c-yes">✓ Your hardware</td>
-            </tr>
-            <tr>
-              <td>Provider-agnostic</td>
-              <td class="c-no">No (OpenAI models only)</td>
-              <td class="c-yes">✓ Yes, any model</td>
-            </tr>
-            <tr>
-              <td>Open source</td>
-              <td class="c-no">No</td>
-              <td class="c-yes">✓ MIT license</td>
-            </tr>
-            <tr>
-              <td>Mobile access</td>
-              <td class="c-yes">✓ ChatGPT app</td>
-              <td class="c-yes">✓ Messaging apps</td>
-            </tr>
-            <tr>
-              <td>Projects</td>
-              <td class="c-yes">✓ Shared context across chats</td>
-              <td class="c-no">N/A</td>
-            </tr>
-            <tr>
-              <td>Always-on</td>
-              <td class="c-yes">✓ Managed cloud</td>
-              <td class="c-yes">✓ Permanent server process</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-
-  <!-- WHO SECTION -->
-  <section class="section section-alt">
-    <div class="container">
-      <h2 class="section-title">Who should use which</h2>
-      <div class="who-grid">
-        <div class="who-card choose-hermes">
-          <div class="who-card-label">Choose Hermes if you…</div>
-          <ul>
-            <li><strong>Data sovereignty</strong> — proprietary code, regulated data, or on-premises requirements</li>
-            <li><strong>Full shell access</strong> — tasks that must touch private servers, local DBs, or internal APIs</li>
-            <li><strong>Self-hosted scheduling</strong> — any interval, any trigger, no cloud dependency</li>
-            <li><strong>Provider flexibility</strong> — swap OpenAI, Anthropic, Google, DeepSeek, or local models freely</li>
-            <li><strong>Permanent non-expiring memory</strong> — persists across model switches and plan changes</li>
-            <li><strong>Open source</strong> — MIT license, full auditability and extensibility</li>
-            <li><strong>No subscription for core features</strong> — not gated behind Pro or Plus tiers</li>
-          </ul>
-        </div>
-        <div class="who-card choose-other">
-          <div class="who-card-label">Choose ChatGPT if you…</div>
-          <ul>
-            <li><strong>Best polished AI UX</strong> — zero server setup, best-in-class interface</li>
-            <li><strong>CUA for visual browser tasks</strong> — form filling, GUI navigation, dynamic scraping</li>
-            <li><strong>50+ managed connectors</strong> — Gmail, GitHub, Drive, Notion maintained by OpenAI</li>
-            <li><strong>Pulse briefings</strong> — daily research summaries on Pro plan</li>
-            <li><strong>Projects</strong> — shared persistent context and organized conversation history</li>
-            <li><strong>OpenAI model priority</strong> — first access to GPT-5.4 and future model releases</li>
-          </ul>
-        </div>
-      </div>
-
-      <!-- Compare Nav Pills -->
-      <div class="compare-nav">
-        <div class="compare-nav-label">Compare Hermes vs.</div>
-      <a href="openclaw.html" class="cpill">vs. OpenClaw</a>
-      <a href="claude-code.html" class="cpill">vs. Claude Code</a>
-      <a href="codex.html" class="cpill">vs. Codex</a>
-      <a href="opencode.html" class="cpill">vs. OpenCode</a>
-      <a href="cursor.html" class="cpill">vs. Cursor</a>
-      <a href="copilot.html" class="cpill">vs. Copilot</a>
-      <a href="claude-ai.html" class="cpill">vs. Claude.ai</a>
-      <a href="chatgpt.html" class="cpill active">vs. ChatGPT</a>
-        <a href="perplexity-computer.html" class="cpill">vs. Perplexity Computer</a>
-      </div>
-    </div>
-  </section>
-
-  <!-- CTA STRIP -->
-  <div class="cta-strip">
-    <div class="container">
-      <h2>Ready to run your own agent?</h2>
-      <p>Hermes is open source, MIT licensed, and runs on hardware you own.</p>
-      <div class="cta-btns">
-        <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-primary" target="_blank" rel="noopener">Get started →</a>
-        <a href="https://github.com/nesquena/hermes-webui" class="btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
-      </div>
-    </div>
-  </div>
+<div class="hero"><div class="container">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Hermes WebUI</a><span class="breadcrumb-sep">/</span><a href="/#compare">Comparisons</a><span class="breadcrumb-sep">/</span><span aria-current="page">ChatGPT</span></nav>
+<div class="page-label">Comparison</div><h1 class="page-title">Hermes vs. ChatGPT</h1>
+<p class="page-sub">ChatGPT pairs chat with Work for longer tasks. Hermes is an agent you run yourself, with a browser workspace.</p></div></div>
+<section class="section"><div class="container"><h2 class="section-title">At a glance</h2>
+<div class="table-wrap"><table><caption>Checked November 14, 2026</caption><thead><tr><th scope="col">Feature</th><th scope="col">Hermes Agent + WebUI</th><th scope="col">ChatGPT</th></tr></thead><tbody><tr><th scope="row">Main workflow</th><td class="is-hermes" data-label="Hermes">General agent, messaging and browser workspace</td><td data-label="ChatGPT">Chat for conversation; Work for research and deliverables</td></tr>
+<tr><th scope="row">Persistent memory</th><td class="is-hermes" data-label="Hermes">Bounded, curated local memory; optional backends</td><td data-label="ChatGPT">Account memory you can view and manage</td></tr>
+<tr><th scope="row">Scheduled work</th><td class="is-hermes" data-label="Hermes">Self-hosted cron and event hooks</td><td data-label="ChatGPT">Scheduled tasks, plus Gmail, Slack and GitHub triggers on web and mobile</td></tr>
+<tr><th scope="row">Execution location</th><td class="is-hermes" data-label="Hermes">Your machine or server</td><td data-label="ChatGPT">OpenAI&rsquo;s cloud; the desktop app can work on local projects</td></tr>
+<tr><th scope="row">Website tasks</th><td class="is-hermes" data-label="Hermes">Configured browser tools and permissions</td><td data-label="ChatGPT">Work&rsquo;s cloud browser on paid plans, including signed-in sites</td></tr>
+<tr><th scope="row">Model choice</th><td class="is-hermes" data-label="Hermes">Hosted or local providers</td><td data-label="ChatGPT">Models offered by your plan and workspace</td></tr></tbody></table></div>
+<h2 class="section-title">Which should you choose?</h2><div class="narrative"><ul><li><strong>Pick Hermes</strong> if you want to run the agent yourself and keep its memory on your machine.</li>
+<li><strong>Pick Hermes</strong> if you want to choose your own model, hosted or local.</li>
+<li><strong>Pick ChatGPT</strong> if you want managed research, documents and connected apps.</li>
+<li><strong>Pick ChatGPT</strong> if you want browser tasks done in the cloud, with no server to run.</li></ul></div>
+<p class="section-body">Explore <a href="/models/">models</a>, <a href="/guides/agent-credentials/">credentials</a> and the <a href="/api-docs/">Bridge API</a>.</p></div></section>
+<section class="section section-alt"><div class="container"><h2 class="section-title">Sources</h2><p class="section-body"><a href="https://help.openai.com/en/articles/20001275-chatgpt-work-and-codex">ChatGPT Work and Codex</a> · <a href="https://help.openai.com/en/articles/11752874-chatgpt-agent">Agent mode</a> · <a href="https://help.openai.com/en/articles/20001280-using-cloud-browser-in-chatgpt">Cloud browser</a> · <a href="https://learn.chatgpt.com/docs/customization/memories">Memory controls</a> · <a href="https://learn.chatgpt.com/docs/automations">Scheduled and event-triggered tasks</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory">Hermes memory</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/cron">Hermes scheduling</a> · <a href="https://hermes-agent.nousresearch.com/docs/integrations/providers">Hermes providers</a> · <a href="https://github.com/nesquena/hermes-webui">Hermes WebUI source</a></p><nav class="compare-nav" aria-label="More comparisons"><div class="compare-nav-label">More comparisons</div><a class="cpill" href="/compare/openclaw.html">vs. OpenClaw</a><a class="cpill" href="/compare/claude-code.html">vs. Claude Code</a><a class="cpill" href="/compare/codex.html">vs. Codex</a><a class="cpill" href="/compare/opencode.html">vs. OpenCode</a><a class="cpill" href="/compare/cursor.html">vs. Cursor</a><a class="cpill" href="/compare/copilot.html">vs. Copilot</a><a class="cpill" href="/compare/claude-ai.html">vs. Claude.ai</a><a class="cpill active" href="/compare/chatgpt.html" aria-current="page">vs. ChatGPT</a><a class="cpill" href="/compare/perplexity-computer.html">vs. Perplexity Computer</a></nav></div></section>
+<div class="cta-strip"><div class="container"><h2>Run Hermes WebUI</h2><div class="cta-btns"><a href="/setup/" class="btn-primary">Get started</a><a href="https://github.com/nesquena/hermes-webui" class="btn-secondary">View on GitHub</a></div></div></div>
 </main>
 <footer class="site-footer"><div class="container">
 <ul class="footer-links"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/api-docs/">Bridge API</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/hidden-features/">Hidden features</a></li><li><a href="/eli5/">What is Hermes?</a></li><li><a href="https://github.com/nesquena/hermes-webui">GitHub</a></li><li><a href="https://hermes-agent.nousresearch.com/">Official Hermes Agent site</a></li></ul>

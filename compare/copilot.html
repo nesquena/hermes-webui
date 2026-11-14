@@ -162,6 +162,7 @@
 .table-wrap caption { text-align: left; padding: 12px 16px; color: var(--text-2); font-size: .85rem; }
 .table-wrap tbody th[scope=row] { text-align: left; padding-left: 16px; }
 .hero + .section { padding-top: 32px; }
+.hero { position: relative; overflow: hidden; }
 @media (max-width: 600px) {
   .table-wrap thead { display: none; }
   .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: 100%; }
@@ -203,7 +204,7 @@ code, pre, kbd, samp { font-family: var(--mono); }
 </div></div>
 <section class="section"><div class="container">
 <h2 class="section-title">At a glance</h2>
-<div class="table-wrap" role="region" tabindex="0" aria-label="Hermes and GitHub Copilot comparison; scroll horizontally on small screens">
+<div class="table-wrap">
 <table><caption>Checked November 14, 2026</caption><thead><tr><th scope="col">Feature</th><th scope="col">Hermes Agent + WebUI</th><th scope="col">GitHub Copilot</th></tr></thead><tbody><tr><th scope="row">Main workflow</th><td class="is-hermes" data-label="Hermes">General agent, messaging and browser workspace</td><td data-label="GitHub Copilot">Coding in editors, CLI and GitHub</td></tr>
 <tr><th scope="row">Persistent memory</th><td class="is-hermes" data-label="Hermes">Profile-scoped, curated local memory; optional backends</td><td data-label="GitHub Copilot">Repository facts and user preferences across repositories</td></tr>
 <tr><th scope="row">Memory retention</th><td class="is-hermes" data-label="Hermes">Stays until you or the agent edit it</td><td data-label="GitHub Copilot">90 days by default; an upvote resets the clock</td></tr>

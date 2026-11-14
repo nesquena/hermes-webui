@@ -173,6 +173,7 @@
 .table-wrap caption { text-align: left; padding: 12px 16px; color: var(--text-2); font-size: .85rem; }
 .table-wrap tbody th[scope=row] { text-align: left; padding-left: 16px; }
 .hero + .section { padding-top: 32px; }
+.hero { position: relative; overflow: hidden; }
 @media (max-width: 600px) {
   .table-wrap thead { display: none; }
   .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: 100%; }
@@ -214,9 +215,9 @@ code, pre, kbd, samp { font-family: var(--mono); }
 </div></div>
 <section class="section"><div class="container">
 <h2 class="section-title">At a glance</h2>
-<div class="table-wrap" role="region" tabindex="0" aria-label="Hermes and OpenClaw comparison; scroll horizontally on small screens">
+<div class="table-wrap">
 <table><caption>Checked November 14, 2026</caption><thead><tr><th scope="col">Feature</th><th scope="col">Hermes Agent + WebUI</th><th scope="col">OpenClaw</th></tr></thead><tbody><tr><th scope="row">Deployment</th><td class="is-hermes" data-label="Hermes">Self-hosted Agent and community WebUI</td><td data-label="OpenClaw">Self-hosted Gateway and its interfaces</td></tr>
-<tr><th scope="row">Persistent context</th><td class="is-hermes" data-label="Hermes">Curated profile memory and optional backends</td><td data-label="OpenClaw">Workspace Markdown memory and configurable recall</td></tr>
+<tr><th scope="row">Persistent memory</th><td class="is-hermes" data-label="Hermes">Curated profile memory and optional backends</td><td data-label="OpenClaw">Workspace Markdown memory and configurable recall</td></tr>
 <tr><th scope="row">Skills and extensions</th><td class="is-hermes" data-label="Hermes">Bundled, hub-installed and agent-created skills</td><td data-label="OpenClaw">Skills and plugins, including the ClawHub registry</td></tr>
 <tr><th scope="row">Scheduled work</th><td class="is-hermes" data-label="Hermes">Cron and event-driven tasks on your host</td><td data-label="OpenClaw">Gateway automation scheduler and event triggers</td></tr></tbody></table>
 </div>

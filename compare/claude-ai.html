@@ -164,12 +164,29 @@
     }
     </style>
   <title>Hermes vs. Claude.ai | Comparison</title>
-  <meta name="description" content="Hermes vs. Claude.ai — how Hermes compares to Claude Cowork in 2026: scheduling, memory, shell access, data sovereignty." />
+  <meta name="description" content="Claude combines chat with Cowork across web, desktop and mobile. Hermes is a general agent you run yourself, with a browser workspace." />
 <style>/* site-wide tokens and type over this page's own variables (unify.py) */
 :root, :root[data-theme="dark"] { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-2: #9198a1; --gold: #f0a500; --gold-text: #f0a500; --bg-primary: #0d1117; --bg-secondary: #161b22; --bg-card: #161b22; --text-primary: #e6edf3; --text-secondary: #9198a1; --text-muted: #9198a1; --accent: #f0a500; --ink: #e6edf3; --muted: #9198a1; --line: #30363d; --nav-height: var(--header); }
 :root[data-theme="light"] { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --text-2: #59636e; --gold: #c07800; --gold-text: #8a5800; --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-card: #f6f8fa; --text-primary: #1f2328; --text-secondary: #59636e; --text-muted: #59636e; --accent: #8a5800; --ink: #1f2328; --muted: #59636e; --line: #d0d7de; --nav-height: var(--header); }
 :root[data-theme="light"] :is(.btn-primary) { background-color: var(--gold); }
 :root[data-theme="light"] .c-yes { color: #116329; }
+.table-wrap caption { text-align: left; padding: 12px 16px; color: var(--text-2); font-size: .85rem; }
+.table-wrap tbody th[scope=row] { text-align: left; padding-left: 16px; }
+.hero + .section { padding-top: 32px; }
+.hero { position: relative; overflow: hidden; }
+@media (max-width: 600px) {
+  .table-wrap thead { display: none; }
+  .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: 100%; }
+  .table-wrap table { min-width: 0; }
+  .table-wrap caption { display: block; max-width: none; }
+  .table-wrap tr { border-top: 1px solid var(--border); padding: 12px 16px; }
+  .table-wrap tbody th[scope=row] { padding: 0 0 6px; border: 0; }
+  .table-wrap td { border: 0; padding: 4px 0 4px 12px; border-left: 2px solid var(--border); text-align: left; }
+  .table-wrap td + td { margin-top: 6px; }
+  .table-wrap td.is-hermes { border-left-color: var(--gold); }
+  .table-wrap td::before { content: attr(data-label); display: block; font-size: 14px; font-weight: 600; color: var(--text-2); }
+  .table-wrap td.is-hermes::before { color: var(--gold-text); }
+}
 main p a:not([class]) { text-decoration: underline; text-underline-offset: 2px; }
 body { font-family: var(--font); }
 code, pre, kbd, samp { font-family: var(--mono); }
@@ -188,247 +205,24 @@ code, pre, kbd, samp { font-family: var(--mono); }
 <div class="legacy-hooks" hidden aria-hidden="true"><button id="compare-hamburger" type="button" tabindex="-1"></button><div id="compare-mobile-menu"></div><button id="theme-toggle" type="button" tabindex="-1"></button></div>
 
 <main id="main">
-  <!-- HERO -->
-  <section class="hero" style="position:relative;overflow:hidden">
-    <div class="container">
-      <div class="breadcrumb">
-        <a href="../index.html">Hermes</a>
-        <span class="breadcrumb-sep">/</span>
-        <a href="../index.html#compare">Comparisons</a>
-        <span class="breadcrumb-sep">/</span>
-        <span>vs. Claude.ai</span>
-      </div>
-      <div class="page-label">Comparison</div>
-      <h1 class="page-title">Hermes vs. Claude.ai</h1>
-      <p class="page-sub">Claude.ai is no longer just chat. Cowork (January 2026) added scheduled tasks, 50+ service connectors, and sandboxed execution. Here's what's actually different.</p>
-      <div class="verdict">
-        <div class="verdict-icon">🤖</div>
-        <div class="verdict-text">
-          <strong>Bottom line</strong>
-          <p>Claude Cowork is a capable knowledge-worker platform on Anthropic's infrastructure. Hermes gives you comparable capabilities on hardware you own, with any model, running as a permanent server process.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- FEATURE COMPARE GRID -->
-  <section class="section">
-    <div class="container">
-      <h2 class="section-title">Quick comparison</h2>
-      <p class="section-body">Side-by-side feature snapshot. Scroll down for the full comparison table and narrative.</p>
-      <div class="feature-compare">
-        <!-- Hermes col -->
-        <div class="fc-col hermes">
-          <div class="fc-col-label">Self-hosted</div>
-          <div class="fc-col-name">Hermes</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory</span><span class="fc-val yes">Yes, layered, permanent</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled tasks</span><span class="fc-val yes">Yes, self-hosted, any interval</span></div>
-          <div class="fc-row"><span class="fc-key">Minimum scheduling interval</span><span class="fc-val yes">Any (seconds)</span></div>
-          <div class="fc-row"><span class="fc-key">Service connectors</span><span class="fc-val partial">Via agent tool use</span></div>
-          <div class="fc-row"><span class="fc-key">Shell access</span><span class="fc-val yes">Full, your server</span></div>
-          <div class="fc-row"><span class="fc-key">File access</span><span class="fc-val yes">Full filesystem</span></div>
-          <div class="fc-row"><span class="fc-key">Self-hosted</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Provider-agnostic</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val yes">Yes, MIT</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val yes">Yes, editable markdown files</span></div>
-          <div class="fc-row"><span class="fc-key">Data sovereignty</span><span class="fc-val yes">Yes, your hardware</span></div>
-          <div class="fc-row"><span class="fc-key">Setup required</span><span class="fc-val partial">Yes (server setup)</span></div>
-          <div class="fc-row"><span class="fc-key">Mobile access</span><span class="fc-val yes">Yes (via messaging apps)</span></div>
-        </div>
-        <!-- Claude.ai col -->
-        <div class="fc-col">
-          <div class="fc-col-label">Cloud managed</div>
-          <div class="fc-col-name">Claude.ai</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory</span><span class="fc-val yes">Yes, auto-generated from chat history</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled tasks</span><span class="fc-val yes">Yes, Cowork (hourly/daily/weekly, since Feb 25 2026)</span></div>
-          <div class="fc-row"><span class="fc-key">Minimum scheduling interval</span><span class="fc-val partial">Hourly (Cowork minimum)</span></div>
-          <div class="fc-row"><span class="fc-key">Service connectors</span><span class="fc-val yes">50+ via Cowork (Slack, Gmail, Notion, Jira, etc.)</span></div>
-          <div class="fc-row"><span class="fc-key">Shell access</span><span class="fc-val partial">Sandboxed (Cowork isolated VM)</span></div>
-          <div class="fc-row"><span class="fc-key">File access</span><span class="fc-val partial">Sandboxed (Cowork VM)</span></div>
-          <div class="fc-row"><span class="fc-key">Self-hosted</span><span class="fc-val no">No (Anthropic infrastructure)</span></div>
-          <div class="fc-row"><span class="fc-key">Provider-agnostic</span><span class="fc-val no">No (Claude models only)</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val no">No</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val no">Limited (opaque)</span></div>
-          <div class="fc-row"><span class="fc-key">Data sovereignty</span><span class="fc-val no">No (Anthropic servers)</span></div>
-          <div class="fc-row"><span class="fc-key">Setup required</span><span class="fc-val yes">None (managed)</span></div>
-          <div class="fc-row"><span class="fc-key">Mobile access</span><span class="fc-val yes">Yes (via Claude app)</span></div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- NARRATIVE -->
-  <section class="section section-alt">
-    <div class="container">
-      <h2 class="section-title">What changed in 2026</h2>
-      <div class="narrative">
-        <h3>Claude.ai Cowork: a substantial platform upgrade</h3>
-        <p>Claude.ai launched <strong>Cowork</strong> on January 12, 2026 for Max plan users on macOS, expanding to Pro on January 16, Team and Enterprise on January 23, and Windows on February 10. <strong>Scheduled Tasks</strong> arrived February 25, 2026. <strong>Dispatch</strong> launched March 17, 2026.</p>
-        <p>Cowork brings 50+ service connectors: <strong>Slack</strong> (Jan 26), Gmail, Google Calendar, Google Drive, Microsoft 365, Notion, Asana, Linear, Jira, Salesforce, and many more. Memory auto-generates from your chat history — no manual curation required. This is no longer a simple chat interface.</p>
-
-        <h3>Scheduling: both capable, different constraints</h3>
-        <p>Both platforms support recurring automated tasks, but with different constraints. <strong>Claude Cowork</strong> requires a Max or Pro subscription, runs on Anthropic infrastructure, enforces a minimum 1-hour interval, and your data leaves your hardware to execute. <strong>Hermes</strong> runs tasks at any interval (even seconds), on your own server, with full access to your memory and installed skills, with no subscription tier requirements beyond the model API you already use.</p>
-        <p>For most users scheduling hourly tasks, Cowork is more than sufficient. If you need sub-hourly automation, on-premises execution, or tasks that touch private infrastructure, the difference matters.</p>
-
-        <h3>Shell access and execution environment</h3>
-        <p>Claude Cowork executes code in a <strong>sandboxed isolated VM</strong> — appropriate for a multi-tenant hosted service, but it can't reach your local filesystem, environment variables, internal databases, or private network resources. Hermes runs scheduled tasks and agent tool use with full shell access: your filesystem, your tools, your env vars, your local databases, and your private APIs are all in scope.</p>
-
-        <h3>Memory: automatic vs. inspectable</h3>
-        <p>Claude.ai's memory system auto-generates facts from your chat history. You can view and delete memories, but the extraction process is largely opaque — you can't read the raw memory files or see exactly how decisions were made. Hermes stores memory as <strong>plain markdown files</strong> you can read, edit, or delete with any text editor. Eight optional external memory providers (vector DBs, graph stores, etc.) are available for more advanced retrieval. Nothing is a black box.</p>
-
-        <h3>When Claude.ai is the better choice</h3>
-        <p>Claude.ai wins decisively when you want <strong>zero server setup</strong> and the tightest possible integration with Anthropic's Claude models. Projects and Artifacts, computer use, 50+ managed Cowork connectors maintained by Anthropic, and a polished mobile app are all available without deploying anything. If data sovereignty isn't a requirement and you're comfortable with Anthropic's infrastructure, Cowork is a genuinely excellent platform.</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- FULL COMPARISON TABLE -->
-  <section class="section">
-    <div class="container">
-      <h2 class="section-title">Full comparison table</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Feature</th>
-              <th>Claude.ai Cowork</th>
-              <th>Hermes</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr class="hl">
-              <td>Persistent memory</td>
-              <td class="c-yes">✓ Auto-generated from chat</td>
-              <td class="c-yes">✓ Layered, permanent</td>
-            </tr>
-            <tr>
-              <td>Memory inspectability</td>
-              <td class="c-no">Limited (opaque)</td>
-              <td class="c-yes">✓ Editable markdown files</td>
-            </tr>
-            <tr class="hl">
-              <td>Scheduled tasks</td>
-              <td class="c-yes">✓ Cowork (since Feb 25 2026)</td>
-              <td class="c-yes">✓ Self-hosted, always-on</td>
-            </tr>
-            <tr>
-              <td>Scheduling interval</td>
-              <td class="c-partial">Hourly minimum</td>
-              <td class="c-yes">✓ Any interval (seconds+)</td>
-            </tr>
-            <tr>
-              <td>Shell / code execution</td>
-              <td class="c-partial">Sandboxed VM</td>
-              <td class="c-yes">✓ Full shell, your server</td>
-            </tr>
-            <tr>
-              <td>File access</td>
-              <td class="c-partial">Sandboxed VM only</td>
-              <td class="c-yes">✓ Full filesystem</td>
-            </tr>
-            <tr>
-              <td>Service connectors</td>
-              <td class="c-yes">✓ 50+ (Slack, Gmail, Notion, Jira…)</td>
-              <td class="c-partial">Via agent tool use</td>
-            </tr>
-            <tr class="hl">
-              <td>Self-hosted</td>
-              <td class="c-no">No (Anthropic infra)</td>
-              <td class="c-yes">✓ Yes</td>
-            </tr>
-            <tr>
-              <td>Provider-agnostic</td>
-              <td class="c-no">No (Claude models only)</td>
-              <td class="c-yes">✓ Yes, any model</td>
-            </tr>
-            <tr class="hl">
-              <td>Data sovereignty</td>
-              <td class="c-no">No (Anthropic servers)</td>
-              <td class="c-yes">✓ Your hardware</td>
-            </tr>
-            <tr>
-              <td>Open source</td>
-              <td class="c-no">No</td>
-              <td class="c-yes">✓ MIT license</td>
-            </tr>
-            <tr>
-              <td>Mobile access</td>
-              <td class="c-yes">✓ Claude app</td>
-              <td class="c-yes">✓ Messaging apps</td>
-            </tr>
-            <tr>
-              <td>Always-on</td>
-              <td class="c-yes">✓ Managed cloud</td>
-              <td class="c-yes">✓ Permanent server process</td>
-            </tr>
-            <tr>
-              <td>Setup required</td>
-              <td class="c-yes">✓ None (managed)</td>
-              <td class="c-partial">Server setup needed</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-
-  <!-- WHO SECTION -->
-  <section class="section section-alt">
-    <div class="container">
-      <h2 class="section-title">Who should use which</h2>
-      <div class="who-grid">
-        <div class="who-card choose-hermes">
-          <div class="who-card-label">Choose Hermes if you…</div>
-          <ul>
-            <li><strong>Hosting control</strong> — run the agent on your hardware and choose which external services it uses</li>
-            <li><strong>Any-interval scheduling</strong> — tasks every second, minute, or hour on your server</li>
-            <li><strong>Full shell access</strong> — reach local DBs, private repos, internal APIs</li>
-            <li><strong>Provider flexibility</strong> — swap Claude, GPT-5.4, Gemini, DeepSeek, or local models freely</li>
-            <li><strong>Inspectable memory</strong> — read and edit plain markdown files</li>
-            <li><strong>Open source</strong> — MIT license, audit and extend the code</li>
-            <li><strong>No subscription tier constraints</strong> — features not gated behind plan levels</li>
-          </ul>
-        </div>
-        <div class="who-card choose-other">
-          <div class="who-card-label">Choose Claude.ai if you…</div>
-          <ul>
-            <li><strong>Zero server setup</strong> — managed infrastructure, no ops burden</li>
-            <li><strong>Tightest Anthropic integration</strong> — first access to Claude model improvements</li>
-            <li><strong>50+ managed Cowork connectors</strong> — Slack, Gmail, Notion, Jira maintained by Anthropic</li>
-            <li><strong>Projects &amp; Artifacts</strong> — polished document and project workflow</li>
-            <li><strong>Computer use</strong> — visual browser control and desktop automation</li>
-            <li><strong>Managed infrastructure</strong> — Anthropic handles uptime, scaling, security</li>
-          </ul>
-        </div>
-      </div>
-
-      <!-- Compare Nav Pills -->
-      <div class="compare-nav">
-        <div class="compare-nav-label">Compare Hermes vs.</div>
-      <a href="openclaw.html" class="cpill">vs. OpenClaw</a>
-      <a href="claude-code.html" class="cpill">vs. Claude Code</a>
-      <a href="codex.html" class="cpill">vs. Codex</a>
-      <a href="opencode.html" class="cpill">vs. OpenCode</a>
-      <a href="cursor.html" class="cpill">vs. Cursor</a>
-      <a href="copilot.html" class="cpill">vs. Copilot</a>
-      <a href="claude-ai.html" class="cpill active">vs. Claude.ai</a>
-      <a href="chatgpt.html" class="cpill">vs. ChatGPT</a>
-        <a href="perplexity-computer.html" class="cpill">vs. Perplexity Computer</a>
-      </div>
-    </div>
-  </section>
-
-  <!-- CTA STRIP -->
-  <div class="cta-strip">
-    <div class="container">
-      <h2>Ready to run your own agent?</h2>
-      <p>Hermes is open source, MIT licensed, and runs on hardware you own.</p>
-      <div class="cta-btns">
-        <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-primary" target="_blank" rel="noopener">Get started →</a>
-        <a href="https://github.com/nesquena/hermes-webui" class="btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
-      </div>
-    </div>
-  </div>
+<div class="hero"><div class="container">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Hermes WebUI</a><span class="breadcrumb-sep">/</span><a href="/#compare">Comparisons</a><span class="breadcrumb-sep">/</span><span aria-current="page">Claude.ai</span></nav>
+<div class="page-label">Comparison</div><h1 class="page-title">Hermes vs. Claude.ai</h1>
+<p class="page-sub">Claude combines chat with Cowork across web, desktop and mobile. Hermes is a general agent you run yourself, with a browser workspace.</p></div></div>
+<section class="section"><div class="container"><h2 class="section-title">At a glance</h2>
+<div class="table-wrap"><table><caption>Checked November 14, 2026</caption><thead><tr><th scope="col">Feature</th><th scope="col">Hermes Agent + WebUI</th><th scope="col">Claude.ai</th></tr></thead><tbody><tr><th scope="row">Main workflow</th><td class="is-hermes" data-label="Hermes">General agent, messaging and browser workspace</td><td data-label="Claude.ai">Conversation and Cowork tasks with connected tools</td></tr>
+<tr><th scope="row">Persistent memory</th><td class="is-hermes" data-label="Hermes">Bounded, curated local memory; optional backends</td><td data-label="Claude.ai">Editable memory, shared by chat and cloud Cowork</td></tr>
+<tr><th scope="row">Scheduled work</th><td class="is-hermes" data-label="Hermes">Self-hosted cron and event hooks</td><td data-label="Claude.ai">Recurring tasks on paid plans, run in the cloud while your computer sleeps</td></tr>
+<tr><th scope="row">Execution location</th><td class="is-hermes" data-label="Hermes">Your machine or server</td><td data-label="Claude.ai">Cloud Cowork; desktop can also work with local files and browser</td></tr>
+<tr><th scope="row">Access</th><td class="is-hermes" data-label="Hermes">Browser workspace and configured chat platforms</td><td data-label="Claude.ai">Web, desktop, mobile and Chrome</td></tr>
+<tr><th scope="row">Model choice</th><td class="is-hermes" data-label="Hermes">Hosted or local providers</td><td data-label="Claude.ai">Claude models available to your account</td></tr></tbody></table></div>
+<h2 class="section-title">Which should you choose?</h2><div class="narrative"><ul><li><strong>Pick Hermes</strong> if you want to run the agent yourself and keep its memory on your machine.</li>
+<li><strong>Pick Hermes</strong> if you want to choose your own model, hosted or local.</li>
+<li><strong>Pick Claude</strong> if you want managed chat, Cowork and connected business tools.</li>
+<li><strong>Pick Claude</strong> if you want to pick up Cowork tasks on any of your devices.</li></ul></div>
+<p class="section-body">Explore <a href="/models/">models</a>, <a href="/guides/agent-credentials/">credentials</a> and the <a href="/api-docs/">Bridge API</a>.</p></div></section>
+<section class="section section-alt"><div class="container"><h2 class="section-title">Sources</h2><p class="section-body"><a href="https://support.claude.com/en/articles/15520349-use-claude-cowork-on-web-desktop-and-mobile">Cowork surfaces and availability</a> · <a href="https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context">Chat and Cowork memory</a> · <a href="https://support.claude.com/en/articles/13854387-schedule-recurring-tasks-in-claude-cowork">Scheduled tasks</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory">Hermes memory</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/cron">Hermes scheduling</a> · <a href="https://hermes-agent.nousresearch.com/docs/integrations/providers">Hermes providers</a> · <a href="https://github.com/nesquena/hermes-webui">Hermes WebUI source</a></p><nav class="compare-nav" aria-label="More comparisons"><div class="compare-nav-label">More comparisons</div><a class="cpill" href="/compare/openclaw.html">vs. OpenClaw</a><a class="cpill" href="/compare/claude-code.html">vs. Claude Code</a><a class="cpill" href="/compare/codex.html">vs. Codex</a><a class="cpill" href="/compare/opencode.html">vs. OpenCode</a><a class="cpill" href="/compare/cursor.html">vs. Cursor</a><a class="cpill" href="/compare/copilot.html">vs. Copilot</a><a class="cpill active" href="/compare/claude-ai.html" aria-current="page">vs. Claude.ai</a><a class="cpill" href="/compare/chatgpt.html">vs. ChatGPT</a><a class="cpill" href="/compare/perplexity-computer.html">vs. Perplexity Computer</a></nav></div></section>
+<div class="cta-strip"><div class="container"><h2>Run Hermes WebUI</h2><div class="cta-btns"><a href="/setup/" class="btn-primary">Get started</a><a href="https://github.com/nesquena/hermes-webui" class="btn-secondary">View on GitHub</a></div></div></div>
 </main>
 <footer class="site-footer"><div class="container">
 <ul class="footer-links"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/guides/agent-credentials/">Credentials</a></li><li><a href="/api-docs/">Bridge API</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/hidden-features/">Hidden features</a></li><li><a href="/eli5/">What is Hermes?</a></li><li><a href="https://github.com/nesquena/hermes-webui">GitHub</a></li><li><a href="https://hermes-agent.nousresearch.com/">Official Hermes Agent site</a></li></ul>

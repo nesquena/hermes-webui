@@ -9,7 +9,7 @@
   <link rel="shortcut icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" sizes="512x512" href="/apple-touch-icon.png" />
   <title>Hermes vs. OpenCode | Comparison</title>
-  <meta name="description" content="OpenCode is an open-source TUI coding assistant with 75+ providers, SQLite history, embedded WebUI, and 30+ community plugins. Here's how it compares to Hermes." />
+  <meta name="description" content="OpenCode is an open-source coding agent for desktop, terminal and phone. Hermes is a general agent you run yourself, with a browser workspace and chat apps." />
 <link rel="stylesheet" href="/chrome.css"><script src="/site.js"></script>
 <style>
     :root {
@@ -159,6 +159,23 @@
 :root[data-theme="light"] { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --text-2: #59636e; --gold: #c07800; --gold-text: #8a5800; --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-card: #f6f8fa; --text-primary: #1f2328; --text-secondary: #59636e; --text-muted: #59636e; --accent: #8a5800; --ink: #1f2328; --muted: #59636e; --line: #d0d7de; --nav-height: var(--header); }
 :root[data-theme="light"] :is(.btn-primary) { background-color: var(--gold); }
 :root[data-theme="light"] .c-yes { color: #116329; }
+.table-wrap caption { text-align: left; padding: 12px 16px; color: var(--text-2); font-size: .85rem; }
+.table-wrap tbody th[scope=row] { text-align: left; padding-left: 16px; }
+.hero + .section { padding-top: 32px; }
+.hero { position: relative; overflow: hidden; }
+@media (max-width: 600px) {
+  .table-wrap thead { display: none; }
+  .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; width: 100%; }
+  .table-wrap table { min-width: 0; }
+  .table-wrap caption { display: block; max-width: none; }
+  .table-wrap tr { border-top: 1px solid var(--border); padding: 12px 16px; }
+  .table-wrap tbody th[scope=row] { padding: 0 0 6px; border: 0; }
+  .table-wrap td { border: 0; padding: 4px 0 4px 12px; border-left: 2px solid var(--border); text-align: left; }
+  .table-wrap td + td { margin-top: 6px; }
+  .table-wrap td.is-hermes { border-left-color: var(--gold); }
+  .table-wrap td::before { content: attr(data-label); display: block; font-size: 14px; font-weight: 600; color: var(--text-2); }
+  .table-wrap td.is-hermes::before { color: var(--gold-text); }
+}
 main p a:not([class]) { text-decoration: underline; text-underline-offset: 2px; }
 body { font-family: var(--font); }
 code, pre, kbd, samp { font-family: var(--mono); }
@@ -179,170 +196,24 @@ code, pre, kbd, samp { font-family: var(--mono); }
 
 
 <main id="main">
-  <div class="hero">
-    <div class="container">
-      <div class="breadcrumb">
-        <a href="../index.html">Hermes</a>
-        <span class="breadcrumb-sep">/</span>
-        <a href="../index.html#compare">Comparisons</a>
-        <span class="breadcrumb-sep">/</span>
-        <span>vs. OpenCode</span>
-      </div>
-      <div class="page-label">Comparison</div>
-      <h1 class="page-title">Hermes vs. OpenCode</h1>
-      <p class="page-sub">OpenCode is an open-source TUI coding assistant with 75+ providers, SQLite history, embedded WebUI, and 30+ community plugins. Here's how it compares.</p>
-
-      <div class="verdict">
-        <div class="verdict-icon">🖥️</div>
-        <div class="verdict-text">
-          <strong>Different tools.</strong>
-          <p>OpenCode is a capable coding TUI with excellent provider coverage. Hermes is a persistent server agent. OpenCode has no first-party scheduling, messaging, or automatic cross-session memory.</p>
-        </div>
-      </div>
-
-      <div class="feature-compare">
-        <div class="fc-col hermes">
-          <div class="fc-col-label">You're here</div>
-          <div class="fc-col-name">Hermes</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory (automatic)</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Self-improving skills</span><span class="fc-val yes">Yes, automatic</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled jobs</span><span class="fc-val yes">Yes, self-hosted</span></div>
-          <div class="fc-row"><span class="fc-key">Messaging (first-party)</span><span class="fc-val yes">Yes, 15+</span></div>
-          <div class="fc-row"><span class="fc-key">Provider support</span><span class="fc-val yes">Yes, many</span></div>
-          <div class="fc-row"><span class="fc-key">Web UI</span><span class="fc-val yes">Yes, self-hosted</span></div>
-          <div class="fc-row"><span class="fc-key">Mobile access</span><span class="fc-val yes">Yes (via messaging)</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val yes">Yes, MIT</span></div>
-          <div class="fc-row"><span class="fc-key">CLAUDE.md support</span><span class="fc-val partial">AGENTS.md</span></div>
-          <div class="fc-row"><span class="fc-key">GitHub Copilot integration</span><span class="fc-val no">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val yes">Yes, markdown</span></div>
-        </div>
-        <div class="fc-col">
-          <div class="fc-col-label">Comparing</div>
-          <div class="fc-col-name">OpenCode</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory (automatic)</span><span class="fc-val partial">Partial (SQLite + AGENTS.md)</span></div>
-          <div class="fc-row"><span class="fc-key">Self-improving skills</span><span class="fc-val partial">30+ community plugins</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled jobs</span><span class="fc-val no">No (community plugin only)</span></div>
-          <div class="fc-row"><span class="fc-key">Messaging (first-party)</span><span class="fc-val no">Community only (Telegram/Slack/Discord/Teams)</span></div>
-          <div class="fc-row"><span class="fc-key">Provider support</span><span class="fc-val yes">75+ providers</span></div>
-          <div class="fc-row"><span class="fc-key">Web UI</span><span class="fc-val yes">Yes (embedded + desktop app)</span></div>
-          <div class="fc-row"><span class="fc-key">Mobile access</span><span class="fc-val no">No</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">CLAUDE.md support</span><span class="fc-val yes">Yes (AGENTS.md + CLAUDE.md fallback)</span></div>
-          <div class="fc-row"><span class="fc-key">GitHub Copilot integration</span><span class="fc-val yes">Yes (official, Jan 2026)</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val partial">SQLite history</span></div>
-        </div>
-      </div>
-
-      <!-- Compare nav pills -->
-      <div class="compare-nav">
-        <div class="compare-nav-label">More comparisons</div>
-        <a href="openclaw.html" class="cpill">vs. OpenClaw</a>
-        <a href="claude-code.html" class="cpill">vs. Claude Code</a>
-        <a href="codex.html" class="cpill">vs. Codex</a>
-        <a href="opencode.html" class="cpill active">vs. OpenCode</a>
-        <a href="cursor.html" class="cpill">vs. Cursor</a>
-        <a href="copilot.html" class="cpill">vs. Copilot</a>
-        <a href="claude-ai.html" class="cpill">vs. Claude.ai</a>
-        <a href="chatgpt.html" class="cpill">vs. ChatGPT</a>
-        <a href="perplexity-computer.html" class="cpill">vs. Perplexity Computer</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Narrative -->
-  <div class="section section-alt">
-    <div class="container">
-      <h2 class="section-title">The details</h2>
-      <p class="section-body">OpenCode is impressive on provider breadth and extensibility. The gaps are in first-party persistence, scheduling, and messaging.</p>
-      <div class="narrative">
-
-        <h3>What OpenCode is</h3>
-        <p>OpenCode is a <strong>terminal UI (TUI) coding assistant</strong> with an embedded WebUI and optional desktop application. It stores conversation history in SQLite, supports AGENTS.md and CLAUDE.md for project context, and as of January 2026 integrates directly with <strong>GitHub Copilot</strong> as an official provider. Pricing tiers include OpenCode Go at $10/month and a Zen tier for heavier usage. The 75+ provider count makes it arguably the most provider-agnostic tool in the TUI coding space.</p>
-
-        <h3>Community plugins vs. automatic skills</h3>
-        <p>OpenCode has <strong>30+ community plugins</strong> that can extend its behaviour — including plugins for Telegram, Slack, Discord, and Teams messaging, and at least one community scheduling plugin. These require manual discovery, installation, and configuration. Hermes takes the opposite approach: the agent <strong>automatically writes new skill modules</strong> based on what it encounters, without any manual plugin management. One is an ecosystem you curate; the other is a system that improves itself.</p>
-
-        <h3>Scheduling and messaging: the first-party gap</h3>
-        <p>Neither scheduling nor messaging is first-party in OpenCode — they exist only through community plugins, which means variable quality, maintenance uncertainty, and manual setup. Hermes ships <strong>scheduling and messaging as core features</strong>: 15+ messaging platforms (Slack, Telegram, Discord, WhatsApp, and more) and cron-based scheduling are built in and maintained by the same team that builds the agent. For production deployments where reliability matters, that distinction is significant.</p>
-
-        <h3>Provider coverage: a genuine OpenCode win</h3>
-        <p>75+ providers is genuinely the widest in the space. If your team uses an uncommon provider — regional cloud APIs, niche inference endpoints, internal model servers — OpenCode is more likely to have native support. Hermes supports multiple providers but does not match this breadth. If provider coverage is the primary constraint, OpenCode has an advantage here.</p>
-
-        <h3>Mobile access</h3>
-        <p>OpenCode has no mobile surface. The TUI and embedded WebUI are desktop-only. Hermes is reachable from any messaging app that has a mobile client — Telegram, WhatsApp, Slack, and others — so you can query your agent, trigger jobs, and receive results from a phone without any special setup. For on-call engineers or anyone who needs agent access away from a desk, this is a meaningful difference.</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Full table -->
-  <div class="section">
-    <div class="container">
-      <h2 class="section-title">Full feature comparison</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Feature</th>
-              <th>OpenCode</th>
-              <th>Hermes</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr class="hl"><td>Persistent memory</td><td class="c-partial">Partial (SQLite + AGENTS.md)</td><td class="c-yes">Yes, automatic</td></tr>
-            <tr><td>Self-improving skills</td><td class="c-partial">30+ community plugins</td><td class="c-yes">Yes, automatic</td></tr>
-            <tr class="hl"><td>Scheduling</td><td class="c-no">Community plugin only</td><td class="c-yes">Yes, self-hosted</td></tr>
-            <tr class="hl"><td>Messaging</td><td class="c-no">Community only</td><td class="c-yes">Yes, 15+ first-party</td></tr>
-            <tr><td>Mobile access</td><td class="c-no">No</td><td class="c-yes">Yes (via messaging)</td></tr>
-            <tr><td>Provider support</td><td class="c-yes">75+ providers</td><td class="c-yes">Yes, many</td></tr>
-            <tr><td>Web UI</td><td class="c-yes">Yes (embedded + desktop)</td><td class="c-yes">Yes, self-hosted</td></tr>
-            <tr><td>Desktop app</td><td class="c-yes">Yes</td><td class="c-no">No (web + CLI)</td></tr>
-            <tr><td>Open source</td><td class="c-yes">Yes</td><td class="c-yes">Yes, MIT</td></tr>
-            <tr><td>CLAUDE.md support</td><td class="c-yes">Yes (AGENTS.md + CLAUDE.md)</td><td class="c-partial">AGENTS.md</td></tr>
-            <tr><td>Community plugins</td><td class="c-yes">30+</td><td class="c-no">N/A (built-in)</td></tr>
-            <tr><td>Always-on process</td><td class="c-no">No (session-based)</td><td class="c-yes">Yes, server daemon</td></tr>
-            <tr><td>Memory inspectability</td><td class="c-partial">SQLite history</td><td class="c-yes">Yes, markdown</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Who section -->
-      <h2 class="section-title" style="margin-top:48px">Which should you choose?</h2>
-      <div class="who-grid">
-        <div class="who-card choose-hermes">
-          <div class="who-card-label">Choose Hermes if you need</div>
-          <ul>
-            <li><strong>Automatic cross-session memory</strong> with no manual management</li>
-            <li><strong>First-party scheduling and messaging</strong> — reliable, built-in</li>
-            <li><strong>Mobile access</strong> via messaging apps</li>
-            <li>An agent that <strong>auto-improves its own skills</strong></li>
-            <li>A persistent always-on server process</li>
-          </ul>
-        </div>
-        <div class="who-card choose-other">
-          <div class="who-card-label">Choose OpenCode if you need</div>
-          <ul>
-            <li>The <strong>widest provider coverage</strong> — 75+ including niche endpoints</li>
-            <li>A polished <strong>TUI experience</strong> in the terminal</li>
-            <li><strong>CLAUDE.md compatibility</strong> for Claude-specific project context</li>
-            <li>Official <strong>GitHub Copilot integration</strong> (Jan 2026)</li>
-            <li>Subscription tiers (Go $10/mo, Zen) with managed billing</li>
-          </ul>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- CTA -->
-  <div class="cta-strip">
-    <div class="container">
-      <h2>Try Hermes for free</h2>
-      <p>Self-hosted, open source, and running in minutes. No cloud account required.</p>
-      <div class="cta-btns">
-        <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-primary" target="_blank" rel="noopener">Get started →</a>
-        <a href="https://github.com/nesquena/hermes-webui" class="btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
-      </div>
-    </div>
-  </div>
+<div class="hero"><div class="container">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Hermes WebUI</a><span class="breadcrumb-sep">/</span><a href="/#compare">Comparisons</a><span class="breadcrumb-sep">/</span><span aria-current="page">OpenCode</span></nav>
+<div class="page-label">Comparison</div><h1 class="page-title">Hermes vs. OpenCode</h1>
+<p class="page-sub">OpenCode is an open-source coding agent for desktop, terminal and phone. Hermes is a general agent you run yourself, with a browser workspace and chat apps.</p></div></div>
+<section class="section"><div class="container"><h2 class="section-title">At a glance</h2>
+<div class="table-wrap"><table><caption>Checked November 14, 2026</caption><thead><tr><th scope="col">Feature</th><th scope="col">Hermes Agent + WebUI</th><th scope="col">OpenCode</th></tr></thead><tbody><tr><th scope="row">Main workflow</th><td class="is-hermes" data-label="Hermes">General agent, messaging and browser workspace</td><td data-label="OpenCode">Coding sessions, diffs, tools and developer workflows</td></tr>
+<tr><th scope="row">Clients</th><td class="is-hermes" data-label="Hermes">Self-hosted browser workspace and configured chat platforms</td><td data-label="OpenCode">Desktop, terminal, iPhone (TestFlight) and Android</td></tr>
+<tr><th scope="row">Project guidance</th><td class="is-hermes" data-label="Hermes">Context files and curated local memory</td><td data-label="OpenCode">AGENTS.md project and global instructions</td></tr>
+<tr><th scope="row">Reusable skills</th><td class="is-hermes" data-label="Hermes">Agent-created and installed skills</td><td data-label="OpenCode">Native SKILL.md discovery, local sources and HTTP catalogs</td></tr>
+<tr><th scope="row">Model choice</th><td class="is-hermes" data-label="Hermes">Hosted or local providers</td><td data-label="OpenCode">Hosted providers and local models</td></tr>
+<tr><th scope="row">Extend and operate</th><td class="is-hermes" data-label="Hermes">Self-hosted agent and Bridge API</td><td data-label="OpenCode">SDK, plugins, MCP servers and a built-in browser</td></tr></tbody></table></div>
+<h2 class="section-title">Which should you choose?</h2><div class="narrative"><ul><li><strong>Pick Hermes</strong> if you want a general agent reachable through your chat apps.</li>
+<li><strong>Pick Hermes</strong> if you want memory and scheduled jobs on your own server.</li>
+<li><strong>Pick OpenCode</strong> if you want coding sessions across terminal, desktop and phone.</li>
+<li><strong>Pick OpenCode</strong> if you want to build on its SDK and skills.</li></ul></div>
+<p class="section-body">Explore <a href="/models/">models</a>, <a href="/guides/agent-credentials/">credentials</a> and the <a href="/api-docs/">Bridge API</a>.</p></div></section>
+<section class="section section-alt"><div class="container"><h2 class="section-title">Sources</h2><p class="section-body"><a href="https://opencode.ai/product">OpenCode clients and license</a> · <a href="https://opencode.ai/docs/skills/">Native skills</a> · <a href="https://opencode.ai/docs/instructions">Project instructions</a> · <a href="https://opencode.ai/docs/">OpenCode documentation</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory">Hermes memory</a> · <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/cron">Hermes scheduling</a> · <a href="https://hermes-agent.nousresearch.com/docs/integrations/providers">Hermes providers</a> · <a href="https://github.com/nesquena/hermes-webui">Hermes WebUI source</a></p><nav class="compare-nav" aria-label="More comparisons"><div class="compare-nav-label">More comparisons</div><a class="cpill" href="/compare/openclaw.html">vs. OpenClaw</a><a class="cpill" href="/compare/claude-code.html">vs. Claude Code</a><a class="cpill" href="/compare/codex.html">vs. Codex</a><a class="cpill active" href="/compare/opencode.html" aria-current="page">vs. OpenCode</a><a class="cpill" href="/compare/cursor.html">vs. Cursor</a><a class="cpill" href="/compare/copilot.html">vs. Copilot</a><a class="cpill" href="/compare/claude-ai.html">vs. Claude.ai</a><a class="cpill" href="/compare/chatgpt.html">vs. ChatGPT</a><a class="cpill" href="/compare/perplexity-computer.html">vs. Perplexity Computer</a></nav></div></section>
+<div class="cta-strip"><div class="container"><h2>Run Hermes WebUI</h2><div class="cta-btns"><a href="/setup/" class="btn-primary">Get started</a><a href="https://github.com/nesquena/hermes-webui" class="btn-secondary">View on GitHub</a></div></div></div>
 </main>
 
 <footer class="site-footer"><div class="container">
