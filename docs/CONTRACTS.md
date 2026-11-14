@@ -232,6 +232,51 @@ PR-body content on GitHub. A future release-time or CI check could
 surface contract-affecting diffs whose PR body lacks `Contract Routing`, but this
 document only defines the review expectation.
 
+## Auxiliary-title request injection and omission
+
+Auxiliary title generation is routed through the Agent's
+`title_generation` auxiliary task. Its effective provider, model, and base URL
+form one request contract: the reasoning-compatibility gate and the LLM request
+must consume that same resolved route.
+
+- A configured explicit provider/model/base URL is injected into the auxiliary
+  request. A caller-supplied route does not receive the configured task API key.
+- A blank provider plus an explicit base URL and non-picker model is an
+  Agent-custom route. Preserve its blank provider, model, and URL; never borrow
+  the main chat provider or model.
+- An explicit provider with a blank model uses the Agent's authoritative
+  auxiliary default. If the Agent has no default, preserve the blank model; do
+  not substitute the WebUI picker catalog or the main route.
+- A blank implicit/auto route is resolved using the Agent's full
+  `title_generation` availability and fallback policy before WebUI injects
+  request controls. The Agent-selected provider/model/endpoint must be used
+  for the request rather than freezing an unavailable main route. This also
+  includes `auxiliary.title_generation.prefer_fast_model`. A selected main
+  route stays `provider: auto` with the profile's main runtime, so the Agent
+  keeps its HTTP-failure fallback. If only the Agent's main-route candidate is
+  available (its full resolver is missing or raises ImportError), the request
+  is that candidate's provider, endpoint, key and transport, without that
+  fallback; a title-model override changes only the model. If the Agent cannot
+  resolve the route at all, the request stays implicit; WebUI's own guess only
+  classifies request controls.
+- An inherited main route retains the main model's resolved transport
+  (`api_mode`, including `anthropic_messages`), even when title_generation
+  specifies only a model override. An explicit title-task `api_key` or
+  `api_mode` overrides the inherited main route. Both travel in the main
+  runtime, the only input the Agent's automatic route reads; a registered
+  named custom main provider still takes its key from its own entry.
+- A fallback provider retains its own selected endpoint, API key and transport
+  (including named-custom fallback overrides). Title-task `api_key` and
+  `api_mode` belong to the primary route; they cannot override the fallback.
+  A fallback with no key of its own on the primary's origin borrows the
+  primary's key by the Agent's same-origin rule, which for a title with a task
+  key is that task key.
+- Reasoning suppression is injected only for a known compatible effective
+  route. Unknown/custom routes, rejected provider routes, and routes with no
+  resolved model omit it (fail closed). MiniMax `reasoning_split` remains a
+  separate transport control keyed to the effective MiniMax route, not to the
+  generic reasoning-suppression capability.
+
 Release batches should list included contract-affecting PRs explicitly so
 reviewers can distinguish ordinary green-CI fixes from changes that update the
 project's product or runtime guardrails.
