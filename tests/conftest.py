@@ -125,8 +125,75 @@ TEST_BASE      = f"http://127.0.0.1:{TEST_PORT}"
 # profile home). We now anchor the default under the OS temp dir, in a dedicated
 # `hermes-webui-tests/` namespace, fully outside any production tree.
 import tempfile as _tempfile
+
+# ── Temp roots must live OUTSIDE the production Hermes home ────────────────
+# The Hermes runtime exports TMPDIR/TMP/TEMP at every boot so `tempfile`
+# defaults land in ``<hermes-home>/cache/scratch`` (hermes_constants
+# .apply_scratch_tmp_env). A test process inherits that, and
+# ``tempfile.gettempdir()`` walks its candidates in order TMPDIR -> TEMP -> TMP,
+# skipping any candidate that is not an existing directory.
+#
+# That combination made a temp home land at
+# ``~/.hermes/cache/scratch/tmpXXXX/.hermes``. The Agent's
+# ``hermes_constants._hermes_root_of()`` treats ANY env home under the native
+# home as a profile dir and folds it back to ``~/.hermes`` — so a test that
+# created a profile wrote it into the REAL ``~/.hermes/profiles/`` instead of
+# the temp tree (observed: a stray ``testprof1`` profile appearing in the
+# live profile list after running tests/test_issue2698_isolated_hermes_home.py).
+#
+# Pin all three variables to a temp root that is verifiably outside the
+# production home, and create it up front so gettempdir() cannot fall through
+# to a TEMP/TMP that points back inside ~/.hermes. A candidate must also be
+# WRITABLE: mkdir(exist_ok=True) succeeds on a root that exists but is
+# read-only, which would otherwise be selected over a writable fallback and
+# every later tempfile/TEST_STATE_DIR write would fail (review of #8898).
+_PROD_HERMES_HOME_FOR_TMP = pathlib.Path(HOME / '.hermes').resolve()
+_TMP_ROOT_CANDIDATES = (
+    pathlib.Path(_tempfile.gettempdir()),
+    pathlib.Path('/tmp'),
+)
+for _tmp_candidate in _TMP_ROOT_CANDIDATES:
+    try:
+        _resolved = _tmp_candidate.resolve()
+    except OSError:
+        continue
+    if _resolved == _PROD_HERMES_HOME_FOR_TMP or _PROD_HERMES_HOME_FOR_TMP in _resolved.parents:
+        continue
+    try:
+        _resolved.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        continue
+    # Prove writability by creating and removing a probe file before accepting:
+    # an existing-but-unwritable root passes the mkdir above silently.
+    try:
+        _probe_fd, _probe_name = _tempfile.mkstemp(dir=_resolved, prefix='.tmp-writable-')
+    except OSError:
+        continue
+    os.close(_probe_fd)
+    try:
+        os.unlink(_probe_name)
+    except OSError:
+        pass
+    _TEST_TMP_ROOT = _resolved
+    break
+else:
+    raise RuntimeError(
+        "REFUSING TO RUN: no writable temp root outside the production Hermes home "
+        f"({_PROD_HERMES_HOME_FOR_TMP}) was usable; tests would resolve their "
+        "temp homes inside ~/.hermes and the Agent would fold them back onto "
+        "the real profile root."
+    )
+# Set all three: gettempdir() skips a candidate dir that does not exist, so a
+# single exported variable is not enough — the others must agree or the walk
+# falls through to whichever one still points inside ~/.hermes.
+os.environ['TMPDIR'] = str(_TEST_TMP_ROOT)
+os.environ['TEMP'] = str(_TEST_TMP_ROOT)
+os.environ['TMP'] = str(_TEST_TMP_ROOT)
+# gettempdir() caches its answer; reset it so it follows the new variables.
+_tempfile.tempdir = None
+
 _TEST_STATE_ROOT = pathlib.Path(
-    os.getenv('HERMES_WEBUI_TEST_STATE_ROOT', _tempfile.gettempdir())
+    os.getenv('HERMES_WEBUI_TEST_STATE_ROOT', str(_TEST_TMP_ROOT))
 ) / 'hermes-webui-tests'
 # ``os.getenv(name, default)`` returns "" (not the default) when the variable is
 # exported but empty, and ``Path("").resolve()`` is the CURRENT DIRECTORY — so a
