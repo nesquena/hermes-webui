@@ -258,6 +258,32 @@ function _interimCollapseDelegatedClick(e){
 }
 document.addEventListener('click', _interimCollapseDelegatedClick);
 
+const COMPOSER_TYPING_RENDER_DEFER_MS=250;
+const COMPOSER_TYPING_RENDER_MAX_DEFER_MS=1000;
+let _composerTypingUntil=0;
+let _composerTypingDeferStarted=null;
+let _composerTypingListenersBound=false;
+function _bindComposerTypingRenderDefer(){
+  if(_composerTypingListenersBound) return;
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer) return;
+  _composerTypingListenersBound=true;
+  const markTyping=()=>{_composerTypingUntil=performance.now()+COMPOSER_TYPING_RENDER_DEFER_MS;};
+  composer.addEventListener('input',markTyping,{passive:true});
+  composer.addEventListener('keydown',markTyping,{passive:true});
+}
+function _deferLiveRenderForTyping(retry){
+  const now=performance.now();
+  if(now>=_composerTypingUntil){_composerTypingDeferStarted=null; return false;}
+  if(_composerTypingDeferStarted===null) _composerTypingDeferStarted=now;
+  const remaining=Math.min(_composerTypingUntil-now,
+    _composerTypingDeferStarted+COMPOSER_TYPING_RENDER_MAX_DEFER_MS-now);
+  if(remaining<=0){_composerTypingDeferStarted=null; return false;}
+  setTimeout(retry,remaining);
+  return true;
+}
+_bindComposerTypingRenderDefer();
+
 // TTS: pause speech synthesis when user focuses the composer (#499)
 const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
@@ -6337,13 +6363,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const sinceLastMs=performance.now()-_lastRenderMs;
     const _doRender=()=>{
       _pendingRafHandle=null;
-      _renderPending=false;
       // Guard: a pending setTimeout+rAF can outlive stream finalization.
-      if(_streamFinalized) return;
+      if(_streamFinalized){_renderPending=false;return;}
       if(!_isActiveSession()||S.activeStreamId!==streamId){
+        _renderPending=false;
         _flushPendingReasoningRender();
         return;
       }
+      _renderPending=true;
+      if(_deferLiveRenderForTyping(_doRender)) return;
+      _renderPending=false;
       // Mobile scroll-jank guard: temporarily disable overflow-anchor before DOM
       // writes to suppress Chromium scroll re-anchoring during streaming growth.
       if(typeof window._fixMobileScrollJank==='function') window._fixMobileScrollJank();
