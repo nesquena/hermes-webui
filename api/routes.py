@@ -26377,6 +26377,81 @@ def _tts_open(req, *, timeout=30, opener_factory=None):
     return _urlopen(req, timeout=timeout)
 
 
+def _detect_text_lang(text: str) -> str:
+    """Best-effort it/en detection: a stopword vote, no extra dependency.
+
+    Returns "" when the vote is inconclusive (short texts), so callers fall back
+    to the configured single voice instead of guessing wrong.
+    """
+    words = re.findall(r"[a-zàèéìòù']+", (text or "").lower())
+    if len(words) < 3:
+        return ""
+    it_words = {
+        "il", "lo", "la", "gli", "le", "un", "una", "di", "che", "non", "per",
+        "con", "sono", "questo", "questa", "anche", "più", "già", "perché",
+        "cosa", "come", "quando", "adesso", "oggi", "molto", "così", "ma",
+    }
+    en_words = {
+        "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
+        "have", "what", "when", "there", "from", "would", "should", "about",
+        "can", "will", "your", "but", "just", "very",
+    }
+    it_votes = sum(1 for w in words if w in it_words)
+    en_votes = sum(1 for w in words if w in en_words)
+    accented_it = sum(1 for w in words if any(c in "àèéìòù" for c in w))
+    it_votes += accented_it
+    if it_votes >= 2 and it_votes > en_votes:
+        return "it"
+    if en_votes >= 2 and en_votes > it_votes:
+        return "en"
+    return ""
+
+
+def _default_edge_voice(text: str = "") -> str:
+    """Default Edge voice for /api/tts, picked by the text's language.
+
+    Precedence: ``tts.edge.voices.<lang>`` from the active profile's config.yaml,
+    then a built-in per-language default (it -> Elsa, en -> Ava), then
+    ``tts.edge.voice`` (the configured single voice, all languages), then Elsa.
+    Before this, the endpoint hardcoded zh-CN-XiaoxiaoNeural and spoke Chinese.
+    """
+    cfg: dict = {}
+    try:
+        from api.profiles import get_active_hermes_home, load_profile_config
+
+        cfg = load_profile_config(get_active_hermes_home()) or {}
+    except Exception:
+        logger.debug("Failed to read the agent config for TTS voices", exc_info=True)
+    # Shape-validate: a hand-edited config must never crash the request.
+    tts_cfg = cfg.get("tts")
+    edge_cfg = tts_cfg.get("edge") if isinstance(tts_cfg, dict) else None
+    if not isinstance(edge_cfg, dict):
+        edge_cfg = {}
+
+    def _usable(value) -> str:
+        # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
+        # would trip the voice allowlist, so treat it as absent.
+        if isinstance(value, str) and value.strip() and "${" not in value:
+            return value.strip()
+        return ""
+
+    lang = _detect_text_lang(text)
+    if lang:
+        voices = edge_cfg.get("voices")
+        if isinstance(voices, dict):
+            per_lang = _usable(voices.get(lang))
+            if per_lang:
+                return per_lang
+        builtin = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}.get(lang)
+        if builtin:
+            return builtin
+    configured = _usable(edge_cfg.get("voice"))
+    if configured:
+        return configured
+    return "it-IT-ElsaNeural"
+
+
+
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
 
@@ -26395,7 +26470,7 @@ def _handle_tts(handler, parsed):
     async API at that time.
     """
     text = ""
-    voice = "zh-CN-XiaoxiaoNeural"
+    voice = ""
     rate_str = ""
     pitch_str = ""
     engine = "edge"  # "edge" | "elevenlabs" | "openai" | "browser" (browser is client-side only)
@@ -26407,7 +26482,11 @@ def _handle_tts(handler, parsed):
     try:
         data = read_body(handler)
         text = (data.get("text") or "").strip()
-        voice = data.get("voice") or voice
+        voice = data.get("voice")
+        # Explicit override only: the configured default is resolved inside the
+        # Edge branch, after admission and rate limiting, so an engine that is
+        # not Edge never reads Edge (or any profile) config.
+        voice = voice.strip() if isinstance(voice, str) else ""
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
         request_engine = data.get("engine")
@@ -26680,12 +26759,21 @@ def _handle_tts(handler, parsed):
         return True
 
     # ── Edge TTS ────────────────────────────────────────────────────────
+    # Omitted voice: resolve the configured per-language default HERE, after
+    # validation, playback-profile admission and rate limiting. An unused Edge
+    # setting therefore cannot affect an OpenAI/ElevenLabs request, and a
+    # request rejected earlier never reads profile config.
+    if not voice:
+        voice = _default_edge_voice(text)
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural",
+        "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
+        "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
         "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
         "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
+        "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
+        "it-IT-GiuseppeMultilingualNeural",
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
@@ -29214,12 +29302,18 @@ def _handle_btw(handler, body):
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
-    # Duplicate-stream guard (same pattern as chat/start)
+    # Duplicate-stream guard (same pattern as chat/start): decide under the
+    # lock, respond outside it. ``j`` writes to the client socket, and a client
+    # that stopped reading would otherwise stall every stream start/Stop/steer
+    # waiting on STREAMS_LOCK for the duration of the write.
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
         with STREAMS_LOCK:
-            if current_stream_id in STREAMS:
-                return j(handler, {"error": "session already has an active stream"}, status=409)
+            busy = current_stream_id in STREAMS
+        if busy:
+            return j(handler, {"error": "session already has an active stream"}, status=409)
+        # Only clear the id when the stream is really gone; a live stream keeps
+        # its owner even though this request is refused above.
         s.active_stream_id = None
     # Create ephemeral hidden session inheriting context
     from api.models import new_session as _new_session
@@ -36591,6 +36685,31 @@ def _handle_handoff_summary(handler, body):
             agent.reasoning_config = previous_reasoning
 
         # Call LLM for summary.
+    # Gateway mode owns model execution and the session's credentials: never
+    # build an in-process helper agent here (#8971). That path either fails on
+    # missing WebUI credentials or silently runs an LLM call outside the
+    # gateway. This handler exists specifically for gateway sessions, so use
+    # the deterministic local fallback — the same path taken when no provider
+    # key resolves — instead of refusing the feature with a 409.
+    if webui_gateway_chat_enabled(get_config_snapshot()):
+        summary_text = _fallback_handoff_summary(msgs)
+        try:
+            _persist_handoff_summary(
+                sid,
+                summary_text,
+                _resolve_handoff_channel_label(),
+                rounds,
+                fallback=True,
+            )
+        except Exception:
+            pass
+        return j(handler, {
+            "ok": True,
+            "summary": summary_text,
+            "message_count": len(msgs),
+            "rounds": rounds,
+            "fallback": True,
+        })
     try:
         ensure_agent_runtime_current()
         import api.config as _cfg
