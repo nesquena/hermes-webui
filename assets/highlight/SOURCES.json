@@ -1,0 +1,32 @@
+{
+  "package": "highlight.js",
+  "version": "11.9.0",
+  "license": "BSD-3-Clause",
+  "purpose": "Exact current homepage dependency self-hosting, no version or image redesign",
+  "files": [
+    {
+      "file": "github-dark.min.css",
+      "url": "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css",
+      "sha256": "9f208d022102b1d0c7aebfecd8e42ca7997d5de636649d2b31ea63093d809019",
+      "bytes": 1315
+    },
+    {
+      "file": "highlight.min.js",
+      "url": "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js",
+      "sha256": "837a6fa5b0c736b52bbde2b2b6190f305da3fc9ed41681db5321507057b5c846",
+      "bytes": 121727
+    },
+    {
+      "file": "bash.min.js",
+      "url": "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js",
+      "sha256": "fd9edcf3c6b2223b8987115f7799b1d1eec3000d045599cf4877c0f938ad8744",
+      "bytes": 3103
+    },
+    {
+      "file": "LICENSE",
+      "url": "https://raw.githubusercontent.com/highlightjs/highlight.js/11.9.0/LICENSE",
+      "sha256": "6c081431591d9df696c82dc598fe1423765b8a299b200ed00b281afd0f64c490",
+      "bytes": 1514
+    }
+  ]
+}

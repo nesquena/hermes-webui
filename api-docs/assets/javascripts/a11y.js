@@ -80,6 +80,7 @@
       l.setAttribute("data-site-open", "");
       l.addEventListener("keydown", function (e) {
         if (e.key !== "Enter" && e.key !== " ") return;
+        if (e.key === " ") { e.preventDefault(); l.click(); }
         var toggle = document.getElementById(l.getAttribute("for"));
         setTimeout(function () {
           if (!toggle || !toggle.checked || !drawerOpen()) return;
@@ -95,6 +96,7 @@
       // Material flips the panel's checkbox without a change event, so check it just after the key
       l.addEventListener("keydown", function (e) {
         if (e.key !== "Enter" && e.key !== " ") return;
+        if (e.key === " ") { e.preventDefault(); l.click(); }
         var panel = document.getElementById(l.getAttribute("for"));
         // Back always lands on the panel one level up: focus its first control (the root panel's is the logo link,
         // then the Site links). Direct, since a hit test would race the slide.
@@ -110,8 +112,40 @@
     });
   }
 
+  // Closed search is no Tab stop: an empty results panel has no scroll area, and below Material's 60em breakpoint the
+  // closed search box is off screen (focusing it would open search out of sight). The search button opens and focuses it.
+  function wireSearchScroll() {
+    var wrap = document.querySelector(".md-search__scrollwrap");
+    if (!wrap) return;
+    var toggle = document.getElementById("__search");
+    var query = document.querySelector(".md-search__input");
+    var overlay = window.matchMedia("(max-width: 59.984375em)");
+    function sync() {
+      var open = !!toggle && toggle.checked;
+      wrap.inert = !open;
+      wrap.tabIndex = open && wrap.clientHeight > 0 && wrap.scrollHeight > wrap.clientHeight ? 0 : -1;
+      if (query) {
+        if (!open && overlay.matches) query.tabIndex = -1;
+        else query.removeAttribute("tabindex");
+      }
+    }
+    if (overlay.addEventListener) overlay.addEventListener("change", sync);
+    if (toggle) toggle.addEventListener("change", sync);
+    if (query) {
+      query.addEventListener("focus", function () { requestAnimationFrame(sync); });
+      query.addEventListener("input", sync);
+    }
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") setTimeout(sync, 0);
+    });
+    sync();
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(sync).observe(wrap);
+    new MutationObserver(sync).observe(wrap, {childList: true, subtree: true});
+  }
+
   // The header is outside Material's instant-navigation swap, so wire it once.
   function wireToggles() {
+    wireSearchScroll();
     var opener = document.querySelector('[data-site-toggle="__drawer"]');
     document.querySelectorAll("[data-site-toggle]").forEach(function (btn) {
       var box = document.getElementById(btn.getAttribute("data-site-toggle"));
