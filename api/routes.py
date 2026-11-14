@@ -2422,6 +2422,7 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
     from api.profiles import (
         cron_store_scope_for_home,
         get_hermes_home_for_profile,
+        is_live_profile_home_for_reads,
         list_profiles_api,
     )
 
@@ -2460,6 +2461,13 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
     seen_homes: set[str] = set()
     for owner_profile in names:
         home = Path(get_hermes_home_for_profile(owner_profile))
+        # A stale client cookie or an outdated fast-path row can still name a profile
+        # whose home was deleted. Reading its cron jobs would call ensure_dirs() and
+        # mkdir `cron/` + `cron/output/` inside the ghost, making a tombstoned shell
+        # look alive. Skip any named home that is not live; the default/custom homes
+        # (not under profiles/) are unaffected.
+        if not is_live_profile_home_for_reads(home):
+            continue
         home_key = _home_key(home)
         if home_key in seen_homes:
             continue
