@@ -26381,10 +26381,12 @@ def _detect_text_lang(text: str) -> str:
     words = re.findall(r"[a-zàèéìòù']+", (text or "").lower())
     if len(words) < 3:
         return ""
+    # No articles or prepositions Italian shares with French and Spanish
+    # (la, le, un, una, con): they made French/Spanish text vote Italian.
     it_words = {
-        "il", "lo", "la", "gli", "le", "un", "una", "di", "che", "non", "per",
-        "con", "sono", "questo", "questa", "anche", "più", "già", "perché",
-        "cosa", "come", "quando", "adesso", "oggi", "molto", "così", "ma",
+        "il", "lo", "gli", "di", "che", "non", "per", "è", "sono", "questo",
+        "questa", "anche", "più", "già", "perché", "cosa", "come", "quando",
+        "adesso", "oggi", "molto", "così", "ma",
     }
     en_words = {
         "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
@@ -26393,7 +26395,9 @@ def _detect_text_lang(text: str) -> str:
     }
     it_votes = sum(1 for w in words if w in it_words)
     en_votes = sum(1 for w in words if w in en_words)
-    accented_it = sum(1 for w in words if any(c in "àèéìòù" for c in w))
+    # é/è are as common in French, Spanish and Portuguese; the word "è" is
+    # counted as a stopword instead.
+    accented_it = sum(1 for w in words if any(c in "àìòù" for c in w))
     it_votes += accented_it
     if it_votes >= 2 and it_votes > en_votes:
         return "it"
@@ -26406,9 +26410,13 @@ def _default_edge_voice(text: str = "") -> str:
     """Default Edge voice for /api/tts, picked by the text's language.
 
     Precedence: ``tts.edge.voices.<lang>`` from the active profile's config.yaml,
-    then a built-in per-language default (it -> Elsa, en -> Ava), then
-    ``tts.edge.voice`` (the configured single voice, all languages), then Elsa.
-    Before this, the endpoint hardcoded zh-CN-XiaoxiaoNeural and spoke Chinese.
+    then ``tts.edge.voice`` (the configured single voice), then a built-in
+    per-language default (it -> Elsa, en -> Ava), then the multilingual Ava.
+    The built-in default outranks the configured voice only when that voice
+    speaks the other detected language (an it-IT voice for English text, or an
+    en-* voice for Italian text). A voice in any other language, or a
+    multilingual one, is kept: the detector only knows it/en, so it must not
+    replace a French voice because French text looked Italian (#9065).
     """
     cfg: dict = {}
     try:
@@ -26426,10 +26434,11 @@ def _default_edge_voice(text: str = "") -> str:
     def _usable(value) -> str:
         # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
         # would trip the voice allowlist, so treat it as absent.
-        if isinstance(value, str) and value.strip() and "${" not in value:
+        if isinstance(value, str) and value.strip() and not _has_env_ref(value):
             return value.strip()
         return ""
 
+    builtins = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}
     lang = _detect_text_lang(text)
     if lang:
         voices = edge_cfg.get("voices")
@@ -26437,13 +26446,20 @@ def _default_edge_voice(text: str = "") -> str:
             per_lang = _usable(voices.get(lang))
             if per_lang:
                 return per_lang
-        builtin = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}.get(lang)
-        if builtin:
-            return builtin
     configured = _usable(edge_cfg.get("voice"))
     if configured:
-        return configured
-    return "it-IT-ElsaNeural"
+        configured_lang = configured.split("-", 1)[0].lower()
+        speaks_other_detected_lang = (
+            lang in builtins
+            and configured_lang in builtins
+            and configured_lang != lang
+            and "Multilingual" not in configured
+        )
+        if not speaks_other_detected_lang:
+            return configured
+    if lang in builtins:
+        return builtins[lang]
+    return "en-US-AvaMultilingualNeural"
 
 
 
