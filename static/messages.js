@@ -569,10 +569,10 @@ function _sanitizeMarkdownTableCellText(cell){
   const sortButton=cell.querySelector?cell.querySelector('.markdown-table-sort'):null;
   if(sortButton){
     const sortLabel=sortButton.querySelector?sortButton.querySelector('.markdown-table-sort-label'):null;
-    if(sortLabel) return _markdownTableCellText(sortLabel);
+    if(sortLabel) return _markdownTableCopyPlainText(sortLabel).replace(/\r/g,'').trim();
     return _markdownTableCellText(sortButton);
   }
-  return _markdownTableCellText(cell);
+  return _markdownTableCopyPlainText(cell).replace(/\r/g,'').trim();
 }
 
 function _markdownTableCopyHtmlEscape(value){
@@ -582,9 +582,110 @@ function _markdownTableCopyHtmlEscape(value){
     .replace(/>/g,'&gt;');
 }
 
+function _markdownTableCopyHtmlAttributeEscape(value){
+  return _markdownTableCopyHtmlEscape(value)
+    .split('"').join('&quot;')
+    .split("'").join('&#39;');
+}
+
+function _markdownTableCopySafeHref(value){
+  const href=String(value||'').trim();
+  if(!href||/[\u0000-\u0020\u007f\\]/.test(href)) return '';
+  if(/^(?:https?:\/\/|mailto:|tel:)/i.test(href)) return href;
+  if(/^[a-z][a-z0-9+.-]*:/i.test(href)||href.startsWith('//')) return '';
+  if(/^(?:#|\/|\.\.\/|\.\/|\?|[a-z0-9_~!$&()*+,;=@%-])/i.test(href)){
+    const base=typeof window!=='undefined'&&window.location?window.location.href:'';
+    if(!base||typeof URL!=='function') return '';
+    try{return new URL(href,base).href;}catch(_){return '';}
+  }
+  return '';
+}
+
+function _markdownTableCopySafeImageSrc(value){
+  const src=String(value||'').trim();
+  if(/^data:/i.test(src)){
+    return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(src)?src:'';
+  }
+  if(/^(?:mailto:|tel:|#)/i.test(src)) return '';
+  return _markdownTableCopySafeHref(src);
+}
+
+function _markdownTableCopySemanticChildren(node){
+  return _markdownTableNodeChildren(node)
+    .map(_markdownTableCopySemanticHtml)
+    .join('');
+}
+
+function _markdownTableCopySemanticHtml(node){
+  if(!node) return '';
+  if(node.nodeType===3) return _markdownTableCopyHtmlEscape(node.textContent||'');
+  if(node.nodeType!==1||!node.tagName) return _markdownTableCopySemanticChildren(node);
+
+  const tag=String(node.tagName).toLowerCase();
+  if(tag==='table'&&node.matches&&node.matches('table[data-markdown-table-enhanced]')){
+    const payload=_markdownTableCopyPayloadForTable(node);
+    return payload?payload.html:'';
+  }
+
+  const blockedTags=[
+    'script','style','button','input','select','textarea','option','svg','canvas',
+    'iframe','object','embed','form','video','audio',
+  ];
+  if(blockedTags.includes(tag)) return '';
+
+  const getAttribute=(name)=>typeof node.getAttribute==='function'?node.getAttribute(name):null;
+  const children=_markdownTableCopySemanticChildren(node);
+  if(tag==='img'){
+    const src=_markdownTableCopySafeImageSrc(getAttribute('src'));
+    if(!src) return '';
+    const alt=getAttribute('alt')||'';
+    return `<img src="${_markdownTableCopyHtmlAttributeEscape(src)}" alt="${_markdownTableCopyHtmlAttributeEscape(alt)}">`;
+  }
+  const semanticTags=[
+    'a','abbr','b','blockquote','br','code','dd','del','details','div','dl','dt',
+    'em','h1','h2','h3','h4','h5','h6','hr','i','kbd','li','mark','ol','p',
+    'pre','q','s','samp','small','span','strong','sub','summary','sup','table',
+    'tbody','td','tfoot','th','thead','tr','u','ul','var',
+  ];
+  if(!semanticTags.includes(tag)) return children;
+
+  const attributes=[];
+  if(tag==='a'){
+    const href=_markdownTableCopySafeHref(getAttribute('href'));
+    if(href) attributes.push(`href="${_markdownTableCopyHtmlAttributeEscape(href)}"`);
+  }
+  if(tag==='ol'){
+    const start=getAttribute('start');
+    if(start!==null&&/^-?\d+$/.test(String(start))) attributes.push(`start="${String(start)}"`);
+  }
+  if(tag==='li'){
+    const value=getAttribute('value');
+    if(value!==null&&/^-?\d+$/.test(String(value))) attributes.push(`value="${String(value)}"`);
+  }
+  if(tag==='td'||tag==='th'){
+    for(const name of ['colspan','rowspan']){
+      const value=getAttribute(name);
+      if(value!==null&&/^\d+$/.test(String(value))) attributes.push(`${name}="${String(value)}"`);
+    }
+  }
+
+  const opening=`<${tag}${attributes.length?' '+attributes.join(' '):''}>`;
+  if(tag==='br'||tag==='hr') return opening;
+  return `${opening}${children}</${tag}>`;
+}
+
+function _markdownTableCopyCellHtml(cell){
+  if(!cell) return '';
+  const sortButton=cell.querySelector?cell.querySelector('.markdown-table-sort'):null;
+  const sortLabel=sortButton&&sortButton.querySelector
+    ? sortButton.querySelector('.markdown-table-sort-label')
+    : null;
+  return _markdownTableCopySemanticChildren(sortLabel||sortButton||cell);
+}
+
 function _markdownTableCopyPayloadForTable(table){
   if(!table||!table.rows) return null;
-  const rows=Array.from(table.rows||[]);
+  const rows=Array.from(table.rows||[]).filter((row)=>row&&!row.hidden);
   if(!rows.length) return null;
   let headerRowCount=0;
   while(headerRowCount<rows.length){
@@ -599,8 +700,7 @@ function _markdownTableCopyPayloadForTable(table){
       .filter((cell)=>cell&&cell.nodeType===1)
       .map((cell)=>{
         const tag=cellTag(cell);
-        const text=_sanitizeMarkdownTableCellText(cell);
-        return `<${tag}>${_markdownTableCopyHtmlEscape(text)}</${tag}>`;
+        return `<${tag}>${_markdownTableCopyCellHtml(cell)}</${tag}>`;
       })
       .join('');
     return `<tr>${cells}</tr>`;
@@ -698,21 +798,121 @@ function _isFullEnhancedMarkdownTableSelection(range, table){
 }
 
 function _findEnhancedMarkdownTableFromRange(range){
-  if(!range) return null;
-  const found=_findEnhancedMarkdownTable(range.startContainer)
-    || _findEnhancedMarkdownTable(range.endContainer)
-    || _findEnhancedMarkdownTable(range.commonAncestorContainer);
-  if(found) return found;
+  return _findEnhancedMarkdownTablesFromRange(range)[0]||null;
+}
+
+function _findEnhancedMarkdownTablesFromRange(range){
+  if(!range) return [];
+  const tables=[];
+  const add=(table)=>{
+    if(table&&table.matches&&table.matches('table[data-markdown-table-enhanced]')&&!tables.includes(table)){
+      tables.push(table);
+    }
+  };
+  add(_findEnhancedMarkdownTable(range.startContainer));
   const container=range.commonAncestorContainer&&range.commonAncestorContainer.nodeType===3
     ? range.commonAncestorContainer.parentElement
     : range.commonAncestorContainer;
-  if(!container||!container.querySelectorAll||typeof range.intersectsNode!=='function') return null;
-  for(const table of container.querySelectorAll('table[data-markdown-table-enhanced]')){
-    try{
-      if(range.intersectsNode(table)) return table;
-    }catch(_){}
+  add(_findEnhancedMarkdownTable(container));
+  if(container&&container.querySelectorAll&&typeof range.intersectsNode==='function'){
+    for(const table of container.querySelectorAll('table[data-markdown-table-enhanced]')){
+      try{
+        if(range.intersectsNode(table)) add(table);
+      }catch(_){}
+    }
   }
-  return null;
+  add(_findEnhancedMarkdownTable(range.endContainer));
+  return tables;
+}
+
+function _markdownTableCopyPlainText(node){
+  if(!node) return '';
+  if(node.nodeType===3) return String(node.textContent||'');
+  const tag=node.nodeType===1&&node.tagName?String(node.tagName).toLowerCase():'';
+  if(tag==='table'&&node.matches&&node.matches('table[data-markdown-table-enhanced]')){
+    const payload=_markdownTableCopyPayloadForTable(node);
+    return payload?`\n${payload.plain}\n`:'';
+  }
+  const blockedTags=[
+    'script','style','button','input','select','textarea','option','svg','canvas',
+    'iframe','object','embed','form','video','audio',
+  ];
+  if(blockedTags.includes(tag)) return '';
+  if(tag==='br') return '\n';
+  if(tag==='hr') return '\n---\n';
+  if(tag==='tr'){
+    const cells=_markdownTableNodeChildren(node)
+      .filter((child)=>child&&/^(?:td|th)$/i.test(String(child.tagName||'')))
+      .map((cell)=>_markdownTableCopyPlainText(cell).trim());
+    if(cells.length) return `${cells.join('\t')}\n`;
+  }
+  if(tag==='ol'){
+    let ordinal=1;
+    const start=typeof node.getAttribute==='function'?node.getAttribute('start'):null;
+    if(start!==null&&/^-?\d+$/.test(String(start))) ordinal=Number(start);
+    const lines=[];
+    for(const child of _markdownTableNodeChildren(node)){
+      if(!child||String(child.tagName||'').toLowerCase()!=='li'){
+        lines.push(_markdownTableCopyPlainText(child));
+        continue;
+      }
+      const value=typeof child.getAttribute==='function'?child.getAttribute('value'):null;
+      if(value!==null&&/^-?\d+$/.test(String(value))) ordinal=Number(value);
+      const content=_markdownTableNodeChildren(child)
+        .map(_markdownTableCopyPlainText)
+        .join('')
+        .trim();
+      lines.push(`\n${ordinal}. ${content}\n`);
+      ordinal++;
+    }
+    return `\n${lines.join('')}\n`;
+  }
+  const children=_markdownTableNodeChildren(node)
+    .map(_markdownTableCopyPlainText)
+    .join('');
+  if(tag==='li'){
+    const parent=node.parentElement||node.parentNode;
+    const parentTag=parent&&parent.tagName?String(parent.tagName).toLowerCase():'';
+    if(parentTag==='ol'){
+      const value=typeof node.getAttribute==='function'?node.getAttribute('value'):null;
+      const ordinal=value!==null&&/^-?\d+$/.test(String(value))?Number(value):1;
+      return `\n${ordinal}. ${children.trim()}\n`;
+    }
+    return `\n- ${children.trim()}\n`;
+  }
+  const blockTags=[
+    'blockquote','dd','details','div','dl','dt','h1','h2','h3','h4','h5','h6',
+    'ol','p','pre','summary','table','ul',
+  ];
+  return blockTags.includes(tag)?`\n${children}\n`:children;
+}
+
+function _markdownTableCopyPayloadForMixedRange(range){
+  if(!range||typeof range.cloneContents!=='function') return null;
+  const originalTables=_findEnhancedMarkdownTablesFromRange(range);
+  if(!originalTables.length) return null;
+  const fragment=range.cloneContents();
+  if(!fragment||!fragment.querySelectorAll) return null;
+  const clonedTables=Array.from(fragment.querySelectorAll('table[data-markdown-table-enhanced]'));
+  if(clonedTables.length!==originalTables.length) return null;
+
+  for(let index=0;index<originalTables.length;index++){
+    const originalPayload=_markdownTableCopyPayloadForTable(originalTables[index]);
+    const clonedPayload=_markdownTableCopyPayloadForTable(clonedTables[index]);
+    if(!originalPayload||!clonedPayload) return null;
+    if(originalPayload.html!==clonedPayload.html||originalPayload.plain!==clonedPayload.plain) return null;
+  }
+
+  const html=_markdownTableCopySemanticChildren(fragment).trim();
+  const plain=_markdownTableCopyPlainText(fragment)
+    .replace(/\r/g,'')
+    .split('\n')
+    .map((line)=>line.replace(/[ \t]+$/g,''))
+    .join('\n')
+    .replace(/\n\n\n+/g,'\n\n')
+    .trim();
+  if(!html||!plain) return null;
+  return {html, plain};
 }
 
 function _handleMarkdownTableCopy(event){
@@ -727,11 +927,12 @@ function _handleMarkdownTableCopy(event){
   if(startCell&&endCell&&startCell===endCell) return;
   const table=_findEnhancedMarkdownTableFromRange(range);
   if(!table||!table.matches||!table.matches('table[data-markdown-table-enhanced]')) return;
-  if(!_isFullEnhancedMarkdownTableSelection(range, table)) return;
-  const payload=_markdownTableCopyPayloadForTable(table);
-  if(!payload) return;
   const clipboardData=event.clipboardData||event.originalEvent&&event.originalEvent.clipboardData;
   if(!clipboardData||typeof clipboardData.setData!=='function') return;
+  const payload=_isFullEnhancedMarkdownTableSelection(range, table)
+    ? _markdownTableCopyPayloadForTable(table)
+    : _markdownTableCopyPayloadForMixedRange(range);
+  if(!payload) return;
   if(typeof event.preventDefault==='function') event.preventDefault();
   clipboardData.setData('text/html', payload.html);
   clipboardData.setData('text/plain', payload.plain);

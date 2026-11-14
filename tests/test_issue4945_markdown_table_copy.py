@@ -75,6 +75,9 @@ function extractFunc(name) {
 
 const required = [
   '_markdownTableCopyHtmlEscape',
+  '_markdownTableCopyHtmlAttributeEscape',
+  '_markdownTableCopySafeHref',
+  '_markdownTableCopySafeImageSrc',
   '_markdownTableText',
   '_markdownTableCellText',
   '_sanitizeMarkdownTableCellText',
@@ -85,13 +88,27 @@ const required = [
   '_markdownTableBoundaryWithinCell',
   '_markdownTableEdgeCell',
   '_isFullEnhancedMarkdownTableSelection',
+  '_findEnhancedMarkdownTablesFromRange',
   '_findEnhancedMarkdownTableFromRange',
+  '_markdownTableCopySemanticChildren',
+  '_markdownTableCopySemanticHtml',
+  '_markdownTableCopyCellHtml',
   '_markdownTableCopyPayloadForTable',
+  '_markdownTableCopyPlainText',
+  '_markdownTableCopyPayloadForMixedRange',
   '_handleMarkdownTableCopy',
 ];
 
 for (const name of required) {
-  eval(extractFunc(name));
+  try {
+    eval(extractFunc(name));
+  } catch (error) {
+    throw new Error(name + ' extraction failed: ' + error.message);
+  }
+}
+
+function _isSafeDataImageUri(value) {
+  return /^data:image\/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$/i.test(String(value || ''));
 }
 
 function toNodeTypeElement(tagName) {
@@ -165,6 +182,10 @@ class FakeElement {
     return Object.prototype.hasOwnProperty.call(this.attrs, name);
   }
 
+  getAttribute(name) {
+    return this.hasAttribute(name) ? this.attrs[name] : null;
+  }
+
   removeAttribute(name) {
     delete this.attrs[name];
   }
@@ -223,6 +244,14 @@ class FakeElement {
   }
 }
 
+class FakeFragment extends FakeElement {
+  constructor() {
+    super('fragment');
+    this.nodeType = 11;
+    this.tagName = undefined;
+  }
+}
+
 function makeElement(tagName, options = {}) {
   return new FakeElement(tagName, options);
 }
@@ -275,6 +304,7 @@ function buildEnhancedTableFixture(includeFilter, options = {}) {
 }
 
 global.window = {
+  location: {href: 'https://hermes.example/chat'},
   getSelection() {
     return null;
   }
@@ -312,15 +342,33 @@ const {table} = buildEnhancedTableFixture(false, {
   headerTexts: ['Product <Name>', 'Price & Tax'],
   bodyTexts: ['Widget > Basic', '12 & change'],
 });
+const hidden = makeRow([makeCell('td', 'Hidden product'), makeCell('td', '99')]);
+hidden.hidden = true;
+table.rows.splice(1, 0, hidden);
 const payload = _markdownTableCopyPayloadForTable(table);
 console.log(JSON.stringify(payload));
 """
     )
     assert "<thead><tr><th>Product &lt;Name&gt;</th><th>Price &amp; Tax</th></tr></thead>" in out["html"]
     assert "<tbody><tr><td>Widget &gt; Basic</td><td>12 &amp; change</td></tr></tbody>" in out["html"]
+    assert "Hidden product" not in out["html"]
     assert "markdown-table-sort" not in out["html"]
-    assert out["plain"].startswith("Product <Name>\tPrice & Tax\n")
-    assert "\nWidget > Basic\t12 & change" in out["plain"]
+    assert out["plain"] == "Product <Name>\tPrice & Tax\nWidget > Basic\t12 & change"
+
+
+def test_copy_payload_preserves_sort_button_text_when_label_is_missing():
+    out = _run_js(
+        """
+const {table, header} = buildEnhancedTableFixture(false);
+const sortButton = header.cells[0].querySelector('.markdown-table-sort');
+sortButton.children = [];
+sortButton.appendChild(new FakeText('Legacy Product Header'));
+const payload = _markdownTableCopyPayloadForTable(table);
+console.log(JSON.stringify(payload));
+"""
+    )
+    assert "<th>Legacy Product Header</th>" in out["html"]
+    assert out["plain"].startswith("Legacy Product Header\tPrice\n")
 
 
 def test_partial_multi_cell_selection_leaves_native_copy_unmodified():
@@ -493,7 +541,7 @@ console.log(JSON.stringify({ prevented: event.preventDefaultCalled }));
     assert out["prevented"] is False
 
 
-def test_mixed_selection_that_crosses_table_leaves_native_copy_unmodified():
+def test_mixed_selection_without_clone_support_leaves_native_copy_unmodified():
     out = _run_js(
         """
 const {root, table, body} = buildEnhancedTableFixture(true);
@@ -646,6 +694,14 @@ const after = makeElement('p');
 after.appendChild(new FakeText('trailing prose'));
 root.appendChild(after);
 
+const partialFragment = new FakeFragment();
+const partial = buildEnhancedTableFixture(false);
+partial.table.rows = [partial.body];
+partialFragment.appendChild(partial.table);
+const clonedAfter = makeElement('p');
+clonedAfter.appendChild(new FakeText('trailing prose'));
+partialFragment.appendChild(clonedAfter);
+
 // Start inside a body cell's text, end in the trailing prose paragraph.
 const range = {
   startContainer: body.cells[0].children[0],
@@ -655,6 +711,9 @@ const range = {
   commonAncestorContainer: root,
   intersectsNode(node) {
     return node === table;
+  },
+  cloneContents() {
+    return partialFragment;
   },
 };
 
@@ -685,3 +744,189 @@ console.log(JSON.stringify({ prevented: event.preventDefaultCalled, data: clipbo
     )
     assert out["prevented"] is False
     assert out["data"] == {}
+
+
+def test_mixed_selection_exports_theme_neutral_semantic_payload():
+    out = _run_js(
+        """
+function appendMixedContent(root, suffix) {
+  const heading = makeElement('h2', {
+    className: 'msg-heading dark-theme',
+    attrs: {style: 'color: white; background: black;'},
+  });
+  heading.appendChild(new FakeText('Monthly Summary'));
+  root.appendChild(heading);
+
+  const ordered = makeElement('ol', {attrs: {start: '5'}});
+  const fifth = makeElement('li', {attrs: {value: '5'}});
+  fifth.appendChild(new FakeText('Fifth item'));
+  const eighth = makeElement('li', {attrs: {value: '8'}});
+  eighth.appendChild(new FakeText('Eighth item'));
+  const ninth = makeElement('li');
+  ninth.appendChild(new FakeText('Ninth item'));
+  ordered.appendChild(fifth);
+  ordered.appendChild(eighth);
+  ordered.appendChild(ninth);
+  root.appendChild(ordered);
+
+  const first = buildEnhancedTableFixture(true, {
+    headerTexts: ['Product Name', 'Total'],
+    bodyTexts: ['Example Service A', '$10.00'],
+  });
+  root.appendChild(first.table);
+
+  const genericTable = makeElement('table');
+  genericTable.appendChild(makeRow([makeCell('td', 'A1'), makeCell('td', 'B1')]));
+  genericTable.appendChild(makeRow([makeCell('td', 'A2'), makeCell('td', 'B2')]));
+  root.appendChild(genericTable);
+
+  const subheading = makeElement('h3', {className: 'muted'});
+  subheading.appendChild(new FakeText('Example Site B'));
+  root.appendChild(subheading);
+
+  const second = buildEnhancedTableFixture(true, {
+    headerTexts: ['Product Name', 'Total'],
+    bodyTexts: ['Monthly Subtotal', '$40.00'],
+  });
+  const strong = makeElement('strong', {attrs: {style: 'color: gold;'}});
+  strong.appendChild(new FakeText('five'));
+  second.body.cells[0].children = [];
+  second.body.cells[0].appendChild(strong);
+  second.body.cells[0].appendChild(makeElement('br'));
+  second.body.cells[0].appendChild(new FakeText('six'));
+  root.appendChild(second.table);
+
+  const trailing = makeElement('p', {
+    className: 'msg-copy-source',
+    attrs: {style: 'font-family: sans-serif;', 'data-copy-id': suffix},
+  });
+  trailing.appendChild(new FakeText('End of report: '));
+  const chart = makeElement('img', {
+    attrs: {
+      src: 'data:image/png;base64,iVBORw0KGgo=',
+      alt: 'Monthly chart',
+      onerror: 'alert(1)',
+    },
+  });
+  trailing.appendChild(chart);
+  trailing.appendChild(new FakeText(' / '));
+  const localChart = makeElement('img', {
+    attrs: {src: 'api/media?path=chart.png', alt: 'Local chart'},
+  });
+  trailing.appendChild(localChart);
+  trailing.appendChild(new FakeText(' / '));
+  const artifactLink = makeElement('a', {
+    attrs: {href: 'api/media?path=report.pdf&download=1'},
+  });
+  artifactLink.appendChild(new FakeText('download report'));
+  trailing.appendChild(artifactLink);
+  trailing.appendChild(new FakeText(' / '));
+  const safeLink = makeElement('a', {
+    className: 'themed-link',
+    attrs: {
+      href: 'https://example.com/report?q=monthly&view=full',
+      style: 'color: cyan;',
+      onclick: 'alert(1)',
+    },
+  });
+  safeLink.appendChild(new FakeText('open report'));
+  trailing.appendChild(safeLink);
+  trailing.appendChild(new FakeText(' / '));
+  const unsafeLink = makeElement('a', {attrs: {href: 'javascript:alert(1)'}});
+  const trailingEnd = new FakeText('unsafe link');
+  unsafeLink.appendChild(trailingEnd);
+  trailing.appendChild(unsafeLink);
+  const unsafeDataLink = makeElement('a', {
+    attrs: {href: 'data:text/html;base64,PHNjcmlwdD4='},
+  });
+  unsafeDataLink.appendChild(new FakeText('unsafe data link'));
+  trailing.appendChild(unsafeDataLink);
+  const unsafeImage = makeElement('img', {
+    attrs: {src: 'data:image/svg+xml,<svg onload=alert(1)>', alt: 'unsafe image'},
+  });
+  trailing.appendChild(unsafeImage);
+  const hiddenForm = makeElement('form');
+  hiddenForm.appendChild(new FakeText('hidden form value'));
+  trailing.appendChild(hiddenForm);
+  root.appendChild(trailing);
+  return {heading, first, second, trailing, trailingEnd};
+}
+
+const source = makeElement('div');
+const original = appendMixedContent(source, 'source');
+const fragment = new FakeFragment();
+appendMixedContent(fragment, 'clone');
+
+const range = {
+  startContainer: original.heading.children[0],
+  startOffset: 0,
+  endContainer: original.trailingEnd,
+  endOffset: original.trailingEnd.textContent.length,
+  commonAncestorContainer: source,
+  intersectsNode(node) {
+    return node === original.first.table || node === original.second.table;
+  },
+  cloneContents() {
+    return fragment;
+  },
+};
+
+window.getSelection = () => ({
+  isCollapsed: false,
+  rangeCount: 1,
+  getRangeAt: () => range,
+});
+
+const clipboard = {
+  data: {},
+  setData(type, value) {
+    this.data[type] = value;
+  },
+};
+const event = {
+  preventDefaultCalled: false,
+  preventDefault() {
+    this.preventDefaultCalled = true;
+  },
+  clipboardData: clipboard,
+};
+
+_handleMarkdownTableCopy(event);
+console.log(JSON.stringify({prevented: event.preventDefaultCalled, data: clipboard.data}));
+"""
+    )
+
+    assert out["prevented"] is True
+    html = out["data"]["text/html"]
+    plain = out["data"]["text/plain"]
+    assert "<h2>Monthly Summary</h2>" in html
+    assert '<ol start="5"><li value="5">Fifth item</li><li value="8">Eighth item</li><li>Ninth item</li></ol>' in html
+    assert html.count("<table>") == 3
+    assert html.count("<th>Product Name</th><th>Total</th>") == 2
+    assert "<strong>five</strong><br>six" in html
+    assert '<img src="data:image/png;base64,iVBORw0KGgo=" alt="Monthly chart">' in html
+    assert '<img src="https://hermes.example/api/media?path=chart.png" alt="Local chart">' in html
+    assert '<a href="https://hermes.example/api/media?path=report.pdf&amp;download=1">download report</a>' in html
+    assert '<a href="https://example.com/report?q=monthly&amp;view=full">open report</a>' in html
+    assert "<a>unsafe link</a>" in html
+    assert "<a>unsafe data link</a>" in html
+    assert "javascript:" not in html
+    assert "data:text/html" not in html
+    assert "image/svg+xml" not in html
+    assert "unsafe image" not in html
+    assert "onerror=" not in html
+    assert "onclick=" not in html
+    assert "style=" not in html
+    assert "class=" not in html
+    assert "data-copy-id" not in html
+    assert "markdown-table-sort" not in html
+    assert "hidden form value" not in html
+    assert "Monthly Summary" in plain
+    assert "5. Fifth item" in plain
+    assert "8. Eighth item" in plain
+    assert "9. Ninth item" in plain
+    assert "Product Name\tTotal" in plain
+    assert "A1\tB1\nA2\tB2" in plain
+    assert "five\nsix\t$40.00" in plain
+    assert "End of report" in plain
+    assert "hidden form value" not in plain
