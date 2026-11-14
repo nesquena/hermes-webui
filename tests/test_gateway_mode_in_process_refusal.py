@@ -647,6 +647,59 @@ def test_dotenv_release_restores_the_launcher_value(monkeypatch, tmp_path):
         _restore_dotenv_provenance(saved)
 
 
+def test_dotenv_reload_waits_for_a_worker_exit_in_progress(monkeypatch, tmp_path):
+    """#9024 review round 12: the dotenv writer holds the env lock.
+
+    A worker exit is three steps under ``api.streaming._ENV_LOCK``: drop its
+    ownership, pop its baseline, restore ``os.environ``. A ``_reload_dotenv``
+    from a provider-setup request that ran between those steps saw an unowned
+    key with no baseline and recorded the worker's TEMPORARY value as the
+    operator's launcher setting. The reload must wait for the exit to finish
+    and record the restored launcher value instead.
+    """
+    import threading
+
+    import api.streaming as streaming
+
+    home = tmp_path / "next"
+    home.mkdir()
+    (home / ".env").write_text(f"{_ENV_KEY}=gateway\n", encoding="utf-8")
+    monkeypatch.setenv(_ENV_KEY, "gateway")  # the launcher's export
+    saved = _snapshot_dotenv_provenance()
+    reloader = None
+    try:
+        with streaming._ENV_LOCK:
+            # A worker for another profile mirrors "legacy" over the launcher
+            # value, then starts exiting: ownership dropped, baseline popped,
+            # os.environ not yet restored.
+            profiles.note_profile_env_mirror({_ENV_KEY: "legacy"})
+            os.environ[_ENV_KEY] = "legacy"
+            profiles.drop_profile_env_mirror({_ENV_KEY: "legacy"})
+            assert profiles._PROFILE_ENV_BASELINE.pop(_ENV_KEY) == "gateway"
+
+            reloader = threading.Thread(
+                target=profiles._reload_dotenv, args=(home,), daemon=True
+            )
+            reloader.start()
+            reloader.join(0.5)
+            assert reloader.is_alive(), (
+                "_reload_dotenv ran inside a worker exit instead of waiting "
+                "for the env lock"
+            )
+            # The worker finishes its restore, then releases the lock.
+            os.environ[_ENV_KEY] = "gateway"
+        reloader.join(5)
+        assert not reloader.is_alive()
+        assert profiles._PROFILE_ENV_BASELINE.get(_ENV_KEY) == "gateway", (
+            "the worker's temporary value was recorded as the launcher setting"
+        )
+        assert profiles.profile_env_writer_owns(_ENV_KEY)
+    finally:
+        if reloader is not None:
+            reloader.join(5)
+        _restore_dotenv_provenance(saved)
+
+
 def _two_writer_homes(monkeypatch, tmp_path, *, first_env, second_env):
     """Homes for two distinct profile writers with different .env values."""
     homes = {}

@@ -9,6 +9,7 @@ cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
 import collections
+import contextlib
 import copy
 import json
 import logging
@@ -2257,6 +2258,22 @@ def _set_hermes_home(home: Path):
         logger.debug("Failed to patch cron.scheduler module")
 
 
+def _dotenv_env_lock():
+    """The process-env lock the worker/streaming mirrors take, or a no-op.
+
+    ``api.streaming._ENV_LOCK`` is what every other writer of the provenance
+    state holds; ``_reload_dotenv`` must hold it too (#9024 review round 12).
+    ``init_profile_state()`` runs while ``api.config`` is still importing, and
+    ``api.streaming`` imports config, so the lock is looked up in
+    ``sys.modules`` instead of imported. If the module is absent no worker or
+    stream can exist yet (each takes the lock from that module before its first
+    env write), so there is nothing to serialise against.
+    """
+    module = sys.modules.get("api.streaming")
+    lock = getattr(module, "_ENV_LOCK", None) if module is not None else None
+    return lock if lock is not None else contextlib.nullcontext()
+
+
 def _reload_dotenv(home: Path):
     """Load .env from the profile dir into os.environ with profile isolation.
 
@@ -2266,68 +2283,86 @@ def _reload_dotenv(home: Path):
     """
     global _loaded_profile_env_keys, _DOTENV_OWNED_ENV_VALUES
 
-    # Remove keys loaded from the previous profile first, including their
-    # pair-level provenance (#9024 review round 4). A key a launcher exported
-    # before the dotenv writer displaced it gets that value back, so a profile
-    # switch cannot erase the operator's setting (#9024 review round 11); a
-    # key a live worker/stream mirror still owns is left to that mirror, whose
-    # own exit restores the launcher baseline.
-    for key in list(_loaded_profile_env_keys):
-        if _WORKER_OWNED_ENV_KEYS.get(key, 0) > 0:
-            continue
-        if key in _PROFILE_ENV_BASELINE:
-            baseline = _PROFILE_ENV_BASELINE.pop(key)
-            if baseline is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = baseline
-        else:
-            os.environ.pop(key, None)
-    for pair in _DOTENV_OWNED_ENV_VALUES:
-        _PROFILE_ENV_VALUES.pop(pair, None)
-    _DOTENV_OWNED_ENV_VALUES = set()
-    _loaded_profile_env_keys = set()
-
+    # Parse before taking the env lock: file I/O does not belong in a critical
+    # section every concurrent stream setup waits behind. ``pending`` stays
+    # ``None`` when there is no (readable) .env, which releases the previous
+    # profile's keys and loads nothing.
     env_path = home / '.env'
-    if not env_path.exists():
-        return
-    try:
-        pending: list[tuple[str, str]] = []
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                k, v = line.split('=', 1)
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if k and v:
-                    # Operator/deployment-level keys are never overridable by a
-                    # profile's own .env (#4589 — prevents a contained user from
-                    # disabling their isolation via HERMES_WEBUI_ISOLATED_PROFILE=0).
-                    if k in _PROTECTED_ENV_KEYS:
-                        logger.warning(
-                            "Ignoring protected key %s in profile .env %s; "
-                            "operator/deployment env takes precedence",
-                            k, env_path,
-                        )
-                        continue
-                    pending.append((k, v))
-        # #9024 review round 11: the dotenv writer records the launcher
-        # baseline it displaces, like the worker/streaming mirrors do. A live
-        # value loaded from this profile's .env must not be read as the
-        # operator's export — and with no baseline the admission reader would
-        # drop the operator's setting entirely while the key stays owned.
-        for key, _value in pending:
-            if not _profile_env_key_owned(key) and key not in _PROFILE_ENV_BASELINE:
-                _PROFILE_ENV_BASELINE[key] = os.environ.get(key)
-        for key, value in pending:
-            os.environ[key] = value
-        _loaded_profile_env_keys = {key for key, _value in pending}
-        _DOTENV_OWNED_ENV_VALUES = set(pending)
-        _PROFILE_ENV_VALUES.update(pending)
-    except Exception:
-        _loaded_profile_env_keys = set()
+    pending: Optional[list[tuple[str, str]]] = None
+    if env_path.exists():
+        try:
+            parsed: list[tuple[str, str]] = []
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k and v:
+                        # Operator/deployment-level keys are never overridable by a
+                        # profile's own .env (#4589 — prevents a contained user from
+                        # disabling their isolation via HERMES_WEBUI_ISOLATED_PROFILE=0).
+                        if k in _PROTECTED_ENV_KEYS:
+                            logger.warning(
+                                "Ignoring protected key %s in profile .env %s; "
+                                "operator/deployment env takes precedence",
+                                k, env_path,
+                            )
+                            continue
+                        parsed.append((k, v))
+            pending = parsed
+        except Exception:
+            logger.debug("Failed to reload dotenv from %s", env_path)
+
+    # One critical section for release, baseline capture, writes and ownership
+    # updates (#9024 review round 12). Without the lock, a worker finishing
+    # between "drop ownership", "pop its baseline" and "restore os.environ"
+    # let the baseline capture below read the worker's TEMPORARY value and
+    # record it as the operator's launcher setting.
+    with _dotenv_env_lock():
+        # Remove keys loaded from the previous profile first, including their
+        # pair-level provenance (#9024 review round 4). A key a launcher
+        # exported before the dotenv writer displaced it gets that value back,
+        # so a profile switch cannot erase the operator's setting (#9024
+        # review round 11); a key a live worker/stream mirror still owns is
+        # left to that mirror, whose own exit restores the launcher baseline.
+        for key in list(_loaded_profile_env_keys):
+            if _WORKER_OWNED_ENV_KEYS.get(key, 0) > 0:
+                continue
+            if key in _PROFILE_ENV_BASELINE:
+                baseline = _PROFILE_ENV_BASELINE.pop(key)
+                if baseline is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = baseline
+            else:
+                os.environ.pop(key, None)
+        for pair in _DOTENV_OWNED_ENV_VALUES:
+            _PROFILE_ENV_VALUES.pop(pair, None)
         _DOTENV_OWNED_ENV_VALUES = set()
-        logger.debug("Failed to reload dotenv from %s", env_path)
+        _loaded_profile_env_keys = set()
+
+        if not pending:
+            return
+        try:
+            # #9024 review round 11: the dotenv writer records the launcher
+            # baseline it displaces, like the worker/streaming mirrors do. A
+            # live value loaded from this profile's .env must not be read as
+            # the operator's export — and with no baseline the admission
+            # reader would drop the operator's setting entirely while the key
+            # stays owned.
+            for key, _value in pending:
+                if not _profile_env_key_owned(key) and key not in _PROFILE_ENV_BASELINE:
+                    _PROFILE_ENV_BASELINE[key] = os.environ.get(key)
+            for key, value in pending:
+                os.environ[key] = value
+            _loaded_profile_env_keys = {key for key, _value in pending}
+            _DOTENV_OWNED_ENV_VALUES = set(pending)
+            _PROFILE_ENV_VALUES.update(pending)
+        except Exception:
+            _loaded_profile_env_keys = set()
+            _DOTENV_OWNED_ENV_VALUES = set()
+            logger.debug("Failed to reload dotenv from %s", env_path)
 
 
 def init_profile_state() -> None:
