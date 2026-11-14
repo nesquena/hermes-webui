@@ -1983,13 +1983,21 @@ def _redact_nested_message_containers(value, *, _enabled: bool):
     return result
 
 
-def public_session_projection(session_dict: dict) -> dict:
+def public_session_projection(session_dict: dict, *, _messages_projected: bool = False) -> dict:
     """Return a public session payload with redaction and alias stripping.
 
     Callers use this for every response/export/SSE session payload.  It never
     mutates the in-memory session or the caller's dictionary.
+
+    ``_messages_projected`` (#7925 by-construction): the caller already ran the
+    delivered projection, so ``messages`` holds the exact rows the prefix digest
+    hashed. Re-projecting here would strip fields that projection *adds* — most
+    visibly ``_active_turn_user``, which is derived from the session's
+    active-turn token rather than stored on the row — and the response would
+    then disagree with its own proof. Forwarded verbatim to
+    ``redact_session_data``.
     """
-    result = redact_session_data(session_dict)
+    result = redact_session_data(session_dict, _messages_projected=_messages_projected)
     from api.gateway_chat import gateway_session_chat_read_only_reason
 
     result.pop("chat_read_only_reason", None)
@@ -2030,10 +2038,34 @@ def _copy_json_value(value):
     return value
 
 
-def redact_session_data(session_dict: dict) -> dict:
-    """Redact credentials in the public session response without mutation."""
-    from api.config import load_settings
-    _enabled = bool(load_settings().get("api_redact_enabled", True))
+def redact_session_data(
+    session_dict: dict,
+    *,
+    redact_enabled: bool | None = None,
+    _messages_projected: bool = False,
+) -> dict:
+    """Redact credentials in the public session response without mutation.
+
+    ``redact_enabled`` (#7925 by-construction): the credential-redaction
+    switch the caller already captured for this request. When given it is
+    used verbatim instead of being re-read here, so a response can never
+    project its rows under one policy while the proof published beside them
+    was minted under another — the GET path captures the switch ONCE, before
+    anything is projected, and threads the same value into the projection
+    that feeds ``prefix_fp`` and into this call. Omitted (the default, what
+    every other caller uses) keeps the historical behaviour: read
+    ``api_redact_enabled`` here.
+
+    ``_messages_projected`` (#7925 by-construction): the caller's ``messages``
+    are ALREADY the final delivered projection — scene-hydrated, internal
+    fields stripped, credentials redacted, active-turn marked — i.e. the very
+    rows the prefix digest hashed, so this call must not build that form a
+    second time. Everything else is transformed exactly as before.
+    """
+    if redact_enabled is None:
+        from api.config import load_settings
+        redact_enabled = bool(load_settings().get("api_redact_enabled", True))
+    _enabled = bool(redact_enabled)
     if not isinstance(session_dict, dict):
         return {}
     result = {}
@@ -2044,6 +2076,10 @@ def redact_session_data(session_dict: dict) -> dict:
             continue
         if key == 'title' and isinstance(value, str):
             result[key] = _redact_text(value, _enabled=_enabled)
+        elif key == 'messages' and _messages_projected:
+            # Already the delivered projection (see the docstring): hand the
+            # very rows the digest hashed to the serializer untouched.
+            result[key] = value
         elif key in {'messages', 'context_messages'}:
             result[key] = _redact_messages(value, _enabled=_enabled, _active_turn_token=_active_turn_token)
         elif key == 'tool_calls' and isinstance(value, list):
