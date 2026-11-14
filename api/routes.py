@@ -2755,7 +2755,9 @@ _PROVIDER_ALIASES = {
 _OPENAI_COMPAT_ENDPOINTS = {
     "zai": "https://api.z.ai/v1",
     "minimax": "https://api.minimax.chat/v1",
-    "mistralai": "https://api.mistral.ai/v1",
+    # Keyed by the canonical provider slug — ``mistral``, not the OpenRouter
+    # vendor namespace ``mistralai`` (#6894).
+    "mistral": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
     "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -28343,8 +28345,17 @@ def _handle_live_models(handler, parsed):
                 if _base_url and _api_key:
                     try:
                         import urllib.request
-                        import json
-                        
+                        # NOTE: no local ``import json`` here. ``json`` is a
+                        # module-level import (line 14); a function-local
+                        # ``import json`` in this custom branch shadows it for
+                        # the WHOLE function, which left the standard-provider
+                        # vendor fallback below with an UNBOUND local ``json``
+                        # — its live response could never be parsed and every
+                        # such fetch silently returned the static list.
+                        # (Inherited from master, verified 2026-11-06; removed
+                        # here because the round-5 live-payload evidence for
+                        # #8664 depends on this parse succeeding.)
+
                         # Build the models endpoint URL
                         # AxonHub and similar OpenAI-compat endpoints serve /v1/models
                         _ep = _base_url.rstrip("/")
@@ -28429,7 +28440,63 @@ def _handle_live_models(handler, parsed):
                 try:
                     import urllib.request
                     _providers_cfg = cfg.get("providers") or {}
-                    _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
+                    # #8664 review P2 "Live models lose their key" (Greptile,
+                    # 2026-11-04): ``provider`` here is the CANONICAL slug
+                    # (``mistral``), but the record in config.yaml may still be
+                    # the legacy spelling (``providers.mistralai``). Reading
+                    # ``providers[provider]`` by exact spelling then missed the
+                    # record's own api_key, the authenticated fetch was skipped,
+                    # and the user got the two static models instead of the
+                    # live list.
+                    #
+                    # So resolve the RAW config key first: the same
+                    # ``_raw_provider_key_for_provider_id`` the rest of the
+                    # WebUI uses to pick one owning record. It returns the
+                    # requested id unchanged when no record matches, so the
+                    # canonical record's own key is still found.
+                    _raw_provider_key = provider
+                    try:
+                        from api.config import _raw_provider_key_for_provider_id as _raw_key_for
+                        _raw_provider_key = _raw_key_for(provider)
+                    except Exception:
+                        pass
+                    _prov = (
+                        _providers_cfg.get(_raw_provider_key, {})
+                        if isinstance(_providers_cfg, dict)
+                        else {}
+                    )
+                    if not isinstance(_prov, dict):
+                        _prov = {}
+                    # #8664 review P1 "Relay key reaches another server"
+                    # (nesquena-hermes + Greptile, 2026-11-06): the raw-key
+                    # lookup above finds the record's credential, but the fetch
+                    # below still targeted the hardcoded VENDOR URL. A record
+                    # that declares its OWN endpoint (a relay, a gateway, a
+                    # self-hosted endpoint) therefore had its key sent to
+                    # https://api.mistral.ai/v1/models — disclosing the key to
+                    # a server the record never named, and asking the wrong
+                    # server for models.
+                    #
+                    # The credential and its destination must come from the
+                    # SAME record: when the selected record declares an
+                    # endpoint and that endpoint is not this vendor's, skip the
+                    # vendor fallback for this provider instead of pairing the
+                    # record's key with the vendor URL. A record that declares
+                    # no endpoint has no differing endpoint to protect — the
+                    # vendor URL is that provider's canonical destination for
+                    # its own key — so the fetch proceeds exactly as before.
+                    _record_endpoint = str(_prov.get("base_url") or "").strip().rstrip("/")
+                    _skip_vendor_fallback = bool(
+                        _record_endpoint
+                        and _record_endpoint != str(_ep).strip().rstrip("/")
+                    )
+                    if _skip_vendor_fallback:
+                        logger.debug(
+                            "Live models: providers.%s declares %s, not the %s "
+                            "endpoint; skipping the vendor fallback so its "
+                            "credential is never sent to the vendor URL",
+                            _raw_provider_key, _record_endpoint, _ep,
+                        )
                     # Only use a provider-scoped key.  A top-level model.api_key
                     # is safe here only when it belongs to the requested provider;
                     # otherwise /api/models/live?provider=<other> could forward
@@ -28443,7 +28510,7 @@ def _handle_live_models(handler, parsed):
                             )
                             if _active_provider == provider:
                                 _key = _model_cfg.get("api_key")
-                    if _key:
+                    if _key and not _skip_vendor_fallback:
                         _req = urllib.request.Request(
                             f"{_ep}/models",
                             headers={"Authorization": f"Bearer {_key}"},
