@@ -128,6 +128,8 @@
 <link rel="stylesheet" href="static/conversation-workbench.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/workspace-navigation.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/chat-workspace.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/voice-workspace.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/work-steps.css?v=__WEBUI_VERSION__">
 </head>
 <body>
 <header class="app-titlebar" role="banner">
@@ -509,6 +511,31 @@
     </div>
     <section id="mainConversations" class="main-view" aria-label="Conversation overview" data-i18n-aria-label="conversation_board_title"></section>
     <div id="mainChat" class="main-view">
+    <section id="realtimeVoiceBar" class="voice-mode-bar" hidden aria-label="Voice conversation" data-i18n-aria-label="voice_workspace_title" data-tour="realtime-voice-bar">
+      <header class="realtime-voice-header">
+        <div><span class="realtime-voice-eyebrow" data-i18n="voice_workspace_title">Voice conversation</span><span id="realtimeVoiceStatus" role="status" aria-live="polite">Voice off</span><span id="realtimeVoiceTaskCount" role="status" aria-live="polite"></span></div>
+        <button type="button" id="realtimeVoiceView" aria-expanded="true" aria-controls="realtimeVoiceStage" data-i18n="voice_workspace_minimize">Minimize</button>
+      </header>
+      <div id="realtimeVoiceStage" class="realtime-voice-stage">
+        <div class="realtime-voice-presence">
+          <div class="realtime-voice-orb" aria-hidden="true"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 9v6M8 5v14M12 2v20M16 5v14M20 9v6"/></svg></div>
+          <p id="realtimeVoiceHint"></p>
+        </div>
+        <div id="realtimeVoiceTranscript" class="realtime-voice-transcript" aria-label="Voice transcript" data-i18n-aria-label="voice_workspace_transcript" aria-live="polite" hidden></div>
+        <section id="realtimeVoiceWork" hidden aria-label="Background tasks" data-i18n-aria-label="voice_workspace_tasks">
+          <div class="realtime-voice-work-heading"><h3 data-i18n="voice_workspace_tasks">Background tasks</h3></div>
+          <div id="realtimeVoiceTasks" class="realtime-voice-tasks" hidden></div>
+        </section>
+      </div>
+      <div id="realtimeVoiceWarning" class="realtime-voice-warning" role="status" hidden></div>
+      <div class="realtime-voice-controls">
+        <button type="button" id="realtimeVoiceHold" data-i18n="voice_workspace_hold">Hold to talk</button>
+        <button type="button" id="realtimeVoiceMic" aria-pressed="false">Unmute microphone</button>
+        <button type="button" id="realtimeVoiceInterrupt" data-i18n="voice_workspace_interrupt">Interrupt speech</button>
+        <button type="button" id="realtimeVoiceEnd" data-i18n="voice_workspace_end">End voice</button>
+      </div>
+    </section>
+
     <div class="messages-shell">
       <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
@@ -669,16 +696,6 @@
         </div>
         <div class="attach-tray" id="attachTray"></div>
         <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> <span data-i18n="voice_listening">Listening…</span></div>
-        <div id="realtimeVoiceBar" class="voice-mode-bar" hidden aria-label="Realtime voice controls" data-tour="realtime-voice-bar">
-          <span id="realtimeVoiceStatus" role="status" aria-live="polite">Voice off</span>
-          <button type="button" id="realtimeVoiceHold">Hold to talk</button>
-          <button type="button" id="realtimeVoiceMic" aria-pressed="false">Unmute microphone</button>
-          <button type="button" id="realtimeVoiceInterrupt">Interrupt speech</button>
-          <button type="button" id="realtimeVoiceEnd">End voice</button>
-          <div id="realtimeVoiceWarning" class="realtime-voice-warning" role="status" hidden></div>
-          <div id="realtimeVoiceTranscript" class="realtime-voice-transcript" aria-label="Voice transcript" aria-live="polite" hidden></div>
-          <div id="realtimeVoiceTasks" class="realtime-voice-tasks" aria-label="Voice background tasks" hidden></div>
-        </div>
         <div class="voice-mode-bar" id="voiceModeBar" style="display:none" data-tour="voice-mode-bar">
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
@@ -693,7 +710,7 @@
             <button type="button" class="icon-btn has-tooltip" id="btnSavedPrompts" data-tooltip="Saved prompts" data-i18n-title="composer_control_saved_prompts" data-i18n-aria-label="composer_control_saved_prompts" onclick="toggleSavedPromptsPopup()" aria-haspopup="menu" aria-expanded="false" aria-controls="savedPromptsPopup" aria-label="Saved prompts" data-tour="chat-saved-prompts">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
             </button>
-            <button type="button" class="icon-btn has-tooltip" id="btnRealtimeVoice" aria-label="Voice mode" aria-pressed="false" title="Voice mode" data-tooltip="Voice mode" data-tour="chat-realtime-voice"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9v6M8 5v14M12 2v20M16 5v14M20 9v6"/></svg></button>
+            <button type="button" class="icon-btn has-tooltip" id="btnRealtimeVoice" data-i18n-title="voice_workspace_title" data-i18n-aria-label="voice_workspace_title" aria-label="Voice mode" aria-pressed="false" title="Voice mode" data-tooltip="Voice mode" data-tour="chat-realtime-voice"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9v6M8 5v14M12 2v20M16 5v14M20 9v6"/></svg></button>
             <button class="icon-btn mic-btn has-tooltip" id="btnMic" aria-label="Dictate message" data-tooltip="Dictate" data-i18n-title="voice_dictate" style="display:none" data-tour="chat-dictate">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <rect x="9" y="1" width="6" height="12" rx="3"/>
@@ -2200,6 +2217,7 @@
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/split.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/realtime_voice.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/work-steps.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/vendor/guida/0.2.0/guida.umd.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/error-reporter.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/help-content.js?v=__WEBUI_VERSION__" defer></script>

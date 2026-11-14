@@ -124,5 +124,7 @@ function applyLocaleToDOM(){
   // data-i18n key) have to be re-rendered after a locale switch.
   if(typeof syncChatModeChip==='function')syncChatModeChip();
   if(typeof syncGroupPeopleChip==='function')syncGroupPeopleChip();
+  if(typeof window.syncVoiceWorkspaceLocale==='function')window.syncVoiceWorkspaceLocale();
+  if(typeof window.syncWorkStepsLocale==='function')window.syncWorkStepsLocale();
 }
 window.i18nReady=loadLocale().catch(err=>{console.warn('[i18n] using English metadata fallback',err);_locale=LOCALES.en;});

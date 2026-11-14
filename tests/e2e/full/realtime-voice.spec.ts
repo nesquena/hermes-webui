@@ -97,6 +97,29 @@ async function end(page:any,callId:string){
   expect(await page.evaluate(()=>(window as any).__qaVoiceTransport.tracks.every((t:any)=>t.stopped))).toBe(true);
 }
 
+async function voiceContrast(page:any,info:any,selectors:string[]) {
+  const evidence:any[]=[];
+  for(const dark of [false,true]) {
+    await page.evaluate(dark=>document.documentElement.classList.toggle('dark',dark),dark);
+    await page.evaluate(()=>document.getAnimations().forEach(a=>{try{a.finish();}catch{}}));
+    const readings=await page.evaluate(selectors=>{
+      const canvas=document.createElement('canvas');canvas.width=canvas.height=1;const ctx=canvas.getContext('2d')!;
+      const rgb=(value:string)=>{ctx.clearRect(0,0,1,1);ctx.fillStyle=value;ctx.fillRect(0,0,1,1);const c=[...ctx.getImageData(0,0,1,1).data];c[3]/=255;return c;};
+      const lum=(c:number[])=>c.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((s,v,i)=>s+v*[.2126,.7152,.0722][i],0);
+      return selectors.map(selector=>{
+        const node=document.querySelector(selector)!,style=getComputedStyle(node,selector==='#msg'?'::placeholder':null);
+        const parents:Element[]=[];let opacity=1,bg=[255,255,255];
+        for(let p:Element|null=node;p;p=p.parentElement){parents.unshift(p);opacity*=Number(getComputedStyle(p).opacity);}
+        for(const parent of parents){const c=rgb(getComputedStyle(parent).backgroundColor);bg=bg.map((v,i)=>c[i]*c[3]+v*(1-c[3]));}
+        const ink=rgb(style.color),alpha=opacity*ink[3];const fg=ink.slice(0,3).map((v,i)=>v*alpha+bg[i]*(1-alpha));
+        const a=lum(fg),b=lum(bg);return {selector,fg,bg,opacity,ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
+      });
+    },selectors);
+    evidence.push({dark,readings});for(const reading of readings)expect(reading.ratio,JSON.stringify({dark,...reading})).toBeGreaterThanOrEqual(4.5);
+  }
+  await info.attach('voice-contrast',{body:JSON.stringify(evidence),contentType:'application/json'});
+}
+
 test.describe('native conversational voice',()=>{
  test.use({user:'alice'});
  test('US-SP-VOICE-REALTIME-TURNS native speech answers two turns without submitting chat or replacing draft',async({page},info)=>{
@@ -195,6 +218,52 @@ for(const [user,allowed] of [['autoapprove',true],['autodeny',false]] as const)t
 
 test.describe('voice lifecycle controls',()=>{
  test.use({user:'bob'});
+ test('VOICE WORKSPACE stage keeps the call and draft while minimizing, translating and resizing',async({page},info)=>{
+  test.setTimeout(60000);
+  const {voiceId,callId}=await begin(page);
+  await page.locator('#msg').fill('Mijn aantekeningen voor het project');
+  await events(page,callId,spoken(21,'Kunnen we samen het project voorbereiden?','Ja. We kunnen verder praten terwijl ik de eerste taken uitwerk.'));
+  await page.screenshot({path:info.outputPath('voice-desktop.png')});
+  const toggle=page.locator('#realtimeVoiceView');
+  await expect(toggle).toHaveAttribute('aria-expanded','true');
+  await expect(page.locator('#realtimeVoiceHint')).toContainText('microphone is off');
+  await page.locator('#realtimeVoiceMic').click();
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded','false');
+  await expect(page.locator('#messages')).toBeVisible();
+  await expect(page.locator('#realtimeVoiceEnd')).toBeInViewport();
+  expect(await page.evaluate(()=>(window as any).__qaVoiceTransport.tracks[0].enabled)).toBe(true);
+  await expect(page.locator('#msg')).toHaveValue('Mijn aantekeningen voor het project');
+  await events(page,callId,[work('stage_task','Maak een korte projectintroductie')]);
+  await taskDone(page,voiceId);
+  await expect(page.locator('#realtimeVoiceTaskCount')).toContainText('1 of 1 done');
+  await events(page,callId,[...spoken(22,'Hoe staat het met de introductie?','De projectintroductie is klaar. Je kunt de taak hieronder openen.'),...spoken(23,'Ik maak ondertussen aantekeningen.','Prima. Je kunt blijven typen terwijl we praten.')]);
+  await toggle.click();
+  await expect(page.locator('#realtimeVoiceTranscript')).toContainText('blijven typen');
+  await page.evaluate(()=>setLocale('nl'));
+  await expect(page.locator('#realtimeVoiceStatus')).toHaveText('Luisteren');
+  await expect(page.locator('#realtimeVoiceMic')).toHaveText('Microfoon uit');
+  for(const width of [1440,900,390]){
+    await page.setViewportSize({width,height:width===390?844:1000});
+    await expect(page.locator('#realtimeVoiceEnd')).toBeInViewport();
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    await page.screenshot({path:info.outputPath('voice-dutch-'+width+'.png')});
+  }
+  await page.setViewportSize({width:1440,height:1000});
+  await voiceContrast(page,info,['#realtimeVoiceStatus','#realtimeVoiceHint','#realtimeVoiceTaskCount','#realtimeVoiceMic','.realtime-voice-task-status']);
+  await page.evaluate(()=>document.documentElement.classList.remove('dark'));
+  await page.screenshot({path:info.outputPath('voice-light.png')});
+  await page.emulateMedia({reducedMotion:'reduce'});
+  expect(await page.locator('.realtime-voice-orb').evaluate(el=>getComputedStyle(el).animationName)).toBe('none');
+  await page.setViewportSize({width:390,height:500});
+  await expect(page.locator('#realtimeVoiceEnd')).toBeInViewport();
+  await toggle.focus();await page.keyboard.press('Escape');
+  await expect(toggle).toBeFocused();await expect(toggle).toHaveAttribute('aria-expanded','false');
+  expect(await page.evaluate(()=>(window as any).synPulseVoice.voiceId)).toBe(voiceId);
+  await expect(page.locator('#msg')).toHaveValue('Mijn aantekeningen voor het project');
+  await end(page,callId);
+  await expect(page.locator('#btnRealtimeVoice')).toBeFocused();
+ });
  test('US-SP-VOICE-REALTIME-CONTROLS microphone, push to talk, interruption and session change release capture correctly',async({page})=>{
   const {callId}=await begin(page);const enabled=()=>page.evaluate(()=>(window as any).__qaVoiceTransport.tracks[0].enabled);
   expect(await enabled()).toBe(false);await page.locator('#realtimeVoiceMic').click();expect(await enabled()).toBe(true);
@@ -234,7 +303,7 @@ test.describe('voice lifecycle controls',()=>{
   expect((await api(page,'/api/voice/realtime/status?voice_id='+voiceId)).status).toBe(404);
   expect((await provider(page,callId)).ended).toBe(true);
  });
- test('US-SP-VOICE-REALTIME-LAUNCH-RACE canceled capability response cannot release a newer pending launch',async({page})=>{
+ test('US-SP-VOICE-REALTIME-LAUNCH-RACE canceled coalesced capability reads cannot start microphone capture',async({page})=>{
   await syntheticAudio(page);await open(page);await session(page);
   const release:Array<()=>void>=[];let reads=0;
   await page.route('**/api/voice/realtime/capability',async route=>{
@@ -244,14 +313,16 @@ test.describe('voice lifecycle controls',()=>{
   try{
     await page.locator('#btnRealtimeVoice').click();await expect.poll(()=>reads).toBe(1);
     await page.locator('#btnRealtimeVoice').click(); // cancel pending first launch
-    await page.locator('#btnRealtimeVoice').click();await expect.poll(()=>reads).toBe(2);
-    const first=page.waitForResponse(r=>r.url().endsWith('/api/voice/realtime/capability'));
-    release[0]();await first;
-    await page.locator('#btnRealtimeVoice').click(); // cancel the still-pending second launch
-    const second=page.waitForResponse(r=>r.url().endsWith('/api/voice/realtime/capability'));
-    release[1]();await second;
+    await page.locator('#btnRealtimeVoice').click(); // new intent shares the in-flight GET
+    await page.locator('#btnRealtimeVoice').click(); // cancel the newer intent too
+    const response=page.waitForResponse(r=>r.url().endsWith('/api/voice/realtime/capability'));
+    release[0]();await response;
+    // api() coalesces identical concurrent reads. Both callbacks must respect
+    // their canceled launch epoch; neither may request microphone capture.
+    await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,100)));
     await expect(page.locator('#realtimeVoiceBar')).toBeHidden();
-    expect(reads).toBe(2);
+    expect(reads).toBe(1);
+    expect(await page.evaluate(()=>(window as any).__qaVoiceTransport.tracks)).toHaveLength(0);
     expect(await page.evaluate(()=>(window as any).__qaVoiceTransport.peers)).toHaveLength(0);
   }finally{for(const finish of release)finish();}
  });

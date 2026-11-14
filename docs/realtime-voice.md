@@ -179,3 +179,20 @@ Official protocol references:
 - https://developers.openai.com/api/docs/guides/realtime-server-controls
 - https://developers.openai.com/api/docs/guides/realtime-conversations
 - https://developers.openai.com/api/docs/models/gpt-realtime-2.1
+
+
+### Conversation pane
+
+The native realtime call appears in a dedicated pane above the existing typed
+composer. Minimize returns to the transcript without changing a continuously
+unmuted microphone; End closes the call. The microphone still starts muted.
+Hold-to-talk releases on pointer/keyboard release, focus loss or minimizing.
+Escape within the pane minimizes it, and ending from its controls returns focus
+to the voice launcher. The typed draft and session controls remain mounted.
+
+Recent captions and background tasks use the existing bounded controller state.
+Each task shows its title and server status, with results and the child-chat link
+behind a native disclosure. Pending approvals retain the existing exact-ID
+buttons. The task count remains visible when minimized. This is presentation
+only: the server sideband, permissions and approval endpoint remain authoritative.
+The interface supports light/dark themes, narrow layouts and reduced motion.

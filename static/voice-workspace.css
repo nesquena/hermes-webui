@@ -1,0 +1,66 @@
+/* Voice is a view of the existing call, not a second audio/session owner. */
+#realtimeVoiceBar {
+  display: flex; flex-direction: column; align-items: stretch; flex-wrap: nowrap;
+  flex: 1 1 0; min-height: 0; width: min(100% - 48px, 764px); max-width: 100%;
+  margin: 20px auto 8px; padding: 0; gap: 0; border: 1px solid var(--border);
+  border-radius: 18px; background: var(--surface); overflow: hidden; color: var(--text);
+}
+#realtimeVoiceBar[hidden], #realtimeVoiceBar [hidden] { display: none; }
+.realtime-voice-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; flex: 0 0 auto; }
+.realtime-voice-header > div { display: grid; gap: 5px; }
+.realtime-voice-eyebrow { color: var(--muted); font-size: 12px; }
+#realtimeVoiceStatus { color: var(--text); font-size: 18px; font-weight: 600; letter-spacing: -.02em; animation: none !important; }
+#realtimeVoiceBar button { min-height: 44px; padding: 8px 12px; font: 12px/1.4 var(--font-ui); background: var(--surface-subtle); color: var(--text); border-radius: 10px; }
+#realtimeVoiceBar button:hover:not(:disabled) { background: var(--hover-bg); border-color: var(--border2); }
+#realtimeVoiceBar :is(button,a,summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#realtimeVoiceBar #realtimeVoiceView { background: transparent; }
+.realtime-voice-stage { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 24px 20px; }
+.realtime-voice-presence { display: grid; justify-items: center; text-align: center; padding: 10px 0; }
+.realtime-voice-orb { display: grid; place-items: center; width: clamp(64px,12vh,112px); aspect-ratio: 1; border-radius: 50%; border: 1px solid var(--border2); color: var(--muted); background: radial-gradient(circle at 35% 25%,var(--surface),var(--surface-subtle)); box-shadow: 0 0 0 10px var(--surface-subtle); margin: 10px; }
+#realtimeVoiceBar:is([data-state="listening"],[data-state="speaking"]) .realtime-voice-orb { color: var(--text); animation: voicePresence 2s ease-in-out infinite; }
+@keyframes voicePresence { 50% { transform: scale(1.045); } }
+#realtimeVoiceHint { max-width: 430px; font-size: 13px; line-height: 1.6; color: var(--muted); margin: 14px 0; }
+#realtimeVoiceTranscript { max-height: 170px; overflow-y: auto; font-size: 14px; line-height: 1.6; color: var(--text); padding: 14px 16px; background: var(--surface-subtle); border-radius: 12px; }
+.realtime-voice-transcript-row + .realtime-voice-transcript-row { margin-top: 9px; }
+.realtime-voice-transcript-row strong { color: var(--muted); font-size: 12px; }
+.realtime-voice-work-heading { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-top: 20px; }
+.realtime-voice-work-heading h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+#realtimeVoiceTaskCount { font-size: 12px; color: var(--muted); }
+#realtimeVoiceTasks { max-height: none; overflow: visible; }
+.realtime-voice-task { padding: 10px 0; }
+.realtime-voice-task summary { display: flex; align-items: center; gap: 9px; min-height: 44px; list-style: none; }
+.realtime-voice-task summary::-webkit-details-marker { display: none; }
+.realtime-voice-task summary::after { content: '›'; font-size: 18px; color: var(--muted); }
+.realtime-voice-task[open] summary::after { transform: rotate(90deg); }
+.realtime-voice-step-number { display: grid; place-items: center; width: 25px; height: 25px; flex-shrink: 0; border: 1px solid var(--border2); border-radius: 50%; color: var(--muted); }
+.realtime-voice-task-title { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.realtime-voice-task-status { flex-shrink: 0; max-width: 40%; color: var(--muted); font-size: 11px; font-weight: 500; }
+.realtime-voice-task:is([data-state="waiting_approval"],[data-state="error"]) .realtime-voice-task-status { color: var(--text); font-weight: 700; }
+.realtime-voice-task > div { padding: 4px 0 8px 34px; line-height: 1.6; }
+.realtime-voice-task a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.realtime-voice-controls { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; flex: 0 0 auto; border-top: 1px solid var(--border); padding: 12px 16px; background: var(--surface); }
+#realtimeVoiceBar #realtimeVoiceMic[aria-pressed="true"] { background: var(--text); color: var(--surface); border-color: var(--text); }
+#realtimeVoiceBar #realtimeVoiceEnd { border-color: var(--border2); font-weight: 600; }
+#realtimeVoiceWarning { padding: 8px 16px; }
+#realtimeVoiceBar.is-compact { flex: 0 0 auto; margin-top: 12px; }
+#realtimeVoiceBar.is-compact .realtime-voice-eyebrow, #realtimeVoiceBar.is-compact #realtimeVoiceHold { display: none; }
+#realtimeVoiceBar.is-compact #realtimeVoiceStatus { font-size: 14px; }
+#mainChat:has(#realtimeVoiceBar:not([hidden]):not(.is-compact)) .messages-shell { display: none; }
+#mainChat:has(#realtimeVoiceBar:not([hidden])) .composer-wrap { margin-block: 0; flex: 0 0 auto; }
+#mainChat:has(#realtimeVoiceBar:not([hidden])) .messages-shell { margin-top: 0; }
+@media (max-width: 640px) {
+  #realtimeVoiceBar { width: calc(100% - 24px); margin-top: 8px; border-radius: 14px; }
+  .realtime-voice-header { padding: 10px 14px; }
+  .realtime-voice-stage { padding: 0 14px 12px; }
+  .realtime-voice-controls { display: grid; grid-template-columns: 1fr 1fr; padding: 10px; }
+  #realtimeVoiceBar.is-compact .realtime-voice-controls { grid-template-columns: repeat(3,1fr); }
+  #realtimeVoiceTranscript { font-size: 13px; }
+}
+@media (max-height: 600px) {
+  .realtime-voice-presence { display: none; }
+  .realtime-voice-header { padding-block: 6px; }
+  .realtime-voice-controls { padding-block: 6px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #realtimeVoiceBar .realtime-voice-orb { animation: none !important; }
+}

@@ -225,6 +225,15 @@ class Handler(BaseHTTPRequestHandler):
                 if write: arguments['content']='QA_GOVERNANCE_EXECUTED'
                 tool_calls=[{'id':'qa-gov-action-'+str(time.time_ns()),'type':'function','function':{'name':'write_file' if write else 'read_file','arguments':json.dumps(arguments)}}]
                 answer=None
+        elif 'QA_STEP_OVERVIEW|' in last:
+            results=[m for m in messages[last_index+1:] if m.get('role')=='tool']
+            target=last.split('QA_STEP_OVERVIEW|',1)[1].splitlines()[0].strip()
+            targets=[target,target,target+'.missing']
+            if len(results)<len(targets):
+                tool_calls=[{'id':'qa-step-'+str(len(results))+'-'+str(time.time_ns()),'type':'function','function':{'name':'read_file','arguments':json.dumps({'path':targets[len(results)]})}}]
+                answer=None
+            else:
+                answer='QA_STEPS_COMPLETE: Two reads finished. The optional file was not found.'
         elif 'QA_READING_SURFACE' in last:
             answer="""## A clear place to start
 

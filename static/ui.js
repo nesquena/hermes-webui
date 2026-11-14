@@ -7123,7 +7123,8 @@ function _activityElapsedLabel(group){
 function _friendlyProcessedLine(group, durationText, live){
   const api=typeof window!=='undefined'&&window._friendlyToolRows!==false?window.SynPulseFriendlyTools:null;
   if(!api||typeof api.processedLine!=='function') return '';
-  const steps=group&&group.querySelectorAll?group.querySelectorAll('.tool-card-row').length:0;
+  const separateOverview=group&&group.hasAttribute('data-anchor-scene-owner')&&typeof window.syncWorkStepOverview==='function';
+  const steps=!separateOverview&&group&&group.querySelectorAll?group.querySelectorAll('.tool-card-row').length:0;
   return api.processedLine({live:!!live,duration:durationText,steps});
 }
 function _activityProcessedElapsedLabel(group){
@@ -13469,7 +13470,7 @@ function _anchorSceneToolCallFromRow(row, opts){
   // A settled anchor may predate the durable error result. Reconcile by the
   // exact call ID; the preview is display text and is never parsed as a failure.
   const historyErrors=settled&&typeof S!=='undefined'&&Array.isArray(S.messages)
-    ? _toolResultErrorsByTid(S.messages):{};
+    ? ((opts&&opts.historyErrors)||_toolResultErrorsByTid(S.messages)):{};
   return {
     name:tool.name||payload.name||'tool',
     args:(tool.args&&typeof tool.args==='object')?tool.args:((payload.args&&typeof payload.args==='object')?payload.args:{}),
@@ -13745,6 +13746,7 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   if(wrote){
     _syncToolCallGroupSummary(group);
   }
+  if(typeof window.syncWorkStepOverview==='function')window.syncWorkStepOverview(group,rows,opts);
   return wrote;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
@@ -14750,6 +14752,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
     const list=_toolWorklogListEl(group);
     if(list) list.innerHTML='';
     _syncToolCallGroupSummary(group);
+    if(typeof window.syncWorkStepOverview==='function')window.syncWorkStepOverview(group,rows,{settled:true});
     return true;
   }
   group._deferredWorklogRows=null;
@@ -19105,7 +19108,10 @@ function _syncToolRowsContainer(tools, isLiveWorklog){
   _unwrapNestedToolGroups(tools);
   rows.forEach(row=>{ if(row.parentElement) row.remove(); });
   tools.querySelectorAll(':scope > .tool-card-row').forEach(row=>row.remove());
-  const shouldGroup=tools.classList.contains('wl-step-tools') && rows.length>1;
+  // The canonical step overview already has one disclosure for the turn.
+  // Keep its numbered actions directly readable instead of nesting another fold.
+  const stepOverview=typeof window.syncWorkStepOverview==='function'&&tools.closest('[data-anchor-scene-owner="1"]');
+  const shouldGroup=!stepOverview && tools.classList.contains('wl-step-tools') && rows.length>1;
   if(!shouldGroup){
     rows.forEach(row=>tools.appendChild(row));
     return;

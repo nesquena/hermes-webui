@@ -82,3 +82,25 @@ uses full opacity for legibility; message actions remain available with keyboard
 focus. The bot roster disclosure follows language changes without refetching its
 catalog. See [chat workspace QA](qa/chat-workspace/README.md) for evidence and
 validation limits.
+
+
+## Voice and work steps
+
+Realtime voice uses a dedicated, collapsible conversation pane with explicit
+microphone and playback states, recent captions and numbered background tasks.
+Minimizing keeps the call and typed draft intact; it releases a held push-to-talk
+control. End, page exit, session changes and transport failures retain the
+existing teardown behavior. Controls and task summaries follow English/Dutch
+locale changes. See [realtime voice](realtime-voice.md) for availability and
+runtime contracts; this presentation does not enable the provider or feature flag.
+
+Compact activity shows numbered tool actions and a count by recorded outcome.
+The existing activity scene owns ordering, identity and status; the overview adds
+no event stream, task database, completion estimate or inferred future plan.
+Collapsed historical rows remain lazy. One disclosure opens the turn's actions;
+individual technical details can be opened with pointer, Enter or Space. The
+existing Transparent Stream and Final answer only preferences remain effective.
+Counts distinguish failure, stopped work and unconfirmed completion. A completed
+parent call does not imply an asynchronous helper completed.
+
+See [voice and steps QA](qa/voice-steps/README.md) for screenshots and validation.
