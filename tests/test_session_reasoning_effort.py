@@ -590,7 +590,11 @@ def test_gateway_worker_resolves_reasoning_from_session_profile(
         # Both transports keep the Gateway's authentication error and use the
         # owning profile's key when suggesting what to check.
         assert error["type"] == "gateway_auth_error"
-        assert error["hint"].startswith("Check that" if work_key else "Set ")
+        if not work_key:
+            # #7877: a keyless named profile's 401 names the key fix, on both paths.
+            assert error["hint"].startswith("No Gateway API key was sent: set API_SERVER_KEY")
+        else:
+            assert error["hint"].startswith("Check that")
 
 
 @pytest.fixture

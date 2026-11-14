@@ -5,6 +5,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import socket
 import threading
 from pathlib import Path
@@ -661,7 +662,9 @@ def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None 
     }
 
 
-def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str | None = None, *, api_key_configured: bool) -> dict:
+def _gateway_http_error_event(
+    exc: urllib.error.HTTPError, err_body: str | None = None, *, api_key_configured: bool, route_hint: str = "",
+) -> dict:
     if err_body is None:
         try:
             err_body = exc.read(2048).decode("utf-8", errors="replace")
@@ -669,6 +672,9 @@ def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str | None 
             err_body = ""
     err_body = (err_body or "")[:2048]
     safe = _redact_text(err_body or str(exc), _enabled=True)[:500]
+    if route_hint:  # the Gateway refused this profile's route: name that fix, not the provider's
+        return {**_gateway_route_error_classification(exc.code, route_hint),
+                "message": f"Gateway returned HTTP {exc.code} for this profile."}
     if exc.code == 401:
         return {
             "label": "Gateway authentication failed",
@@ -1905,6 +1911,7 @@ def _relay_gateway_pending_steer(session_id, payload, put_gateway_event) -> None
         put_gateway_event("pending_steer_leftover", {"session_id": session_id, "text": text})
 
 
+# "unknown" is NOT terminal: the Gateway keeps the session paused and may still recover a captured answer.
 _GATEWAY_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 GATEWAY_REATTACH_POLL_INTERVAL = 2.0
 # Consecutive unreachable polls tolerated before the reattached turn is failed (~5 min at 2s).
@@ -2160,6 +2167,25 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
     return ids
 
 
+def _process_environ() -> dict[str, str]:
+    """The process-wide settings the resolver reads: os.environ minus any open background worker's profile mirror.
+
+    profile_env_for_background_worker() mirrors its profile's .env into os.environ for the worker body, so a shared
+    URL read from os.environ while another profile's worker runs would be that worker's, not the launcher's, and
+    would be paired with a different profile's credential.
+    """
+    from api import profiles as _profiles
+
+    return _profiles.process_environ_without_worker_overlays()
+
+
+def _is_named_profile(profile_name) -> bool:
+    from api import profiles as _profiles
+
+    name = str(profile_name or "").strip()
+    return bool(name) and not _profiles._is_root_profile(name) and not _profiles._is_isolated_profile_mode()
+
+
 def _profile_config_path(home):
     """config.yaml of a profile home. For the ACTIVE profile that is the authoritative ambient config file
     (HERMES_CONFIG_PATH may point outside the profile home), the same rule get_config_for_profile_home() uses;
@@ -2231,7 +2257,8 @@ def _config_url_may_belong_to_a_profile(profiles_mod, process_home) -> bool:
     from api.config import _load_yaml_config_file_raw
     from api.workspace import _safe_resolve
 
-    override = str(os.environ.get("HERMES_CONFIG_PATH") or "").strip()
+    process_env = _process_environ()
+    override = str(process_env.get("HERMES_CONFIG_PATH") or "").strip()
     if not override or _env_value_is_profile_sourced(profiles_mod, "HERMES_CONFIG_PATH", override):
         return True
     cfg_dir = _safe_resolve(Path(override).expanduser()).parent
@@ -2254,7 +2281,7 @@ def _config_url_may_belong_to_a_profile(profiles_mod, process_home) -> bool:
     raw_url = str(raw.get("webui_gateway_base_url") or "") if isinstance(raw, dict) else ""
     for ref in _re.findall(r"\$\{([^}]+)\}", raw_url):
         name = ref.split(":-", 1)[0].strip()
-        value = os.environ.get(name)
+        value = process_env.get(name)
         if value is not None and _env_value_is_profile_sourced(profiles_mod, name, value):
             return True
     return False
@@ -2282,7 +2309,7 @@ def _shared_url_may_belong_to_process_profile(session_home) -> bool:
             return False
     except Exception:
         process_home = None
-    raw_env_url = str(os.environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    raw_env_url = str(_process_environ().get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
     try:
         if raw_env_url:
             return _env_value_is_profile_sourced(_profiles, _WEBUI_GATEWAY_BASE_URL_ENV, raw_env_url)
@@ -2304,7 +2331,25 @@ def _same_profile_home(a, b) -> bool:
     return _safe_resolve(Path(a).expanduser()) == _safe_resolve(Path(b).expanduser())
 
 
-def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
+def _shared_gateway_url_config(process_env: dict[str, str]) -> dict:
+    """The ambient config's webui_gateway_base_url, ${VAR}s expanded from ``process_env`` (the clean process view).
+
+    get_config() expands from live os.environ at reload time, so a reload while another profile's background worker
+    has mirrored its .env would cache that worker's host. Re-expand the raw file value against the clean view."""
+    from api.config import _get_config_path, _has_env_ref, get_config
+    from api.profiles import load_profile_config
+
+    cfg = get_config()
+    value = cfg.get("webui_gateway_base_url") if isinstance(cfg, dict) else None
+    if isinstance(value, str) and value:
+        path = Path(_get_config_path())  # the exact file get_config() read, even a custom HERMES_CONFIG_PATH name
+        clean = load_profile_config(path.parent, env=process_env, config_path=path).get("webui_gateway_base_url")
+        if isinstance(clean, str) and clean and not _has_env_ref(clean):
+            value = clean
+    return {"webui_gateway_base_url": value} if value else {}
+
+
+def _gateway_endpoint_for_profile(profile_name, *, profile_routing: bool = True) -> tuple[str, str]:
     """URL and key for a session's profile, never those of the process-active profile.
 
     The shared pair is what the WebUI process was given (launcher environment, default profile's .env, ambient
@@ -2325,12 +2370,22 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     - Exception (#8432): under a NAMED process profile, a profile with a key but no URL gets the process pair
       (URL and key from one source, as v0.52.492 sends) unless the shared URL is provably the launcher's (an
       export that no profile .env supplied, or an operator config file outside every profile home), because that
-      URL may be a profile's own Gateway and must never receive another profile's key.
+      URL may be a profile's own Gateway and must never receive another profile's key. This applies with
+      profile_routing off (a pre-routing run's reattach) AND with it on whenever the shared URL may belong to the
+      named process profile, a profile has only a HERMES_WEBUI_GATEWAY_API_KEY, or it is the process profile
+      itself: those are not routed. Otherwise a URL-less named profile takes the /p/<name> route below.
+    - Named profile with no URL of its own (and profile_routing): the shared listener serves it under /p/<name>,
+      checked against that profile's API_SERVER_KEY only, so that key or none is sent, never a shared one.
+      The shared pair is read from the process environment without any open background-worker scope's mirrored
+      profile env, so a concurrent worker's URL is never the destination for another profile's key. A shared URL
+      that already ends in /p/<x> is refused (RuntimeError naming the fix) instead of becoming /p/x/p/<name>.
     """
     from api import profiles as _profiles
-    from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
+    from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx
 
-    shared_url, shared_key = _gateway_base_url(get_config(), os.environ), _gateway_api_key(os.environ)
+    process_env = _process_environ()
+    shared_url = _gateway_base_url(_shared_gateway_url_config(process_env), process_env)
+    shared_key = _gateway_api_key(process_env)
 
     home = Path(_profiles.get_hermes_home_for_profile(str(profile_name or "").strip()))
     own_env = _profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home))
@@ -2344,16 +2399,28 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     # profile's OWN Gateway (docs: HERMES_WEBUI_GATEWAY_API_KEY first, API_SERVER_KEY as the fallback).
     # An alias the profile loader mirrored from a NAMED active profile's .env is that profile's, not shared; one
     # mirrored from the root profile's ~/.hermes/.env is the shared alias.
-    shared_alias = str(os.environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    shared_alias = str(process_env.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     if _WEBUI_GATEWAY_API_KEY_ENV in _profiles._loaded_profile_env_keys and not _process_profile_is_root():
         shared_alias = ""
 
+    routed = profile_routing and _is_named_profile(profile_name)
+    route_key = str(own_env.get("API_SERVER_KEY") or "").strip()
+    if (routed and not (own_url_env or own_url_cfg) and not _session_is_process_profile(home)
+            and not _shared_url_may_belong_to_process_profile(home) and not (own_alias and not route_key)):
+        # An unprefixed shared-listener request runs as the process profile, so route only where the shared URL is
+        # provably shared and no explicit WebUI alias (the shared URL's own key) names it.
+        if re.search(r"/p/[^/]+$", shared_url):
+            raise RuntimeError(
+                f"the shared Gateway URL ({shared_url}) already names a profile route, so profile "
+                f"{profile_name!r} cannot be routed under it; set HERMES_WEBUI_GATEWAY_BASE_URL in that profile's .env"
+            )
+        return (f"{shared_url}/p/{urllib.parse.quote(str(profile_name).strip(), safe='')}", route_key)
     if not (own_url_env or own_url_cfg or own_key):
         return shared_url, shared_key
 
     url = shared_url
     if own_url_env or own_url_cfg:
-        environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
+        environ = {k: v for k, v in process_env.items() if k not in _profiles._loaded_profile_env_keys}
         environ.update(own_env)
         previous_env = getattr(_thread_ctx, "env", {})
         previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
@@ -2364,8 +2431,9 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
         finally:
             _thread_ctx.env = previous_env
             _thread_ctx.block_process_env_fallback = previous_block
-        # a launcher-exported URL still outranks config.yaml, as everywhere else
-        url_env = own_url_env or str(environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        # a launcher-exported URL still outranks config.yaml, except for a routed named profile: there the process
+        # URL is the SHARED listener, and the profile's config.yaml names its own.
+        url_env = own_url_env or ("" if routed else str(process_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip())
         url = _gateway_base_url({"webui_gateway_base_url": expanded_url} if expanded_url else {},
                                 {_WEBUI_GATEWAY_BASE_URL_ENV: url_env} if url_env else {})
         if "${" in url:
@@ -2401,6 +2469,47 @@ def _session_is_process_profile(session_home) -> bool:
     except Exception:
         return False
 
+# Marks run records admitted on the per-profile endpoint, so reattach knows where the run lives.
+_GATEWAY_ENDPOINT_ROUTING = "profile-v1"
+
+
+def _gateway_reattach_endpoint(session, run) -> tuple[str, str | None]:
+    """Endpoint a persisted run was admitted on; the key is None if the profile's endpoint has since moved."""
+    if run.get("endpoint_routing") != _GATEWAY_ENDPOINT_ROUTING:
+        return _gateway_endpoint_for_profile(session.profile, profile_routing=False)
+    base_url, api_key = _gateway_endpoint_for_profile(session.profile)
+    saved = str(run.get("base_url") or base_url)
+    return saved, (api_key if saved == base_url else None)
+
+
+# The tail every routing refusal shares: name the URL that serves this profile instead.
+_ROUTE_FIX_HINT = "or set HERMES_WEBUI_GATEWAY_BASE_URL in the profile's .env to a Gateway that serves this profile."
+
+
+def _gateway_profile_route_hint(base_url: str, code, keyless_profile: bool = False) -> str:
+    """How to route this profile when its endpoint refuses: a 401 names the key, a 404 names multiplexing."""
+    routed = bool(re.search(r"/p/[^/]+$", str(base_url or "")))
+    if not routed:
+        if code == 401 and keyless_profile:
+            return ("No Gateway API key was sent: set API_SERVER_KEY in the profile's .env. The root key is reused "
+                    "only when the profile's Gateway URL is exactly the root Gateway URL.")
+        return ""
+    if code == 401:  # routed and refused: multiplexing is on, so only the key can be wrong
+        return ("The shared Gateway serves this profile under /p/<profile> but rejected the key: set "
+                "API_SERVER_KEY in the profile's .env to that Gateway's key, " + _ROUTE_FIX_HINT)
+    if code == 404:
+        return ("This profile's turn went to the shared Gateway under /p/<profile>: enable "
+                "gateway.multiplex_profiles (and set API_SERVER_KEY in the profile's .env), " + _ROUTE_FIX_HINT)
+    return ""
+
+
+def _gateway_route_error_classification(code, route_hint: str) -> dict:
+    """A Gateway routing refusal is not a provider/model error: classify it as the Gateway's."""
+    auth = code == 401
+    return {"type": "gateway_auth_error" if auth else "gateway_http_error",
+            "label": "Gateway authentication failed" if auth else "Gateway request failed",
+            "hint": route_hint}
+
 
 def _gateway_config_for_profile(profile_name) -> dict | None:
     """Config of a named non-root profile; None means the process default applies."""
@@ -2432,7 +2541,7 @@ def _resume_gateway_run_for_session(session) -> bool:
     if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
         return False
     sid = session.session_id
-    endpoint = _gateway_endpoint_for_profile(session.profile)
+    endpoint = _gateway_reattach_endpoint(session, run)
     # Review #7302 (nesquena, 01-Oct-2026) finding 2 -- "CORE": publish the
     # reattached run's ownership (ACTIVE_RUNS row + retained cancel signal) on the
     # SAME STREAMS_LOCK -> ACTIVE_RUNS_LOCK edge that creates the STREAMS entry,
@@ -2522,6 +2631,7 @@ def _settle_gateway_terminal_error(
     *,
     persisted_model=None,
     persisted_model_provider=None,
+    route_classification=None,
 ):
     from api.streaming import (
         _classify_provider_error,
@@ -2540,7 +2650,7 @@ def _settle_gateway_terminal_error(
             error_payload = dict(terminal_error)
             error_classification = {"label": error_payload.get("label") or "Gateway request failed"}
         else:
-            error_classification = _classify_provider_error(terminal_error)
+            error_classification = route_classification or _classify_provider_error(terminal_error)
             error_payload = _provider_error_payload(
                 terminal_error,
                 error_classification["type"],
@@ -3279,7 +3389,7 @@ def _run_gateway_chat_streaming(
             logger.debug("Failed to put gateway event to queue")
 
     s = None
-    api_key = ""
+    base_url, api_key, keyless_profile = "", "", False
     final_text = ""
     terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
@@ -3310,6 +3420,9 @@ def _run_gateway_chat_streaming(
         # thread-local profile, so get_config()/os.environ describe whichever profile the
         # process loaded. Same resolver the restart-reattach path already uses.
         base_url, api_key = reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None))
+        # None: the profile's Gateway moved since admission, so no credential is bound to the saved URL.
+        endpoint_moved, api_key = api_key is None, api_key or ""
+        keyless_profile = not api_key and _is_named_profile(getattr(s, "profile", None))
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
@@ -3373,14 +3486,23 @@ def _run_gateway_chat_streaming(
             body_extras.update(_gateway_reasoning_body_fields(reasoning_effort))
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+            # A replayed pre-upgrade record keeps its legacy routing, so a later restart resolves it as before.
+            routing = {} if reattach_run and reattach_run.get("endpoint_routing") != _GATEWAY_ENDPOINT_ROUTING else {
+                "endpoint_routing": _GATEWAY_ENDPOINT_ROUTING, "base_url": base_url}
+
             def record_run(run_id, request=None, **extra):
                 _record_gateway_run(
                     session_id, stream_id, run_id, request=request,
-                    regeneration=bool(regeneration), goal_related=bool(goal_related), **extra,
+                    regeneration=bool(regeneration), goal_related=bool(goal_related), **{**routing, **extra},
                 )
                 if run_id:  # the Gateway accepted the run: its delegation lease is delivered
                     _settle_delegation_reservation(session_id, stream_id, accepted=True)
             try:
+                if reattach_run and endpoint_moved:
+                    raise RuntimeError(
+                        "This profile's Gateway URL changed after the run started, so the WebUI cannot "
+                        "authenticate to the Gateway that holds it; its result could not be recovered."
+                    )
                 if _use_session_rpc:
                     final_text, usage, canonical_snapshot = run_session(
                         s, stream_id, msg_text, emit=put_gateway_event, cancel=cancel_event,
@@ -3421,8 +3543,10 @@ def _run_gateway_chat_streaming(
                     "hint": "Reopen the conversation to recover the existing turn. Do not resend it."})
                 return
             except Exception as exc:
+                code = getattr(exc, "code", None) or getattr(exc.__cause__, "code", None)
+                hint = "" if reattach_run else _gateway_profile_route_hint(base_url, code, keyless_profile)
                 terminal_error = (
-                    _gateway_http_error_event(exc, api_key_configured=bool(api_key))
+                    _gateway_http_error_event(exc, api_key_configured=bool(api_key), route_hint=hint)
                     if isinstance(exc, urllib.error.HTTPError) else str(exc)
                 )
                 error_payload = _settle_gateway_terminal_error(
@@ -3434,6 +3558,7 @@ def _run_gateway_chat_streaming(
                     terminal_error,
                     persisted_model=persisted_model,
                     persisted_model_provider=persisted_model_provider,
+                    route_classification=_gateway_route_error_classification(code, hint) if hint else None,
                 )
                 if error_payload is None:
                     return
@@ -3885,7 +4010,8 @@ def _run_gateway_chat_streaming(
     except urllib.error.HTTPError as exc:
         error_payload = _settle_gateway_terminal_error(
             session_id, stream_id, workspace, model, model_provider,
-            _gateway_http_error_event(exc, api_key_configured=bool(api_key)),
+            _gateway_http_error_event(exc, api_key_configured=bool(api_key),
+                                      route_hint=_gateway_profile_route_hint(base_url, exc.code, keyless_profile)),
             persisted_model=persisted_model,
             persisted_model_provider=persisted_model_provider,
         )

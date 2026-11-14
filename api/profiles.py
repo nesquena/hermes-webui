@@ -1172,13 +1172,14 @@ def expand_profile_config(home, raw, *, env: Optional[dict] = None):
             _thread_ctx.env = previous_env
 
 
-def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
+def load_profile_config(home, *, env: Optional[dict] = None, config_path=None) -> dict:
     """Return the profile's config.yaml with every ``${VAR}`` expanded under that
     profile's env binding (see ``expand_profile_config``); ``{}`` when the file
     is missing or unparsable. Parsed fresh on every call, like the readers it
-    replaced, so an out-of-band edit is never served stale.
+    replaced, so an out-of-band edit is never served stale. *config_path*
+    names the exact file when it is not ``<home>/config.yaml`` (HERMES_CONFIG_PATH).
     """
-    config_path = Path(home).expanduser() / 'config.yaml'
+    config_path = Path(config_path or Path(home) / 'config.yaml').expanduser()
     try:
         raw = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
     except Exception:
@@ -1449,6 +1450,51 @@ def _resolve_hermes_home_override():
     return None
 
 
+# Process-env keys currently overlaid by open background-worker scopes -> [open scope count, value before the first
+# overlay]. The overlay is a per-worker mirror, not process configuration; readers of the process-wide settings
+# (the shared Gateway URL and key) must not see it. Guarded by _WORKER_ENV_BASELINE_LOCK, which a worker also holds
+# while it mutates or restores os.environ, so a reader never sees a mirrored value without its saved baseline.
+_WORKER_ENV_BASELINE: dict[str, list] = {}
+_WORKER_ENV_BASELINE_LOCK = threading.RLock()
+
+
+def _worker_env_overlay_enter(previous_env: dict[str, Optional[str]]) -> None:
+    with _WORKER_ENV_BASELINE_LOCK:
+        for key, previous in previous_env.items():
+            entry = _WORKER_ENV_BASELINE.get(key)
+            if entry is None:
+                _WORKER_ENV_BASELINE[key] = [1, previous]
+            else:
+                entry[0] += 1
+
+
+def _worker_env_overlay_exit(keys) -> None:
+    with _WORKER_ENV_BASELINE_LOCK:
+        for key in keys:
+            entry = _WORKER_ENV_BASELINE.get(key)
+            if entry is None:
+                continue
+            entry[0] -= 1
+            if entry[0] <= 0:
+                del _WORKER_ENV_BASELINE[key]
+
+
+def process_environ_without_worker_overlays() -> dict[str, str]:
+    """os.environ as the process was configured, with every open background-worker scope's mirror taken back out.
+
+    profile_env_for_background_worker() mirrors a profile's .env into os.environ for the length of the worker body, so
+    a concurrent reader of process-wide settings would otherwise see that profile's values as the process's own.
+    """
+    with _WORKER_ENV_BASELINE_LOCK:
+        env = dict(os.environ)
+        for key, (_count, previous) in _WORKER_ENV_BASELINE.items():
+            if previous is None:
+                env.pop(key, None)
+            else:
+                env[key] = previous
+    return env
+
+
 @contextmanager
 def profile_env_for_background_worker(
     session,
@@ -1517,6 +1563,7 @@ def profile_env_for_background_worker(
     has_profile_skill_home = False
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
+    _overlay_entered = False
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1578,24 +1625,31 @@ def profile_env_for_background_worker(
                 skill_home_snapshot = snapshot_skill_home_modules()
                 patch_skill_home_modules(profile_home_path)
 
-            old_runtime_env = _apply_profile_env_to_process(
-                os.environ,
-                safe_runtime_env,
-                secret_env_names=secret_env_names,
-            )
-            had_hermes_home = "HERMES_HOME" in os.environ
-            old_hermes_home = os.environ.get("HERMES_HOME")
-            os.environ.update(safe_runtime_env)
-            os.environ["HERMES_HOME"] = str(profile_home_path)
+            with _WORKER_ENV_BASELINE_LOCK:  # register the baseline and mirror in one step for readers
+                old_runtime_env = _apply_profile_env_to_process(
+                    os.environ,
+                    safe_runtime_env,
+                    secret_env_names=secret_env_names,
+                )
+                _worker_env_overlay_enter(old_runtime_env)
+                _overlay_entered = True
+                had_hermes_home = "HERMES_HOME" in os.environ
+                old_hermes_home = os.environ.get("HERMES_HOME")
+                os.environ.update(safe_runtime_env)
+                os.environ["HERMES_HOME"] = str(profile_home_path)
         yield
     finally:
         try:
-            with _ENV_LOCK:
+            # Restore os.environ before dropping the saved baseline, under the lock readers take, so a concurrent
+            # reader never sees this worker's mirrored values as the process's own.
+            with _ENV_LOCK, _WORKER_ENV_BASELINE_LOCK:
                 for key, old_value in old_runtime_env.items():
                     if old_value is None:
                         os.environ.pop(key, None)
                     else:
                         os.environ[key] = old_value
+                if _overlay_entered:
+                    _worker_env_overlay_exit(old_runtime_env)
                 if had_hermes_home:
                     os.environ["HERMES_HOME"] = old_hermes_home or ""
                 else:
