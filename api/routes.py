@@ -11421,6 +11421,8 @@ def _session_model_state_from_request(
     model: str | None,
     requested_provider: str | None,
     current_provider: str | None = None,
+    *,
+    prefer_cached_catalog: bool = False,
 ) -> tuple[str | None, str | None]:
     model_value = str(model).strip() if model is not None else None
     provider = (
@@ -11437,6 +11439,7 @@ def _session_model_state_from_request(
         model_value, provider, _changed = _resolve_compatible_session_model_state(
             model_value,
             provider,
+            prefer_cached_catalog=prefer_cached_catalog,
         )
     return model_value, provider
 
@@ -20472,6 +20475,9 @@ def handle_post(handler, parsed) -> bool:
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
+            # A new chat reads the catalog from cache only: it must not start or
+            # wait out a live provider rebuild (the browser aborts at 30s).
+            prefer_cached_catalog=True,
         )
         try:
             enabled_toolsets = _validate_session_toolsets_shape(body.get("enabled_toolsets"))
