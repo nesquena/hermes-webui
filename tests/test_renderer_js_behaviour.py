@@ -1031,6 +1031,107 @@ class TestBareFileUrlMediaRendering:
         assert "<img" not in out
 
 
+class TestRootRelativeMarkdownImage:
+    """#9071: same-origin root-relative image paths must render in the settled
+    renderer.  The streaming path accepts a leading `/`, but both settled image
+    passes only matched absolute schemes, so `![x](/static/chart.svg)` fell
+    through to literal text once the answer settled.  Scheme-relative
+    (`//host/x`) and backslash (`/\\host/x`) forms stay literal: the browser
+    normalises those to a remote origin, which the image policy must not load."""
+
+    def test_root_relative_image_in_paragraph(self, driver_path):
+        out = _render(driver_path, "![chart](/static/charts/probe.svg)")
+        assert '<img' in out, f"root-relative markdown image must render: {out!r}"
+        assert 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative src must be preserved verbatim: {out!r}"
+        )
+
+    def test_root_relative_image_in_list_item(self, driver_path):
+        out = _render(driver_path, "- ![chart](/static/charts/probe.svg)")
+        assert '<img' in out and 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative image inside a list item must render: {out!r}"
+        )
+
+    def test_root_relative_image_in_table_cell(self, driver_path):
+        src = "| chart |\n| --- |\n| ![chart](/static/charts/probe.svg) |"
+        out = _render(driver_path, src)
+        assert '<img' in out and 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative image inside a table cell must render: {out!r}"
+        )
+
+    def test_protocol_relative_image_stays_literal(self, driver_path):
+        out = _render(driver_path, "![x](//evil.example/x.png)")
+        assert '<img' not in out, f"protocol-relative URL must not render as img: {out!r}"
+
+    def test_backslash_authority_image_stays_literal(self, driver_path):
+        out = _render(driver_path, r"![x](/\evil.example/x.png)")
+        assert '<img' not in out, f"backslash authority URL must not render as img: {out!r}"
+
+    def test_root_relative_image_in_fenced_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "```\n![x](/static/charts/probe.svg)\n```")
+        assert '<img' not in out, f"image inside a fenced code block must stay literal: {out!r}"
+
+    def test_root_relative_image_in_inline_code_stays_literal(self, driver_path):
+        # #9072 review: the outer image pass now matches root-relative paths, so
+        # image syntax written inside an inline code span must stay verbatim
+        # instead of rendering as an <img> nested in <code>.
+        out = _render(driver_path, "see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, f"image inside inline code must stay literal: {out!r}"
+        assert '[chart](/static/charts/probe.svg)' in out, (
+            f"inline code content must be preserved verbatim: {out!r}"
+        )
+
+    def test_code_wrapped_link_label_still_links(self, driver_path):
+        # Control for the inline-code stash: only spans containing `![` are
+        # stashed, so a code-wrapped link label keeps flowing through the
+        # outer link pass.
+        out = _render(driver_path, "[`chart`](https://example.com/page)")
+        assert '<a href="https://example.com/page"' in out, (
+            f"code-wrapped link label must still link: {out!r}"
+        )
+        assert '<code>chart</code>' in out, f"label must stay code: {out!r}"
+
+    def test_image_between_two_inline_code_spans_still_renders(self, driver_path):
+        # #9072 review: code spans pair up the way inlineMd() pairs them, so a
+        # stash may never run from the closing backtick of one span to the
+        # opening backtick of the next -- that would swallow the image sitting
+        # between them and leave it as literal Markdown.
+        out = _render(
+            driver_path, "see `before` ![chart](/static/charts/probe.svg) `after` here"
+        )
+        assert 'src="/static/charts/probe.svg"' in out, (
+            f"image between two code spans must render: {out!r}"
+        )
+        assert '<code>before</code>' in out and '<code>after</code>' in out, (
+            f"both code spans must stay literal: {out!r}"
+        )
+
+    def test_root_relative_image_in_list_item_inline_code_stays_literal(self, driver_path):
+        # List item text is rendered to <code> before the outer image pass and
+        # then re-entered through inlineMd() by the paragraph splitter, so the
+        # second pass must not render image syntax inside an existing <code>
+        # element either.
+        out = _render(driver_path, "- see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, (
+            f"image inside inline code in a list item must stay literal: {out!r}"
+        )
+        assert '<code>![chart](/static/charts/probe.svg)</code>' in out, (
+            f"list-item inline code content must be preserved verbatim: {out!r}"
+        )
+
+    def test_root_relative_image_in_heading_inline_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "## see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, (
+            f"image inside inline code in a heading must stay literal: {out!r}"
+        )
+
+    def test_absolute_https_image_still_renders(self, driver_path):
+        out = _render(driver_path, "![x](https://example.com/x.png)")
+        assert '<img' in out and 'src="https://example.com/x.png"' in out, (
+            f"absolute https image regression: {out!r}"
+        )
+
+
 class TestMarkdownTableCellLineBreaks:
     """<br> inside markdown table cells must be preserved and not split cells across lines."""
 
