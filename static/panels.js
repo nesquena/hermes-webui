@@ -12989,6 +12989,14 @@ async function _refreshProviderModels(providerId, btn){
     if(res.ok){
       showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
       _refreshModelDropdownsAfterProviderChange();
+      // Reflect the refreshed catalog on the card itself WITHOUT rebuilding
+      // it: editable controls, their listeners, and any unsaved draft value
+      // must survive a models refresh (#8418 review). Metadata-only update.
+      try{
+        const data=await api('/api/providers',{cache:'no-store'});
+        const fresh=((data&&data.providers)||[]).find(x=>x&&x.id===providerId);
+        _updateProviderCardModels(providerId,fresh);
+      }catch(_e){}
     }else{
       showToast(res.error||'Failed to refresh models');
     }
@@ -12997,6 +13005,80 @@ async function _refreshProviderModels(providerId, btn){
   }finally{
     btn.disabled=false;
     btn.innerHTML=orig;
+  }
+}
+
+function _updateProviderCardModels(providerId, p){
+  // In-place metadata update for one provider card. Editable controls
+  // (inputs, save buttons, listeners, focus) are never touched, so an
+  // unsaved draft key survives a models refresh (#8418 review).
+  if(!p||!providerId) return;
+  const list=$('providersList');
+  if(!list||!list.querySelectorAll) return;
+  let card=null;
+  for(const c of list.querySelectorAll('.provider-card')){
+    if(c.dataset&&c.dataset.provider===providerId){ card=c; break; }
+  }
+  if(!card) return;
+  const modelCount=Number.isFinite(p.models_total)
+    ? p.models_total
+    : (Array.isArray(p.models)?p.models.length:0);
+  // Meta line: its first segment is the model count ("N models · status").
+  const metaEl=card.querySelector('.provider-card-meta');
+  if(metaEl&&modelCount>0){
+    const countText=modelCount+(modelCount===1?' model':' models');
+    const parts=String(metaEl.textContent||'').split(' · ');
+    if(parts.length>1&&/^\d+ models?$/.test(parts[0])) parts[0]=countText;
+    else parts.unshift(countText);
+    metaEl.textContent=parts.join(' · ');
+  }
+  if(modelCount<=0){
+    // The refreshed catalog retired every known model: drop the stale
+    // section instead of rendering an empty "Models" block.
+    const stale=card.querySelector('.provider-card-models');
+    if(stale&&stale.remove) stale.remove();
+    return;
+  }
+  let modelSection=card.querySelector('.provider-card-models');
+  if(!modelSection){
+    // The card rendered with no known models; grow the section now,
+    // keeping it ahead of the trailing refresh row like _buildProviderCard.
+    modelSection=document.createElement('div');
+    modelSection.className='provider-card-models';
+    const label=document.createElement('div');
+    label.className='provider-card-label';
+    label.textContent='Models';
+    modelSection.appendChild(label);
+    const body=card.querySelector('.provider-card-body');
+    if(body){
+      const last=body.lastElementChild;
+      if(last&&last.classList&&last.classList.contains('provider-card-row')) body.insertBefore(modelSection,last);
+      else body.appendChild(modelSection);
+    }
+  }
+  let modelList=modelSection.querySelector('.provider-card-model-tags');
+  if(!modelList){
+    modelList=document.createElement('div');
+    modelList.className='provider-card-model-tags';
+    modelSection.appendChild(modelList);
+  }
+  modelList.textContent='';
+  const renderedModels=Array.isArray(p.models)?p.models:[];
+  for(const m of renderedModels){
+    const tag=document.createElement('span');
+    tag.className='provider-card-model-tag';
+    tag.textContent=(m&&typeof m==='object')?(m.id||m.label||''):String(m);
+    modelList.appendChild(tag);
+  }
+  // Same "+N more" overflow pill as _buildProviderCard (#1567): models may
+  // be a trimmed subset of the full models_total catalog.
+  const hiddenCount=Math.max(0, modelCount-renderedModels.length);
+  if(hiddenCount>0){
+    const more=document.createElement('span');
+    more.className='provider-card-model-tag provider-card-model-tag-more';
+    more.textContent='+'+hiddenCount+' more';
+    more.title='The /model slash command can autocomplete every model in this provider\'s catalog.';
+    modelList.appendChild(more);
   }
 }
 
