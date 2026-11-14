@@ -1239,7 +1239,19 @@ def check_auth(handler, parsed) -> bool:
         return False
     session_info = ensure_trusted_auth_session(handler)
     if session_info:
-        if not trusted_session_allows_active_profile(session_info):
+        bound_profile = str(session_info.get('bound_profile') or '').strip()
+        instance_wide_request = False
+        if bound_profile:
+            from api.routes import _all_profiles_query_flag
+
+            instance_wide_request = (
+                _all_profiles_query_flag(parsed)
+                or (handler.command == 'POST' and parsed.path in {
+                    '/api/profile/create', '/api/profile/delete',
+                    '/api/auth/passkey/delete',
+                })
+            )
+        if instance_wide_request or not trusted_session_allows_active_profile(session_info):
             if parsed.path.startswith('/api/'):
                 body = b'{"error":"Profile access forbidden"}'
                 handler.send_response(403)
