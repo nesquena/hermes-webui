@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+
+<html data-theme="dark" lang="en">
 <head>
-  <script>
+<script>
     (function(){
       var p = window.location.pathname;
       if (p.endsWith('/index.html')) {
@@ -10,1237 +11,808 @@
       }
     })();
   </script>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
-  <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
-  <link rel="shortcut icon" href="/favicon.ico" />
-  <link rel="apple-touch-icon" sizes="512x512" href="/apple-touch-icon.png" />
-  <title>Hermes memory providers: which plugin to use (2026 guide)</title>
-  <meta property="og:title" content="Hermes memory providers: which plugin to use (2026 guide)">
-  <meta property="og:description" content="The most popular Hermes Agent memory plugins compared: Mem0, Hindsight, OpenViking, Cognee, Supermemory, agentmemory, Memori, Honcho, ReMe, Mnemosyne and Holographic. Pricing, hosting, license, benchmarks and a free and paid pick.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://get-hermes.ai/memory/">
-  <meta property="og:image" content="https://get-hermes.ai/images/ui-hero.png">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Hermes memory providers: which plugin to use (2026 guide)">
-  <meta name="twitter:description" content="11 popular Hermes memory plugins compared on price, hosting, license and published benchmarks, with a straight free and paid pick.">
-  <meta name="twitter:image" content="https://get-hermes.ai/images/ui-hero.png">
-  <meta name="description" content="Which memory provider should Hermes Agent use? The most popular memory plugins compared on pricing, free tiers, hosting, license and benchmarks, with a free pick and a paid pick. Verified November 2026.">
-<style>
-  :root {
-    --bg-primary: #0d1117;
-    --bg-secondary: #161b22;
-    --bg-tertiary: #21262d;
-    --bg-card: #161b22;
-    --border: #30363d;
-    --text-primary: #e6edf3;
-    --text-secondary: #8b949e;
-    --text-muted: #6e7681;
-    --accent: #f0a500;
-    --accent-dim: #c88800;
-    --accent-glow: rgba(240,165,0,0.12);
-    --green: #3fb950;
-    --blue: #58a6ff;
-    --purple: #bc8cff;
-    --red: #f85149;
-    --orange: #ff9040;
-    --nav-height: 64px;
-  }
-  [data-theme="light"] nav {
-    background: rgba(246, 248, 250, 0.95);
-  }
-  [data-theme="light"] {
-    --bg-primary: #ffffff;
-    --bg-secondary: #f6f8fa;
-    --bg-tertiary: #eaeef2;
-    --bg-card: #ffffff;
-    --border: #d0d7de;
-    --text-primary: #1f2328;
-    --text-secondary: #656d76;
-    --text-muted: #9198a1;
-    --accent: #c07800;
-    --accent-dim: #9a6200;
-    --accent-glow: rgba(192,120,0,0.10);
-  }
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link href="/favicon.svg" rel="icon" type="image/svg+xml"/>
+<link href="/favicon-32.png" rel="icon" sizes="32x32" type="image/png"/>
+<link href="/favicon-192.png" rel="icon" sizes="192x192" type="image/png"/>
+<link href="/favicon.ico" rel="shortcut icon"/>
+<link href="/apple-touch-icon.png" rel="apple-touch-icon" sizes="512x512"/>
+<title>Hermes memory providers: which plugin to use</title>
+<meta content="Hermes memory providers: which plugin to use (2026 guide)" property="og:title"/>
+<meta content="The most popular Hermes Agent memory plugins compared: Mem0, Hindsight, OpenViking, Cognee, Supermemory, agentmemory, Memori, Honcho, ReMe, Mnemosyne and Holographic. Pricing, hosting, license, benchmarks and a free and paid pick." property="og:description"/>
+<meta content="website" property="og:type"/>
+<meta content="https://get-hermes.ai/memory/" property="og:url"/>
+<meta content="https://get-hermes.ai/images/ui-hero.png" property="og:image"/>
+<meta content="summary_large_image" name="twitter:card"/>
+<meta content="Hermes memory providers: which plugin to use (2026 guide)" name="twitter:title"/>
+<meta content="11 popular Hermes memory plugins compared on price, hosting, license and published benchmarks, with a straight free and paid pick." name="twitter:description"/>
+<meta content="https://get-hermes.ai/images/ui-hero.png" name="twitter:image"/>
+<meta content="Which memory provider should Hermes Agent use? The most popular memory plugins compared on pricing, free tiers, hosting, license and benchmarks, with a free pick and a paid pick. Verified November 2026." name="description"/>
 
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+<link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap" rel="stylesheet"/><link href="/site.css" rel="stylesheet"/><script src="/site.js"></script></head>
+<body><a class="skip" href="#main">Skip to content</a>
+<header class="site-header"><div class="container">
+<a class="brand" href="/"><img alt="" height="28" src="/favicon.svg" width="28"/><span class="brand-name">Hermes WebUI</span></a>
+<nav aria-label="Main" class="site-nav"><ul class="nav"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a aria-current="page" href="/memory/">Memory</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/api-docs/">API</a></li></ul>
+<details class="menu"><summary>Menu</summary><ul><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a aria-current="page" href="/memory/">Memory</a></li><li><a href="/#compare">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/api-docs/">API</a></li><li><a href="/setup/">Get started</a></li><li><button class="theme-toggle" type="button">Light</button></li></ul></details></nav>
+<div class="header-actions">
+<button class="theme-toggle" type="button">Light</button>
+<a class="btn btn-primary" href="/setup/">Get started</a>
+</div></div></header><main id="main">
 
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    line-height: 1.6;
-    min-height: 100vh;
-  }
 
-  /* NAV */
-  nav {
-    position: sticky; top: 0; height: var(--nav-height);
-    background: rgba(13, 17, 23, 0.92); border-bottom: 1px solid var(--border);
-    backdrop-filter: blur(12px); display: flex; align-items: center;
-    justify-content: space-between; padding: 0 24px; z-index: 100;
-  }
-  .nav-left { display: flex; align-items: center; gap: 16px; }
-  .nav-logo {
-    font-size: 1.1rem; font-weight: 700; color: var(--accent);
-    text-decoration: none; letter-spacing: -0.01em;
-  }
-  .nav-back {
-    font-size: 0.85rem; color: var(--text-secondary); text-decoration: none;
-    display: flex; align-items: center; gap: 6px; padding: 4px 10px;
-    border: 1px solid var(--border); border-radius: 6px; transition: color .15s, border-color .15s;
-  }
-  .nav-back:hover { color: var(--text-primary); border-color: var(--text-secondary); }
-  .nav-right { display: flex; align-items: center; gap: 12px; }
-  #theme-toggle {
-    background: none; border: 1px solid var(--border); color: var(--text-secondary);
-    cursor: pointer; border-radius: 6px; padding: 6px 10px; font-size: 1rem;
-    transition: color .15s, border-color .15s;
-  }
-  #theme-toggle:hover { color: var(--text-primary); border-color: var(--text-secondary); }
-  .btn-cta {
-    background: var(--accent); color: #0d1117; padding: 8px 16px;
-    border-radius: 6px; font-weight: 600; font-size: 0.85rem;
-    text-decoration: none; transition: background .15s;
-  }
-  .btn-cta:hover { background: var(--accent-dim); }
+<header class="page-head"><div class="container"><nav aria-label="Breadcrumb" class="breadcrumb"><a href="/">Home</a> / <span aria-current="page">Memory</span></nav><h1>Which memory provider should Hermes use?</h1><p class="lead">The eleven most popular memory provider plugins for Hermes Agent, compared on price, hosting, license and published benchmarks, with a straight free pick and paid pick.</p><p class="prose muted">Install any of them with <code>hermes plugins install &lt;name&gt;</code> and <code>hermes memory setup</code>. One external provider runs at a time, alongside Hermes's built-in MEMORY.md and USER.md.</p><p class="stamp"> Last verified 11 November 2026</p></div></header>
 
-  /* HAMBURGER */
-  .hamburger {
-    display: none; flex-direction: column; gap: 5px; cursor: pointer;
-    background: none; border: none; padding: 8px;
-  }
-  .hamburger span { display: block; width: 22px; height: 2px; background: var(--text-primary); border-radius: 2px; }
-  #memory-mobile-menu {
-    display: none; position: fixed; top: var(--nav-height); left: 0; right: 0;
-    background: var(--bg-secondary); border-bottom: 1px solid var(--border);
-    padding: 16px 24px; z-index: 99; flex-direction: column; gap: 4px;
-  }
-  #memory-mobile-menu.open { display: flex; }
-  #memory-mobile-menu a {
-    padding: 10px 0; color: var(--text-primary); text-decoration: none;
-    border-bottom: 1px solid var(--border); font-size: 0.95rem;
-  }
-  #memory-mobile-menu a:last-child { border-bottom: none; }
-  #memory-mobile-menu a.accent { color: var(--accent); font-weight: 600; }
+<section class="section" id="top-picks">
+<div class="container">
 
-  /* HERO */
-  .hero { padding: 56px 24px 40px; text-align: center; max-width: 760px; margin: 0 auto; }
-  .hero-eyebrow {
-    display: inline-block; font-size: 0.78rem; font-weight: 600;
-    letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); margin-bottom: 14px;
-  }
-  .hero h1 {
-    font-size: clamp(1.8rem, 4vw, 2.7rem); font-weight: 800;
-    letter-spacing: -0.02em; line-height: 1.2; margin-bottom: 14px;
-  }
-  .hero p { font-size: 1rem; color: var(--text-secondary); max-width: 560px; margin: 0 auto 14px; }
-  .updated-stamp {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 0.75rem; color: var(--text-muted);
-    background: var(--bg-secondary); border: 1px solid var(--border);
-    border-radius: 20px; padding: 4px 12px;
-  }
+<h2>Best free and best paid</h2>
+<p class="lead">Weighted by published results, price, license and how well each plugin is maintained.</p>
+<div class="grid-2">
+<div class="card card-highlight">
 
-  /* SECTION */
-  section { padding: 52px 24px; }
-  section.alt { background: var(--bg-secondary); }
-  .section-inner { max-width: 1060px; margin: 0 auto; }
-  .section-label {
-    font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--accent); margin-bottom: 6px;
-  }
-  .section-title { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.015em; margin-bottom: 6px; }
-  .section-sub { font-size: 0.92rem; color: var(--text-secondary); margin-bottom: 28px; max-width: 580px; }
+<h3>Best free</h3>
+<p class="muted">Runs on your own machine or server. No subscription.</p>
+<ol class="ranked">
+<li>
 
-  /* PILLS */
-  .pill {
-    display: inline-block; font-size: 0.72rem; font-weight: 600;
-    padding: 3px 8px; border-radius: 12px; white-space: nowrap;
-  }
-  .pill-green  { background: rgba(63,185,80,0.15); color: var(--green); }
-  .pill-amber  { background: rgba(240,165,0,0.15); color: var(--accent); }
-  .pill-blue   { background: rgba(88,166,255,0.15); color: var(--blue); }
-  .pill-purple { background: rgba(188,140,255,0.15); color: var(--purple); }
-  .pill-red    { background: rgba(248,81,73,0.15); color: var(--red); }
-  .pill-gray   { background: var(--bg-tertiary); color: var(--text-secondary); }
+<span><strong>Hindsight, self-hosted</strong>: <span>MIT, no usage limits, one Docker command. The strongest published results across LongMemEval, LoCoMo and BEAM-10M. Bring any LLM, including a local one.</span></span>
+</li>
+<li>
 
-  /* QUICK TABLE */
-  .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border); }
-  table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
-  thead tr { background: var(--bg-tertiary); }
-  th {
-    padding: 11px 14px; text-align: left; font-weight: 600;
-    color: var(--text-secondary); white-space: nowrap; border-bottom: 1px solid var(--border);
-  }
-  td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  tbody tr:last-child td { border-bottom: none; }
-  tbody tr:hover { background: rgba(255,255,255,0.02); }
-  [data-theme="light"] tbody tr:hover { background: rgba(0,0,0,0.02); }
-  .t-name { font-weight: 600; color: var(--text-primary); }
-  .t-name a { color: inherit; text-decoration: none; }
-  .t-name a:hover { color: var(--accent); }
-  .t-stars { font-size: 0.78rem; color: var(--text-muted); white-space: nowrap; }
-  .t-bench { font-size: 0.82rem; }
-  .t-bench strong { color: var(--green); }
-  .t-bench small { color: var(--text-muted); display: block; font-size: 0.7rem; }
-  /* hide less-critical columns on small screens */
-  @media (max-width: 1100px) { .col-tools { display: none; } }
-  @media (max-width: 820px) { .col-arch { display: none; } }
-  @media (max-width: 640px) { .col-stars { display: none; } .col-tools { display: none; } }
+<span><strong>Honcho, self-hosted</strong>: <span>the pick if you want Hermes to learn you. 90.4% on LongMemEval-S with a small model. AGPL.</span></span>
+</li>
+<li>
 
-  /* BENCHMARK CALLOUT */
-  .bench-callout {
-    background: var(--accent-glow); border: 1px solid rgba(240,165,0,0.3);
-    border-left: 3px solid var(--accent); border-radius: 8px;
-    padding: 14px 18px; font-size: 0.84rem; color: var(--text-secondary); margin-top: 20px;
-  }
-  .bench-callout strong { color: var(--accent); }
+<span><strong>Cognee, local</strong>: <span>Apache-licensed knowledge-graph memory. Also free in the cloud for the first 1M tokens.</span></span>
+</li>
+</ol>
+</div>
+<div class="card">
 
-  /* PROVIDER CARDS */
-  .provider-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 16px;
-  }
-  .provider-card {
-    background: var(--bg-tertiary); border: 1px solid var(--border);
-    border-radius: 10px; padding: 20px; transition: border-color .15s;
-    display: flex; flex-direction: column; gap: 0;
-  }
-  .provider-card:hover { border-color: var(--accent); }
-  .provider-grid > *, .picker-grid > *, .tradeoff-grid > * { min-width: 0; }
-  .pc-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
-  .pc-icon { font-size: 1.5rem; line-height: 1; flex-shrink: 0; margin-top: 2px; }
-  .pc-name { font-size: 1rem; font-weight: 700; }
-  .pc-name a { color: inherit; text-decoration: none; }
-  .pc-name a:hover { color: var(--accent); }
-  .pc-meta { font-size: 0.72rem; color: var(--text-muted); margin-top: 1px; }
-  .pc-desc { font-size: 0.86rem; color: var(--text-secondary); margin-bottom: 10px; }
-  .pc-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
-  .pc-rows { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
-  .pc-row { display: flex; gap: 8px; font-size: 0.82rem; }
-  .pc-row-label { color: var(--text-muted); flex-shrink: 0; width: 68px; }
-  .pc-row-val { color: var(--text-secondary); }
-  .pc-row-val strong { color: var(--green); }
-  .pc-row-val a { color: var(--blue); text-decoration: none; font-family: 'SFMono-Regular', monospace; font-size: 0.78rem; }
-  .pc-best {
-    font-size: 0.82rem; color: var(--text-secondary);
-    border-top: 1px solid var(--border); padding-top: 10px; margin-top: auto;
-  }
-  .pc-best strong { color: var(--text-primary); }
+<h3>Best paid</h3>
+<p class="muted">Managed for you, billed by usage or a flat monthly fee.</p>
+<ol class="ranked">
+<li>
 
-  /* USE CASE PICKER */
-  .picker-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
-    gap: 16px;
-  }
-  .picker-card {
-    background: var(--bg-tertiary); border: 1px solid var(--border);
-    border-left: 3px solid var(--accent); border-radius: 10px; padding: 20px;
-  }
-  .picker-card.green-accent  { border-left-color: var(--green); }
-  .picker-card.blue-accent   { border-left-color: var(--blue); }
-  .picker-card.purple-accent { border-left-color: var(--purple); }
-  .picker-card.red-accent    { border-left-color: var(--red); }
-  .picker-card.orange-accent { border-left-color: var(--orange); }
-  .picker-icon { font-size: 1.4rem; margin-bottom: 6px; }
-  .picker-title { font-size: 0.95rem; font-weight: 700; margin-bottom: 3px; }
-  .picker-sub { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 12px; }
-  .picker-picks { list-style: none; display: flex; flex-direction: column; gap: 8px; }
-  .picker-pick { display: flex; align-items: flex-start; gap: 8px; font-size: 0.83rem; }
-  .pick-rank {
-    flex-shrink: 0; width: 19px; height: 19px; border-radius: 50%;
-    background: var(--bg-secondary); border: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 0.68rem; font-weight: 700; color: var(--accent); margin-top: 1px;
-  }
-  .pick-name { font-weight: 600; color: var(--text-primary); }
-  .pick-why { color: var(--text-secondary); }
+<span><strong>Hindsight Cloud</strong>: <span>pay as you go with no monthly fee: $10 per 1M tokens retained, $0.75 per 1M recalled. Same engine as the free version.</span></span>
+</li>
+<li>
 
-  /* TRADEOFF GRID */
-  .tradeoff-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 12px;
-  }
-  .tradeoff-card {
-    background: var(--bg-tertiary); border: 1px solid var(--border);
-    border-radius: 8px; padding: 16px;
-  }
-  .tradeoff-label {
-    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em;
-    text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px;
-  }
-  .tradeoff-winner { font-size: 1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 3px; }
-  .tradeoff-note { font-size: 0.78rem; color: var(--text-secondary); }
+<span><strong>Honcho Cloud</strong>: <span>$2 per 1M tokens stored and free context reads. The cheapest way to get managed user modeling.</span></span>
+</li>
+<li>
 
-  /* CONFIG SNIPPETS */
-  .config-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
-    gap: 12px;
-  }
-  .config-grid > * { min-width: 0; }
-  .config-card {
-    background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px;
-  }
-  .config-header {
-    padding: 10px 14px; border-bottom: 1px solid var(--border);
-    font-size: 0.82rem; font-weight: 600; color: var(--text-secondary);
-  }
-  .config-body {
-    padding: 12px 14px; font-family: 'SFMono-Regular', 'Consolas', monospace;
-    font-size: 0.78rem; color: #e6edf3; line-height: 1.6; white-space: pre;
-    overflow-x: auto; background: #0d1117; border-radius: 0 0 8px 8px;
-  }
-  [data-theme="light"] .config-body { background: #f6f8fa; color: #1f2328; }
-  .cfg-key { color: var(--blue); }
-  .cfg-val { color: var(--green); }
-  .cfg-comment { color: var(--text-muted); }
+<span><strong>Supermemory Pro</strong>: <span>$19 a month with $20 of credits included. Best for document search and connectors.</span></span>
+</li>
+</ol>
+</div>
+</div>
+<p class="small muted prose">Mem0 is still the biggest project, but since 27 October it sells no self-serve paid plan, only a free plan and custom contracts. Its free plan is generous if you bring your own LLM key. Want memory with no setup at all? Holographic needs no LLM and agentmemory needs no account.</p>
+</div>
+</section>
 
-  /* CTA */
-  .cta-strip {
-    background: var(--bg-secondary); border-top: 1px solid var(--border);
-    padding: 48px 24px; text-align: center;
-  }
-  .cta-strip h2 { font-size: 1.4rem; font-weight: 700; margin-bottom: 8px; }
-  .cta-strip p { color: var(--text-secondary); font-size: 0.93rem; margin-bottom: 22px; }
-  .cta-strip a {
-    display: inline-block; background: var(--accent); color: #0d1117;
-    padding: 11px 26px; border-radius: 8px; font-weight: 700;
-    text-decoration: none; transition: background .15s;
-  }
-  .cta-strip a:hover { background: var(--accent-dim); }
+<section class="section" id="table">
+<div class="container">
 
-  /* RESPONSIVE */
-  @media (max-width: 640px) {
-    .hamburger { display: flex; }
-    .btn-cta { display: none; }
-    .nav-back { display: none; }
-    .hero { padding: 36px 16px 28px; }
-    section { padding: 36px 16px; }
-    th, td { padding: 9px 10px; }
-    .provider-grid { grid-template-columns: minmax(0, 1fr); }
-    .picker-grid { grid-template-columns: minmax(0, 1fr); }
-    .tradeoff-grid { grid-template-columns: 1fr 1fr; }
-    .config-grid { grid-template-columns: minmax(0, 1fr); }
-  }
-  @media (max-width: 400px) {
-    .tradeoff-grid { grid-template-columns: 1fr; }
-  }
-  /* NOV 2026 ADDITIONS */
-  .hero-install { font-size: 0.85rem; color: var(--text-muted); margin: 0 auto 16px; max-width: 600px; }
-  .hero-install code, .inline-code {
-    font-family: 'SFMono-Regular', 'Consolas', monospace; font-size: 0.82em;
-    background: var(--bg-tertiary); padding: 1px 6px; border-radius: 4px; color: var(--text-primary);
-  }
-  .picker-grid.two { grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
-  .picks-note { margin-top: 16px; font-size: 0.84rem; color: var(--text-secondary); max-width: 760px; }
-  .pc-row-val { min-width: 0; overflow-wrap: anywhere; }
-  .t-bench { min-width: 170px; }
-  .watch-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px;
-  }
-  .watch-grid > * { min-width: 0; }
-  .watch-card {
-    background: var(--bg-tertiary); border: 1px solid var(--border);
-    border-radius: 8px; padding: 16px;
-  }
-  .watch-card .tradeoff-winner a { color: inherit; text-decoration: none; }
-  .watch-card .tradeoff-winner a:hover { color: var(--accent); }
-  .watch-card .pill { margin-bottom: 8px; }
-  .source-list { margin-top: 10px; font-size: 0.78rem; color: var(--text-muted); }
-  .source-list a { color: var(--blue); text-decoration: none; }
-  @media (max-width: 640px) { .watch-grid { grid-template-columns: 1fr; } }
-  .pc-install { margin-bottom: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
-  .pc-install a {
-    display: inline-block; max-width: 100%; overflow-x: auto; white-space: nowrap; text-decoration: none;
-    background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px;
-  }
-  .pc-install a:hover { border-color: var(--accent); }
-  .pc-install code { font-family: 'SFMono-Regular', 'Consolas', monospace; font-size: 0.78rem; color: var(--blue); }
-  .pc-install-note { font-size: 0.75rem; color: var(--text-secondary); }
-  .pc-row-val small { color: var(--text-secondary); }
-  .provider-card.builtin { border-style: dashed; }
-</style>
-</head>
-<body>
+<h2>All eleven at a glance</h2>
+<p class="lead">Sorted by GitHub stars. Scroll right on mobile.</p>
+<div aria-label="Provider comparison, scrolls sideways" class="table-wrap" role="region" tabindex="0">
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Best for</th>
+<th>Free</th>
+<th>Paid from</th>
+<th>Hosting</th>
+<th>License</th>
+<th>Stars</th>
+<th>Tools</th>
+<th>Benchmark</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://mem0.ai" rel="noopener" target="_blank">Mem0</a></td>
+<td>Biggest ecosystem, managed facts</td>
+<td><span class="chip">50K adds / 10K recalls</span><small class="muted block">with your own LLM key</small></td>
+<td>Usage-based past limits<br/><small class="muted">Custom plans by contract</small></td>
+<td>Cloud + self-host</td>
+<td><span class="chip">Apache 2.0</span></td>
+<td>68.8K</td>
+<td>4</td>
+<td>LongMemEval-S <strong>94.4%</strong><small>LoCoMo 92.5% · BEAM-10M 48.6% · competitor re-run 73.8%</small></td>
+</tr>
+<tr>
+<td><a href="https://hindsight.vectorize.io" rel="noopener" target="_blank">Hindsight</a></td>
+<td>Best measured all-rounder</td>
+<td><span class="chip">Self-host, no limits</span></td>
+<td>$10/M tokens retained<br/><small class="muted">$0.75/M recalled · $0.05/reflect</small></td>
+<td>Local + cloud</td>
+<td><span class="chip">MIT</span></td>
+<td>60.5K</td>
+<td>3</td>
+<td>LongMemEval-S <strong>94.6%</strong><small>91.4% in paper · LoCoMo 92.0% · BEAM-10M 64.1%</small></td>
+</tr>
+<tr>
+<td><a href="https://openviking.ai" rel="noopener" target="_blank">OpenViking</a></td>
+<td>Self-hosted knowledge, token savings</td>
+<td><span class="chip">Self-host free</span></td>
+<td>Hosted from ¥0.01/hour<br/><small class="muted">Volcengine, China · first 50 files free</small></td>
+<td>Self-host + hosted</td>
+<td><span class="chip">AGPL-3.0</span></td>
+<td>42.0K</td>
+<td>6</td>
+<td>LoCoMo on Hermes <strong>33% → 83%</strong><small>vs Hermes built-in memory · 34% fewer input tokens</small></td>
+</tr>
+<tr>
+<td><a href="https://www.cognee.ai" rel="noopener" target="_blank">Cognee</a></td>
+<td>Knowledge-graph memory</td>
+<td><span class="chip">Local · 1M cloud tokens</span></td>
+<td>$1 per 1M tokens<br/><small class="muted">+$5/mo per extra workspace</small></td>
+<td>Local + cloud</td>
+<td><span class="chip">Apache 2.0</span></td>
+<td>33.2K</td>
+<td>6</td>
+<td>BEAM-10M <strong>0.67</strong><small>in-sample, by Cognee's own account · BEAM-100K 0.79</small></td>
+</tr>
+<tr>
+<td><a href="https://supermemory.ai" rel="noopener" target="_blank">Supermemory</a></td>
+<td>Document search + connectors</td>
+<td><span class="chip">$5 credit a month</span></td>
+<td>$19/mo Pro<br/><small class="muted">$100 Max · $399 Scale</small></td>
+<td>Cloud (+ local)</td>
+<td><span class="chip">Mixed</span></td>
+<td>31.6K</td>
+<td>4</td>
+<td>LongMemEval-S <strong>84.6%</strong><small>GPT-5 answers · 81.6% in a competitor's run</small></td>
+</tr>
+<tr>
+<td><a href="https://github.com/rohitg00/agentmemory" rel="noopener" target="_blank">agentmemory</a></td>
+<td>Coding agents, no account</td>
+<td><span class="chip">Free, local</span></td>
+<td>No paid tier</td>
+<td>Local</td>
+<td><span class="chip">Apache 2.0</span></td>
+<td>30.3K</td>
+<td>3</td>
+<td>Retrieval only<small>84.7% recall-all@5 on LongMemEval-S · no QA score</small></td>
+</tr>
+<tr>
+<td><a href="https://memorilabs.ai" rel="noopener" target="_blank">Memori</a></td>
+<td>Low-token structured recall</td>
+<td><span class="chip">5K writes / 15K recalls</span></td>
+<td>From $60K/year<br/><small class="muted">production plans only</small></td>
+<td>Cloud</td>
+<td><span class="chip">Apache 2.0</span></td>
+<td>17.6K</td>
+<td>5</td>
+<td>LoCoMo <strong>87.0%</strong><small>GPT-4.1-mini answers · about 721 tokens per answer</small></td>
+</tr>
+<tr>
+<td><a href="https://honcho.dev" rel="noopener" target="_blank">Honcho</a></td>
+<td>Learning the user</td>
+<td><span class="chip">$5 + $5/mo credit</span></td>
+<td>$2/M tokens stored<br/><small class="muted">reads free · queries $0.001–$0.50</small></td>
+<td>Cloud + self-host</td>
+<td><span class="chip">AGPL-3.0</span></td>
+<td>8.1K</td>
+<td>5</td>
+<td>LongMemEval-S <strong>90.4%</strong><small>LoCoMo 89.9% · BEAM-10M 40.9% · Claude Haiku 4.5</small></td>
+</tr>
+<tr>
+<td><a href="https://reme.agentscope.io" rel="noopener" target="_blank">ReMe</a></td>
+<td>Memory as readable files</td>
+<td><span class="chip">Free, local</span></td>
+<td>No paid tier</td>
+<td>Local</td>
+<td><span class="chip">Apache 2.0</span></td>
+<td>3.8K</td>
+<td>Auto only</td>
+<td>LongMemEval <strong>89.4%</strong><small>ReMe's cleaned S split · BEAM-1M 65.0%</small></td>
+</tr>
+<tr>
+<td><a href="https://github.com/mnemosyne-oss/mnemosyne" rel="noopener" target="_blank">Mnemosyne</a></td>
+<td>Local power-user memory</td>
+<td><span class="chip">Free, local</span></td>
+<td>No paid tier</td>
+<td>Local</td>
+<td><span class="chip">MIT</span></td>
+<td>3.6K</td>
+<td>41</td>
+<td>BEAM-100K <strong>65.2%</strong><small>Llama 3.3 70B reader · LongMemEval claim withdrawn</small></td>
+</tr>
+<tr>
+<td><a href="https://github.com/itpartypattaya/hermes-plugin-holographic" rel="noopener" target="_blank">Holographic</a></td>
+<td>Zero setup, fully private</td>
+<td><span class="chip">Free, local</span></td>
+<td>No paid tier</td>
+<td>Local only</td>
+<td><span class="chip">MIT</span></td>
+<td>36 <small>(plugin)</small></td>
+<td>2</td>
+<td>Not published</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="callout">
+<strong>Read the benchmarks with care.</strong> Almost every score here is published by the vendor, using its own answer and judge models, so the numbers aren't directly comparable. The few outside re-runs come from competitors: Maximem re-ran Mem0's hosted product on LongMemEval in May and got 73.8%, against the 93.4% Mem0 announced in April (its current claim is 94.4%), and agentmemorybenchmark.ai is run by Vectorize, the company behind Hindsight. LongMemEval and LoCoMo now fit inside a large model's context window, so they're close to saturated. BEAM at 10M tokens can't be stuffed into context, which makes it the most telling test. Treat every number as directional.
+      <div class="small muted prose">Sources: <a href="https://github.com/mem0ai/memory-benchmarks" rel="noopener" target="_blank">Mem0</a> · <a href="https://agentmemorybenchmark.ai" rel="noopener" target="_blank">Hindsight / AMB</a> · <a href="https://hindsight.vectorize.io/blog/2026/04/02/beam-sota" rel="noopener" target="_blank">Hindsight BEAM</a> · <a href="https://blog.openviking.ai/post/openviking-benchmark-results/" rel="noopener" target="_blank">OpenViking</a> · <a href="https://www.cognee.ai/benchmarking-cognee-on-beam" rel="noopener" target="_blank">Cognee</a> · <a href="https://supermemory.ai/research/longmembench/" rel="noopener" target="_blank">Supermemory</a> · <a href="https://memorilabs.ai/docs/memori-cloud/benchmark/results/" rel="noopener" target="_blank">Memori</a> · <a href="https://honcho.dev/evals/" rel="noopener" target="_blank">Honcho</a> · <a href="https://reme.agentscope.io/en/benchmarks/longmemeval" rel="noopener" target="_blank">ReMe</a> · <a href="https://www.maximem.ai/blog/state-of-ai-memory-2026-claimed-vs-observed" rel="noopener" target="_blank">Maximem re-run</a></div>
+</div>
+</div>
+</section>
 
-<nav>
-  <div class="nav-left">
-    <a class="nav-logo" href="../">⚡ Hermes</a>
-    <a class="nav-back" href="../"><span>←</span><span>Back</span></a>
-  </div>
-  <div class="nav-right">
-    <button id="theme-toggle" aria-label="Toggle theme">🌙</button>
-    <a class="btn-cta" href="https://hermes-agent.nousresearch.com/docs/getting-started/installation">Get started →</a>
-    <button class="hamburger" id="memory-hamburger" aria-label="Open menu">
-      <span></span><span></span><span></span>
-    </button>
-  </div>
-</nav>
+<section class="section" id="providers">
+<div class="container">
 
-<div id="memory-mobile-menu">
-  <a href="../">← Main site</a>
-  <a href="../eli5/">ELI5 explainer</a>
-  <a href="../models/">Model guide</a>
-  <a href="../community/">Community</a>
-  <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="accent">Get started →</a>
+<h2>The fast version</h2>
+<p class="lead">How each one works, what it costs, and the command that installs it.</p>
+<div class="grid">
+<div class="card" id="p-mem0">
+
+
+<div>
+<h3><a href="https://mem0.ai" rel="noopener" target="_blank">Mem0</a></h3>
+<div class="meta">Apache 2.0 SDK · <a href="https://github.com/mem0ai/mem0" rel="noopener" target="_blank">mem0ai/mem0</a> · 68.8K stars</div>
 </div>
 
-<div class="hero">
-  <span class="hero-eyebrow">Hermes memory plugins · 2026 guide</span>
-  <h1>Which memory provider should Hermes use?</h1>
-  <p>The eleven most popular memory provider plugins for Hermes Agent, compared on price, hosting, license and published benchmarks, with a straight free pick and paid pick.</p>
-  <p class="hero-install">Install any of them with <code>hermes plugins install &lt;name&gt;</code> and <code>hermes memory setup</code>. One external provider runs at a time, alongside Hermes's built-in MEMORY.md and USER.md.</p>
-  <span class="updated-stamp">🕐 Last verified 11 November 2026</span>
+<p>An LLM pass extracts facts from each conversation, deduplicates them and stores them for semantic search, with optional reranking. The Hermes plugin runs against Mem0's cloud platform, a Mem0 server you host, or fully in-process with your own LLM and vector store. Since 27 October 2026 Mem0 sells no self-serve paid plan: the free plan covers most solo use if you bring your own LLM key, while graph memory, user profiles and SSO need a custom contract.</p>
+<div class="chips">
+<span class="chip">Free with your LLM key</span>
+<span class="chip">Cloud + self-host</span>
+<span class="chip">4 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free: 10K adds and 1K retrievals a month for the first 30 days on Mem0's models, then 50K and 10K with your own LLM key · usage-based billing past that, with a monthly cap you set · custom plans by contract · open-source SDK free to self-host</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>LongMemEval-S <strong>94.4%</strong> · LoCoMo 92.5% · BEAM-10M 48.6% <small>(self-reported; a competitor's re-run of the hosted product scored 73.8% on LongMemEval)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install mem0</code></a></p>
+<p><strong>Best for:</strong> the largest community and a managed fact store. Self-host the Apache-licensed SDK if you want no vendor in the loop.</p>
+</div>
+<div class="card" id="p-hindsight">
+
+
+<div>
+<h3><a href="https://hindsight.vectorize.io" rel="noopener" target="_blank">Hindsight</a></h3>
+<div class="meta">MIT · <a href="https://github.com/vectorize-io/hindsight" rel="noopener" target="_blank">vectorize-io/hindsight</a> · 60.5K stars</div>
 </div>
 
-<!-- SHORT ANSWER -->
-<section id="top-picks">
-  <div class="section-inner">
-    <div class="section-label">The short answer</div>
-    <div class="section-title">Best free and best paid</div>
-    <p class="section-sub">Weighted by published results, price, license and how well each plugin is maintained.</p>
+<p>Retains full conversation turns, resolves entities and relationships into a knowledge graph, and recalls with several strategies at once (semantic, keyword, entity and time). Its reflect tool reasons across everything stored. Runs fully local with an embedded Postgres and any LLM, including open-weight ones, or on Hindsight Cloud with no monthly fee.</p>
+<div class="chips">
+<span class="chip">Self-host free</span>
+<span class="chip">Local + cloud</span>
+<span class="chip">3 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Self-host free, MIT, no usage limits · Cloud pay-as-you-go: $10 per 1M tokens retained, $0.75 per 1M recalled, $0.05 per reflect call, no monthly fee · new accounts get $5 of credit</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>LongMemEval-S <strong>94.6%</strong> (own benchmark site) / 91.4% (paper) · LoCoMo 92.0% · BEAM-10M <strong>64.1%</strong> <small>(self-reported)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install hindsight</code></a></p>
+<p><strong>Best for:</strong> the strongest all-round published results, free when self-hosted and cheap at low volume in the cloud.</p>
+</div>
+<div class="card" id="p-openviking">
 
-    <div class="picker-grid two">
 
-      <div class="picker-card green-accent">
-        <div class="picker-icon">🆓</div>
-        <div class="picker-title">Best free</div>
-        <p class="picker-sub">Runs on your own machine or server. No subscription.</p>
-        <ul class="picker-picks">
-          <li class="picker-pick">
-            <div class="pick-rank">1</div>
-            <div><span class="pick-name">Hindsight, self-hosted</span>: <span class="pick-why">MIT, no usage limits, one Docker command. The strongest published results across LongMemEval, LoCoMo and BEAM-10M. Bring any LLM, including a local one.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">2</div>
-            <div><span class="pick-name">Honcho, self-hosted</span>: <span class="pick-why">the pick if you want Hermes to learn you. 90.4% on LongMemEval-S with a small model. AGPL.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">3</div>
-            <div><span class="pick-name">Cognee, local</span>: <span class="pick-why">Apache-licensed knowledge-graph memory. Also free in the cloud for the first 1M tokens.</span></div>
-          </li>
-        </ul>
-      </div>
+<div>
+<h3><a href="https://openviking.ai" rel="noopener" target="_blank">OpenViking</a></h3>
+<div class="meta">AGPL-3.0 · <a href="https://github.com/volcengine/OpenViking" rel="noopener" target="_blank">volcengine/OpenViking</a> · 42.0K stars</div>
+</div>
 
-      <div class="picker-card">
-        <div class="picker-icon">💳</div>
-        <div class="picker-title">Best paid</div>
-        <p class="picker-sub">Managed for you, billed by usage or a flat monthly fee.</p>
-        <ul class="picker-picks">
-          <li class="picker-pick">
-            <div class="pick-rank">1</div>
-            <div><span class="pick-name">Hindsight Cloud</span>: <span class="pick-why">pay as you go with no monthly fee: $10 per 1M tokens retained, $0.75 per 1M recalled. Same engine as the free version.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">2</div>
-            <div><span class="pick-name">Honcho Cloud</span>: <span class="pick-why">$2 per 1M tokens stored and free context reads. The cheapest way to get managed user modeling.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">3</div>
-            <div><span class="pick-name">Supermemory Pro</span>: <span class="pick-why">$19 a month with $20 of credits included. Best for document search and connectors.</span></div>
-          </li>
-        </ul>
-      </div>
+<p>A context database from ByteDance's Volcengine. Memories, documents and skills live in a virtual filesystem (viking://) and load in tiers: a short abstract, then an overview, then full content only when it's needed. That's where the token savings come from. In Volcengine's May 2026 test, adding it to Hermes raised LoCoMo accuracy from 33.4% to 82.9% and cut input tokens by 34% and query time by 66%.</p>
+<div class="chips">
+<span class="chip">Self-host free</span>
+<span class="chip">Self-host + hosted</span>
+<span class="chip">6 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free to self-host with your own LLM (Ollama works) · hosted service on Volcengine in China: first 50 files free per database, then from ¥0.01 per hour</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>LoCoMo with Hermes <strong>82.9%</strong> vs 33.4% with Hermes's built-in memory <small>(vendor-run, May 2026)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install openviking</code></a><p class="small muted">start openviking-server first</p></p>
+<p><strong>Best for:</strong> self-hosted knowledge management and long histories where token cost matters. It's AGPL, so check the license before shipping it inside a product.</p>
+</div>
+<div class="card" id="p-cognee">
 
-    </div>
-    <p class="picks-note">Mem0 is still the biggest project, but since 27 October it sells no self-serve paid plan, only a free plan and custom contracts. Its free plan is generous if you bring your own LLM key. Want memory with no setup at all? Holographic needs no LLM and agentmemory needs no account.</p>
-  </div>
+
+<div>
+<h3><a href="https://www.cognee.ai" rel="noopener" target="_blank">Cognee</a></h3>
+<div class="meta">Apache 2.0 · <a href="https://github.com/topoteretes/cognee" rel="noopener" target="_blank">topoteretes/cognee</a> · 33.2K stars (core repo)</div>
+</div>
+
+<p>An LLM extracts entities and relations into a knowledge graph alongside a vector store, and recall walks both. The Hermes plugin adds remember, recall, forget, recap and code search, and shares memory with Cognee's Claude Code and Codex plugins. Local mode installs about 1 GB of dependencies.</p>
+<div class="chips">
+<span class="chip">Local free</span>
+<span class="chip">Local + cloud</span>
+<span class="chip">6 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Local and self-host free · Cloud: free for the first 1M tokens, then $1 per 1M tokens processed, plus $5 a month per extra workspace</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>BEAM-100K <strong>0.79</strong> · BEAM-10M 0.67 <small>(self-reported; Cognee calls the 10M run exploratory because settings were picked on the scored questions)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install cognee</code></a></p>
+<p><strong>Best for:</strong> memory that's really a graph of people, projects and code, shared across several coding agents.</p>
+</div>
+<div class="card" id="p-supermemory">
+
+
+<div>
+<h3><a href="https://supermemory.ai" rel="noopener" target="_blank">Supermemory</a></h3>
+<div class="meta">MIT apps + SDKs, closed engine · <a href="https://github.com/supermemoryai/supermemory" rel="noopener" target="_blank">supermemoryai/supermemory</a> · 31.6K stars (apps + SDKs)</div>
+</div>
+
+<p>Builds a memory graph per user (a profile plus a fact hierarchy) and pairs it with SuperRAG document search and connectors. The Hermes plugin captures each turn, recalls before each turn and re-injects profile facts periodically. The core engine is closed source; a free local server handles up to 10,000 documents.</p>
+<div class="chips">
+<span class="chip">$5 free credit monthly</span>
+<span class="chip">Cloud + local</span>
+<span class="chip">4 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free: $5 of credits a month (about 1M memory tokens) · Pro $19/mo with $20 of credits · Max $100/mo · Scale $399/mo with SOC 2, HIPAA BAA and a self-host option</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>LongMemEval-S <strong>84.6%</strong> with GPT-5 answers <small>(self-reported) · 81.6% in a run by competitor Vectorize</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install supermemory</code></a></p>
+<p><strong>Best for:</strong> search over lots of documents, and teams that want connectors (Gmail, S3, web crawler) with a flat monthly price.</p>
+</div>
+<div class="card" id="p-agentmemory">
+
+
+<div>
+<h3><a href="https://github.com/rohitg00/agentmemory" rel="noopener" target="_blank">agentmemory</a></h3>
+<div class="meta">Apache 2.0 · <a href="https://github.com/rohitg00/agentmemory" rel="noopener" target="_blank">rohitg00/agentmemory</a> · 30.3K stars</div>
+</div>
+
+<p>Local memory built for coding agents. It captures sessions automatically and recalls with BM25 keyword search, optional on-device embeddings and a small knowledge graph, with no account or API key. One local server shares memory across 26 coding agents; the Hermes plugin connects to it and adds save, recall and search tools.</p>
+<div class="chips">
+<span class="chip">Free, no account</span>
+<span class="chip">Local</span>
+<span class="chip">3 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free and open source, no paid tier (agentmemory.space is an unrelated product)</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>No answer-accuracy score yet. Retrieval only: 84.7% recall-all@5 on LongMemEval-S <small>(self-reported)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install agentmemory</code></a><p class="small muted">run the agentmemory server first</p></p>
+<p><strong>Best for:</strong> one local memory shared by Hermes, Claude Code, Codex and the other coding agents you use.</p>
+</div>
+<div class="card" id="p-memori">
+
+
+<div>
+<h3><a href="https://memorilabs.ai" rel="noopener" target="_blank">Memori</a></h3>
+<div class="meta">Apache 2.0 SDK · <a href="https://github.com/MemoriLabs/Memori" rel="noopener" target="_blank">MemoriLabs/Memori</a> · 17.6K stars</div>
+</div>
+
+<p>Turns chat into structured facts and summaries with project and session attribution, so recall stays short: about 721 tokens per answer in its own LoCoMo test. The Hermes provider uses Memori Cloud only and installs through Memori's own hermes-memori tool rather than the plugin catalog.</p>
+<div class="chips">
+<span class="chip">Free developer key</span>
+<span class="chip">Cloud only</span>
+<span class="chip">5 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free key: 5,000 memories created and 15,000 recalled a month · paid production plans start at $60K a year</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>LoCoMo <strong>87.0%</strong> with GPT-4.1-mini answers <small>(self-reported)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes-memori install</code></a><p class="small muted">external installer, see the Hermes docs</p></p>
+<p><strong>Best for:</strong> trying structured, low-token recall on the free key. The paid plans are aimed at enterprises.</p>
+</div>
+<div class="card" id="p-honcho">
+
+
+<div>
+<h3><a href="https://honcho.dev" rel="noopener" target="_blank">Honcho</a></h3>
+<div class="meta">AGPL-3.0 · <a href="https://github.com/plastic-labs/honcho" rel="noopener" target="_blank">plastic-labs/honcho</a> · 8.1K stars</div>
+</div>
+
+<p>Models people, not just facts. Honcho stores messages, reasons about each user in the background, and answers questions about them on demand. Each Hermes profile becomes its own AI peer watching the same user, so a coding profile and a writing profile build separate views of you. Cloud or self-hosted.</p>
+<div class="chips">
+<span class="chip">$5 + $5/mo credit</span>
+<span class="chip">Cloud + self-host</span>
+<span class="chip">5 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>$2 per 1M tokens stored · context reads free · reasoning queries $0.001 to $0.50 each · new accounts get $5, plus $5 a month with a card on file · self-host free</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>LongMemEval-S <strong>90.4%</strong> · LoCoMo 89.9% · BEAM-10M 40.9% <small>(self-reported, Dec 2025, with the small Claude Haiku 4.5 model)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install honcho</code></a></p>
+<p><strong>Best for:</strong> personal assistants and multi-user gateways where the agent should learn each person's preferences and style.</p>
+</div>
+<div class="card" id="p-reme">
+
+
+<div>
+<h3><a href="https://reme.agentscope.io" rel="noopener" target="_blank">ReMe</a></h3>
+<div class="meta">Apache 2.0 · <a href="https://github.com/agentscope-ai/ReMe" rel="noopener" target="_blank">agentscope-ai/ReMe</a> · 3.8K stars</div>
+</div>
+
+<p>From the AgentScope project. Memory is plain Markdown in a workspace folder (daily notes and digests) that you can read and edit, with BM25 recall that needs no embedding model. The Hermes provider recalls before each turn and records after it, in-process or through a local ReMe service. It adds no tools for the model.</p>
+<div class="chips">
+<span class="chip">Free</span>
+<span class="chip">Local</span>
+<span class="chip">Automatic, no tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free and open source · bring an LLM for memory extraction</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>LongMemEval <strong>89.4%</strong> on ReMe's cleaned S split · BEAM-1M 65.0% <small>(self-reported)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install reme</code></a></p>
+<p><strong>Best for:</strong> memory you can open in a text editor, with nothing to sign up for.</p>
+</div>
+<div class="card" id="p-mnemosyne">
+
+
+<div>
+<h3><a href="https://github.com/mnemosyne-oss/mnemosyne" rel="noopener" target="_blank">Mnemosyne</a></h3>
+<div class="meta">MIT · <a href="https://github.com/mnemosyne-oss/mnemosyne" rel="noopener" target="_blank">mnemosyne-oss/mnemosyne</a> · 3.6K stars</div>
+</div>
+
+<p>A local SQLite memory layer with vector plus full-text search, episodic consolidation and a temporal knowledge graph, with no cloud at all. It exposes 41 tools to the model, the most of any provider here, covering personas, graph queries, import and export, and diagnostics.</p>
+<div class="chips">
+<span class="chip">Free</span>
+<span class="chip">Local</span>
+<span class="chip">41 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free and open source</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>BEAM-100K <strong>65.2%</strong> with a Llama 3.3 70B reader <small>(self-reported; an earlier LongMemEval figure was withdrawn pending a re-run)</small></span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install mnemosyne</code></a></p>
+<p><strong>Best for:</strong> power users who want fully local memory with a lot of agent-facing control.</p>
+</div>
+<div class="card" id="p-holographic">
+
+
+<div>
+<h3><a href="https://github.com/itpartypattaya/hermes-plugin-holographic" rel="noopener" target="_blank">Holographic</a></h3>
+<div class="meta">MIT · <a href="https://github.com/itpartypattaya/hermes-plugin-holographic" rel="noopener" target="_blank">itpartypattaya/hermes-plugin-holographic</a> · 36 stars (plugin repo)</div>
+</div>
+
+<p>A local SQLite fact store with full-text search, trust scores that learn from your feedback, and Holographic Reduced Representations for algebraic queries: everything about one entity, facts that link several, and contradiction checks. No API keys, no network calls and no LLM required. It used to ship inside Hermes and now installs from the catalog with the same data.</p>
+<div class="chips">
+<span class="chip">Fully local, free</span>
+<span class="chip">Local only</span>
+<span class="chip">2 tools</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free</span></div>
+<div class="kv-row"><span>Benchmarks</span><span>Not published</span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install holographic</code></a></p>
+<p><strong>Best for:</strong> instant, fully private memory with no accounts and nothing to configure.</p>
+</div>
+<div class="card" id="p-builtin">
+
+
+<div>
+<h3><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank">Built-in memory</a></h3>
+<div class="meta">Part of Hermes · MEMORY.md + USER.md · always on</div>
+</div>
+
+<p>Every Hermes install keeps two small Markdown files: notes the agent writes for itself, and a profile of you. They stay on whichever provider you pick, and an external provider adds to them rather than replacing them. Hermes also mirrors writes to these files into the provider you enable.</p>
+<div class="chips">
+<span class="chip">Included</span>
+<span class="chip">Local</span>
+<span class="chip">Always on</span>
+</div>
+<div class="kv">
+<div class="kv-row"><span>Pricing</span><span>Free, part of Hermes</span></div>
+<div class="kv-row"><span>Limits</span><span>Small and curated by design; not built for searching long histories</span></div>
+</div>
+<p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes memory status</code></a><p class="small muted">shows what's active</p></p>
+<p><strong>Best for:</strong> a handful of standing facts and preferences. Add a provider when you need recall across months of sessions.</p>
+</div>
+</div>
+</div>
 </section>
 
-<!-- QUICK REFERENCE TABLE -->
-<section id="table" class="alt">
-  <div class="section-inner">
-    <div class="section-label">Quick reference</div>
-    <div class="section-title">All eleven at a glance</div>
-    <p class="section-sub">Sorted by GitHub stars. Scroll right on mobile.</p>
+<section class="section" id="picks">
+<div class="container">
 
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Provider</th>
-            <th>Best for</th>
-            <th>Free</th>
-            <th class="col-paid">Paid from</th>
-            <th>Hosting</th>
-            <th>License</th>
-            <th class="col-stars">Stars</th>
-            <th class="col-tools">Tools</th>
-            <th>Benchmark</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td class="t-name"><a href="https://mem0.ai" target="_blank" rel="noopener">Mem0</a></td>
-            <td>Biggest ecosystem, managed facts</td>
-            <td><span class="pill pill-green">50K adds / 10K recalls</span><small style="display:block;color:var(--text-muted);margin-top:3px">with your own LLM key</small></td>
-            <td class="col-paid">Usage-based past limits<br><small style="color:var(--text-muted)">Custom plans by contract</small></td>
-            <td>Cloud + self-host</td>
-            <td><span class="pill pill-blue">Apache 2.0</span></td>
-            <td class="t-stars col-stars">68.8K ⭐</td>
-            <td class="col-tools">4</td>
-            <td class="t-bench">LongMemEval-S <strong>94.4%</strong><small>LoCoMo 92.5% · BEAM-10M 48.6% · competitor re-run 73.8%</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://hindsight.vectorize.io" target="_blank" rel="noopener">Hindsight</a></td>
-            <td>Best measured all-rounder</td>
-            <td><span class="pill pill-green">Self-host, no limits</span></td>
-            <td class="col-paid">$10/M tokens retained<br><small style="color:var(--text-muted)">$0.75/M recalled · $0.05/reflect</small></td>
-            <td>Local + cloud</td>
-            <td><span class="pill pill-blue">MIT</span></td>
-            <td class="t-stars col-stars">60.5K ⭐</td>
-            <td class="col-tools">3</td>
-            <td class="t-bench">LongMemEval-S <strong>94.6%</strong><small>91.4% in paper · LoCoMo 92.0% · BEAM-10M 64.1%</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://openviking.ai" target="_blank" rel="noopener">OpenViking</a></td>
-            <td>Self-hosted knowledge, token savings</td>
-            <td><span class="pill pill-green">Self-host free</span></td>
-            <td class="col-paid">Hosted from ¥0.01/hour<br><small style="color:var(--text-muted)">Volcengine, China · first 50 files free</small></td>
-            <td>Self-host + hosted</td>
-            <td><span class="pill pill-amber">AGPL-3.0</span></td>
-            <td class="t-stars col-stars">42.0K ⭐</td>
-            <td class="col-tools">6</td>
-            <td class="t-bench">LoCoMo on Hermes <strong>33% → 83%</strong><small>vs Hermes built-in memory · 34% fewer input tokens</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://www.cognee.ai" target="_blank" rel="noopener">Cognee</a></td>
-            <td>Knowledge-graph memory</td>
-            <td><span class="pill pill-green">Local · 1M cloud tokens</span></td>
-            <td class="col-paid">$1 per 1M tokens<br><small style="color:var(--text-muted)">+$5/mo per extra workspace</small></td>
-            <td>Local + cloud</td>
-            <td><span class="pill pill-blue">Apache 2.0</span></td>
-            <td class="t-stars col-stars">33.2K ⭐</td>
-            <td class="col-tools">6</td>
-            <td class="t-bench">BEAM-10M <strong>0.67</strong><small>in-sample, by Cognee's own account · BEAM-100K 0.79</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://supermemory.ai" target="_blank" rel="noopener">Supermemory</a></td>
-            <td>Document search + connectors</td>
-            <td><span class="pill pill-green">$5 credit a month</span></td>
-            <td class="col-paid">$19/mo Pro<br><small style="color:var(--text-muted)">$100 Max · $399 Scale</small></td>
-            <td>Cloud (+ local)</td>
-            <td><span class="pill pill-amber">Mixed</span></td>
-            <td class="t-stars col-stars">31.6K ⭐</td>
-            <td class="col-tools">4</td>
-            <td class="t-bench">LongMemEval-S <strong>84.6%</strong><small>GPT-5 answers · 81.6% in a competitor's run</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://github.com/rohitg00/agentmemory" target="_blank" rel="noopener">agentmemory</a></td>
-            <td>Coding agents, no account</td>
-            <td><span class="pill pill-green">Free, local</span></td>
-            <td class="col-paid">No paid tier</td>
-            <td>Local</td>
-            <td><span class="pill pill-blue">Apache 2.0</span></td>
-            <td class="t-stars col-stars">30.3K ⭐</td>
-            <td class="col-tools">3</td>
-            <td class="t-bench">Retrieval only<small>84.7% recall-all@5 on LongMemEval-S · no QA score</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://memorilabs.ai" target="_blank" rel="noopener">Memori</a></td>
-            <td>Low-token structured recall</td>
-            <td><span class="pill pill-green">5K writes / 15K recalls</span></td>
-            <td class="col-paid">From $60K/year<br><small style="color:var(--text-muted)">production plans only</small></td>
-            <td>Cloud</td>
-            <td><span class="pill pill-blue">Apache 2.0</span></td>
-            <td class="t-stars col-stars">17.6K ⭐</td>
-            <td class="col-tools">5</td>
-            <td class="t-bench">LoCoMo <strong>87.0%</strong><small>GPT-4.1-mini answers · about 721 tokens per answer</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://honcho.dev" target="_blank" rel="noopener">Honcho</a></td>
-            <td>Learning the user</td>
-            <td><span class="pill pill-amber">$5 + $5/mo credit</span></td>
-            <td class="col-paid">$2/M tokens stored<br><small style="color:var(--text-muted)">reads free · queries $0.001–$0.50</small></td>
-            <td>Cloud + self-host</td>
-            <td><span class="pill pill-amber">AGPL-3.0</span></td>
-            <td class="t-stars col-stars">8.1K ⭐</td>
-            <td class="col-tools">5</td>
-            <td class="t-bench">LongMemEval-S <strong>90.4%</strong><small>LoCoMo 89.9% · BEAM-10M 40.9% · Claude Haiku 4.5</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://reme.agentscope.io" target="_blank" rel="noopener">ReMe</a></td>
-            <td>Memory as readable files</td>
-            <td><span class="pill pill-green">Free, local</span></td>
-            <td class="col-paid">No paid tier</td>
-            <td>Local</td>
-            <td><span class="pill pill-blue">Apache 2.0</span></td>
-            <td class="t-stars col-stars">3.8K ⭐</td>
-            <td class="col-tools">Auto only</td>
-            <td class="t-bench">LongMemEval <strong>89.4%</strong><small>ReMe's cleaned S split · BEAM-1M 65.0%</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://github.com/mnemosyne-oss/mnemosyne" target="_blank" rel="noopener">Mnemosyne</a></td>
-            <td>Local power-user memory</td>
-            <td><span class="pill pill-green">Free, local</span></td>
-            <td class="col-paid">No paid tier</td>
-            <td>Local</td>
-            <td><span class="pill pill-blue">MIT</span></td>
-            <td class="t-stars col-stars">3.6K ⭐</td>
-            <td class="col-tools">41</td>
-            <td class="t-bench">BEAM-100K <strong>65.2%</strong><small>Llama 3.3 70B reader · LongMemEval claim withdrawn</small></td>
-          </tr>
-          <tr>
-            <td class="t-name"><a href="https://github.com/itpartypattaya/hermes-plugin-holographic" target="_blank" rel="noopener">Holographic</a></td>
-            <td>Zero setup, fully private</td>
-            <td><span class="pill pill-green">Free, local</span></td>
-            <td class="col-paid">No paid tier</td>
-            <td>Local only</td>
-            <td><span class="pill pill-blue">MIT</span></td>
-            <td class="t-stars col-stars">36 ⭐ <small>(plugin)</small></td>
-            <td class="col-tools">2</td>
-            <td class="t-bench">Not published</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+<h2>Just tell me what to pick</h2>
+<p class="lead">Ranked by fit for each scenario, not by partnership or popularity.</p>
+<div class="grid">
+<div class="card">
 
-    <div class="bench-callout">
-      <strong>Read the benchmarks with care.</strong> Almost every score here is published by the vendor, using its own answer and judge models, so the numbers aren't directly comparable. The few outside re-runs come from competitors: Maximem re-ran Mem0's hosted product on LongMemEval in May and got 73.8%, against the 93.4% Mem0 announced in April (its current claim is 94.4%), and agentmemorybenchmark.ai is run by Vectorize, the company behind Hindsight. LongMemEval and LoCoMo now fit inside a large model's context window, so they're close to saturated. BEAM at 10M tokens can't be stuffed into context, which makes it the most telling test. Treat every number as directional.
-      <div class="source-list">Sources: <a href="https://github.com/mem0ai/memory-benchmarks" target="_blank" rel="noopener">Mem0</a> · <a href="https://agentmemorybenchmark.ai" target="_blank" rel="noopener">Hindsight / AMB</a> · <a href="https://hindsight.vectorize.io/blog/2026/04/02/beam-sota" target="_blank" rel="noopener">Hindsight BEAM</a> · <a href="https://blog.openviking.ai/post/openviking-benchmark-results/" target="_blank" rel="noopener">OpenViking</a> · <a href="https://www.cognee.ai/benchmarking-cognee-on-beam" target="_blank" rel="noopener">Cognee</a> · <a href="https://supermemory.ai/research/longmembench/" target="_blank" rel="noopener">Supermemory</a> · <a href="https://memorilabs.ai/docs/memori-cloud/benchmark/results/" target="_blank" rel="noopener">Memori</a> · <a href="https://honcho.dev/evals/" target="_blank" rel="noopener">Honcho</a> · <a href="https://reme.agentscope.io/en/benchmarks/longmemeval" target="_blank" rel="noopener">ReMe</a> · <a href="https://www.maximem.ai/blog/state-of-ai-memory-2026-claimed-vs-observed" target="_blank" rel="noopener">Maximem re-run</a></div>
-    </div>
-  </div>
+<h3>Coding agents</h3>
+<p class="muted">State across long sessions and exact technical recall: file names, ports, error strings.</p>
+<ol class="ranked">
+<li>
+
+<span><strong>Hindsight</strong>: <span>keyword and entity recall finds exact names; reflect summarizes what happened across sessions.</span></span>
+</li>
+<li>
+
+<span><strong>agentmemory</strong>: <span>captures coding sessions automatically and shares one memory with Claude Code, Codex and others.</span></span>
+</li>
+<li>
+
+<span><strong>Cognee</strong>: <span>has a code-search tool, and shares memory with its Claude Code and Codex plugins.</span></span>
+</li>
+</ol>
+</div>
+<div class="card card-highlight">
+
+<h3>Documents and knowledge bases</h3>
+<p class="muted">Indexing a large, growing body of content and pulling the right slice at query time.</p>
+<ol class="ranked">
+<li>
+
+<span><strong>Supermemory</strong>: <span>SuperRAG handles PDFs, images and audio, with Gmail, S3 and crawler connectors.</span></span>
+</li>
+<li>
+
+<span><strong>OpenViking</strong>: <span>filesystem-style hierarchy with tiered loading; ingests URLs and documents.</span></span>
+</li>
+<li>
+
+<span><strong>Cognee</strong>: <span>builds a knowledge graph over your documents.</span></span>
+</li>
+</ol>
+</div>
+<div class="card">
+
+<h3>Learning the user</h3>
+<p class="muted">The agent should pick up your style, preferences and habits and use them in every session.</p>
+<ol class="ranked">
+<li>
+
+<span><strong>Honcho</strong>: <span>the only provider here built to model people; each Hermes profile keeps its own view of you.</span></span>
+</li>
+<li>
+
+<span><strong>Supermemory</strong>: <span>keeps a per-user profile and re-injects it into the conversation.</span></span>
+</li>
+<li>
+
+<span><strong>Mem0</strong>: <span>fact extraction tracks preferences well; its dedicated user profiles need a custom plan.</span></span>
+</li>
+</ol>
+</div>
+<div class="card">
+
+<h3>No accounts, no API keys</h3>
+<p class="muted">Memory that works the moment it's installed.</p>
+<ol class="ranked">
+<li>
+
+<span><strong>Holographic</strong>: <span>no LLM, no network, one SQLite file.</span></span>
+</li>
+<li>
+
+<span><strong>agentmemory</strong>: <span>keyless keyword search out of the box, optional on-device embeddings.</span></span>
+</li>
+<li>
+
+<span><strong>Mnemosyne</strong>: <span>local SQLite with vector and full-text search, zero cloud.</span></span>
+</li>
+</ol>
+</div>
+<div class="card">
+
+<h3>Privacy and air-gapped setups</h3>
+<p class="muted">Data never leaves your infrastructure.</p>
+<ol class="ranked">
+<li>
+
+<span><strong>Holographic</strong>: <span>a file on disk with zero network calls.</span></span>
+</li>
+<li>
+
+<span><strong>Hindsight</strong>: <span>fully local with an open-weight model; its own decision, rerank and embedding models are open weights too.</span></span>
+</li>
+<li>
+
+<span><strong>ReMe</strong>: <span>plain files in a folder, served on 127.0.0.1 or in-process.</span></span>
+</li>
+</ol>
+</div>
+<div class="card">
+
+<h3>Commercial and enterprise</h3>
+<p class="muted">SSO, audit logs, SLAs and a license your lawyers will accept.</p>
+<ol class="ranked">
+<li>
+
+<span><strong>Hindsight</strong>: <span>MIT; Enterprise runs in your cloud or on-prem with SSO and up to a 99.95% SLA.</span></span>
+</li>
+<li>
+
+<span><strong>Supermemory</strong>: <span>Scale plan adds SOC 2, a HIPAA BAA and a self-host option.</span></span>
+</li>
+<li>
+
+<span><strong>Mem0</strong>: <span>Apache-licensed SDK; a custom contract adds SSO, audit logs and on-prem.</span></span>
+</li>
+</ol>
+</div>
+</div>
+</div>
 </section>
 
-<!-- PROVIDER PROFILES -->
-<section id="providers">
-  <div class="section-inner">
-    <div class="section-label">Provider profiles</div>
-    <div class="section-title">The fast version</div>
-    <p class="section-sub">How each one works, what it costs, and the command that installs it.</p>
+<section class="section" id="config">
+<div class="container">
 
-    <div class="provider-grid">
-
-      <div class="provider-card" id="p-mem0">
-        <div class="pc-header">
-          <div class="pc-icon">🧠</div>
-          <div>
-            <div class="pc-name"><a href="https://mem0.ai" target="_blank" rel="noopener">Mem0</a></div>
-            <div class="pc-meta">Apache 2.0 SDK · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener" style="color:inherit">mem0ai/mem0</a> · 68.8K ⭐</div>
-          </div>
-        </div>
-        <p class="pc-desc">An LLM pass extracts facts from each conversation, deduplicates them and stores them for semantic search, with optional reranking. The Hermes plugin runs against Mem0's cloud platform, a Mem0 server you host, or fully in-process with your own LLM and vector store. Since 27 October 2026 Mem0 sells no self-serve paid plan: the free plan covers most solo use if you bring your own LLM key, while graph memory, user profiles and SSO need a custom contract.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Free with your LLM key</span>
-          <span class="pill pill-blue">Cloud + self-host</span>
-          <span class="pill pill-purple">4 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free: 10K adds and 1K retrievals a month for the first 30 days on Mem0's models, then 50K and 10K with your own LLM key · usage-based billing past that, with a monthly cap you set · custom plans by contract · open-source SDK free to self-host</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">LongMemEval-S <strong>94.4%</strong> · LoCoMo 92.5% · BEAM-10M 48.6% <small>(self-reported; a competitor's re-run of the hosted product scored 73.8% on LongMemEval)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install mem0</code></a></div>
-        <div class="pc-best"><strong>Best for:</strong> the largest community and a managed fact store. Self-host the Apache-licensed SDK if you want no vendor in the loop.</div>
-      </div>
-
-      <div class="provider-card" id="p-hindsight">
-        <div class="pc-header">
-          <div class="pc-icon">🔬</div>
-          <div>
-            <div class="pc-name"><a href="https://hindsight.vectorize.io" target="_blank" rel="noopener">Hindsight</a></div>
-            <div class="pc-meta">MIT · <a href="https://github.com/vectorize-io/hindsight" target="_blank" rel="noopener" style="color:inherit">vectorize-io/hindsight</a> · 60.5K ⭐</div>
-          </div>
-        </div>
-        <p class="pc-desc">Retains full conversation turns, resolves entities and relationships into a knowledge graph, and recalls with several strategies at once (semantic, keyword, entity and time). Its reflect tool reasons across everything stored. Runs fully local with an embedded Postgres and any LLM, including open-weight ones, or on Hindsight Cloud with no monthly fee.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Self-host free</span>
-          <span class="pill pill-blue">Local + cloud</span>
-          <span class="pill pill-purple">3 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Self-host free, MIT, no usage limits · Cloud pay-as-you-go: $10 per 1M tokens retained, $0.75 per 1M recalled, $0.05 per reflect call, no monthly fee · new accounts get $5 of credit</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">LongMemEval-S <strong>94.6%</strong> (own benchmark site) / 91.4% (paper) · LoCoMo 92.0% · BEAM-10M <strong>64.1%</strong> <small>(self-reported)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install hindsight</code></a></div>
-        <div class="pc-best"><strong>Best for:</strong> the strongest all-round published results, free when self-hosted and cheap at low volume in the cloud.</div>
-      </div>
-
-      <div class="provider-card" id="p-openviking">
-        <div class="pc-header">
-          <div class="pc-icon">🏛️</div>
-          <div>
-            <div class="pc-name"><a href="https://openviking.ai" target="_blank" rel="noopener">OpenViking</a></div>
-            <div class="pc-meta">AGPL-3.0 · <a href="https://github.com/volcengine/OpenViking" target="_blank" rel="noopener" style="color:inherit">volcengine/OpenViking</a> · 42.0K ⭐</div>
-          </div>
-        </div>
-        <p class="pc-desc">A context database from ByteDance's Volcengine. Memories, documents and skills live in a virtual filesystem (viking://) and load in tiers: a short abstract, then an overview, then full content only when it's needed. That's where the token savings come from. In Volcengine's May 2026 test, adding it to Hermes raised LoCoMo accuracy from 33.4% to 82.9% and cut input tokens by 34% and query time by 66%.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Self-host free</span>
-          <span class="pill pill-blue">Self-host + hosted</span>
-          <span class="pill pill-purple">6 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free to self-host with your own LLM (Ollama works) · hosted service on Volcengine in China: first 50 files free per database, then from ¥0.01 per hour</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">LoCoMo with Hermes <strong>82.9%</strong> vs 33.4% with Hermes's built-in memory <small>(vendor-run, May 2026)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install openviking</code></a><span class="pc-install-note">start openviking-server first</span></div>
-        <div class="pc-best"><strong>Best for:</strong> self-hosted knowledge management and long histories where token cost matters. It's AGPL, so check the license before shipping it inside a product.</div>
-      </div>
-
-      <div class="provider-card" id="p-cognee">
-        <div class="pc-header">
-          <div class="pc-icon">🕸️</div>
-          <div>
-            <div class="pc-name"><a href="https://www.cognee.ai" target="_blank" rel="noopener">Cognee</a></div>
-            <div class="pc-meta">Apache 2.0 · <a href="https://github.com/topoteretes/cognee" target="_blank" rel="noopener" style="color:inherit">topoteretes/cognee</a> · 33.2K ⭐ (core repo)</div>
-          </div>
-        </div>
-        <p class="pc-desc">An LLM extracts entities and relations into a knowledge graph alongside a vector store, and recall walks both. The Hermes plugin adds remember, recall, forget, recap and code search, and shares memory with Cognee's Claude Code and Codex plugins. Local mode installs about 1 GB of dependencies.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Local free</span>
-          <span class="pill pill-blue">Local + cloud</span>
-          <span class="pill pill-purple">6 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Local and self-host free · Cloud: free for the first 1M tokens, then $1 per 1M tokens processed, plus $5 a month per extra workspace</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">BEAM-100K <strong>0.79</strong> · BEAM-10M 0.67 <small>(self-reported; Cognee calls the 10M run exploratory because settings were picked on the scored questions)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install cognee</code></a></div>
-        <div class="pc-best"><strong>Best for:</strong> memory that's really a graph of people, projects and code, shared across several coding agents.</div>
-      </div>
-
-      <div class="provider-card" id="p-supermemory">
-        <div class="pc-header">
-          <div class="pc-icon">🔍</div>
-          <div>
-            <div class="pc-name"><a href="https://supermemory.ai" target="_blank" rel="noopener">Supermemory</a></div>
-            <div class="pc-meta">MIT apps + SDKs, closed engine · <a href="https://github.com/supermemoryai/supermemory" target="_blank" rel="noopener" style="color:inherit">supermemoryai/supermemory</a> · 31.6K ⭐ (apps + SDKs)</div>
-          </div>
-        </div>
-        <p class="pc-desc">Builds a memory graph per user (a profile plus a fact hierarchy) and pairs it with SuperRAG document search and connectors. The Hermes plugin captures each turn, recalls before each turn and re-injects profile facts periodically. The core engine is closed source; a free local server handles up to 10,000 documents.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">$5 free credit monthly</span>
-          <span class="pill pill-blue">Cloud + local</span>
-          <span class="pill pill-purple">4 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free: $5 of credits a month (about 1M memory tokens) · Pro $19/mo with $20 of credits · Max $100/mo · Scale $399/mo with SOC 2, HIPAA BAA and a self-host option</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">LongMemEval-S <strong>84.6%</strong> with GPT-5 answers <small>(self-reported) · 81.6% in a run by competitor Vectorize</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install supermemory</code></a></div>
-        <div class="pc-best"><strong>Best for:</strong> search over lots of documents, and teams that want connectors (Gmail, S3, web crawler) with a flat monthly price.</div>
-      </div>
-
-      <div class="provider-card" id="p-agentmemory">
-        <div class="pc-header">
-          <div class="pc-icon">🧩</div>
-          <div>
-            <div class="pc-name"><a href="https://github.com/rohitg00/agentmemory" target="_blank" rel="noopener">agentmemory</a></div>
-            <div class="pc-meta">Apache 2.0 · <a href="https://github.com/rohitg00/agentmemory" target="_blank" rel="noopener" style="color:inherit">rohitg00/agentmemory</a> · 30.3K ⭐</div>
-          </div>
-        </div>
-        <p class="pc-desc">Local memory built for coding agents. It captures sessions automatically and recalls with BM25 keyword search, optional on-device embeddings and a small knowledge graph, with no account or API key. One local server shares memory across 26 coding agents; the Hermes plugin connects to it and adds save, recall and search tools.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Free, no account</span>
-          <span class="pill pill-blue">Local</span>
-          <span class="pill pill-purple">3 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free and open source, no paid tier (agentmemory.space is an unrelated product)</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">No answer-accuracy score yet. Retrieval only: 84.7% recall-all@5 on LongMemEval-S <small>(self-reported)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install agentmemory</code></a><span class="pc-install-note">run the agentmemory server first</span></div>
-        <div class="pc-best"><strong>Best for:</strong> one local memory shared by Hermes, Claude Code, Codex and the other coding agents you use.</div>
-      </div>
-
-      <div class="provider-card" id="p-memori">
-        <div class="pc-header">
-          <div class="pc-icon">🗂️</div>
-          <div>
-            <div class="pc-name"><a href="https://memorilabs.ai" target="_blank" rel="noopener">Memori</a></div>
-            <div class="pc-meta">Apache 2.0 SDK · <a href="https://github.com/MemoriLabs/Memori" target="_blank" rel="noopener" style="color:inherit">MemoriLabs/Memori</a> · 17.6K ⭐</div>
-          </div>
-        </div>
-        <p class="pc-desc">Turns chat into structured facts and summaries with project and session attribution, so recall stays short: about 721 tokens per answer in its own LoCoMo test. The Hermes provider uses Memori Cloud only and installs through Memori's own hermes-memori tool rather than the plugin catalog.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Free developer key</span>
-          <span class="pill pill-red">Cloud only</span>
-          <span class="pill pill-purple">5 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free key: 5,000 memories created and 15,000 recalled a month · paid production plans start at $60K a year</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">LoCoMo <strong>87.0%</strong> with GPT-4.1-mini answers <small>(self-reported)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes-memori install</code></a><span class="pc-install-note">external installer, see the Hermes docs</span></div>
-        <div class="pc-best"><strong>Best for:</strong> trying structured, low-token recall on the free key. The paid plans are aimed at enterprises.</div>
-      </div>
-
-      <div class="provider-card" id="p-honcho">
-        <div class="pc-header">
-          <div class="pc-icon">👤</div>
-          <div>
-            <div class="pc-name"><a href="https://honcho.dev" target="_blank" rel="noopener">Honcho</a></div>
-            <div class="pc-meta">AGPL-3.0 · <a href="https://github.com/plastic-labs/honcho" target="_blank" rel="noopener" style="color:inherit">plastic-labs/honcho</a> · 8.1K ⭐</div>
-          </div>
-        </div>
-        <p class="pc-desc">Models people, not just facts. Honcho stores messages, reasons about each user in the background, and answers questions about them on demand. Each Hermes profile becomes its own AI peer watching the same user, so a coding profile and a writing profile build separate views of you. Cloud or self-hosted.</p>
-        <div class="pc-tags">
-          <span class="pill pill-amber">$5 + $5/mo credit</span>
-          <span class="pill pill-blue">Cloud + self-host</span>
-          <span class="pill pill-purple">5 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">$2 per 1M tokens stored · context reads free · reasoning queries $0.001 to $0.50 each · new accounts get $5, plus $5 a month with a card on file · self-host free</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">LongMemEval-S <strong>90.4%</strong> · LoCoMo 89.9% · BEAM-10M 40.9% <small>(self-reported, Dec 2025, with the small Claude Haiku 4.5 model)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install honcho</code></a></div>
-        <div class="pc-best"><strong>Best for:</strong> personal assistants and multi-user gateways where the agent should learn each person's preferences and style.</div>
-      </div>
-
-      <div class="provider-card" id="p-reme">
-        <div class="pc-header">
-          <div class="pc-icon">📝</div>
-          <div>
-            <div class="pc-name"><a href="https://reme.agentscope.io" target="_blank" rel="noopener">ReMe</a></div>
-            <div class="pc-meta">Apache 2.0 · <a href="https://github.com/agentscope-ai/ReMe" target="_blank" rel="noopener" style="color:inherit">agentscope-ai/ReMe</a> · 3.8K ⭐</div>
-          </div>
-        </div>
-        <p class="pc-desc">From the AgentScope project. Memory is plain Markdown in a workspace folder (daily notes and digests) that you can read and edit, with BM25 recall that needs no embedding model. The Hermes provider recalls before each turn and records after it, in-process or through a local ReMe service. It adds no tools for the model.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Free</span>
-          <span class="pill pill-blue">Local</span>
-          <span class="pill pill-purple">Automatic, no tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free and open source · bring an LLM for memory extraction</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">LongMemEval <strong>89.4%</strong> on ReMe's cleaned S split · BEAM-1M 65.0% <small>(self-reported)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install reme</code></a></div>
-        <div class="pc-best"><strong>Best for:</strong> memory you can open in a text editor, with nothing to sign up for.</div>
-      </div>
-
-      <div class="provider-card" id="p-mnemosyne">
-        <div class="pc-header">
-          <div class="pc-icon">🏺</div>
-          <div>
-            <div class="pc-name"><a href="https://github.com/mnemosyne-oss/mnemosyne" target="_blank" rel="noopener">Mnemosyne</a></div>
-            <div class="pc-meta">MIT · <a href="https://github.com/mnemosyne-oss/mnemosyne" target="_blank" rel="noopener" style="color:inherit">mnemosyne-oss/mnemosyne</a> · 3.6K ⭐</div>
-          </div>
-        </div>
-        <p class="pc-desc">A local SQLite memory layer with vector plus full-text search, episodic consolidation and a temporal knowledge graph, with no cloud at all. It exposes 41 tools to the model, the most of any provider here, covering personas, graph queries, import and export, and diagnostics.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Free</span>
-          <span class="pill pill-blue">Local</span>
-          <span class="pill pill-purple">41 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free and open source</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">BEAM-100K <strong>65.2%</strong> with a Llama 3.3 70B reader <small>(self-reported; an earlier LongMemEval figure was withdrawn pending a re-run)</small></span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install mnemosyne</code></a></div>
-        <div class="pc-best"><strong>Best for:</strong> power users who want fully local memory with a lot of agent-facing control.</div>
-      </div>
-
-      <div class="provider-card" id="p-holographic">
-        <div class="pc-header">
-          <div class="pc-icon">💾</div>
-          <div>
-            <div class="pc-name"><a href="https://github.com/itpartypattaya/hermes-plugin-holographic" target="_blank" rel="noopener">Holographic</a></div>
-            <div class="pc-meta">MIT · <a href="https://github.com/itpartypattaya/hermes-plugin-holographic" target="_blank" rel="noopener" style="color:inherit">itpartypattaya/hermes-plugin-holographic</a> · 36 ⭐ (plugin repo)</div>
-          </div>
-        </div>
-        <p class="pc-desc">A local SQLite fact store with full-text search, trust scores that learn from your feedback, and Holographic Reduced Representations for algebraic queries: everything about one entity, facts that link several, and contradiction checks. No API keys, no network calls and no LLM required. It used to ship inside Hermes and now installs from the catalog with the same data.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Fully local, free</span>
-          <span class="pill pill-blue">Local only</span>
-          <span class="pill pill-purple">2 tools</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free</span></div>
-          <div class="pc-row"><span class="pc-row-label">Benchmarks</span><span class="pc-row-val">Not published</span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes plugins install holographic</code></a></div>
-        <div class="pc-best"><strong>Best for:</strong> instant, fully private memory with no accounts and nothing to configure.</div>
-      </div>
-
-      <div class="provider-card builtin" id="p-builtin">
-        <div class="pc-header">
-          <div class="pc-icon">📒</div>
-          <div>
-            <div class="pc-name"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener">Built-in memory</a></div>
-            <div class="pc-meta">Part of Hermes · MEMORY.md + USER.md · always on</div>
-          </div>
-        </div>
-        <p class="pc-desc">Every Hermes install keeps two small Markdown files: notes the agent writes for itself, and a profile of you. They stay on whichever provider you pick, and an external provider adds to them rather than replacing them. Hermes also mirrors writes to these files into the provider you enable.</p>
-        <div class="pc-tags">
-          <span class="pill pill-green">Included</span>
-          <span class="pill pill-blue">Local</span>
-          <span class="pill pill-purple">Always on</span>
-        </div>
-        <div class="pc-rows">
-          <div class="pc-row"><span class="pc-row-label">Pricing</span><span class="pc-row-val">Free, part of Hermes</span></div>
-          <div class="pc-row"><span class="pc-row-label">Limits</span><span class="pc-row-val">Small and curated by design; not built for searching long histories</span></div>
-        </div>
-        <div class="pc-install"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" target="_blank" rel="noopener"><code>hermes memory status</code></a><span class="pc-install-note">shows what's active</span></div>
-        <div class="pc-best"><strong>Best for:</strong> a handful of standing facts and preferences. Add a provider when you need recall across months of sessions.</div>
-      </div>
-
-    </div>
-  </div>
-</section>
-
-<!-- USE CASE PICKS -->
-<section id="picks" class="alt">
-  <div class="section-inner">
-    <div class="section-label">Use case recommendations</div>
-    <div class="section-title">Just tell me what to pick</div>
-    <p class="section-sub">Ranked by fit for each scenario, not by partnership or popularity.</p>
-
-    <div class="picker-grid">
-
-      <div class="picker-card">
-        <div class="picker-icon">💻</div>
-        <div class="picker-title">Coding agents</div>
-        <p class="picker-sub">State across long sessions and exact technical recall: file names, ports, error strings.</p>
-        <ul class="picker-picks">
-          <li class="picker-pick">
-            <div class="pick-rank">1</div>
-            <div><span class="pick-name">Hindsight</span>: <span class="pick-why">keyword and entity recall finds exact names; reflect summarizes what happened across sessions.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">2</div>
-            <div><span class="pick-name">agentmemory</span>: <span class="pick-why">captures coding sessions automatically and shares one memory with Claude Code, Codex and others.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">3</div>
-            <div><span class="pick-name">Cognee</span>: <span class="pick-why">has a code-search tool, and shares memory with its Claude Code and Codex plugins.</span></div>
-          </li>
-        </ul>
-      </div>
-
-      <div class="picker-card green-accent">
-        <div class="picker-icon">📚</div>
-        <div class="picker-title">Documents and knowledge bases</div>
-        <p class="picker-sub">Indexing a large, growing body of content and pulling the right slice at query time.</p>
-        <ul class="picker-picks">
-          <li class="picker-pick">
-            <div class="pick-rank">1</div>
-            <div><span class="pick-name">Supermemory</span>: <span class="pick-why">SuperRAG handles PDFs, images and audio, with Gmail, S3 and crawler connectors.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">2</div>
-            <div><span class="pick-name">OpenViking</span>: <span class="pick-why">filesystem-style hierarchy with tiered loading; ingests URLs and documents.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">3</div>
-            <div><span class="pick-name">Cognee</span>: <span class="pick-why">builds a knowledge graph over your documents.</span></div>
-          </li>
-        </ul>
-      </div>
-
-      <div class="picker-card orange-accent">
-        <div class="picker-icon">🧑‍💬</div>
-        <div class="picker-title">Learning the user</div>
-        <p class="picker-sub">The agent should pick up your style, preferences and habits and use them in every session.</p>
-        <ul class="picker-picks">
-          <li class="picker-pick">
-            <div class="pick-rank">1</div>
-            <div><span class="pick-name">Honcho</span>: <span class="pick-why">the only provider here built to model people; each Hermes profile keeps its own view of you.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">2</div>
-            <div><span class="pick-name">Supermemory</span>: <span class="pick-why">keeps a per-user profile and re-injects it into the conversation.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">3</div>
-            <div><span class="pick-name">Mem0</span>: <span class="pick-why">fact extraction tracks preferences well; its dedicated user profiles need a custom plan.</span></div>
-          </li>
-        </ul>
-      </div>
-
-      <div class="picker-card purple-accent">
-        <div class="picker-icon">🔑</div>
-        <div class="picker-title">No accounts, no API keys</div>
-        <p class="picker-sub">Memory that works the moment it's installed.</p>
-        <ul class="picker-picks">
-          <li class="picker-pick">
-            <div class="pick-rank">1</div>
-            <div><span class="pick-name">Holographic</span>: <span class="pick-why">no LLM, no network, one SQLite file.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">2</div>
-            <div><span class="pick-name">agentmemory</span>: <span class="pick-why">keyless keyword search out of the box, optional on-device embeddings.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">3</div>
-            <div><span class="pick-name">Mnemosyne</span>: <span class="pick-why">local SQLite with vector and full-text search, zero cloud.</span></div>
-          </li>
-        </ul>
-      </div>
-
-      <div class="picker-card red-accent">
-        <div class="picker-icon">🔐</div>
-        <div class="picker-title">Privacy and air-gapped setups</div>
-        <p class="picker-sub">Data never leaves your infrastructure.</p>
-        <ul class="picker-picks">
-          <li class="picker-pick">
-            <div class="pick-rank">1</div>
-            <div><span class="pick-name">Holographic</span>: <span class="pick-why">a file on disk with zero network calls.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">2</div>
-            <div><span class="pick-name">Hindsight</span>: <span class="pick-why">fully local with an open-weight model; its own decision, rerank and embedding models are open weights too.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">3</div>
-            <div><span class="pick-name">ReMe</span>: <span class="pick-why">plain files in a folder, served on 127.0.0.1 or in-process.</span></div>
-          </li>
-        </ul>
-      </div>
-
-      <div class="picker-card blue-accent">
-        <div class="picker-icon">🏢</div>
-        <div class="picker-title">Commercial and enterprise</div>
-        <p class="picker-sub">SSO, audit logs, SLAs and a license your lawyers will accept.</p>
-        <ul class="picker-picks">
-          <li class="picker-pick">
-            <div class="pick-rank">1</div>
-            <div><span class="pick-name">Hindsight</span>: <span class="pick-why">MIT; Enterprise runs in your cloud or on-prem with SSO and up to a 99.95% SLA.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">2</div>
-            <div><span class="pick-name">Supermemory</span>: <span class="pick-why">Scale plan adds SOC 2, a HIPAA BAA and a self-host option.</span></div>
-          </li>
-          <li class="picker-pick">
-            <div class="pick-rank">3</div>
-            <div><span class="pick-name">Mem0</span>: <span class="pick-why">Apache-licensed SDK; a custom contract adds SSO, audit logs and on-prem.</span></div>
-          </li>
-        </ul>
-      </div>
-
-    </div>
-  </div>
-</section>
-
-<!-- CONFIG SNIPPETS -->
-<section id="config">
-  <div class="section-inner">
-    <div class="section-label">Setup</div>
-    <div class="section-title">Get started in two commands</div>
-    <p class="section-sub">Install the plugin from the catalog, then pick it in the setup wizard. Keys go in <code class="inline-code">~/.hermes/.env</code>, never in chat.</p>
-
-    <div class="config-grid">
-      <div class="config-card">
-        <div class="config-header">Hindsight (free, local)</div>
-        <div class="config-body">hermes plugins install hindsight
+<h2>Get started in two commands</h2>
+<p class="lead">Install the plugin from the catalog, then pick it in the setup wizard. Keys go in <code>~/.hermes/.env</code>, never in chat.</p>
+<div class="grid">
+<div class="card">
+<h3>Hindsight (free, local)</h3>
+<pre tabindex="0" role="region" aria-label="Memory configuration command example 1"><code>hermes plugins install hindsight
 hermes memory setup
-<span class="cfg-comment"># choose local_embedded mode</span>
-<span class="cfg-comment"># bring any LLM key, or a local model</span></div>
-      </div>
-      <div class="config-card">
-        <div class="config-header">Honcho (cloud or self-host)</div>
-        <div class="config-body">hermes plugins install honcho
+<span class="muted"># choose local_embedded mode</span>
+<span class="muted"># bring any LLM key, or a local model</span></code></pre>
+</div>
+<div class="card">
+<h3>Honcho (cloud or self-host)</h3>
+<pre tabindex="0" role="region" aria-label="Memory configuration command example 2"><code>hermes plugins install honcho
 hermes memory setup
-<span class="cfg-comment"># pick device auth on a headless box</span>
-<span class="cfg-comment"># or point baseUrl at your own server</span></div>
-      </div>
-      <div class="config-card">
-        <div class="config-header">Mem0 (cloud)</div>
-        <div class="config-body">hermes plugins install mem0
+<span class="muted"># pick device auth on a headless box</span>
+<span class="muted"># or point baseUrl at your own server</span></code></pre>
+</div>
+<div class="card">
+<h3>Mem0 (cloud)</h3>
+<pre tabindex="0" role="region" aria-label="Memory configuration command example 3"><code>hermes plugins install mem0
 hermes config set memory.provider mem0
-echo "MEM0_API_KEY=your-key" &gt;&gt; ~/.hermes/.env</div>
-      </div>
-      <div class="config-card">
-        <div class="config-header">Supermemory (cloud)</div>
-        <div class="config-body">hermes plugins install supermemory
+echo "MEM0_API_KEY=your-key" &gt;&gt; ~/.hermes/.env</code></pre>
+</div>
+<div class="card">
+<h3>Supermemory (cloud)</h3>
+<pre tabindex="0" role="region" aria-label="Memory configuration command example 4"><code>hermes plugins install supermemory
 hermes config set memory.provider supermemory
-echo "SUPERMEMORY_API_KEY=your-key" &gt;&gt; ~/.hermes/.env</div>
-      </div>
-      <div class="config-card">
-        <div class="config-header">OpenViking (self-host)</div>
-        <div class="config-body">openviking-server init
+echo "SUPERMEMORY_API_KEY=your-key" &gt;&gt; ~/.hermes/.env</code></pre>
+</div>
+<div class="card">
+<h3>OpenViking (self-host)</h3>
+<pre tabindex="0" role="region" aria-label="Memory configuration command example 5"><code>openviking-server init
 openviking-server
 hermes plugins install openviking
-hermes memory setup</div>
-      </div>
-      <div class="config-card">
-        <div class="config-header">What it writes to config.yaml</div>
-        <div class="config-body"><span class="cfg-key">memory</span>:
-  <span class="cfg-key">provider</span>: <span class="cfg-val">hindsight</span>
-<span class="cfg-comment"># one external provider at a time;</span>
-<span class="cfg-comment"># MEMORY.md and USER.md stay on</span></div>
-      </div>
-    </div>
-    <p style="margin-top: 18px; font-size: 0.83rem; color: var(--text-muted)">
-      Full setup and options for every provider:
-      <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" style="color: var(--blue)">hermes-agent.nousresearch.com/docs/…/memory-providers</a>
-    </p>
-  </div>
-</section>
-
-<!-- TRADEOFF SNAPSHOT -->
-<section id="tradeoffs" class="alt">
-  <div class="section-inner">
-    <div class="section-label">Best in class by axis</div>
-    <div class="section-title">If one thing matters most</div>
-    <p class="section-sub">When a single dimension drives the decision.</p>
-
-    <div class="tradeoff-grid">
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Hardest test (BEAM-10M)</div>
-        <div class="tradeoff-winner">Hindsight</div>
-        <div class="tradeoff-note">64.1% at 10M tokens. Cognee reports 0.67 but calls it in-sample; Mem0 48.6%, Honcho 40.9%.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">LongMemEval-S</div>
-        <div class="tradeoff-winner">Hindsight / Mem0</div>
-        <div class="tradeoff-note">94.6% and 94.4%, both self-reported. A competitor re-ran Mem0's hosted product and got 73.8%.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">LoCoMo</div>
-        <div class="tradeoff-winner">Mem0 / Hindsight</div>
-        <div class="tradeoff-note">92.5% and 92.0%, self-reported. Honcho 89.9%, Memori 87.0%.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Tested on Hermes itself</div>
-        <div class="tradeoff-winner">OpenViking</div>
-        <div class="tradeoff-note">LoCoMo went from 33.4% with Hermes's built-in memory to 82.9% (vendor-run).</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">User modeling</div>
-        <div class="tradeoff-winner">Honcho</div>
-        <div class="tradeoff-note">Reasons about each person; every Hermes profile gets its own peer.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Most private</div>
-        <div class="tradeoff-winner">Holographic</div>
-        <div class="tradeoff-note">One SQLite file, zero network calls, no LLM.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Easiest to start</div>
-        <div class="tradeoff-winner">Holographic</div>
-        <div class="tradeoff-note">One install command, no account, nothing to configure.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Biggest community</div>
-        <div class="tradeoff-winner">Mem0</div>
-        <div class="tradeoff-note">68.8K GitHub stars and SDKs for Python and TypeScript.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Cloud free tier</div>
-        <div class="tradeoff-winner">Mem0</div>
-        <div class="tradeoff-note">50K adds and 10K retrievals a month with your own LLM key (you pay your LLM provider).</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Cheapest managed</div>
-        <div class="tradeoff-winner">Honcho / Hindsight</div>
-        <div class="tradeoff-note">Usage-based, no monthly fee. Supermemory is $19 a month flat.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Token efficiency</div>
-        <div class="tradeoff-winner">OpenViking</div>
-        <div class="tradeoff-note">Tiered loading: 34% fewer input tokens on Hermes, up to 91% on other agents.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Commercial-safe license</div>
-        <div class="tradeoff-winner">Hindsight / Mem0 / Cognee</div>
-        <div class="tradeoff-note">MIT and Apache 2.0. Honcho and OpenViking are AGPL.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Shared across coding agents</div>
-        <div class="tradeoff-winner">agentmemory</div>
-        <div class="tradeoff-note">One local memory for 26 coding agents, Hermes included.</div>
-      </div>
-      <div class="tradeoff-card">
-        <div class="tradeoff-label">Most tools for the agent</div>
-        <div class="tradeoff-winner">Mnemosyne</div>
-        <div class="tradeoff-note">41 tools, from graph queries to persona management.</div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- LEFT OFF -->
-<section id="left-off">
-  <div class="section-inner">
-    <div class="section-label">Not on the list</div>
-    <div class="section-title">Left off, and why</div>
-    <p class="section-sub">Well-known names that are fading from Hermes, or that don't have a maintained Hermes plugin yet.</p>
-
-    <div class="watch-grid">
-      <div class="watch-card">
-        <span class="pill pill-red">Leaving Hermes core</span>
-        <div class="tradeoff-winner"><a href="https://github.com/campfirein/byterover-cli" target="_blank" rel="noopener">ByteRover</a></div>
-        <div class="tradeoff-note">Its CLI repo was archived in June 2026, Hermes lists the plugin as unmaintained, and the install script now returns 404.</div>
-      </div>
-      <div class="watch-card">
-        <span class="pill pill-red">Leaving Hermes core</span>
-        <div class="tradeoff-winner"><a href="https://www.retaindb.com" target="_blank" rel="noopener">RetainDB</a></div>
-        <div class="tradeoff-note">Hermes lists the plugin as unmaintained. The API still answers, but its app and docs sites were down when we checked.</div>
-      </div>
-      <div class="watch-card">
-        <span class="pill pill-purple">No native plugin</span>
-        <div class="tradeoff-winner"><a href="https://github.com/getzep/graphiti" target="_blank" rel="noopener">Zep / Graphiti</a></div>
-        <div class="tradeoff-note">32.7K stars and a self-reported 94.7% on LoCoMo, but only tiny community providers exist. Use it through its MCP server.</div>
-      </div>
-      <div class="watch-card">
-        <span class="pill pill-purple">No native plugin</span>
-        <div class="tradeoff-winner"><a href="https://www.letta.com" target="_blank" rel="noopener">Letta</a></div>
-        <div class="tradeoff-note">Only a one-star community provider so far.</div>
-      </div>
-      <div class="watch-card">
-        <span class="pill pill-amber">Community plugins only</span>
-        <div class="tradeoff-winner"><a href="https://github.com/garrytan/gbrain" target="_blank" rel="noopener">GBrain</a></div>
-        <div class="tradeoff-note">Garry Tan's 32.7K-star knowledge brain. Both catalog plugins say they aren't affiliated with it, and its 93.6% LongMemEval-S score was tuned on that same set.</div>
-      </div>
-      <div class="watch-card">
-        <span class="pill pill-blue">Official adapter, not in the catalog</span>
-        <div class="tradeoff-winner"><a href="https://github.com/MemTensor/MemOS" target="_blank" rel="noopener">MemOS / EverOS</a></div>
-        <div class="tradeoff-note">Both projects ship their own Hermes provider (MemOS as a v2 beta, EverOS as a pre-release). Worth watching.</div>
-      </div>
-      <div class="watch-card">
-        <span class="pill pill-green">100+ more</span>
-        <div class="tradeoff-winner"><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins" target="_blank" rel="noopener">The plugin catalog</a></div>
-        <div class="tradeoff-note">Over 100 memory plugins, mostly small community projects. This page covers the popular, maintained ones.</div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<div class="cta-strip">
-  <h2>Ready to add memory to Hermes?</h2>
-  <p>Setup guides, config options and per-profile behavior for every provider are in the docs.</p>
-  <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers">Memory provider docs →</a>
+hermes memory setup</code></pre>
 </div>
+<div class="card">
+<h3>What it writes to config.yaml</h3>
+<pre tabindex="0" role="region" aria-label="Memory configuration command example 6"><code><span class="muted">memory</span>:
+  <span class="muted">provider</span>: <span>hindsight</span>
+<span class="muted"># one external provider at a time;</span>
+<span class="muted"># MEMORY.md and USER.md stay on</span></code></pre>
+</div>
+</div>
+<p class="muted">
+      Full setup and options for every provider:
+      <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers">hermes-agent.nousresearch.com/docs/…/memory-providers</a>
+</p>
+</div>
+</section>
 
-<script>
-  var themeToggle = document.getElementById('theme-toggle');
-  function setTheme(t) {
-    document.documentElement.setAttribute('data-theme', t);
-    localStorage.setItem('theme', t);
-    themeToggle.textContent = t === 'light' ? '🌙' : '☀️';
-  }
-  setTheme(localStorage.getItem('theme') || 'dark');
-  themeToggle.addEventListener('click', function() {
-    setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
-  });
+<section class="section" id="tradeoffs">
+<div class="container">
 
-  var ham = document.getElementById('memory-hamburger');
-  var menu = document.getElementById('memory-mobile-menu');
-  ham.addEventListener('click', function(e) {
-    e.stopPropagation();
-    ham.classList.toggle('open');
-    menu.classList.toggle('open');
-  });
-  document.addEventListener('click', function(e) {
-    if (!menu.contains(e.target) && e.target !== ham) {
-      ham.classList.remove('open');
-      menu.classList.remove('open');
-    }
-  });
-  menu.querySelectorAll('a').forEach(function(a) {
-    a.addEventListener('click', function() {
-      ham.classList.remove('open');
-      menu.classList.remove('open');
-    });
-  });
-</script>
-</body>
+<h2>If one thing matters most</h2>
+<p class="lead">When a single dimension drives the decision.</p>
+<div class="grid">
+<div class="card">
+<div class="meta">Hardest test (BEAM-10M)</div>
+<h3>Hindsight</h3>
+<p>64.1% at 10M tokens. Cognee reports 0.67 but calls it in-sample; Mem0 48.6%, Honcho 40.9%.</p>
+</div>
+<div class="card">
+<div class="meta">LongMemEval-S</div>
+<h3>Hindsight / Mem0</h3>
+<p>94.6% and 94.4%, both self-reported. A competitor re-ran Mem0's hosted product and got 73.8%.</p>
+</div>
+<div class="card">
+<div class="meta">LoCoMo</div>
+<h3>Mem0 / Hindsight</h3>
+<p>92.5% and 92.0%, self-reported. Honcho 89.9%, Memori 87.0%.</p>
+</div>
+<div class="card">
+<div class="meta">Tested on Hermes itself</div>
+<h3>OpenViking</h3>
+<p>LoCoMo went from 33.4% with Hermes's built-in memory to 82.9% (vendor-run).</p>
+</div>
+<div class="card">
+<div class="meta">User modeling</div>
+<h3>Honcho</h3>
+<p>Reasons about each person; every Hermes profile gets its own peer.</p>
+</div>
+<div class="card">
+<div class="meta">Most private</div>
+<h3>Holographic</h3>
+<p>One SQLite file, zero network calls, no LLM.</p>
+</div>
+<div class="card">
+<div class="meta">Easiest to start</div>
+<h3>Holographic</h3>
+<p>One install command, no account, nothing to configure.</p>
+</div>
+<div class="card">
+<div class="meta">Biggest community</div>
+<h3>Mem0</h3>
+<p>68.8K GitHub stars and SDKs for Python and TypeScript.</p>
+</div>
+<div class="card">
+<div class="meta">Cloud free tier</div>
+<h3>Mem0</h3>
+<p>50K adds and 10K retrievals a month with your own LLM key (you pay your LLM provider).</p>
+</div>
+<div class="card">
+<div class="meta">Cheapest managed</div>
+<h3>Honcho / Hindsight</h3>
+<p>Usage-based, no monthly fee. Supermemory is $19 a month flat.</p>
+</div>
+<div class="card">
+<div class="meta">Token efficiency</div>
+<h3>OpenViking</h3>
+<p>Tiered loading: 34% fewer input tokens on Hermes, up to 91% on other agents.</p>
+</div>
+<div class="card">
+<div class="meta">Commercial-safe license</div>
+<h3>Hindsight / Mem0 / Cognee</h3>
+<p>MIT and Apache 2.0. Honcho and OpenViking are AGPL.</p>
+</div>
+<div class="card">
+<div class="meta">Shared across coding agents</div>
+<h3>agentmemory</h3>
+<p>One local memory for 26 coding agents, Hermes included.</p>
+</div>
+<div class="card">
+<div class="meta">Most tools for the agent</div>
+<h3>Mnemosyne</h3>
+<p>41 tools, from graph queries to persona management.</p>
+</div>
+</div>
+</div>
+</section>
+
+<section class="section" id="left-off">
+<div class="container">
+
+<h2>Left off, and why</h2>
+<p class="lead">Well-known names that are fading from Hermes, or that don't have a maintained Hermes plugin yet.</p>
+<div class="grid">
+<div class="card">
+<span class="chip">Leaving Hermes core</span>
+<h3><a href="https://github.com/campfirein/byterover-cli" rel="noopener" target="_blank">ByteRover</a></h3>
+<p>Its CLI repo was archived in June 2026, Hermes lists the plugin as unmaintained, and the install script now returns 404.</p>
+</div>
+<div class="card">
+<span class="chip">Leaving Hermes core</span>
+<h3><a href="https://www.retaindb.com" rel="noopener" target="_blank">RetainDB</a></h3>
+<p>Hermes lists the plugin as unmaintained. The API still answers, but its app and docs sites were down when we checked.</p>
+</div>
+<div class="card">
+<span class="chip">No native plugin</span>
+<h3><a href="https://github.com/getzep/graphiti" rel="noopener" target="_blank">Zep / Graphiti</a></h3>
+<p>32.7K stars and a self-reported 94.7% on LoCoMo, but only tiny community providers exist. Use it through its MCP server.</p>
+</div>
+<div class="card">
+<span class="chip">No native plugin</span>
+<h3><a href="https://www.letta.com" rel="noopener" target="_blank">Letta</a></h3>
+<p>Only a one-star community provider so far.</p>
+</div>
+<div class="card">
+<span class="chip">Community plugins only</span>
+<h3><a href="https://github.com/garrytan/gbrain" rel="noopener" target="_blank">GBrain</a></h3>
+<p>Garry Tan's 32.7K-star knowledge brain. Both catalog plugins say they aren't affiliated with it, and its 93.6% LongMemEval-S score was tuned on that same set.</p>
+</div>
+<div class="card">
+<span class="chip">Official adapter, not in the catalog</span>
+<h3><a href="https://github.com/MemTensor/MemOS" rel="noopener" target="_blank">MemOS / EverOS</a></h3>
+<p>Both projects ship their own Hermes provider (MemOS as a v2 beta, EverOS as a pre-release). Worth watching.</p>
+</div>
+<div class="card">
+<span class="chip">100+ more</span>
+<h3><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins" rel="noopener" target="_blank">The plugin catalog</a></h3>
+<p>Over 100 memory plugins, mostly small community projects. This page covers the popular, maintained ones.</p>
+</div>
+</div>
+</div>
+</section>
+<section class="section"><div class="container"><div class="prose"><h2>Ready to add memory to Hermes?</h2><p>Setup guides, config options and per-profile behavior for every provider are in the docs.</p><a class="btn btn-primary" href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers">Memory provider docs →</a></div></div></section>
+
+</main><footer class="site-footer"><div class="container">
+<span>Community project. Not affiliated with Nous Research.</span>
+<span class="footer-links"><a href="https://github.com/nesquena/hermes-webui">GitHub</a><a href="https://hermes-agent.nousresearch.com/">Official Hermes Agent site</a></span>
+</div></footer></body>
 </html>

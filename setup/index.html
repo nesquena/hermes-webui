@@ -393,6 +393,7 @@ hermes model          <span class="c-cmt"># choose your LLM provider</span></cod
       <div class="code-head"><span class="code-label">bash — start with a password</span><button class="code-copy">Copy</button></div>
       <pre><code>HERMES_WEBUI_PASSWORD&#61;your-secret ./start.sh</code></pre>
     </div>
+<p>Need an agent to sign into other websites? Read <a href="../guides/agent-credentials/">passwords and website logins for agents</a>.</p>
 
     <h3 class="sub reveal">Verify it's running</h3>
     <div class="code reveal">
@@ -417,7 +418,7 @@ hermes model          <span class="c-cmt"># choose your LLM provider</span></cod
     <div class="opt-grid stagger reveal">
       <div class="opt">
         <h4><svg viewBox="0 0 640 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M256 64l128 0 0 64-128 0 0-64zM240 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l48 0 0 32L32 224c-17.7 0-32 14.3-32 32s14.3 32 32 32l96 0 0 32-48 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l160 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48l-48 0 0-32 256 0 0 32-48 0c-26.5 0-48 21.5-48 48l0 96c0 26.5 21.5 48 48 48l160 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48l-48 0 0-32 96 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-256 0 0-32 48 0c26.5 0 48-21.5 48-48l0-96c0-26.5-21.5-48-48-48L240 0zM96 448l0-64 128 0 0 64L96 448zm320-64l128 0 0 64-128 0 0-64z"/></svg> <span class="opt-name">Tailscale</span> <span class="opt-tag private">Easiest</span></h4>
-        <p><a href="https://tailscale.com/download" target="_blank">Tailscale</a> puts your devices on one private network — nothing is exposed to the internet. Install on both, sign into the same tailnet, then bind the server to all interfaces:</p>
+        <p><a href="https://tailscale.com/download" target="_blank">Tailscale</a> puts your devices on one private network. Install it on both and sign into the same tailnet. The command below listens on every interface, so on a machine with a public IP, firewall port 8787.</p>
         <div class="code">
           <div class="code-head"><span class="code-label">on the server</span><button class="code-copy">Copy</button></div>
           <pre><code>HERMES_WEBUI_HOST=0.0.0.0 \
@@ -541,7 +542,7 @@ cloudflared tunnel \
     </div>
     <div class="callout reveal">
       <span class="icon-tile"><svg viewBox="0 0 384 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M16 64C16 28.7 44.7 0 80 0L304 0c35.3 0 64 28.7 64 64l0 384c0 35.3-28.7 64-64 64L80 512c-35.3 0-64-28.7-64-64L16 64zM224 448a32 32 0 1 0 -64 0 32 32 0 1 0 64 0zM304 64L80 64l0 320 224 0 0-320z"/></svg></span>
-      <div>Most people on a phone use their <b>Tailscale</b> address or <b>Cloudflare</b> hostname — <code>127.0.0.1</code> only works on the same machine as the server. After entering the URL, tap <b>Test Connection</b>, then sign in. Your URL is stored on-device; your data stays on your server.</div>
+      <div>Most people on a phone use their <b>Tailscale</b> address or <b>Cloudflare</b> hostname — <code>127.0.0.1</code> only works on the same machine as the server. After entering the URL, tap <b>Test Connection</b>, then sign in. Your URL is stored on-device. The app connects to your server; your chosen model and connected services may still receive task data.</div>
     </div>
   </div>
 </section>

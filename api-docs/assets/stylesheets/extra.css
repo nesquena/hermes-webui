@@ -1,0 +1,93 @@
+/* get-hermes.ai theme for MkDocs Material. Same tokens as the site's /site.css.
+   Fonts: fonts.css (self-hosted; theme.font: false). Toolchain: requirements.txt. */
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #ffffff;
+  --md-default-fg-color: #1f2328;
+  --md-default-fg-color--light: #59636e;
+  --md-default-fg-color--lighter: #8c959f;
+  --md-default-fg-color--lightest: #d0d7de;
+  --md-code-bg-color: #f6f8fa;
+  --md-code-fg-color: #1f2328;
+  --md-typeset-a-color: #946000;
+  --md-footer-bg-color: #f6f8fa;
+  --md-footer-bg-color--dark: #f6f8fa;
+  --md-footer-fg-color: #1f2328;
+  --md-footer-fg-color--light: #59636e;
+  --md-footer-fg-color--lighter: #59636e;
+  --hermes-border: #d0d7de;
+  --hermes-gold: #c07800;
+  --hermes-gold-soft: rgba(192,120,0,.08);
+}
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #0d1117;
+  --md-default-fg-color: #e6edf3;
+  --md-default-fg-color--light: #9198a1;
+  --md-default-fg-color--lighter: #6e7681;
+  --md-default-fg-color--lightest: #30363d;
+  --md-code-bg-color: #161b22;
+  --md-code-fg-color: #e6edf3;
+  --md-typeset-a-color: #f0a500;
+  --md-footer-bg-color: #161b22;
+  --md-footer-bg-color--dark: #161b22;
+  --md-footer-fg-color: #e6edf3;
+  --md-footer-fg-color--light: #9198a1;
+  --md-footer-fg-color--lighter: #9198a1;
+  --hermes-border: #30363d;
+  --hermes-gold: #f0a500;
+  --hermes-gold-soft: rgba(240,165,0,.10);
+}
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: var(--md-default-bg-color);
+  --md-primary-fg-color--light: var(--md-default-bg-color);
+  --md-primary-fg-color--dark: var(--md-default-bg-color);
+  --md-primary-bg-color: var(--md-default-fg-color);
+  --md-primary-bg-color--light: var(--md-default-fg-color--light);
+}
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: var(--md-typeset-a-color);
+  --md-accent-fg-color--transparent: var(--hermes-gold-soft);
+  --md-accent-bg-color: var(--md-default-bg-color);
+}
+/* Same 1100px grid and 64px header as the site */
+.md-grid { max-width: 1100px; }
+.md-header, .md-tabs { box-shadow: none; border-bottom: 1px solid var(--hermes-border); }
+.md-header__inner { height: 3.2rem; }
+.md-header__button.md-logo img, .md-nav__button.md-logo img { width: 28px; height: 28px; border-radius: 6px; }
+.md-header__topic:first-child { font-weight: 700; }
+.hermes-sitenav { display: none; gap: 20px; margin-right: 16px; }
+.hermes-sitenav a { color: var(--md-default-fg-color--light); font-size: .75rem; font-weight: 400; }
+.hermes-sitenav a:hover, .hermes-sitenav a[aria-current] { color: var(--md-default-fg-color); }
+@media (min-width: 76.25em) { .hermes-sitenav { display: flex; } }
+.md-search__form { background: var(--md-code-bg-color); border: 1px solid var(--hermes-border); border-radius: 6px; }
+.md-search__input { color: var(--md-default-fg-color); }
+.md-search__input::placeholder, .md-search__icon { color: var(--md-default-fg-color--light); }
+.md-search-result__meta { background: var(--md-code-bg-color); color: var(--md-default-fg-color--light); }
+/* Type */
+.md-typeset { font-size: .8rem; line-height: 1.6; }
+.md-typeset h1 { font-weight: 700; color: var(--md-default-fg-color); letter-spacing: -0.02em; font-size: 2.4rem; }
+.md-typeset h2 { font-weight: 700; letter-spacing: -0.01em; }
+.md-typeset h3 { font-weight: 600; }
+body .md-nav .md-nav__title { color: var(--md-default-fg-color); background-color: var(--md-code-bg-color); }
+.md-nav__link--active, .md-nav__item .md-nav__link--active { color: var(--md-typeset-a-color); }
+/* Code, tables, admonitions */
+.md-typeset code { border: 1px solid var(--hermes-border); border-radius: 4px; }
+.md-typeset pre { border: 1px solid var(--hermes-border); border-radius: 6px; }
+.md-typeset table:not([class]) { border: 1px solid var(--hermes-border); border-radius: 8px; box-shadow: none; font-size: .75rem; }
+.md-typeset table:not([class]) th { background: var(--md-code-bg-color); color: var(--md-default-fg-color--light); font-weight: 600; }
+.md-typeset .admonition, .md-typeset details { border-radius: 8px; box-shadow: none; }
+/* Footer: same community line as the site */
+.md-footer, .md-footer-meta { background: var(--md-footer-bg-color); color: var(--md-footer-fg-color); }
+.md-footer { border-top: 1px solid var(--hermes-border); }
+.md-copyright, .md-copyright__highlight, .md-social__link { color: var(--md-default-fg-color--light); }
+@media (max-width: 47.9375em) { .md-typeset h1 { font-size: 1.8rem; } }
+/* Permalinks: readable when shown (hover/focus) */
+.md-typeset .headerlink { color: var(--md-default-fg-color--light); }
+/* Code copy button (Material 9.7 .md-code__nav): a solid, bordered backdrop with a readable icon,
+   and code lines keep clear of it so nothing sits underneath on phones */
+.md-code__nav { background-color: var(--md-code-bg-color); border: 1px solid var(--hermes-border); border-radius: 6px; }
+.md-code__button { color: var(--md-default-fg-color--light); }
+.md-typeset pre > code { border: 0; font-variant-ligatures: none; padding-right: 3.2em; }
+/* Links in page content are underlined, so they never rely on colour alone (navigation keeps its own design) */
+.md-content .md-typeset a:not(.headerlink):not(.md-button):not(.md-annotation__index) { text-decoration: underline; text-underline-offset: 2px; }
+/* Focusable scrolling tables: a visible focus ring */
+.md-typeset__scrollwrap[role="region"]:focus-visible { outline: 2px solid var(--md-accent-fg-color); outline-offset: 2px; border-radius: 8px; }

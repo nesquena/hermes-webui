@@ -24,7 +24,7 @@
         
       
       
-      <link rel="icon" href="../assets/images/favicon.png">
+      <link rel="icon" href="../assets/favicon.svg">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
     
     
@@ -47,13 +47,11 @@
     
     
       
-        
-        
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
-        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
-      
     
+    
+      <link rel="stylesheet" href="../assets/stylesheets/fonts.css">
+    
+      <link rel="stylesheet" href="../assets/stylesheets/extra.css">
     
     <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
@@ -61,6 +59,26 @@
 
     
     
+  <link rel="preload" href="../assets/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin><script>
+    (function () {
+      try {
+        var light = localStorage.getItem("theme") === "light";
+        __md_set("__palette", {
+          index: light ? 1 : 0,
+          color: { scheme: light ? "default" : "slate", primary: "custom", accent: "custom" }
+        });
+      } catch (e) {}
+      try {
+        document.addEventListener("change", function (e) {
+          if (e.target && e.target.name === "__palette") {
+            var scheme = e.target.getAttribute("data-md-color-scheme");
+            localStorage.setItem("theme", scheme === "default" ? "light" : "dark");
+          }
+        });
+      } catch (e) {}
+    })();
+  </script>
+
   </head>
   
   
@@ -71,7 +89,7 @@
     
     
     
-    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="cyan" data-md-color-accent="cyan">
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
   
     
     <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
@@ -96,10 +114,9 @@
 
 <header class="md-header md-header--shadow" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href=".." title="Hermes Bridge API" class="md-header__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
+    <a href="/" title="get-hermes.ai home" class="md-header__button md-logo" aria-label="get-hermes.ai home" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../assets/favicon.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -122,6 +139,14 @@
         </div>
       </div>
     </div>
+    <nav class="hermes-sitenav" aria-label="Site">
+  <a href="/setup/">Setup</a>
+  <a href="/models/">Models</a>
+  <a href="/memory/">Memory</a>
+  <a href="/#compare">Compare</a>
+  <a href="/community/">Community</a>
+  <a href="/api-docs/" aria-current="true">API</a>
+</nav>
     
       
         <form class="md-header__option" data-md-component="palette">
@@ -129,7 +154,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="cyan" data-md-color-accent="cyan"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
     
       <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
@@ -139,7 +164,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="cyan" data-md-color-accent="cyan"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
     
       <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
@@ -160,7 +185,7 @@
           
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
         </label>
-        <div class="md-search" data-md-component="search" role="dialog">
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search documentation">
   <label class="md-search__overlay" for="__search"></label>
   <div class="md-search__inner" role="search">
     <form class="md-search__form" name="search">
@@ -222,10 +247,9 @@
 
 <nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href=".." title="Hermes Bridge API" class="md-nav__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
+    <a href="/" title="Hermes Bridge API" class="md-nav__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../assets/favicon.svg" alt="logo">
 
     </a>
     Hermes Bridge API
@@ -1110,17 +1134,21 @@
 </code></pre></div>
 <p>Each event on the wire is a normal SSE frame — an <code>event:</code> type line and a <code>data:</code> line carrying a JSON object:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>event: token
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>data: {&quot;text&quot;: &quot;Hello&quot;}
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>data: {"text": "Hello"}
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
 <a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>event: token
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>data: {&quot;text&quot;: &quot; world&quot;}
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>data: {"text": " world"}
 <a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
 <a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>event: done
-<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>data: {&quot;session_id&quot;: &quot;…&quot;, &quot;message_id&quot;: …, …}
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>data: {"session": {"session_id": "example", "messages": []}, "usage": {}}
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>event: stream_end
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>data: {"session_id": "example"}
 </code></pre></div>
-<p>Clients that use a generic <code>EventSource</code> see the type in <code>event.type</code> (or the <code>message</code> default) and parse <code>event.data</code> as JSON. The reference iOS client keys off the SSE <code>event:</code> field; a browser <code>EventSource</code> can <code>addEventListener('token', …)</code> per type.</p>
+<p>Example shape only, not an exhaustive payload schema.</p>
+<p>The server sends only <strong>named</strong> frames: every frame has an <code>event:</code> line followed by one JSON <code>data:</code> line. In a browser, register <code>EventSource.addEventListener('&lt;type&gt;', …)</code> for each event type you handle and parse <code>event.data</code> as JSON inside each handler. <code>onmessage</code> receives only unnamed frames, so it never fires for this stream. Native clients key off the SSE <code>event:</code> field, as the reference iOS client does.</p>
 <h2 id="the-turn-lifecycle">The turn lifecycle<a class="headerlink" href="#the-turn-lifecycle" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>POST /api/chat/start   ──▶  { &quot;stream_id&quot;: &quot;…&quot; }        (1) start a turn
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>POST /api/chat/start   ──▶  { "stream_id": "…" }        (1) start a turn
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>GET  /api/chat/stream?stream_id=…                        (2) open the SSE stream
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>        │
 <a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>        ├─ event: token            incremental assistant text  ── append
@@ -1130,7 +1158,7 @@
 <a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>        ├─ event: title            the session was auto-titled
 <a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>        ├─ event: approval  │ initial   agent is WAITING for tool approval  ⇢ respond
 <a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>        ├─ event: clarify   │ initial   agent is WAITING for an answer       ⇢ respond
-<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>        ├─ event: done             the assistant message SETTLED (final text + id)
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>        ├─ event: done             the turn SETTLED (final transcript in session.messages)
 <a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>        └─ event: stream_end       the stream is closing (turn over)
 </code></pre></div>
 <p>A typical successful turn: a burst of <code>token</code> (and <code>reasoning</code>) frames, possibly interleaved <code>tool</code> / <code>tool_complete</code> pairs, an optional <code>title</code>, then <code>done</code>, then <code>stream_end</code>.</p>
@@ -1177,8 +1205,8 @@
 </tr>
 <tr>
 <td><code>done</code></td>
-<td><code>{ "session_id", "message_id", + final message fields }</code></td>
-<td>Finalize the message: replace streamed text with the settled version, stop the typing indicator.</td>
+<td><code>{ "session": { … }, "usage": { … }, "terminal_state"?: … }</code></td>
+<td>Reconcile the final transcript using <code>session.messages</code>; do not assume a top-level <code>message_id</code> or final-text field. Not the closing frame: a normal successful turn is followed by <code>stream_end</code>. Ephemeral <code>/btw</code> turns add <code>ephemeral</code> and <code>answer</code>.</td>
 </tr>
 <tr>
 <td><code>approval</code> / <code>initial</code></td>
@@ -1197,21 +1225,27 @@
 </tr>
 <tr>
 <td><code>stream_end</code></td>
-<td>(none)</td>
+<td><code>{ "session_id" }</code></td>
 <td>The stream is over; close the <code>EventSource</code>.</td>
 </tr>
 <tr>
 <td><code>cancel</code></td>
-<td>(none)</td>
-<td>The turn was cancelled (via <code>/api/chat/cancel</code>); settle the UI as cancelled.</td>
+<td><code>{ "type": "cancelled", "message", … }</code></td>
+<td>The turn was cancelled (via <code>GET /api/chat/cancel</code>); settle the UI as cancelled and close the <code>EventSource</code>.</td>
+</tr>
+<tr>
+<td><code>apperror</code></td>
+<td><code>{ "type", "message", "details", "session_id", … }</code></td>
+<td>The turn failed. Show the message, stop the typing indicator and close the <code>EventSource</code>.</td>
 </tr>
 <tr>
 <td><code>error</code></td>
 <td><code>{ "error"/"message": "…" }</code></td>
-<td>Show the error; stop the typing indicator.</td>
+<td>Show the error; stop the typing indicator and close the <code>EventSource</code>. A browser <code>EventSource</code> also fires a payload-less <code>error</code> event on transport loss, which is not a server frame.</td>
 </tr>
 </tbody>
 </table>
+<p>On a completed turn against an isolated scratch server (stub model), <code>done</code> was followed by <code>metering</code>, <code>title_status</code>, <code>title</code> and then <code>stream_end</code>, so keep the stream open after <code>done</code>: the generated title can arrive before <code>stream_end</code>. The same turn also sent status frames not listed above (<code>context_status</code>, <code>memory_status</code>, <code>runtime_model</code>, <code>metering</code>, <code>title_status</code>); clients that do not use them ignore them.</p>
 <blockquote>
 <p>Unknown <code>event:</code> types must be <strong>ignored</strong>, not treated as errors — the protocol adds frame types over time and old clients must tolerate them. (The reference client returns <code>.ignored</code> for anything it doesn't recognize.)</p>
 </blockquote>
@@ -1220,7 +1254,7 @@
 <h2 id="interacting-with-a-live-turn">Interacting with a live turn<a class="headerlink" href="#interacting-with-a-live-turn" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Steer</strong> — <code>POST /api/chat/steer</code> injects a mid-turn nudge into the running agent without cancelling it.</li>
-<li><strong>Cancel</strong> — <code>POST /api/chat/cancel</code> (with the <code>stream_id</code>) stops the turn; expect a <code>cancel</code> frame.</li>
+<li><strong>Cancel</strong> — <code>GET /api/chat/cancel?stream_id=…</code> requests cancellation of that running turn. This <code>GET</code> changes state: do not prefetch it or retry it automatically as if it were a harmless read. A typical response is <code>{ "ok": true, "cancelled": true, "stream_id": "…" }</code>; <code>cancelled</code> is <code>false</code> when the stream is unknown or already finished, and a failed gateway stop returns <code>502</code> with <code>ok: false</code>, <code>cancelled: false</code> and an <code>error</code>. A cancelled turn ends with a <code>cancel</code> frame. Inspect the result and reconcile run/session state; not every cancellation succeeds.</li>
 </ul>
 <h2 id="the-other-sse-streams">The other SSE streams<a class="headerlink" href="#the-other-sse-streams" title="Permanent link">&para;</a></h2>
 <p>The same SSE mechanism powers two ambient, session-scoped streams a client keeps open to stay in sync even outside a chat turn:</p>
@@ -1233,7 +1267,8 @@
 <ul>
 <li>[ ] Use a client that does <strong>not</strong> buffer the whole response — stream frames as they arrive (<code>URLSession</code> bytes, <code>EventSource</code>, <code>OkHttp</code>+SSE).</li>
 <li>[ ] Parse per-<code>event:</code> type; <strong>ignore</strong> unknown types.</li>
-<li>[ ] Coalesce <code>token</code> frames into the bubble; swap to the <code>done</code> payload's final text when it arrives.</li>
+<li>[ ] Coalesce <code>token</code> frames; reconcile against <code>done.session.messages</code> when the settled transcript arrives.</li>
+<li>[ ] Close the <code>EventSource</code> on terminal frames (<code>stream_end</code>, <code>cancel</code>, <code>apperror</code>, <code>error</code>) so it does not reconnect a completed turn.</li>
 <li>[ ] Match <code>tool_complete</code> to its <code>tool</code> by id.</li>
 <li>[ ] Handle <code>approval</code>/<code>clarify</code> by opening the corresponding prompt UI and responding.</li>
 <li>[ ] Tolerate reconnect: check <code>/api/chat/stream/status</code> on foreground.</li>
@@ -1273,7 +1308,7 @@
       <div class="md-copyright">
   
     <div class="md-copyright__highlight">
-      Hermes WebUI — the bridge API layer. Self-hosted, sovereign, client-agnostic.
+      Community project. Not affiliated with Nous Research.
     </div>
   
   
@@ -1312,6 +1347,8 @@
     
     
       <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../assets/javascripts/a11y.js"></script>
       
     
   </body>

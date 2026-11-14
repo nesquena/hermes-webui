@@ -24,7 +24,7 @@
         
       
       
-      <link rel="icon" href="../assets/images/favicon.png">
+      <link rel="icon" href="../assets/favicon.svg">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
     
     
@@ -47,13 +47,11 @@
     
     
       
-        
-        
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
-        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
-      
     
+    
+      <link rel="stylesheet" href="../assets/stylesheets/fonts.css">
+    
+      <link rel="stylesheet" href="../assets/stylesheets/extra.css">
     
     <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
@@ -61,6 +59,26 @@
 
     
     
+  <link rel="preload" href="../assets/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin><script>
+    (function () {
+      try {
+        var light = localStorage.getItem("theme") === "light";
+        __md_set("__palette", {
+          index: light ? 1 : 0,
+          color: { scheme: light ? "default" : "slate", primary: "custom", accent: "custom" }
+        });
+      } catch (e) {}
+      try {
+        document.addEventListener("change", function (e) {
+          if (e.target && e.target.name === "__palette") {
+            var scheme = e.target.getAttribute("data-md-color-scheme");
+            localStorage.setItem("theme", scheme === "default" ? "light" : "dark");
+          }
+        });
+      } catch (e) {}
+    })();
+  </script>
+
   </head>
   
   
@@ -71,7 +89,7 @@
     
     
     
-    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="cyan" data-md-color-accent="cyan">
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
   
     
     <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
@@ -96,10 +114,9 @@
 
 <header class="md-header md-header--shadow" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href=".." title="Hermes Bridge API" class="md-header__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
+    <a href="/" title="get-hermes.ai home" class="md-header__button md-logo" aria-label="get-hermes.ai home" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../assets/favicon.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -122,6 +139,14 @@
         </div>
       </div>
     </div>
+    <nav class="hermes-sitenav" aria-label="Site">
+  <a href="/setup/">Setup</a>
+  <a href="/models/">Models</a>
+  <a href="/memory/">Memory</a>
+  <a href="/#compare">Compare</a>
+  <a href="/community/">Community</a>
+  <a href="/api-docs/" aria-current="true">API</a>
+</nav>
     
       
         <form class="md-header__option" data-md-component="palette">
@@ -129,7 +154,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="cyan" data-md-color-accent="cyan"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
     
       <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
@@ -139,7 +164,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="cyan" data-md-color-accent="cyan"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
     
       <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
@@ -160,7 +185,7 @@
           
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
         </label>
-        <div class="md-search" data-md-component="search" role="dialog">
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search documentation">
   <label class="md-search__overlay" for="__search"></label>
   <div class="md-search__inner" role="search">
     <form class="md-search__form" name="search">
@@ -222,10 +247,9 @@
 
 <nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href=".." title="Hermes Bridge API" class="md-nav__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
+    <a href="/" title="Hermes Bridge API" class="md-nav__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../assets/favicon.svg" alt="logo">
 
     </a>
     Hermes Bridge API
@@ -1085,56 +1109,96 @@
 <h2 id="2-check-whether-auth-is-required">2. Check whether auth is required<a class="headerlink" href="#2-check-whether-auth-is-required" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>https://your-host/api/auth/status
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;authenticated&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;password_required&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">}</span>
+<p>Illustrative response from an open server (other fields omitted):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">"auth_enabled"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"logged_in"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <ul>
-<li><code>password_required: false</code> → the instance is open; you can call the API directly.</li>
-<li><code>password_required: true</code> and <code>authenticated: false</code> → log in first (next step).</li>
+<li><code>auth_enabled: false</code> → no sign-in is configured; call the API directly. <code>logged_in</code> is always <code>false</code> on an open server, so it does <strong>not</strong> mean an auth failure there.</li>
+<li><code>auth_enabled: true</code> and <code>logged_in: true</code> → the request already carries a valid session.</li>
+<li><code>auth_enabled: true</code> and <code>logged_in: false</code> → sign in with a method the instance has configured. The password login in the next step works only when <code>password_auth_enabled</code> is <code>true</code>. Passkey, OIDC and trusted-header sign-in use their own routes (see <a href="../authentication/#probe-first-apiauthstatus">Authentication</a>).</li>
 </ul>
 <p><code>/api/auth/status</code> is public — you can always call it to probe an instance.</p>
 <h2 id="3-log-in-if-needed">3. Log in (if needed)<a class="headerlink" href="#3-log-in-if-needed" title="Permanent link">&para;</a></h2>
+<p>Only when <code>auth_enabled</code> and <code>password_auth_enabled</code> are both <code>true</code>:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>-c<span class="w"> </span>cookies.txt<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>https://your-host/api/auth/login<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;password&quot;: &quot;your-server-password&quot;}&#39;</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"password": "your-server-password"}'</span>
 </code></pre></div>
 <p>On success the server sets a session cookie (<code>hermes_session</code> by default). Send that cookie on every subsequent request. In a native client, use a cookie-storing HTTP session (<code>URLSession</code> and <code>OkHttp</code> do this automatically) — see <a href="../authentication/">Authentication</a>.</p>
 <h2 id="4-list-sessions">4. List sessions<a class="headerlink" href="#4-list-sessions" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>-b<span class="w"> </span>cookies.txt<span class="w"> </span>https://your-host/api/sessions
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;sessions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;…&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;…&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;updated_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;…&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;pinned&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">"sessions"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"session_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"…"</span><span class="p">,</span><span class="w"> </span><span class="nt">"title"</span><span class="p">:</span><span class="w"> </span><span class="s2">"…"</span><span class="p">,</span><span class="w"> </span><span class="nt">"updated_at"</span><span class="p">:</span><span class="w"> </span><span class="mf">1794632218.45</span><span class="p">,</span><span class="w"> </span><span class="nt">"pinned"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
+<p>Illustrative values. <code>updated_at</code> is Unix epoch seconds (a number, possibly fractional), not an ISO string. A brand-new session with no messages may not appear in this list yet.</p>
 <h2 id="5-start-a-streaming-conversation">5. Start a streaming conversation<a class="headerlink" href="#5-start-a-streaming-conversation" title="Permanent link">&para;</a></h2>
 <p>This is the core loop. Two steps: <strong>start</strong> a turn, then <strong>open the SSE stream</strong> to receive tokens live.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># (a) start a turn — returns a stream id</span>
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>curl<span class="w"> </span>-s<span class="w"> </span>-b<span class="w"> </span>cookies.txt<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>https://your-host/api/chat/start<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;session_id&quot;: &quot;…&quot;, &quot;message&quot;: &quot;Hello!&quot;}&#39;</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="c1"># → { &quot;stream_id&quot;: &quot;…&quot; }</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"session_id": "…", "message": "Hello!"}'</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="c1"># → { "stream_id": "…" }</span>
 <a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>
 <a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="c1"># (b) open the live stream (Server-Sent Events)</span>
-<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>curl<span class="w"> </span>-N<span class="w"> </span>-b<span class="w"> </span>cookies.txt<span class="w"> </span><span class="s2">&quot;https://your-host/api/chat/stream?stream_id=…&quot;</span>
-<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="c1"># → a sequence of `data: {…}` frames: tokens, tool calls, then a final done frame</span>
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>curl<span class="w"> </span>-N<span class="w"> </span>-b<span class="w"> </span>cookies.txt<span class="w"> </span><span class="s2">"https://your-host/api/chat/stream?stream_id=…"</span>
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="c1"># → named SSE frames, each an `event:` line plus a JSON `data:` line: token/tool</span>
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="c1">#   events, a `done` payload, then `stream_end` on the normal successful path</span>
 </code></pre></div>
 <p>The full frame format is documented in <a href="../streaming/">Streaming (SSE)</a>. That's the whole model — a native client renders those frames into the live assistant bubble exactly like the web UI does.</p>
 <h2 id="minimal-client-end-to-end">Minimal client, end to end<a class="headerlink" href="#minimal-client-end-to-end" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kd">const</span><span class="w"> </span><span class="nx">BASE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://your-host&quot;</span><span class="p">;</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="kd">const</span><span class="w"> </span><span class="nx">opts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;Content-Type&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;application/json&quot;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">};</span>
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="c1">// login (skip if password_required is false)</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">BASE</span><span class="si">}</span><span class="sb">/api/auth/login`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">opts</span><span class="p">,</span><span class="w"> </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
-<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">  </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">password</span><span class="o">:</span><span class="w"> </span><span class="nx">PW</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">});</span>
-<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>
-<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="c1">// list sessions</span>
-<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">sessions</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">BASE</span><span class="si">}</span><span class="sb">/api/sessions`</span><span class="p">,</span><span class="w"> </span><span class="nx">opts</span><span class="p">)).</span><span class="nx">json</span><span class="p">();</span>
-<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>
-<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="c1">// start a turn</span>
-<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">stream_id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">BASE</span><span class="si">}</span><span class="sb">/api/chat/start`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">opts</span><span class="p">,</span><span class="w"> </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
-<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="w">  </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">session_id</span><span class="o">:</span><span class="w"> </span><span class="nx">sessions</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">session_id</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;Hi&quot;</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">})).</span><span class="nx">json</span><span class="p">();</span>
-<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a>
-<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="c1">// stream the reply</span>
-<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a><span class="kd">const</span><span class="w"> </span><span class="nx">es</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">EventSource</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">BASE</span><span class="si">}</span><span class="sb">/api/chat/stream?stream_id=</span><span class="si">${</span><span class="nx">stream_id</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">withCredentials</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
-<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="nx">es</span><span class="p">.</span><span class="nx">onmessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">f</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span><span class="w"> </span><span class="cm">/* append f.token / handle f.type */</span><span class="w"> </span><span class="p">};</span>
+<p>This browser example runs inside an already signed-in WebUI page on the same origin. Reload the WebUI after signing in so the page carries the current session-bound CSRF token. Cookie credentials alone do not make an arbitrary cross-origin website an API client. The configuration object below is supplied by the WebUI page, not by a public token endpoint; on an instance without a password the token is an empty string and is not required. For a standalone native client, use the cookie-storing HTTP workflow above, and do not forge browser <code>Origin</code>/<code>Referer</code> headers to get past the checks.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1">// Run inside a signed-in WebUI tab (same origin), for example from its</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="c1">// developer console. Not for third-party sites. Paths assume the WebUI is</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="c1">// served at the site root. Supply onFrame(type, payload) to render your UI.</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">startExample</span><span class="p">(</span><span class="nx">onFrame</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">  </span><span class="c1">// Supplied by the WebUI shell. It is an empty string when the instance has</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">  </span><span class="c1">// no password; the server then does not require the header.</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">csrf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">window</span><span class="p">.</span><span class="nx">__HERMES_CONFIG__</span><span class="o">?</span><span class="p">.</span><span class="nx">csrfToken</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s2">""</span><span class="p">;</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">json</span><span class="p">(</span><span class="nx">path</span><span class="p">,</span><span class="w"> </span><span class="nx">init</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{})</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">headers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Headers</span><span class="p">(</span><span class="nx">init</span><span class="p">.</span><span class="nx">headers</span><span class="p">);</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">init</span><span class="p">.</span><span class="nx">body</span><span class="p">)</span><span class="w"> </span><span class="nx">headers</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s2">"Content-Type"</span><span class="p">,</span><span class="w"> </span><span class="s2">"application/json"</span><span class="p">);</span>
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">csrf</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="sr">/^(POST|PUT|PATCH|DELETE)$/i</span><span class="p">.</span><span class="nx">test</span><span class="p">(</span><span class="nx">init</span><span class="p">.</span><span class="nx">method</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s2">"GET"</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="w">      </span><span class="nx">headers</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s2">"X-Hermes-CSRF-Token"</span><span class="p">,</span><span class="w"> </span><span class="nx">csrf</span><span class="p">);</span>
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">path</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="nx">init</span><span class="p">,</span><span class="w"> </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">"same-origin"</span><span class="p">,</span><span class="w"> </span><span class="nx">headers</span><span class="w"> </span><span class="p">});</span>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a><span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span>
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">response</span><span class="p">.</span><span class="nx">ok</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="nx">payload</span><span class="p">.</span><span class="nx">error</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="sb">`HTTP </span><span class="si">${</span><span class="nx">response</span><span class="p">.</span><span class="nx">status</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">payload</span><span class="p">;</span>
+<a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a>
+<a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a><span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">sessions</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">json</span><span class="p">(</span><span class="s2">"/api/sessions"</span><span class="p">);</span>
+<a id="__codelineno-6-22" name="__codelineno-6-22" href="#__codelineno-6-22"></a><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">sessions</span><span class="o">?</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s2">"Create a conversation in the WebUI, then try again."</span><span class="p">);</span>
+<a id="__codelineno-6-23" name="__codelineno-6-23" href="#__codelineno-6-23"></a><span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">stream_id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">json</span><span class="p">(</span><span class="s2">"/api/chat/start"</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-24" name="__codelineno-6-24" href="#__codelineno-6-24"></a><span class="w">    </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">"POST"</span><span class="p">,</span>
+<a id="__codelineno-6-25" name="__codelineno-6-25" href="#__codelineno-6-25"></a><span class="w">    </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">session_id</span><span class="o">:</span><span class="w"> </span><span class="nx">sessions</span><span class="p">[</span><span class="mf">0</span><span class="p">].</span><span class="nx">session_id</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="o">:</span><span class="w"> </span><span class="s2">"Hi"</span><span class="w"> </span><span class="p">})</span>
+<a id="__codelineno-6-26" name="__codelineno-6-26" href="#__codelineno-6-26"></a><span class="w">  </span><span class="p">});</span>
+<a id="__codelineno-6-27" name="__codelineno-6-27" href="#__codelineno-6-27"></a><span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">es</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">EventSource</span><span class="p">(</span><span class="sb">`/api/chat/stream?stream_id=</span><span class="si">${</span><span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">stream_id</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<a id="__codelineno-6-28" name="__codelineno-6-28" href="#__codelineno-6-28"></a><span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">terminal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Set</span><span class="p">([</span><span class="s2">"stream_end"</span><span class="p">,</span><span class="w"> </span><span class="s2">"cancel"</span><span class="p">,</span><span class="w"> </span><span class="s2">"apperror"</span><span class="p">,</span><span class="w"> </span><span class="s2">"error"</span><span class="p">]);</span>
+<a id="__codelineno-6-29" name="__codelineno-6-29" href="#__codelineno-6-29"></a><span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">type</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="p">[</span><span class="s2">"token"</span><span class="p">,</span><span class="w"> </span><span class="s2">"reasoning"</span><span class="p">,</span><span class="w"> </span><span class="s2">"tool"</span><span class="p">,</span><span class="w"> </span><span class="s2">"tool_complete"</span><span class="p">,</span><span class="w"> </span><span class="s2">"title"</span><span class="p">,</span><span class="w"> </span><span class="s2">"done"</span><span class="p">,</span><span class="w"> </span><span class="p">...</span><span class="nx">terminal</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-30" name="__codelineno-6-30" href="#__codelineno-6-30"></a><span class="w">    </span><span class="nx">es</span><span class="p">.</span><span class="nx">addEventListener</span><span class="p">(</span><span class="nx">type</span><span class="p">,</span><span class="w"> </span><span class="nx">event</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-31" name="__codelineno-6-31" href="#__codelineno-6-31"></a><span class="w">      </span><span class="c1">// A transport error is a plain Event, not a server "error" frame.</span>
+<a id="__codelineno-6-32" name="__codelineno-6-32" href="#__codelineno-6-32"></a><span class="w">      </span><span class="c1">// EventSource may reconnect; production clients need a bounded policy.</span>
+<a id="__codelineno-6-33" name="__codelineno-6-33" href="#__codelineno-6-33"></a><span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">type</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s2">"error"</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="ow">typeof</span><span class="w"> </span><span class="nx">event</span><span class="p">.</span><span class="nx">data</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s2">"string"</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-34" name="__codelineno-6-34" href="#__codelineno-6-34"></a><span class="w">        </span><span class="nx">onFrame</span><span class="p">(</span><span class="s2">"transport_error"</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">readyState</span><span class="o">:</span><span class="w"> </span><span class="nx">es</span><span class="p">.</span><span class="nx">readyState</span><span class="w"> </span><span class="p">});</span>
+<a id="__codelineno-6-35" name="__codelineno-6-35" href="#__codelineno-6-35"></a><span class="w">        </span><span class="k">return</span><span class="p">;</span>
+<a id="__codelineno-6-36" name="__codelineno-6-36" href="#__codelineno-6-36"></a><span class="w">      </span><span class="p">}</span>
+<a id="__codelineno-6-37" name="__codelineno-6-37" href="#__codelineno-6-37"></a><span class="w">      </span><span class="kd">let</span><span class="w"> </span><span class="nx">payload</span><span class="p">;</span>
+<a id="__codelineno-6-38" name="__codelineno-6-38" href="#__codelineno-6-38"></a><span class="w">      </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-39" name="__codelineno-6-39" href="#__codelineno-6-39"></a><span class="w">        </span><span class="nx">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">event</span><span class="p">.</span><span class="nx">data</span><span class="p">);</span>
+<a id="__codelineno-6-40" name="__codelineno-6-40" href="#__codelineno-6-40"></a><span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-41" name="__codelineno-6-41" href="#__codelineno-6-41"></a><span class="w">        </span><span class="nx">es</span><span class="p">.</span><span class="nx">close</span><span class="p">();</span>
+<a id="__codelineno-6-42" name="__codelineno-6-42" href="#__codelineno-6-42"></a><span class="w">        </span><span class="nx">onFrame</span><span class="p">(</span><span class="s2">"parse_error"</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">type</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="o">:</span><span class="w"> </span><span class="nb">String</span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">});</span>
+<a id="__codelineno-6-43" name="__codelineno-6-43" href="#__codelineno-6-43"></a><span class="w">        </span><span class="k">return</span><span class="p">;</span>
+<a id="__codelineno-6-44" name="__codelineno-6-44" href="#__codelineno-6-44"></a><span class="w">      </span><span class="p">}</span>
+<a id="__codelineno-6-45" name="__codelineno-6-45" href="#__codelineno-6-45"></a><span class="w">      </span><span class="nx">onFrame</span><span class="p">(</span><span class="nx">type</span><span class="p">,</span><span class="w"> </span><span class="nx">payload</span><span class="p">);</span>
+<a id="__codelineno-6-46" name="__codelineno-6-46" href="#__codelineno-6-46"></a><span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">terminal</span><span class="p">.</span><span class="nx">has</span><span class="p">(</span><span class="nx">type</span><span class="p">))</span><span class="w"> </span><span class="nx">es</span><span class="p">.</span><span class="nx">close</span><span class="p">();</span>
+<a id="__codelineno-6-47" name="__codelineno-6-47" href="#__codelineno-6-47"></a><span class="w">    </span><span class="p">});</span>
+<a id="__codelineno-6-48" name="__codelineno-6-48" href="#__codelineno-6-48"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-6-49" name="__codelineno-6-49" href="#__codelineno-6-49"></a><span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">es</span><span class="p">;</span>
+<a id="__codelineno-6-50" name="__codelineno-6-50" href="#__codelineno-6-50"></a><span class="p">}</span>
 </code></pre></div>
+<p>The server sends <strong>named</strong> SSE frames, so register <code>addEventListener('token', …)</code>, <code>addEventListener('done', …)</code> and the other named handlers. <code>onmessage</code> only receives unnamed messages and will miss every frame. <code>done</code> carries the settled transcript; <code>stream_end</code> normally follows it and ends a successful turn. A failed turn ends with <code>apperror</code> (or <code>cancel</code> after a cancellation). This is a small wiring example: production clients also need approval/clarification UI, replay/reconciliation and bounded reconnect behaviour.</p>
 <p>Next: read <a href="../conventions/">Conventions</a> for the shared rules (session IDs, error shapes, headers), then jump to the <a href="../#endpoint-reference">endpoint reference</a> for the surface you're building.</p>
 
 
@@ -1171,7 +1235,7 @@
       <div class="md-copyright">
   
     <div class="md-copyright__highlight">
-      Hermes WebUI — the bridge API layer. Self-hosted, sovereign, client-agnostic.
+      Community project. Not affiliated with Nous Research.
     </div>
   
   
@@ -1210,6 +1274,8 @@
     
     
       <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../assets/javascripts/a11y.js"></script>
       
     
   </body>

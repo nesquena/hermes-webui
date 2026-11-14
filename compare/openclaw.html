@@ -82,7 +82,7 @@
     .btn-cta:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
     /* Layout */
     main{padding-top:var(--nav-height)}
-    .hero{padding:60px 24px 48px;background:var(--bg-primary)}
+    .hero{position:relative;overflow:hidden;padding:60px 24px 48px;background:var(--bg-primary)}
     .hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:400px;background:radial-gradient(ellipse at center,var(--accent-glow) 0%,transparent 70%);pointer-events:none}
     .container{max-width:1100px;margin:0 auto;position:relative}
     .section{padding:64px 24px}
@@ -332,7 +332,7 @@
   <section class="section section-alt">
     <div class="container">
       <h2 class="section-title">Full feature comparison</h2>
-      <div class="table-wrap">
+      <div class="table-wrap" role="region" aria-label="Full feature comparison, scroll horizontally" tabindex="0">
         <table>
           <thead>
             <tr>

@@ -1,489 +1,75 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
-  <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
-  <link rel="shortcut icon" href="/favicon.ico" />
-  <link rel="apple-touch-icon" sizes="512x512" href="/apple-touch-icon.png" />
-  <title>Hermes vs. Claude Code | Comparison</title>
-  <meta name="description" content="Claude Code is Anthropic's official agentic CLI, now spanning terminal, IDE plugin, desktop app, and browser. Strong for focused coding. Here's what's actually different." />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <style>
-    :root {
-      --bg-primary: #0d1117;
-      --bg-secondary: #161b22;
-      --bg-tertiary: #21262d;
-      --bg-card: #161b22;
-      --bg-card-hover: #1c2128;
-      --border: #30363d;
-      --border-hover: #484f58;
-      --text-primary: #e6edf3;
-      --text-secondary: #8b949e;
-      --text-muted: #6e7681;
-      --accent: #f0a500;
-      --accent-dim: #c88800;
-      --accent-glow: rgba(240,165,0,0.15);
-      --accent-subtle: rgba(240,165,0,0.08);
-      --green: #3fb950;
-      --red: #f85149;
-      --blue: #58a6ff;
-      --purple: #bc8cff;
-      --nav-height: 64px;
-      --radius: 8px;
-      --radius-lg: 12px;
-      --shadow: 0 1px 3px rgba(0,0,0,0.4),0 4px 16px rgba(0,0,0,0.3);
-    }
-    [data-theme="light"] {
-      --bg-primary: #ffffff;
-      --bg-secondary: #f6f8fa;
-      --bg-tertiary: #eaeef2;
-      --bg-card: #ffffff;
-      --bg-card-hover: #f6f8fa;
-      --border: #d0d7de;
-      --border-hover: #9198a1;
-      --text-primary: #1f2328;
-      --text-secondary: #656d76;
-      --text-muted: #9198a1;
-      --accent: #c07800;
-      --accent-dim: #a06000;
-      --accent-glow: rgba(192,120,0,0.12);
-      --accent-subtle: rgba(192,120,0,0.06);
-      --green: #1a7f37;
-      --red: #cf222e;
-      --blue: #0969da;
-      --purple: #7c3aed;
-      --shadow: 0 1px 3px rgba(0,0,0,0.1),0 4px 16px rgba(0,0,0,0.06);
-    }
-    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    html{scroll-behavior:smooth;font-size:16px;overflow-x:hidden}
-    body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg-primary);color:var(--text-primary);line-height:1.6;transition:background 0.2s,color 0.2s;-webkit-font-smoothing:antialiased}
-    a{color:var(--accent);text-decoration:none;transition:color 0.15s}
-    a:hover{color:var(--accent-dim)}
-    img{max-width:100%}
-    ::-webkit-scrollbar{width:6px;height:6px}
-    ::-webkit-scrollbar-track{background:var(--bg-secondary)}
-    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-    /* Nav */
-    #nav{position:fixed;top:0;left:0;right:0;height:var(--nav-height);background:rgba(13,17,23,0.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);z-index:1000}
-    [data-theme="light"] #nav{background:rgba(255,255,255,0.92)}
-    .nav-inner{max-width:1100px;margin:0 auto;padding:0 24px;height:100%;display:flex;align-items:center;justify-content:space-between;gap:16px}
-    .nav-logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.1rem;color:var(--text-primary);text-decoration:none;flex-shrink:0}
-    .nav-logo-icon{width:32px;height:32px;background:linear-gradient(135deg,var(--accent),var(--accent-dim));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;line-height:1}
-    .nav-back{display:flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:0.875rem;font-weight:500;padding:6px 12px;border-radius:6px;transition:color 0.15s,background 0.15s;text-decoration:none}
-    .nav-back:hover{color:var(--text-primary);background:var(--bg-tertiary)}
-    .btn-theme{background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;padding:7px 10px;border-radius:6px;font-size:15px;line-height:1;transition:border-color 0.15s,color 0.15s,background 0.15s}
-    .btn-theme:hover{border-color:var(--border-hover);color:var(--text-primary);background:var(--bg-tertiary)}
-    .btn-cta{background:var(--accent);color:#000;font-size:0.8rem;font-weight:600;padding:7px 14px;border-radius:6px;border:none;cursor:pointer;text-decoration:none;display:inline-block;transition:background 0.15s,transform 0.1s;white-space:nowrap}
-    .btn-cta:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
-    /* Layout */
-    main{padding-top:var(--nav-height)}
-    .hero{padding:60px 24px 48px;background:var(--bg-primary)}
-    .hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:400px;background:radial-gradient(ellipse at center,var(--accent-glow) 0%,transparent 70%);pointer-events:none}
-    .container{max-width:1100px;margin:0 auto;position:relative}
-    .section{padding:64px 24px}
-    .section-alt{background:var(--bg-secondary)}
-    /* Breadcrumb */
-    .breadcrumb{display:flex;align-items:center;gap:8px;font-size:0.8rem;color:var(--text-muted);margin-bottom:24px;flex-wrap:wrap}
-    .breadcrumb a{color:var(--text-muted)}
-    .breadcrumb a:hover{color:var(--accent)}
-    .breadcrumb-sep{opacity:0.4}
-    /* Hero content */
-    .page-label{font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
-    .page-title{font-size:clamp(2rem,5vw,3.2rem);font-weight:800;line-height:1.1;letter-spacing:-0.02em;margin-bottom:16px}
-    .page-sub{font-size:1.05rem;color:var(--text-secondary);max-width:680px;line-height:1.7;margin-bottom:32px}
-    /* Verdict banner */
-    .verdict{display:flex;align-items:flex-start;gap:16px;background:var(--accent-subtle);border:1px solid rgba(240,165,0,0.2);border-radius:var(--radius-lg);padding:20px 24px;margin-bottom:48px}
-    [data-theme="light"] .verdict{border-color:rgba(192,120,0,0.2)}
-    .verdict-icon{font-size:1.6rem;flex-shrink:0;line-height:1}
-    .verdict-text strong{color:var(--text-primary);display:block;margin-bottom:4px;font-size:1rem}
-    .verdict-text p{color:var(--text-secondary);font-size:0.9rem;line-height:1.6;margin:0}
-    /* Section titles */
-    .section-title{font-size:clamp(1.4rem,3vw,1.9rem);font-weight:700;margin-bottom:8px;color:var(--text-primary)}
-    .section-body{font-size:1rem;color:var(--text-secondary);max-width:720px;line-height:1.7;margin-bottom:32px}
-    /* Feature comparison grid */
-    .feature-compare{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:40px}
-    @media(max-width:700px){.feature-compare{grid-template-columns:1fr}}
-    .fc-col{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px}
-    .fc-col.hermes{border-color:var(--accent);border-width:2px}
-    .fc-col-label{font-size:0.75rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:16px;color:var(--text-muted)}
-    .fc-col.hermes .fc-col-label{color:var(--accent)}
-    .fc-col-name{font-size:1.1rem;font-weight:700;color:var(--text-primary);margin-bottom:20px}
-    .fc-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)}
-    .fc-row:last-child{border-bottom:none}
-    .fc-key{flex:1;font-size:0.875rem;color:var(--text-secondary)}
-    .fc-val{font-size:0.875rem;font-weight:500;text-align:right;min-width:60px}
-    .fc-val.yes{color:var(--green)}
-    .fc-val.no{color:var(--text-muted)}
-    .fc-val.partial{color:var(--accent)}
-    .fc-val.preview{color:var(--purple)}
-    .fc-val.cloud{color:var(--blue)}
-    .fc-val.na{color:var(--text-muted);font-style:italic}
-    /* Narrative sections */
-    .narrative{max-width:780px;min-width:0;word-break:break-word}
-    .narrative h3{font-size:1.1rem;font-weight:700;color:var(--text-primary);margin:32px 0 10px}
-    .narrative h3:first-child{margin-top:0}
-    .narrative p{font-size:0.975rem;color:var(--text-secondary);line-height:1.75;margin-bottom:16px}
-    .narrative ul{padding-left:20px;margin-bottom:16px}
-    .narrative li{font-size:0.975rem;color:var(--text-secondary);line-height:1.7;margin-bottom:6px}
-    .narrative strong{color:var(--text-primary)}
-    .narrative a{color:var(--accent)}
-    /* Inline code */
-    .narrative code,.inline-code{background:#0d1117;color:#e6edf3;font-family:'JetBrains Mono',monospace;font-size:0.85em;padding:2px 6px;border-radius:4px;border:1px solid #30363d}
-    /* Full comparison table */
-    .table-wrap{overflow-x:auto;border-radius:var(--radius-lg);border:1px solid var(--border);margin:24px 0 40px}
-    table{width:100%;border-collapse:collapse;font-size:0.875rem}
-    thead th{background:var(--bg-tertiary);color:var(--text-secondary);font-weight:600;font-size:0.78rem;letter-spacing:0.04em;text-transform:uppercase;padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
-    thead th:first-child{color:var(--text-primary)}
-    tbody tr{border-bottom:1px solid var(--border);transition:background 0.1s}
-    tbody tr:last-child{border-bottom:none}
-    tbody tr:hover{background:var(--bg-card-hover)}
-    tbody tr.hl{background:var(--accent-subtle)}
-    tbody tr.hl:hover{background:rgba(240,165,0,0.12)}
-    tbody td{padding:12px 16px;color:var(--text-secondary);vertical-align:middle}
-    tbody td:first-child{font-weight:600;color:var(--text-primary);white-space:nowrap}
-    .c-yes{color:var(--green);font-weight:600}
-    .c-no{color:var(--text-muted);font-size:0.82rem}
-    .c-partial{color:var(--accent);font-size:0.82rem}
-    .c-cloud{color:var(--blue);font-size:0.82rem}
-    .c-prev{color:var(--purple);font-size:0.82rem}
-    .c-na{color:var(--text-muted);font-size:0.82rem;font-style:italic}
-    /* Who section */
-    .who-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}
-    @media(max-width:600px){.who-grid{grid-template-columns:1fr}}
-    .who-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px}
-    .who-card.choose-hermes{border-color:var(--green)}
-    .who-card.choose-other{border-color:var(--border)}
-    .who-card-label{font-size:0.72rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;color:var(--text-muted)}
-    .who-card.choose-hermes .who-card-label{color:var(--green)}
-    .who-card ul{padding-left:18px}
-    .who-card li{font-size:0.9rem;color:var(--text-secondary);line-height:1.65;margin-bottom:6px}
-    .who-card strong{color:var(--text-primary)}
-    /* CTA footer */
-    .cta-strip{background:var(--bg-secondary);border-top:1px solid var(--border);padding:40px 24px;text-align:center}
-    .cta-strip h2{font-size:1.4rem;font-weight:700;margin-bottom:8px}
-    .cta-strip p{color:var(--text-secondary);margin-bottom:24px;font-size:0.975rem}
-    .cta-btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
-    .btn-primary{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#000;font-weight:600;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:background 0.15s,transform 0.1s}
-    .btn-primary:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
-    .btn-secondary{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-primary);font-weight:500;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:border-color 0.15s,background 0.15s}
-    .btn-secondary:hover{border-color:var(--border-hover);background:var(--bg-card-hover);color:var(--text-primary)}
-    /* Nav between compare pages */
-    .compare-nav{display:flex;flex-wrap:wrap;gap:8px;margin-top:40px;padding-top:32px;border-top:1px solid var(--border)}
-    .compare-nav-label{width:100%;font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px}
-    .cpill{display:inline-block;padding:6px 14px;border:1px solid var(--border);border-radius:100px;font-size:0.82rem;font-weight:500;color:var(--text-secondary);transition:border-color 0.15s,color 0.15s,background 0.15s}
-    .cpill:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-subtle)}
-    .cpill.active{border-color:var(--accent);color:var(--accent);background:var(--accent-subtle)}
-    /* Responsive */
-    /* ── Mobile nav: prevent 3-item nav overflow ── */
-    @media(max-width:640px){
-      .nav-back{display:none}
-      .btn-cta{display:none}
-      .nav-inner{gap:8px}
-    }
-    @media(max-width:768px){
-      .section{padding:48px 16px}
-      .hero{padding:48px 16px 36px}
-      .feature-compare{grid-template-columns:1fr}
-    }
-  
-    /* HAMBURGER */
-    .hamburger{display:none;flex-direction:column;gap:5px;cursor:pointer;padding:6px;border:1px solid var(--border);border-radius:6px;background:none;transition:border-color 0.15s;flex-shrink:0}
-    .hamburger:hover{border-color:var(--accent)}
-    .hamburger span{display:block;width:20px;height:2px;background:var(--text-secondary);border-radius:2px;transition:transform 0.2s,opacity 0.2s}
-    .hamburger.open span:nth-child(1){transform:translateY(7px) rotate(45deg)}
-    .hamburger.open span:nth-child(2){opacity:0}
-    .hamburger.open span:nth-child(3){transform:translateY(-7px) rotate(-45deg)}
-    #compare-mobile-menu{display:none;position:fixed;top:var(--nav-height,64px);left:0;right:0;background:var(--bg-secondary,#161b22);border-bottom:1px solid var(--border,#30363d);padding:16px 24px;z-index:999;flex-direction:column;gap:4px}
-    #compare-mobile-menu.open{display:flex}
-    #compare-mobile-menu a{color:var(--text-secondary,#8b949e);font-size:0.95rem;font-weight:500;padding:10px 12px;border-radius:6px;text-decoration:none;transition:color 0.15s,background 0.15s}
-    #compare-mobile-menu a:hover{color:var(--text-primary,#e6edf3);background:var(--bg-tertiary,#21262d)}
-    #compare-mobile-menu a.accent{color:var(--accent,#f0a500)}
-    #compare-mobile-menu .menu-divider{height:1px;background:var(--border,#30363d);margin:4px 0}
-    @media(max-width:640px){
-      .hamburger{display:flex}
-      .btn-cta{display:none}
-      .nav-back{display:none}
-    }
-    </style>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" sizes="512x512" href="/apple-touch-icon.png">
+<title>Hermes and Claude Code | Compare</title>
+<meta name="description" content="Claude Code is Anthropic's coding agent. Hermes stays running on your machine. When to add Hermes, and how the two work together.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap"><link rel="stylesheet" href="/site.css"><script src="/site.js"></script>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header"><div class="container">
+<a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28"><span class="brand-name">Hermes WebUI</span></a>
+<nav class="site-nav" aria-label="Main"><ul class="nav"><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/#compare" aria-current="true">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/api-docs/">API</a></li></ul>
+<details class="menu"><summary>Menu</summary><ul><li><a href="/setup/">Setup</a></li><li><a href="/models/">Models</a></li><li><a href="/memory/">Memory</a></li><li><a href="/#compare" aria-current="true">Compare</a></li><li><a href="/community/">Community</a></li><li><a href="/api-docs/">API</a></li><li><a href="/setup/">Get started</a></li><li><button class="theme-toggle" type="button">Light</button></li></ul></details></nav>
+<div class="header-actions">
+<button type="button" class="theme-toggle">Light</button>
+<a class="btn btn-primary" href="/setup/">Get started</a>
+</div></div></header>
+<main id="main">
+<header class="page-head"><div class="container">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Home</a> / <a href="/#compare">Compare</a> / <span aria-current="page">Claude Code</span></nav>
+<h1>Hermes and Claude Code</h1>
+<p class="lead">Claude Code is Anthropic's coding agent. Hermes is an agent that stays running on your machine. Plenty of people use both, with Hermes handing coding work to Claude Code.</p>
+<div class="callout"><div class="callout-label">Bottom line</div>
+<p>Use Claude Code for focused coding sessions. Add Hermes when you want one memory across projects, jobs on a schedule on your own machine, and any model you like.</p></div>
+</div></header>
 
-<nav id="nav">
-  <div class="nav-inner">
-    <a href="../index.html" class="nav-logo">
-      <div class="nav-logo-icon">⚡</div>
-      Hermes
-    </a>
-    <a href="../index.html#compare" class="nav-back"><span>← All comparisons</span></a>
-    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme">🌙</button>
-      <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-cta" target="_blank" rel="noopener">Get started →</a>
-    </div>
-  </div>
-  <button class="hamburger" id="compare-hamburger" aria-label="Open menu" aria-expanded="false"><span></span><span></span><span></span></button>
-</nav>
-
-<div id="compare-mobile-menu">
-  <a href="../index.html">⚡ Hermes Home</a>
-  <a href="../index.html#compare">← All comparisons</a>
-  <div class="menu-divider"></div>
-  <a href="../eli5/" class="accent">🧠 ELI5</a>
-  <a href="../models/" class="accent">🤖 Best Models</a>
-  <a href="../community/" class="accent">🌎 Community</a>
-  <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" class="accent">Get started →</a>
+<section class="section"><div class="container">
+<h2>When to add Hermes</h2>
+<div class="grid-2">
+<div class="card"><h3>Keep using Claude Code for</h3><ul>
+<li>Long coding sessions inside one repo</li>
+<li>Its editor integrations</li>
+<li>Hooks and plugins built for coding</li></ul></div>
+<div class="card card-highlight"><h3>Add Hermes when you want</h3><ul>
+<li>One memory across every project, in files you can read and edit</li>
+<li>Jobs that run on a schedule on your own machine</li>
+<li>Your agent in Slack, Telegram and other chat apps</li>
+<li>Any model, including a local one</li></ul></div>
 </div>
+</div></section>
 
-<main>
-  <div class="hero">
-    <div class="container">
-      <nav class="breadcrumb" aria-label="Breadcrumb">
-        <a href="../index.html">Hermes</a>
-        <span class="breadcrumb-sep">/</span>
-        <a href="../index.html#compare">Compare</a>
-        <span class="breadcrumb-sep">/</span>
-        <span>Claude Code</span>
-      </nav>
+<section class="section"><div class="container">
+<h2>How they differ</h2>
+<div class="table-wrap"><table class="table-stack">
+<thead><tr><th scope="col">Feature</th><th scope="col">Claude Code</th><th scope="col" class="is-hermes">Hermes</th></tr></thead>
+<tbody><tr><th scope="row">Where it runs</th><td data-label="Claude Code">In a session you start: terminal, editor, desktop or web</td><td class="is-hermes" data-label="Hermes">A background service on your machine or server</td></tr><tr><th scope="row">Memory</th><td data-label="Claude Code">Project, user and organization instructions, plus automatic memory</td><td class="is-hermes" data-label="Hermes">One memory across projects, as markdown in <code>~/.hermes/</code></td></tr><tr><th scope="row">Scheduling</th><td data-label="Claude Code">Session timers, desktop tasks, or cloud tasks</td><td class="is-hermes" data-label="Hermes">Built-in cron on your machine</td></tr><tr><th scope="row">Models</th><td data-label="Claude Code">Claude models</td><td class="is-hermes" data-label="Hermes">Any provider, or a local model</td></tr><tr><th scope="row">Where you reach it</th><td data-label="Claude Code">Terminal, editor, desktop, web and some chat apps</td><td class="is-hermes" data-label="Hermes">Web UI, terminal and chat apps</td></tr><tr><th scope="row">Extending it</th><td data-label="Claude Code">Hooks and a plugin marketplace</td><td class="is-hermes" data-label="Hermes">Skills the agent writes as you work</td></tr><tr><th scope="row">License</th><td data-label="Claude Code">Proprietary</td><td class="is-hermes" data-label="Hermes">MIT</td></tr></tbody></table></div>
+</div></section>
 
-      <div class="page-label">Head-to-head comparison</div>
-      <h1 class="page-title">Hermes vs. Claude Code</h1>
-      <p class="page-sub">Claude Code is Anthropic's official agentic CLI, now spanning terminal, IDE plugin, desktop app, and browser. Strong for focused coding. Here's what's actually different.</p>
+<section class="section"><div class="container">
+<h2>Using them together</h2>
+<div class="prose">
+<p>Run Hermes as the agent that's always on, and let it call Claude Code for heavy coding. Hermes passes in the goal and the context it has. Claude Code does the work. What Hermes learns goes back into its memory for next time.</p>
+<p>Hermes runs on your machine. It sends data only to the model and services you connect.</p>
+<p><a class="btn btn-primary" href="/setup/">Set up Hermes</a></p>
+</div>
+<figure class="shot">
+<img class="only-dark" src="/images/demo/desktop-dark-top.png" alt="Hermes Web UI with a conversation open" width="1440" height="900" loading="lazy">
+<img class="only-light" src="/images/demo/desktop-light-top.png" alt="Hermes Web UI with a conversation open" width="1440" height="900" loading="lazy">
+<figcaption>The Hermes Web UI, where you can watch what the agent is doing.</figcaption>
+</figure>
+</div></section>
 
-      <div class="verdict">
-        <div class="verdict-icon">🔄</div>
-        <div class="verdict-text">
-          <strong>Verdict</strong>
-          <p>Complementary, not competing. Claude Code excels at intensive coding sessions. Hermes is a persistent server agent with cross-session memory, self-hosted scheduling, and multi-surface reach. Hermes can spawn Claude Code as a sub-agent.</p>
-        </div>
-      </div>
-
-      <div class="feature-compare">
-        <div class="fc-col hermes">
-          <div class="fc-col-label">You are here</div>
-          <div class="fc-col-name">Hermes</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory (cross-project)</span><span class="fc-val yes">Yes, automatic</span></div>
-          <div class="fc-row"><span class="fc-key">Self-improving skills</span><span class="fc-val yes">Yes, automatic</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled jobs (self-hosted)</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Native /loop command</span><span class="fc-val na">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">Messaging (production)</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Slack messaging</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Provider-agnostic</span><span class="fc-val yes">Yes (any LLM)</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val yes">Yes, MIT</span></div>
-          <div class="fc-row"><span class="fc-key">26-event hooks system</span><span class="fc-val na">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">Plugin marketplace</span><span class="fc-val na">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">Runs as Hermes sub-agent</span><span class="fc-val na">N/A</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val yes">Yes, markdown files</span></div>
-        </div>
-        <div class="fc-col">
-          <div class="fc-col-label">Comparing against</div>
-          <div class="fc-col-name">Claude Code</div>
-          <div class="fc-row"><span class="fc-key">Persistent memory (cross-project)</span><span class="fc-val partial">Partial (CLAUDE.md + auto-memory v2.1.59+)</span></div>
-          <div class="fc-row"><span class="fc-key">Self-improving skills</span><span class="fc-val no">No</span></div>
-          <div class="fc-row"><span class="fc-key">Scheduled jobs (self-hosted)</span><span class="fc-val no">No (cloud or desktop app only)</span></div>
-          <div class="fc-row"><span class="fc-key">Native /loop command</span><span class="fc-val yes">Yes (built-in, session-scoped polling)</span></div>
-          <div class="fc-row"><span class="fc-key">Messaging (production)</span><span class="fc-val partial">Preview (Telegram/Discord/iMessage only)</span></div>
-          <div class="fc-row"><span class="fc-key">Slack messaging</span><span class="fc-val no">Not yet shipped</span></div>
-          <div class="fc-row"><span class="fc-key">Provider-agnostic</span><span class="fc-val no">No (Claude models only)</span></div>
-          <div class="fc-row"><span class="fc-key">Open source</span><span class="fc-val no">No (minified TypeScript)</span></div>
-          <div class="fc-row"><span class="fc-key">26-event hooks system</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Plugin marketplace</span><span class="fc-val yes">Yes, installable</span></div>
-          <div class="fc-row"><span class="fc-key">Runs as Hermes sub-agent</span><span class="fc-val yes">Yes</span></div>
-          <div class="fc-row"><span class="fc-key">Memory inspectability</span><span class="fc-val partial">Partial</span></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Narrative -->
-  <section class="section">
-    <div class="container">
-      <h2 class="section-title">Deep dive</h2>
-      <p class="section-body">Hermes and Claude Code solve different problems, and the most interesting insight from this comparison is how well they work together. Understanding where each tool fits makes the decision straightforward.</p>
-
-      <div class="narrative">
-
-        <h3>Two different tools with an important relationship</h3>
-        <p>Claude Code is Anthropic's official agentic coding tool. It started as a terminal CLI, and has since expanded to an IDE plugin (VS Code, JetBrains), a desktop app, and a browser-accessible interface. Its core design is session-oriented: you launch Claude Code, describe a coding task, and it works through the codebase, executes tests, and iterates — with impressive depth and context about your specific project. When the session ends, that context is largely gone (with some memory features emerging as of v2.1.59+).</p>
-        <p>Hermes is a persistent <strong>server agent</strong> — a daemon that runs continuously on your hardware, accumulating memory across all your projects and interactions over time. It handles cron-scheduled jobs, receives messages across 15+ platforms, and builds a growing skill library that represents how you specifically work. The two tools are complementary: Hermes manages orchestration, scheduling, and persistent context; Claude Code handles intensive coding sessions when called.</p>
-        <p>The clearest sign of this relationship is that <strong>Hermes can spawn Claude Code as a sub-agent</strong>. You can instruct Hermes to kick off a complex refactor, and it will delegate the heavy coding work to Claude Code, then fold the results and what it learned back into its own memory. This is the recommended pattern for users who work heavily with code.</p>
-
-        <h3>/loop, ralph-wiggum, and scheduling explained</h3>
-        <p>Claude Code ships with a native <code>/loop</code> command that enables session-scoped polling. It's built into the core product, requires no plugin, and works in any session type — terminal, IDE, desktop app. <code>/loop</code> lets the model iterate repeatedly toward a goal within a single session, checking its own output and continuing until a condition is met or it decides it's done. This is a genuinely useful feature for long coding tasks that need iterative refinement.</p>
-        <p>The <strong>ralph-wiggum</strong> plugin (<code>/ralph-loop</code>) is Anthropic's official goal-driven iteration plugin, installable from the Claude Code plugin marketplace. It extends the loop concept to goal-driven completion — you specify what "done" looks like, and ralph-wiggum keeps running until it reaches that state or hits a configured limit. It's more structured than the bare <code>/loop</code> and designed for longer, more complex tasks.</p>
-        <p>For scheduling, Claude Code offers two distinct modes: <strong>desktop app scheduled tasks</strong> run locally on your machine while the app is open, with a minimum interval of 1 minute. They're convenient for recurring coding tasks but stop when you close the app. <strong>Cloud scheduled tasks</strong> run on Anthropic's infrastructure 24/7 with a minimum interval of 1 hour — they work even when your laptop is shut, but your task data leaves your hardware and runs on Anthropic's servers. Neither mode is equivalent to a headless server daemon. Hermes cron runs on your own hardware, continuously, with no minimum interval restriction, no data leaving your environment, and no dependency on an open app or a cloud subscription.</p>
-
-        <h3>Memory model differences</h3>
-        <p>Claude Code's memory is file-based at the project level. <code>CLAUDE.md</code> and <code>MEMORY.md</code> files in your project directories store context that Claude Code reads at session start. As of version 2.1.59+, an auto-memory feature can create and update these files automatically during sessions. This is a meaningful improvement, but the fundamental model remains <strong>per-project</strong>: what Claude Code learns in one project does not automatically propagate to others. Each project starts from its own memory baseline.</p>
-        <p>Hermes uses a unified memory model that <strong>compounds across all projects over time</strong>. When you have Hermes help you solve a problem in one codebase, it may surface relevant context from a different project six months later — because both interactions are in the same memory store. Skills written from one experience are reusable in others. Over weeks and months, the behavioral profile Hermes builds of your preferences, patterns, and workflows becomes a significant accumulated asset that no per-project file can replicate.</p>
-        <p>Hermes memory is also stored as plain markdown files on your filesystem — directly readable, editable, and version-controllable. Claude Code's auto-generated memory files are also readable, but the scope remains per-project rather than spanning your entire workflow history.</p>
-
-        <h3>The provider lock-in question</h3>
-        <p>Claude Code supports <strong>Anthropic's API, AWS Bedrock, Google Vertex AI, and Anthropic Foundry</strong>. These are meaningful options for enterprise deployment, but they share one constraint: every inference uses a Claude model. If Claude pricing changes, if a competitor releases a model significantly better for a specific task, or if you simply want to use a local open-source model for cost or privacy reasons, you cannot do that within Claude Code. The tool is by design Claude-native.</p>
-        <p>Hermes is provider-agnostic. You configure which provider and model to use, and can change it at any time — or route different tasks to different providers. GPT-5.4 for one thing, Claude Opus 4.7 for another, a local Ollama model for private data. This flexibility is especially valuable when the model landscape is moving as fast as it currently is: you're not locked into today's best option when something better ships.</p>
-        <p>For most users evaluating these two tools for coding work, provider flexibility is a secondary concern — Claude is genuinely excellent at coding tasks, and Claude Code's tight integration is an advantage. But for users with strong privacy requirements, cost sensitivity, or a preference to hedge model risk, Hermes's open provider model is a concrete benefit.</p>
-
-        <h3>Using them together</h3>
-        <p>The most powerful configuration for heavy coding users is to <strong>run both</strong>. The workflow: Hermes serves as the always-on orchestrator — it receives your requests via messaging, manages your scheduled jobs, and maintains your accumulated context. When a task requires serious coding work, Hermes delegates to Claude Code as a sub-agent, passing in the relevant context and specifying the goal. Claude Code executes the coding session with its full depth of project understanding and tool use. When it completes, the results and any new context fold back into Hermes's memory store.</p>
-        <p>This architecture gives you the best of both: Claude Code's quality and depth on coding tasks, plus Hermes's persistence, cross-project memory, multi-platform messaging, and self-hosted scheduling. You're not choosing between a coding tool and an agent — you're combining them into a workflow that's more capable than either alone. See the <a href="https://hermes-agent.nousresearch.com/docs/" target="_blank" rel="noopener">Hermes documentation</a> for the sub-agent configuration guide.</p>
-
-      </div>
-    </div>
-  </section>
-
-  <!-- Full table -->
-  <section class="section section-alt">
-    <div class="container">
-      <h2 class="section-title">Full feature comparison</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Feature</th>
-              <th>Claude Code</th>
-              <th>Hermes</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr class="hl">
-              <td>Memory model</td>
-              <td><span class="c-partial">Per-project (CLAUDE.md / MEMORY.md; auto-memory v2.1.59+)</span></td>
-              <td><span class="c-yes">Cross-project, unified, compounds over time</span></td>
-            </tr>
-            <tr>
-              <td>Self-improving skills</td>
-              <td><span class="c-no">No</span></td>
-              <td><span class="c-yes">Yes, automatic</span></td>
-            </tr>
-            <tr class="hl">
-              <td>/loop (session polling)</td>
-              <td><span class="c-yes">Yes, native built-in</span></td>
-              <td><span class="c-na">N/A — persistent daemon, not session-based</span></td>
-            </tr>
-            <tr>
-              <td>Scheduled jobs (self-hosted)</td>
-              <td><span class="c-no">No — desktop app (app must be open) or cloud (1 hr min, data leaves hardware)</span></td>
-              <td><span class="c-yes">Yes, headless cron on your hardware</span></td>
-            </tr>
-            <tr class="hl">
-              <td>Messaging (production)</td>
-              <td><span class="c-prev">Preview — Telegram, Discord, iMessage only</span></td>
-              <td><span class="c-yes">Yes, 15+ platforms including Slack</span></td>
-            </tr>
-            <tr>
-              <td>Provider-agnostic</td>
-              <td><span class="c-no">No — Anthropic, Bedrock, Vertex, Foundry only</span></td>
-              <td><span class="c-yes">Yes, any LLM provider</span></td>
-            </tr>
-            <tr class="hl">
-              <td>Open source</td>
-              <td><span class="c-no">No (minified TypeScript)</span></td>
-              <td><span class="c-yes">Yes, MIT</span></td>
-            </tr>
-            <tr>
-              <td>Hooks system</td>
-              <td><span class="c-yes">Yes, 26-event system for deterministic control</span></td>
-              <td><span class="c-na">N/A</span></td>
-            </tr>
-            <tr class="hl">
-              <td>Plugin marketplace</td>
-              <td><span class="c-yes">Yes, installable (incl. ralph-wiggum)</span></td>
-              <td><span class="c-na">N/A — skills are auto-written</span></td>
-            </tr>
-            <tr>
-              <td>Web UI</td>
-              <td><span class="c-yes">Yes (desktop app + browser)</span></td>
-              <td><span class="c-yes">Yes, self-hosted</span></td>
-            </tr>
-            <tr class="hl">
-              <td>Desktop app scheduled tasks</td>
-              <td><span class="c-yes">Yes (1 min min, app must be open)</span></td>
-              <td><span class="c-na">N/A — daemon runs headless</span></td>
-            </tr>
-            <tr>
-              <td>Memory inspectability</td>
-              <td><span class="c-partial">Partial — CLAUDE.md files, per-project</span></td>
-              <td><span class="c-yes">Yes, plain markdown files, full history</span></td>
-            </tr>
-            <tr class="hl">
-              <td>Runs as Hermes sub-agent</td>
-              <td><span class="c-yes">Yes — recommended for heavy coding tasks</span></td>
-              <td><span class="c-na">N/A (is the orchestrator)</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Who section -->
-      <h2 class="section-title" style="margin-top:40px">Who should choose what</h2>
-      <div class="who-grid">
-        <div class="who-card choose-hermes">
-          <div class="who-card-label">Choose Hermes if…</div>
-          <ul>
-            <li><strong>Cross-project persistent memory</strong> is important — context that builds across all your work over time</li>
-            <li><strong>Self-hosted cron without an open app</strong> — headless scheduled jobs that run even when your laptop is off</li>
-            <li><strong>Production messaging today</strong> — Slack, Telegram, WhatsApp, and 12+ others in production, not preview</li>
-            <li><strong>Provider flexibility</strong> — you want to swap models without switching tools</li>
-            <li><strong>Open source, MIT licensed</strong> — you need to inspect, modify, or self-host the full codebase</li>
-          </ul>
-        </div>
-        <div class="who-card choose-other">
-          <div class="who-card-label">Choose Claude Code (or both) if…</div>
-          <ul>
-            <li><strong>Intensive coding sessions</strong> are your primary use case — Claude Code's IDE integration and depth are best-in-class</li>
-            <li><strong>26-event hooks</strong> for deterministic, auditable control over every step of the agent loop</li>
-            <li><strong>Plugin marketplace</strong> — immediate access to ralph-wiggum and other installable extensions</li>
-            <li><strong>Claude model quality</strong> — you specifically want to use Claude and Anthropic's tooling ecosystem</li>
-            <li><strong>Use both:</strong> run Hermes as orchestrator and persistent memory layer, Claude Code as the coding sub-agent for heavy tasks</li>
-          </ul>
-        </div>
-      </div>
-
-      <!-- Compare nav pills -->
-      <div class="compare-nav">
-        <div class="compare-nav-label">More comparisons</div>
-        <a href="openclaw.html" class="cpill">vs. OpenClaw</a>
-        <a href="claude-code.html" class="cpill active">vs. Claude Code</a>
-        <a href="codex.html" class="cpill">vs. Codex</a>
-        <a href="opencode.html" class="cpill">vs. OpenCode</a>
-        <a href="cursor.html" class="cpill">vs. Cursor</a>
-        <a href="copilot.html" class="cpill">vs. Copilot</a>
-        <a href="claude-ai.html" class="cpill">vs. Claude.ai</a>
-        <a href="chatgpt.html" class="cpill">vs. ChatGPT</a>
-        <a href="perplexity-computer.html" class="cpill">vs. Perplexity Computer</a>
-      </div>
-    </div>
-  </section>
-
-  <!-- CTA strip -->
-  <div class="cta-strip">
-    <h2>Try Hermes alongside Claude Code</h2>
-    <p>Self-hosted, open source, and designed to work with the tools you already use. Get Hermes running in minutes.</p>
-    <div class="cta-btns">
-      <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-primary" target="_blank" rel="noopener">Read the docs →</a>
-      <a href="../index.html#compare" class="btn-secondary">← Back to comparisons</a>
-    </div>
-  </div>
+<section class="section"><div class="container">
+<h2>More comparisons</h2>
+<ul class="link-list"><li><a href="/compare/chatgpt.html">ChatGPT</a></li><li><a href="/compare/claude-ai.html">Claude.ai</a></li><li><a href="/compare/codex.html">Codex</a></li><li><a href="/compare/opencode.html">OpenCode</a></li><li><a href="/compare/cursor.html">Cursor</a></li><li><a href="/compare/copilot.html">GitHub Copilot</a></li><li><a href="/compare/perplexity-computer.html">Perplexity Computer</a></li><li><a href="/compare/openclaw.html">OpenClaw</a></li></ul>
+</div></section>
 </main>
-
-<script>
-  const html = document.documentElement;
-  const toggle = document.getElementById('theme-toggle');
-  function setTheme(t) {
-    html.setAttribute('data-theme', t);
-    localStorage.setItem('theme', t);
-    toggle.textContent = t === 'light' ? '🌙' : '☀️';
-  }
-  const saved = localStorage.getItem('theme');
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  if (saved) setTheme(saved);
-  else if (!prefersDark) setTheme('light');
-  else setTheme('dark');
-  toggle.addEventListener('click', () => setTheme(html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'));
-</script>
-
-</body>
-</html>
+<footer class="site-footer"><div class="container">
+<span>Community project. Not affiliated with Nous Research.</span>
+<span class="footer-links"><a href="https://github.com/nesquena/hermes-webui">GitHub</a><a href="https://hermes-agent.nousresearch.com/">Official Hermes Agent site</a></span>
+</div></footer>
+</body></html>

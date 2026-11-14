@@ -311,7 +311,7 @@
         <p>Cursor Memories are <strong>per-project</strong> and stored on Cursor's cloud infrastructure — they persist as long as your subscription is active. Cursor Automations run on <strong>Cursor cloud VMs</strong>, not on your own server. Hermes runs on your hardware: memory accumulates <strong>cross-project</strong> indefinitely, and scheduled jobs run on whatever server you choose. The architectural difference matters for teams that need to keep code off external infrastructure, or who want memory that spans multiple projects and codebases.</p>
 
         <h3>Data sovereignty</h3>
-        <p>When Cursor Automations execute your code on cloud VMs, your code passes through Cursor's infrastructure. For open-source side projects this is often fine. For proprietary business logic, regulated data, or security-sensitive codebases, the question of <strong>where your code runs</strong> is non-trivial. Hermes runs entirely on your own hardware — the agent, the scheduler, the memory store, and any code it executes never leave your network unless you explicitly push something out.</p>
+        <p>When Cursor Automations execute your code on cloud VMs, your code passes through Cursor's infrastructure. For open-source side projects this is often fine. For proprietary business logic, regulated data, or security-sensitive codebases, the question of <strong>where your code runs</strong> is non-trivial. Hermes runs the agent and scheduler on your hardware. Model requests and connected services still have their own data flows; self-hosting does not make every task local.</p>
 
         <h3>The combination pattern</h3>
         <p>These tools work well together. Use <strong>Cursor in the editor</strong> for autocomplete, inline diffs, and active coding sessions. Use <strong>Hermes in the background</strong> for cross-project memory, headless scheduled tasks, messaging integrations, and continuity between sessions. Many teams run both: Cursor for the creative act of writing code, Hermes for everything that needs to persist and run when no one is watching.</p>
@@ -356,7 +356,7 @@
         <div class="who-card choose-hermes">
           <div class="who-card-label">Choose Hermes for</div>
           <ul>
-            <li><strong>Self-hosted execution</strong> — nothing leaves your network</li>
+            <li><strong>Self-hosted execution</strong> — control where the agent runs</li>
             <li><strong>Data sovereignty</strong> for proprietary or regulated code</li>
             <li><strong>Cross-project memory</strong> that accumulates indefinitely</li>
             <li><strong>Headless scheduling</strong> with no GUI required</li>
@@ -385,7 +385,7 @@
       <p>Self-hosted, open source, and running in minutes. No cloud account required.</p>
       <div class="cta-btns">
         <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-primary" target="_blank" rel="noopener">Get started →</a>
-        <a href="https://github.com/nousresearch/hermes" class="btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
+        <a href="https://github.com/nesquena/hermes-webui" class="btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
       </div>
     </div>
   </div>

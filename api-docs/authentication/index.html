@@ -24,7 +24,7 @@
         
       
       
-      <link rel="icon" href="../assets/images/favicon.png">
+      <link rel="icon" href="../assets/favicon.svg">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
     
     
@@ -47,13 +47,11 @@
     
     
       
-        
-        
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
-        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
-      
     
+    
+      <link rel="stylesheet" href="../assets/stylesheets/fonts.css">
+    
+      <link rel="stylesheet" href="../assets/stylesheets/extra.css">
     
     <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
@@ -61,6 +59,26 @@
 
     
     
+  <link rel="preload" href="../assets/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin><script>
+    (function () {
+      try {
+        var light = localStorage.getItem("theme") === "light";
+        __md_set("__palette", {
+          index: light ? 1 : 0,
+          color: { scheme: light ? "default" : "slate", primary: "custom", accent: "custom" }
+        });
+      } catch (e) {}
+      try {
+        document.addEventListener("change", function (e) {
+          if (e.target && e.target.name === "__palette") {
+            var scheme = e.target.getAttribute("data-md-color-scheme");
+            localStorage.setItem("theme", scheme === "default" ? "light" : "dark");
+          }
+        });
+      } catch (e) {}
+    })();
+  </script>
+
   </head>
   
   
@@ -71,7 +89,7 @@
     
     
     
-    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="cyan" data-md-color-accent="cyan">
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
   
     
     <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
@@ -96,10 +114,9 @@
 
 <header class="md-header md-header--shadow" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href=".." title="Hermes Bridge API" class="md-header__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
+    <a href="/" title="get-hermes.ai home" class="md-header__button md-logo" aria-label="get-hermes.ai home" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../assets/favicon.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -122,6 +139,14 @@
         </div>
       </div>
     </div>
+    <nav class="hermes-sitenav" aria-label="Site">
+  <a href="/setup/">Setup</a>
+  <a href="/models/">Models</a>
+  <a href="/memory/">Memory</a>
+  <a href="/#compare">Compare</a>
+  <a href="/community/">Community</a>
+  <a href="/api-docs/" aria-current="true">API</a>
+</nav>
     
       
         <form class="md-header__option" data-md-component="palette">
@@ -129,7 +154,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="cyan" data-md-color-accent="cyan"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
     
       <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
@@ -139,7 +164,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="cyan" data-md-color-accent="cyan"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
     
       <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
@@ -160,7 +185,7 @@
           
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
         </label>
-        <div class="md-search" data-md-component="search" role="dialog">
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search documentation">
   <label class="md-search__overlay" for="__search"></label>
   <div class="md-search__inner" role="search">
     <form class="md-search__form" name="search">
@@ -222,10 +247,9 @@
 
 <nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href=".." title="Hermes Bridge API" class="md-nav__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
+    <a href="/" title="Hermes Bridge API" class="md-nav__button md-logo" aria-label="Hermes Bridge API" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../assets/favicon.svg" alt="logo">
 
     </a>
     Hermes Bridge API
@@ -1113,7 +1137,7 @@
 
 
 <h1 id="authentication">Authentication<a class="headerlink" href="#authentication" title="Permanent link">&para;</a></h1>
-<p>Hermes Web UI uses <strong>one shared secret per instance</strong> — a server password — and a <strong>session cookie</strong>. There is no per-user account system: whoever holds the password (or is admitted by your reverse proxy) is the operator, and gets the full API surface. This keeps a single-user, self-hosted deployment simple, and every client authenticates the same way.</p>
+<p>Hermes Web UI is single-operator: there is no per-user account system. The usual setup is <strong>one server password per instance</strong> plus a <strong>session cookie</strong>; an operator can instead (or also) enable passkeys, OIDC sign-in or trusted-header auth from a reverse proxy. Whoever gets through the configured method is the operator and gets the full API surface.</p>
 <h2 id="the-model-at-a-glance">The model at a glance<a class="headerlink" href="#the-model-at-a-glance" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -1125,11 +1149,15 @@
 <tbody>
 <tr>
 <td><strong>No auth</strong></td>
-<td>The instance has no password set (<code>password_required: false</code>). Call the API directly.</td>
+<td>No sign-in method is configured (<code>auth_enabled: false</code>). Call the API directly.</td>
 </tr>
 <tr>
 <td><strong>Password → session cookie</strong></td>
-<td>The default. <code>POST /api/auth/login</code> with the password; the server sets a <code>hermes_session</code> cookie you replay on every request.</td>
+<td><code>password_auth_enabled: true</code>. <code>POST /api/auth/login</code> with the password; the server sets a <code>hermes_session</code> cookie you replay on every request.</td>
+</tr>
+<tr>
+<td><strong>Passkey / OIDC / trusted header</strong></td>
+<td>Browser-oriented methods with their own routes: passkeys via <code>/api/auth/passkey/options</code> + <code>/api/auth/passkey/login</code> (WebAuthn), OIDC via a redirect through <code>/api/auth/oidc/start</code>, trusted-header auth via a header your proxy injects. They also end in a session; <code>POST /api/auth/login</code> does not cover them.</td>
 </tr>
 <tr>
 <td><strong>Custom headers</strong></td>
@@ -1141,18 +1169,63 @@
 <p>Always public. Tells a client which path to take.</p>
 <p><div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="err">GET /api/auth/status</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;authenticated&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;password_required&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+Illustrative responses (other fields omitted). Open server, then password-protected server before login:</p>
+<p><div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">"auth_enabled"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"logged_in"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">"auth_enabled"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"logged_in"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"password_auth_enabled"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div></p>
 <ul>
-<li><code>password_required: false</code> → open instance, no login needed.</li>
-<li><code>authenticated: true</code> → your current cookie/headers are already valid.</li>
-<li><code>authenticated: false</code> + <code>password_required: true</code> → log in.</li>
+<li><code>auth_enabled: false</code> → open instance, no login needed. <code>logged_in</code> is always <code>false</code> here; it is not an auth failure.</li>
+<li><code>auth_enabled: true</code> + <code>logged_in: true</code> → your current cookie (or trusted proxy header) is already valid.</li>
+<li><code>auth_enabled: true</code> + <code>logged_in: false</code> → sign in with a configured method. Check <code>password_auth_enabled</code> before showing a password prompt; if it is <code>false</code>, the instance uses passkeys, OIDC or trusted-header auth instead.</li>
 </ul>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auth_enabled</code></td>
+<td>Any sign-in method is configured: password, passkeys, OIDC or trusted-header auth.</td>
+</tr>
+<tr>
+<td><code>logged_in</code></td>
+<td>This request carries a valid session. Only evaluated when <code>auth_enabled</code> is <code>true</code>; otherwise <code>false</code>.</td>
+</tr>
+<tr>
+<td><code>password_auth_enabled</code></td>
+<td>A server password is set, so <code>POST /api/auth/login</code> can succeed.</td>
+</tr>
+<tr>
+<td><code>passwordless_enabled</code></td>
+<td>Passkeys are registered and no password is set.</td>
+</tr>
+<tr>
+<td><code>passkeys_enabled</code>, <code>passkeys_count</code>, <code>passkey_feature_flag</code></td>
+<td>Passkey state. Registered passkeys count only while the passkey feature flag is on.</td>
+</tr>
+<tr>
+<td><code>oidc_enabled</code></td>
+<td>OIDC sign-in is configured (browser redirect via <code>/api/auth/oidc/start</code>).</td>
+</tr>
+<tr>
+<td><code>auth_disabled_acknowledged</code></td>
+<td>Open servers only: the operator acknowledged running without auth. Always <code>false</code> when <code>auth_enabled</code> is <code>true</code>.</td>
+</tr>
+<tr>
+<td><code>trusted_auth_enabled</code>, <code>auth_type</code>, <code>user</code>, <code>bound_profile</code></td>
+<td>Present only with trusted-header auth (<code>auth_type</code>, <code>user</code> and <code>bound_profile</code> only on a trusted session).</td>
+</tr>
+</tbody>
+</table>
 <h2 id="password-login-apiauthlogin">Password login: <code>/api/auth/login</code><a class="headerlink" href="#password-login-apiauthlogin" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="err">POST /api/auth/login</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="err">Content-Type: application/json</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="err">{ &quot;password&quot;: &quot;your-server-password&quot; }</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="err">POST /api/auth/login</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="err">Content-Type: application/json</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="err">{ "password": "your-server-password" }</span>
 </code></pre></div>
 <p>On success (HTTP 200) the response carries a <code>Set-Cookie: hermes_session=…</code> header. <strong>Store it and send it on every subsequent request.</strong> On a wrong password the server returns <code>401</code> (and rate-limits repeated attempts).</p>
 <ul>
@@ -1164,16 +1237,16 @@
 <ul>
 <li><strong>iOS / Swift</strong> — <code>URLSession</code> with the default <code>HTTPCookieStorage</code> stores and replays <code>hermes_session</code> automatically. (The reference client <a href="https://github.com/uzairansaruzi/hermex"><code>hermex</code></a> does exactly this.)</li>
 <li><strong>Android / Kotlin</strong> — add a <code>JavaNetCookieJar(CookieManager())</code> to your <code>OkHttpClient</code>.</li>
-<li><strong>Browser / JS</strong> — use <code>fetch(url, { credentials: "include" })</code> (same-origin) so the cookie rides along.</li>
+<li><strong>Browser / JS</strong> — state-changing requests (<code>POST</code>/<code>PUT</code>/<code>PATCH</code>/<code>DELETE</code>) from a browser on a password-protected instance need the session cookie <strong>and</strong> that session's <code>X-Hermes-CSRF-Token</code> header, and they must pass the server's same-origin check. The WebUI page supplies the token and attaches it to its own same-origin unsafe requests; a missing or stale token gets <code>403</code>. Login is exempt because it creates the session. Requests that carry no <code>Origin</code>/<code>Referer</code> (native clients, <code>curl</code>) are not subject to the CSRF token check, so do not copy the cookie-only <code>curl</code> examples as browser <code>POST</code> examples. See the <a href="../getting-started/#minimal-client-end-to-end">browser example</a>.</li>
 </ul>
 <h2 id="custom-headers-proxied-token-gated-deployments">Custom headers (proxied / token-gated deployments)<a class="headerlink" href="#custom-headers-proxied-token-gated-deployments" title="Permanent link">&para;</a></h2>
 <p>Some self-hosters put Hermes behind an authenticating proxy or a token gate that the password flow can't satisfy. For those, attach one or more fixed headers to <strong>every</strong> outgoing request:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="err">Authorization: Bearer &lt;token&gt;</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="err">X-Api-Key: &lt;key&gt;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="err">Authorization: Bearer &lt;token&gt;</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="err">X-Api-Key: &lt;key&gt;</span>
 </code></pre></div>
 <p>The reference iOS client persists these in the Keychain and injects them on all requests (see its <code>CustomHeader</code> type). Security note for client authors: <strong>do not forward <code>Authorization</code> (and other sensitive headers) across a cross-origin redirect</strong> — strip them if the server redirects off-origin, to avoid leaking the secret.</p>
 <h2 id="what-requires-auth">What requires auth<a class="headerlink" href="#what-requires-auth" title="Permanent link">&para;</a></h2>
-<p>Nearly the entire <code>/api/*</code> surface requires a valid session when a password is set. A small set of paths are always public: <code>/api/auth/login</code>, <code>/api/auth/status</code>, static assets under <code>/static/</code>, and the login page. Everything else in this reference assumes an authenticated request.</p>
+<p>Nearly the entire <code>/api/*</code> surface requires a valid session when <code>auth_enabled</code> is <code>true</code>. A small set of paths are always public: <code>/api/auth/login</code>, <code>/api/auth/status</code>, the passkey login pair (<code>/api/auth/passkey/options</code>, <code>/api/auth/passkey/login</code>), the OIDC pair (<code>/api/auth/oidc/start</code>, <code>/api/auth/oidc/callback</code>), static assets under <code>/static/</code>, and the login page. Everything else in this reference assumes an authenticated request.</p>
 <h2 id="errors">Errors<a class="headerlink" href="#errors" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -1187,7 +1260,7 @@
 <tr>
 <td><code>401</code></td>
 <td>Not authenticated / wrong password</td>
-<td>Prompt for the password, call <code>/api/auth/login</code>, retry</td>
+<td>Re-check <code>/api/auth/status</code>, sign in with a configured method (password via <code>/api/auth/login</code>), retry</td>
 </tr>
 <tr>
 <td><code>403</code></td>
@@ -1237,7 +1310,7 @@
       <div class="md-copyright">
   
     <div class="md-copyright__highlight">
-      Hermes WebUI — the bridge API layer. Self-hosted, sovereign, client-agnostic.
+      Community project. Not affiliated with Nous Research.
     </div>
   
   
@@ -1276,6 +1349,8 @@
     
     
       <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../assets/javascripts/a11y.js"></script>
       
     
   </body>

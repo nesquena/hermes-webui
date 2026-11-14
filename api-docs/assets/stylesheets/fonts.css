@@ -1,0 +1,7 @@
+/* Self-hosted Inter and JetBrains Mono (OFL 1.1). Sources and SHA-256: assets/fonts/SOURCES.txt */
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap; src: url("../fonts/Inter-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap; src: url("../fonts/Inter-SemiBold.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 700; font-display: swap; src: url("../fonts/Inter-Bold.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("../fonts/JetBrainsMono-Regular.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 600; font-display: swap; src: url("../fonts/JetBrainsMono-SemiBold.woff2") format("woff2"); }
+:root { --md-text-font: "Inter"; --md-code-font: "JetBrains Mono"; }
