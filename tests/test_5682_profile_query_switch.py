@@ -700,8 +700,10 @@ global.t = value => value;
 global.assistantDisplayName = () => 'Hermes';
 global._profileSwitchPanelLoad = async () => {{}};
 global._refreshProfileSwitchBackground = () => {{}};
+let skillResets = 0;
+global.resetSkillsForProfileTransition = () => {{ skillResets++; }};
 var _profileSwitchGeneration = 0;
-var _skillsData = null, _workspaceList = null;
+var _workspaceList = null;
 var _currentReasoningEffort = 'low';
 var _currentReasoningEffortsSupported = ['low', 'high'];
 var _profileTransitionReasoningContext = null;
@@ -730,6 +732,7 @@ global.api = (url) => {{
 fetchReasoningChip();
 (async () => {{
   await switchToProfile('vops');
+  const skillResetsAfterSwitch = skillResets;
   const blankBoot = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice() }};
   pending[0]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
   const blankBootAfterOld = _currentReasoningEffort;
@@ -744,7 +747,7 @@ fetchReasoningChip();
   pending[2]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
   const directLoadAfterOld = _currentReasoningEffort;
   pending[3]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
-  console.log(JSON.stringify({{ blankBoot, blankBootAfterOld, blankBootAfterNew, directLoad, directLoadAfterOld, directLoadAfterNew: _currentReasoningEffort }}));
+  console.log(JSON.stringify({{ blankBoot, blankBootAfterOld, blankBootAfterNew, directLoad, directLoadAfterOld, directLoadAfterNew: _currentReasoningEffort, skillResetsAfterSwitch, skillResets }}));
 }})().catch(err => {{ console.error(err); process.exit(1); }});
 """
     payload = json.loads(_run_node(source))
@@ -760,6 +763,8 @@ fetchReasoningChip();
     }
     assert payload["directLoadAfterOld"] == ""
     assert payload["directLoadAfterNew"] == "high"
+    assert payload["skillResetsAfterSwitch"] == 1
+    assert payload["skillResets"] == 2
 
 
 def test_blank_profile_transition_context_clears_before_explicit_model_change():
