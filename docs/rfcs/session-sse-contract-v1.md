@@ -246,7 +246,7 @@ gate rather than inventing values without source support.
 ## Authoritative emitted events (`/api/chat/stream`)
 
 These are the **real wire `event:` names** emitted by `api/streaming.py` today
-(24 names). Clients and docs must use this table — not the semantic draft above —
+(25 names). Clients and docs must use this table — not the semantic draft above —
 when integrating with the live chat SSE relay.
 
 | Wire name | Role |
@@ -263,6 +263,7 @@ when integrating with the live chat SSE relay.
 | `title` | Session title update (often after `done`) |
 | `title_status` | Title generation status / skip reason |
 | `warning` | Non-fatal provider/fallback warning |
+| `memory_recall` | Agent memory recall indicator for the turn (shown in the assistant turn header and persisted as `_memoryRecall` on the settled turn; journal-replayed after reconnect) |
 | `runtime_model` | Local Agent serving identity observed at output or successful completion |
 | `apperror` | Terminal application error (no trailing `stream_end`) |
 | `cancel` | Run cancelled |

@@ -1338,6 +1338,30 @@ def _is_session_lease_wait_message(kind: str, message: str) -> bool:
     return any(marker in m for marker in _SESSION_LEASE_WAIT_MARKERS)
 
 
+def _is_memory_recall_status(kind: str, message: str, agent) -> bool:
+    """Return True for the Agent's per-turn memory recall indicator.
+
+    Right after an external memory provider injects context, hermes-agent emits
+    ``MemoryManager.describe_recall()`` through ``_emit_status`` (kind
+    ``lifecycle``), e.g. "🧠 Honcho — recalled 3 memories". The line has no
+    marker of its own, so instead of matching its wording this compares it with
+    the value the agent's own memory manager reports for the same turn: user
+    text or any other lifecycle notice can never be promoted, and a provider
+    that words its label differently still matches.
+    """
+    if str(kind or '').strip().lower() != 'lifecycle':
+        return False
+    text = str(message or '').strip()
+    describe = getattr(getattr(agent, '_memory_manager', None), 'describe_recall', None)
+    if not text or not callable(describe):
+        return False
+    try:
+        expected = str(describe() or '').strip()
+    except Exception:
+        return False
+    return bool(expected) and expected == text
+
+
 def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     """Return True only for real Hermes context-compression start notices.
 
@@ -14652,12 +14676,17 @@ def _run_agent_streaming(
     # write without nonlocal) so it can seed `_last_err` and let the classifier
     # surface the real, actionable cause (model_not_found / auth_mismatch).
     _captured_terminal_error = [None]
+    # The memory recall line the Agent emitted for this turn. Stamped on the
+    # settled assistant row as ``_memoryRecall``, next to ``_turnTps``, so the
+    # turn header keeps showing it after the stream ends and on reload.
+    _turn_memory_recall = [None]
 
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
 
-        Passes compression events as 'compressing' events and rate-limit/fallback
-        events as 'warning' events so the frontend can surface them to the user.
+        Passes compression events as 'compressing' events, rate-limit/fallback
+        events as 'warning' events and the memory recall indicator as a
+        'memory_recall' event so the frontend can surface them to the user.
         Also captures a terminal non-retryable provider error (#5940) so the
         turn-completion classifier can report the real cause instead of the
         generic no_response fallback. All other lifecycle messages are dropped.
@@ -14689,6 +14718,12 @@ def _run_agent_streaming(
         # use the same channel so a delayed turn explains itself.
         if _is_session_lease_wait_message(_kind, _message):
             put('warning', {'type': 'session_lease_wait', 'message': _message})
+            return
+        # Which external memory provider fed this turn ("🧠 <provider> — recalled
+        # N memories"). Other surfaces (CLI, messaging gateway) already show it.
+        if _is_memory_recall_status(_kind, _message, agent):
+            _turn_memory_recall[0] = _message
+            put('memory_recall', {'session_id': session_id, 'message': _message})
             return
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
         if _is_fallback_notice:
@@ -17456,6 +17491,9 @@ def _run_agent_streaming(
                         }
                         if _turn_duration is not None:
                             _error_message['_turnDuration'] = _turn_duration
+                        # The recall happened even though the turn failed.
+                        if _turn_memory_recall[0]:
+                            _error_message['_memoryRecall'] = _turn_memory_recall[0]
                         if _err_type == 'compression_exhausted':
                             _recovery = stamp_compression_exhausted_recovery(
                                 s,
@@ -17749,6 +17787,8 @@ def _run_agent_streaming(
                             _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
                             if _turn_tps is not None:
                                 _dm['_turnTps'] = _turn_tps
+                            if _turn_memory_recall[0]:
+                                _dm['_memoryRecall'] = _turn_memory_recall[0]
                             if _gateway_routing:
                                 _dm['_gatewayRouting'] = _gateway_routing
                             _ttft_ms = meter().get_ttft_ms(stream_id)
@@ -19039,6 +19079,9 @@ def _run_agent_streaming(
                 }
                 if _turn_duration is not None:
                     _error_message['_turnDuration'] = _turn_duration
+                # The recall happened even though the turn failed.
+                if _turn_memory_recall[0]:
+                    _error_message['_memoryRecall'] = _turn_memory_recall[0]
                 if _exc_type == 'compression_exhausted':
                     _recovery = stamp_compression_exhausted_recovery(
                         s,

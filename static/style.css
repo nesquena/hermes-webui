@@ -93,6 +93,9 @@
   :root[data-font-size="small"] .msg-tps-inline { font-size: 9.5px; }
   :root[data-font-size="large"] .msg-tps-inline { font-size: 12.5px; }
   :root[data-font-size="xlarge"] .msg-tps-inline { font-size: 14.5px; }
+  :root[data-font-size="small"] .msg-memory-recall { font-size: 9.5px; }
+  :root[data-font-size="large"] .msg-memory-recall { font-size: 12.5px; }
+  :root[data-font-size="xlarge"] .msg-memory-recall { font-size: 14.5px; }
   :root[data-font-size="small"] .msg-role .msg-time { font-size: 9px; }
   :root[data-font-size="large"] .msg-role .msg-time { font-size: 12px; }
   :root[data-font-size="xlarge"] .msg-role .msg-time { font-size: 14px; }
@@ -6488,6 +6491,23 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   font-size: 10.5px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+.msg-memory-recall {
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 10.5px;
+  font-weight: 500;
   line-height: 1.4;
 }
 .msg-time { opacity: .65; font-size: 10px; }

@@ -2600,8 +2600,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){
     INFLIGHT[activeSid].lastRunJournalSeq=0;
     INFLIGHT[activeSid].lastRunJournalEventId='';
+    INFLIGHT[activeSid].memoryRecall='';
   }
   INFLIGHT[activeSid].streamId=streamId;
+  // A reattach resumes after the journal cursor, past the memory_recall event.
+  if(INFLIGHT[activeSid].memoryRecall&&typeof _noteLiveMemoryRecall==='function'){
+    _noteLiveMemoryRecall(activeSid,streamId,INFLIGHT[activeSid].memoryRecall);
+  }
   if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
   if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
@@ -2816,6 +2821,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       toolCalls:inflight.toolCalls||[],
       lastAssistantText:inflight.lastAssistantText||'',
       lastReasoningText:inflight.lastReasoningText||'',
+      memoryRecall:inflight.memoryRecall||'',
       lastRunJournalSeq:inflight.lastRunJournalSeq||0,
       lastRunJournalEventId:inflight.lastRunJournalEventId||'',
       journalReplayFromStart:!!inflight.journalReplayFromStart,
@@ -7093,6 +7099,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           // Stamp _ts on the last assistant message if it has no timestamp
           if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
+          if(lastAsst&&!lastAsst._memoryRecall&&typeof _liveMemoryRecallText==='function'){
+            const _recall=_liveMemoryRecallText(activeSid,streamId);
+            if(_recall) lastAsst._memoryRecall=_recall;
+          }
           if(d.usage){
             const _doneUsageFallback={...(S.lastUsage||{})};
             if(S.session){
@@ -7560,6 +7570,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    source.addEventListener('memory_recall',e=>{
+      // An external memory provider injected context for this turn. Shown in the
+      // turn header, as the CLI prints it above the reply; the server persists it
+      // on the settled turn as _memoryRecall.
+      try{
+        const d=JSON.parse(e.data||'{}')||{};
+        if(d.session_id&&d.session_id!==activeSid) return;
+        if(!d.message) return;
+        if(typeof _noteLiveMemoryRecall==='function') _noteLiveMemoryRecall(activeSid,streamId,String(d.message));
+        // Kept with the stream's recovery state: a reload resumes after the
+        // journal cursor, past this event.
+        const _recallInflight=INFLIGHT[activeSid];
+        if(_recallInflight&&_recallInflight.memoryRecall!==String(d.message)){
+          _recallInflight.memoryRecall=String(d.message);
+          persistInflightState();
+        }
+        if(!S.session||S.session.session_id!==activeSid) return;
+        if(typeof _syncLiveAssistantMemoryRecall==='function') _syncLiveAssistantMemoryRecall();
+      }catch(_){}
+    });
+
     source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       // #8517: memory is off for the agent serving this stream's session. It updates
@@ -7820,7 +7851,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','memory_recall','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
@@ -7843,7 +7874,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_memoryRecall','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
     const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;

@@ -1733,6 +1733,27 @@ def runtime_model_from_events(session_id: str, stream_id: str, events: Iterable[
     return observed
 
 
+def memory_recall_from_events(session_id: str, stream_id: str, events: Iterable[dict]) -> str:
+    """Return the memory recall line relayed for this journal owner, if any.
+
+    A reload resumes the stream after the snapshot cursor, past the
+    ``memory_recall`` event, so the live snapshot carries the line itself.
+    """
+    recall = ""
+    for event in events:
+        if not isinstance(event, dict) or event.get("session_id") != session_id or event.get("run_id") != stream_id:
+            continue
+        if event.get("event") != "memory_recall":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            recall = message.strip()
+    return recall
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
