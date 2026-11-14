@@ -1963,6 +1963,64 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      // Plugin skills surface in the slash picker as qualified
+      // `/namespace:skill` names (#7770). No COMMANDS entry or bundle handles
+      // them, so send() used to forward the literal text as a chat message and
+      // the skill body never reached the agent. Resolve qualified names here:
+      // match the plugin row in /api/skills, load its content, and feed it to
+      // the same forced-skill-directive mechanism /use relies on so the body
+      // rides on this turn's message — keeping whatever the user typed after
+      // the command. Non-plugin qualified commands fall through unchanged.
+      //
+      // This resolution runs BEFORE the #7683 fail-closed registry guard below,
+      // and a positive plugin match is exempted from that guard: qualified
+      // `plugin:skill` names never exist in the command registry, so during a
+      // /api/commands outage the guard would otherwise answer "metadata
+      // temporarily unavailable" and drop a skill the user can see in the
+      // picker.
+      let _pluginSkillResolved=false;
+      if(_parsedCmd.name.includes(':')&&!_bundleCmd){
+        // #7781 [CORE]: both fetches below park this send across awaits while
+        // the user is free to switch chats. Reuse the #8718 _slashOwner
+        // snapshot — captured before send()'s first metadata await — and stop
+        // WITHOUT touching the composer or the transcript as soon as the
+        // viewed session is no longer the chat that issued the command.
+        // Without the guard a send started in chat A finished in chat B: the
+        // forced-skill directive POSTed into B and B's composer draft was
+        // wiped, and a failed content fetch wrote its "Plugin skill error"
+        // bubble into whichever chat happened to be open.
+        //
+        // #7781 should-fix: the listing fetch gets its OWN try. A /api/skills
+        // outage must fall through to master's behaviour (forward the literal
+        // text) instead of answering "Plugin skill error" and swallowing the
+        // command — the previous single try wrapped the listing fetch too.
+        let _match=null;
+        try{
+          const _skillsData=await api('/api/skills');
+          _match=(Array.isArray(_skillsData&&_skillsData.skills)?_skillsData.skills:[])
+            .find(s=>String(s.name||'').toLowerCase()===_parsedCmd.name.toLowerCase()&&s.source==='plugin')||null;
+        }catch(e){_match=null;}
+        if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
+        if(_match){
+          try{
+            const _detail=await api('/api/skills/content?name='+encodeURIComponent(_match.name));
+            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
+            const _content=_detail&&typeof _detail.content==='string'?_detail.content.trim():'';
+            if(!_content) throw new Error(`Skill \`${_match.name}\` has no readable content.`);
+            _forcedSkillDirectivePending={sessionId:_slashOwner.sid,promise:Promise.resolve({name:_match.name,directive:`[USER OVERRIDE] You MUST follow the skill '${_match.name}' content provided below before responding to the next message.`,content:_content})};
+            _slashDisplayTextOverride=text;
+            text=_parsedCmd.args||'';
+            _pluginSkillResolved=true;
+          }catch(e){
+            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
+            if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+            S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+            S.messages.push({role:'assistant',content:`Plugin skill error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+            renderMessages();
+            $('msg').value='';autoResize();hideCmdDropdown();return;
+          }
+        }
+      }
       // #7683 [CORE]: the fail-closed guard runs LAST, after every dispatch
       // branch above has had its chance. `_agentCmdName` is only meaningful
       // once those branches have run, and a bundle command that resolved must
@@ -1996,7 +2054,7 @@ async function send(){
         && typeof loadSkillCommands === 'function'
           ? (await loadSkillCommands()).find(skill => _skillVariants.includes(skill.name))
           : null;
-      if(_commandShapedSlashName&&!_bundleCmd&&!_skillCmd&&_registryUnavailable&&_agentCmdName!=='moa'){
+      if(_commandShapedSlashName&&!_bundleCmd&&!_skillCmd&&!_pluginSkillResolved&&_registryUnavailable&&_agentCmdName!=='moa'){
         if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:'Command metadata is temporarily unavailable — please try again.',_ts:Date.now()/1000});
