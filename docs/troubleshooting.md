@@ -548,6 +548,45 @@ only sanitized hosts and errors; do not include credential-bearing URLs, tokens,
 
 ---
 
+## Update fails due to diverged local branch or non-fast-forward state
+
+**Symptom.** An update attempt fails with an error indicating that the local checkout has
+"commits that are not on the remote branch, so a fast-forward update is not possible", or
+the update banner reports a divergent branch requiring repair.
+
+**Why.** Normal self-update requires a clean fast-forward (`git pull --ff-only`). If local commits
+were made, an upstream branch was rebased, or the local checkout diverged from the channel's
+release line, a standard fast-forward cannot advance cleanly without manual intervention or
+discarding divergent commits.
+
+**Fix.** To restore the checkout to the promoted release or tracking ref, navigate to
+**Settings → Updates** and choose **Force Update** (or run the force repair action from the update
+status banner). Note carefully what force update discards:
+- **Discarded:** tracked modifications (`git checkout .`), untracked non-ignored files
+  (`git clean -fd`), and any local commits on the diverged branch (`git reset --hard <target-ref>`).
+- **Preserved:** ignored build and cache artifacts survive the clean operation because `git clean`
+  runs without `-x`.
+
+If force update refuses with an incomplete history error ("Cannot verify ancestry of ... the local Git
+history is incomplete or unreadable"), the repository was cloned with shallow history (e.g., `--depth 1`)
+or lacks ancestry connection to the remote release tag. Note that fetching tags does not remove a shallow
+boundary (`git fetch --tags` on a `--depth` clone leaves `git rev-parse --is-shallow-repository` reporting
+`true`). When a bounded deepening leaves the history incomplete, the updater fails closed instead of
+offering a destructive repair. Before retrying force update, deepen or unshallow the history in the
+repository directory:
+
+```bash
+git fetch --unshallow
+# or repeatedly deepen history:
+git fetch --deepen=100
+```
+
+Once full history is fetched, verify status in **Settings → Updates** and retry the update.
+
+**When to file a bug.** File a bug if the checkout is already on full history (`git rev-parse --is-shallow-repository` reports `false`), the target ref is a proven descendant or diverged commit, and force update still reports unknown ancestry or fails unexpectedly.
+
+---
+
 ## "OpenCode Go model picker shows a model that errors when you send" (or is missing newly released models)
 
 **Symptom.** One of two directions:

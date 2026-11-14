@@ -1376,6 +1376,94 @@ def _can_fast_forward_to(path, ref):
     return bool(ok)
 
 
+ANCESTRY_ANCESTOR = 'ancestor'        # ref is an ancestor of HEAD  -> rewind if applied
+ANCESTRY_DESCENDANT = 'descendant'    # HEAD is an ancestor of ref  -> fast-forward possible
+ANCESTRY_DIVERGENT = 'divergent'      # PROVEN: shared base reachable and neither direction
+ANCESTRY_UNKNOWN = 'unknown'          # shallow/incomplete history or a Git failure
+
+HISTORY_COMPLETE = 'complete'
+HISTORY_SHALLOW = 'shallow'
+HISTORY_UNKNOWN = 'unknown'
+
+
+def _history_completeness(path):
+    """Return repository history completeness status:
+    - HISTORY_SHALLOW: rev-parse --is-shallow-repository returned 'true'
+    - HISTORY_COMPLETE: rev-parse --is-shallow-repository returned 'false'
+    - HISTORY_UNKNOWN: command failed, timed out, or produced unrecognized output
+    """
+    out, ok = _run_git(['rev-parse', '--is-shallow-repository'], path)
+    if not ok:
+        return HISTORY_UNKNOWN
+    normalized = out.strip().lower()
+    if normalized == 'true':
+        return HISTORY_SHALLOW
+    if normalized == 'false':
+        return HISTORY_COMPLETE
+    return HISTORY_UNKNOWN
+
+
+def _repository_is_shallow(path):
+    """Return True if the repository is a shallow clone."""
+    return _history_completeness(path) == HISTORY_SHALLOW
+
+
+def _has_reachable_merge_base(path, ref):
+    """Return True if HEAD and ref share a reachable merge-base commit."""
+    if not ref:
+        return False
+    out, ok = _run_git(['merge-base', 'HEAD', ref], path)
+    return bool(ok and out.strip())
+
+
+def _deepen_history_once(path):
+    """Perform a one-time bounded deepening of repository history."""
+    _, ok = _run_git(['fetch', 'origin', '--deepen=64', '--quiet'], path, timeout=15)
+    return bool(ok)
+
+
+def _ancestry_relation(path, ref, *, allow_deepen=True):
+    """Return the ancestry relation between HEAD and *ref*.
+
+    Outcome is one of:
+    - ANCESTRY_ANCESTOR: ref is an ancestor of HEAD (applying ref would rewind)
+    - ANCESTRY_DESCENDANT: HEAD is an ancestor of ref (fast-forward possible)
+    - ANCESTRY_DIVERGENT: proven divergent (shared merge base exists, neither direction,
+      and repository history is complete)
+    - ANCESTRY_UNKNOWN: shallow/incomplete history or git failure
+
+    Invariant: ANCESTRY_DIVERGENT requires neither `--is-ancestor` direction,
+    a resolvable `merge-base HEAD <ref>`, and an explicit successful `false` from
+    `rev-parse --is-shallow-repository`; an unreadable or unrecognized answer is
+    ANCESTRY_UNKNOWN. Any Git failure keeps collapsing to ANCESTRY_UNKNOWN.
+    """
+    if not ref:
+        return ANCESTRY_UNKNOWN
+
+    is_ancestor = _head_contains_ref(path, ref)
+    can_ff = _can_fast_forward_to(path, ref)
+    if is_ancestor and not can_ff:
+        return ANCESTRY_ANCESTOR
+    if can_ff:
+        return ANCESTRY_DESCENDANT
+
+    if _has_reachable_merge_base(path, ref):
+        completeness = _history_completeness(path)
+        if completeness == HISTORY_COMPLETE:
+            return ANCESTRY_DIVERGENT
+        if completeness == HISTORY_SHALLOW and allow_deepen:
+            if _deepen_history_once(path):
+                re_eval = _ancestry_relation(path, ref, allow_deepen=False)
+                if re_eval == ANCESTRY_DIVERGENT:
+                    return ANCESTRY_DIVERGENT
+            return ANCESTRY_UNKNOWN
+        return ANCESTRY_UNKNOWN
+
+    if allow_deepen and _history_completeness(path) == HISTORY_SHALLOW and _deepen_history_once(path):
+        return _ancestry_relation(path, ref, allow_deepen=False)
+    return ANCESTRY_UNKNOWN
+
+
 def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None):
     """Return the same remote ref family that the update check reports.
 
@@ -1397,10 +1485,13 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     contains the latest stable tag but sits behind master's tip must NOT fall
     through to the branch comparison (that would advance it to ``origin/master``
     — the full experimental firehose, defeating the channel). We return ``None``
-    so the caller reports "no update". Every other case — the experimental
-    channel, and the AGENT repo (which is a separate project that legitimately
-    tracks master past its tags) — keeps the historical branch fallthrough
-    unchanged. This mirrors ``_check_repo_release``.
+    so the caller reports "no update". A divergent stable checkout (HEAD neither
+    contains nor can fast-forward to the latest tag) returns the promoted
+    ``latest_tag``, keeping check, normal apply and force recovery stable-scoped
+    (#8556, #8655), instead of the branch fallthrough. Other cases — the
+    experimental channel and the AGENT repo (which is a separate project that
+    legitimately tracks master past its tags) — keep the historical branch
+    fallthrough unchanged. This mirrors ``_check_repo_release``.
     """
     channel = _normalize_channel(channel)
     suppress_stable_fallthrough = (channel == 'stable' and target == 'webui')
@@ -1422,7 +1513,6 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
         if (
             (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel, stable_filter=stable_filter))
             or (behind > 0 and _head_contains_ref(path, latest_tag))
-            or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
         ):
             # WebUI stable: "HEAD past/contains the latest stable tag" means
             # up-to-date on the promoted subset — NOT a signal to advance to
@@ -1430,6 +1520,29 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
             if suppress_stable_fallthrough:
                 return None
             # Experimental / agent: preserve the historical branch fallthrough.
+        elif behind > 0 and not _can_fast_forward_to(path, latest_tag):
+            # Divergent local branch: HEAD is OFF the stable line (it neither
+            # contains the tag nor can fast-forward to it) — the opposite of
+            # the up-to-date conditions above — so the stable suppression must
+            # not claim "no update" here (#8556).
+            #
+            # However, for WebUI on stable, falling through to branch comparison
+            # would target the configured upstream (e.g. origin/master or a
+            # feature branch), escaping the stable channel. Return latest_tag so
+            # apply and force recovery remain stable-scoped (#8556, #8655).
+            if suppress_stable_fallthrough:
+                relation = _ancestry_relation(path, latest_tag)
+                if relation == ANCESTRY_ANCESTOR:
+                    # Deepening the history can prove HEAD already contains the
+                    # promoted tag — a shallow clone looks divergent until the
+                    # boundary is filled in. That is the truthful "up to date"
+                    # state, not an available update (#8655).
+                    return None
+                # Divergent or unknown ancestry: keep the stable-scoped target.
+                # Normal apply is `pull --ff-only`, which cannot rewind, so this
+                # stays safe even when ancestry is unknown; the destructive force
+                # path refuses unknown ancestry on its own.
+                return latest_tag
             pass
         else:
             return latest_tag
@@ -1564,9 +1677,55 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # Patch releases can land on a side branch while day-to-day installs track
     # main past an older tag. A positive tag-name gap then advertises an update
     # that `git pull --ff-only <latest-tag>` cannot reach.
+    #
+    # Unlike conditions 1-2 ("HEAD is on/past the stable line" → up-to-date is
+    # truthful), this condition means HEAD is OFF that line — it neither
+    # contains the latest tag nor can fast-forward to it — so claiming
+    # "Up to date" would hide every missing commit.
+    #
+    # However, for WebUI on stable, falling through to branch comparison targets
+    # the configured upstream (e.g. origin/master or a feature branch), escaping
+    # the stable channel (#8556, #8655). Instead, report a release-based payload
+    # targeting the promoted latest_tag with divergent/repair flags and the
+    # release-unit gap. The count is a release gap because a divergent checkout
+    # is still on the stable line's tag family; a raw rev-list count cannot be
+    # advertised as the missing-commit count either, since it counts commits
+    # with no ancestry relation when history depth is limited (depth-1 clones)
+    # and mixing two units in one payload is what produced the wrong noun.
+    # Experimental and the agent repo keep the branch fallthrough unchanged.
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
         if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
+            relation = _ancestry_relation(path, latest_tag)
+            if relation == ANCESTRY_ANCESTOR:
+                # The shallow boundary hid the ancestry: once deepened, HEAD is
+                # proven to contain the promoted tag, so "up to date" is the
+                # truthful answer and no repair is offered (#8655).
+                return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
+            remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+            remote_url = _normalize_remote_url(remote_url)
+            payload = {
+                'name': name,
+                'behind': behind,
+                'current_sha': current_sha_ref,
+                'latest_sha': latest_tag,
+                'branch': latest_tag,
+                'repo_url': remote_url,
+                'compare_url': _build_compare_url(remote_url, current_sha_ref, latest_tag),
+                'release_based': True,
+                'current_version': current_version_display,
+                'latest_version': latest_tag,
+                'latest_tag': latest_tag,
+                'channel': channel,
+            }
+            if relation == ANCESTRY_DIVERGENT:
+                payload['divergent'] = True
+                payload['repair_required'] = True
+            else:
+                # Shallow/incomplete history or a failing Git read: the release
+                # gap is still reportable, but ancestry is not proven, so the
+                # banner must not offer destructive recovery (#8655).
+                payload['ancestry_unknown'] = True
+            return payload
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
@@ -2564,12 +2723,18 @@ def apply_force_update(target: str, channel=None, *, force_active_runs: bool = F
     The endpoint is called after the user has confirmed they want to discard
     local changes, including the stable no-ref dirty-checkout recovery path.
 
-    CHANNEL SAFETY (rewind guard): ``reset --hard`` is destructive. When the
-    selected channel resolves to a ref that is an ANCESTOR of HEAD (i.e. the
-    checkout is already ahead of the channel — e.g. an ex-experimental install
-    switching back to stable), resetting to it would REWIND code and on-disk
-    state. We refuse and return a clear message instead of silently downgrading.
-    A deliberate rollback would be a separate, explicit feature.
+    CHANNEL SAFETY (rewind & ancestry guard): ``reset --hard`` is destructive.
+    Ancestry relation between HEAD and the target ref determines admission:
+    - ANCESTRY_ANCESTOR: target ref is an ancestor of HEAD (the checkout is
+      already ahead of the channel — e.g. switching ex-experimental back to stable).
+      Resetting would REWIND code and state; refused with ``refused_rewind: True``.
+    - ANCESTRY_UNKNOWN: shallow or incomplete history prevents proving ancestry.
+      Resetting could inadvertently downgrade code; refused with
+      ``refused_rewind: True`` and ``ancestry_unknown: True``.
+    - ANCESTRY_DIVERGENT: proven divergent line with a shared merge base.
+      Legitimate force-update recovery (resolves conflicts/divergence); allowed.
+    - ANCESTRY_DESCENDANT: target ref is a descendant of HEAD (or at HEAD).
+      Normal fast-forward / advance path; allowed.
     """
     if channel is None:
         channel = _read_update_channel()
@@ -2634,14 +2799,12 @@ def _apply_force_update_inner(target: str, channel) -> dict:
                 'channel': channel,
             }
 
-    # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
-    # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
-    # switch-back-to-stable-while-ahead case. A ref that is a descendant of
-    # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
-    # allowed. Refs on a divergent line (neither ancestor nor descendant) are
-    # the legitimate force-update case (conflict/diverged recovery) and are
-    # also allowed — the guard fires ONLY on a pure-ancestor rewind.
-    if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
+    # Rewind & ancestry guard: reset --hard is destructive.
+    # Distinguish proven ancestor (refused rewind), unknown ancestry / shallow
+    # boundary (refused rewind due to unknown ancestry), and proven divergent
+    # or descendant lines (allowed).
+    relation = _ancestry_relation(path, compare_ref)
+    if relation == ANCESTRY_ANCESTOR:
         return {
             'ok': False,
             'message': (
@@ -2653,6 +2816,22 @@ def _apply_force_update_inner(target: str, channel) -> dict:
             'target': target,
             'channel': channel,
             'refused_rewind': True,
+        }
+    if relation == ANCESTRY_UNKNOWN:
+        return {
+            'ok': False,
+            'message': (
+                f'Cannot verify ancestry of {compare_ref} for {target} on the {channel} channel; '
+                'the local Git history is incomplete or unreadable. It cannot be proven '
+                'whether this version is older than HEAD or on a different line. '
+                'Fetching tags does not remove a shallow boundary; restore complete history '
+                'with `git fetch --unshallow` (or repeated `git fetch --deepen=<n>`) '
+                'before retrying force update.'
+            ),
+            'target': target,
+            'channel': channel,
+            'refused_rewind': True,
+            'ancestry_unknown': True,
         }
     if not _discard_local_changes(path, compare_ref):
         return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
