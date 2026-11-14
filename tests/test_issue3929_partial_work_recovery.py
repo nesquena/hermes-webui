@@ -190,6 +190,56 @@ def test_core_sync_keeps_pending_owner_for_reasoning_only_partial(tmp_path):
     )
 
 
+def test_tokenless_current_core_row_receives_reasoning_without_duplicate():
+    """A tokenless current-turn core row must be backfilled, not duplicated."""
+    session_id = "issue3929_tokenless_core_row"
+    stream_id = "stream_tokenless_core_row"
+    repeated_text = "The current answer is already in the core transcript."
+    pending_started_at = 2_222
+    session = Session(
+        session_id=session_id,
+        title="Tokenless core row",
+        messages=[
+            {
+                "role": "user",
+                "content": "Continue",
+                "timestamp": pending_started_at,
+                "_source": "webui",
+                "attachments": [],
+            },
+            {"role": "assistant", "content": repeated_text},
+        ],
+        context_messages=[
+            {"role": "user", "content": "Continue", "timestamp": pending_started_at},
+            {"role": "assistant", "content": repeated_text},
+        ],
+        pending_user_message="Continue",
+        pending_started_at=pending_started_at,
+        pending_user_source="webui",
+        pending_attachments=[],
+        active_stream_id=stream_id,
+    )
+    append_run_event(
+        session_id,
+        stream_id,
+        "reasoning",
+        {"text": "Backfill the existing answer exactly once."},
+    )
+    append_run_event(session_id, stream_id, "token", {"text": repeated_text})
+
+    assert _append_journaled_partial_output(
+        session, stream_id, dedupe_existing=True,
+    ) == (True, True)
+
+    matching = [
+        message for message in session.messages
+        if message.get("role") == "assistant" and message.get("content") == repeated_text
+    ]
+    assert len(matching) == 1
+    assert matching[0].get("reasoning") == "Backfill the existing answer exactly once."
+
+
+
 def test_reasoning_backfill_is_idempotent_for_existing_recovered_text():
     session_id = "issue3929_reasoning_dedupe"
     stream_id = "stream_reasoning_dedupe"
@@ -216,10 +266,10 @@ def test_reasoning_backfill_is_idempotent_for_existing_recovered_text():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is False
+    ) == (False, True)
 
     matching = [
         message for message in session.messages
@@ -261,7 +311,7 @@ def test_reasoning_backfill_does_not_claim_matching_content_from_prior_turn():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
 
     assert prior_assistant.get("reasoning") is None
     current_rows = [
@@ -319,7 +369,7 @@ def test_repeated_pending_prompt_uses_checkpoint_owner_not_prior_same_text():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
 
     assert prior_assistant.get("reasoning") is None
     current_rows = [
@@ -355,7 +405,7 @@ def test_empty_context_recovery_seeds_reasoning_free_model_context():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
 
     assert [message.get("content") for message in session.context_messages] == [
         "Continue",
@@ -401,7 +451,7 @@ def test_empty_context_recovery_omits_structured_reasoning_only_content(tmp_path
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
     session.save()
 
     models.SESSIONS.clear()
@@ -468,7 +518,7 @@ def test_empty_context_recovery_preserves_tool_calls_with_reasoning_only_content
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
     session.save()
 
     models.SESSIONS.clear()
@@ -520,7 +570,7 @@ def test_empty_context_recovery_preserves_duplicate_historical_replies():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
 
     assert [
         (message.get("role"), message.get("content"))
@@ -570,7 +620,7 @@ def test_reasoning_backfill_accepts_core_row_before_recovered_owner_echo():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
 
     assert core_assistant.get("reasoning") == (
         "Attach this Thinking to the current core row."
@@ -603,10 +653,10 @@ def test_reasoning_only_recovery_is_idempotent_across_replays():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is False
+    ) == (False, True)
 
     reasoning_rows = [
         message for message in session.messages
@@ -633,7 +683,7 @@ def test_retry_growth_attaches_later_tool_to_reasoning_segment():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
     reasoning_idx = next(
         idx for idx, message in enumerate(session.messages)
         if message.get("reasoning") == "Inspect the first boundary."
@@ -648,7 +698,7 @@ def test_retry_growth_attaches_later_tool_to_reasoning_segment():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
     reasoning_rows = [
         message for message in session.messages
         if message.get("reasoning") == "Inspect the first boundary."
@@ -690,7 +740,7 @@ def test_tool_before_reasoning_keeps_own_anchor_on_regrowth():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
 
     assert session.tool_calls[0]["assistant_msg_idx"] == 1
     assert session.messages[1].get("reasoning") is None
@@ -734,7 +784,7 @@ def test_identical_reasoning_segments_around_tool_remain_distinct():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
 
     reasoning_rows = [
         (idx, message)
@@ -795,10 +845,10 @@ def test_identical_content_segments_claim_distinct_rows_on_replay():
 
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is True
+    ) == (True, True)
     assert _append_journaled_partial_output(
         session, stream_id, dedupe_existing=True,
-    ) is False
+    ) == (False, True)
 
     matching_rows = [
         message for message in session.messages
