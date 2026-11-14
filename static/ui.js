@@ -10991,7 +10991,7 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/|\/(?!\/|\\))[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -11180,7 +11180,7 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/|\/(?!\/|\\))[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -11286,6 +11286,9 @@ function renderMd(raw){
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:|message:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
+    // Root-relative same-origin media. Scheme-relative `//host` and backslash
+    // forms are excluded: browsers normalise those to a remote origin.
+    if(img && /^\/(?!\/|\\)/.test(compact)) return true;
     if(!img && (/^api\//i.test(raw) || /^#/.test(raw) || _isInternalSessionHref(raw))) return true;
     return false;
   }

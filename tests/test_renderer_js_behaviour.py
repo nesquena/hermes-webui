@@ -1031,6 +1031,53 @@ class TestBareFileUrlMediaRendering:
         assert "<img" not in out
 
 
+class TestRootRelativeMarkdownImage:
+    """#9071: same-origin root-relative image paths must render in the settled
+    renderer.  The streaming path accepts a leading `/`, but both settled image
+    passes only matched absolute schemes, so `![x](/static/chart.svg)` fell
+    through to literal text once the answer settled.  Scheme-relative
+    (`//host/x`) and backslash (`/\\host/x`) forms stay literal: the browser
+    normalises those to a remote origin, which the image policy must not load."""
+
+    def test_root_relative_image_in_paragraph(self, driver_path):
+        out = _render(driver_path, "![chart](/static/charts/probe.svg)")
+        assert '<img' in out, f"root-relative markdown image must render: {out!r}"
+        assert 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative src must be preserved verbatim: {out!r}"
+        )
+
+    def test_root_relative_image_in_list_item(self, driver_path):
+        out = _render(driver_path, "- ![chart](/static/charts/probe.svg)")
+        assert '<img' in out and 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative image inside a list item must render: {out!r}"
+        )
+
+    def test_root_relative_image_in_table_cell(self, driver_path):
+        src = "| chart |\n| --- |\n| ![chart](/static/charts/probe.svg) |"
+        out = _render(driver_path, src)
+        assert '<img' in out and 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative image inside a table cell must render: {out!r}"
+        )
+
+    def test_protocol_relative_image_stays_literal(self, driver_path):
+        out = _render(driver_path, "![x](//evil.example/x.png)")
+        assert '<img' not in out, f"protocol-relative URL must not render as img: {out!r}"
+
+    def test_backslash_authority_image_stays_literal(self, driver_path):
+        out = _render(driver_path, r"![x](/\evil.example/x.png)")
+        assert '<img' not in out, f"backslash authority URL must not render as img: {out!r}"
+
+    def test_root_relative_image_in_fenced_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "```\n![x](/static/charts/probe.svg)\n```")
+        assert '<img' not in out, f"image inside a fenced code block must stay literal: {out!r}"
+
+    def test_absolute_https_image_still_renders(self, driver_path):
+        out = _render(driver_path, "![x](https://example.com/x.png)")
+        assert '<img' in out and 'src="https://example.com/x.png"' in out, (
+            f"absolute https image regression: {out!r}"
+        )
+
+
 class TestMarkdownTableCellLineBreaks:
     """<br> inside markdown table cells must be preserved and not split cells across lines."""
 
