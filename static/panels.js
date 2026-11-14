@@ -9895,15 +9895,17 @@ function setAdvancedChatControls(enabled){
   try{localStorage.setItem(_advancedChatPreferenceKey(),enabled?'1':'0');}catch(_){}
 }
 function restoreAdvancedChatControls(){
-  let enabled=false;
-  try{enabled=localStorage.getItem(_advancedChatPreferenceKey())==='1';}catch(_){}
+  const kind=((window.__GOV_ME__||{}).workspace_navigation||{}).kind;
+  let enabled=['engineer','operator','admin'].includes(kind);
+  try{const saved=localStorage.getItem(_advancedChatPreferenceKey());if(saved!==null)enabled=saved==='1';}catch(_){}
   document.documentElement.dataset.advancedChatControls=enabled?'1':'0';
   const checkbox=$('settingsAdvancedChatControls');
   if(checkbox)checkbox.checked=enabled;
 }
 function _applyNavigationAudience(me){
   window._navAudience=me&&me.nav_audience==='admin'?'admin':'member';
-  window._capabilityNavigation=!!(me&&me.access_mode==='blacklist');
+  const workspace=me&&me.workspace_navigation;
+  window._capabilityNavigation=!!(me&&(me.access_mode==='blacklist'||workspace&&['engineer','operator'].includes(workspace.kind)));
   document.documentElement.dataset.navAudience=window._navAudience;
   document.documentElement.dataset.governanceNavigation=window._capabilityNavigation?'capabilities':'daily';
   _applyCapabilitySettingsVisibility();
@@ -9951,6 +9953,7 @@ function _applyTabVisibility(hidden){
   if(activeEl&&activeEl.classList.contains('nav-tab-hidden')){
     if(typeof switchPanel==='function') switchPanel('chat');
   }
+  if(window.SynthPulseWorkspace)window.SynthPulseWorkspace.sync();
 }
 
 function _renderTabVisibilityChips(){

@@ -1,5 +1,47 @@
 # Daily work navigation
 
+## Role workspaces
+
+`/api/governance/me` also returns `workspace_navigation`: a `kind` and the
+permitted `primary` and `secondary` panel IDs. This is presentation derived
+from resolved roles and effective permissions, not a second access policy.
+
+- Members start with daily work. A blacklist policy alone does not put every
+  permitted technical destination on the primary rail.
+- Operators additionally get Kanban and Insights when permitted.
+- Engineers additionally get technical workspace destinations when permitted.
+  An elevated access level selects the engineering presentation, while the
+  existing whitelist/legacy availability contract still applies.
+- Administrators retain all existing destinations. Explicit capability denies
+  in blacklist mode still apply.
+
+The existing `nav_audience` remains `member` for operators and engineers; this
+does not change ownership, approval authority, or administrative identity.
+Named engineer/operator roles extend the daily presentation only after each
+feature's permission check. Unrecognized roles fall back to the member view.
+
+Additional permitted destinations can be disclosed with **More tools** on both
+desktop and mobile. This choice is saved per signed-in email. The active
+destination remains visible when the disclosure closes; denied or module-gated
+destinations never become visible through this preference. Administrators do
+not need the disclosure. Technical roles default to expanded composer controls;
+an explicit personal choice in Appearance still wins.
+
+The workspace's visual shell uses Herm-inspired neutral surfaces, rounded
+panels, compact controls and restrained navigation. SynthPulse identity and the
+existing theme/skin choices remain. No Herm artwork, executable code, Mac-only
+integration, or runtime was imported. Chat rendering, bots, projects, scheduled
+tasks, approvals, files, artifacts, split views and integrations keep their
+existing handlers and state owners. Kanban has a navigation entry for permitted
+technical and administrative workspaces; member access still follows policy.
+
+Validation includes `tests/test_workspace_navigation.py` and the isolated
+`WORKSPACE SHELL` browser cases, alongside the existing blacklist navigation,
+chat and bot roster cases. Browser evidence uses synthetic users, conversations
+and a deterministic local model provider, never production customer data.
+
+## Existing access and navigation contracts
+
 SynPulse members have seven primary destinations: Chats, Bots, Projects,
 Scheduled tasks, Skills library, Connections and My approvals. A destination
 is omitted when its feature permission is absent. Settings remains a utility

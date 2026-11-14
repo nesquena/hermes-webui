@@ -1,5 +1,13 @@
 // Locale bundle; loaded on demand by static/i18n.js.
 window.__registerHermesLocale('en', {
+  "workspace_kind_member": "My workspace",
+  "workspace_kind_operator": "Operations",
+  "workspace_kind_engineer": "Engineering",
+  "workspace_kind_admin": "Administration",
+  "workspace_more": "More tools",
+  "workspace_less": "Fewer tools",
+  "workspace_role_hint": "Your workspace follows your role and access. Extra tools retain the same permissions.",
+
   "bot_scout_yourself": "Yourself",
   "bot_scout_choose_person": "Change person",
   "bot_scout_search_people": "Find a person",

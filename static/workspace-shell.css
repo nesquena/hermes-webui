@@ -1,0 +1,166 @@
+/* SynthPulse workspace, inspired by Herm's native workbench.
+   Presentation only: existing panels, controls, state and theme choices survive.
+   The neutral palette belongs to the default skin; other skins retain their tokens. */
+:root {
+  --workspace-radius: 16px;
+  --workspace-control-radius: 9px;
+  --workspace-gap: 8px;
+  --workspace-line: color-mix(in srgb, var(--text) 10%, transparent);
+}
+:root:is(:not([data-skin]), [data-skin="synthpulse"]) {
+  --bg: #f6f7f9;
+  --sidebar: #eef0f3;
+  --surface: #fff;
+  --surface-subtle: #f2f3f6;
+  --surface-subtle-hover: #e9ecf1;
+  --main-bg: #fff;
+  --border: #dfe3e9;
+  --border2: #d0d7e1;
+  --border-subtle: #e9ecf1;
+  --text: #293340;
+  --strong: #17212e;
+  --muted: #6b7583;
+  --input-bg: #f3f5f8;
+  --hover-bg: #e7ebf1;
+  --sp-chrome-bg: var(--sidebar);
+  --sp-page-grad: var(--surface);
+  --sp-card-bg: var(--surface-subtle);
+  --sp-composer-bg: var(--surface);
+  --sp-active-bg: #e2eaf5;
+  --sp-active-border: transparent;
+  --user-bubble-bg: #eef1f6;
+  --user-bubble-border: #e4e8ef;
+  --user-bubble-text: var(--text);
+}
+:root.dark:is(:not([data-skin]), [data-skin="synthpulse"]) {
+  --bg: #202226;
+  --sidebar: #25272c;
+  --surface: #2b2d32;
+  --surface-subtle: #303238;
+  --surface-subtle-hover: #383b42;
+  --main-bg: #2b2d32;
+  --border: #3b3e46;
+  --border2: #4a4f59;
+  --border-subtle: #353840;
+  --text: #e1e4ea;
+  --strong: #f7f8fa;
+  --muted: #a3aab6;
+  --input-bg: #303238;
+  --hover-bg: #363940;
+  --sp-chrome-bg: var(--sidebar);
+  --sp-page-grad: var(--surface);
+  --sp-card-bg: var(--surface-subtle);
+  --sp-composer-bg: #303238;
+  --sp-active-bg: #374252;
+  --sp-active-border: transparent;
+  --user-bubble-bg: #383b42;
+  --user-bubble-border: #454951;
+  --user-bubble-text: var(--text);
+}
+.workspace-secondary-hidden { display: none !important; }
+.workspace-role-badge {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid var(--workspace-line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+.workspace-more {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  min-height: 36px;
+  width: calc(100% - 12px);
+  margin: 4px 6px;
+  padding: 8px;
+  border: 0;
+  border-radius: var(--workspace-control-radius);
+  background: transparent;
+  color: var(--muted);
+  font: 500 12px var(--font-ui);
+  cursor: pointer;
+  text-align: left;
+}
+.workspace-more[hidden] { display: none; }
+.workspace-more:hover { background: var(--hover-bg); color: var(--text); }
+.workspace-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.workspace-more svg { flex-shrink: 0; }
+.app-titlebar { gap: 10px; border-bottom: 0 !important; }
+.app-titlebar-title { font-weight: 600 !important; }
+.synthpulse-titlebar-logo-wrap { box-shadow: none; background: transparent; }
+.app-titlebar-title.is-brand::after { content: none !important; }
+.app-titlebar, .rail, .sidebar, .topbar, .composer-wrap, .rightpanel {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.topbar { min-height: 48px; padding: 10px 20px; background: var(--surface) !important; }
+.main-view-header { padding-block: 18px; background: var(--surface); }
+.panel-head { min-height: 50px; font-weight: 600 !important; }
+.panel-view { background: var(--sidebar) !important; }
+.session-search-field { background: var(--input-bg); border: 1px solid var(--workspace-line); border-radius: var(--workspace-control-radius); }
+.session-item { border-radius: var(--workspace-control-radius); margin: 2px 8px; border: 1px solid transparent; }
+.session-item.active { box-shadow: none; }
+.session-item.active::before { display: none; }
+.rail-btn.active, .nav-tab.active { background: var(--sp-active-bg, var(--accent-bg)) !important; color: var(--text) !important; border-color: transparent !important; }
+.rail-btn.active::before { display: none; }
+.rail-btn svg { stroke-width: 1.6; }
+.rail-group span { text-transform: none !important; letter-spacing: 0 !important; font-weight: 500 !important; }
+.composer-wrap { background: var(--surface) !important; padding: 12px 24px 20px; }
+.composer-wrap::before { background: linear-gradient(to bottom, transparent, var(--surface)); height: 18px; }
+.composer-box { border-radius: 20px !important; border: 1px solid var(--border2) !important; box-shadow: 0 2px 8px color-mix(in srgb, var(--text) 3%, transparent) !important; }
+.composer-box:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 2px var(--accent-bg) !important; }
+.composer-footer { padding: 6px 12px 10px; }
+.composer-box textarea { padding: 16px; }
+.composer-chip { border-radius: var(--workspace-control-radius); }
+.msg-row[data-role="user"] .msg-body { border-radius: 16px 16px 5px 16px; box-shadow: none; }
+.tool-card, .activity-card, .thinking-card { border-radius: var(--workspace-control-radius); }
+.empty-logo.synthpulse-empty-logo { box-shadow: none !important; background: var(--surface-subtle) !important; border-color: var(--border-subtle) !important; }
+.empty-logo.synthpulse-empty-logo img { filter: none; }
+.profile-card, .cron-item { border-radius: var(--workspace-control-radius); }
+.main-view :is(.settings-card, .gov-card, .intg-card, .intg-hub-card) { border-radius: 12px; box-shadow: none; }
+.workspace-tab { border-radius: 7px; }
+.workspace-tab.active { background: var(--surface-subtle); color: var(--text); }
+@media (min-width: 641px) {
+  .layout { padding: 0 var(--workspace-gap) var(--workspace-gap) 0; box-sizing: border-box; gap: 0; }
+  .main { border: 1px solid var(--workspace-line); border-radius: var(--workspace-radius); }
+  .rail { padding: 10px 4px; background: var(--bg) !important; border-right: 0; }
+  html[data-rail-expanded="1"] .rail, html[data-nav-audience="member"] .rail { width: 196px; padding-inline: 8px; }
+  html[data-rail-expanded="1"] .rail .rail-btn, html[data-nav-audience="member"] .rail .rail-btn { height: 36px; }
+  .sidebar { background: var(--sidebar) !important; margin-right: var(--workspace-gap); border: 1px solid var(--workspace-line); border-radius: var(--workspace-radius); }
+  html[data-sidebar-collapsed="1"] .sidebar { margin-right: 0; border: 0; }
+  .rightpanel { margin-left: var(--workspace-gap); border: 1px solid var(--workspace-line); border-radius: var(--workspace-radius); }
+  html[data-workspace-panel="closed"] .rightpanel,
+  .layout.workspace-panel-collapsed .rightpanel { margin-left: 0; border-width: 0; }
+  html:not([data-rail-expanded="1"]):not([data-nav-audience="member"]) .workspace-more { width: 36px; padding: 8px; margin-inline: 0; }
+  html:not([data-rail-expanded="1"]):not([data-nav-audience="member"]) .workspace-more span { display: none; }
+  .rail { overflow-y: auto; scrollbar-width: thin; }
+  .sidebar > .panel-view { border-radius: var(--workspace-radius); }
+}
+@media (min-width: 641px) and (max-width: 1100px) {
+  html[data-rail-expanded="1"] .rail, html[data-nav-audience="member"] .rail { width: 168px; }
+}
+@media (max-width: 640px) {
+  .workspace-role-badge { display: none; }
+  .main, .sidebar, .rightpanel { border-radius: 0; }
+  .composer-wrap { padding: 8px 8px max(10px, env(safe-area-inset-bottom)); }
+  .composer-box { border-radius: 16px !important; }
+  .composer-box textarea { padding: 12px; }
+  .topbar { padding: 8px 12px; }
+  .workspace-more { width: 68px; min-height: 62px; flex-direction: column; justify-content: center; gap: 4px; margin: 0 4px; padding: 6px 2px; text-align: center; font-size: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail, .sidebar, .workspace-more, .composer-box { transition: none; }
+}
+
+/* The work surface stays quiet on a new conversation, too. */
+.empty-state { background: var(--surface); }
+.empty-logo::before { display: none; }
+.empty-logo.synthpulse-empty-logo { border: 0 !important; background: transparent !important; }
+.topbar { box-sizing: border-box; }
+.workspace-panel-tab { border-radius: 7px; }
+.workspace-panel-tab.active { background: var(--surface-subtle); color: var(--text); }

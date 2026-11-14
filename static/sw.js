@@ -24,6 +24,8 @@ const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
   './static/style.css' + VQ,
   './static/workspace-clarity.css' + VQ,
+  './static/workspace-shell.css' + VQ,
+  './static/workspace-shell.js' + VQ,
   './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
   './static/assistant_turn_anchors.js' + VQ,

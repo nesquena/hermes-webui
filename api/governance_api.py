@@ -445,7 +445,7 @@ def _handle_me(handler, parsed, policy, subject, access) -> bool:
     again on every request.
     """
     from api.governance.delegation import delegated_scope
-    from api.governance.nav import feature_permissions
+    from api.governance.nav import feature_permissions, workspace_navigation
 
     j(
         handler,
@@ -471,6 +471,7 @@ def _handle_me(handler, parsed, policy, subject, access) -> bool:
             # APIs stay the real enforcement.
             "hidden_nav": _hidden_nav(access, policy),
             "nav_audience": _nav_audience(access, policy),
+            "workspace_navigation": workspace_navigation(access, policy),
             "delegated_scope": delegated_scope(policy, subject).to_dict(),
         },
     )

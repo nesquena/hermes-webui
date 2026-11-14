@@ -11,7 +11,7 @@
 (function(){
   'use strict';
   const GROUPS = [
-    { key: 'work', nl: 'Werk', en: 'Work', panels: ['chat', 'studio', 'profiles', 'tasks', 'projects'] },
+    { key: 'work', nl: 'Werk', en: 'Work', panels: ['chat', 'studio', 'profiles', 'tasks', 'kanban', 'projects'] },
     { key: 'build', nl: 'Bouwstenen', en: 'Building blocks', panels: ['modules', 'skills', 'memory', 'integrations', 'workspaces', 'files', 'todos'] },
     { key: 'org', nl: 'Organisatie', en: 'Organisation', panels: ['organisation', 'management', 'insights', 'approvals', 'governance', 'logs'] }
   ];

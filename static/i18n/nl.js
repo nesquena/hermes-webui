@@ -1,6 +1,14 @@
 // Locale bundle; loaded on demand by static/i18n.js.
 // Dutch (nl): plain B1-level Dutch for SynthPulse. Missing keys fall back to English.
 window.__registerHermesLocale('nl', {
+  "workspace_kind_member": "Mijn werkplek",
+  "workspace_kind_operator": "Operatie",
+  "workspace_kind_engineer": "Techniek",
+  "workspace_kind_admin": "Beheer",
+  "workspace_more": "Meer functies",
+  "workspace_less": "Minder functies",
+  "workspace_role_hint": "Je werkplek volgt je rol en toegang. Extra functies behouden dezelfde rechten.",
+
   "bot_scout_yourself": "Jezelf",
   "bot_scout_choose_person": "Persoon wijzigen",
   "bot_scout_search_people": "Zoek een persoon",
