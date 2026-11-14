@@ -147,6 +147,10 @@
   html[data-rail-expanded="1"] .rail, html[data-nav-audience="member"] .rail { width: 168px; }
 }
 @media (max-width: 640px) {
+  .app-titlebar { gap: 4px; }
+  .app-titlebar .app-titlebar-spacer { display: none; }
+  .app-titlebar-left, .app-titlebar-profile { min-width: 0; }
+  .app-titlebar-profile { flex-shrink: 1; }
   .workspace-role-badge { display: none; }
   .main, .sidebar, .rightpanel { border-radius: 0; }
   .composer-wrap { padding: 8px 8px max(10px, env(safe-area-inset-bottom)); }

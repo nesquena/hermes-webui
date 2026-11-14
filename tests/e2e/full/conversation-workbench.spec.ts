@@ -360,3 +360,20 @@ test('SECTION TREE shows each conversation in its own branch and remembers indep
   await expect(card(design)).toBeVisible();
   await expect(card(free)).toBeVisible();
 });
+
+test('MOBILE OVERVIEW HEADER keeps the bot switcher and page actions within reach', async ({page}, info) => {
+  await ready(page);
+  await page.locator('#btnConversationBoard').click();
+  await page.evaluate(() => { window._showTitlebarProfile=true; window._applyTitlebarProfileVisibility(); });
+  const widths = [390,360,320];
+  const rightEdges:number[]=[];
+  for (const width of widths) {
+    await page.setViewportSize({width,height:844});
+    await expect.poll(()=>page.locator('.sidebar').evaluate(el=>el.getBoundingClientRect().right)).toBeLessThanOrEqual(1);
+    await expect(page.locator('#titlebarProfileBtn')).toBeVisible();
+    await page.screenshot({path:info.outputPath('header-'+width+'.png'), animations:'disabled'});
+    rightEdges.push(await page.locator('#btnPageHelp').evaluate(el=>el.getBoundingClientRect().right));
+    await expect(page.locator('#conversationBoardSearch')).toBeInViewport();
+  }
+  widths.forEach((width,i)=>expect(rightEdges[i]).toBeLessThanOrEqual(width));
+});
