@@ -84,6 +84,7 @@
       directory = document.createElement('section'); directory.id = 'botDirectory'; empty.appendChild(directory);
       directory.innerHTML = '<header class="bot-directory-head"><div><h2>' + esc(tx('title')) + '</h2><p>' + esc(tx('intro')) + '</p></div></header><div class="bot-directory-toolbar"><input id="botDirectorySearch" type="search"><div class="bot-directory-controls"><div class="bot-directory-filters"></div><div class="bot-layout-controls"></div></div></div><p id="botDirectoryCount" role="status"></p><div class="bot-directory-grid"></div>';
       const create = button(t('new_profile'), 'sm-btn bot-directory-create workspace-primary', () => openProfileCreate());
+      create.dataset.tour = 'bots-new';
       directory.querySelector('.bot-directory-head').appendChild(create);
       const search = directory.querySelector('#botDirectorySearch');
       search.placeholder = tx('search'); search.setAttribute('aria-label', search.placeholder);

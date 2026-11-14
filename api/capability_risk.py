@@ -107,7 +107,7 @@ PERMISSION_RISKS = {
     },
     "chat:use": {
         "capability": "Run the assistant: start conversations and have it do work.",
-        "data": "Whatever the conversation reaches, through the tools the person's profile allows.",
+        "data": "The conversation, its personal memory and the data reachable through the allowed tools.",
         "risks": (RISK_EXTERNAL_COMMS, RISK_FINANCIAL),
         "narrower": "",
         "depends_on": ("sessions:read",),
@@ -280,20 +280,6 @@ PERMISSION_RISKS = {
         "narrower": "mcp:read allows reviewing the connected services without changing them.",
         "depends_on": ("mcp:read",),
     },
-    "memory:read": {
-        "capability": "Read what the assistant has remembered.",
-        "data": "Saved notes about people, projects and preferences.",
-        "risks": (RISK_DATA_ACCESS,),
-        "narrower": "",
-        "depends_on": (),
-    },
-    "memory:write": {
-        "capability": "Add to and change what the assistant remembers.",
-        "data": "Saved notes about people, projects and preferences.",
-        "risks": (RISK_DATA_ACCESS,),
-        "narrower": "memory:read allows reading the notes without changing them.",
-        "depends_on": ("memory:read",),
-    },
     "model:read": {
         "capability": "See which models are available and which one is selected.",
         "data": "Model names and the current selection.",
@@ -332,6 +318,13 @@ PERMISSION_RISKS = {
     "profiles:read": {
         "capability": "See which working profiles exist and switch between the allowed ones.",
         "data": "Profile names and their settings.",
+        "risks": (),
+        "narrower": "",
+        "depends_on": (),
+    },
+    "self:read": {
+        "capability": "View the status of your own access requests.",
+        "data": "The requests and decisions associated with your signed-in identity.",
         "risks": (),
         "narrower": "",
         "depends_on": (),

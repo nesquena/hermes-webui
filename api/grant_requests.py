@@ -89,7 +89,6 @@ GRANTABLE_PERMISSIONS = frozenset({
     "kanban:read",
     "logs:read",
     "mcp:read",
-    "memory:read",
     "model:read",
     "plugins:read",
     "profiles:read",
