@@ -14921,7 +14921,7 @@ async function applyUpdates(opts){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       if(forceActiveRuns) _applyBody.force_active_runs=true;
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:300000});
       if(!res.ok){
         _showUpdateError(target,res);
         if(res.restart_blocked&&res.force_available){
@@ -15210,7 +15210,7 @@ async function forceUpdate(btn,opts){
     const _ch=window._updateData?.[target]?.channel;
     if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
     if(forceActiveRuns) _forceBody.force_active_runs=true;
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
