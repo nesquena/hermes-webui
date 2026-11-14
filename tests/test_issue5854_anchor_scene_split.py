@@ -295,10 +295,16 @@ def test_fully_loaded_session_never_uses_stale_fingerprint(session_store):
 
 
 def _write_legacy_large(session_store, sid, n_msgs=5):
-    """Write a legacy large-scene sidecar (scenes before count, >64KB prefix)."""
+    """Write a legacy large-scene sidecar (scenes before count, >64KB prefix).
+
+    Key order follows the pre-#5854 ``save()``, which wrote ``METADATA_FIELDS``
+    in list order: ``profile`` early, ``anchor_activity_scenes`` near the end.
+    So the prefix of a real legacy file carries ``profile`` (#8857 sends a
+    prefix without one to a full read on every metadata read).
+    """
     big = _big_scenes(n_scenes=3, n_rows=80)
     doc = {"session_id": sid, "title": "Legacy", "workspace": str(session_store.parent),
-           "model": "glm", "created_at": 1.0, "updated_at": 2.0,
+           "model": "glm", "created_at": 1.0, "updated_at": 2.0, "profile": None,
            "anchor_activity_scenes": big,
            "message_count": n_msgs,
            "messages": [{"role": "user", "content": f"m{i}"} for i in range(n_msgs)]}

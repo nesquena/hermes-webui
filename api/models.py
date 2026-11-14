@@ -2590,7 +2590,9 @@ class Session:
                 )
 
     @classmethod
-    def load(cls, sid):
+    def load(cls, sid, *, _repair=True):
+        # ``_repair=False``: a read that must not write (#8857); see the
+        # duplicate-partial self-heal below.
         # Validate session ID format to prevent path traversal.  API/gateway
         # session ids may contain hyphens (for example ``api-*`` and
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
@@ -2633,7 +2635,12 @@ class Session:
         if _names_other_session:
             # Mark it so save() refuses. Loads still return it as before.
             session._sidecar_names_other_session = sid
-        if _collapsed_partials and _names_other_session:
+        if _collapsed_partials and not _repair:
+            # #8857: a read that must not write (load_metadata_only, which
+            # another profile's sidebar poll can reach) keeps the collapse in
+            # memory only and skips the facts cache, as below.
+            pass
+        elif _collapsed_partials and _names_other_session:
             # Keep the collapse in memory only (see above), and skip the legacy
             # facts cache: the file still holds the uncollapsed transcript.
             logger.info(
@@ -2721,6 +2728,45 @@ class Session:
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
+            # #8857: 'profile' names the owner that metadata-only routes and the
+            # sidebar judge the session by. A prefix without it (an older or
+            # outside writer put it after 'messages', or wrote none) would give
+            # the stub profile=None, the legacy no-profile owner. Read the whole
+            # file instead, once, so the title and the owner come from the same
+            # read whatever replaced the file after the prefix read. Nothing is
+            # cached: an owner cached under anything but the file's content can
+            # pair one version's title with another version's owner. The read
+            # never writes (another profile's sidebar poll lands here), and a
+            # failed read is a miss, never the repairing fallback below. WebUI
+            # never writes this layout: save() has put 'profile' before
+            # 'messages' (None included) since #959, and the earlier __dict__
+            # dump put the timestamps after 'messages' too, so those files fail
+            # the check above. Only other writers' files get here.
+            # It still returns a metadata-only stub: callers that save
+            # (stale-stream cleanup, #1558) reload the canonical session for a
+            # stub, but would save a detached full copy over a newer turn.
+            # __init__ took count, visible count and scene fingerprint from the
+            # file's own keys; a file without them gets them from this read
+            # (a stub's compact() trusts these and never walks messages).
+            if 'profile' not in parsed:
+                try:
+                    session = cls.load(sid, _repair=False)
+                    if session is None:
+                        return None
+                    if session._metadata_message_count is None:
+                        session._metadata_message_count = len(session.messages or [])
+                    if session._anchor_scene_index is None:
+                        session._anchor_scene_index = _anchor_scene_index_from_records(session.anchor_activity_scenes)
+                    if session._metadata_visible_message_count is None:
+                        session._metadata_visible_message_count = sum(
+                            1 for m in (session.messages or []) if not is_hidden_transcript_row(m)
+                        )
+                    session.messages, session.tool_calls, session.anchor_activity_scenes = [], [], {}
+                    session._loaded_metadata_only = True
+                    return session
+                except Exception:
+                    logger.debug("metadata read of %s failed", sid, exc_info=True)
+                    return None
             # #8852: mark a stub whose body names another session, as
             # Session.load does, so writers that bypass save() refuse it too.
             _names_other_session = parsed.get('session_id') != sid
