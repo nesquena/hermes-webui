@@ -60,7 +60,7 @@ def test_scroll_to_bottom_settles_across_late_markdown_layout_growth():
     # automatic scrollIfPinned() path passes no explicit flag (stays auto-gated).
     assert "_settleMessageScrollToBottom(false, true)" in scroll
     assert "_settleMessageScrollToBottom(false)" in pinned
-    assert "!_scrollPinned" in settle
+    assert "!_bottomFollowOwnsReader(el)" in settle
     assert "const token=++_bottomSettleToken" in settle
     assert "token!==_bottomSettleToken" in settle
 
@@ -112,7 +112,9 @@ def test_user_scroll_cancels_delayed_bottom_settling():
     assert "_recentMessageWheelIntent()" in _pinned_compact and "_recentMessageKeyScrollIntent()" in _pinned_compact, (
         "scrollIfPinned() re-pin must bail on recent wheel/key scroll intent so it can't fight a reader"
     )
-    assert "_messageUserUnpinned" in final and "return" in final
+    owner = _function_body(UI_JS, "function _bottomFollowOwnsReader")
+    assert "!_bottomFollowOwnsReader(el)" in final and "return" in final
+    assert "!_messageUserUnpinned" in owner and "_scrollPinned" in owner
     assert "_recentMessageUpwardIntent()" not in pinned
 
 
@@ -155,7 +157,7 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     restore = _function_body(UI_JS, "function _restoreMessageScrollSnapshot")
 
     snapshot_idx = render.index("const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null")
-    inner_idx = render.index("const inner=$('msgInner')")
+    inner_idx = render.index("const liveInner=$('msgInner')")
     final_scroll_idx = render.rindex("_scrollAfterMessageRender(preserveScroll, scrollSnapshot)")
 
     assert snapshot_idx < inner_idx < final_scroll_idx, (

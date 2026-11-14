@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -48,6 +49,60 @@ def _function_source(name: str) -> str:
             if depth == 0:
                 return ui_js[start : i + 1]
     raise AssertionError(f"function {name}() is unterminated")
+
+
+def _optional_function_source(name: str) -> str:
+    """Extract ``function name(...)`` when ui.js defines it; '' otherwise.
+
+    PR branches add renderMessages() helpers that do not exist on master (the
+    typed Steer-row predicate, the preserved-live-turn reconciler). Extracting
+    their real bodies keeps the harness DOM-faithful instead of papering over
+    them with behavior-free stubs; on master the lookup misses and the shim is
+    unchanged. Extracted sources may themselves call further ui.js helpers —
+    any helper needed on an executed path must be listed here too.
+    """
+    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+    start = ui_js.find(f"function {name}(")
+    if start == -1:
+        return ""
+    brace = ui_js.index("{", start)
+    depth = 0
+    for i in range(brace, len(ui_js)):
+        if ui_js[i] == "{":
+            depth += 1
+        elif ui_js[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return ui_js[start : i + 1] + "\n"
+    raise AssertionError(f"function {name}() is unterminated")
+
+
+def _optional_declaration_source(name: str) -> str:
+    """Extract a top-level single-line ``let/const/var NAME = ...;`` if present.
+
+    PR render helpers read module-level state (the message-window revision
+    counter) that master does not declare; same optional contract as
+    _optional_function_source.
+    """
+    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+    match = re.search(
+        rf"^(?:let|const|var)\s+{re.escape(name)}\s*=[^\n]*;\s*$", ui_js, re.M
+    )
+    return match.group(0) + "\n" if match else ""
+
+
+# renderMessages() helpers and module state that exist only on PR branches.
+# Injected when ui.js defines them, skipped on master, so this shim serves
+# every base without per-PR forks of the harness.
+_PR_RENDER_HELPERS = (
+    "_isSteerDisplayMessage",
+    "_reconcilePreservedLiveTurn",
+    "_initializeMessageWindowOwnership",
+    "_rememberMessageWindowReader",
+)
+_PR_RENDER_DECLARATIONS = (
+    "_messageWindowRevision",
+)
 
 
 _SCRIPT = r"""
@@ -124,6 +179,13 @@ class FakeElement {
     this.innerHTML = '';
     this.style = {};
     this.classList = new FakeClassList(this);
+  }
+  // Serialized like the anchor-fallback/owned-window harnesses so PR helpers
+  // that stamp raw markup (e.g. _reconcilePreservedLiveTurn's
+  // node._messageWindowMarkup=node.outerHTML) run against real strings.
+  get outerHTML() {
+    return '<'+this.tagName+' class="'+this.className+'">'+this.innerHTML+
+      this.children.map(child=>child.outerHTML).join('')+'</'+this.tagName+'>';
   }
   get firstChild() { return this.children.length ? this.children[0] : null; }
   appendChild(child) {
@@ -434,6 +496,7 @@ function _fmtTokens(value) { return String(value); }
 /*RAW_TURN_BOUNDARY*/
 /*INSERT_SEGMENT_BLOCK*/
 /*ASSISTANT_SEGMENT_IS_TURN_FINAL*/
+/*PR_RENDER_HELPERS*/
 /*RENDER_MESSAGES*/
 
 function footCounts(foot) {
@@ -494,6 +557,13 @@ def _run_footer_scenario() -> dict:
         .replace(
             "/*ASSISTANT_SEGMENT_IS_TURN_FINAL*/",
             _function_source("_assistantSegmentIsTurnFinal"),
+        )
+        .replace(
+            "/*PR_RENDER_HELPERS*/",
+            "".join(_optional_function_source(n) for n in _PR_RENDER_HELPERS)
+            + "".join(
+                _optional_declaration_source(n) for n in _PR_RENDER_DECLARATIONS
+            ),
         )
         .replace("/*RENDER_MESSAGES*/", _function_source("renderMessages"))
     )

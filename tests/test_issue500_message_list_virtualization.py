@@ -809,6 +809,7 @@ let _messageVirtualEstimatedRowHeight = 140;
 function _syncMessageVirtualHeightCache(){ /* no-op for the test */ }
 function $(id){ return {scrollTop: 5000, clientHeight: 720}; }
 function _messageVirtualRoleForEntry(){ return 'default'; }
+const S={busy:false};
 const window = {};
 eval(extractFunc('_messageVirtualWindow'));
 eval(extractFunc('_currentMessageVirtualWindow'));
@@ -927,7 +928,7 @@ const metrics = _messageVirtualWindow({
   total: 3,
   scrollTop: 0,
   viewportHeight: 600,
-  heights: [0, 0, 0],
+  heights: new Array(3),  // Unmeasured; a numeric zero is a measured collapsed row.
   defaultHeight: 140,
   roleForIdx: (idx) => {
     const entry = visWithIdx[idx];
@@ -1088,7 +1089,7 @@ const win = _messageVirtualWindow({
   total: 3,
   scrollTop: 0,
   viewportHeight: 600,
-  heights: [0, 0, 0],
+  heights: new Array(3),  // Unmeasured; a numeric zero is a measured collapsed row.
   defaultHeight: 140,
   roleForIdx: idx => _messageVirtualRoleForEntry(visWithIdx[idx]),
   bufferPx: 0,
@@ -1323,20 +1324,27 @@ console.log(JSON.stringify({
     )
 
 
-def test_virtualized_render_uses_compensation_helper():
-    """_scheduleMessageVirtualizedRender must wrap renderMessages with _compensateScrollForMeasurementDelta."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    start = js.index("function _scheduleMessageVirtualizedRender(")
-    end = js.index("\n// ──", start)
-    body = js[start:end]
-
-    assert "_compensateScrollForMeasurementDelta" in body, (
-        "_scheduleMessageVirtualizedRender must call "
-        "_compensateScrollForMeasurementDelta to compensate scroll after measurement-driven rerenders"
-    )
-    assert "renderMessages(" in body, (
-        "the compensation helper should wrap the actual renderMessages call"
-    )
+def test_virtualized_render_samples_live_window_once_at_commit():
+    """A queued window update uses current geometry, not request-time state."""
+    source = _extract_func_script(UI_JS_PATH.read_text()) + """
+let _messageVirtualWindowKey='old', _messageVirtualScrollRaf=0;
+let revision=1, raf, calls=[];
+function $(){return {};}
+function _getVisibleMessagesWithIdx(){return [revision];}
+function _currentMessageVirtualWindow(entries){return {virtualized:true,key:entries[0]};}
+function _messageVirtualKeepTailCount(){return 50;}
+function _messageVirtualWindowKeyFor(w){return w.key;}
+function _settleMessageWindowReader(){}
+function requestAnimationFrame(cb){raf=cb;return 1;}
+function renderMessages(options){calls.push({revision,options});}
+eval(extractFunc('_scheduleMessageVirtualizedRender'));
+_scheduleMessageVirtualizedRender();
+revision=2;
+_scheduleMessageVirtualizedRender();
+raf();
+console.log(JSON.stringify({calls,pending:_messageVirtualScrollRaf}));
+"""
+    assert json.loads(_run_node(source)) == dict(calls=[dict(revision=2,options=dict(preserveScroll=True,_windowOnly=True,_internalMeasurement=False))],pending=0)
 
 
 def test_scroll_listener_guards_programmatic_scroll_before_marking_active():
@@ -1469,6 +1477,7 @@ let _programmaticScrollSetAt = 0;
 function _deferClearProgrammaticScroll(){}
 function $(id){ return {}; }
 function _getVisibleMessagesWithIdx(){ return []; }
+function _settleMessageWindowReader(){}
 function _messageVirtualKeepTailCount(){ return 0; }
 function _currentMessageVirtualWindow(){
   return { virtualized:true, start:0, end:10, topPad:0, bottomPad:0, tailStart:10, total:20 };
