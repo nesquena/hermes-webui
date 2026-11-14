@@ -101,10 +101,10 @@ def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse
 
 def test_branch_handler_uses_merged_messaging_messages_for_keep_count():
     branch_idx = ROUTES_PY.index('parsed.path == "/api/session/branch":')
-    block = ROUTES_PY[branch_idx : branch_idx + 2600]
+    block = ROUTES_PY[branch_idx : branch_idx + 3000]
 
     assert "_merged_session_messages_for_display(source, cli_messages)" in block
-    assert "get_cli_session_messages(source.session_id)" in block
+    assert "get_cli_session_messages(source.session_id, include_row_identity=True)" in block
     assert "source_messages = source.messages or []" not in block
 
 

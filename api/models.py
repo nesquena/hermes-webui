@@ -13030,7 +13030,34 @@ def _decode_state_db_content(value):
     return decoded
 
 
-def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
+def _state_db_projection_keeps_row_identity(msg) -> bool:
+    """Whether the default projection keeps a row's private id (provider replay, native image)."""
+    native_image_projection = (
+        msg.get('role') == 'user'
+        and isinstance(msg.get('content'), str)
+        and '[screenshot]' in msg['content']
+    )
+    return native_image_projection or (
+        isinstance(msg.get('api_content'), str) and bool(msg['api_content'])
+    )
+
+
+def without_requested_row_identity(msg):
+    """Return *msg* as the default projection shapes it, from an ``include_row_identity`` read."""
+    if not isinstance(msg, dict):
+        return msg
+    drop_row_id = '_state_db_row_id' in msg and not _state_db_projection_keeps_row_identity(msg)
+    if drop_row_id or STATE_DB_MESSAGE_UID_KEY in msg:
+        msg = dict(msg)
+        if drop_row_id:
+            del msg['_state_db_row_id']
+        msg.pop(STATE_DB_MESSAGE_UID_KEY, None)
+    return msg
+
+
+def _project_state_db_message(
+    row, available, id_col, optional, *, include_row_identity=False, include_message_uid=False,
+):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
     Shared by ``get_state_db_session_messages`` and the regeneration
@@ -13053,24 +13080,14 @@ def _project_state_db_message(row, available, id_col, optional, *, include_row_i
         if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
             value = _json_loads_if_string(value)
         msg[col] = value
-    native_image_projection = (
-        msg.get('role') == 'user'
-        and isinstance(msg.get('content'), str)
-        and '[screenshot]' in msg['content']
-    )
     if (
         id_col
         and row['id'] is not None
-        and (
-            include_row_identity
-            or native_image_projection
-            or (
-                isinstance(msg.get('api_content'), str)
-                and msg['api_content']
-            )
-        )
+        and (include_row_identity or _state_db_projection_keeps_row_identity(msg))
     ):
         msg['_state_db_row_id'] = row['id']
+    if include_message_uid and 'message_uid' in row.keys() and _valid_message_uid(row['message_uid']):
+        msg[STATE_DB_MESSAGE_UID_KEY] = row['message_uid']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
         msg['name'] = msg['tool_name']
     return msg
@@ -13086,6 +13103,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     include_row_identity: bool = False,
+    include_message_uid: bool = False,
     with_revision: Literal[False] = False,
 ) -> list: ...
 
@@ -13100,6 +13118,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     include_row_identity: bool = False,
+    include_message_uid: bool = False,
     with_revision: Literal[True],
 ) -> StateDBSessionMessagesSnapshot: ...
 
@@ -13113,6 +13132,7 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     include_row_identity: bool = False,
+    include_message_uid: bool = False,
     with_revision: bool = False,
 ):
     """Read messages for a Hermes session from state.db.
@@ -13154,6 +13174,10 @@ def get_state_db_session_messages(
     projected row. Cancelled-journal consumers use this to carry proven SQLite
     successor identity through sidecar persistence; ordinary projections retain
     their historical shape. Public/provider projections strip the private IDs.
+
+    ``include_message_uid=True`` also keeps the Agent's per-occurrence
+    ``message_uid`` (``STATE_DB_MESSAGE_UID_KEY``). Only the messaging display
+    merge asks for it, through ``get_cli_session_messages``.
     """
     try:
         import sqlite3
@@ -13203,6 +13227,7 @@ def get_state_db_session_messages(
                 + ['role', 'content', 'timestamp']
                 + revision_cols
                 + [c for c in optional if c in available]
+                + (['message_uid'] if include_message_uid and 'message_uid' in available else [])
             )
 
             session_chain = [str(sid)]
@@ -13345,6 +13370,7 @@ def get_state_db_session_messages(
                     _project_state_db_message(
                         row, available, bool(id_col), optional,
                         include_row_identity=include_row_identity,
+                        include_message_uid=include_message_uid,
                     )
                 )
     except Exception:
@@ -14529,6 +14555,185 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
             target[key] = copy.deepcopy(value)
 
 
+# Agent-store-only semantic payload: the model's actual reasoning/thinking
+# trace and the Codex-specific structured item lists. These are NOT display
+# metadata (_SESSION_MESSAGE_DISPLAY_METADATA_KEYS above) and are deliberately
+# NOT folded into it: that allowlist is reused by several merge paths beyond
+# the gateway dual-store reconciliation this one exists for, and widening it
+# would change behavior in call sites that never asked for reasoning/Codex
+# payload semantics. Kept as its own narrow, explicitly-named list instead.
+# `api_content` is deliberately excluded from both lists — its identity rules
+# elsewhere in this module are stricter for good reason and must not be
+# bypassed by a generic dict merge.
+_AGENT_SEMANTIC_PAYLOAD_KEYS = (
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "codex_reasoning_items",
+    "codex_message_items",
+)
+
+
+def _adopt_agent_semantic_payload(target: dict | None, source: dict | None) -> None:
+    """Copy Agent-store-only semantic payload onto the surviving sidecar row.
+
+    Used when a gateway dual-store reconciliation discards an unidentified
+    Agent-store copy of a turn in favor of the identified WebUI sidecar copy:
+    the discarded row can carry the model's real reasoning trace and Codex
+    item lists that the sidecar copy never received. Same fill-only-if-absent
+    policy as `_merge_session_display_metadata`: a field the survivor already
+    carries a non-empty value for is left alone rather than overwritten, so
+    Agent-side data never silently clobbers a sidecar-authored value.
+    """
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    for key in _AGENT_SEMANTIC_PAYLOAD_KEYS:
+        if _message_display_metadata_value_present(target.get(key)):
+            continue
+        value = source.get(key)
+        if _message_display_metadata_value_present(value):
+            target[key] = copy.deepcopy(value)
+
+
+def _cross_store_pairing_key(msg, *, from_sidecar: bool):
+    """Visible identity of one turn's row across the WebUI sidecar and state.db.
+
+    Deliberately narrower than `_session_message_visible_key`: it excludes the
+    `api_content` provider sidecar that key appends via
+    `_session_message_key_with_sidecar`. `api_content` is state.db-only by
+    design, so a gateway turn's Agent copy commonly carries provider bytes its
+    sidecar twin does not have, and keying on it would give the two copies of
+    ONE turn different keys. The shared visible key is left untouched -- other
+    merge paths rely on its stricter identity.
+
+    The Agent copy of a user prompt can carry the workspace prefix the sidecar
+    copy never has; it is stripped from string content only, since structured
+    content keeps its out-of-band tuple identity.
+    """
+    if not isinstance(msg, dict):
+        return ("non_dict", repr(msg))
+    tool_calls = msg.get("tool_calls")
+    tool_calls_key = json.dumps(tool_calls, sort_keys=True, default=str) if tool_calls else ""
+    role = str(msg.get("role") or "")
+    content = _normalized_session_message_content(msg)
+    if role == "user" and not from_sidecar and isinstance(content, str):
+        from api.streaming import _strip_workspace_prefix
+
+        content = " ".join(_strip_workspace_prefix(content, include_legacy=True).split())
+    return (role, content, tool_calls_key)
+
+
+def _state_db_path_for_profile(profile) -> Path:
+    if isinstance(profile, str) and profile:
+        return _get_profile_home(profile) / 'state.db'
+    return _active_state_db_path()
+
+
+def state_db_message_id_floor(sid, *, profile=None) -> int | None:
+    """Return the highest state.db row id *sid* holds, before a Gateway run starts.
+
+    Rows the Agent writes for the run land above it. ``0`` when the store has
+    no rows for the session yet; ``None`` when the store cannot say, which
+    leaves the run's sidecar rows unstamped rather than guessed.
+    """
+    db_path = _state_db_path_for_profile(profile)
+    if not db_path.exists():
+        return 0
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+            if 'id' not in columns:
+                return None
+            floor = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?", (str(sid),)
+            ).fetchone()[0]
+        return int(floor)
+    except Exception:
+        return None
+
+
+def state_db_session_rows_after(sid, floor, *, profile=None) -> list | None:
+    """Return *sid*'s active user/assistant state.db rows above *floor*, with private identity.
+
+    Only the rows the sidecar turn can mirror are read, so a tool-heavy run
+    does not decode its tool outputs here.
+    """
+    db_path = _state_db_path_for_profile(profile)
+    if not db_path.exists():
+        return []
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            available = {str(row['name']) for row in conn.execute("PRAGMA table_info(messages)")}
+            if not {'id', 'role', 'content', 'timestamp'}.issubset(available):
+                return None
+            optional = [
+                col for col in ('tool_call_id', 'tool_calls', 'tool_name', 'api_content')
+                if col in available
+            ]
+            uid_col = ['message_uid'] if 'message_uid' in available else []
+            # The same archived-row filter as the display reader.
+            active_clause = " AND (active IS NULL OR active != 0)" if 'active' in available else ""
+            rows = conn.execute(
+                f"SELECT {', '.join(['id', 'role', 'content', 'timestamp', *optional, *uid_col])} "
+                "FROM messages WHERE session_id = ? AND id > ? AND role IN ('user', 'assistant')"
+                f"{active_clause} ORDER BY id ASC",
+                (str(sid), int(floor)),
+            ).fetchall()
+            return [
+                _project_state_db_message(
+                    row, available, True, optional, include_row_identity=True, include_message_uid=True,
+                )
+                for row in rows
+            ]
+    except Exception:
+        return None
+
+
+def stamp_gateway_turn_message_uids(run_rows, turn_messages) -> None:
+    """Give a Gateway turn's sidecar rows the ``message_uid`` of their state.db twins.
+
+    *run_rows* are the state.db rows the Agent wrote for this run (above the
+    pre-run floor). They prove a twin only while they hold exactly one turn:
+    a single user row. A concurrent Telegram turn, a steer, or a transcript
+    rewrite (which reinserts the history above the floor) adds prompts, and
+    then nothing is stamped. Within one turn, a sidecar row takes the
+    ``message_uid`` of the single row that matches it on the cross-store
+    pairing key; a reply the stream joined across tool calls matches none.
+
+    The Agent mints that uid per occurrence (128 random bits) and keeps it
+    when a rewrite copies the message, so unlike a row id it is never handed
+    out again by a restored or recreated state.db. The stamp is a private key
+    only the display merge reads (``STATE_DB_MESSAGE_UID_KEY``); the row ids
+    other merge paths trust are left as they were. A uid the row carried
+    before -- inherited from the run a regeneration superseded -- is dropped
+    either way, so an unproven row is never paired.
+    """
+    rows = [row for row in run_rows or () if isinstance(row, dict)]
+    one_turn = sum(1 for row in rows if row.get('role') == 'user') == 1
+    run_keys = [(_cross_store_pairing_key(row, from_sidecar=False), row) for row in rows] if one_turn else []
+    for msg in turn_messages:
+        if not isinstance(msg, dict):
+            continue
+        msg.pop(STATE_DB_MESSAGE_UID_KEY, None)
+        key = _cross_store_pairing_key(msg, from_sidecar=True)
+        matches = [row for row_key, row in run_keys if row_key == key]
+        if len(matches) == 1 and _valid_message_uid(matches[0].get(STATE_DB_MESSAGE_UID_KEY)):
+            msg[STATE_DB_MESSAGE_UID_KEY] = matches[0][STATE_DB_MESSAGE_UID_KEY]
+
+
+# Every key a message's private state.db row id has been stored under.
+STATE_DB_ROW_ID_ALIASES = ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id")
+# The Agent's own per-occurrence ``message_uid`` for a state.db row, read only
+# with ``include_message_uid`` and stamped on gateway sidecar rows. It is the
+# display merge's proof that two rows are one message.
+STATE_DB_MESSAGE_UID_KEY = "_state_db_message_uid"
+
+
+def _valid_message_uid(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:
     """Return ``(row_id, valid)`` for private state.db provenance aliases.
 
@@ -14539,7 +14744,7 @@ def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bo
     if not isinstance(message, dict):
         return None, True
     values = set()
-    for key in ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+    for key in STATE_DB_ROW_ID_ALIASES:
         if key not in message or message.get(key) in (None, ""):
             continue
         value = message.get(key)
@@ -17308,8 +17513,11 @@ def reconciled_state_db_messages_for_session(
     )
 
 
-def get_cli_session_messages(sid, *, profile=None) -> list:
+def get_cli_session_messages(sid, *, profile=None, include_row_identity: bool = False) -> list:
     """Read messages for a single CLI/external-agent session.
+
+    ``include_row_identity=True`` is the messaging display merge's read: it
+    keeps the private row ids and the Agent's ``message_uid``.
 
     Preserve tool-call/result and reasoning metadata from the agent state.db so
     CLI-origin transcripts render with the same tool cards as WebUI-native
@@ -17319,7 +17527,10 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     """
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
-    return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
+    return get_state_db_session_messages(
+        sid, stitch_continuations=True, profile=profile,
+        include_row_identity=include_row_identity, include_message_uid=include_row_identity,
+    )
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:

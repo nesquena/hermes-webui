@@ -22,6 +22,7 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "api_content",
     "_row_id",
     "_state_db_row_id",
+    "_state_db_message_uid",
     "_db_row_id",
     "state_db_row_id",
     "_active_turn_token",
