@@ -2102,7 +2102,11 @@ async function send(){
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
+    // #8643: busy before the optimistic render, so the just-pushed user row
+    // never paints Edit while the turn it belongs to is already running.
+    // Rendering first left the idle-styled row — and its dead Edit — on screen
+    // until the first stream event re-rendered at busy.
+    S.messages.push(userMsg);setBusy(true);renderMessages();
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});
@@ -2302,7 +2306,9 @@ async function send(){
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    // #8643: clear busy first (as the regeneration failure terminal does) so
+    // the error row paints as an idle final answer, with Regenerate.
+    _queueDrainSid=activeSid;setBusy(false);renderMessages();setComposerStatus(`Error: ${errMsg}`);
     // #5472: the send was rejected before the turn was durably started, so the
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
@@ -2407,7 +2413,12 @@ async function startRegeneration(sessionId, regenerationRevision){
   const retained=Object.assign({},snapshot[userIndex],{_pending:true});
   S.messages=snapshot.slice(0,userIndex+1);
   S.messages[userIndex]=retained;
-  renderMessages();setBusy(true);
+  // #8643: set busy BEFORE the optimistic render. Rendering first painted the
+  // idle action bar (Edit on the pending user row) and nothing re-renders
+  // until the stream attaches, so the button sat on screen — tappable, and
+  // refused by editMessage()/regenerateResponse() on S.busy — for the whole
+  // /api/chat/start round-trip. Paint the state the turn is actually in.
+  setBusy(true);renderMessages();
   if(typeof ensureLiveWorklogShell==='function')ensureLiveWorklogShell();
   else if(typeof appendThinking==='function')appendThinking('',{pending:true});
   try{
@@ -2433,7 +2444,15 @@ async function startRegeneration(sessionId, regenerationRevision){
     if(S.session&&S.session.session_id===sid){
       S.messages=snapshot;delete INFLIGHT[sid];
       if(typeof clearInflightState==='function')clearInflightState(sid);
-      removeThinking();renderMessages();setBusy(false);setComposerStatus('');
+      // #8643: clear busy BEFORE rebuilding the restored transcript. Rendering
+      // first painted the running-turn action bar — the busy predicate omits
+      // Edit on the pending user row and Regenerate on the turn's final
+      // assistant row — and setBusy(false) only touches the composer, so the
+      // restored idle transcript kept the button-less footer until some
+      // unrelated re-render. Availability has to follow the real state
+      // transition (busy → idle), so the flag moves first. Same ordering as
+      // the send() failure terminal.
+      removeThinking();setBusy(false);renderMessages();setComposerStatus('');
     }
     throw error;
   }
@@ -2806,6 +2825,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof setStatus==='function') setStatus('');
     }
   }
+
+  // #8643 follow-up (review P2): a terminal rebuild must be painted from the
+  // IDLE state. renderMessages() derives the action bar from S.busy, so a
+  // rebuild that still sees S.busy===true paints the running-turn footer (no
+  // Edit, no Regenerate) — and the idle clear that follows the rebuild only
+  // touches the composer, never the transcript, so the settled transcript kept
+  // the button-less footer until some unrelated re-render.
+  //
+  // This clears ONLY the flag, deliberately NOT via setBusy(false): that
+  // drains one queued message, and the drain must happen exactly once — in
+  // the owner-aware _setActivePaneIdleIfOwner() call that follows the
+  // rebuild. The owner test is the same 3-way OR as that helper's (v0.51.12
+  // #1753), so a background session's terminal event still cannot idle the
+  // visible pane. Keep the two owner tests in sync.
+  function _clearActivePaneBusyForTerminalRender(){
+    if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id])S.busy=false;
+  }
   function persistInflightState(){
     const inflight=INFLIGHT[activeSid];
     if(!inflight||typeof saveInflightState!=='function') return;
@@ -2908,6 +2944,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_isActiveSession()){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
+      // #8643 (review P2): the terminal rebuild must be painted idle, or the
+      // settled transcript keeps the running-turn footer (no Edit/Regenerate).
+      // The drain stays with _setActivePaneIdleIfOwner() below.
+      _clearActivePaneBusyForTerminalRender();
       renderMessages({preserveScroll:true});
     }
     renderSessionList();
@@ -7538,6 +7578,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           })();
         } else {
           _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length);
+          // #8643 (review P2): paint the settled error transcript from the IDLE
+          // state, so its action bar offers Edit/Regenerate. The idle clear
+          // itself (and the queue drain) stays with _setActivePaneIdleIfOwner()
+          // below — this only moves the flag, so the drain still happens once.
+          _clearActivePaneBusyForTerminalRender();
           renderMessages({preserveScroll:true});
         }
       }else if(typeof trackBackgroundError==='function'){
@@ -8244,6 +8289,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       clearLiveToolCards();if(!assistantText)removeThinking();
       _ensureSingleTerminalStreamErrorMarker(S.messages);
       _attachProjectedAnchorSceneToLastAssistant(S.messages);
+      // #8643 (review P2): the interrupted transcript is a terminal state, so
+      // its rebuild must be painted idle (Edit/Regenerate available). The
+      // drain stays with _setActivePaneIdleIfOwner() below.
+      _clearActivePaneBusyForTerminalRender();
       renderMessages({preserveScroll:true});
       // If they were following the stream, force the viewport to the bottom after
       // the recovery render so they see the interruption notice in place instead
