@@ -1,0 +1,93 @@
+/* Skin: paper-graphite
+   Codex x ChatGPT graphite-on-paper — ported from the Hermes Desktop
+   `codex-theme` plugin (MIT, hey-yx/hermes-codex-theme v1.2.0). */
+/* ── Skin: Paper Graphite (graphite-on-paper) ──
+   Ported from the Hermes Desktop `codex-theme` plugin (MIT, hey-yx/hermes-codex-theme v1.2.0).
+   Achromatic surfaces carry hierarchy by weight; blue is reserved for interaction only.
+   Hairline borders instead of shadows. OpenAI radius scale: inline 4 / rows 8 / controls 10 /
+   cards, bubbles, dialogs 12 / composer 20. Content line-height 1.625, reading column 880px. */
+:root[data-skin="paper-graphite"]{
+  color-scheme:light;
+  --bg:#FFFFFF;--sidebar:#F9F9F9;--surface:#F7F7F7;--surface-subtle:#F4F4F4;--surface-subtle-hover:#EFEFEF;
+  --border:#E7E7E7;--border2:#D9D9D9;--border-subtle:#EFEFEF;--border-muted:#DEDEDE;
+  --text:#1A1A1A;--strong:#000000;--muted:#6F6F6F;--em:#4A4A4A;
+  --accent:#0285FF;--accent-hover:#0169CC;--accent-bg:rgba(2,133,255,0.08);--accent-bg-strong:rgba(2,133,255,0.16);--accent-text:#0169CC;
+  --link:#0285FF;--blue:#0285FF;--gold:#0285FF;--focus-ring:rgba(2,133,255,0.30);--focus-glow:rgba(2,133,255,0.10);
+  --input-bg:#F6F6F6;--hover-bg:rgba(0,0,0,0.045);--code-bg:#F4F4F4;--code-inline-bg:rgba(0,0,0,0.05);--code-text:#1A1A1A;--pre-text:#1A1A1A;
+  --topbar-bg:rgba(255,255,255,0.96);--main-bg:#FFFFFF;
+  --error:#C93A36;--success:#1A7F37;--warning:#B87916;--info:#0285FF;
+  --user-bubble-bg:#F3F3F3;--user-bubble-border:transparent;--user-bubble-text:#1A1A1A;--user-bubble-placeholder:#6F6F6F;
+  --user-selection-bg:rgba(0,0,0,0.10);--user-selection-text:#1A1A1A;
+  --radius-sm:4px;--radius-md:8px;--radius-card:12px;--radius-lg:12px;
+  --codex-radius-control:10px;--codex-radius-composer:20px;
+  --message-body-line-height:1.625;--msg-max:880px;--msg-rail:0px;
+  --font-ui:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji",emoji;
+  --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji",emoji;
+  --codex-shadow-dialog:0 8px 16px 0 rgba(0,0,0,0.07),0 2px 6px 0 rgba(0,0,0,0.05),0 0 0 1px var(--border);
+  --codex-shadow-composer:0 1px 2px 0 rgba(0,0,0,0.04),0 6px 16px -4px rgba(0,0,0,0.08);
+  font-family:var(--font-ui);
+}
+:root.dark[data-skin="paper-graphite"]{
+  color-scheme:dark;
+  --bg:#181818;--sidebar:#171717;--surface:#212121;--surface-subtle:#262626;--surface-subtle-hover:#2E2E2E;
+  --border:#2A2A2A;--border2:#3A3A3A;--border-subtle:#232323;--border-muted:#333333;
+  --text:#F5F5F5;--strong:#FFFFFF;--muted:#9B9B9B;--em:#CFCFCF;
+  --accent:#339CFF;--accent-hover:#0285FF;--accent-bg:rgba(51,156,255,0.10);--accent-bg-strong:rgba(51,156,255,0.18);--accent-text:#339CFF;
+  --link:#339CFF;--blue:#339CFF;--gold:#339CFF;--focus-ring:rgba(51,156,255,0.40);--focus-glow:rgba(51,156,255,0.12);
+  --input-bg:#242424;--hover-bg:rgba(255,255,255,0.06);--code-bg:#212121;--code-inline-bg:rgba(255,255,255,0.08);--code-text:#F5F5F5;--pre-text:#F5F5F5;
+  --topbar-bg:rgba(24,24,24,0.96);--main-bg:#181818;
+  --error:#E5484D;--success:#3FB950;--warning:#D29922;--info:#339CFF;
+  --user-bubble-bg:#202020;--user-bubble-border:transparent;--user-bubble-text:#F5F5F5;--user-bubble-placeholder:#9B9B9B;
+  --user-selection-bg:rgba(255,255,255,0.14);--user-selection-text:#FFFFFF;
+  --codex-shadow-dialog:0 8px 16px 0 rgba(0,0,0,0.35),0 2px 8px 0 rgba(0,0,0,0.20),0 0 0 1px var(--border);
+  --codex-shadow-composer:0 1px 2px 0 rgba(0,0,0,0.40),0 6px 16px -4px rgba(0,0,0,0.45);
+}
+:root[data-skin="paper-graphite"] body{background:var(--bg);font-family:var(--font-ui);-webkit-font-smoothing:subpixel-antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;}
+:root[data-skin="paper-graphite"] :is(h1,h2,h3,h4){font-weight:600;letter-spacing:-0.012em;}
+/* Chrome: flat --sidebar surface, hairline edges, no shadows. */
+:root[data-skin="paper-graphite"] .app-titlebar,
+:root[data-skin="paper-graphite"] .rail,
+:root[data-skin="paper-graphite"] .sidebar,
+:root[data-skin="paper-graphite"] .rightpanel,
+:root[data-skin="paper-graphite"] .topbar,
+:root[data-skin="paper-graphite"] .composer-wrap{background:var(--sidebar)!important;border-color:var(--border)!important;box-shadow:none!important;}
+:root[data-skin="paper-graphite"] .main,
+:root[data-skin="paper-graphite"] .chat,
+:root[data-skin="paper-graphite"] .panel-view{background:var(--bg);}
+:root[data-skin="paper-graphite"] .sidebar{border-right:1px solid var(--border)!important;}
+:root[data-skin="paper-graphite"] .session-item{border-radius:8px;}
+/* Composer: 20px radius + hairline, elevation only. */
+:root[data-skin="paper-graphite"] .composer-box{background:var(--surface)!important;border:1px solid var(--border)!important;border-radius:var(--codex-radius-composer)!important;box-shadow:var(--codex-shadow-composer)!important;}
+:root[data-skin="paper-graphite"] .composer-box:hover{border-color:var(--border2)!important;}
+:root[data-skin="paper-graphite"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:var(--codex-shadow-composer),0 0 0 3px var(--focus-ring)!important;}
+:root[data-skin="paper-graphite"] .composer-box .btn{border-radius:var(--codex-radius-control);}
+/* Prose: reading rhythm, 4px inline code, 12px cards. */
+:root[data-skin="paper-graphite"] .msg-body{line-height:var(--message-body-line-height);}
+:root[data-skin="paper-graphite"] .msg-body :not(pre)>code{border-radius:4px;border:none;padding:0.08em 0.3em;font-size:0.88em;background:var(--code-inline-bg);color:var(--code-text);}
+:root[data-skin="paper-graphite"] .msg-body pre{border-radius:12px;border:1px solid var(--border);}
+:root[data-skin="paper-graphite"] .msg-body blockquote{border-left:2px solid var(--border);color:var(--muted);}
+/* Dialogs: the base rules hardcode a warm paper gradient (light) and a navy
+   gradient (dark); repaint them on the skin's own surfaces. */
+:root[data-skin="paper-graphite"] .app-dialog{background:var(--bg)!important;border:1px solid var(--border)!important;border-radius:12px!important;box-shadow:var(--codex-shadow-dialog)!important;color:var(--text)!important;}
+:root.dark[data-skin="paper-graphite"] .app-dialog{background:var(--surface)!important;}
+:root[data-skin="paper-graphite"] .app-dialog-overlay{background:rgba(0,0,0,0.32);backdrop-filter:blur(2px);}
+:root.dark[data-skin="paper-graphite"] .app-dialog-overlay{background:rgba(0,0,0,0.56);}
+:root[data-skin="paper-graphite"] .app-dialog-title{font-weight:600;letter-spacing:-0.01em;color:var(--text)!important;}
+:root[data-skin="paper-graphite"] .app-dialog-desc{color:var(--muted)!important;line-height:1.625;}
+:root[data-skin="paper-graphite"] .app-dialog-input{background:var(--input-bg)!important;border:1px solid var(--border)!important;border-radius:var(--codex-radius-control)!important;color:var(--text)!important;}
+:root[data-skin="paper-graphite"] .app-dialog-input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--focus-ring)!important;}
+:root[data-skin="paper-graphite"] .app-dialog-close{background:transparent!important;border-radius:8px!important;color:var(--muted)!important;}
+:root[data-skin="paper-graphite"] .app-dialog-close:hover{background:var(--hover-bg)!important;color:var(--text)!important;}
+:root[data-skin="paper-graphite"] .app-dialog-btn{background:var(--bg)!important;border:1px solid var(--border2)!important;border-radius:var(--codex-radius-control)!important;color:var(--text)!important;font-weight:600;}
+:root.dark[data-skin="paper-graphite"] .app-dialog-btn{background:transparent!important;}
+:root[data-skin="paper-graphite"] .app-dialog-btn:hover{background:var(--surface-subtle-hover)!important;}
+:root[data-skin="paper-graphite"] .app-dialog-btn.confirm{background:var(--accent)!important;border-color:var(--accent)!important;color:#FFFFFF!important;}
+:root[data-skin="paper-graphite"] .app-dialog-btn.confirm:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;}
+/* Destructive confirmations keep the semantic error colour. Two class selectors
+   (.confirm.danger) plus the skin scope outrank the plain .confirm rules above,
+   so these must also carry !important to beat them; dropping !important is not
+   enough because the base .confirm rule is itself !important and more specific
+   than the stock .app-dialog-btn.confirm.danger rule. */
+:root[data-skin="paper-graphite"] .app-dialog-btn.confirm.danger{background:color-mix(in srgb,var(--error) 12%,transparent)!important;border-color:var(--error)!important;color:var(--error)!important;}
+:root[data-skin="paper-graphite"] .app-dialog-btn.confirm.danger:hover{background:color-mix(in srgb,var(--error) 20%,transparent)!important;border-color:var(--error)!important;color:var(--error)!important;}
+:root[data-skin="paper-graphite"] ::selection{background:var(--accent-bg-strong);color:inherit;}

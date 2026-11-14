@@ -14,6 +14,10 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+# The transparent-stream resets moved to static/scaffold.css, which loads after
+# the per-skin files; the two reset assertions below read all three layers.
+from tests.skin_css import read_all_css
+ALL_CSS = read_all_css()
 NODE = shutil.which("node")
 
 _EXTRACT_FUNC_JS = """
@@ -987,10 +991,10 @@ def test_transparent_thinking_card_is_reset_to_flat_quiet_row():
     """Thinking inner cards must be reset to flat/transparent inside a transparent
     event row (they previously kept their accent-bg/border/radius/msg-rail chrome
     and were the heaviest object in the stream). (Trifecta V1.)"""
-    assert ".transparent-event-row .thinking-card," in STYLE_CSS
+    assert ".transparent-event-row .thinking-card," in ALL_CSS
     # The reset block carries background:transparent!important + border:0!important.
-    reset_start = STYLE_CSS.index(".transparent-event-row .tool-card,")
-    reset_block = STYLE_CSS[reset_start:reset_start + 700]
+    reset_start = ALL_CSS.index(".transparent-event-row .tool-card,")
+    reset_block = ALL_CSS[reset_start:reset_start + 700]
     assert ".transparent-event-row .thinking-card" in reset_block
     assert "background:transparent!important" in reset_block
     assert "border:0!important" in reset_block
@@ -999,7 +1003,7 @@ def test_transparent_thinking_card_is_reset_to_flat_quiet_row():
 def test_transparent_skin_reset_beats_per_skin_card_rules():
     """The reset must also win against the per-skin :root[data-skin] .tool-card
     rules that otherwise re-card the rows. (Trifecta V3.)"""
-    assert ":root[data-skin] .transparent-event-row .tool-card" in STYLE_CSS
+    assert ":root[data-skin] .transparent-event-row .tool-card" in ALL_CSS
 
 
 def test_transparent_failed_status_is_legible():

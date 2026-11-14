@@ -3504,6 +3504,7 @@ const _SKINS=[
   {name:'Graphite', colors:['#FFFFFF','#D6D6D6','#242424']},
   {name:'GitHub', colors:['#0969DA','#1F883D','#242424']},
   {name:'Codex', colors:['#72B39A','#242624','#ECEBE4']},
+  {name:'Paper Graphite', value:'paper-graphite', colors:['#FFFFFF','#181818','#0285FF']},
   {name:'Terracotta', colors:['#D97757','#F0EEE6','#141413']},
   {name:'Slate',    colors:['#334155','#475569','#64748b']},
   {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},

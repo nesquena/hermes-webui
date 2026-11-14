@@ -32,7 +32,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
-CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+from tests.skin_css import read_all_skins_css, read_base_css
+
+CSS = read_base_css() + read_all_skins_css()
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 

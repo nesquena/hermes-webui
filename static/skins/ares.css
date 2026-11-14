@@ -1,0 +1,9 @@
+/* Skin: ares
+   Extracted verbatim from style.css (see static/skins/README.md).
+   Loaded from index.html after style.css; every selector is scoped to
+   [data-skin="ares"] so this file can never affect another skin. */
+/* ── Skin: Default (gold — matches base) ── */
+  /* No overrides needed — :root and .dark already use gold accent */
+  /* ── Skin: Ares (red) ── */
+  :root[data-skin="ares"]{--accent:#C0392B;--accent-hover:#A93226;--accent-bg:rgba(192,57,43,0.08);--accent-bg-strong:rgba(192,57,43,0.15);--accent-text:#922B21;}
+:root.dark[data-skin="ares"]{--accent:#FF4444;--accent-hover:#CC3333;--accent-bg:rgba(255,68,68,0.08);--accent-bg-strong:rgba(255,68,68,0.15);--accent-text:#FF4444;}

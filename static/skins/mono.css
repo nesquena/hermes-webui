@@ -1,0 +1,7 @@
+/* Skin: mono
+   Extracted verbatim from style.css (see static/skins/README.md).
+   Loaded from index.html after style.css; every selector is scoped to
+   [data-skin="mono"] so this file can never affect another skin. */
+/* ── Skin: Mono (gray) ── */
+  :root[data-skin="mono"]{--accent:#666666;--accent-hover:#555555;--accent-bg:rgba(102,102,102,0.08);--accent-bg-strong:rgba(102,102,102,0.15);--accent-text:#555555;}
+:root.dark[data-skin="mono"]{--accent:#CCCCCC;--accent-hover:#999999;--accent-bg:rgba(204,204,204,0.08);--accent-bg-strong:rgba(204,204,204,0.15);--accent-text:#CCCCCC;}

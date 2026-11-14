@@ -13,7 +13,9 @@ except Exception:  # pragma: no cover - dependency optional
 
 
 REPO = Path(__file__).parent.parent
-CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+from tests.skin_css import read_all_skins_css, read_base_css
+
+CSS = read_base_css() + read_all_skins_css()
 TERMINAL_JS = (REPO / "static" / "terminal.js").read_text(encoding="utf-8")
 PANEL_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
