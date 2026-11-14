@@ -519,6 +519,15 @@ function invalidateSlashSkillCaches(){
   _skillCommandCache=[];
   _skillCommandCacheReady=false;
   _skillCommandLoadPromise=null;
+  // Slash command metadata is profile-scoped: a profile switch must never
+  // keep profile A's skill/agent/bundle command list authoritative in
+  // profile B (#5896 gate-fail #7).
+  _bundleCommandCache=[];
+  _bundleCommandLoadPromise=null;
+  _bundleCommandCacheReady=false;
+  _agentCommandCache=null;
+  _agentCommandCachePromise=null;
+  _agentCommandCacheReady=false;
 }
 
 function _getSlashSubArgOptions(spec){
@@ -710,6 +719,17 @@ async function resolveBundleCommand(text,_meta){
   return api('/api/commands/bundles/resolve',{
     method:'POST',
     body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})
+  });
+}
+
+async function resolveSkillCommand(text, sessionId){
+  const command=String(text||'').trim();
+  if(!command) throw new Error('command is required');
+  const body={command};
+  if(sessionId) body.session_id=sessionId;
+  return api('/api/commands/skills/resolve',{
+    method:'POST',
+    body:JSON.stringify(body)
   });
 }
 

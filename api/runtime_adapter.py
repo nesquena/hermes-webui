@@ -31,6 +31,7 @@ _VALID_RUNTIME_ADAPTER_MODES = {
 class StartRunRequest:
     session_id: str
     message: str
+    agent_message: str | None = None
     attachments: list[dict[str, Any]] = field(default_factory=list)
     workspace: str | None = None
     profile: str | None = None
