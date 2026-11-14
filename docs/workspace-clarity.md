@@ -104,3 +104,7 @@ Counts distinguish failure, stopped work and unconfirmed completion. A completed
 parent call does not imply an asynchronous helper completed.
 
 See [voice and steps QA](qa/voice-steps/README.md) for screenshots and validation.
+
+A settled answer is not proof that every tool succeeded. Unmatched historical
+tool rows without a completion event/result remain unconfirmed in the numbered
+step overview; hydration must not synthesize a successful tool result.

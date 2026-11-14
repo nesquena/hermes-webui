@@ -97,9 +97,14 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
-          console.warn('[pwa] Service worker registration failed:', err);
-        });
+        try {
+          navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
+            console.warn('[pwa] Service worker registration failed:', err);
+          });
+        } catch (err) {
+          // Sandboxed previews can expose the property but forbid reading it.
+          console.debug('[pwa] Service worker unavailable in this context');
+        }
       });
     }
   </script>
@@ -1328,7 +1333,7 @@
                 <input type="checkbox" id="settingsWorkspaceTodosTab" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_workspace_todos_tab">Show Todos tab in workspace panel</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_workspace_todos_tab">When enabled, a Todos tab appears in the workspace panel (right side). The sidebar Todos panel remains available regardless.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_workspace_todos_tab">Show the task list for the current conversation in the workspace panel.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

@@ -212,7 +212,7 @@ if(typeof document!=='undefined') (function(){
         const name=document.createElement('span');name.className='realtime-voice-task-title';name.textContent=task.title||text('task');
         const status=document.createElement('span');status.className='realtime-voice-task-status';translated(status,'task_'+state);
         title.append(number,name,status);
-        const text=document.createElement('p');text.textContent=String(task.error||task.result||'').slice(0,8000);body.append(text);
+        const result=document.createElement('p');result.textContent=String(task.error||task.result||'').slice(0,8000);body.append(result);
         if(task.session_id&&/^[A-Za-z0-9_-]+$/.test(task.session_id)){
           const link=document.createElement('a');translated(link,'open_task');link.href=new URL('session/'+encodeURIComponent(task.session_id),document.baseURI).href;link.target='_blank';link.rel='noopener';body.append(link);
         }

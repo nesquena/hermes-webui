@@ -63,6 +63,8 @@
   };
   // Existing click toggles remain authoritative and survive cached HTML restore.
   document.addEventListener('keydown',event=>{
+    // Transparent Stream already handles these keys on its own header.
+    if(event.defaultPrevented)return;
     const header=event.target.closest?.('.tool-card-header[role="button"]');
     if(header===event.target&&(event.key==='Enter'||event.key===' ')){
       event.preventDefault();if(!event.repeat)header.click();

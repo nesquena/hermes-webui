@@ -28,7 +28,7 @@
 .msg-role, .msg-role.assistant { opacity: 1; color: var(--muted); }
 .msg-role-name { font-size: 12px; font-weight: 600; }
 .assistant-turn .msg-foot, .msg-row[data-role="assistant"] .msg-foot { opacity: 1; }
-.assistant-turn .msg-foot .msg-actions, .msg-row[data-role="assistant"] .msg-foot .msg-actions { opacity: 1; }
+#mainChat :is(.assistant-turn, .msg-row[data-role="assistant"]) .msg-foot .msg-actions { opacity: 1; pointer-events: auto; }
 .msg-foot .msg-time { font-size: 11px; }
 .msg-row:focus-within .msg-foot .msg-time, .msg-row:hover .msg-foot .msg-time { opacity: 1; }
 

@@ -3083,8 +3083,6 @@
   .composer-footer.cf-icons .composer-people-label,
   .composer-footer.cf-icons #composerPeopleLabel{display:none;}
   .composer-footer.cf-icons .composer-people-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;}
-  .composer-footer.cf-icons #btnSavedPrompts,
-  .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}
 
   .composer-footer.cf-burger .composer-left{gap:8px;}
