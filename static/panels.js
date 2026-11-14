@@ -2070,7 +2070,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
           <select id="cronFormDeliver">
-            <option value="" disabled>loading...</option>
+            <option value="${esc(deliver || 'local')}" selected>loading...</option>
           </select>
         </div>
         <div class="detail-form-row">

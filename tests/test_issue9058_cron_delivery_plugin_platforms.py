@@ -314,3 +314,13 @@ def test_failed_delivery_options_load_keeps_the_saved_delivery_value():
     restore = body.index("selectedValue + ' *'")
     assert restore > fallback, "the saved-value restore must run after the catch fallback too"
     assert body.index("sel.disabled = false", restore) > restore
+
+
+def test_delivery_placeholder_carries_the_form_value_until_the_list_loads():
+    """Duplicate -> Save before the per-form list loads must not post ``deliver: ""``
+    (the create handler stores that as ``local``)."""
+    src = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    start = src.index('<select id="cronFormDeliver">')
+    placeholder = src[start:src.index("</select>", start)]
+    assert "<option value=\"${esc(deliver || 'local')}\" selected>" in placeholder
+    assert 'value="" disabled' not in placeholder
