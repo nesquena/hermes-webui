@@ -95,11 +95,12 @@ WHAT IT CHECKS
     bottom of the screen only as far as they must.
   - an open picker follows a resize: after a window is made shorter (opened
     at the top, the middle and the bottom of the list, and once more after a
-    sidebar repaint replaced the row it was opened from) and a tablet is
-    turned, every row can still be tapped and the picker still lines up with
-    its anchor;
-  - a phone turned on its side closes its drawer and collapses the sidebar:
-    the picker closes with it instead of floating over the composer.
+    sidebar repaint replaced the row it was opened from), a tablet is turned,
+    and a phone is turned on its side, every row can still be tapped and the
+    picker still lines up with its anchor;
+  - a phone turned on its side stays on the phone drawer. A coarse screen
+    shorter than 600px is not the desktop rail, so the open drawer does not
+    collapse and the picker stays with it.
   the same list of conversations and fifteen projects, with a mouse
   - a list that fits a 900px-tall window and not a 420px one: after the
     resize the row the keyboard was on is inside the picker's box.
@@ -2402,15 +2403,18 @@ RESIZES = (
     # The drawer stays open, as when a keyboard takes part of the screen: the
     # sidebar is not hidden, so the picker must not close.
     ("a phone made shorter with its drawer open", (390, 844), True, "middle", (390, 560), False),
+    # 844x390 is wider than 640px but shorter than 600px. A coarse pointer there
+    # stays on the phone drawer (boot.js _isDesktopWidth), so the sidebar does
+    # not collapse into the desktop rail and the picker is not dismissed.
+    ("a phone turned on its side, opened at the bottom", (390, 844), True, "last", (844, 390), False),
+    ("a phone turned on its side, opened in the middle", (390, 844), True, "middle", (844, 390), False),
 )
 # A resize can hide the sidebar the picker was opened from, and then the picker
-# closes. Turning a phone on its side crosses the width at which the drawer
-# closes and the sidebar collapses; turning a large phone upright, or narrowing a
-# window to phone width, turns an open sidebar into a drawer that is closed.
+# closes. Turning a large phone upright, or narrowing a window to phone width,
+# turns an open sidebar into a drawer that is closed. A short phone turned on
+# its side does not: that screen stays on the phone drawer (see RESIZES).
 # (what, viewport, touch, which conversation, the viewport afterwards, how the sidebar is hidden)
 RESIZES_THAT_HIDE_THE_SIDEBAR = (
-    ("a phone turned on its side, opened at the bottom", (390, 844), True, "last", (844, 390), "collapsed"),
-    ("a phone turned on its side, opened in the middle", (390, 844), True, "middle", (844, 390), "collapsed"),
     ("a large phone turned upright, opened in the middle", (932, 430), True, "middle", (430, 932), "closed drawer"),
     ("a large phone turned upright, opened at the bottom", (915, 412), True, "last", (412, 915), "closed drawer"),
     ("a window narrowed to phone width, opened in the middle", (1000, 800), False, "middle", (600, 800), "closed drawer"),
@@ -2520,6 +2524,15 @@ def _check_resize(browser):
             page.evaluate("_repaintSidebarForBackgroundChurn()")
         page.set_viewport_size({"width": after[0], "height": after[1]})
         page.wait_for_timeout(400)
+        # Wider than 640px, but a coarse screen shorter than 600px is still the
+        # phone drawer. Collapsing here is the desktop rail this must not enter.
+        if touch and after[0] > 640 and after[1] <= 600:
+            chrome = page.evaluate(AFTER_HIDING_JS)
+            if chrome["collapsed"] or chrome["sidebarVisibility"] == "hidden" or not chrome["drawerOpen"]:
+                failures.append(
+                    f"  [resize] {what}: a short landscape phone left the phone drawer"
+                    f" for the desktop rail ({chrome})"
+                )
         state = page.evaluate(OPEN_PICKER_JS, target)
         if state.get("problem"):
             failures.append(f"  [resize] {what}: {state['problem']}")
@@ -2532,7 +2545,7 @@ def _check_resize(browser):
                     f" {state['viewport']} and {len(state['unreachable'])} of {state['rows']} rows cannot be tapped"
                 )
             # Its right edge on its anchor's, or its left edge on the margin when it is wider than
-            # that leaves room for. Turning a phone closes its drawer and takes the row off the
+            # that leaves room for. A resize that closes the drawer takes the row off the
             # screen: nothing to line up with then.
             if state["anchorOnScreen"]:
                 wanted = max(8, state["anchorRight"] - (state["right"] - state["left"]))
