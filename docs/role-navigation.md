@@ -40,6 +40,40 @@ Validation includes `tests/test_workspace_navigation.py` and the isolated
 chat and bot roster cases. Browser evidence uses synthetic users, conversations
 and a deterministic local model provider, never production customer data.
 
+### Conversation overview and session files
+
+The grid button beside **New conversation** opens a full overview of the loaded
+conversation list. It follows the existing bot, project, source and archive
+filters, with additional local search and attention/running/unread/pinned
+filters. Cards show bot and project attribution, read-only/current-chat labels
+and the existing session status signals. No idle card is described as a
+completed task. Counts explicitly describe matching loaded conversations;
+the overview is not a search of the entire archive. Results are shown in
+batches of 36 without additional requests.
+
+`sessions.js` owns the filtered, lineage-folded projection. The overview receives
+its sorted rows before date-group collapsing and virtual rendering, and opens
+them through `_openSidebarSession`, preserving source import, profile resolution,
+extension vetoes and backend authorization. A profile-switch skeleton clears
+the overview immediately. Refresh errors show a stale-data notice and use the
+existing retry path. No separate session polling or local history is added.
+Returning to chat preserves the composer DOM and draft; opening a card or
+starting a new conversation exits the overview. Keyboard focus survives live
+row updates, and mobile navigation closes the drawer to reveal the overview.
+
+The Artifacts tab now searches detected file paths and filters file extensions
+into documents, images, code, data/spreadsheets and other files. It keeps using
+`collectSessionArtifacts` and `openArtifactPath`, including the existing
+50-file bound and existence/preview checks. The displayed count explains that
+files come from loaded messages, not a complete filesystem scan. Filters survive
+streaming redraws but reset when session, bot or workspace changes. They make
+no API calls. The controls remain mounted so typing does not lose focus.
+
+`conversation-workbench.spec.ts` exercises persisted conversation selection,
+draft retention, live activity, keyboard focus, profile-switch isolation,
+failed refresh/retry, user isolation, file filtering and real previews, including
+desktop and mobile evidence from the isolated engine fixture.
+
 ## Existing access and navigation contracts
 
 ### Bot workspace

@@ -52,15 +52,15 @@ let _logsSeverityFilter = 'all';
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
-  apps: 'tab_apps', modules: 'modules_title', approvals: 'tab_approvals', chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
+  conversations: 'conversation_board_title', apps: 'tab_apps', modules: 'modules_title', approvals: 'tab_approvals', chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', governance: 'tab_governance', integrations: 'tab_integrations', projects: 'tab_projects', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['studio','organisation','management','msp','apps','modules','approvals','settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','governance','integrations','projects','plugin'];
-const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings', organisation: 'studio', management: 'studio' };
+const MAIN_VIEW_PANELS = ['conversations','studio','organisation','management','msp','apps','modules','approvals','settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','governance','integrations','projects','plugin'];
+const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { conversations: 'chat', plugin: 'settings', organisation: 'studio', management: 'studio' };
 // Organisation and Management live inside the Studio screen: one nav item, the
 // Studio sidebar is their second-level navigation.
-const PANEL_NAV_HOME = { organisation: 'studio', management: 'studio' };
+const PANEL_NAV_HOME = { conversations: 'chat', organisation: 'studio', management: 'studio' };
 
 /**
  * Update the top app titlebar to reflect the current page or selected conversation.

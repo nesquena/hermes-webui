@@ -2101,6 +2101,7 @@ function _currentSessionIsReusableEmptyChat(){
 
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{
+  if(document.querySelector('main.main.showing-conversations')) await switchPanel('chat');
   // If the current session has no messages AND nothing is in flight, just focus
   // the composer rather than creating another empty session that will clutter the
   // sidebar list (#1171).
@@ -2519,6 +2520,7 @@ document.addEventListener('keydown',async e=>{
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
     // and bug #1432 for why the in-flight check is needed.
+    if(document.querySelector('main.main.showing-conversations')) await switchPanel('chat');
     if(_currentSessionIsReusableEmptyChat()){
       $('msg').focus();return;
     }

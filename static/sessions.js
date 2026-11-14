@@ -2734,6 +2734,7 @@ async function _openSidebarSession(session, loadOpts={}){
     var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
     if(_preResult&&_preResult.cancel===true) return;
   }
+  if(window.ConversationWorkbench && document.querySelector('main.main.showing-conversations')) await switchPanel('chat');
   // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
   if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){
@@ -5394,6 +5395,7 @@ const _SESSION_SKELETON_GROUPS = [
 // Called the instant a profile switch begins so the user never sees the
 // previous profile's conversations.
 function showSessionListSkeleton(targetProfile){
+  if(window.ConversationWorkbench) window.ConversationWorkbench.setLoading();
   const list = $('sessionList');
   if(!list) return;
   // Tear down any active virtual-scroll state up front so a pending scroll-driven
@@ -8199,6 +8201,7 @@ function renderSessionListFromCache(){
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
+  if(window.ConversationWorkbench) window.ConversationWorkbench.sync(orderedSessions);
   // Separate pinned from unpinned
   const pinned=orderedSessions.filter(s=>s.pinned);
   const unpinned=orderedSessions.filter(s=>!s.pinned);

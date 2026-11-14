@@ -125,6 +125,7 @@
 <link rel="stylesheet" href="static/workspace-clarity.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/workspace-shell.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/bot-workbench.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/conversation-workbench.css?v=__WEBUI_VERSION__">
 </head>
 <body>
 <header class="app-titlebar" role="banner">
@@ -232,6 +233,7 @@
       <div class="panel-head">
         <span data-i18n="tab_chat">Chat</span>
         <div class="panel-head-actions">
+          <button type="button" class="panel-head-btn" id="btnConversationBoard" onclick="ConversationWorkbench.show()" title="Conversation overview" aria-label="Conversation overview" data-i18n-title="conversation_board_title" data-i18n-aria-label="conversation_board_title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="btnNewChat" data-tooltip="New conversation (Cmd+K)" data-i18n-title="new_conversation" aria-label="New conversation" data-tour="chat-new">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           </button>
@@ -504,6 +506,7 @@
         <button class="update-btn update-primary" id="btnStaleClientRefresh" type="button" onclick="hardRefreshWebUIClient()" data-i18n="update_hard_refresh_now">Hard refresh now</button>
       </div>
     </div>
+    <section id="mainConversations" class="main-view" aria-label="Conversation overview" data-i18n-aria-label="conversation_board_title"></section>
     <div id="mainChat" class="main-view">
     <div class="messages-shell">
       <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
@@ -2052,6 +2055,21 @@
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree" data-tour="workspace-file-tree"></div>
+    <div class="workspace-artifact-controls" id="workspaceArtifactControls">
+      <input type="search" id="workspaceArtifactSearch" oninput="renderSessionArtifacts()" placeholder="Find a file…" aria-label="Find a file" data-i18n-placeholder="artifact_browser_search" data-i18n-aria-label="artifact_browser_search">
+      <div class="workspace-artifact-filter-row">
+        <select id="workspaceArtifactType" onchange="renderSessionArtifacts()" aria-label="File type" data-i18n-aria-label="artifact_browser_type">
+          <option value="all" data-i18n="artifact_browser_all">All file types</option>
+          <option value="documents" data-i18n="artifact_browser_documents">Documents</option>
+          <option value="images" data-i18n="artifact_browser_images">Images</option>
+          <option value="code" data-i18n="artifact_browser_code">Code</option>
+          <option value="data" data-i18n="artifact_browser_data">Data &amp; spreadsheets</option>
+          <option value="other" data-i18n="artifact_browser_other">Other files</option>
+        </select>
+        <button type="button" class="sm-btn" id="workspaceArtifactReset" onclick="clearArtifactFilters()" data-i18n="artifact_browser_reset">Reset</button>
+      </div>
+      <p id="workspaceArtifactSummary" role="status"></p>
+    </div>
     <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
     <div class="workspace-todos" id="workspaceTodosPanel" hidden style="flex:1;overflow-y:auto;padding:8px 12px"></div>
     <div class="workspace-screens" id="workspaceScreensPanel" role="tabpanel" aria-labelledby="workspaceScreensTab" hidden></div>
@@ -2330,5 +2348,6 @@
 <div class="profile-dropdown" id="profileDropdown"></div>
 <script src="static/workspace-shell.js?v=__WEBUI_VERSION__"></script>
 <script src="static/bot-workbench.js?v=__WEBUI_VERSION__"></script>
+<script src="static/conversation-workbench.js?v=__WEBUI_VERSION__"></script>
 </body>
 </html>
