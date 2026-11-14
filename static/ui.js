@@ -10979,9 +10979,13 @@ function renderMd(raw){
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
   function inlineMd(t){
-    // Stash backtick code spans first so bold/italic never esc() their content
+    // Stash existing/backtick code spans first so later passes never alter their content
     const _code_stash=[];
+    t=t.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_code_stash.push(m);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
+    // GFM consumes escaped backslash pairs in plain text. Code spans are
+    // already stashed, so their literal backslashes remain unchanged.
+    t=t.replace(/\\\\/g,'\\');
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
@@ -11166,7 +11170,16 @@ function renderMd(raw){
     // Bracket set is paren / square / curly only -- NOT angle brackets, since
     // angle brackets are overwhelmingly comparison operators in real LLM table
     // output (`| x < 5 | y > 10 |`) and treating them as a pair collapses cells.
-    const _protectPipes=r=>{let prev;do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/(<code>[^<]*)[|]([^<]*<\/code>)/g,(_,a,b)=>a+'\x00PIPE\x00'+b);}while(r!==prev);return r;};
+    // A GFM backslash-escaped pipe (`\|`) is also a literal pipe inside a cell,
+    // not a column delimiter — and it takes no bracket partner, so the bracket
+    // pass above never sees it. Without this rule a cell like
+    // `| error\|panic\|fatal |` splits into four cells and leaks the bare
+    // backslashes into the rendered text. The escape is consumed here (the
+    // sentinel restore emits only the pipe) because GFM defines `\|` as an
+    // escaped literal, not as a backslash followed by a pipe. Backslash parity
+    // matters: an odd run escapes the pipe, while an even run leaves a real
+    // delimiter after the escaped backslash pairs.
+    const _protectPipes=r=>{let prev;r=r.replace(/(\\+)[|]/g,(_,bs)=>bs.length%2?bs.slice(0,-1)+'\x00PIPE\x00':bs+'|');do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/(<code>[^<]*)[|]([^<]*<\/code>)/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/(\\+)[|]/g,(_,bs)=>bs.length%2?bs.slice(0,-1)+'\x00PIPE\x00':bs+'|');}while(r!==prev);return r;};
     const _restorePipes=s=>s.replace(/\x00PIPE\x00/g,'|');
     const parseRow=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(_restorePipes(c.trim()))}</td>`).join('');};
     const parseHeader=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(_restorePipes(c.trim()))}</th>`).join('');};
