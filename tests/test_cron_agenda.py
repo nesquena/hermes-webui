@@ -51,4 +51,3 @@ def test_dense_cron_counts_bounds_and_no_history_invention():
 def test_reject_invalid_calendar_window(days, zone):
     with pytest.raises(ValueError):
         window("2026-11-15",days,zone)
-

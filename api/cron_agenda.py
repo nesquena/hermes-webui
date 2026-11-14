@@ -125,4 +125,3 @@ def project_calendar(jobs, bounds, profile_zone, now=None):
         except (ValueError, TypeError, OverflowError, KeyError, ImportError, OSError, AttributeError):
             incomplete = True
     return {"days": rows, "partial": incomplete}
-

@@ -4,7 +4,8 @@ async function boot(page) {
   await page.goto('/');
   await page.waitForFunction(() => typeof S !== 'undefined' && S._bootReady && Array.isArray(window.__GOV_ME__?.hidden_nav));
   const tour = page.locator('#spHelpCard[data-kind="tour_offer"] .sp-help-btn').first();
-  if (await tour.isVisible()) await tour.click();
+  // The first-run offer is intentionally delayed until preferences have loaded.
+  await page.addLocatorHandler(tour, async()=>{await tour.click();});
 }
 
 test('WORK VIEWS Overview opens on a plain visit and respects the personal Chat preference', async ({page}, info) => {

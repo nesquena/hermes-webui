@@ -29,4 +29,3 @@
 .agenda-job:hover strong,.agenda-day-heading:hover{text-decoration:underline}
 .agenda-date:hover{background:var(--accent-bg)}
 @media(max-width:640px){.agenda-date{font-size:13px;padding:4px}.agenda-date small{font-size:10px}.agenda-toolbar .sm-btn{padding:4px 8px}.agenda-sheet{padding:14px}}
-
