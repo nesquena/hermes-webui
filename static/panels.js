@@ -7992,12 +7992,14 @@ function _renderProfileDropdownLoading(){
 function _openProfileDropdownShell(){
   const dd=$('profileDropdown');
   if(!dd)return;
+  const opening=!dd.classList.contains('open');
   dd.classList.add('open');
   _positionProfileDropdown();
   const chip=$('profileChip');
   if(chip && _profileDropdownTrigger===chip) chip.classList.add('active');
   const tbtn=$('titlebarProfileBtn');
   if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
+  if(opening||document.activeElement===_profileDropdownTrigger) $('profilePickerSearch')?.focus();
 }
 
 async function _profileSwitchPanelLoad(){
@@ -8588,6 +8590,7 @@ function filterProfilesPanel() {
 }
 
 function clearProfileSearch() {
+  if (window.BotWorkbench) { window.BotWorkbench.reset(); return; }
   const search = $('profileSearch');
   if (search) { search.value = ''; search.focus(); }
   filterProfilesPanel();
@@ -8598,11 +8601,13 @@ function _renderProfilesList(data, refreshDetail) {
   if (!panel) return;
   const words = String($('profileSearch')?.value || '').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   const profiles = (data.profiles || []).filter(p => {
+    if (window.BotWorkbench) return window.BotWorkbench.matches(p, words);
     const text = [botDisplayName(p), p.name, p.bot?.description, p.bot?.category].join(' ').toLocaleLowerCase();
     return words.every(word => text.includes(word));
   });
   const status = $('profileSearchStatus');
   if (status) status.textContent = t('profiles_search_count', profiles.length, (data.profiles || []).length);
+  if (window.BotWorkbench) window.BotWorkbench.render(data, profiles);
     panel.innerHTML = '';
 
     // Hide "New profile" button in single profile mode
@@ -8785,6 +8790,7 @@ function _renderProfileDetail(p, activeName){
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _setProfileHeaderButtons('read', p, activeName);
+  if (window.BotWorkbench) window.BotWorkbench.mountDetail(p);
   _loadProfileBotJobs(p);
 }
 
@@ -9004,34 +9010,72 @@ function renderProfileDropdown(data) {
   data = data || {};
   const dd = $('profileDropdown');
   if (!dd) return;
+  const oldSearch = dd.querySelector('#profilePickerSearch');
+  const query = dd.classList.contains('open') ? (oldSearch?.value || '') : '';
+  const focused = dd.contains(document.activeElement);
+  const focusedName = document.activeElement?.dataset.profileName;
   dd.innerHTML = '';
   const allProfiles = (Array.isArray(data.profiles) ? data.profiles : []).filter(p => p && typeof p.name === 'string');
   const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
     : (data.active || 'default');
   const profiles = allProfiles.filter(p => p && (p.visible !== false || p.name === active));
+  if (window.BotWorkbench) profiles.sort((a,b) => Number(window.BotWorkbench.isFavorite(b.name)) - Number(window.BotWorkbench.isFavorite(a.name)));
+  const searchLabel = document.createElement('label');
+  searchLabel.className = 'profile-picker-search';
+  const label = document.createElement('span'); label.className = 'sr-only'; label.textContent = t('profiles_search');
+  const search = document.createElement('input'); search.id = 'profilePickerSearch'; search.type = 'search';
+  search.placeholder = t('profiles_search'); search.autocomplete = 'off'; search.value = query;
+  searchLabel.append(label, search); dd.appendChild(searchLabel);
+  const list = document.createElement('div'); list.className = 'profile-picker-list'; dd.appendChild(list);
   for (const p of profiles) {
-    const opt = document.createElement('div');
+    const opt = document.createElement('button'); opt.type = 'button'; opt.dataset.profileName = p.name;
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
+    opt.setAttribute('aria-pressed', String(p.name === active));
+    opt.dataset.search = [botDisplayName(p), p.name, p.bot?.description, p.bot?.category, p.bot?.role, p.model].join(' ').toLocaleLowerCase();
     const meta = [];
     if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
     if (!p.skill_counts_pending && p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
-    const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
-    opt.innerHTML = `<div class="profile-opt-name">${botAvatarHtml(p)}${gwDot}${esc(botDisplayName(p))}${defaultBadge}${checkmark}</div>` +
+    opt.innerHTML = `<div class="profile-opt-name">${botAvatarHtml(p)}<span>${esc(botDisplayName(p))}${defaultBadge}${checkmark}</span></div>` +
+      (p.bot?.description ? `<div class="profile-picker-description">${esc(p.bot.description)}</div>` : '') +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
+    if (window.BotWorkbench?.isFavorite(p.name)) {
+      const star = document.createElement('span'); star.className = 'profile-picker-favorite'; star.textContent = '★'; star.title = t('bot_workspace_favorites');
+      opt.querySelector('.profile-opt-name').appendChild(star);
+    }
     opt.onclick = async () => {
       closeProfileDropdown();
       if (p.name === active) return;
       await switchToProfile(p.name);
     };
-    dd.appendChild(opt);
+    list.appendChild(opt);
   }
+  const count = document.createElement('div'); count.className = 'profile-picker-count'; count.setAttribute('role', 'status'); dd.appendChild(count);
+  const applySearch = () => {
+    const words = search.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    let total = 0;
+    list.querySelectorAll('[data-profile-name]').forEach(node => {
+      node.hidden = !words.every(word => node.dataset.search.includes(word));
+      if (!node.hidden) total++;
+    });
+    count.textContent = total ? t('profiles_search_count', total, profiles.length) : t('profiles_search_empty');
+  };
+  search.oninput = applySearch; applySearch();
+  dd.onkeydown = event => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeProfileDropdown(); _profileDropdownTrigger?.focus(); return; }
+    if (!['ArrowDown','ArrowUp'].includes(event.key)) return;
+    event.preventDefault();
+    const nodes = [...list.querySelectorAll('[data-profile-name]:not([hidden])')];
+    const index = nodes.indexOf(document.activeElement);
+    const next = index < 0 ? (event.key === 'ArrowDown' ? 0 : nodes.length - 1) : (index + (event.key === 'ArrowDown' ? 1 : -1) + nodes.length) % nodes.length;
+    nodes[next]?.focus();
+  };
   // Divider + Manage link (hidden in single profile mode)
   if (!data.single_profile_mode) {
     const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
-    const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
+    const mgmt = document.createElement('button'); mgmt.type = 'button'; mgmt.className = 'profile-opt ws-manage';
     mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
     mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
     dd.appendChild(mgmt);
@@ -9039,6 +9083,10 @@ function renderProfileDropdown(data) {
   // Sync titlebar label to the resolved active profile
   const tbl = $('titlebarProfileLabel');
   if (tbl) tbl.textContent = active;
+  if (focused) {
+    const restore = focusedName && [...list.children].find(node => node.dataset.profileName === focusedName && !node.hidden);
+    (restore || search).focus();
+  }
 }
 
 function toggleProfileDropdown(e) {

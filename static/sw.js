@@ -26,6 +26,8 @@ const SHELL_ASSETS = [
   './static/workspace-clarity.css' + VQ,
   './static/workspace-shell.css' + VQ,
   './static/workspace-shell.js' + VQ,
+  './static/bot-workbench.css' + VQ,
+  './static/bot-workbench.js' + VQ,
   './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
   './static/assistant_turn_anchors.js' + VQ,

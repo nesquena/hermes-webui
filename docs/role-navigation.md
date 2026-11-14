@@ -42,6 +42,29 @@ and a deterministic local model provider, never production customer data.
 
 ## Existing access and navigation contracts
 
+### Bot workspace
+
+The Bots destination opens an avatar-led catalog with cards/list layouts,
+local search over names, descriptions, roles, categories and models, and a
+Favorites filter. Favorites and layout preferences are stored per signed-in
+email in browser storage; they never alter the profile, visibility or grants.
+Only profiles already returned by the authorized catalog are displayed.
+Favorites also sort first in the chat bot picker. Hidden profiles remain
+excluded there unless they are the active profile, following the existing rule.
+
+Bot details separate Overview, Work, Identity and Configuration. Existing forms,
+task lists, work results and Scout controls are moved into tab panels without
+rebuilding their DOM when switching tabs, so unsaved inputs survive. The Overview
+provides contextual entry cards for the existing instructions, memory, skills
+and tools editors. “Chat with this bot” uses the existing profile-switch path;
+it does not submit a message. Selected-for-chat labels are not live status.
+
+The searchable chat picker keeps its query and keyboard focus across catalog
+refreshes, supports arrow-key navigation and returns focus to its trigger on
+Escape. Searches do not issue new requests. `bot-workbench.spec.ts` covers
+identity-separated preferences, draft retention, mobile layouts, picker refresh
+and real engine dispatch from the bot detail action.
+
 SynPulse members have seven primary destinations: Chats, Bots, Projects,
 Scheduled tasks, Skills library, Connections and My approvals. A destination
 is omitted when its feature permission is absent. Settings remains a utility
