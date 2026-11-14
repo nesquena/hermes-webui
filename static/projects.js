@@ -138,13 +138,17 @@ function _projRenderList() {
 }
 
 async function _projOpen(projectId) {
-  _projSelectedId = String(projectId || '');
+  window._spMyWorkOpen = false;
+  const requested = _projSelectedId = String(projectId || '');
   _projRenderList();
   try {
-    _projDetail = await api(
+    const detail = await api(
       '/api/projects/hub/detail?project_id=' + encodeURIComponent(_projSelectedId),
       { redirect401: false, timeoutToast: false });
+    if (requested !== _projSelectedId || window._spMyWorkOpen) return false;
+    _projDetail = detail;
   } catch (e) {
+    if (requested !== _projSelectedId || window._spMyWorkOpen) return false;
     _projDetail = null;
     _projUnavailable();
     return false;
@@ -152,6 +156,20 @@ async function _projOpen(projectId) {
   _projRenderDetail();
   return true;
 }
+
+const _projDisclosures = new Map();
+function _projFold(key, title, content, options = {}) {
+  const scope = JSON.stringify([window.__GOV_ME__?.email || '', options.project ?? _projSelectedId, key]);
+  const open = _projDisclosures.get(scope) ?? options.open;
+  const count = options.count ? '<span class="proj-chip">' + _projEsc(String(options.count)) + '</span>' : '';
+  return '<details class="proj-card proj-disclosure" data-project-scope="' + _projEsc(scope) +
+    '" data-project-section="' + _projEsc(key) + '"' + (open ? ' open' : '') + '><summary class="proj-card-title">' +
+    _projEsc(title) + count + '</summary><div class="proj-fold-body">' + content + '</div></details>';
+}
+document.addEventListener('toggle', event => {
+  const el = event.target;
+  if (el.isConnected && el.matches?.('details[data-project-scope]')) _projDisclosures.set(el.dataset.projectScope, el.open);
+}, true);
 
 function _projSectionCard(titleKey, titleFallback, section, rowRenderer) {
   // A section the server did not send is a section this caller is not entitled
@@ -171,9 +189,10 @@ function _projSectionCard(titleKey, titleFallback, section, rowRenderer) {
         + _projEsc(_projT('projects_truncated', 'Only the first entries are shown.')) + '</div>';
     }
   }
-  return '<div class="proj-card"><div class="proj-card-title">'
-    + _projEsc(_projT(titleKey, titleFallback))
-    + '</div>' + body + '</div>';
+  return _projFold(titleKey, _projT(titleKey, titleFallback), body, {
+    open:titleKey === 'projects_section_conversations' && items.length > 0,
+    count:items.length ? String(items.length) + (section.truncated ? '+' : '') : ''
+  });
 }
 
 function _projRenderDetail() {
@@ -258,10 +277,8 @@ function _projRenderIntegrations() {
     configured_not_readable: _projT('projects_state_configured_not_readable', 'Set up, not readable here'),
     reader_missing: _projT('projects_state_reader_missing', 'Connected, not read here yet'),
   };
-  host.innerHTML = '<div class="proj-card"><div class="proj-card-title">'
-    + _projEsc(_projT('projects_integrations_title', 'Sources not connected yet'))
-    + '</div>'
-    + '<div class="proj-empty">'
+  host.innerHTML = _projFold('sources', _projT('projects_integrations_title', 'Sources not connected yet'),
+    '<div class="proj-empty">'
     + _projEsc(_projT('projects_connect_hint', 'Ask your administrator to connect a source before expecting it here.'))
     + '</div>'
     + rows.map(r => '<div class="proj-integration"><div class="proj-integration-head">'
@@ -269,8 +286,7 @@ function _projRenderIntegrations() {
       + '<span class="proj-chip">'
       + _projEsc(String(states[r.state] || _projT('projects_not_connected', 'Not connected')))
       + '</span></div><div class="proj-integration-seam">'
-      + _projEsc(String(r.seam)) + '</div></div>').join('')
-    + '</div>';
+      + _projEsc(String(r.seam)) + '</div></div>').join(''), {project:'', count:rows.length});
 }
 
 async function _projWithBusy(button, label, action) {
@@ -393,11 +409,12 @@ async function _projLoadTeamControls(project) {
   if (!isCurrent()) return;
   // Opening a conversation only needs the project's own detail. Keep its
   // button stable while optional directories/files load or a create is busy.
-  host.innerHTML = '<div class="proj-card"><div class="proj-card-title">' + _projEsc(_projT('projects_team_title', 'Project team')) + '</div>'
-    + '<div id="projTeamMetadata"><p class="proj-state">'+_projEsc(_projT('loading','Loading…'))+'</p></div>'
-    + '<p class="proj-state">' + _projEsc(_projT('projects_team_note', 'Project membership does not change your bot or tool permissions.')) + '</p>'
-    + '<button class="app-dialog-btn" id="projStartChat">' + _projEsc(_projT('projects_new_group_chat', 'New group conversation')) + '</button></div>'
-    + '<div id="projTeamFiles"></div>';
+  host.innerHTML = '<div class="proj-actions"><button class="app-dialog-btn" id="projStartChat">' +
+    _projEsc(_projT('projects_new_group_chat', 'New group conversation')) + '</button></div>' +
+    _projFold('team', _projT('projects_team_title', 'Project team'),
+      '<div id="projTeamMetadata"><p class="proj-state">' + _projEsc(_projT('loading','Loading…')) + '</p></div>' +
+      '<p class="proj-state">' + _projEsc(_projT('projects_team_note', 'Project membership does not change your bot or tool permissions.')) + '</p>') +
+    '<div id="projTeamFiles"></div>';
   const metadataHost = $('projTeamMetadata');
   const filesHost = $('projTeamFiles');
   const startButton = $('projStartChat');
@@ -429,7 +446,7 @@ async function _projLoadTeamControls(project) {
       + (project.can_manage ? '<p class="sp-shared-hint" role="note">👥 ' + _projEsc(_projT('shared_change_hint_project', 'This changes it for everyone in this project.')) + '</p>' : '')
       + (project.can_manage ? '<div class="proj-actions"><button class="app-dialog-btn" id="projSaveTeam">' + _projEsc(_projT('projects_save_team', 'Save members, bots and category')) + '</button><button class="app-dialog-btn" id="projArchiveTeam">' + _projEsc(_projT('projects_archive', 'Archive project')) + '</button></div>' : '');
     if (window.SpPicker) SpPicker.mountAll(metadataHost);
-    filesHost.innerHTML = files ? '<div class="proj-card"><div class="proj-card-title">' + _projEsc(_projT('projects_files_title', 'Project files')) + '</div><label class="proj-field" for="projUpload"><span id="projUploadLabel">' + _projEsc(_projT('projects_upload', 'Upload a file')) + '</span><input type="file" id="projUpload"></label><div id="projFileList" class="proj-actions"></div></div>' : '';
+    filesHost.innerHTML = files ? _projFold('uploads', _projT('projects_files_title', 'Project files'), '<label class="proj-field" for="projUpload"><span id="projUploadLabel">' + _projEsc(_projT('projects_upload', 'Upload a file')) + '</span><input type="file" id="projUpload"></label><div id="projFileList" class="proj-actions"></div>', {count:files.files?.length}) : '';
     const humanHost=$('projHumanChoices');
     const ownerRow=document.createElement('div');ownerRow.className='proj-owner';ownerRow.textContent=_projT('projects_owner', 'Owner: ')+project.owner_email;humanHost.appendChild(ownerRow);
     humans.filter(p=>p.email!==project.owner_email).forEach(person=>{

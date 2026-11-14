@@ -14165,6 +14165,21 @@ def handle_get(handler, parsed) -> bool:
         _promote_prompt_categories(active_jobs)
         _promote_prompt_values(active_jobs)
         jobs = active_jobs + other_jobs if all_profiles else active_jobs
+        query = parse_qs(parsed.query or "", keep_blank_values=True)
+        if "agenda_start" in query:
+            from api.cron_agenda import calendar_window, project_calendar
+            from api.profiles import cron_profile_context_for_home, get_hermes_home_for_profile
+            try:
+                bounds = calendar_window(query)
+            except ValueError as exc:
+                return bad(handler, str(exc))
+            def profile_zone(owner):
+                from hermes_time import get_timezone
+                with cron_profile_context_for_home(get_hermes_home_for_profile(owner)):
+                    return get_timezone()
+            agenda = project_calendar(jobs, bounds, profile_zone)
+            agenda["jobs"] = [{key: row.get(key) for key in ("id", "name", "owner_profile", "assigned_bot")} for row in jobs]
+            return j(handler, agenda)
         try:
             from api.cron_bots import annotate_job_chats
             annotate_job_chats(jobs, _cron_request_email(handler))

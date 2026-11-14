@@ -19,6 +19,13 @@
 .om-seg button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
 /* Counts */
+.wp-destinations>summary{cursor:pointer;font-weight:600;padding:14px 18px}
+.wp-destinations>.wp-shortcuts{padding:0 18px 16px}
+.wp-shortcuts{display:flex;flex-wrap:wrap;gap:8px}
+.wp-no-recent{font-size:13px;color:var(--muted);margin:0;padding:16px}
+.wp-activity>div{min-width:0}
+.wp-kind-dot.k-conversation{background:var(--accent)}
+.wp-kind-dot.k-run{background:var(--success,var(--accent))}
 .wp-kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px}
 .wp-kpi{all:unset;box-sizing:border-box;cursor:pointer;display:flex;flex-direction:column;gap:10px;padding:16px 18px;border:1px solid var(--border);border-radius:var(--sp-radius-lg);background:var(--surface);box-shadow:var(--sp-shadow-xs);transition:border-color .15s var(--sp-ease,ease),box-shadow .15s var(--sp-ease,ease),transform .15s var(--sp-ease,ease)}
 .wp-kpi:hover{border-color:color-mix(in srgb,var(--accent) 60%,var(--border));box-shadow:var(--sp-shadow-sm)}

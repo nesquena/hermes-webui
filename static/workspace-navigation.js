@@ -45,7 +45,7 @@
   }
   async function activate(panel) {
     if (!destinations().some(item => item.panel === panel)) { render(); return; }
-    dialog.close();
+    if (dialog?.open) dialog.close();
     try {
       if (panel === 'conversations') { await ConversationWorkbench.show(); return; }
       if (!(await switchPanel(panel))) return;
@@ -93,6 +93,7 @@
     search.placeholder = tx('search'); search.setAttribute('aria-label', tx('search')); list.setAttribute('aria-label', tx('title'));
     returnFocus = document.activeElement; search.value = ''; matches = []; selected = 0; render(); dialog.showModal(); search.focus();
   }
+  window.WorkspaceDestinations = {destinations, open:activate};
   function start() {
     $('btnWorkspaceNavigator').onclick = show;
     document.addEventListener('keydown', event => {

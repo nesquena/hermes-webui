@@ -65,6 +65,8 @@ const SHELL_ASSETS = [
   './static/messages.js' + VQ,
   './static/sessions.js' + VQ,
   './static/sp-picker.js' + VQ,
+  './static/cron-agenda.js' + VQ,
+  './static/cron-agenda.css' + VQ,
   './static/panels.js' + VQ,
   './static/module-content.js' + VQ,
   './static/apps.js' + VQ,

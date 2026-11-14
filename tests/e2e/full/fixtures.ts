@@ -68,7 +68,7 @@ export async function selectPicker(page: Page, inputId: string, value: string) {
   await expect(root.locator('.sp-chip[data-value=' + JSON.stringify(value) + ' i]')).toHaveCount(1);
 }
 export async function open(page: Page, panel = 'chat') {
-  await page.goto('/');
+  await page.goto('/?view=chat');
   await expect(page.locator('#msg')).toBeVisible();
   if (panel !== 'chat') await page.locator(`.rail-btn[data-panel="${panel}"]`).click();
 }

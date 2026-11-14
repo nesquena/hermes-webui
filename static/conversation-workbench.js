@@ -136,7 +136,15 @@
     else { renderSessionListFromCache(); render(); }
     $('conversationBoardSearch')?.focus({preventScroll:true});
   }
-  function sync(sessions) { rows = sessions; loading = false; render(); }
-  function setLoading() { rows = []; loading = true; render(); }
-  window.ConversationWorkbench = {show, sync, setLoading};
+  function recent() {
+    return rows.slice().sort((a,b) => _sessionTimestampMs(b) - _sessionTimestampMs(a)).slice(0,4).map(s =>
+      ({id:s.session_id, title:title(s), bot:bot(s), at:_sessionTimestampMs(s)}));
+  }
+  function openRecent(id) {
+    const row = rows.find(s => s.session_id === id);
+    if (row) return _openSidebarSession(row);
+  }
+  function sync(sessions) { rows = sessions; loading = false; render(); window.SPWorkplace?.refreshRecent(); }
+  function setLoading() { rows = []; loading = true; render(); window.SPWorkplace?.refreshRecent(); }
+  window.ConversationWorkbench = {show, sync, setLoading, recent, openRecent};
 })();

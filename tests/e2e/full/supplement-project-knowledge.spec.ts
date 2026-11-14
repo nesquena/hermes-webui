@@ -47,6 +47,11 @@ async function project(page: Page, name: string) {
   await page.locator('.proj-row').filter({hasText: name}).click();
   await expect(page.locator('#projSummary')).toContainText(name);
   await expect(page.locator('#projStartChat')).toBeVisible();
+  for (const key of ['team','uploads']) {
+    const fold=page.locator('[data-project-section="'+key+'"]');
+    await fold.waitFor();
+    if (!(await fold.evaluate(e=>e.open))) await fold.locator('summary').click();
+  }
 }
 
 async function grantProjectWorkspace(page: Page, workspace: string) {
@@ -144,12 +149,14 @@ test('SUPPLEMENT PROJECT KNOWLEDGE retained project pages lose files conversatio
   expect((await created).status()).toBe(200);
   const initial = (await (await created).json()).project;
   await expect(page.locator('#projSummary')).toContainText(name);
+  await page.locator('[data-project-section="team"] > summary').click();
   await page.locator('#projHumanChoices input[value="bob@example.test"]').check();
   await page.locator('#projBotChoices input[value="qa-research"]').check();
   const assigned = response(page, '/api/projects/team'); await page.locator('#projSaveTeam').click();
   expect((await assigned).status()).toBe(200);
   const team = (await (await assigned).json()).project;
   expect(team.members).toEqual(['bob@example.test']);
+  await page.locator('[data-project-section="uploads"] > summary').click();
   await page.locator('#projUpload').setInputFiles({name: filename, mimeType: 'text/plain', buffer: Buffer.from(bytes)});
   await expect(page.locator('#projFileList').getByRole('button', {name: filename, exact: true})).toBeVisible();
   // Membership and the RBAC workspace ceiling are independent. Establish the

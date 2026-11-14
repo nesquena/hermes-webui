@@ -2734,7 +2734,7 @@ async function _openSidebarSession(session, loadOpts={}){
     var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
     if(_preResult&&_preResult.cancel===true) return;
   }
-  if(window.ConversationWorkbench && document.querySelector('main.main.showing-conversations')) await switchPanel('chat');
+  if(window.ConversationWorkbench && document.querySelector('main.main.showing-conversations, main.main.showing-studio')) await switchPanel('chat');
   // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
   if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){

@@ -280,3 +280,20 @@ opening a child conversation preserves its bot profile. Queued work appears befo
 its child conversation exists. Result delivery remains in progress until the
 coordinating bot's report finishes. The authenticated parent-session check also
 protects the delegation listing; authority records are never included in it.
+
+### Workspace overview, projects and schedule
+
+An ordinary visit opens the Studio Overview. Preferences offers a personal start
+page on this device. The title-bar symbol returns to Overview. Conversation
+links, active runs and restored drafts open in Chat.
+
+Overview reuses the conversation list and scheduler's visible records. Its
+recent task list shows the last recorded run per task in the selected scope.
+All destinations opens the same permitted panels as workspace navigation.
+Project teams, files and resources have keyboard-operable disclosures. Opening
+and closing a section keeps its inputs mounted.
+
+The task calendar opens in the current week. Select a day in the month grid to
+inspect its tasks and expand repeated times. Projections use the scheduler
+owner's timezone and display in the viewer's timezone. Paused and completed
+jobs have no future runs. Task history holds the actual execution results.

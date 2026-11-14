@@ -92,6 +92,8 @@
 .workspace-more svg { flex-shrink: 0; }
 .app-titlebar { gap: 10px; border-bottom: 0 !important; }
 .app-titlebar-title { font-weight: 600 !important; }
+#workspaceHome{padding:0;border:0;cursor:pointer;-webkit-app-region:no-drag}
+#workspaceHome:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .synthpulse-titlebar-logo-wrap { box-shadow: none; background: transparent; }
 .app-titlebar-title.is-brand::after { content: none !important; }
 .app-titlebar, .rail, .sidebar, .topbar, .composer-wrap, .rightpanel {
