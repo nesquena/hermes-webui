@@ -11177,6 +11177,14 @@ function renderMd(raw){
     // markdown block's trailing newlines.
     return `\n\n<table><thead>${header}</thead><tbody>${body}</tbody></table>\n\n`;
   });
+  // Image syntax inside an inline code span is documentation, not media: keep
+  // such spans verbatim through the outer image and link passes.  Paragraph
+  // text is still raw backticks here (the paragraph splitter runs inlineMd()
+  // later), while list / heading / table text already carries rendered <code>.
+  // Only spans that actually contain `![` are stashed, so a code-wrapped link
+  // label still flows through the outer link pass as before.
+  const _code_outer_stash=[];
+  s=s.replace(/`[^`\n]*!\[[^`\n]*`|<code\b[^>]*>[\s\S]*?!\[[\s\S]*?<\/code>/g,m=>{_code_outer_stash.push(m);return `\x00K${_code_outer_stash.length-1}\x00`;});
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
@@ -11188,6 +11196,7 @@ function renderMd(raw){
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
   s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
+  s=s.replace(/\x00K(\d+)\x00/g,(_,i)=>_code_outer_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
   s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);

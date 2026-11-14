@@ -1071,6 +1071,26 @@ class TestRootRelativeMarkdownImage:
         out = _render(driver_path, "```\n![x](/static/charts/probe.svg)\n```")
         assert '<img' not in out, f"image inside a fenced code block must stay literal: {out!r}"
 
+    def test_root_relative_image_in_inline_code_stays_literal(self, driver_path):
+        # #9072 review: the outer image pass now matches root-relative paths, so
+        # image syntax written inside an inline code span must stay verbatim
+        # instead of rendering as an <img> nested in <code>.
+        out = _render(driver_path, "see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, f"image inside inline code must stay literal: {out!r}"
+        assert '[chart](/static/charts/probe.svg)' in out, (
+            f"inline code content must be preserved verbatim: {out!r}"
+        )
+
+    def test_code_wrapped_link_label_still_links(self, driver_path):
+        # Control for the inline-code stash: only spans containing `![` are
+        # stashed, so a code-wrapped link label keeps flowing through the
+        # outer link pass.
+        out = _render(driver_path, "[`chart`](https://example.com/page)")
+        assert '<a href="https://example.com/page"' in out, (
+            f"code-wrapped link label must still link: {out!r}"
+        )
+        assert '<code>chart</code>' in out, f"label must stay code: {out!r}"
+
     def test_absolute_https_image_still_renders(self, driver_path):
         out = _render(driver_path, "![x](https://example.com/x.png)")
         assert '<img' in out and 'src="https://example.com/x.png"' in out, (
