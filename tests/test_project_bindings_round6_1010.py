@@ -17,7 +17,7 @@
    label at all, so a screen reader could not tell a model change from a
    workspace add. ``_makeBindingsCombo`` now accepts ``ariaLabel`` and the dialog
    passes ``pb_add_workspace_title`` / ``pb_field_model`` (both already present
-   in all 15 locale blocks — no new key).
+   in all 16 locale blocks — no new key).
 """
 
 from __future__ import annotations
@@ -198,7 +198,7 @@ def test_both_accessible_name_keys_exist_in_every_locale():
     every locale block (a missing key falls back to the raw id)."""
     i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
     for key in ("pb_add_workspace_title", "pb_field_model"):
-        assert len(re.findall(rf"^\s*{key}:", i18n, flags=re.M)) == 15, key
+        assert len(re.findall(rf"^\s*{key}:", i18n, flags=re.M)) == 16, key
 
 
 # --- finding 3 (Greptile P2 2026-10-10T06:00:25Z): auto_assign must be a real

@@ -86,4 +86,4 @@ def test_i18n_no_git_key_all_locales():
 
     # Count occurrences of the new key (should be exactly 13, one per locale)
     count = content.count("settings_update_no_git")
-    assert count == 15, f"Expected exactly 15 settings_update_no_git keys, found {count}"
+    assert count == 16, f"Expected exactly 16 settings_update_no_git keys, found {count}"

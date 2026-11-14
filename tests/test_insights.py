@@ -2195,7 +2195,7 @@ def test_insights_range_keys_are_localized_at_runtime():
 
     assert out["en"]["vals"] == ["Custom range…", "Start date", "End date"]
     non_english = sorted(l for l in out if l != "en")
-    assert len(non_english) == 14, f"expected 14 non-English locales, got {non_english}"
+    assert len(non_english) == 15, f"expected 15 non-English locales, got {non_english}"
     english = out["en"]["vals"]
     for loc in non_english:
         assert out[loc]["lang"], f"{loc} did not resolve a document lang (setLocale failed)"
@@ -2827,7 +2827,7 @@ def test_insights_range_fallback_note_is_localized_at_runtime():
     assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert len(out) == 15, sorted(out)
+    assert len(out) == 16, sorted(out)
     english = out["en"]["val"]
     assert english == "That range isn\u2019t available. Showing the last {days} days."
     for loc in sorted(l for l in out if l != "en"):
