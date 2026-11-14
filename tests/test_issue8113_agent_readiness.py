@@ -23,6 +23,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -229,14 +230,23 @@ def ambient_umask(request):
 
 
 def _agent(tmp_path: Path, name: str, *, reqs: bool = True, mode: int = 0o755) -> Path:
-    """An Agent-shaped source directory with an explicit, trusted mode."""
+    """An Agent-shaped source directory with an explicit, trusted mode.
+
+    The install input keeps whatever mode the ambient umask produced — under
+    umask 002 that is 0664, the shape a `git pull` under umask 002 leaves in a
+    real checkout. The producer (docker_init.bash / ``_staged_copy``) is what
+    must make the *staged* copy private (#8472); pinning the source input to
+    0644 here would hide that producer-to-installer path.
+    """
     d = tmp_path / name
     d.mkdir()
     d.chmod(mode)
     if reqs:
-        (d / "requirements.txt").write_text("python-dotenv==1.2.2\n", encoding="utf-8")
+        input_file = d / "requirements.txt"
+        input_file.write_text("python-dotenv==1.2.2\n", encoding="utf-8")
     else:
-        (d / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n', encoding="utf-8")
+        input_file = d / "pyproject.toml"
+        input_file.write_text('[project]\nname="hermes-agent"\n', encoding="utf-8")
     return d
 
 
@@ -253,10 +263,20 @@ def _publish_stage(source: Path, stage: Path) -> None:
 
 
 def _staged_copy(tmp_path: Path, source: Path, *, name: str = "hermes-agent-src", mode: int = 0o755) -> Path:
-    """A staged copy of ``source`` with its manifest, as docker_init.bash leaves it."""
+    """A staged copy of ``source`` as docker_init.bash leaves it.
+
+    ``shutil.copytree`` preserves mode bits the way ``rsync -a`` / ``cp -a``
+    do; the producer then strips group/world write from the install inputs
+    (``secure_stage_install_inputs`` in docker_init.bash) before publishing
+    the manifest, so a 0664 source input lands in the stage as 0644 (#8472).
+    """
     stage = tmp_path / name
     shutil.copytree(source, stage)
     stage.chmod(mode)
+    for _f in ("pyproject.toml", "requirements.txt", "setup.py"):
+        p = stage / _f
+        if p.is_file():
+            p.chmod(stat.S_IMODE(p.stat().st_mode) & ~0o022)
     _publish_stage(source, stage)
     return stage
 
@@ -509,21 +529,24 @@ def _bash_function(src: str, name: str) -> str:
     reason="bash and sha256sum are needed to run the docker_init.bash publisher",
 )
 def test_docker_init_stage_manifest_is_accepted_by_the_recovery_path(tmp_path):
-    """The real bash publisher and the Python reader must agree on the binding.
+    """The real bash producer (securer + publisher) and the Python reader must agree.
 
-    Runs `write_agent_stage_manifest` from docker_init.bash on a staged copy,
-    then checks that `_agent_install_dir()` accepts it — and stops accepting it
-    once the Agent's install inputs change underneath the stage.
+    Runs `secure_stage_install_inputs` and `write_agent_stage_manifest` from
+    docker_init.bash on a staged copy, then checks that `_agent_install_dir()`
+    accepts it — and stops accepting it once the Agent's install inputs change
+    underneath the stage.
     """
     from api.startup import _agent_install_dir
 
-    publisher = _bash_function(INIT_SH, "write_agent_stage_manifest")
+    producer = _bash_function(INIT_SH, "secure_stage_install_inputs") + \
+        _bash_function(INIT_SH, "write_agent_stage_manifest")
     mount = _agent(tmp_path, "hermes-agent", reqs=False)
     staged = tmp_path / "hermes-agent-src"
     shutil.copytree(mount, staged)
     staged.chmod(0o755)
     subprocess.run(
-        ["bash", "-c", publisher + '\nwrite_agent_stage_manifest "$1" "$2"', "bash", str(mount), str(staged)],
+        ["bash", "-c", producer + '\nsecure_stage_install_inputs "$2"\nwrite_agent_stage_manifest "$1" "$2"',
+         "bash", str(mount), str(staged)],
         check=True,
         capture_output=True,
         text=True,
@@ -560,3 +583,262 @@ def test_docker_init_exports_the_stage_dir_before_the_server_starts():
     assert export_pos != -1, "staged dir must be exported to the recovery path"
     assert server_pos != -1
     assert export_pos < server_pos
+
+
+# ── install-input hygiene (#8472) ─────────────────────────────────────────────
+
+# The trust checks above prove the stage *directory* is ours, but say nothing
+# about the input *files* inside it. A world-writable requirements.txt in a
+# valid stage passes validation, then its contents can change before pip reads
+# it. Each install input must be a regular file (not a symlink) owned by the
+# current user and not group- or world-writable.
+
+
+def test_auto_install_rejects_a_stage_with_a_world_writable_requirements_file(tmp_path):
+    """The manifest digest is of contents, not permissions; mode must be checked."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    (staged / "requirements.txt").chmod(0o666)
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+def test_auto_install_rejects_a_stage_with_a_group_writable_requirements_file(tmp_path):
+    """Group-writable is as dangerous as world-writable: any group member can edit."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    (staged / "requirements.txt").chmod(0o664)
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+def test_auto_install_rejects_a_stage_with_a_world_writable_pyproject(tmp_path):
+    """Same bar for the pyproject.toml install path."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent", reqs=False)
+    staged = _staged_copy(tmp_path, mount)
+    (staged / "pyproject.toml").chmod(0o666)
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+def test_auto_install_rejects_a_stage_with_a_symlinked_requirements_file(tmp_path):
+    """A symlink can be repointed after validation; only a real file is trusted.
+
+    The digest check alone is not enough here the link's target is the very
+    file whose digest the manifest recorded, so contents match today.
+    """
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    req = staged / "requirements.txt"
+    req.unlink()
+    req.symlink_to(mount / "requirements.txt")  # same content, via a link
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
+def test_auto_install_rejects_a_stage_with_input_owned_by_another_user(tmp_path):
+    """Not our file: its contents can be changed by whoever owns it (#8472)."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    other_uid = 0 if os.getuid() != 0 else 65534  # root has no "other user" above it
+    try:
+        os.chown(staged / "requirements.txt", other_uid, -1)
+    except OSError:
+        # PermissionError, and EINVAL from a sandbox without CAP_CHOWN.
+        pytest.skip("cannot chown in this environment; ownership check not exercised")
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+def test_auto_install_accepts_a_stage_with_trusted_private_input_files(tmp_path, ambient_umask):
+    """Happy path: an owned regular file, mode 0644 or stricter, is accepted."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    req = staged / "requirements.txt"
+    assert req.is_file() and not req.is_symlink()
+    req.chmod(0o600)  # stricter than 0644, still fine
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == staged.resolve()
+
+
+def test_auto_install_installs_the_authorized_agent_when_a_stage_input_is_unsafe(tmp_path):
+    """Consumer level: an unsafe input redirects the install, it does not cancel it.
+
+    ``_agent_install_dir`` falls back to the authorized Agent directory when a
+    stage fails validation, so ``auto_install_agent_deps`` still runs pip —
+    from the Agent. The pip arguments, not the absence of a call, are what
+    prove the unsafe stage stayed out of the install (#8472). The real trust
+    checks run here: the world-writable input is the only thing wrong with the
+    stage, so only the file-level check can reject it.
+    """
+    from api.startup import auto_install_agent_deps
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    (staged / "requirements.txt").chmod(0o666)
+    env = {
+        "HERMES_WEBUI_AGENT_DIR": str(mount),
+        "HERMES_WEBUI_AGENT_STAGE_DIR": str(staged),
+        "HERMES_WEBUI_AUTO_INSTALL": "1",
+    }
+    with patch.dict("os.environ", env, clear=False):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            assert auto_install_agent_deps(expected_agent_dir=mount) is True
+    assert mock_run.call_count == 1, "rejecting the stage must not cancel the install"
+    args = [str(a) for a in mock_run.call_args[0][0]]
+    assert str(mount.resolve() / "requirements.txt") in args, args
+    assert not any(str(staged) in a for a in args), f"install used the unsafe stage: {args}"
+
+
+def test_auto_install_rejects_a_stage_when_an_input_lstat_fails(tmp_path, monkeypatch):
+    """Fail closed when an input cannot even be stat'ed.
+
+    ``FileNotFoundError`` means pip never reads the input and is skipped; any
+    other ``OSError`` (EACCES, a vanishing mount, …) must reject the stage
+    rather than wave the input through unvalidated.
+    """
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    real_lstat = Path.lstat
+
+    def lstat_that_fails(self):
+        if self.name in ("requirements.txt", "pyproject.toml"):
+            raise PermissionError("simulated lstat failure")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", lstat_that_fails)
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
+def test_trusted_install_inputs_rejects_inputs_the_current_user_does_not_own(tmp_path, monkeypatch):
+    """The ownership branch must be covered where a real chown is not permitted.
+
+    The selector-level case above performs a real ``os.chown`` and skips on an
+    unprivileged runner (as this one does), leaving the branch unexercised;
+    faking ``getuid`` covers it everywhere. The helper is called directly so
+    the fake stays away from ``_trusted_ancestry``, which reads ``getuid`` too.
+    """
+    from api.startup import _trusted_install_inputs
+
+    staged = _agent(tmp_path, "hermes-agent")
+    (staged / "requirements.txt").chmod(0o644)
+    assert _trusted_install_inputs(staged) is True  # control: ours, regular, private
+    real_getuid = os.getuid
+    monkeypatch.setattr(os, "getuid", lambda: real_getuid() + 1)
+    assert _trusted_install_inputs(staged) is False
+
+
+# ── producer re-secures the staged inputs (#8472) ────────────────────────────
+
+
+def test_docker_init_recovery_accepts_a_group_writable_source_input(tmp_path):
+    """A 0664 source input (a git pull under umask 002) must not break recovery.
+
+    ``rsync -a``/``cp -a`` preserve mode bits, so the plain copied stage of a
+    0664 input is itself 0664 and the private-file check rejects it. The
+    producer's ``secure_stage_install_inputs`` strips group/world write from
+    the staged inputs before the manifest is published, so the recovery path
+    accepts the stage instead of falling back to the read-only mount (where
+    pip fails with EROFS).
+    """
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    (mount / "requirements.txt").chmod(0o664)  # umask-002 checkout shape
+    staged = tmp_path / "hermes-agent-src"
+    shutil.copytree(mount, staged)
+    staged.chmod(0o755)
+    producer = _bash_function(INIT_SH, "secure_stage_install_inputs") + \
+        _bash_function(INIT_SH, "write_agent_stage_manifest")
+    subprocess.run(
+        ["bash", "-c", producer + '\nsecure_stage_install_inputs "$2"\nwrite_agent_stage_manifest "$1" "$2"',
+         "bash", str(mount), str(staged)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert stat.S_IMODE((staged / "requirements.txt").stat().st_mode) & 0o022 == 0
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == staged.resolve()
+
+
+def test_docker_init_secures_the_staged_inputs_before_publishing_the_manifest():
+    """go-w must land between the copy and the manifest, which vouches for the
+    copy and names the exact files the recovery path re-checks."""
+    copy_pos = INIT_SH.find('chmod -R u+w "$_stage_src"')
+    secure_pos = INIT_SH.find('secure_stage_install_inputs "$_stage_src"')
+    call_pos = INIT_SH.find('write_agent_stage_manifest "$_agent_src" "$_stage_src"')
+    assert secure_pos != -1, "docker_init.bash must re-secure the staged install inputs"
+    assert copy_pos != -1 and call_pos != -1
+    assert copy_pos < secure_pos < call_pos
+
+
+def test_docker_init_resecures_an_existing_stage_on_fast_restart():
+    """A stage published before the go-w step stays unsecured across restarts;
+    the fast-restart branch must re-secure it or recovery rejects it."""
+    assert 'secure_stage_install_inputs "$_agent_stage"' in INIT_SH
+
+
+def test_auto_install_rejects_a_stage_with_a_world_writable_setup_py(tmp_path):
+    """setuptools executes setup.py on the pyproject build path (#8472).
+
+    The real Agent ships pyproject.toml plus setup.py and no requirements.txt,
+    so ``pip install <stage>`` runs setup.py — a writable one is code injection.
+    """
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent", reqs=False)
+    (mount / "setup.py").write_text("from setuptools import setup\nsetup()\n", encoding="utf-8")
+    staged = _staged_copy(tmp_path, mount)
+    (staged / "setup.py").chmod(0o666)
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+def test_auto_install_accepts_a_stage_with_a_private_setup_py(tmp_path, ambient_umask):
+    """Happy path: a private setup.py beside a trusted pyproject.toml is fine."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent", reqs=False)
+    (mount / "setup.py").write_text("from setuptools import setup\nsetup()\n", encoding="utf-8")
+    staged = _staged_copy(tmp_path, mount)
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == staged.resolve()
+
+
+def test_auto_install_names_a_stage_rejected_for_an_unsafe_input(tmp_path, capsys):
+    """The fallback to the mount must name the stage and the reason (#8472).
+
+    Rejecting silently leaves startup with an EROFS pip failure and no clue
+    which stage was skipped and why.
+    """
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    (staged / "requirements.txt").chmod(0o666)
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+    out = capsys.readouterr().out
+    assert "[!!]" in out
+    assert str(staged) in out
+    assert "private-regular-file" in out
