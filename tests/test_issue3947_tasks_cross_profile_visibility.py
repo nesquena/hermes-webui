@@ -464,6 +464,7 @@ async function loadKanban() {{ kanbanLoads += 1; }}
 async function loadProfilesPanel() {{ profileLoads += 1; }}
 async function loadWorkspacesPanel() {{ workspaceLoads += 1; }}
 function _clearCronDetail() {{ clearCronDetailCalls += 1; }}
+function _resetHindsightState() {{}}
 {profile_switch_panel_load}
 (async () => {{
   await _profileSwitchPanelLoad();
