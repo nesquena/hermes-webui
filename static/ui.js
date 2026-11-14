@@ -7709,13 +7709,28 @@ let _composerFitResizeObserver=null;
 let _composerFitMutationObserver=null;
 let _composerFitObservedFooter=null;
 let _composerFitResizeListenerBound=false;
+let _composerFitLastFooter=null;
+let _composerFitLastKey='';
 
-function _fitComposerFooter(){
+function _fitComposerFooter(force){
   const footer=document.querySelector('.composer-footer');
   if(!footer) return;
   const left=footer.querySelector('.composer-left');
   if(!left) return;
-  if(!left.clientWidth) return;
+  const leftWidth=left.clientWidth;
+  if(!leftWidth) return;
+  // Distinguish available space from the content that needs it. Include
+  // fit-relevant descendant state, so label, visibility and inline/class
+  // geometry changes invalidate a scheduled fit without probing layout early.
+  const fitKey=function(){
+    const descendants=left.querySelectorAll ? Array.from(left.querySelectorAll('*')).map(function(el){
+      return (el.hidden?'1':'0')+getComputedStyle(el).display+'|'+(el.className||'')+
+        '|'+(el.style?el.style.cssText:'');
+    }).join(',') : '';
+    return footer.clientWidth+':'+left.clientWidth+':'+left.textContent+':'+descendants;
+  };
+  const key=fitKey();
+  if(arguments[0]===false && footer===_composerFitLastFooter && key===_composerFitLastKey) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
   // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
   // boundary crossing (this fit path measures real overflow at any width,
@@ -7780,6 +7795,10 @@ function _fitComposerFooter(){
   if(isBurger!==wasBurger && typeof _onPhoneBoundaryChange==='function'){
     try{ _onPhoneBoundaryChange(); }catch(_){ }
   }
+  _composerFitLastFooter=footer;
+  // Cache the restored geometry, not the expanded pre-fit geometry: the
+  // fitter's own class/style mutations then hit the memo on the next frame.
+  _composerFitLastKey=fitKey();
 }
 window._fitComposerFooter=_fitComposerFooter;
 
@@ -7788,7 +7807,7 @@ function _scheduleComposerFit(){
   _composerFitScheduled=true;
   requestAnimationFrame(function(){
     _composerFitScheduled=false;
-    try{_fitComposerFooter();}catch(_){ }
+    try{_fitComposerFooter(false);}catch(_){ }
   });
 }
 window._scheduleComposerFit=_scheduleComposerFit;
@@ -7818,7 +7837,7 @@ function _initComposerFooterFit(){
   if(window.MutationObserver){
     try{
       _composerFitMutationObserver=new MutationObserver(_scheduleComposerFit);
-      _composerFitMutationObserver.observe(left,{
+      _composerFitMutationObserver.observe(footer,{
         childList:true,subtree:true,characterData:true,
         attributes:true,attributeFilter:['class','style','hidden']
       });
