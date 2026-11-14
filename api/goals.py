@@ -522,6 +522,112 @@ def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Pa
         logger.debug("Goal state restore failed for %s: %s", session_id, exc)
 
 
+# Hermes' native `/goal draft` success output ends with this hint. Its edit path
+# (re-set the goal with inline `field: value` lines) is a CLI/TUI feature: WebUI
+# does not parse inline contract fields, so following the hint here would
+# replace the drafted contract with a plain goal. WebUI drops the hint instead
+# of showing advice that does not apply. A test pins this text against the
+# installed Agent so a wording change surfaces.
+_NATIVE_DRAFT_TIGHTEN_HINT = (
+    "\nTighten any field by re-setting the goal with inline lines "
+    "(e.g. verify: <command>), then /goal resume. Use /goal show to review."
+)
+_DRAFT_FALLBACK_TOAST = "Couldn't draft a contract — running as a free-form goal."
+_DRAFT_UNSUPPORTED_MESSAGE = "/goal draft requires a newer Hermes Agent."
+
+
+def _goal_verb(text: str) -> str:
+    """Return the lowercased first word of /goal args (Hermes' subcommand rule)."""
+    tokens = str(text or "").split(None, 1)
+    return tokens[0].lower() if tokens else ""
+
+
+def _native_goal_command_module():
+    try:
+        from hermes_cli import goal_command  # type: ignore
+    except Exception as exc:  # pragma: no cover - depends on installed hermes-agent
+        logger.debug("hermes_cli.goal_command unavailable: %s", exc)
+        return None
+    return goal_command if callable(getattr(goal_command, "dispatch_goal_command", None)) else None
+
+
+def _state_has_contract(state: Any) -> bool:
+    has_contract = getattr(state, "has_contract", None)
+    try:
+        return bool(callable(has_contract) and has_contract())
+    except Exception:
+        return False
+
+
+def _draft_goal_payload(mgr: Any, text: str) -> Dict[str, Any]:
+    """Run Hermes' own `/goal draft` and translate its result to the WebUI payload.
+
+    Drafting, the empty-objective usage error and the free-form fallback when no
+    contract can be drafted are all Hermes' native behavior (the same handler the
+    CLI, TUI and Desktop use). WebUI only scopes the call to the session's
+    profile, maps the result, and picks the toast type from the stored state.
+    """
+    goal_command = _native_goal_command_module()
+    if goal_command is None or isinstance(mgr, _LegacyProfileGoalManager):
+        # The legacy explicit-DB manager cannot persist a completion contract.
+        return _payload(ok=False, action="draft", message=_DRAFT_UNSUPPORTED_MESSAGE)
+
+    def _dispatch():
+        return goal_command.dispatch_goal_command(
+            mgr,
+            text,
+            # Only `/goal draft …` reaches this helper; gates are not a WebUI surface.
+            authorize_gate=lambda: "/goal gate is not available from WebUI.",
+        )
+
+    try:
+        # The contract drafter is an auxiliary-model call made outside the
+        # manager, so the whole dispatch runs under the session's profile home;
+        # otherwise drafting would use the server process's profile config.
+        result = mgr._scoped(_dispatch) if isinstance(mgr, _ProfileGoalManager) else _dispatch()
+    except Exception as exc:
+        logger.warning("WebUI /goal draft failed: %s", exc)
+        return _payload(ok=False, action="draft", message=f"Goal draft failed: {type(exc).__name__}")
+
+    output = str(getattr(result, "output", "") or "")
+    if getattr(result, "error", False):
+        return _payload(ok=False, action="draft", message=output, state=getattr(mgr, "state", None))
+
+    state = getattr(mgr, "state", None)
+    drafted = _state_has_contract(state)
+    body = _payload(
+        action="draft",
+        message=output.replace(_NATIVE_DRAFT_TIGHTEN_HINT, "") if drafted else output,
+        state=state,
+        kickoff_prompt=getattr(result, "prompt", None) if getattr(result, "kickoff", False) else None,
+    )
+    if drafted:
+        body["toast_type"] = "info"
+    else:
+        # Same as the TUI: no contract could be drafted, so the goal runs free-form.
+        fallback = next(
+            (line.strip() for line in output.splitlines() if line.startswith("Couldn't draft a contract")),
+            "",
+        )
+        body["toast_type"] = "warning"
+        body["toast_message"] = fallback or _DRAFT_FALLBACK_TOAST
+    return body
+
+
+def _goal_contract_detail(mgr: Any, state: Any) -> str:
+    """Return Hermes' rendered completion contract for /goal show, if any."""
+    if state is None or str(getattr(state, "status", "") or "") == "cleared":
+        return ""
+    render_contract = getattr(mgr, "render_contract", None)
+    if render_contract is None:
+        return ""
+    try:
+        return str(render_contract() or "").strip()
+    except Exception as exc:
+        logger.debug("goal contract render failed: %s", exc)
+        return ""
+
+
 def goal_command_payload(
     session_id: str,
     args: str = "",
@@ -533,9 +639,12 @@ def goal_command_payload(
 
     Mirrors the gateway command semantics:
     - /goal or /goal status shows status
+    - /goal show shows status plus the completion contract (read-only)
     - /goal pause pauses
     - /goal resume resumes without auto-starting a turn
     - /goal clear|stop|done clears
+    - /goal draft <text> runs Hermes' native contract drafter, then sets the
+      goal like /goal <text> (falling back to a free-form goal as Hermes does)
     - /goal <text> sets a new active goal and returns kickoff_prompt so the
       caller can start the first normal user-role turn immediately.
     """
@@ -549,11 +658,22 @@ def goal_command_payload(
 
     text = str(args or "").strip()
     lower = text.lower()
+    verb = _goal_verb(text)
 
     if not text or lower == "status":
         state = getattr(mgr, "state", None)
         status_payload = _goal_status_payload(state)
         return _payload(action="status", state=state, **status_payload)
+
+    if verb == "show":
+        # Hermes treats `show` as a control verb even with trailing words, so
+        # `/goal show …` never replaces the goal. Read-only: no kickoff.
+        state = getattr(mgr, "state", None)
+        body = _payload(action="show", state=state, **_goal_status_payload(state))
+        detail = _goal_contract_detail(mgr, state)
+        if detail:
+            body["detail"] = detail
+        return body
 
     if lower == "pause":
         state = mgr.pause(reason="user-paused")
@@ -614,6 +734,9 @@ def goal_command_payload(
                 "or /stop before setting a new goal."
             ),
         )
+
+    if verb == "draft":
+        return _draft_goal_payload(mgr, text)
 
     try:
         state = mgr.set(text)
