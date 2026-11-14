@@ -541,6 +541,112 @@ def test_open_worker_scope_keeps_the_launcher_rule(
     assert captured_route_j["payload"]["code"] == "server_draining"
 
 
+def _snapshot_dotenv_provenance():
+    return (
+        set(profiles._loaded_profile_env_keys),
+        set(profiles._DOTENV_OWNED_ENV_VALUES),
+        collections.Counter(profiles._PROFILE_ENV_VALUES),
+        dict(profiles._PROFILE_ENV_BASELINE),
+    )
+
+
+def _restore_dotenv_provenance(saved):
+    profiles._loaded_profile_env_keys = saved[0]
+    profiles._DOTENV_OWNED_ENV_VALUES = saved[1]
+    profiles._PROFILE_ENV_VALUES = saved[2]
+    profiles._PROFILE_ENV_BASELINE.clear()
+    profiles._PROFILE_ENV_BASELINE.update(saved[3])
+
+
+def test_startup_dotenv_cannot_hide_the_launcher_rule(
+    monkeypatch, tmp_path, captured, captured_route_j
+):
+    """#9024 review round 11: the dotenv writer keeps the launcher baseline too.
+
+    The operator launches with HERMES_WEBUI_CHAT_BACKEND=gateway and the
+    startup profile's .env repeats ``gateway``. ``_reload_dotenv`` owns the key
+    but used to record no baseline, so the admission reader — which must ignore
+    a profile-owned live value — fell through to a local owner's .env/config and
+    let an in-process route run. The dotenv writer now records the launcher
+    value it displaces, in both directions.
+    """
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda _sid: "owner")
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("dotenv-hidden launcher rule reached the model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+    homes = tmp_path / "homes"
+    homes.mkdir()
+    _profile_homes(monkeypatch, homes, owner_env=None, other_env=None)
+    startup = tmp_path / "home-startup"
+    startup.mkdir()
+    (startup / ".env").write_text(
+        "HERMES_WEBUI_CHAT_BACKEND=gateway\n", encoding="utf-8"
+    )
+    saved = _snapshot_dotenv_provenance()
+    try:
+        # A) launcher "gateway" repeated by the startup .env: still refuses.
+        monkeypatch.setenv(_ENV_KEY, "gateway")
+        profiles._reload_dotenv(startup)
+        assert profiles.profile_env_writer_owns(_ENV_KEY)
+        assert profiles._PROFILE_ENV_BASELINE.get(_ENV_KEY) == "gateway"
+        monkeypatch.setattr(gateway_sessions, "config_for_profile", lambda _profile=None: {})
+        routes._handle_git_commit_message(object(), {"session_id": "s1"})
+        assert captured["status"] == 409
+        assert captured["payload"]["code"] == "gateway_mode_unsupported"
+        assert calls["model_boundary"] == 0
+    finally:
+        _restore_dotenv_provenance(saved)
+
+    saved = _snapshot_dotenv_provenance()
+    try:
+        # B) launcher "legacy" repeated by the startup .env: no refusal.
+        monkeypatch.setenv(_ENV_KEY, "legacy")
+        profiles._reload_dotenv(startup)
+        assert profiles._PROFILE_ENV_BASELINE.get(_ENV_KEY) == "legacy"
+        monkeypatch.setattr(
+            gateway_sessions, "config_for_profile", lambda _profile=None: dict(_GATEWAY_CFG)
+        )
+        routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+        assert captured_route_j["status"] == 503
+        assert captured_route_j["payload"]["code"] == "server_draining"
+    finally:
+        _restore_dotenv_provenance(saved)
+
+
+def test_dotenv_release_restores_the_launcher_value(monkeypatch, tmp_path):
+    """#9024 review round 11: a profile switch must not erase the export.
+
+    ``_reload_dotenv`` clears the previous profile's keys. With a launcher
+    value underneath, the revert restores it instead of deleting the key.
+    """
+    monkeypatch.setenv(_ENV_KEY, "gateway")
+    startup = tmp_path / "home-startup"
+    startup.mkdir()
+    (startup / ".env").write_text(
+        "HERMES_WEBUI_CHAT_BACKEND=legacy\n", encoding="utf-8"
+    )
+    next_home = tmp_path / "home-next"
+    next_home.mkdir()
+    saved = _snapshot_dotenv_provenance()
+    try:
+        profiles._reload_dotenv(startup)
+        assert os.environ.get(_ENV_KEY) == "legacy", "fixture setup: dotenv did not apply"
+        assert profiles.profile_env_writer_owns(_ENV_KEY)
+
+        profiles._reload_dotenv(next_home)
+        assert os.environ.get(_ENV_KEY) == "gateway", "switch erased the launcher export"
+        assert not profiles.profile_env_writer_owns(_ENV_KEY)
+    finally:
+        _restore_dotenv_provenance(saved)
+
+
 def _two_writer_homes(monkeypatch, tmp_path, *, first_env, second_env):
     """Homes for two distinct profile writers with different .env values."""
     homes = {}

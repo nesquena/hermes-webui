@@ -2267,9 +2267,22 @@ def _reload_dotenv(home: Path):
     global _loaded_profile_env_keys, _DOTENV_OWNED_ENV_VALUES
 
     # Remove keys loaded from the previous profile first, including their
-    # pair-level provenance (#9024 review round 4).
+    # pair-level provenance (#9024 review round 4). A key a launcher exported
+    # before the dotenv writer displaced it gets that value back, so a profile
+    # switch cannot erase the operator's setting (#9024 review round 11); a
+    # key a live worker/stream mirror still owns is left to that mirror, whose
+    # own exit restores the launcher baseline.
     for key in list(_loaded_profile_env_keys):
-        os.environ.pop(key, None)
+        if _WORKER_OWNED_ENV_KEYS.get(key, 0) > 0:
+            continue
+        if key in _PROFILE_ENV_BASELINE:
+            baseline = _PROFILE_ENV_BASELINE.pop(key)
+            if baseline is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = baseline
+        else:
+            os.environ.pop(key, None)
     for pair in _DOTENV_OWNED_ENV_VALUES:
         _PROFILE_ENV_VALUES.pop(pair, None)
     _DOTENV_OWNED_ENV_VALUES = set()
@@ -2279,8 +2292,7 @@ def _reload_dotenv(home: Path):
     if not env_path.exists():
         return
     try:
-        loaded_keys: set[str] = set()
-        loaded_pairs: set[tuple] = set()
+        pending: list[tuple[str, str]] = []
         for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith('#') and '=' in line:
@@ -2298,12 +2310,20 @@ def _reload_dotenv(home: Path):
                             k, env_path,
                         )
                         continue
-                    os.environ[k] = v
-                    loaded_keys.add(k)
-                    loaded_pairs.add((k, v))
-        _loaded_profile_env_keys = loaded_keys
-        _DOTENV_OWNED_ENV_VALUES = loaded_pairs
-        _PROFILE_ENV_VALUES.update(loaded_pairs)
+                    pending.append((k, v))
+        # #9024 review round 11: the dotenv writer records the launcher
+        # baseline it displaces, like the worker/streaming mirrors do. A live
+        # value loaded from this profile's .env must not be read as the
+        # operator's export — and with no baseline the admission reader would
+        # drop the operator's setting entirely while the key stays owned.
+        for key, _value in pending:
+            if not _profile_env_key_owned(key) and key not in _PROFILE_ENV_BASELINE:
+                _PROFILE_ENV_BASELINE[key] = os.environ.get(key)
+        for key, value in pending:
+            os.environ[key] = value
+        _loaded_profile_env_keys = {key for key, _value in pending}
+        _DOTENV_OWNED_ENV_VALUES = set(pending)
+        _PROFILE_ENV_VALUES.update(pending)
     except Exception:
         _loaded_profile_env_keys = set()
         _DOTENV_OWNED_ENV_VALUES = set()
