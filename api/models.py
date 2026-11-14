@@ -9703,6 +9703,7 @@ def _apply_sidebar_state_db_override_rows(
                             current_count,
                             current_visible,
                         ),
+                        profile=session.get('profile'),
                     )
                     if reconciled_visible is not None:
                         # The walk returns its count together with whether it
@@ -13661,6 +13662,185 @@ _SIDEBAR_RECONCILE_MEMO: contextvars.ContextVar[dict | None] = contextvars.Conte
 )
 
 
+# Cross-poll cache for the same walk (#8368 follow-up). The per-call memo above
+# only helps within ONE build, so a board whose rows sit permanently behind
+# state.db -- the overlay writes ``message_count`` into the response payload,
+# never into the sidecar, so the growth guard fires again on the next poll --
+# re-walks every grown row on EVERY poll. Measured on a 98-row board: 98 x
+# 0.19 s = 18.8 s inside a 20 s ``all_sessions.state_db_overrides`` stage, while
+# the same SQL over the same ids runs in 7 ms.
+#
+# The revision that produces the answer is NOT the request, it is the resolved
+# state.db STORE plus the revisions of both sources (sidecar bytes, and every
+# byte of the message store that the merge reads), so all of it travels in the
+# key:
+#
+#   key   ``(session_id, sidecar stat signature, state.db message count,
+#           store generation)``
+#   value ``(visible, hidden_excluded)``
+#
+# A sidecar write -- atomic rename or in-place -- changes the stat signature
+# (:func:`_sidecar_stat_signature`), and an append to state.db changes the
+# count. The count alone is NOT a revision of the transcript, though: the
+# native row-addressed writer (``set_message_api_content``, reached from the
+# turn prologue) rewrites a row's payload without changing either the total or
+# the active count, and that payload is part of the merge identity. So the key
+# also carries :func:`_sidebar_reconcile_store_generation` -- the stat signature
+# of the resolved ``state.db`` and of its ``-wal``/``-journal`` companions. Any
+# commit to the store goes through one of those files, so a same-count write
+# invalidates the entry exactly like an append does, and switching the state
+# dir or the profile cannot alias one store's answer onto another's.
+#
+# The generation is store-wide, so unrelated writes to the same store invalidate
+# it too (a false miss, never a false hit): correctness first, and a settled
+# board still costs one ``stat`` per row instead of a full JSON parse plus a
+# state.db read.
+#
+# Bounded (LRU) and single-locked: the WebUI serves every poll from a thread, so
+# both the read's ``move_to_end`` and the write are mutations.
+_SIDEBAR_RECONCILE_CACHE_LOCK = threading.Lock()
+_SIDEBAR_RECONCILE_CACHE_MAX = 512
+_SIDEBAR_RECONCILE_CACHE: 'collections.OrderedDict[tuple, tuple[int, bool]]' = (
+    collections.OrderedDict()
+)
+
+
+def _sidebar_reconcile_signature(sid: str):
+    """Stat signature of *sid*'s sidecar, or None when it can't be read."""
+    try:
+        path = SESSION_DIR / f'{sid}.json'
+        return _sidecar_stat_signature(path)
+    except Exception:
+        return None
+
+
+_UNREADABLE_STATE_FILE = ('unreadable',)
+
+
+def _state_file_signature(path):
+    """Stat signature of one file of the state store.
+
+    ``None`` means the file does not exist (a legitimate state: a store in
+    rollback-journal mode has no ``-wal``), ``_UNREADABLE_STATE_FILE`` means it
+    exists but cannot be stat'd -- an unproved generation, never a stable one.
+    """
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _UNREADABLE_STATE_FILE
+    except Exception:
+        return _UNREADABLE_STATE_FILE
+    return (
+        int(getattr(st, 'st_dev', 0)),
+        int(getattr(st, 'st_ino', 0)),
+        int(st.st_size),
+        int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
+    )
+
+
+def _sidebar_reconcile_store_generation(*, profile=None):
+    """Complete generation of the resolved state.db store, or None.
+
+    The merge reads messages out of this store, so an answer is only valid for
+    the exact bytes it was derived from. SQLite gives no per-row version, and a
+    row-addressed update moves neither the message count nor any timestamp
+    watermark, so the store's own stat signature is the generation: every
+    commit writes the database file or its journal/WAL companion.
+
+    ``None`` = the store could not be resolved or proved; a caller that cannot
+    prove the generation must not serve or publish a cached answer.
+    """
+    try:
+        db_path = _agent_state_db_path(profile=profile)
+    except Exception:
+        return None
+    if db_path is None:
+        return None
+    main = _state_file_signature(db_path)
+    if main is None or main == _UNREADABLE_STATE_FILE:
+        return None
+    companions = (
+        _state_file_signature(db_path.with_name(db_path.name + '-wal')),
+        _state_file_signature(db_path.with_name(db_path.name + '-journal')),
+    )
+    # A companion that exists but cannot be stat'd leaves the generation
+    # unprovable -- it may have been committed to, so the cached answer could be
+    # older than the store. Absent is a legitimate state and stays ``None`` in
+    # the tuple (a rollback-journal store has no ``-wal``); unreadable is not a
+    # state at all, so the WHOLE generation is rejected rather than accepted
+    # with a hole in it. Guarding only the main file would cache an
+    # unprovable store and serve a stale count forever, which is the same
+    # durable-stale defect the generation exists to prevent.
+    if any(sig == _UNREADABLE_STATE_FILE for sig in companions):
+        return None
+    return (str(db_path), main) + companions
+
+
+def _sidebar_reconcile_cache_get(sid: str, *, profile=None):
+    """Cached ``(visible, hidden_excluded)`` for this exact revision, or None."""
+    signature = _sidebar_reconcile_signature(sid)
+    if signature is None:
+        return None
+    generation = _sidebar_reconcile_store_generation(profile=profile)
+    if generation is None:
+        return None
+    # No count in the key. The store generation already covers every way the
+    # transcript can move (append, same-count rewrite, WAL commit), and a count
+    # could not be keyed consistently anyway: the caller's top-N count and the
+    # walk's own row count live in different domains (raw rows vs paginated
+    # rows: 605 vs 203 on one session here), so a key built at lookup from one
+    # and at store time from the other missed on every poll. Keying on the two
+    # proven sources is both stricter and domain-free, and it does not require
+    # the caller to supply a count -- which is what left every row outside the
+    # paint cap re-walking on each poll.
+    key = (str(sid), signature, generation)
+    with _SIDEBAR_RECONCILE_CACHE_LOCK:
+        entry = _SIDEBAR_RECONCILE_CACHE.get(key)
+        if entry is None:
+            return None
+        _SIDEBAR_RECONCILE_CACHE.move_to_end(key)
+        return entry
+
+
+def _sidebar_reconcile_cache_put(
+    sid: str,
+    visible: int,
+    hidden_excluded: bool,
+    *,
+    sidecar_signature,
+    store_generation,
+    profile=None,
+) -> None:
+    """Record a walk's answer under the revision it was derived from.
+
+    Both generations were captured BEFORE the walk read anything. They are
+    re-proved here: if either moved while the walk ran, this answer describes a
+    snapshot that is no longer the store's, and publishing it under the newer
+    signature is exactly the durable-stale defect this guards. A changed or
+    unprovable generation is not cacheable at all -- the next poll re-derives.
+    """
+    if sidecar_signature is None or store_generation is None:
+        return
+    if _sidebar_reconcile_signature(sid) != sidecar_signature:
+        return
+    if _sidebar_reconcile_store_generation(profile=profile) != store_generation:
+        return
+    key = (str(sid), sidecar_signature, store_generation)
+    with _SIDEBAR_RECONCILE_CACHE_LOCK:
+        _SIDEBAR_RECONCILE_CACHE[key] = (int(visible), bool(hidden_excluded))
+        _SIDEBAR_RECONCILE_CACHE.move_to_end(key)
+        while len(_SIDEBAR_RECONCILE_CACHE) > _SIDEBAR_RECONCILE_CACHE_MAX:
+            _SIDEBAR_RECONCILE_CACHE.popitem(last=False)
+
+
+def _clear_sidebar_reconcile_cache() -> None:
+    """Drop every cached reconciliation (tests, and a state-dir switch)."""
+    with _SIDEBAR_RECONCILE_CACHE_LOCK:
+        _SIDEBAR_RECONCILE_CACHE.clear()
+
+
 class _ReconciledSidebarVisible(NamedTuple):
     """Result of the reconciled sidebar walk.
 
@@ -13682,6 +13862,7 @@ def _reconciled_visible_count_for_sidebar(
     expected_state_count: int | None = None,
     expected_last_message_at: float | None = None,
     fresh_if_unchanged_state_count: tuple[int, int] | None = None,
+    profile: str | None = None,
 ) -> _ReconciledSidebarVisible | None:
     """Count visible rows in the reconciled sidecar+state.db transcript.
 
@@ -13724,6 +13905,22 @@ def _reconciled_visible_count_for_sidebar(
     """
     if not sid:
         return None
+    # The generations this answer will belong to, captured BEFORE either source
+    # is read (see the cache block above): a write that lands while the walk
+    # runs makes the result describe a snapshot the store no longer has, and
+    # publishing it under the newer signature is the durable-stale defect. The
+    # publication step drops it instead.
+    observed_signature = _sidebar_reconcile_signature(str(sid))
+    observed_generation = _sidebar_reconcile_store_generation(profile=profile)
+    # Cross-poll hit: the answer is a function of the sidecar bytes and of the
+    # state store's full generation (which covers same-count row rewrites, not
+    # only appends), so when neither source has moved the walk is answered by a
+    # couple of stats instead of a full JSON parse plus a state.db read. No
+    # caller-supplied count is required: rows outside the paint cap have none,
+    # and gating the lookup on it is what made them re-walk on every poll.
+    cached = _sidebar_reconcile_cache_get(str(sid), profile=profile)
+    if cached is not None:
+        return _ReconciledSidebarVisible(int(cached[0]), bool(cached[1]))
     try:
         session = Session.load_metadata_only(str(sid))
     except Exception:
@@ -13867,15 +14064,39 @@ def _reconciled_visible_count_for_sidebar(
             and (_message_exact_timestamp_details(m)[0] or 0) > boundary_ts
         )
         visible = min(visible, kept)
+    # The count travels with its provenance so a memo hit is never reported as
+    # "no hidden row excluded" by accident, and it is the revision both caches
+    # key on.
+    built_count, _built_last = _state_db_shape_of_messages(state_messages)
     memo = _SIDEBAR_RECONCILE_MEMO.get()
-    if isinstance(memo, dict):
-        # Remember the answer under the revision it was derived from, so the
-        # next poll on this board can skip the walk while state.db is unchanged.
-        # The count travels with its provenance so a memo hit is never
-        # reported as "no hidden row excluded" by accident.
-        built_count, _built_last = _state_db_shape_of_messages(state_messages)
-        if built_count is not None:
-            memo[(str(sid), int(built_count))] = (visible, hidden_excluded)
+    if isinstance(memo, dict) and built_count is not None:
+        memo[(str(sid), int(built_count))] = (visible, hidden_excluded)
+    # Same answer, durable across polls: without this the walk above runs on
+    # every poll for every row whose sidecar count trails state.db (the overlay
+    # never persists the reconciled count), which is the 5-20 s sidebar stall.
+    # Only a revision this walk actually read may be cached: if the detailed
+    # read resolved a different store (named profile) than the generation
+    # captured before the walk, the answer's revision is unproved and stays
+    # uncached.
+    publish_generation = observed_generation
+    if publish_generation is not None:
+        try:
+            read_store = _sidebar_reconcile_store_generation(
+                profile=getattr(session, 'profile', None)
+            )
+        except Exception:
+            read_store = None
+        if read_store != observed_generation:
+            publish_generation = None
+    if built_count is not None:
+        _sidebar_reconcile_cache_put(
+            str(sid),
+            visible,
+            hidden_excluded,
+            sidecar_signature=observed_signature,
+            store_generation=publish_generation,
+            profile=profile,
+        )
     return _ReconciledSidebarVisible(visible, hidden_excluded)
 
 
