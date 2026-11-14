@@ -1091,7 +1091,7 @@ def test_goal_command_payload_parses_inline_contract_fields(monkeypatch, tmp_pat
     state = webui_goals._manager("sid-contract").state
 
     assert payload["ok"] is True
-    assert payload["kickoff_prompt"] == "Ship the export endpoint"
+    assert payload["kickoff_prompt"] == _CONTRACT_GOAL_TEXT
     assert state.goal == "Ship the export endpoint"
     assert state.contract.outcome == "GET /export returns CSV for every active account"
     assert state.contract.verification.startswith("uv run pytest tests/test_export.py passes")
@@ -1291,8 +1291,8 @@ def test_goal_endpoint_refuses_gate_without_kickoff_or_goal_change(monkeypatch, 
     assert not hasattr(session, "model_explicit_pick_signature")
 
 
-def test_goal_endpoint_stores_inline_contract_and_kicks_off_headline(monkeypatch, tmp_path):
-    """POST /api/goal with contract lines stores the contract and starts the headline turn."""
+def test_goal_endpoint_stores_inline_contract_and_kicks_off_with_contract(monkeypatch, tmp_path):
+    """POST /api/goal with contract lines stores the contract and starts the first turn with it."""
     from api import goals as webui_goals
     from api import routes
     pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
@@ -1336,7 +1336,7 @@ def test_goal_endpoint_stores_inline_contract_and_kicks_off_headline(monkeypatch
     state = webui_goals._manager("sid-goal-contract-route").state
 
     assert result["status"] == 200
-    assert started and started[0]["msg"] == "Ship the export endpoint"
+    assert started and started[0]["msg"] == _CONTRACT_GOAL_TEXT
     assert state.goal == "Ship the export endpoint"
     assert state.contract.verification.startswith("uv run pytest tests/test_export.py passes")
     assert state.contract.stop_when == "the schema needs a migration"

@@ -693,7 +693,8 @@ def goal_command_payload(
         message_key="goal_set",
         message_args=[state.max_turns, state.goal],
         state=state,
-        kickoff_prompt=state.goal,
+        # The first turn gets the whole text so it starts under the contract too.
+        kickoff_prompt=text if set_kwargs else state.goal,
     )
 
 
