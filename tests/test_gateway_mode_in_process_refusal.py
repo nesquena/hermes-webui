@@ -700,6 +700,123 @@ def test_dotenv_reload_waits_for_a_worker_exit_in_progress(monkeypatch, tmp_path
         _restore_dotenv_provenance(saved)
 
 
+def test_provider_save_is_not_the_launcher_baseline(monkeypatch, tmp_path):
+    """#9024 review round 13: a provider save belongs to the profile, not the launcher.
+
+    ``_write_env_file`` puts the new credential into ``os.environ`` before
+    ``_reload_dotenv()`` claims the key, so the baseline capture recorded the
+    credential as the operator's export and the next profile switch restored
+    it — a credential that outlived its profile. The save now claims the key
+    as profile-owned first, so the pre-save value is the baseline.
+    """
+    from api import providers
+
+    key = "OPENAI_API_KEY"
+    first = tmp_path / "home-first"
+    first.mkdir()
+    second = tmp_path / "home-second"
+    second.mkdir()
+    monkeypatch.delenv(key, raising=False)
+    saved = _snapshot_dotenv_provenance()
+    try:
+        providers._write_env_file(first / ".env", {key: "sk-profile-written"})
+        profiles._reload_dotenv(first)
+        assert os.environ.get(key) == "sk-profile-written"
+
+        profiles._reload_dotenv(second)
+        assert os.environ.get(key) is None, (
+            "the profile's credential outlived the profile that owned it"
+        )
+        assert not profiles.profile_env_writer_owns(key)
+    finally:
+        os.environ.pop(key, None)
+        _restore_dotenv_provenance(saved)
+
+
+def test_provider_save_release_restores_the_launcher_value(monkeypatch, tmp_path):
+    """The other direction: an operator export survives the save and switch."""
+    from api import providers
+
+    key = "OPENAI_API_KEY"
+    first = tmp_path / "home-first"
+    first.mkdir()
+    second = tmp_path / "home-second"
+    second.mkdir()
+    monkeypatch.setenv(key, "sk-launcher-export")
+    saved = _snapshot_dotenv_provenance()
+    try:
+        providers._write_env_file(first / ".env", {key: "sk-profile-written"})
+        profiles._reload_dotenv(first)
+        assert os.environ.get(key) == "sk-profile-written"
+
+        profiles._reload_dotenv(second)
+        assert os.environ.get(key) == "sk-launcher-export", (
+            "the switch erased the operator's export instead of restoring it"
+        )
+    finally:
+        _restore_dotenv_provenance(saved)
+
+
+def test_owner_config_env_reference_uses_the_owner_env(
+    monkeypatch, tmp_path, captured, captured_route_j
+):
+    """#9024 review round 13: owner config ``${VAR}`` expands under the owner's env.
+
+    The owner's config.yaml decides the backend through a ``${CHAT_MODE}``
+    reference and the owner's own ``.env`` defines it. The requesting
+    profile's process env defines a DIFFERENT value; the rule must follow the
+    owner's, in both directions.
+    """
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda _sid: "owner")
+    drain = {"error": "server draining", "code": "server_draining", "_status": 503}
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: dict(drain))
+    calls = {"model_boundary": 0}
+
+    def _no_model(*_args, **_kwargs):
+        calls["model_boundary"] += 1
+        raise AssertionError("owner-config env reference reached the model boundary")
+
+    monkeypatch.setattr(routes, "_llm_git_commit_message", _no_model)
+    homes = {}
+    for name, env_text in (
+        ("default", None),
+        ("owner", "CHAT_MODE=gateway\n"),
+        ("other", None),
+    ):
+        home = tmp_path / f"home-{name}"
+        home.mkdir()
+        if env_text:
+            (home / ".env").write_text(env_text, encoding="utf-8")
+        homes[name] = home
+    (homes["owner"] / "config.yaml").write_text(
+        "webui_chat_backend: ${CHAT_MODE}\n", encoding="utf-8"
+    )
+    # The OWNER must not be the ambient/default profile: the direct
+    # profile-config read is what expands ${VAR} under the owner's binding.
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name, _h=homes: _h.get(str(name or "default"), _h["default"]),
+    )
+    profiles._CHAT_BACKEND_ENV_CACHE.clear()
+
+    # A) the requesting profile's env says "legacy"; the OWNER's says "gateway".
+    monkeypatch.setenv("CHAT_MODE", "legacy")
+    routes._handle_git_commit_message(object(), {"session_id": "s1"})
+    assert captured["status"] == 409, captured
+    assert captured["payload"]["code"] == "gateway_mode_unsupported"
+    assert calls["model_boundary"] == 0
+
+    # B) the owner's .env says "legacy"; the requesting profile's env says
+    # "gateway". The owner is admitted instead of being refused.
+    (homes["owner"] / ".env").write_text("CHAT_MODE=legacy\n", encoding="utf-8")
+    monkeypatch.setenv("CHAT_MODE", "gateway")
+    routes._handle_btw(object(), {"session_id": "s1", "question": "why?"})
+    assert captured_route_j["status"] == 503
+    assert captured_route_j["payload"]["code"] == "server_draining"
+
+
 def _two_writer_homes(monkeypatch, tmp_path, *, first_env, second_env):
     """Homes for two distinct profile writers with different .env values."""
     homes = {}

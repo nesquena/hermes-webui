@@ -480,7 +480,10 @@ def chat_backend_rule_for_session(session, config_data=None) -> tuple:
     ``profile_env_for_background_worker`` mirror) never decides another
     profile's session. While such a writer owns the key, the launcher value
     its first claim displaced is the launcher's rule (#9024 review round 10);
-    the dotenv writer records and restores that baseline too (round 11).
+    the dotenv writer records and restores that baseline too (round 11). The owner's config.yaml `${VAR}` references expand
+    under the owner's own env binding (#9024 review round 13), so an owner
+    rule written as ``webui_chat_backend: ${CHAT_MODE}`` is decided by the
+    owner's ``CHAT_MODE``, not the requesting profile's.
     ``config_data`` is the fallback for callers with no session context (the
     request snapshot). A resolution failure is unverifiable ownership and
     fails closed to the gateway/refusal side (#9024 review round 4, #8971):

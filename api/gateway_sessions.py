@@ -56,12 +56,20 @@ def config_for_profile(profile):
     process-active, which is how the Gateway worker read it through ``get_config()``
     before this resolver existed (Runs API opt-in included). Root still never reads a
     named profile's file. Named profiles keep the resolver the worker used before.
+
+    ``${VAR}`` references expand under the OWNING profile's env binding
+    (#9024 review round 13): the ambient process env belongs to whichever
+    profile is active (or whatever a streaming turn/worker mirrors), so an
+    owner config reading ``webui_chat_backend: ${CHAT_MODE}`` must not be
+    resolved with the requesting profile's ``CHAT_MODE``. The ambient-config
+    shortcut still returns the process-expanded cache — that profile's own env.
     """
     from api.config import get_config_for_profile_home
-    from api.profiles import get_hermes_home_for_profile
+    from api.profiles import get_hermes_home_for_profile, profile_config_env_binding
     home = get_hermes_home_for_profile(profile)
     is_root = Path(home).resolve() == Path(get_hermes_home_for_profile("default")).resolve()
-    return get_config_for_profile_home(home, isolate_config_override=is_root)
+    with profile_config_env_binding(home):
+        return get_config_for_profile_home(home, isolate_config_override=is_root)
 
 
 def config_for_session(session):

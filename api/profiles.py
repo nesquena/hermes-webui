@@ -247,6 +247,38 @@ def restore_profile_env_snapshot(old_values: dict) -> None:
         else:
             os.environ[key] = old_value
 
+
+def claim_profile_env_write(env: dict) -> None:
+    """Claim keys a profile-scoped ``.env`` writer wrote into ``os.environ``.
+
+    Provider setup (``_write_env_file``) writes a credential into the active
+    profile's ``.env`` and into ``os.environ`` BEFORE ``_reload_dotenv()``
+    claims the key. Without this claim the loader's baseline capture read the
+    just-written credential as the launcher's value, so releasing the key
+    after a profile switch restored it — the credential outlived the profile
+    that owned it (#9024 review round 13).
+
+    The key is recorded as dotenv-owned, so the loader keeps the pre-save
+    value as the baseline (and a worker/stream exit while the key is live
+    restores its snapshot, not the baseline). Call under
+    ``api.streaming._ENV_LOCK``, BEFORE writing the process env.
+    """
+    for raw_key, raw_value in (env or {}).items():
+        key = str(raw_key)
+        if key in _PROTECTED_ENV_KEYS:
+            # The dotenv loader never claims these (#4589); a baseline nobody
+            # releases would outlive the write.
+            continue
+        value = str(raw_value)
+        if not _profile_env_key_owned(key) and key not in _PROFILE_ENV_BASELINE:
+            _PROFILE_ENV_BASELINE[key] = os.environ.get(key)
+        _loaded_profile_env_keys.add(key)
+        pair = (key, value)
+        if pair not in _DOTENV_OWNED_ENV_VALUES:
+            _DOTENV_OWNED_ENV_VALUES.add(pair)
+            _PROFILE_ENV_VALUES[pair] += 1
+
+
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
 # reads its own profile from the hermes_profile cookie instead of the
@@ -1400,6 +1432,45 @@ def profile_env_binding(home) -> dict[str, str]:
     return _profile_env_binding(home, _read_profile_dotenv(Path(home).expanduser()))
 
 
+@contextmanager
+def profile_config_env_binding(home, *, env: Optional[dict] = None):
+    """Bind the calling thread's ``${VAR}`` expansion to *home*'s profile env.
+
+    ``api.config._expand_env_vars`` resolves a reference against the thread env
+    first and the live process env second — whichever profile is active, or
+    whatever a streaming turn / background worker mirrors there while it runs.
+    Any read of a profile's config VALUES must run inside this scope:
+
+    * ``expand_profile_config`` for raw-document value readers (#8032);
+    * ``api.gateway_sessions.config_for_profile``, whose owner may be another
+      profile than the request's, so an owner's
+      ``webui_chat_backend: ${CHAT_MODE}`` is decided by the owner's own
+      ``CHAT_MODE`` (#9024 review round 13).
+
+    Pass *env* to reuse a binding computed earlier. The caller's thread env and
+    process-fallback flag are restored on exit.
+    """
+    from api.config import _thread_ctx
+
+    if env is None:
+        env = profile_env_binding(home)
+    previous_env = getattr(_thread_ctx, 'env', None)
+    previous_block = getattr(_thread_ctx, 'block_process_env_fallback', False)
+    _thread_ctx.env = dict(env)
+    _thread_ctx.block_process_env_fallback = True
+    try:
+        yield env
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_env is None:
+            try:
+                del _thread_ctx.env
+            except AttributeError:
+                pass
+        else:
+            _thread_ctx.env = previous_env
+
+
 def expand_profile_config(home, raw, *, env: Optional[dict] = None):
     """Expand ``${VAR}`` in a RAW config document (or any subtree of it) that
     belongs to the profile at *home*, under ``profile_env_binding(home)``.
@@ -1410,15 +1481,9 @@ def expand_profile_config(home, raw, *, env: Optional[dict] = None):
     Pass *env* to reuse a binding computed earlier (e.g. before taking a lock).
     The binding is applied to the calling thread only, for the expansion.
     """
-    from api.config import _expand_env_vars, _thread_ctx
+    from api.config import _expand_env_vars
 
-    if env is None:
-        env = profile_env_binding(home)
-    previous_env = getattr(_thread_ctx, 'env', None)
-    previous_block = getattr(_thread_ctx, 'block_process_env_fallback', False)
-    _thread_ctx.env = dict(env)
-    _thread_ctx.block_process_env_fallback = True
-    try:
+    with profile_config_env_binding(home, env=env):
         try:
             return _expand_env_vars(raw)
         except RecursionError:
@@ -1427,12 +1492,6 @@ def expand_profile_config(home, raw, *, env: Optional[dict] = None):
             # literals read as absent via _has_env_ref) instead of {}.
             logger.debug("profile config at %s has a recursive alias; served unexpanded", home)
             return copy.deepcopy(raw)
-    finally:
-        _thread_ctx.block_process_env_fallback = previous_block
-        if previous_env is None:
-            del _thread_ctx.env
-        else:
-            _thread_ctx.env = previous_env
 
 
 def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
