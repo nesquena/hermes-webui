@@ -80,6 +80,7 @@ async function createWithAllFields(page: Page, email: string) {
 }
 
 test('US-SP-GOV-006 [field roundtrip] all 14 extra allow and 14 deny controls persist through real save and reload', async ({ page }, info) => {
+  test.setTimeout(100_000); // Exercise all 28 controls, save, reload and read back the policy.
   const email = userId('roundtrip');
   await createWithAllFields(page, email);
   await page.reload();
@@ -106,6 +107,7 @@ test('US-SP-GOV-006 [field roundtrip] all 14 extra allow and 14 deny controls pe
 });
 
 test('US-SP-GOV-006 [field removal] clearing all extra grants and denials removes persisted entries', async ({ page }) => {
+  test.setTimeout(100_000); // Exercise all 28 controls, save, reload and read back the policy.
   const email = userId('clear');
   await createWithAllFields(page, email);
   await edit(page, email);

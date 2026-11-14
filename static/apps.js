@@ -14,7 +14,7 @@
   function localized(value){return typeof value==='string'?value:value?.[lang()]||value?.en||'';}
   function appId(row){return row.id||row.module;}
   function validUrl(value){try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&!u.search&&!u.hash?u.href:null;}catch(_){return null;}}
-  function guide(id,trigger){const feature='webui.apps.'+id;const known=window.SynthPulseFeatureCatalog?.features?.some(f=>f.id===feature);window.SynthPulseHelp?.startFeatureTour(id==='overview'&&msp.connected?['webui.apps.overview','webui.apps.availability','webui.apps.request','webui.apps.support']:[known?feature:'webui.modules.apps'],{locale:lang(),trigger});}
+  function guide(id,trigger){window.SynthPulseHelp?.startFeatureTour(id==='overview'&&msp.connected?['webui.apps.overview','webui.apps.availability','webui.apps.request','webui.apps.support']:['webui.apps.'+id],{locale:lang(),trigger,fallbackId:'webui.modules.apps'});}
   const categories=['creative','marketing','sales','automation','productivity','platform'];
   function startRequest(id=''){
     if(requestBusy||mutation||draft||!msp.request_apps)return;

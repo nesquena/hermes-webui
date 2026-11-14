@@ -2500,10 +2500,7 @@ async function loadSession(sid){
     // persisted copy, silently losing every other queued message on refresh.
     if(typeof restoreSessionQueueFromStorage==='function'){
       try{
-        const _restoredCount=restoreSessionQueueFromStorage(sid,S.messages,S.session);
-        // Idle session: nothing will call setBusy(false) to drain, so kick the
-        // drain now (it no-ops when the session is busy or the queue is empty).
-        if(_restoredCount&&typeof drainQueuedSessionMessage==='function') drainQueuedSessionMessage(sid);
+        restoreSessionQueueFromStorage(sid,S.messages,S.session);
       }catch(_){/* storage may be blocked (private browsing); keep the queue untouched */}
     }
 
@@ -2632,6 +2629,9 @@ async function loadSession(sid){
     );
   }
 
+  // The composer now belongs to this session. Retry any queue entry whose
+  // claim was released while a cancelled turn's transcript was loading.
+  if(!_loadingSessionId&&S.session&&S.session.session_id===sid&&typeof drainQueuedSessionMessage==='function') drainQueuedSessionMessage(sid);
   if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
 
   // ── Cross-channel handoff hint ──

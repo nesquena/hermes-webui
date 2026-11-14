@@ -162,6 +162,7 @@ const localStorage=_store();
 const SESSION_QUEUES={};
 const _queueRenderKeys={};
 const S={busy:false,session:{session_id:'s1'},pendingFiles:[]};
+let _loadingSessionId=null;
 const _msgEl={value:''};
 const $=()=>_msgEl;
 const autoResize=()=>{};
@@ -264,6 +265,18 @@ async function runScenario(name){
     await scheduled.shift()();
     out.queue=snapshot('s1');
   }
+  if(name==='hydration_during_drain'){
+    queueSessionMessage('s1',{text:'replacement'});
+    drainQueuedSessionMessage('s1');
+    _loadingSessionId='s1';
+    sendImpl=async()=>{if(!_loadingSessionId)_queueDrainEntryAccepted('s1');};
+    await scheduled.shift()();
+    out.pending=persisted('s1');out.composer=_msgEl.value;
+    _loadingSessionId=null;
+    drainQueuedSessionMessage('s1');
+    if(scheduled.length) await scheduled.shift()();
+    out.after=persisted('s1');
+  }
   return out;
 }
 runScenario(process.argv[1]).then(o=>console.log(JSON.stringify(o))).catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
@@ -318,6 +331,12 @@ class TestRefreshWithQueuedMessages:
 
 
 class TestDisconnectDuringQueueDrain:
+    def test_hydration_during_drain_keeps_replacement_until_ready(self):
+        out = _run_queue_harness('hydration_during_drain')
+        assert out['pending'] == [{'text': 'replacement', 'state': 'queued'}]
+        assert out['composer'] == ''
+        assert out['after'] == []
+
     def test_entry_stays_persisted_while_running(self):
         out = _run_queue_harness("drain_failure_surfaces")
         assert out["duringSettle"][0]["state"] == "running"

@@ -8695,6 +8695,78 @@
         "static/panels.js:8240"
       ],
       "feature_id": "webui.bots.scout"
+    },
+    {
+      "control": "btnWorkspaceNavigator",
+      "tag": "button",
+      "label": "Go to a feature",
+      "source_refs": [
+        "static/index.html:158"
+      ],
+      "feature_id": "webui.help.navigation"
+    },
+    {
+      "control": "workspaceNavigatorSearch",
+      "tag": "input",
+      "label": "Search workspace destinations",
+      "source_refs": [
+        "static/workspace-navigation.js:67"
+      ],
+      "feature_id": "webui.help.navigation"
+    },
+    {
+      "control": "btnConversationBoard",
+      "tag": "button",
+      "label": "Conversation overview",
+      "source_refs": [
+        "static/index.html:244"
+      ],
+      "feature_id": "webui.sessions.organize"
+    },
+    {
+      "control": "botDirectorySearch",
+      "tag": "input",
+      "label": "Search bots",
+      "source_refs": [
+        "static/bot-workbench.js:85"
+      ],
+      "feature_id": "webui.bots.select"
+    },
+    {
+      "control": "realtimeVoiceView",
+      "tag": "button",
+      "label": "Minimize or expand the voice conversation",
+      "source_refs": [
+        "static/index.html:522"
+      ],
+      "feature_id": "webui.voice.realtime"
+    },
+    {
+      "control": "workspaceArtifactSearch",
+      "tag": "input",
+      "label": "Find a file",
+      "source_refs": [
+        "static/index.html:2082"
+      ],
+      "feature_id": "webui.files.artifacts"
+    },
+    {
+      "control": "workspaceArtifactType",
+      "tag": "select",
+      "label": "File type",
+      "source_refs": [
+        "static/index.html:2084"
+      ],
+      "feature_id": "webui.files.artifacts"
+    },
+    {
+      "control": "workspaceArtifactReset",
+      "tag": "button",
+      "label": "Reset artifact filters",
+      "source_refs": [
+        "static/index.html:2092"
+      ],
+      "feature_id": "webui.files.artifacts"
     }
   ],
   "method": "Inventory of concrete HTML controls and inline handlers, supplemented by manual review of generated conversation menus, bot builder and knowledge controls, composer customization and the embedded read-only memory dashboard. Save/cancel and equivalent responsive controls share a feature. Hidden vendor login, server settings and inactive legacy visualizers are excluded from user workflows.",

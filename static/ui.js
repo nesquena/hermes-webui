@@ -9017,7 +9017,9 @@ function drainQueuedSessionMessage(sid){
     // wrong chat. Revert it to 'queued' IN PLACE (order preserved) and
     // skip sending; it will drain when the user returns to that session
     // or when its next stream completes while it is the active view.
-    if(S.session&&S.session.session_id!==sid){
+    // A terminal event can reload this same chat in the settle window. send()
+    // rejects during hydration; leave the item queued for loadSession to drain.
+    if((S.session&&S.session.session_id!==sid)||(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)){
       _setQueueEntryState(sid,next._qid,'queued');
       updateQueueBadge(sid);
       return;

@@ -51,11 +51,15 @@ and physical microphone/audio quality were not tested.
 [Light voice](voice-light.png) · [Narrow voice](voice-narrow.png) ·
 [Mobile voice](voice-mobile.png) · [Mobile steps](steps-mobile.png)
 
-## Remaining validation limits
+## Governance follow-up
 
-The manual voice-approval case does not reach waiting_approval in the isolated
-fixture: the server reports done first. This reproduces on the prior checkout
-c12df1b61. This change retains the approval endpoint and exact IDs, but the
-pending-approval interaction is not certified by these browser runs. No live
-external provider, production entitlement, full suite, production activation or
-deployment was performed. All screenshots use synthetic fixture conversations.
+The initial approval fixture expected every ordinary tool call to prompt for
+approval. The current policy instead reviews **access requests** and treats a
+configured mandatory CLI command as a separate human decision. Later browser
+tests exercise that actual boundary: the voice pane stays open, the exact child
+request is approved once or denied, and the file effect is checked. An ordinary
+permitted file operation does not prompt. The unmatched historical tool case
+now verifies its running/unconfirmed status instead of inventing a result.
+
+Browser audio, provider events and calls use synthetic fixtures. These runs do
+not measure a physical microphone, speaker quality or a live provider call.

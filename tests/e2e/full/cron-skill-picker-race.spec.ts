@@ -52,6 +52,7 @@ test('SUPPLEMENT CRON SKILL PICKER an old blur cannot close a reopened query and
     await releaseBlurs('current outside blur');
     await expect(dropdown).toBeHidden();
     await search.click();await expect(option).toBeVisible();await option.click();
+    await page.getByRole('checkbox',{name:'Not known yet',exact:true}).check();
     const saved=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/crons/create'&&r.request().method()==='POST');
     await page.locator('#btnSaveTaskDetail').click();const response=await saved;expect(response.status()).toBe(200);
     const created=(await response.json()).job;id=created.id;expect(created.skills).toEqual([skill]);
