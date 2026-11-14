@@ -45,11 +45,12 @@ async function syntheticAudio(page:any, denied=false) {
     w.RTCPeerConnection=Peer;
   },{wsBase:auth.realtime_ws_base,denied});
 }
-async function begin(page:any){
+async function begin(page:any,toolsets?:string[]){
   await syntheticAudio(page);await open(page);
   const mobile=page.viewportSize().width<768;
   if(mobile){await page.locator('#btnTitlebarNewChat').click();await expect.poll(()=>page.url()).toContain('/session/');}
   const sid=mobile?page.url().split('/session/')[1].split(/[?#]/)[0]:await session(page);
+  if(toolsets)expect((await api(page,'/api/session/toolsets',{session_id:sid,toolsets})).status).toBe(200);
   const created=page.waitForResponse((r:any)=>r.url().endsWith('/api/voice/realtime/call')&&r.request().method()==='POST');
   await page.locator('#btnRealtimeVoice').click();const response=await created;
   expect(response.status(),await response.text()).toBe(200);
@@ -176,11 +177,11 @@ test.describe('native conversational voice',()=>{
  });
 });
 
-for(const [user,choice] of [['manualapprove','once'],['manualdeny','deny']] as const)test.describe('voice '+user,()=>{
+for(const [user,choice] of [['clionce','once'],['clideny','deny'],['cliauto','once']] as const)test.describe('voice '+user,()=>{
  test.use({user,viewport:{width:390,height:844}});
- test(`US-SP-VOICE-REALTIME-${choice.toUpperCase()} governed native action waits for exact child approval while voice stays open`,async({page},info)=>{
-  const {voiceId,callId}=await begin(page);const target=path.join(auth.workspace,'qa-voice-'+choice+'-'+Date.now()+'.txt');
-  await events(page,callId,[work('governed_'+choice,'QA_GOV_WRITE|'+target)]);
+ test(`US-SP-VOICE-REALTIME-${choice.toUpperCase()} mandatory CLI action waits for exact child approval while voice stays open`,async({page},info)=>{
+  const {voiceId,callId}=await begin(page,['terminal']);const file='qa-cli-voice-'+user+'-'+Date.now()+'.txt',target=path.join(auth.workspace,file);
+  await events(page,callId,[work('governed_'+choice,'QA_SUPPLEMENT_CLI|'+file)]);
   let task:any;await expect.poll(async()=>{task=(await snapshot(page,voiceId)).tasks[0];return task?.status;},{timeout:25000}).toBe('waiting_approval');
   expect(fs.existsSync(target)).toBe(false);expect(task.approval.approval_id).toBeTruthy();
   const row=page.locator('.realtime-voice-task').first();await expect(row.getByRole('button',{name:'Allow once',exact:true})).toBeVisible();
@@ -192,26 +193,26 @@ for(const [user,choice] of [['manualapprove','once'],['manualdeny','deny']] as c
   await row.getByRole('button',{name:choice==='once'?'Allow once':'Deny',exact:true}).click();const response=await responsePromise;
   expect(response.status(),await response.text()).toBe(200);
   expect(response.request().postDataJSON()).toMatchObject({session_id:task.session_id,approval_id:task.approval.approval_id,choice});
-  const result=await taskDone(page,voiceId);expect(result.result).toContain('QA_GOV_TOOL_RESULT:');expect(fs.existsSync(target)).toBe(choice==='once');
+  const result=await taskDone(page,voiceId);expect(result.result).toContain('QA_SUPPLEMENT_TOOL_RESULT:');expect(fs.existsSync(target)).toBe(choice==='once');
+  if(choice==='once')expect(fs.statSync(target).size).toBe(0);
   expect(await page.evaluate(()=>(window as any).synPulseVoice.voiceId)).toBe(voiceId);
   await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
   await page.screenshot({path:info.outputPath('voice-mobile-'+choice+'.png')});await capture(page,'voice-mobile-'+choice,info);await end(page,callId);
  });
 });
 
-for(const [user,allowed] of [['autoapprove',true],['autodeny',false]] as const)test.describe('voice automatic '+user,()=>{
+for(const user of ['autoapprove','autodeny','automanual','manualapprove'] as const)test.describe('voice automatic '+user,()=>{
  test.use({user});
- test(`US-SP-VOICE-REALTIME-${user.toUpperCase()} native tool effect follows the user's real AI review decision`,async({page},info)=>{
+ test(`US-SP-VOICE-REALTIME-${user.toUpperCase()} access-request reviewer does not intercept an already permitted native file write`,async({page},info)=>{
   const {voiceId,callId}=await begin(page);const target=path.join(auth.workspace,'qa-voice-'+user+'-'+Date.now()+'.txt');
   await events(page,callId,[work('voice_'+user,'QA_GOV_WRITE|'+target)]);
   const task=await taskDone(page,voiceId);expect(task.result).toContain('QA_GOV_TOOL_RESULT:');
-  expect(fs.existsSync(target)).toBe(allowed);if(allowed)expect(fs.readFileSync(target,'utf8')).toBe('QA_GOVERNANCE_EXECUTED');
+  expect(fs.readFileSync(target,'utf8')).toBe('QA_GOVERNANCE_EXECUTED');
   await expect(page.locator('.realtime-voice-approval')).toHaveCount(0);
   const auditPath=path.join(path.dirname(process.env.QA_SESSIONS!),'home','dashboard-governance-audit.jsonl');
-  const rows=fs.readFileSync(auditPath,'utf8').trim().split('\n').map(s=>JSON.parse(s));
-  const row=rows.find(r=>r.event==='action_approval'&&r.extra?.session_id===task.session_id);
-  expect(row.extra).toMatchObject({source:'automatic',decision:allowed?'approve':'deny',tool:'write_file'});
-  expect(row.extra.policy_revision).toMatch(/^[a-f0-9]{64}$/);await info.attach('voice-persisted-governance-audit',{body:JSON.stringify(row),contentType:'application/json'});
+  const rows=fs.existsSync(auditPath)?fs.readFileSync(auditPath,'utf8').trim().split('\n').filter(Boolean).map(s=>JSON.parse(s)):[];
+  const reviews=rows.filter(r=>r.event==='action_approval'&&r.extra?.session_id===task.session_id);
+  expect(reviews).toEqual([]);await info.attach('voice-no-per-call-review',{body:JSON.stringify({session_id:task.session_id,reviews}),contentType:'application/json'});
   expect(await page.evaluate(()=>(window as any).synPulseVoice.voiceId)).toBe(voiceId);await end(page,callId);
  });
 });

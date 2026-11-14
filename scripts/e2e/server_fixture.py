@@ -98,7 +98,7 @@ def main():
         os.environ['SYNPULSE_REALTIME_VOICE_ENABLED'] = '1'
         os.environ['OPENAI_API_KEY'] = 'qa-realtime-local-only'
 
-    users = ['climcp', 'continuation', 'govrequest', 'resource', 'admin', 'alice', 'bob', 'outsider', 'denied', 'voicedenied', 'autoapprove', 'autodeny', 'automanual', 'manualapprove', 'manualdeny']
+    users = ['clionce', 'clideny', 'cliauto', 'grantapprove', 'grantdeny', 'grantmanual', 'grantharddeny', 'climcp', 'continuation', 'govrequest', 'resource', 'admin', 'alice', 'bob', 'outsider', 'denied', 'voicedenied', 'autoapprove', 'autodeny', 'automanual', 'manualapprove', 'manualdeny']
     permissions = ['chat:use', 'sessions:read', 'sessions:write', 'profiles:read',
                    'files:read', 'files:write', 'cron:read', 'cron:write',
                    'skills:read', 'skills:write', 'workspaces:read', 'workspaces:write', 'memory:read', 'memory:write', 'integrations:read',
@@ -111,11 +111,11 @@ def main():
             'routes': ['*'], 'files': {'read_roots': [str(workspace)], 'write_roots': [str(workspace)]},
             'workspaces': [str(workspace)], 'models': {'providers': ['*'], 'models': ['*']},
             'skills': {'view': ['*'], 'load': ['*']},
-            'tools': {'toolsets': ['file', 'delegation', 'todo'], 'builtins': ['read_file','write_file','delegate_task','delegate_to_bot','todo']},
+            'tools': {'toolsets': ['file', 'delegation', 'todo'], 'builtins': ['read_file','write_file','delegate_task','delegate_to_bot','todo','todo_list']},
         }}},
         'users': {u + '@example.test': {'roles': ['member']} for u in users if u not in {'admin', 'denied'}},
     }
-    for who, mode, rules in [('autoapprove','automatic','QA_ALLOW_ONLY: allow synthetic reads and writes.'),('autodeny','automatic','QA_DENY_ONLY: deny all requested synthetic actions.'),('automanual','automatic','QA_MANUAL_ONLY: require a human review.'),('manualapprove','manual',''),('manualdeny','manual','')]:
+    for who, mode, rules in [('autoapprove','automatic','QA_ALLOW_ONLY: approve synthetic access requests.'),('autodeny','automatic','QA_DENY_ONLY: reject synthetic access requests.'),('automanual','automatic','QA_MANUAL_ONLY: require a human review.'),('manualapprove','manual',''),('manualdeny','manual','')]:
         policy['users'][who+'@example.test'].update({'access_level':'user','access_mode':'blacklist','approval':{'mode':mode,'prompt':rules}})
     policy['users']['voicedenied@example.test']['deny'] = {'models': {'providers': ['openai']}}
     # A creator can configure bots without becoming a governance administrator.
@@ -132,6 +132,31 @@ def main():
         'mcp': {'servers': ['qa-stdio'], 'tools': {'qa-stdio': ['*']}},
     }}
     policy['users']['climcp@example.test']['roles'].append('qa_cli_mcp')
+    # Per-call review is a CLI policy floor, independent of the per-person
+    # access-request reviewer. Keep these personas isolated from the ordinary
+    # file-tool tests and from the supplement that edits its own CLI policy.
+    policy['roles']['qa_cli_review'] = {'grants': {
+        'permissions': ['terminal:use'],
+        'tools': {'builtins': ['terminal'], 'toolsets': ['terminal']},
+        'cli': {'commands': ['touch'], 'approval_commands': ['touch'],
+                'workdir_roots': [str(workspace)]},
+    }}
+    for who in ('clionce', 'clideny', 'cliauto'):
+        policy['users'][who+'@example.test'].update({
+            'roles': ['member', 'qa_cli_review'], 'access_level': 'elevated',
+            'access_mode': 'blacklist', 'approval': {
+                'mode': 'automatic' if who == 'cliauto' else 'manual',
+                'prompt': 'QA_ALLOW_ONLY: approve synthetic access requests.' if who == 'cliauto' else ''}})
+    # A missing direct whitelist route generates a real grant request. The
+    # member role is its upper bound; an explicit deny must remain ungrantable.
+    for who, rules in (('grantapprove', 'QA_ALLOW_ONLY'), ('grantdeny', 'QA_DENY_ONLY'),
+                       ('grantmanual', 'QA_MANUAL_ONLY'), ('grantharddeny', 'QA_ALLOW_ONLY')):
+        policy['users'][who+'@example.test'].update({
+            'access_level': 'user', 'access_mode': 'whitelist',
+            'approval': {'mode': 'automatic', 'prompt': rules + ': review the synthetic access request.'},
+            'grants': {'permissions': ['*'], 'profiles': ['*'], 'routes': [],
+                       'skills': {'view': ['*'], 'load': ['*']}}})
+    policy['users']['grantharddeny@example.test']['deny'] = {'routes': ['/api/skills']}
     policy['groups'] = {'qa-team': {'roles': ['member']}}
     policy['groups']['qa-sso-restricted'] = {'grants': {'files': {
         'denied_globs': [str(workspace / 'qa-continuation-protected-*')]}}}

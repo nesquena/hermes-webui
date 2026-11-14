@@ -7,6 +7,8 @@ test('US-SP-BOT-HANDOFF delegates through real engine and replies in the same ch
  expect(created.status).toBe(200);
  const sid=created.body.session.session_id;
  await page.goto('/session/'+sid);
+ // The composer mounts before the selected conversation finishes hydrating.
+ await page.waitForFunction(id=>typeof S!=='undefined'&&S._bootReady&&_loadingSessionId===null&&S.session?.session_id===id,sid);
  await page.locator('#msg').fill('@default QA_BOT_HANDOFF_START');await page.locator('#btnSend').click();
  await expect(page.locator('#messages')).toContainText('QA_BOT_HANDOFF_DONE',{timeout:60000});
  const read=(await api(page,'/api/session?session_id='+sid)).body.session;
@@ -18,10 +20,10 @@ test('US-SP-BOT-HANDOFF delegates through real engine and replies in the same ch
  expect(read.session_id).toBe(sid);
  await page.reload();await expect(page.locator('#messages')).toContainText('QA_BOT_HANDOFF_DONE');
  await expect(page.locator('#messages')).not.toContainText('not a new human instruction');
- // The task row names both bots by display name; profile IDs stay in the tooltip.
+ // The task row and its tooltip use display names; persisted metadata above keeps the exact profile IDs.
  const author=page.locator('.msg-author.sp-handoff-author').first();
  await expect(author).toBeVisible();
- await expect(author).toHaveAttribute('title','@default ↪ @qa-research');
+ await expect(author).toHaveAttribute('title','Standard bot ↪ Research');
  await expect(author).not.toContainText('qa-research');
  await expect(page.locator('details.sp-handoff-task').first()).toBeVisible();
  await page.screenshot({path:testInfo.outputPath('handoff-desktop.png'),fullPage:true});

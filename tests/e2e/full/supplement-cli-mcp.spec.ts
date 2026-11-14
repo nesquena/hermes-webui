@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {test,expect,open,session,auth,api,capture} from './fixtures';
+import {test,expect,open,session,auth,api,capture,picker,selectPicker} from './fixtures';
 
 const email='climcp@example.test';
 const unique=(kind:string)=>'qa-cli-'+kind+'-'+Date.now()+'.txt';
 async function identity(page:any,context:any,user:string){
  await context.addCookies([{name:auth.cookie_name,value:auth.cookies[user],url:auth.base_url,httpOnly:true,sameSite:'Lax'}]);await open(page);
 }
-async function chip(page:any,id:string,value:string){await page.locator('#'+id+'Input').fill(value);await page.locator('#'+id+'Input').press('Enter');await page.locator('#'+id+'Input').press('Escape');}
+async function chip(page:any,id:string,value:string){await selectPicker(page,id+'Input',value);}
 async function entry(page:any){return (await api(page,'/api/governance/users')).body.users[email];}
 async function seed(page:any){
  const snapshot=await api(page,'/api/governance/users');
@@ -46,7 +46,7 @@ test('SUPPLEMENT CLI MCP command grants manual Once Deny and wildcard hard denia
   await pending(page,sid);expect(fs.existsSync(target)).toBe(false);await capture(page,'cli-pending-'+choice,info);
   await page.locator(choice==='once'?'#approvalBtnOnce':'#approvalBtnDeny').click();await complete(page);expect(fs.existsSync(target)).toBe(choice==='once');if(choice==='once')expect(fs.statSync(target).size).toBe(0);
  }
- await identity(page,context,'admin');await edit(page);await page.locator('#govUserCliCommandsBox .gov-chip-x').click();await chip(page,'govUserCliCommands','*');await chip(page,'govUserDenyCli','touch');await save(page);await page.reload();
+ await identity(page,context,'admin');await edit(page);await picker(page,'govUserCliCommandsInput').locator('.sp-chip-x').click();await chip(page,'govUserCliCommands','*');await chip(page,'govUserDenyCli','touch');await save(page);await page.reload();
  expect((await entry(page)).grants.cli.commands).toEqual(['*']);expect((await entry(page)).deny.cli.commands).toEqual(['touch']);
  await page.locator('.rail-btn[data-panel="governance"]').click();await page.locator('[data-gov-tab="preview"]').click();await page.locator('#govPreviewEmail').fill(email);await page.locator('[onclick="_govRunPreview()"]').click();await expect(page.locator('#govPreviewResult')).toContainText('cli / commands: touch');
  await identity(page,context,'climcp');const file=unique('hard-deny');await invoke(page,'QA_SUPPLEMENT_CLI|'+file,['terminal']);await complete(page);expect(fs.existsSync(path.join(auth.workspace,file))).toBe(false);await expect(page.locator('#messages')).toContainText('cli_command_denied');
@@ -63,12 +63,12 @@ test('SUPPLEMENT CLI MCP real initialized stdio catalog has exact schemas search
  }finally{await mcpEnabled(page,false);}
 });
 
-test('SUPPLEMENT CLI MCP server grant permits real manual invocation while explicit server deny blocks dispatch and catalog disclosure',async({page,context},info)=>{
+test('SUPPLEMENT CLI MCP server grant permits real invocation while explicit server deny blocks dispatch and catalog disclosure',async({page,context},info)=>{
  test.setTimeout(150000);await open(page);await seed(page);
  try{
   await mcpEnabled(page,true);await edit(page);await chip(page,'govUserMcpServers','qa-stdio');await save(page);await page.reload();expect((await entry(page)).grants.mcp).toMatchObject({servers:['qa-stdio'],tools:{'qa-stdio':['*']}});
-  await identity(page,context,'climcp');const allowed='QA_MCP_ALLOWED_'+Date.now();const sid=await invoke(page,'QA_SUPPLEMENT_MCP|'+allowed,['mcp-qa-stdio']);await pending(page,sid);expect(effects().some(r=>r.marker===allowed)).toBe(false);await page.locator('#approvalBtnOnce').click();await complete(page);expect(effects().filter(r=>r.marker===allowed)).toHaveLength(1);await expect(page.locator('#messages')).toContainText('QA_MCP_EXECUTED:'+allowed);
-  await identity(page,context,'admin');await edit(page);await page.locator('#govUserMcpServersBox .gov-chip-x').click();await chip(page,'govUserMcpServers','*');await chip(page,'govUserDenyMcp','qa-stdio');await save(page);await page.reload();expect((await entry(page)).deny.mcp.servers).toEqual(['qa-stdio']);
+  await identity(page,context,'climcp');const allowed='QA_MCP_ALLOWED_'+Date.now();const sid=await invoke(page,'QA_SUPPLEMENT_MCP|'+allowed,['mcp-qa-stdio']);await complete(page);await expect(page.locator('#approvalCard')).toBeHidden();expect(effects().filter(r=>r.marker===allowed)).toHaveLength(1);await expect(page.locator('#messages')).toContainText('QA_MCP_EXECUTED:'+allowed);
+  await identity(page,context,'admin');await edit(page);await picker(page,'govUserMcpServersInput').locator('.sp-chip-x').click();await chip(page,'govUserMcpServers','*');await chip(page,'govUserDenyMcp','qa-stdio');await save(page);await page.reload();expect((await entry(page)).deny.mcp.servers).toEqual(['qa-stdio']);
   await identity(page,context,'climcp');const denied='QA_MCP_DENIED_'+Date.now();await invoke(page,'QA_SUPPLEMENT_MCP|'+denied,['mcp-qa-stdio']);await complete(page);expect(effects().some(r=>r.marker===denied)).toBe(false);await expect(page.locator('#messages')).toContainText(/denied|not.allowed|not available|blocked/i);await capture(page,'mcp-explicit-denial',info);
   // A permitted catalog route must not disclose a specifically denied server.
   await open(page,'settings');await expect(page.locator('[data-settings-section="system"]')).toBeHidden();await capture(page,'restricted-system-navigation',info);
@@ -78,7 +78,7 @@ test('SUPPLEMENT CLI MCP server grant permits real manual invocation while expli
  }finally{await identity(page,context,'admin');await mcpEnabled(page,false);}
 });
 
-test('SUPPLEMENT CLI MCP mandatory command review stays manual while the same user automatically approves an eligible read',async({page,context},info)=>{
+test('SUPPLEMENT CLI MCP mandatory command review stays manual while an already permitted read needs no per-call review',async({page,context},info)=>{
  test.setTimeout(150000);await open(page);const original=await entry(page);
  const control=unique('automatic-control'),controlPath=path.join(auth.workspace,control);
  fs.writeFileSync(controlPath,'QA_CLI_AUTOMATIC_CONTROL');
@@ -89,7 +89,7 @@ test('SUPPLEMENT CLI MCP mandatory command review stays manual while the same us
  try{
   await seed(page);await edit(page);await chip(page,'govUserCliCommands','touch');await chip(page,'govUserCliApproval','touch');
   await page.locator('#govUserApprovalMode').selectOption('automatic');
-  await page.locator('#govUserApprovalPrompt').fill('QA_ALLOW_ONLY: approve these harmless synthetic fixture reads and touch commands.');
+  await page.locator('#govUserApprovalPrompt').fill('QA_ALLOW_ONLY: approve harmless synthetic access requests.');
   await save(page);await page.reload();const policy=await entry(page);
   expect(policy.approval.mode).toBe('automatic');expect(policy.grants.cli.approval_commands).toEqual(['touch']);
   await identity(page,context,'climcp');const before=reviews().length;
@@ -97,23 +97,23 @@ test('SUPPLEMENT CLI MCP mandatory command review stays manual while the same us
   await expect(page.locator('#messages')).toContainText('QA_GOV_TOOL_RESULT:',{timeout:30000});
   await expect(page.locator('#messages')).toContainText('QA_CLI_AUTOMATIC_CONTROL');await expect(page.locator('#approvalCard')).toBeHidden();
   await expect.poll(async()=>(await api(page,'/api/session/status?session_id='+readSid)).body.agent_running).toBe(false);
-  expect(reviews().slice(before).map(row=>row.review_decision)).toEqual(['approve']);
-  const afterAutomatic=reviews().length;const decisions=[];
+  expect(reviews().slice(before)).toEqual([]);
+  const afterRead=reviews().length;const decisions=[];
   for(const choice of ['once','deny']){
    const file=unique('mandatory-'+choice),target=path.join(auth.workspace,file);
    const sid=await invoke(page,'QA_SUPPLEMENT_CLI|'+file,['terminal']);
    await pending(page,sid);expect(fs.existsSync(target)).toBe(false);
-   expect(reviews()).toHaveLength(afterAutomatic);
+   expect(reviews()).toHaveLength(afterRead);
    await expect(page.locator('#approvalCard')).toContainText('requires manual approval');
    const answered=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/approval/respond'&&r.request().method()==='POST');
    await page.locator(choice==='once'?'#approvalBtnOnce':'#approvalBtnDeny').click();const accepted=await answered;
    expect(accepted.status()).toBe(200);expect((await accepted.json()).ok).toBe(true);
    const answer=accepted.request().postDataJSON();expect(answer.approval_id).toBeTruthy();expect(answer.session_id).toBe(sid);expect(answer.choice).toBe(choice);await complete(page);
    await expect.poll(async()=>(await api(page,'/api/session/status?session_id='+sid)).body.agent_running).toBe(false);
-   expect(fs.existsSync(target)).toBe(choice==='once');expect(reviews()).toHaveLength(afterAutomatic);
+   expect(fs.existsSync(target)).toBe(choice==='once');expect(reviews()).toHaveLength(afterRead);
    decisions.push({session_id:sid,choice,approval_id:answer.approval_id,file_effect:fs.existsSync(target)});
   }
-  await info.attach('manual-cli-floor-with-automatic-control',{body:JSON.stringify({read_session:readSid,automatic_decision:reviews().slice(before),decisions}),contentType:'application/json'});
+  await info.attach('manual-cli-floor-with-allowed-read',{body:JSON.stringify({read_session:readSid,access_request_reviews:reviews().slice(before),decisions}),contentType:'application/json'});
   await capture(page,'mandatory-cli-denied-with-automatic-policy',info);
  }finally{
   await identity(page,context,'admin');const current=await api(page,'/api/governance/users');

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 const file = path.resolve(process.env.QA_SESSIONS || '../e2e-state/browser-sessions.json');
 export const auth = JSON.parse(fs.readFileSync(file, 'utf8'));
-export type User = 'continuation' | 'govrequest' | 'resource' | 'admin' | 'alice' | 'bob' | 'outsider' | 'denied' | 'voicedenied' | 'autoapprove' | 'autodeny' | 'automanual' | 'manualapprove' | 'manualdeny';
+export type User = 'clionce' | 'clideny' | 'cliauto' | 'grantapprove' | 'grantdeny' | 'grantmanual' | 'grantharddeny' | 'climcp' | 'continuation' | 'govrequest' | 'resource' | 'admin' | 'alice' | 'bob' | 'outsider' | 'denied' | 'voicedenied' | 'autoapprove' | 'autodeny' | 'automanual' | 'manualapprove' | 'manualdeny';
 export const test = base.extend<{ user: User; errors: string[] }>({
   user: ['admin', { option: true }],
   errors: [async ({ page }, use, info) => {
@@ -53,6 +53,20 @@ export const test = base.extend<{ user: User; errors: string[] }>({
   },
 });
 export { expect };
+export function picker(page: Page, inputId: string) {
+  return page.locator('.sp-picker').filter({has:page.locator('#' + inputId)});
+}
+export async function selectPicker(page: Page, inputId: string, value: string) {
+  const root = picker(page, inputId);
+  await root.getByRole('combobox').click();
+  const menu = page.locator('.sp-picker-menu[role="listbox"]');
+  await menu.getByRole('textbox', {name:'Search', exact:true}).fill(value);
+  // Custom values are available only where the rendered control allows them.
+  // Match IDs as well as display names, including normalized email addresses.
+  await menu.locator('.sp-picker-option[data-value=' + JSON.stringify(value) + ' i]').click();
+  if (await menu.isVisible()) await page.keyboard.press('Escape');
+  await expect(root.locator('.sp-chip[data-value=' + JSON.stringify(value) + ' i]')).toHaveCount(1);
+}
 export async function open(page: Page, panel = 'chat') {
   await page.goto('/');
   await expect(page.locator('#msg')).toBeVisible();
