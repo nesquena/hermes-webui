@@ -175,7 +175,7 @@ test('BOARD SECTIONS filters existing chats and starts a fresh chat inside an em
   await page.locator('#msg').fill('Keep the delivery draft');
   await page.locator('#btnConversationBoard').click();
   const panel = page.locator('#mainConversations');
-  const pick = (id:string) => panel.locator('[data-board-section="'+id+'"]');
+  const pick = (id:string) => panel.locator('#conversationBoardSectionPick').selectOption(id);
   const create = panel.getByRole('button', {name:'New conversation in Delivery / Kick-off', exact:true});
   for (const width of [1440,900,390]) {
     await page.setViewportSize({width, height:900});
@@ -183,9 +183,9 @@ test('BOARD SECTIONS filters existing chats and starts a fresh chat inside an em
     await page.screenshot({path:info.outputPath('sections-'+width+'.png')});
   }
   await expect(create).toBeVisible({timeout:3000});
-  await pick(parent).click();
-  await expect(panel.locator('[data-conversation-open="'+original+'"]')).toContainText(name);
-  await pick(child).click();
+  await pick(parent);
+  await expect(panel.locator('[data-section-branch="'+parent+'"] [data-conversation-open="'+original+'"]')).toBeVisible();
+  await pick(child);
   await expect(panel.locator('.conversation-board-card')).toHaveCount(0);
   await expect(create).toBeInViewport();
   await create.focus();
@@ -206,10 +206,10 @@ test('BOARD SECTIONS filters existing chats and starts a fresh chat inside an em
   expect(creations).toBe(1);
   await send(page,'QA_SECTION_NEW');
   await page.goto('/?view=conversations');
-  await pick(child).click();
+  await pick(child);
   await expect(panel.locator('.conversation-board-card')).toHaveCount(1);
-  await expect(panel.locator('[data-conversation-open="'+fresh+'"]')).toContainText('Delivery / Kick-off');
-  await pick(parent).click();
+  await expect(panel.locator('[data-section-branch="'+child+'"] [data-conversation-open="'+fresh+'"]')).toBeVisible();
+  await pick(parent);
   await panel.locator('[data-conversation-open="'+original+'"]').click();
   await expect(page.locator('#msg')).toHaveValue('Keep the delivery draft');
 });
@@ -226,8 +226,7 @@ test('BOARD SECTIONS recovers the same new chat when the selected section was re
   const removed=(await change({action:'create',name:'Archive later'})).sections.at(-1).id;
   const fallback=(await change({action:'create',name:'Follow-up'})).sections.at(-1).id;
   await page.goto('/?view=conversations');
-  const section=page.locator('[data-board-section="'+removed+'"]');
-  await section.click();
+  await page.locator('#conversationBoardSectionPick').selectOption(removed);
   await change({action:'delete',id:removed});
   let creations=0;
   page.on('request', req=>{if(req.method()==='POST' && new URL(req.url()).pathname==='/api/session/new') creations++;});
@@ -273,4 +272,91 @@ test('BOARD SECTIONS keeps shared project membership and leaves private draft at
   const draft=(await api(page,'/api/session?session_id='+original)).body.session.composer_draft;
   expect(draft.text).toBe('Private note for the previous conversation');
   expect(draft.files[0].name).toBe('personal-note.txt');
+});
+
+test('SECTION TREE shows each conversation in its own branch and remembers independent folds', async ({page}, info) => {
+  test.setTimeout(90000);
+  await ready(page);
+  const endpoint = '/api/me/sidebar-organization';
+  let org = (await api(page, endpoint)).body;
+  async function change(body:object) {
+    const update = await api(page, endpoint, {revision:org.revision, ...body});
+    expect(update.status).toBe(200);
+    org = update.body;
+  }
+  async function section(name:string, parent?:string) {
+    await change({action:'create', name, parent});
+    return org.sections.at(-1).id;
+  }
+  async function chat(title:string, section?:string) {
+    const result = await api(page, '/api/session/import', {title, messages:[{role:'user',content:title}]});
+    expect(result.status).toBe(200);
+    const id = result.body.session.session_id;
+    if (section) await change({action:'assign', session_id:id, section});
+    return id;
+  }
+  const parent = await section('Client work');
+  const child = await section('Launch', parent);
+  const grandchild = await section('Design review', child);
+  const sibling = await section('Operations');
+  const meeting = await chat('Weekly client meeting', parent);
+  const launch = await chat('Launch checklist', child);
+  const design = await chat('Illustration feedback', grandchild);
+  const ops = await chat('Office planning', sibling);
+  const free = await chat('Loose notes');
+  await page.goto('/?view=conversations');
+  const board = page.locator('#mainConversations');
+  const card = (id:string) => board.locator('[data-conversation-open="'+id+'"]');
+  const branch = (id:string) => board.locator('[data-section-branch="'+id+'"]');
+  const toggle = (id:string) => board.locator('[data-section-toggle="'+id+'"]');
+  await expect(card(meeting)).toBeVisible();
+  for (const width of [1440,900,390]) {
+    await page.setViewportSize({width,height:920});
+    if (width === 390) {
+      await expect.poll(() => page.locator('.sidebar').evaluate(el => el.getBoundingClientRect().right)).toBeLessThanOrEqual(1);
+      await board.locator('#conversationBoardCount').scrollIntoViewIfNeeded();
+      await board.locator('#conversationBoardCount').evaluate(el=>el.scrollIntoView({block:'start'}));
+    }
+    await page.screenshot({path:info.outputPath('tree-'+width+'.png'),animations:'disabled'});
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  }
+  await expect(branch(parent)).toBeVisible({timeout:3000});
+  for (const [sid,id] of [[meeting,parent],[launch,child],[design,grandchild],[ops,sibling],[free,'unassigned']]) {
+    await expect(card(sid)).toHaveCount(1);
+    expect(await card(sid).evaluate(el=>el.closest('[data-section-branch]')?.getAttribute('data-section-branch'))).toBe(id);
+  }
+  await toggle(child).press('Enter');
+  await expect(card(launch)).toBeHidden();
+  await expect(card(meeting)).toBeVisible();
+  await toggle(parent).click();
+  await expect(toggle(child)).toBeHidden();
+  await expect(card(ops)).toBeVisible();
+  await page.evaluate(()=>renderSessionListFromCache());
+  await expect(toggle(parent)).toBeFocused();
+  await page.reload();
+  await expect(toggle(parent)).toHaveAttribute('aria-expanded','false');
+  await board.locator('#conversationBoardSearch').fill('Illustration');
+  await expect(card(design)).toBeVisible();
+  await expect(card(ops)).toBeHidden();
+  await board.locator('#conversationBoardSearch').fill('');
+  await expect(toggle(parent)).toHaveAttribute('aria-expanded','false');
+  await toggle(parent).click();
+  await expect(toggle(child)).toHaveAttribute('aria-expanded','false');
+  await toggle(child).click();
+  await card(design).click();
+  await expect(page).toHaveURL(new RegExp('/session/'+design+'$'));
+
+  // A busy section must not consume another section's first page.
+  for (let i=1; i<=7; i++) await chat('Facilities update ' + i, sibling);
+  await page.goto('/?view=conversations');
+  await expect(branch(sibling).locator('[data-conversation-open]')).toHaveCount(6);
+  await expect(card(meeting)).toBeVisible();
+  await branch(sibling).locator('[data-more-in-section]').click();
+  await expect(branch(sibling).locator('[data-conversation-open]')).toHaveCount(8);
+  const foldAll = board.locator('#conversationBoardFoldAll');
+  await foldAll.click();
+  await expect(board.locator('[data-conversation-open]')).toHaveCount(0);
+  await foldAll.click();
+  await expect(card(design)).toBeVisible();
+  await expect(card(free)).toBeVisible();
 });
