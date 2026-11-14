@@ -41,6 +41,8 @@
 
 ### Fixed
 
+- **External memory providers keep working with Hermes Agent v0.23.2 and later (#9063, #9060).** WebUI's shared-instance guard wraps the Agent's `claim_instance(provider, home)`. Agent `c9de60702c0d` (on Agent main and the v0.23.2 release candidates) also passes `manager=`, so every claim raised `TypeError` and honcho, mem0 and the other external providers were silently dropped while chat kept working. The guard now passes every argument after `home` through to the Agent unchanged, and its own first three parameters are positional-only so a future Agent keyword can't collide with them. Older Agents are unaffected.
+
 - **`tests/test_approval_unblock.py` runs again (#9042 by @webtecnica, #9008).** Its 28 gateway-approval tests were skipped on every Agent because `_ApprovalEntry` moved from `tools.approval` to `tools.approval_gateway_wait`; the file now imports it from the new home, falling back to the old one. Test-only. Thanks @webtecnica!
 
 - **Agent-module tests run again on hosts whose Agent install predates a module (#9033).** The test suite's Agent-module check imported `cron.jobs` before the Agent checkout was on `sys.path`, so on an Agent venv installed before `hermes_yaml` existed the check failed. Every `requires_agent_modules` test was then skipped, and so were the 30 tests on conftest's Agent-dependent name list. The check now appends the checkout to `sys.path` first, as the server does, so with the Agent present about 73 more tests run. All pass except one, which shows a real gap with current Agents (#9058, the cron delivery picker). The sandboxed suite, which has no Agent, is unchanged. Test-only.
