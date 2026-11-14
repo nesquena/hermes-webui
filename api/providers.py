@@ -72,16 +72,25 @@ def _provider_env_var_for(provider_id: str) -> str | None:
     return effective_provider_env_var(provider_id, _PROVIDER_ENV_VAR)
 
 
-def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
+def _custom_provider_name_matches(provider_id: str, name: object, entry: dict | None = None) -> bool:
     """Return True when *provider_id* refers to a named custom provider."""
+    if isinstance(name, dict) and entry is None:
+        entry = name
+        name = entry.get("name")
     pid = str(provider_id or "").strip().lower()
     raw_name = str(name or "").strip().lower()
     if not pid or not raw_name:
         return False
-    slug = _custom_provider_slug_from_name(raw_name)
+    slug = _custom_provider_slug_from_name(raw_name, entry)
     candidates = {raw_name, f"custom:{raw_name}"}
     if slug:
         candidates.add(slug)
+        candidates.add(slug.removeprefix("custom:"))
+    if isinstance(entry, dict):
+        pk = str(entry.get("provider_key") or "").strip().lower()
+        if pk:
+            candidates.add(pk)
+            candidates.add(f"custom:{pk}")
     return pid in candidates
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
@@ -1265,7 +1274,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
     custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list):
         for cp in custom_providers:
-            if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
+            if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name"), cp):
                 cp_key = cp.get("api_key")
                 if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
                     values.append(_thread_local_env_value(cp_key[2:-1]))
@@ -1438,7 +1447,7 @@ def _provider_has_key(provider_id: str) -> bool:
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict):
-                if _custom_provider_name_matches(provider_id, cp.get("name")):
+                if _custom_provider_name_matches(provider_id, cp.get("name"), cp):
                     key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
                     if _provider_value_counts_as_api_key(provider_id, key):
                         return True
@@ -1514,7 +1523,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         for cp in custom_providers:
             if not isinstance(cp, dict):
                 continue
-            if _custom_provider_name_matches(provider_id, cp.get("name")):
+            if _custom_provider_name_matches(provider_id, cp.get("name"), cp):
                 cp_key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
@@ -3217,7 +3226,7 @@ def get_providers() -> dict[str, Any]:
             if not isinstance(cp, dict) or not cp.get("name"):
                 continue
             cp_name = str(cp["name"]).strip()
-            cp_id = _custom_provider_slug_from_name(cp_name)
+            cp_id = _custom_provider_slug_from_name(cp_name, cp)
             if not cp_id:
                 logger.warning(
                     "Custom provider entry %r produced empty slug; skipping",
@@ -3459,7 +3468,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             if isinstance(custom_providers, list):
                 for cp in custom_providers:
                     if isinstance(cp, dict):
-                        if _custom_provider_name_matches(provider_id, _resolved(cp.get("name"))):
+                        if _custom_provider_name_matches(provider_id, _resolved(cp.get("name")), cp):
                             if cp.get("api_key"):
                                 del cp["api_key"]
                                 changed = True
