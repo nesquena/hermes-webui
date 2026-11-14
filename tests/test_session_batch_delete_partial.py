@@ -51,6 +51,7 @@ const calls = { drafts: [], handoff: [], toasts: [], exit: 0, loaded: [], render
 const t = (k) => k;
 const $ = () => null;
 const localStorage = { removeItem: () => {} };
+const window = {};
 function showToast(msg, ms, kind) { calls.toasts.push({ msg, kind: kind || null }); }
 function showConfirmDialog() { return Promise.resolve(true); }
 function _readComposerModelPick() { return null; }

@@ -96,7 +96,7 @@ class TestClientFallbackSourceShape:
         # Window covers the model-fallback region of newSession(); the function
         # has grown over time (e.g. pre-session toolset staging #4490), so keep
         # the window comfortably larger than the fallback block it guards.
-        body = src[idx:idx + 7000]
+        body = src[idx:idx + 12000]
         assert "#2518" in body, (
             "newSession()'s fallback comment should reference #2518 so the "
             "follow-up provenance survives future refactors."
@@ -209,7 +209,7 @@ def _provider_assignment_in_new_session() -> str:
             || (_bareModel ? (window._activeProvider || (S.session && S.session.model_provider)) : null)
             || null;
 
-    Both lines live in the same 4000-char slice of newSession()'s
+    Both lines live in the same bounded slice of newSession()'s
     function body, so the helper can read them as a single contract
     unit. Anchors on the ``=`` of the assignment (not a prose mention
     in a comment) and on the guard declaration so future comments
