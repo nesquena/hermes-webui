@@ -442,10 +442,13 @@ def test_profile_switch_resets_cross_profile_tasks_toggle():
         "async function _profileSwitchPanelLoad",
         1,
     )
+    # #9069: the synchronous Tasks reset lives in its own shared helper.
+    profile_switch_panel_load += "\n" + _extract_function(PANELS_JS, "_resetProfileScopedPanelState")
     script = f"""
 const results = {{}};
 let _showAllCronProfiles = true;
 let _cronOtherProfileCount = 9;
+let _cronLoadGeneration = 0;
 let _currentPanel = 'chat';
 let skillLoads = 0;
 let memoryLoads = 0;
