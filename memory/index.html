@@ -84,7 +84,7 @@
 </li>
 <li>
 
-<span><strong>Supermemory Pro</strong>: <span>$19 a month with $20 of credits included. Best for document search and connectors.</span></span>
+<span><strong>Supermemory Pro</strong>: <span>$19 a month with $20 of credits included. Best for document search; connectors need higher plans.</span></span>
 </li>
 </ol>
 </div>
@@ -129,7 +129,7 @@
 <td><a href="https://hindsight.vectorize.io" rel="noopener" target="_blank">Hindsight</a></td>
 <td>Best measured all-rounder</td>
 <td><span class="chip">Self-host, no limits</span></td>
-<td>$10/M tokens retained<br/><small class="muted">$0.75/M recalled · $0.05/reflect</small></td>
+<td>$10/M tokens retained<br/><small class="muted">$0.75/M recalled · $0.05/reflect · $0.25/M tokens/month storage after 30 days</small></td>
 <td>Local + cloud</td>
 <td><span class="chip">MIT</span></td>
 <td>60.5K</td>
@@ -270,7 +270,7 @@
 <div class="kv-row"><span>Benchmarks</span><span>LongMemEval-S <strong>94.4%</strong> · LoCoMo 92.5% · BEAM-10M 48.6% <small>(self-reported; a competitor's re-run of the hosted product scored 73.8% on LongMemEval)</small></span></div>
 </div>
 <p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install mem0</code></a></p>
-<p><strong>Best for:</strong> the largest community and a managed fact store. Self-host the Apache-licensed SDK if you want no vendor in the loop.</p>
+<p><strong>Best for:</strong> the largest community and a managed fact store. Self-host the Apache-licensed SDK with your own model and storage services; set MEM0_TELEMETRY=false to turn off its default usage telemetry.</p>
 </div>
 <div class="card" id="p-hindsight">
 
@@ -287,7 +287,7 @@
 <span class="chip">3 tools</span>
 </div>
 <div class="kv">
-<div class="kv-row"><span>Pricing</span><span>Self-host free, MIT, no usage limits · Cloud pay-as-you-go: $10 per 1M tokens retained, $0.75 per 1M recalled, $0.05 per reflect call, no monthly fee · new accounts get $5 of credit</span></div>
+<div class="kv-row"><span>Pricing</span><span>Self-host free, MIT, no usage limits · Cloud pay-as-you-go: $10 per 1M tokens retained, $0.75 per 1M recalled, $0.05 per reflect call, plus $0.25 per 1M stored tokens per month after 30 days (billed daily), no base monthly fee · new accounts get $5 of credit</span></div>
 <div class="kv-row"><span>Benchmarks</span><span>LongMemEval-S <strong>94.6%</strong> (own benchmark site) / 91.4% (paper) · LoCoMo 92.0% · BEAM-10M <strong>64.1%</strong> <small>(self-reported)</small></span></div>
 </div>
 <p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install hindsight</code></a></p>
@@ -354,7 +354,7 @@
 <div class="kv-row"><span>Benchmarks</span><span>LongMemEval-S <strong>84.6%</strong> with GPT-5 answers <small>(self-reported) · 81.6% in a run by competitor Vectorize</small></span></div>
 </div>
 <p><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers" rel="noopener" target="_blank"><code>hermes plugins install supermemory</code></a></p>
-<p><strong>Best for:</strong> search over lots of documents, and teams that want connectors (Gmail, S3, web crawler) with a flat monthly price.</p>
+<p><strong>Best for:</strong> search over lots of documents. Connectors cost more: Gmail starts on Max ($100 a month), S3 and the web crawler on Scale ($399).</p>
 </div>
 <div class="card" id="p-agentmemory">
 
@@ -592,7 +592,7 @@
 <div class="card">
 
 <h3>Privacy and air-gapped setups</h3>
-<p class="muted">Data never leaves your infrastructure.</p>
+<p class="muted">To keep data on your own machines, run the agent&rsquo;s model, embeddings and storage locally too.</p>
 <ol class="ranked">
 <li>
 
@@ -600,7 +600,7 @@
 </li>
 <li>
 
-<span><strong>Hindsight</strong>: <span>fully local with an open-weight model; its own decision, rerank and embedding models are open weights too.</span></span>
+<span><strong>Hindsight</strong>: <span>fully local when the LLM, reranker and embeddings run locally; its own decision, rerank and embedding models have open weights.</span></span>
 </li>
 <li>
 
@@ -739,7 +739,7 @@ hermes memory setup</code></pre>
 <div class="card">
 <div class="meta">Cheapest managed</div>
 <h3>Honcho / Hindsight</h3>
-<p>Usage-based, no monthly fee. Supermemory is $19 a month flat.</p>
+<p>Usage-based, no monthly fee. Supermemory Pro is $19 a month with $20 of usage credits.</p>
 </div>
 <div class="card">
 <div class="meta">Token efficiency</div>
