@@ -7237,6 +7237,26 @@ function _openProfileDropdownShell(){
 }
 
 async function _profileSwitchPanelLoad(){
+  _resetProfileScopedPanelState();
+  if (_currentPanel === 'skills') await loadSkills();
+  if (_currentPanel === 'memory') await loadMemory();
+  if (_currentPanel === 'tasks') await loadCrons();
+  if (_currentPanel === 'kanban') await loadKanban();
+  if (_currentPanel === 'profiles') await loadProfilesPanel();
+  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+}
+
+// Synchronous half of the profile-switch panel reset: drops the previous
+// profile's Tasks state (detail, edit id, pre-form snapshot, duplicate flag,
+// cross-profile view) without any network. Shared by the canonical switch
+// (through _profileSwitchPanelLoad) and the session-load switch in
+// sessions.js (#9069), which must not leave a Duplicate/Edit form that would
+// write the previous profile's job under the new profile's cookie.
+function _resetProfileScopedPanelState(){
+  // Retire any loadCrons() still in flight for the previous profile (#6767
+  // latest-wins). With Tasks hidden no newer load supersedes it, and its reply
+  // would otherwise publish that profile's writable rows under this one.
+  ++_cronLoadGeneration;
   // Cross-profile cron visibility is an active-profile opt-in; never carry it
   // into the next profile when the Tasks panel wasn't the visible panel.
   _showAllCronProfiles = false;
@@ -7245,12 +7265,6 @@ async function _profileSwitchPanelLoad(){
   _editingCronId = null;
   _cronIsDuplicate = false;
   _clearCronDetail();
-  if (_currentPanel === 'skills') await loadSkills();
-  if (_currentPanel === 'memory') await loadMemory();
-  if (_currentPanel === 'tasks') await loadCrons();
-  if (_currentPanel === 'kanban') await loadKanban();
-  if (_currentPanel === 'profiles') await loadProfilesPanel();
-  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 }
 
 // ── Tab-visibility reconciliation guard ────────────────────────────────────
