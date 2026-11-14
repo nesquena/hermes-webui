@@ -6735,6 +6735,12 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .proj-row-name{font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .proj-row-meta{font-size:11px;color:var(--muted);margin-top:2px;}
 .proj-card{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px;}
+.proj-disclosure>summary.proj-card-title{margin:0;cursor:pointer;list-style:none;min-height:28px}
+.proj-disclosure>summary::-webkit-details-marker{display:none}
+.proj-disclosure>summary::after{content:"";width:7px;height:7px;border-right:1.5px solid;border-bottom:1.5px solid;transform:rotate(-45deg);margin-inline-start:auto;color:var(--muted)}
+.proj-disclosure[open]>summary::after{transform:rotate(45deg)}
+.proj-disclosure>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.proj-fold-body{margin-top:12px}
 .proj-card-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;display:flex;align-items:center;gap:8px;}
 .proj-item{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px;color:var(--text);min-width:0;}
 .proj-item:last-child{border-bottom:none;}

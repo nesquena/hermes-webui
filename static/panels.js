@@ -436,7 +436,8 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'apps' && window.SynthPulseApps) await window.SynthPulseApps.load();
   if (nextPanel === 'modules' && window.SynthPulseModules) await window.SynthPulseModules.load();
   // Lazy-load panel data
-  if (nextPanel === 'tasks') await loadCrons();
+  if (prevPanel === 'tasks' && nextPanel !== 'tasks') window.CronAgenda?.leave();
+  if (nextPanel === 'tasks') { window.CronAgenda?.mode(_cronMode); await loadCrons(); }
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
@@ -1266,6 +1267,7 @@ async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
   loadCronGatewayNotice();
+  if (animate && _currentPanel === 'tasks' && _cronMode === 'empty') window.CronAgenda?.reload();
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
@@ -2347,6 +2349,7 @@ function _renderCronDetail(job){
 }
 
 function _setCronHeaderButtons(mode, job) {
+  globalThis.CronAgenda?.mode(mode);
   const runBtn = $('btnRunTaskDetail');
   const pauseBtn = $('btnPauseTaskDetail');
   const resumeBtn = $('btnResumeTaskDetail');

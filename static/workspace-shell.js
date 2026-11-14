@@ -7,6 +7,27 @@
   function preferenceKey() {
     return 'synthpulse-workspace-more:' + String((window.__GOV_ME__ || {}).email || 'local');
   }
+  const entry = new URL(location.href);
+  let pendingHome = entry.pathname === new URL(document.baseURI).pathname && !entry.search && !entry.hash && window === window.top;
+  function allowed(panel) {
+    const nav = document.querySelector('.rail .nav-tab[data-panel="' + panel + '"]');
+    return Array.isArray(window.__GOV_ME__?.hidden_nav) && nav && !nav.hidden && !nav.disabled &&
+      !nav.classList.contains('nav-tab-hidden') && !window.__GOV_ME__.hidden_nav.includes(panel) &&
+      (!window.SynthPulseModules || window.SynthPulseModules.canOpen(panel));
+  }
+  function startKey() { return 'synthpulse-start:' + String(window.__GOV_ME__?.email || 'local'); }
+  function startChoice() {
+    try { return localStorage.getItem(startKey()) === 'chat' ? 'chat' : 'overview'; } catch (_) { return 'overview'; }
+  }
+  function applyStart() {
+    if (!pendingHome || typeof S === 'undefined' || !S._bootReady || !Array.isArray(window._govHiddenNav)) return;
+    pendingHome = false;
+    const draft = S.session?.composer_draft;
+    if (!allowed('studio') || startChoice() === 'chat' || _currentPanel !== 'chat' || S.busy || S.activeStreamId ||
+        S.session?.active_stream_id || S.session?.pending_user_message || draft?.text || draft?.files?.length ||
+        document.getElementById('msg')?.value.trim() || window.__HERMES_PANE_MODE) return;
+    switchPanel('studio');
+  }
   function expanded() {
     try { return localStorage.getItem(preferenceKey()) === '1'; } catch (_) { return false; }
   }
@@ -42,6 +63,14 @@
       badge.textContent = text('workspace_kind_' + kind);
       badge.title = text('workspace_role_hint');
     }
+    const field = document.getElementById('workspaceStartField');
+    if (field) {
+      field.hidden = !allowed('studio');
+      document.getElementById('settingsStartPage').value = startChoice();
+    }
+    const home = document.getElementById('workspaceHome');
+    if (home) home.disabled = !allowed('studio');
+    applyStart();
     if (window.SPNavGroups) window.SPNavGroups.sync();
   }
   function start() {
@@ -62,7 +91,18 @@
     });
     new MutationObserver(() => sync()).observe(document.documentElement, {attributes: true, attributeFilter: ['lang']});
   }
-  window.SynthPulseWorkspace = {sync};
+  document.addEventListener('pointerdown', () => { pendingHome = false; }, {once:true, capture:true});
+  document.addEventListener('keydown', () => { pendingHome = false; }, {once:true, capture:true});
+  document.getElementById('settingsStartPage')?.addEventListener('change', event => {
+    try { localStorage.setItem(startKey(), event.target.value); } catch (_) { showToast(text('workspace_start_failed')); }
+  });
+  document.getElementById('workspaceHome')?.addEventListener('click', async () => {
+    if (!allowed('studio')) return;
+    if (_currentPanel !== 'studio' && !(await switchPanel('studio'))) return;
+    if (_currentPanel === 'studio') { window.SPStudio.setTab('home'); closeMobileSidebar(); }
+  });
+  window.addEventListener('synpulse:boot-ready', applyStart);
+  window.SynthPulseWorkspace = {sync, allowed};
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
 })();

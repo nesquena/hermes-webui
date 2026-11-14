@@ -52,15 +52,16 @@
     try { data = await call('/api/projects/folders?project_id=' + encodeURIComponent(project.project_id)); }
     catch (_) { return; }
     const current = (typeof _projSelectedId !== 'undefined') ? String(_projSelectedId) : String(project.project_id);
-    if (!data || current !== String(project.project_id)) return;
+    if (!data || root._spMyWorkOpen || current !== String(project.project_id)) return;
     const old = sections.querySelector('.sp-folders-card');
     if (old) old.remove();
-    const card = root.document.createElement('div');
-    card.className = 'proj-card sp-folders-card';
+    const template = root.document.createElement('template');
     const items = (data.folders || []).map(folderRow).join('')
       || '<div class="proj-empty">' + esc(T('projects_folders_empty', 'No folders yet. Add one of your spaces to work on it in this project.')) + '</div>';
-    card.innerHTML = '<div class="proj-card-title">📂 ' + esc(T('projects_folders_title', 'Files and folders')) + '</div>' + items
-      + (data.can_manage ? '<div class="proj-actions"><button type="button" class="app-dialog-btn sp-folder-add">➕ ' + esc(T('projects_folder_add', 'Add folder')) + '</button></div>' : '');
+    template.innerHTML = _projFold('folders', T('projects_folders_title', 'Files and folders'), items
+      + (data.can_manage ? '<div class="proj-actions"><button type="button" class="app-dialog-btn sp-folder-add">➕ ' + esc(T('projects_folder_add', 'Add folder')) + '</button></div>' : ''), {count:data.folders?.length, open:!!data.folders?.length});
+    const card = template.content.firstElementChild;
+    card.classList.add('sp-folders-card');
     sections.insertBefore(card, sections.children[1] || null);
     const add = card.querySelector('.sp-folder-add');
     if (add) add.onclick = () => pickFolder(project.project_id);
@@ -97,6 +98,7 @@
     root._spMyWorkOpen = true;
     let data;
     try { data = await call('/api/projects/my-work'); } catch (_) { return; }
+    if (!root._spMyWorkOpen) return;
     const body = root.document.getElementById('projDetailBody');
     const empty = root.document.getElementById('projDetailEmpty');
     const summary = root.document.getElementById('projSummary');
@@ -111,8 +113,9 @@
       || '<div class="proj-empty">' + esc(T('projects_my_work_no_chats', 'No chats without a project yet.')) + '</div>';
     const folders = (data.folders || []).map(folderRow).join('') || '<div class="proj-empty">' + esc(T('projects_none_yet', 'Nothing here yet.')) + '</div>';
     if (sections) {
-      sections.innerHTML = '<div class="proj-card"><div class="proj-card-title">💬 ' + esc(T('projects_section_conversations', 'Conversations')) + ' (' + (data.conversation_count || 0) + ')</div>' + convs + '</div>'
-        + '<div class="proj-card sp-folders-card"><div class="proj-card-title">📂 ' + esc(T('projects_folders_title', 'Files and folders')) + '</div>' + folders + '</div>';
+      sections.innerHTML = _projFold('conversations', T('projects_section_conversations', 'Conversations'), convs,
+        {project:'my-work', count:data.conversation_count, open:true}) + _projFold('folders', T('projects_folders_title', 'Files and folders'),
+        folders, {project:'my-work', count:data.folders?.length, open:!!data.folders?.length});
       sections.querySelectorAll('[data-project-session]').forEach(row => row.addEventListener('click', () => {
         if (typeof root.loadSession === 'function') root.loadSession(row.dataset.projectSession);
         if (typeof root.switchPanel === 'function') root.switchPanel('chat');

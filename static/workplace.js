@@ -12,6 +12,8 @@
 (function(){
   'use strict';
   const NL = {
+    recent_chats:'Recente gesprekken', recent_runs:'Laatst uitgevoerde taken', no_chats:'Nog geen recente gesprekken.', no_runs:'Nog geen uitgevoerde taken in deze weergave.',
+    projects:'Projecten', chart:'Botorganogram', agenda:'Taakagenda', navigate:'Alle onderdelen',
     title: 'Overzicht', morning: 'Goedemorgen', afternoon: 'Goedemiddag', evening: 'Goedenavond',
     intro: 'Alles wat van jou is, van je team en van de organisatie op één plek.',
     l_mine: 'Van mij', l_team: 'Mijn team', l_teams: 'Mijn teams', l_dept: 'Mijn afdeling', l_depts: 'Mijn afdelingen', l_org: 'Organisatie', l_all: 'Alles',
@@ -29,6 +31,8 @@
     p_discover: 'Ontdekken', p_design: 'Inrichten', p_playbook: 'Bouwplan', p_build: 'Bouwen', p_measure: 'Meten'
   };
   const EN = {
+    recent_chats:'Recent conversations', recent_runs:'Recently run tasks', no_chats:'No recent conversations yet.', no_runs:'No task runs in this view yet.',
+    projects:'Projects', chart:'Bot org chart', agenda:'Task calendar', navigate:'All destinations',
     title: 'Overview', morning: 'Good morning', afternoon: 'Good afternoon', evening: 'Good evening',
     intro: 'Everything that is yours, your team\'s and the organisation\'s in one place.',
     l_mine: 'Mine', l_team: 'My team', l_teams: 'My teams', l_dept: 'My department', l_depts: 'My departments', l_org: 'Organisation', l_all: 'Everything',
@@ -198,8 +202,9 @@
       const botTitle = (bots.get(bot) || {}).title || '';
       items.push({ kind: 'task', id: j.id, store: st, bot, title: j.name || '', owner: norm(j.owner_email),
                    team: c.jobTeam.get(st + ':' + j.id) || (bots.get(bot) || {}).team || primaryTeam(c, j.owner_email),
-                   sub: [sched, botTitle].filter(Boolean).join(' · '), status, at: Date.parse(j.last_run_at || '') / 1000 || 0 });
+                   sub: [sched, botTitle].filter(Boolean).join(' · '), status, runStatus:j.last_status === 'error' ? w('s_error') : j.last_status === 'ok' || j.last_status === 'success' ? w('s_done') : '', at: Date.parse(j.last_run_at || '') / 1000 || 0 });
     }
+    Wp.runsReadable = Array.isArray(cr?.jobs);
     Wp.data = items; Wp.at = Date.now();
     return items;
   }
@@ -306,13 +311,43 @@
         <p>${H(job || w('intro'))}</p>
         ${rs.length ? `<div class="wp-badges">${rs.map(r => `<span class="om-badge wp-role ${r.cls}">${H(r.label)}</span>`).join('')}</div>` : ''}</div></section>`;
   }
+  function allowed(panel) { return !!window.SynthPulseWorkspace?.allowed(panel); }
+  function recentHtml(title, target, items, empty) {
+    return `<section class="wp-card"><header class="wp-card-head"><h3>${H(w(title))}</h3><button type="button" class="om-link wp-all" data-wp-go="${target}">${H(w('all'))}</button></header>${items || '<p class="wp-no-recent">'+H(w(empty))+'</p>'}</section>`;
+  }
+  function recentChats() {
+    const chats = window.ConversationWorkbench?.recent() || [];
+    return recentHtml('recent_chats', 'conversations', chats.map(s => rowHtml(ctxCache, {kind:'conversation', id:s.id,
+      title:s.title, sub:[s.bot, s.at ? _formatRelativeSessionTime(s.at) : ''].filter(Boolean).join(' · ')})).join(''), 'no_chats');
+  }
+  function refreshRecent() {
+    const node = Wp.body?.querySelector('[data-wp-recent-chats]');
+    if (node && allowed('chat')) {
+      const focused = node.contains(document.activeElement) ? document.activeElement.dataset : null;
+      node.innerHTML = recentChats();
+      if (focused) [...node.querySelectorAll('button')].find(b=>b.dataset.wpGo === focused.wpGo && b.dataset.wpId === focused.wpId)?.focus({preventScroll:true});
+    }
+  }
+  function activity(rows) {
+    const jobs = rows.filter(r=>r.kind === 'task' && r.at > 0).sort((a,b)=>b.at-a.at).slice(0,4);
+    const runs = jobs.map(r=>rowHtml(ctxCache, {...r, status:undefined, kind:'run',
+      sub:[_formatRelativeSessionTime(r.at*1000), r.runStatus].filter(Boolean).join(' · ')})).join('');
+    return `<div class="wp-grid wp-activity">${allowed('chat') ? '<div data-wp-recent-chats>'+recentChats()+'</div>' : ''}
+      ${allowed('tasks') ? recentHtml('recent_runs','task',runs,Wp.runsReadable ? 'no_runs' : 'failed') : ''}</div>`;
+  }
+  function shortcuts() {
+    const actions = [['projects','projects','projects'],['profiles','chart','chart'],['tasks','agenda','agenda']];
+    return '<div class="wp-shortcuts">'+actions.filter(([panel])=>allowed(panel)).map(([,target,label])=>
+      `<button type="button" class="sm-btn" data-wp-go="${target}">${H(w(label))}</button>`).join('')+
+      `<button type="button" class="sm-btn" data-wp-go="navigate">${H(t('workspace_navigation_search'))}</button></div>`;
+  }
   function paint(force){
     const body = Wp.body, c = ctxCache;
     if (!body || !body.isConnected || !c || !Wp.data) return;
     // The Studio body is shared by every hub: never paint over another hub that opened meanwhile.
     if (!force && !(body.firstElementChild && body.firstElementChild.classList.contains('wp'))) return;
     const lens = homeLens(c);
-    const rows = Wp.data.filter(it => match(c, it, lens));
+    const rows = Wp.data.filter(it => match(c, it, lens) && (it.kind !== 'task' || allowed('tasks')) && (it.kind !== 'bot' || allowed('profiles')));
     const group = lens === 'mine' ? 'kind' : Wp.group;
     const n = Object.fromEntries(KINDS.map(k => [k, rows.filter(it => it.kind === k).length]));
     const groupSeg = lens === 'mine' ? '' : `<div class="om-seg" role="group" aria-label="${H(w('group'))}">${['kind', 'team', 'person'].map(g => `<button type="button" aria-pressed="${g === group}" data-wp-group="${g}">${H(w('g_' + g))}</button>`).join('')}</div>`;
@@ -329,8 +364,12 @@
     body.innerHTML = `<div class="wp" data-tour="studio-home">${heroHtml(c)}
       ${Wp.setup}
       <div class="wp-bar">${barHtml(c, 'home', Wp.data, lens)}${groupSeg}</div>
-      <div class="wp-kpis">${KINDS.map(k => `<button type="button" class="wp-kpi ${n[k] ? '' : 'zero'}" title="${H(w('kpi_hint', { k: w('k_' + k) }))}" data-wp-go="${k}"${k === 'usecase' ? ' data-tour="studio-usecases"' : ''}><span class="wp-kpi-label"><span class="wp-kind-dot k-${k}" aria-hidden="true"></span>${H(short(k))}</span><span class="wp-kpi-value">${n[k]}</span></button>`).join('')}</div>
-      ${main}</div>`;
+      <div class="wp-kpis">${KINDS.filter(k => k === 'task' ? allowed('tasks') : k !== 'bot' || allowed('profiles')).map(k => `<button type="button" class="wp-kpi ${n[k] ? '' : 'zero'}" title="${H(w('kpi_hint', { k: w('k_' + k) }))}" data-wp-go="${k}"${k === 'usecase' ? ' data-tour="studio-usecases"' : ''}><span class="wp-kpi-label"><span class="wp-kind-dot k-${k}" aria-hidden="true"></span>${H(short(k))}</span><span class="wp-kpi-value">${n[k]}</span></button>`).join('')}</div>
+      ${shortcuts()}
+      <details class="wp-card wp-destinations"><summary>${H(w('navigate'))}</summary><div class="wp-shortcuts">${(window.WorkspaceDestinations?.destinations() || []).map(d=>
+        `<button type="button" class="sm-btn" data-wp-destination="${H(d.panel)}">${H(d.label)}</button>`).join('')}${[...document.querySelectorAll('#studioHubNav [data-st-hub]')].filter(b=>['me','profile','teams','chart','mgmt'].includes(b.dataset.stHub)).map(b=>
+        `<button type="button" class="sm-btn" data-wp-studio="${H(b.dataset.stHub)}">${H(b.textContent)}</button>`).join('')}</div></details>
+      ${activity(rows)}${main}</div>`;
   }
   async function render(body, opts){
     Wp.body = body; Wp.setup = (opts && opts.setup) || '';
@@ -355,8 +394,17 @@
   async function go(kind){
     const c = ctxCache;
     const lens = c ? homeLens(c) : 'org';
-    if (kind === 'task') { if (typeof switchPanel === 'function') await switchPanel('tasks'); return; }
-    if (kind === 'bot') { if (typeof switchPanel === 'function') await switchPanel('profiles'); return; }
+    if (kind === 'conversations' && allowed('chat')) return window.ConversationWorkbench.show();
+    if (kind === 'projects' && allowed('projects')) return switchPanel('projects');
+    if (kind === 'chart' && allowed('profiles')) {
+      await switchPanel('profiles'); if (_currentPanel === 'profiles') openBotOrgChart(); return;
+    }
+    if (kind === 'agenda' && allowed('tasks')) {
+      await switchPanel('tasks'); if (_currentPanel === 'tasks' && ['empty','read'].includes(_cronMode)) window.CronAgenda.open(); return;
+    }
+    if (kind === 'navigate') return document.getElementById('btnWorkspaceNavigator')?.click();
+    if (kind === 'task' && allowed('tasks')) { if (typeof switchPanel === 'function') await switchPanel('tasks'); return; }
+    if (kind === 'bot' && allowed('profiles')) { if (typeof switchPanel === 'function') await switchPanel('profiles'); return; }
     const tab = { usecase: 'usecases', playbook: 'playbooks', prompt: 'prompts', backlog: 'backlog' }[kind];
     if (tab === 'usecases') store.set('sp-lens-usecases', lens);
     if (tab && window.SPStudio) window.SPStudio.setTab(tab);
@@ -366,8 +414,9 @@
     if (kind === 'usecase' && window.SPStudio) return window.SPStudio.openUseCase(id);
     if (kind === 'playbook' && window.SPLibrary) return window.SPLibrary.openPlaybook(id);
     if ((kind === 'backlog' || kind === 'prompt') && window.SPStudio) return window.SPStudio.setTab(kind === 'backlog' ? 'backlog' : 'prompts');
-    if (kind === 'task' && typeof openCronFromBot === 'function') return openCronFromBot(id, b.dataset.wpStore === 'default' ? '' : b.dataset.wpStore, b.dataset.wpBot);
-    if (kind === 'bot' && typeof switchPanel === 'function') {
+    if (kind === 'conversation' && allowed('chat')) return window.ConversationWorkbench.openRecent(id);
+    if ((kind === 'task' || kind === 'run') && allowed('tasks') && typeof openCronFromBot === 'function') return openCronFromBot(id, b.dataset.wpStore === 'default' ? '' : b.dataset.wpStore, b.dataset.wpBot);
+    if (kind === 'bot' && allowed('profiles') && typeof switchPanel === 'function') {
       await switchPanel('profiles');
       if (typeof openProfileDetail === 'function') openProfileDetail(id);
     }
@@ -378,11 +427,13 @@
     if (b.dataset.wpGroup) { Wp.group = b.dataset.wpGroup; store.set('sp-wp-group', Wp.group); paint(); return; }
     if (b.dataset.wpToggle) { const k = b.dataset.wpToggle; if (Wp.open.has(k)) Wp.open.delete(k); else Wp.open.add(k); paint(); return; }
     if (b.dataset.wpMore) { const k = b.dataset.wpMore; if (Wp.more.has(k)) Wp.more.delete(k); else Wp.more.add(k); paint(); return; }
+    if (b.dataset.wpStudio) { document.querySelector('#studioHubNav [data-st-hub="'+CSS.escape(b.dataset.wpStudio)+'"]')?.click(); return; }
+    if (b.dataset.wpDestination) { window.WorkspaceDestinations.open(b.dataset.wpDestination); return; }
     if (b.dataset.wpGo) { go(b.dataset.wpGo); return; }
     if (b.dataset.wpOpen) { openItem(b); return; }
     if (b.hasAttribute('data-wp-retry')) { render(Wp.body); }
   }
   document.addEventListener('sp-lens-change', ev => { if (ev.detail && ev.detail.surface === 'home') paint(); });
 
-  window.SPWorkplace = { render, title: () => w('title'), invalidate: () => { Wp.at = 0; ctxAt = 0; } };
+  window.SPWorkplace = { render, refreshRecent, title: () => w('title'), invalidate: () => { Wp.at = 0; ctxAt = 0; } };
 })();

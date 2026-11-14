@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import type {Browser, Page, TestInfo} from '@playwright/test';
-import {test, expect, open, api, auth, capture} from './fixtures';
+import {test, expect, open, api, auth, capture, selectPicker} from './fixtures';
 
 const unique = (label: string) => `qa-supp-${label}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
 const response = (page: Page, endpoint: string, method = 'POST') => page.waitForResponse(r =>
@@ -47,6 +47,11 @@ async function project(page: Page, name: string) {
   await page.locator('.proj-row').filter({hasText: name}).click();
   await expect(page.locator('#projSummary')).toContainText(name);
   await expect(page.locator('#projStartChat')).toBeVisible();
+  for (const key of ['team','uploads']) {
+    const fold=page.locator('[data-project-section="'+key+'"]');
+    await fold.waitFor();
+    if (!(await fold.evaluate(e=>e.open))) await fold.locator('summary').click();
+  }
 }
 
 async function grantProjectWorkspace(page: Page, workspace: string) {
@@ -55,8 +60,7 @@ async function grantProjectWorkspace(page: Page, workspace: string) {
   await page.locator('#govPaneUsers tr').filter({hasText: 'bob@example.test'}).getByRole('button', {name: 'Edit', exact: true}).click();
   await page.locator('details.gov-access-details').first().locator('summary').click();
   for (const field of ['govUserGrantWorkspaces', 'govUserGrantFilesRead', 'govUserGrantFilesWrite']) {
-    const input = page.locator('#' + field + 'Input');
-    await input.fill(workspace); await input.press('Enter'); await input.press('Escape');
+    await selectPicker(page, field + 'Input', workspace);
   }
   const saved = response(page, '/api/governance/users/update'); await page.locator('#govUserSave').click();
   expect((await saved).status()).toBe(200);
@@ -144,12 +148,14 @@ test('SUPPLEMENT PROJECT KNOWLEDGE retained project pages lose files conversatio
   expect((await created).status()).toBe(200);
   const initial = (await (await created).json()).project;
   await expect(page.locator('#projSummary')).toContainText(name);
+  await page.locator('[data-project-section="team"] > summary').click();
   await page.locator('#projHumanChoices input[value="bob@example.test"]').check();
   await page.locator('#projBotChoices input[value="qa-research"]').check();
   const assigned = response(page, '/api/projects/team'); await page.locator('#projSaveTeam').click();
   expect((await assigned).status()).toBe(200);
   const team = (await (await assigned).json()).project;
   expect(team.members).toEqual(['bob@example.test']);
+  await page.locator('[data-project-section="uploads"] > summary').click();
   await page.locator('#projUpload').setInputFiles({name: filename, mimeType: 'text/plain', buffer: Buffer.from(bytes)});
   await expect(page.locator('#projFileList').getByRole('button', {name: filename, exact: true})).toBeVisible();
   // Membership and the RBAC workspace ceiling are independent. Establish the
@@ -158,17 +164,13 @@ test('SUPPLEMENT PROJECT KNOWLEDGE retained project pages lose files conversatio
   const originalMember = await grantProjectWorkspace(page, team.workspace);
   let member: Awaited<ReturnType<typeof actor>> | undefined;
   try {
-  // Project state is outside the fixture's private OS home, so use the normal
-  // admin workspace registration and assignment forms for this exact directory.
-  await open(page, 'workspaces');
-  await page.getByRole('button', {name: 'Add space', exact: true}).click();
-  await page.locator('#workspaceFormPath').fill(team.workspace);
-  await page.locator('#workspaceFormName').fill(name);
-  await page.locator('#btnSaveWorkspaceDetail').click();
-  await expect(page.locator('#workspaceDetailTitle')).toHaveText(name);
+  // Register the synthetic folder through the authenticated workspace API.
+  // Projects owns navigation. The old standalone Spaces rail entry is retired.
+  expect((await api(page, '/api/workspaces/add', {path:team.workspace})).status).toBe(200);
   await open(page, 'governance'); await page.locator('[data-gov-tab="workspaces"]').click();
   const workspaceRow = page.locator('#govPaneWorkspaces tbody tr').filter({has: page.getByText(team.workspace, {exact: true})});
-  await workspaceRow.locator('[id^="govWsMembers_"]').fill('bob@example.test');
+  const memberInput = await workspaceRow.locator('[id^="govWsMembers_"]').getAttribute('id');
+  await selectPicker(page, memberInput!, 'bob@example.test');
   const workspaceAssigned = response(page, '/api/workspaces/assign');
   await workspaceRow.getByRole('button', {name: 'Save', exact: true}).click();
   expect((await workspaceAssigned).status()).toBe(200);
@@ -207,7 +209,8 @@ test('SUPPLEMENT PROJECT KNOWLEDGE retained project pages lose files conversatio
     const deniedUpload = response(retained, '/api/projects/files');
     await retained.locator('#projUpload').setInputFiles({name: 'forbidden-after-revoke.txt', mimeType: 'text/plain', buffer: Buffer.from('FORBIDDEN')});
     expect((await deniedUpload).status()).toBe(404);
-    const deniedStart = response(retained, '/api/projects/chat'); await retained.locator('#projStartChat').click();
+    // The project launch rechecks visibility before offering to create a chat.
+    const deniedStart = response(retained, '/api/projects/hub/detail', 'GET'); await retained.locator('#projStartChat').click();
     expect((await deniedStart).status()).toBe(404);
     // The composer rejects the stale group in mention preparation, before a
     // chat run can start. Also check the direct start boundary independently.

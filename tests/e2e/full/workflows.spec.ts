@@ -27,8 +27,10 @@ test('US-SP-KNOW-001 upload does not select; explicit selection saves and surviv
 });
 test('US-SP-PROJ-001 create project, configure people and bots, upload file, reopen membership',async({page})=>{
  const name=marker('QA Project');await open(page,'projects');await page.locator('#projNewName').fill(name);await page.locator('#projCreateButton').click();await expect(page.locator('#projSummary')).toContainText(name);
- await page.locator('#projHumanChoices input[value="bob@example.test"]').check();await page.locator('#projBotChoices input[value="qa-research"]').check();await page.locator('#projSaveTeam').click();await expect(page.locator('#projHumanChoices input[value="bob@example.test"]')).toBeChecked();
- await page.locator('#projUpload').setInputFiles({name:'qa-project.txt',mimeType:'text/plain',buffer:Buffer.from('Synthetic project evidence')});await expect(page.locator('#projFileList')).toContainText('qa-project.txt');
+ await page.locator('[data-project-section="team"] > summary').click();
+  await page.locator('#projHumanChoices input[value="bob@example.test"]').check();await page.locator('#projBotChoices input[value="qa-research"]').check();await page.locator('#projSaveTeam').click();await expect(page.locator('#projHumanChoices input[value="bob@example.test"]')).toBeChecked();
+ await page.locator('[data-project-section="uploads"] > summary').click();
+  await page.locator('#projUpload').setInputFiles({name:'qa-project.txt',mimeType:'text/plain',buffer:Buffer.from('Synthetic project evidence')});await expect(page.locator('#projFileList')).toContainText('qa-project.txt');
  await page.reload();await page.locator('.rail-btn[data-panel="projects"]').click();await page.locator('.proj-row').filter({hasText:name}).click();await expect(page.locator('#projHumanChoices input[value="bob@example.test"]')).toBeChecked();await expect(page.locator('#projBotChoices input[value="qa-research"]')).toBeChecked();
 });
 test('US-SP-MEM-001 personal memory edits persist, cancel preserves previous value',async({page})=>{
