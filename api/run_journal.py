@@ -5,6 +5,7 @@ the existing in-process streaming path without changing execution ownership.
 """
 from __future__ import annotations
 
+import bisect
 import contextlib
 import gzip
 import io
@@ -809,6 +810,95 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
             events.append(parsed)
         else:
             malformed.append({"line": line_no, "raw": raw})
+    return events, malformed
+
+
+_AFTER_SEQ_INDEX_MAX_PATHS = 64
+_AFTER_SEQ_INDEX_STRIDE = 256
+_after_seq_index: "OrderedDict[str, dict]" = OrderedDict()
+_after_seq_index_lock = threading.Lock()
+
+
+def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], list[dict]] | None:
+    """Tail read for ``after_seq`` via a per-path byte-offset checkpoint index.
+
+    Returns exactly what ``_read_jsonl`` would (all events, all malformed rows
+    with absolute line numbers) minus events at or below ``after_seq``, which
+    the caller filters anyway. Returns None whenever equivalence cannot be
+    guaranteed (archive/gz, CR bytes, identity change, shrink, bad seq);
+    the caller then takes the full-parse path.
+    """
+    if path.suffix == ".gz":
+        return None
+    archived = _archive_path_for(path)
+    if archived is not None and os.path.lexists(archived):
+        return None
+    key = str(path)
+    try:
+        threshold = int(after_seq)
+        with open(path, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            with _after_seq_index_lock:
+                idx = _after_seq_index.pop(key, None)
+            if idx is not None and (idx["id"] != (st.st_dev, st.st_ino) or st.st_size < idx["size"]):
+                idx = None
+            if idx is None:
+                idx = {"id": (st.st_dev, st.st_ino), "size": 0, "maxes": [float("-inf")], "offs": [0],
+                       "lines": [0], "malformed": [], "rows": 0}
+            pos = bisect.bisect_right(idx["maxes"], threshold) - 1
+            start, line_no = idx["offs"][pos], idx["lines"][pos]
+            fh.seek(start)
+            if start and os.pread(fh.fileno(), 1, start - 1) != b"\n":
+                return None
+            data = fh.read()
+    except FileNotFoundError:
+        return [], []
+    except (OSError, TypeError, ValueError):
+        return None
+    if b"\r" in data:
+        return None
+    events: list[dict] = []
+    malformed = [m for m in idx["malformed"] if m["line"] <= line_no]
+    off = start
+    prefix_max = idx["maxes"][pos]
+    for raw_b in data.split(b"\n"):
+        line_no += 1
+        line_end = off + len(raw_b) + 1
+        complete = line_end <= start + len(data)
+        extend = complete and line_end > idx["size"]
+        raw = raw_b.decode("utf-8", errors="surrogateescape")
+        if raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                try:
+                    seq = int(parsed.get("seq") or 0)
+                except (TypeError, ValueError):
+                    return None
+                prefix_max = max(prefix_max, seq)
+                if seq > threshold:
+                    events.append(parsed)
+                if extend:
+                    idx["rows"] += 1
+                    if idx["rows"] % _AFTER_SEQ_INDEX_STRIDE == 0:
+                        idx["maxes"].append(prefix_max)
+                        idx["offs"].append(line_end)
+                        idx["lines"].append(line_no)
+            else:
+                malformed.append({"line": line_no, "raw": raw})
+                if extend:
+                    idx["malformed"].append(malformed[-1])
+        if extend:
+            idx["size"] = line_end
+        off = line_end
+    if archived is not None and os.path.lexists(archived):
+        return None
+    with _after_seq_index_lock:
+        _after_seq_index[key] = idx
+        while len(_after_seq_index) > _AFTER_SEQ_INDEX_MAX_PATHS:
+            _after_seq_index.popitem(last=False)
     return events, malformed
 
 
@@ -1667,7 +1757,8 @@ def read_run_events(
     if validated_recovery:
         events, malformed = _read_validated_recovery_events(path, str(session_id), str(run_id))
     else:
-        events, malformed = _read_jsonl(path)
+        indexed = _read_jsonl_after_seq_indexed(path, after_seq) if after_seq is not None else None
+        events, malformed = indexed if indexed is not None else _read_jsonl(path)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
