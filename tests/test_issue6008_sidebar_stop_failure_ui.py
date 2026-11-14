@@ -13,7 +13,6 @@ UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 def _extract_function(src: str, name: str) -> str:
@@ -169,10 +168,9 @@ def test_failed_sidebar_stop_keeps_local_state():
 
 def test_primary_composer_stop_renders_localized_error_and_preserves_success():
     cancel_key = "cancel_" + "failed"
-    english = re.search(rf"{cancel_key}:\s*'((?:\\'|[^'])*)'", I18N_JS)
-    japanese = re.search(
-        rf"{cancel_key}:\s*'((?:\\'|[^'])*)'", I18N_JS[I18N_JS.index("ja:"):]
-    )
+    pattern = rf"{cancel_key}:\s*'((?:\\'|[^'])*)'"
+    english, japanese = (re.search(pattern, (REPO / 'static' / 'i18n' / (locale + '.js')).read_text(encoding='utf-8'))
+                         for locale in ('en', 'ja'))
     assert english and japanese
     english_message = english.group(1).replace("\\'", "'")
     japanese_message = japanese.group(1).replace("\\'", "'")
