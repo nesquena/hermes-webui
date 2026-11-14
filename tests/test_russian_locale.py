@@ -10,6 +10,10 @@ REPO = Path(__file__).resolve().parent.parent
 PROFILE_CONCEPT_FALLBACK_KEYS = {
     "workspace_artifact_source_session",
     *scripts_fallback_keys('ru'),
+    "composer_action_interrupt",
+    "composer_action_queue",
+    "composer_action_steer",
+    "composer_action_stop",
 }
 
 
