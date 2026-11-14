@@ -28,7 +28,15 @@ test('US-SP-GROUP-001 selecting named colleague stages participants and persists
 test.describe('voice policy prerequisite',()=>{
 test.use({user:'voicedenied'});
 test('US-SP-VOICE-001 voice policy denial explains prerequisite without hanging',async({page})=>{
- await open(page);await session(page);await page.locator('#btnRealtimeVoice').click();await expect(page.getByText('Voice mode is not enabled. Ask an administrator to enable speech.',{exact:false})).toBeVisible();
+ await open(page); const sid=await session(page);
+ const capability=await api(page,'/api/voice/realtime/capability');
+ expect(capability.status).toBe(200); expect(capability.body.available).toBe(false);
+ expect(capability.body.help).toMatch(/administrator.*speech/i);
+ const calls:string[]=[]; page.on('request',r=>{if(r.url().endsWith('/api/voice/realtime/call')) calls.push(r.method());});
+ await page.locator('#btnRealtimeVoice').click();
+ await expect(page.getByText(capability.body.help,{exact:true})).toBeVisible();
+ expect(calls).toEqual([]);
+ expect((await api(page,'/api/voice/realtime/call',{session_id:sid,sdp:'v=0'})).status).toBe(403);
 });
 });
 test('US-SP-CHAT-ROSTER bot roster hides and shows through its real toggle',async({page})=>{

@@ -2101,6 +2101,7 @@ function _currentSessionIsReusableEmptyChat(){
 
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{
+  if(document.querySelector('main.main.showing-conversations')) await switchPanel('chat');
   // If the current session has no messages AND nothing is in flight, just focus
   // the composer rather than creating another empty session that will clutter the
   // sidebar list (#1171).
@@ -2519,6 +2520,7 @@ document.addEventListener('keydown',async e=>{
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
     // and bug #1432 for why the in-flight check is needed.
+    if(document.querySelector('main.main.showing-conversations')) await switchPanel('chat');
     if(_currentSessionIsReusableEmptyChat()){
       $('msg').focus();return;
     }
@@ -2631,7 +2633,22 @@ $('msg').addEventListener('paste',e=>{
   _attachLargePastedText(pastedTextFile);
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
-  btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
+  btn.onclick=()=>{
+    const composer=$('msg');
+    if(!composer||composer.disabled||composer.readOnly) return;
+    const key=btn.dataset.promptI18n;
+    const translated=key&&typeof t==='function'?t(key):'';
+    const prompt=(translated&&translated!==key?translated:btn.dataset.msg||'').trim();
+    if(!prompt) return;
+    // A starter prepares a draft. The normal input path owns resizing,
+    // persistence and Send state; it must not replace text or start a run.
+    if(!composer.value.trimEnd().endsWith(prompt)){
+      composer.value+=(composer.value.trim()?'\n\n':'')+prompt;
+      composer.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+    composer.focus();
+    composer.setSelectionRange(composer.value.length,composer.value.length);
+  };
 });
 
 function applyEmptyStateSuggestionPref(){

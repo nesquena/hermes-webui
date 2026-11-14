@@ -1,0 +1,235 @@
+{
+  "runs": [
+    {
+      "label": "voice-steps-before-e2e",
+      "run_id": "20261114-185546-198661321",
+      "exit_code": 1,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "VOICE WORKSPACE stage keeps the call and draft while minimizing, translating and resizing",
+          "statuses": [
+            "failed"
+          ]
+        },
+        {
+          "title": "WORK STEPS actual actions stay numbered and counted after reload without opening detail",
+          "statuses": [
+            "failed"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "voice-steps-first-e2e",
+      "run_id": "20261114-185927-916230160",
+      "exit_code": 1,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "US-SP-VOICE-REALTIME-TURNS native speech answers two turns without submitting chat or replacing draft",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "US-SP-VOICE-REALTIME-BACKGROUND native dispatch performs real file write once and preserves ongoing conversation",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "US-SP-VOICE-REALTIME-END ending call leaves a real engine task running to completion",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "VOICE WORKSPACE stage keeps the call and draft while minimizing, translating and resizing",
+          "statuses": [
+            "failed"
+          ]
+        },
+        {
+          "title": "US-SP-VOICE-REALTIME-CONTROLS microphone, push to talk, interruption and session change release capture correctly",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "US-SP-VOICE-REALTIME-MIC-DENIED microphone refusal fails without creating a provider call",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "US-SP-VOICE-REALTIME-REMOTE-END removed server call stops browser microphone capture",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "US-SP-VOICE-REALTIME-LAUNCH-RACE canceled capability response cannot release a newer pending launch",
+          "statuses": [
+            "failed"
+          ]
+        },
+        {
+          "title": "WORK STEPS actual actions stay numbered and counted after reload without opening detail",
+          "statuses": [
+            "passed"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "voice-steps-proof-e2e",
+      "run_id": "20261114-190230-839154010",
+      "exit_code": 1,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "US-SP-VOICE-REALTIME-ONCE governed native action waits for exact child approval while voice stays open",
+          "statuses": [
+            "failed"
+          ]
+        },
+        {
+          "title": "VOICE WORKSPACE stage keeps the call and draft while minimizing, translating and resizing",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "US-SP-CHAT-TOOL-STATUS successful writes and reads of error-looking content remain successful after reload",
+          "statuses": [
+            "failed"
+          ]
+        },
+        {
+          "title": "WORK STEPS actual actions stay numbered and counted after reload without opening detail",
+          "statuses": [
+            "passed"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "voice-steps-final-e2e",
+      "run_id": "20261114-190433-910459223",
+      "exit_code": 0,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "US-SP-VOICE-REALTIME-LAUNCH-RACE canceled coalesced capability reads cannot start microphone capture",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "US-SP-CHAT-TOOL-STATUS successful writes and reads of error-looking content remain successful after reload",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "WORK STEPS actual actions stay numbered and counted after reload without opening detail",
+          "statuses": [
+            "passed"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "voice-steps-delivery-e2e",
+      "run_id": "20261114-190607-423417970",
+      "exit_code": 0,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "VOICE WORKSPACE stage keeps the call and draft while minimizing, translating and resizing",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "US-SP-CHAT-TOOL-STATUS successful writes and reads of error-looking content remain successful after reload",
+          "statuses": [
+            "passed"
+          ]
+        },
+        {
+          "title": "WORK STEPS actual actions stay numbered and counted after reload without opening detail",
+          "statuses": [
+            "passed"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "voice-steps-cache-e2e",
+      "run_id": "20261114-190746-728961327",
+      "exit_code": 1,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "WORK STEPS actual actions stay numbered and counted after reload without opening detail",
+          "statuses": [
+            "failed"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "voice-steps-layout-e2e",
+      "run_id": "20261114-190908-224391926",
+      "exit_code": 0,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "WORK STEPS actual actions stay numbered and counted after reload without opening detail",
+          "statuses": [
+            "passed"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "voice-launch-baseline-e2e",
+      "run_id": "20261114-190201-135698156",
+      "exit_code": 1,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "US-SP-VOICE-REALTIME-LAUNCH-RACE canceled capability response cannot release a newer pending launch",
+          "statuses": [
+            "failed"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "voice-approval-baseline-e2e",
+      "run_id": "20261114-190434-85507666",
+      "exit_code": 1,
+      "source_unchanged": true,
+      "cases": [
+        {
+          "title": "US-SP-VOICE-REALTIME-ONCE governed native action waits for exact child approval while voice stays open",
+          "statuses": [
+            "failed"
+          ]
+        }
+      ]
+    }
+  ],
+  "python": {
+    "passed": 50,
+    "failed": 1,
+    "baseline_failure": "test_anchor_scene_hydration_seals_unmatched_live_running_activity_rows"
+  },
+  "voice_minimum_contrast": {
+    "light": 5.252840515331377,
+    "dark": 5.893639442297708
+  }
+}

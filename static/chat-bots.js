@@ -504,6 +504,7 @@
     if (!bar) { bar = document.createElement('div'); bar.id = 'chatBotRoster'; bar.className = 'chat-bot-roster'; host.prepend(bar); }
     bar.replaceChildren();
     const toggle = document.createElement('button'); toggle.type = 'button'; toggle.id = 'chatBotRosterToggle'; toggle.className = 'chat-bot-recipient chat-bot-toggle';
+    toggle.dataset.i18n = collapsed() ? 'chat_roster_show' : 'chat_roster_hide';
     toggle.textContent = collapsed() ? tx('chat_roster_show', 'Show bots') : tx('chat_roster_hide', 'Hide bots'); toggle.setAttribute('aria-expanded',String(!collapsed())); toggle.setAttribute('aria-controls','chatBotRosterItems');
     toggle.onclick = () => { try { if (preferenceKey()) localStorage.setItem(preferenceKey(), collapsed() ? '0' : '1'); } catch (_) {} paint(); document.getElementById('chatBotRosterToggle').focus(); };
     bar.appendChild(toggle);

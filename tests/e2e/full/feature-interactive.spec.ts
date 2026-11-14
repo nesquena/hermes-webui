@@ -52,9 +52,10 @@ test('every catalogue feature has complete interactive NL/EN content, including 
    }
    window.SynthPulseHelp.closeAll();
   }
-  return {count:ids.length,failures,clean:!document.querySelector('.guida-tooltip,#spFeatureTourAnchor,[data-sp-help-step]')};
+  const inventory=[...window.SynthPulseFeatureCatalog.features,...window.SynthPulseMspFeatureCatalog.features].map(f=>f.id);
+  return {ids:ids.sort(),inventory:inventory.sort(),failures,clean:!document.querySelector('.guida-tooltip,#spFeatureTourAnchor,[data-sp-help-step]')};
  });
- expect(report.count).toBe(510);expect(report.failures).toEqual([]);expect(report.clean).toBe(true);
+ expect(report.inventory.length).toBeGreaterThanOrEqual(510);expect(report.ids).toEqual(report.inventory);expect(report.failures).toEqual([]);expect(report.clean).toBe(true);
 });
 
 test('catalogue opens an individual or filtered tour and preserves language and selection',async({page})=>{

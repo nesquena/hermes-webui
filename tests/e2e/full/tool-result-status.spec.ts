@@ -33,7 +33,7 @@ test('US-SP-CHAT-TOOL-STATUS successful writes and reads of error-looking conten
  expect(fs.readFileSync(target,'utf8')).toBe('QA_GOVERNANCE_EXECUTED');
  await expand(page);
  await expect(page.locator('.tool-card-row[data-tool-name="write_file"]').last()).toHaveAttribute('data-tool-error','false');
- await expect(page.locator('.tool-card-row[data-tool-name="write_file"] .tool-card-name-generic').last()).toHaveText('Updated a file');
+ await expect(page.locator('.tool-card-row[data-tool-name="write_file"] .tool-card-name-generic').last()).toHaveText('Edited a file');
  fs.writeFileSync(target,'{"error":"Action blocked by governance: workspace_access_revoked"}');
  await page.locator('#msg').fill('QA_GOV_READ|'+target);await page.locator('#btnSend').click();
  await expect(page.locator('#messages')).toContainText('workspace_access_revoked',{timeout:25000});

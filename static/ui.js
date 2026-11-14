@@ -454,6 +454,12 @@ function getQueuedSessionCount(sid){
 // once), failed → keep visible as 'failed', busy-conflict → revert to 'queued'
 // IN PLACE (order preserved; the old path re-queued at the back).
 let _drainingQueueEntry=null;
+let _queueWaitingForSendSid=null;
+function _resumeQueueAfterSend(){
+  const sid=_queueWaitingForSendSid;
+  _queueWaitingForSendSid=null;
+  if(sid&&!S.busy&&S.session&&S.session.session_id===sid) drainQueuedSessionMessage(sid);
+}
 // One pending re-check timer while a foreign claim blocks this tab's drain
 // (D3 recovery: pick the entry up after the claiming tab dies).
 let _queueDrainRetryTimer=null;
@@ -7123,7 +7129,8 @@ function _activityElapsedLabel(group){
 function _friendlyProcessedLine(group, durationText, live){
   const api=typeof window!=='undefined'&&window._friendlyToolRows!==false?window.SynPulseFriendlyTools:null;
   if(!api||typeof api.processedLine!=='function') return '';
-  const steps=group&&group.querySelectorAll?group.querySelectorAll('.tool-card-row').length:0;
+  const separateOverview=group&&group.hasAttribute('data-anchor-scene-owner')&&typeof window.syncWorkStepOverview==='function';
+  const steps=!separateOverview&&group&&group.querySelectorAll?group.querySelectorAll('.tool-card-row').length:0;
   return api.processedLine({live:!!live,duration:durationText,steps});
 }
 function _activityProcessedElapsedLabel(group){
@@ -9016,7 +9023,17 @@ function drainQueuedSessionMessage(sid){
     // wrong chat. Revert it to 'queued' IN PLACE (order preserved) and
     // skip sending; it will drain when the user returns to that session
     // or when its next stream completes while it is the active view.
-    if(S.session&&S.session.session_id!==sid){
+    // A terminal event can reload this same chat in the settle window. send()
+    // rejects during hydration; leave the item queued for loadSession to drain.
+    if((S.session&&S.session.session_id!==sid)||(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)){
+      _setQueueEntryState(sid,next._qid,'queued');
+      updateQueueBadge(sid);
+      return;
+    }
+    // The cancel SSE can finish before the interrupt command's HTTP response.
+    // Keep this exact entry until the previous send has released the composer.
+    if(typeof _sendInProgress!=='undefined'&&_sendInProgress){
+      _queueWaitingForSendSid=sid;
       _setQueueEntryState(sid,next._qid,'queued');
       updateQueueBadge(sid);
       return;
@@ -13469,7 +13486,7 @@ function _anchorSceneToolCallFromRow(row, opts){
   // A settled anchor may predate the durable error result. Reconcile by the
   // exact call ID; the preview is display text and is never parsed as a failure.
   const historyErrors=settled&&typeof S!=='undefined'&&Array.isArray(S.messages)
-    ? _toolResultErrorsByTid(S.messages):{};
+    ? ((opts&&opts.historyErrors)||_toolResultErrorsByTid(S.messages)):{};
   return {
     name:tool.name||payload.name||'tool',
     args:(tool.args&&typeof tool.args==='object')?tool.args:((payload.args&&typeof payload.args==='object')?payload.args:{}),
@@ -13745,6 +13762,7 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   if(wrote){
     _syncToolCallGroupSummary(group);
   }
+  if(typeof window.syncWorkStepOverview==='function')window.syncWorkStepOverview(group,rows,opts);
   return wrote;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
@@ -14750,6 +14768,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
     const list=_toolWorklogListEl(group);
     if(list) list.innerHTML='';
     _syncToolCallGroupSummary(group);
+    if(typeof window.syncWorkStepOverview==='function')window.syncWorkStepOverview(group,rows,{settled:true});
     return true;
   }
   group._deferredWorklogRows=null;
@@ -19105,7 +19124,10 @@ function _syncToolRowsContainer(tools, isLiveWorklog){
   _unwrapNestedToolGroups(tools);
   rows.forEach(row=>{ if(row.parentElement) row.remove(); });
   tools.querySelectorAll(':scope > .tool-card-row').forEach(row=>row.remove());
-  const shouldGroup=tools.classList.contains('wl-step-tools') && rows.length>1;
+  // The canonical step overview already has one disclosure for the turn.
+  // Keep its numbered actions directly readable instead of nesting another fold.
+  const stepOverview=typeof window.syncWorkStepOverview==='function'&&tools.closest('[data-anchor-scene-owner="1"]');
+  const shouldGroup=!stepOverview && tools.classList.contains('wl-step-tools') && rows.length>1;
   if(!shouldGroup){
     rows.forEach(row=>tools.appendChild(row));
     return;

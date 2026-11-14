@@ -117,8 +117,10 @@ class TestSSEStaticAnalysis:
             "_approval_notify_cb must mirror approval data into polling state before SSE"
         assert '"pending_count": total' in cb_body, \
             "_approval_notify_cb must emit the reconciled pending count"
-        assert "put('approval', approval_data)" in cb_body, \
-            "_approval_notify_cb must still emit the approval SSE event"
+        assert 'event_data = {**head, "pending_count": total}' in cb_body, \
+            "_approval_notify_cb must send the reconciled head's approval_id"
+        assert "put('approval', event_data)" in cb_body, \
+            "_approval_notify_cb must emit the reconciled approval SSE event"
 
     def test_unsubscribe_in_finally(self):
         """SSE handler must unsubscribe in a finally block."""

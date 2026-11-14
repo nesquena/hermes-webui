@@ -1,0 +1,324 @@
+{
+  "scope": "Herm-inspired chat presentation and draft starters",
+  "product_baseline": "c12df1b6137d5ebe44f54fe819d63a21190193de",
+  "synthetic_state": true,
+  "deployed": false,
+  "runs": {
+    "before_starter": {
+      "run": "20261114-183406-974014690",
+      "exit_code": 1,
+      "stats": {
+        "startTime": "2026-11-14T17:34:12.926Z",
+        "duration": 20670.658,
+        "expected": 0,
+        "skipped": 0,
+        "unexpected": 1,
+        "flaky": 0
+      },
+      "source_unchanged": true,
+      "webui_source_sha256": "101fcc316f99373f8368ad785a07c9329fd4e22f459160b3649dfde23460445c",
+      "engine_head": "b1ce60881854c6033e74c9f0ddf975ea198fefda"
+    },
+    "first": {
+      "run": "20261114-183609-530723345",
+      "exit_code": 1,
+      "stats": {
+        "startTime": "2026-11-14T17:36:15.511Z",
+        "duration": 49710.511,
+        "expected": 7,
+        "skipped": 0,
+        "unexpected": 1,
+        "flaky": 0
+      },
+      "source_unchanged": true,
+      "webui_source_sha256": "d3c26ae779f9f9dcb459ff13d8f7152373389a470466f413fa84a3de2c22a03e",
+      "engine_head": "b1ce60881854c6033e74c9f0ddf975ea198fefda"
+    },
+    "focused": {
+      "run": "20261114-184147-368366932",
+      "exit_code": 0,
+      "stats": {
+        "startTime": "2026-11-14T17:41:53.207Z",
+        "duration": 34791.587,
+        "expected": 5,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "source_unchanged": true,
+      "webui_source_sha256": "83e5c60070476fc9550afc91fa0308b80b44be757032b5433c22cac2ac91de0f",
+      "engine_head": "b1ce60881854c6033e74c9f0ddf975ea198fefda"
+    },
+    "localized_reload": {
+      "run": "20261114-184516-319327538",
+      "exit_code": 0,
+      "stats": {
+        "startTime": "2026-11-14T17:45:22.367Z",
+        "duration": 20553.640000000003,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "source_unchanged": true,
+      "webui_source_sha256": "7fd515b6021f83de22695c56c6d985a7c18cb872e19f28cc656e21a0b019ad2c",
+      "engine_head": "b1ce60881854c6033e74c9f0ddf975ea198fefda"
+    },
+    "previous_commit": {
+      "run": "20261114-184240-996414069",
+      "exit_code": 1,
+      "stats": {
+        "startTime": "2026-11-14T17:42:48.070Z",
+        "duration": 42475.46,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 1,
+        "flaky": 0
+      },
+      "source_unchanged": true,
+      "webui_source_sha256": "c3db1650ed0a60be972f0119a52d7b45e9c055e5e43ea0f15ad24e983631c134",
+      "engine_head": "b1ce60881854c6033e74c9f0ddf975ea198fefda"
+    }
+  },
+  "contrast": [
+    [
+      {
+        "dark": false,
+        "readings": [
+          {
+            "selector": "#emptyState p",
+            "fg": [
+              98,
+              109,
+              124
+            ],
+            "bg": [
+              255,
+              255,
+              255
+            ],
+            "opacity": 1,
+            "ratio": 5.252840515331377
+          },
+          {
+            "selector": ".suggestion",
+            "fg": [
+              98,
+              109,
+              124
+            ],
+            "bg": [
+              255,
+              255,
+              255
+            ],
+            "opacity": 1,
+            "ratio": 5.252840515331377
+          },
+          {
+            "selector": "#msg",
+            "fg": [
+              98,
+              109,
+              124
+            ],
+            "bg": [
+              255,
+              255,
+              255
+            ],
+            "opacity": 1,
+            "ratio": 5.252840515331377
+          },
+          {
+            "selector": ".chat-bot-toggle",
+            "fg": [
+              98,
+              109,
+              124
+            ],
+            "bg": [
+              255,
+              255,
+              255
+            ],
+            "opacity": 1,
+            "ratio": 5.252840515331377
+          }
+        ]
+      },
+      {
+        "dark": true,
+        "readings": [
+          {
+            "selector": "#emptyState p",
+            "fg": [
+              163,
+              170,
+              182
+            ],
+            "bg": [
+              43,
+              45,
+              50
+            ],
+            "opacity": 1,
+            "ratio": 5.893639442297708
+          },
+          {
+            "selector": ".suggestion",
+            "fg": [
+              163,
+              170,
+              182
+            ],
+            "bg": [
+              43,
+              45,
+              50
+            ],
+            "opacity": 1,
+            "ratio": 5.893639442297708
+          },
+          {
+            "selector": "#msg",
+            "fg": [
+              163,
+              170,
+              182
+            ],
+            "bg": [
+              48,
+              50,
+              56
+            ],
+            "opacity": 1,
+            "ratio": 5.480512123770629
+          },
+          {
+            "selector": ".chat-bot-toggle",
+            "fg": [
+              163,
+              170,
+              182
+            ],
+            "bg": [
+              43,
+              45,
+              50
+            ],
+            "opacity": 1,
+            "ratio": 5.893639442297708
+          }
+        ]
+      }
+    ],
+    [
+      {
+        "dark": false,
+        "readings": [
+          {
+            "selector": ".msg-row[data-role=\"assistant\"] .msg-body",
+            "fg": [
+              41,
+              51,
+              64
+            ],
+            "bg": [
+              255,
+              255,
+              255
+            ],
+            "opacity": 1,
+            "ratio": 12.79047287959218
+          },
+          {
+            "selector": ".msg-body td",
+            "fg": [
+              41,
+              51,
+              64
+            ],
+            "bg": [
+              255,
+              255,
+              255
+            ],
+            "opacity": 1,
+            "ratio": 12.79047287959218
+          },
+          {
+            "selector": ".msg-role-name",
+            "fg": [
+              98,
+              109,
+              124
+            ],
+            "bg": [
+              255,
+              255,
+              255
+            ],
+            "opacity": 1,
+            "ratio": 5.252840515331377
+          }
+        ]
+      },
+      {
+        "dark": true,
+        "readings": [
+          {
+            "selector": ".msg-row[data-role=\"assistant\"] .msg-body",
+            "fg": [
+              225,
+              228,
+              234
+            ],
+            "bg": [
+              43,
+              45,
+              50
+            ],
+            "opacity": 1,
+            "ratio": 10.817297643049821
+          },
+          {
+            "selector": ".msg-body td",
+            "fg": [
+              225,
+              228,
+              234
+            ],
+            "bg": [
+              43,
+              45,
+              50
+            ],
+            "opacity": 1,
+            "ratio": 10.817297643049821
+          },
+          {
+            "selector": ".msg-role-name",
+            "fg": [
+              163,
+              170,
+              182
+            ],
+            "bg": [
+              43,
+              45,
+              50
+            ],
+            "opacity": 1,
+            "ratio": 5.893639442297708
+          }
+        ]
+      }
+    ]
+  ],
+  "python": {
+    "passed": 20,
+    "baseline_failure": "test_hide_welcome_panel_copy_covers_every_locale expects inline locale catalogs; same failure on 48891f169"
+  },
+  "browser_baseline_failure": "US-SP-POL-RUNTIME-manualdeny does not show pending approval, reproduced at c12df1b61; approval surface unchanged in final implementation."
+}

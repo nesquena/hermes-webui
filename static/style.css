@@ -3083,8 +3083,6 @@
   .composer-footer.cf-icons .composer-people-label,
   .composer-footer.cf-icons #composerPeopleLabel{display:none;}
   .composer-footer.cf-icons .composer-people-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;}
-  .composer-footer.cf-icons #btnSavedPrompts,
-  .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}
 
   .composer-footer.cf-burger .composer-left{gap:8px;}
@@ -5002,7 +5000,7 @@ main.main > #mainGovernance,
 main.main > #mainProjects,
 main.main > #mainApprovals,
 main.main > #mainIntegrations{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-governance):not(.showing-integrations):not(.showing-projects):not(.showing-plugin):not(.showing-approvals) > #mainChat{display:flex;}
+main.main:not(.showing-conversations):not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-governance):not(.showing-integrations):not(.showing-projects):not(.showing-plugin):not(.showing-approvals) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
@@ -6558,6 +6556,14 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .rightpanel[data-active-tab="screens"] :is(.breadcrumb-bar,.file-tree,#wsEmptyState,.preview-area,.workspace-artifacts,.workspace-todos,.git-badge,.workspace-hidden-indicator){display:none!important;}
 .rightpanel[data-active-tab="screens"] .panel-actions>button:not(#btnClearPreview){display:none!important;}
 .workspace-artifacts{flex:1;overflow:auto;padding:8px;}
+.workspace-artifact-controls{display:none;flex-direction:column;gap:8px;padding:12px 10px 4px;}
+.rightpanel[data-active-tab="artifacts"] .workspace-artifact-controls{display:flex;}
+.workspace-artifact-controls input,.workspace-artifact-controls select{min-width:0;width:100%;box-sizing:border-box;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px;font:inherit;font-size:12px;}
+.workspace-artifact-filter-row{display:flex;gap:6px;}
+.workspace-artifact-filter-row .sm-btn{flex:0 0 auto;min-width:52px;}
+.workspace-artifact-controls input,.workspace-artifact-controls select,.workspace-artifact-controls button{min-height:40px;}
+.workspace-artifact-controls p{margin:0;color:var(--muted);font-size:11px;line-height:1.5;}
+.workspace-artifact-controls :focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
 .workspace-artifact-empty{padding:16px 8px;color:var(--muted);font-size:12px;line-height:1.5;text-align:center;}
 .workspace-artifact-item{display:block;width:100%;text-align:left;background:var(--surface-subtle);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;cursor:pointer;}
 .workspace-artifact-item:hover{border-color:var(--accent);}

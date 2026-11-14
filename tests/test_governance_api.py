@@ -157,6 +157,8 @@ def test_me_shape_admin(policy_file, as_user):
     handled, handler = _call("/api/governance/me")
     assert handled is True and handler.status == 200
     me = handler.body
+    assert me["workspace_navigation"]["kind"] == "admin"
+    assert me["workspace_navigation"]["secondary"] == []
     assert me["email"] == "admin@example.test"
     assert me["mode"] == "report_only"
     assert me["is_bootstrap_admin"] is False
@@ -167,7 +169,7 @@ def test_me_shape_admin(policy_file, as_user):
         "roles", "groups", "permissions", "profiles",
         # Left-navigation items this caller may not see, derived from the same
         # permissions that gate the panels' APIs (27 Aug 2026 ticket).
-        "hidden_nav", "nav_audience",
+        "hidden_nav", "nav_audience", "workspace_navigation", "feature_permissions", "delegated_scope",
         "access_level", "access_mode", "approval_mode", "can_chat", "effective_access",
     }
 

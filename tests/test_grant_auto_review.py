@@ -125,3 +125,203 @@ def test_schedule_pings_administrators_only_when_the_row_stays(env, monkeypatch)
     entry2 = env.request("yq")
     grant_auto_review.schedule(entry2, on_manual=on_manual)
     assert done.wait(5) and pinged == [entry2["key"]]
+
+
+@pytest.mark.parametrize("decision", ["approve", "deny"])
+@pytest.mark.parametrize("change", ["manual", "prompt", "removed", "disabled"])
+def test_policy_change_during_model_review_leaves_request_pending(env, monkeypatch, decision, change):
+    original = _raw()
+    original["users"][ME]["access_mode"] = "whitelist"
+    original["users"][ME]["grants"] = {}
+    env.write(original)
+    entry = env.request("jq")
+
+    def changed_policy(_access, _request):
+        if change == "manual":
+            original["users"][ME]["approval"] = {"mode": "manual"}
+        elif change == "prompt":
+            original["users"][ME]["approval"]["prompt"] = "Require a human for all new capabilities."
+        elif change == "removed":
+            original["users"][ME].pop("approval")
+        else:
+            original["mode"] = "off"
+        env.write(original)
+        return {"decision": decision, "reason": "old rules allowed a decision", "confidence": 1.0}
+
+    monkeypatch.setattr(grant_auto_review, "_ask_model", changed_policy)
+    review = grant_auto_review.auto_review_entry(entry)
+    assert review["decided"] is False
+    assert review["decision"] == "manual"
+    assert approvals.get(approvals.KIND_GRANT, entry["key"])["status"] == "pending"
+    assert "jq" not in _policy_cli(env.tmp)
+
+
+def test_replaced_request_during_review_cannot_inherit_old_verdict(env, monkeypatch):
+    entry = env.request("jq")
+
+    def replace_request(_access, _request):
+        approvals.remove(approvals.KIND_GRANT, entry["key"])
+        approvals.request(approvals.KIND_GRANT, entry["key"], ME,
+                          payload={"email": ME, "gkind": "cli", "value": "yq"})
+        return {"decision": "approve", "reason": "jq was reviewed", "confidence": 1.0}
+
+    monkeypatch.setattr(grant_auto_review, "_ask_model", replace_request)
+    review = grant_auto_review.auto_review_entry(entry)
+    assert review["decided"] is False
+    stored = approvals.get(approvals.KIND_GRANT, entry["key"])
+    assert stored["status"] == "pending"
+    assert "auto_review" not in stored["payload"]
+    assert "jq" not in _policy_cli(env.tmp) and "yq" not in _policy_cli(env.tmp)
+
+
+@pytest.mark.parametrize("first", ["approve", "reject"])
+def test_concurrent_opposite_decisions_commit_only_one_outcome(env, monkeypatch, first):
+    from concurrent.futures import ThreadPoolExecutor
+    from api import governance_api
+    from api.governance.models import GovernanceSubject
+
+    raw = _raw()
+    raw["users"][ME]["access_mode"] = "whitelist"
+    raw["users"][ME]["grants"] = {}
+    env.write(raw)
+    entry = env.request("jq")
+    first_at_write, release_first = threading.Event(), threading.Event()
+    second_started, second_done = threading.Event(), threading.Event()
+    saved_policy = governance_api.save_governance_policy
+    saved_decide = approvals.decide
+
+    def pause_first():
+        first_at_write.set()
+        assert release_first.wait(5), "test must release first decision"
+
+    def save_policy(data):
+        if first == "approve":
+            pause_first()
+        return saved_policy(data)
+
+    def save_decision(kind, key, decision, *args, **kwargs):
+        if first == "reject" and decision == "reject":
+            pause_first()
+        return saved_decide(kind, key, decision, *args, **kwargs)
+
+    monkeypatch.setattr(governance_api, "save_governance_policy", save_policy)
+    monkeypatch.setattr(approvals, "decide", save_decision)
+    subject = GovernanceSubject(email="michael@example.test")
+
+    def decide(choice, second=False):
+        if second:
+            second_started.set()
+        try:
+            return governance_api.decide_grant_request(entry["key"], choice, subject)
+        finally:
+            if second:
+                second_done.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        leading = pool.submit(decide, first)
+        try:
+            assert first_at_write.wait(5)
+            trailing = pool.submit(decide, "reject" if first == "approve" else "approve", True)
+            assert second_started.wait(5)
+            second_done.wait(.3)
+        finally:
+            release_first.set()
+        first_result, second_result = leading.result(5), trailing.result(5)
+    assert first_result[0] == 200
+    assert second_result[0] == 409
+    assert approvals.get(approvals.KIND_GRANT, entry["key"])["status"] == (
+        "approved" if first == "approve" else "rejected")
+    assert ("jq" in _policy_cli(env.tmp)) is (first == "approve")
+
+
+def test_manual_rejection_during_model_wait_cannot_be_overwritten(env, monkeypatch):
+    from api import governance_api
+    from api.governance.models import GovernanceSubject
+    entry = env.request("jq")
+
+    def reject_while_waiting(_access, _request):
+        status, _ = governance_api.decide_grant_request(
+            entry["key"], "reject", GovernanceSubject(email="michael@example.test"), "Human decision")
+        assert status == 200
+        return {"decision": "approve", "reason": "late automatic result", "confidence": 1.0}
+
+    monkeypatch.setattr(grant_auto_review, "_ask_model", reject_while_waiting)
+    review = grant_auto_review.auto_review_entry(entry)
+    assert review["decided"] is False
+    stored = approvals.get(approvals.KIND_GRANT, entry["key"])
+    assert stored["status"] == "rejected" and stored["reason"] == "Human decision"
+    assert "jq" not in _policy_cli(env.tmp)
+
+
+def test_failed_registry_write_rolls_back_grant_and_does_not_resume(env, monkeypatch):
+    from api import governance_api, approval_resume
+    from api.governance.models import GovernanceSubject
+    raw = _raw()
+    raw["users"][ME]["access_mode"] = "whitelist"
+    raw["users"][ME]["grants"] = {}
+    env.write(raw)
+    entry = env.request("jq")
+
+    def unavailable_registry(_registry):
+        raise OSError("Synthetic registry write failure")
+
+    monkeypatch.setattr(approvals, "save", unavailable_registry)
+    monkeypatch.setattr(approval_resume, "decide", lambda *a: pytest.fail("failed decision must not resume work"))
+    status, _ = governance_api.decide_grant_request(
+        entry["key"], "approve", GovernanceSubject(email="michael@example.test"))
+    assert status == 500
+    assert approvals.get(approvals.KIND_GRANT, entry["key"])["status"] == "pending"
+    assert "jq" not in _policy_cli(env.tmp)
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_automatic_decision_requires_captured_revisions(env, decision):
+    from api import governance_api
+    from api.governance.models import GovernanceSubject
+    entry = env.request("jq")
+    status, out = governance_api.decide_grant_request(
+        entry["key"], decision, GovernanceSubject(email=grant_auto_review.REVIEWER_EMAIL), source="automatic")
+    assert status == 409 and out["error"] == "stale_review"
+    assert approvals.get(approvals.KIND_GRANT, entry["key"])["status"] == "pending"
+    assert "jq" not in _policy_cli(env.tmp)
+
+
+@pytest.mark.parametrize("change", ["unchanged", "trigger", "count", "new_key"])
+def test_ingest_keeps_manual_review_only_for_the_same_request(env, monkeypatch, change):
+    from copy import deepcopy
+    from api import grant_requests
+    key = f"{ME}|cli|jq"
+    item = {"email": ME, "gkind": "cli", "value": "jq", "reason": "cli_command_not_allowed",
+            "tool": "terminal", "detail": "jq", "trigger": "parse the json export", "count": 1,
+            "first_seen": 1234.5}
+    spool = {key: item}
+    monkeypatch.setattr(grant_requests, "_load_spool", lambda: spool)
+    # Drive review explicitly so both ingest passes have deterministic timing.
+    monkeypatch.setattr(grant_auto_review, "schedule", lambda *a, **kw: None)
+    _verdict(monkeypatch, "manual")
+    assert grant_requests.ingest_spool() == 1
+    entry = approvals.get(approvals.KIND_GRANT, key)
+    revision = approvals.request_revision(entry)
+    review = grant_auto_review.auto_review_entry(entry)
+    assert review["decision"] == "manual" and review["decided"] is False
+
+    if change == "trigger":
+        item["trigger"] = "inspect a different private export"
+    elif change == "count":
+        item["count"] = 2
+    elif change == "new_key":
+        next_key = f"{ME}|cli|yq"
+        spool[next_key] = {**deepcopy(item), "value": "yq", "detail": "yq"}
+
+    assert grant_requests.ingest_spool() == (2 if change == "new_key" else 1)
+    stored = approvals.get(approvals.KIND_GRANT, key)
+    if change in {"unchanged", "new_key"}:
+        assert approvals.request_revision(stored) == revision
+        assert stored["payload"].get("auto_review") == review
+    else:
+        assert approvals.request_revision(stored) != revision
+        assert "auto_review" not in stored["payload"]
+    if change == "new_key":
+        added = approvals.get(approvals.KIND_GRANT, next_key)
+        assert approvals.request_revision(added) != revision
+        assert "auto_review" not in added["payload"]

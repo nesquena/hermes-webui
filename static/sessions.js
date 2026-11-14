@@ -2500,10 +2500,7 @@ async function loadSession(sid){
     // persisted copy, silently losing every other queued message on refresh.
     if(typeof restoreSessionQueueFromStorage==='function'){
       try{
-        const _restoredCount=restoreSessionQueueFromStorage(sid,S.messages,S.session);
-        // Idle session: nothing will call setBusy(false) to drain, so kick the
-        // drain now (it no-ops when the session is busy or the queue is empty).
-        if(_restoredCount&&typeof drainQueuedSessionMessage==='function') drainQueuedSessionMessage(sid);
+        restoreSessionQueueFromStorage(sid,S.messages,S.session);
       }catch(_){/* storage may be blocked (private browsing); keep the queue untouched */}
     }
 
@@ -2632,6 +2629,9 @@ async function loadSession(sid){
     );
   }
 
+  // The composer now belongs to this session. Retry any queue entry whose
+  // claim was released while a cancelled turn's transcript was loading.
+  if(!_loadingSessionId&&S.session&&S.session.session_id===sid&&typeof drainQueuedSessionMessage==='function') drainQueuedSessionMessage(sid);
   if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
 
   // ── Cross-channel handoff hint ──
@@ -2734,6 +2734,7 @@ async function _openSidebarSession(session, loadOpts={}){
     var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
     if(_preResult&&_preResult.cancel===true) return;
   }
+  if(window.ConversationWorkbench && document.querySelector('main.main.showing-conversations')) await switchPanel('chat');
   // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
   if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){
@@ -5394,6 +5395,7 @@ const _SESSION_SKELETON_GROUPS = [
 // Called the instant a profile switch begins so the user never sees the
 // previous profile's conversations.
 function showSessionListSkeleton(targetProfile){
+  if(window.ConversationWorkbench) window.ConversationWorkbench.setLoading();
   const list = $('sessionList');
   if(!list) return;
   // Tear down any active virtual-scroll state up front so a pending scroll-driven
@@ -8199,6 +8201,7 @@ function renderSessionListFromCache(){
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
+  if(window.ConversationWorkbench) window.ConversationWorkbench.sync(orderedSessions);
   // Separate pinned from unpinned
   const pinned=orderedSessions.filter(s=>s.pinned);
   const unpinned=orderedSessions.filter(s=>!s.pinned);

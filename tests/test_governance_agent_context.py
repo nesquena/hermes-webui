@@ -104,13 +104,16 @@ def test_managed_binding_rejects_engine_control_roundtrip_drift(inject_policy, m
     from copy import deepcopy
     from dataclasses import replace
     raw = deepcopy(POLICY)
-    raw["users"][FREELANCER].update(access_level="elevated", access_mode="blacklist",
+    # Whitelist mode has a role ceiling; blacklist deliberately does not.
+    raw["users"][FREELANCER].update(access_level="elevated", access_mode="whitelist",
         approval={"mode": "manual", "prompt": ""})
     policy = inject_policy(raw)
     module = _real_agent_module()
     original = module.context_from_env_payload
     def drift(payload):
         ctx = original(payload)
+        assert ctx.access.role_ceiling is not None
+        assert ctx.access.approval_configured is True
         return replace(ctx, access=replace(ctx.access, **{dropped: None if dropped == "role_ceiling" else False}))
     monkeypatch.setattr(module, "context_from_env_payload", drift)
     monkeypatch.setattr("api.bot_builder.access_ceiling", lambda *a: None)

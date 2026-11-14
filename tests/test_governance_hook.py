@@ -143,6 +143,57 @@ def test_mode_off_is_a_passthrough(governance_env):
     assert _audit_events() == []
 
 
+@pytest.mark.parametrize("method,permission,owner,status", [
+    ("GET", "files:read", "viewer@example.test", 200),
+    ("GET", "files:read", "other@example.test", 404),
+    ("GET", "", "viewer@example.test", 403),
+    ("POST", "files:write", "other@example.test", 404),
+    ("POST", "files:read", "viewer@example.test", 403),
+])
+def test_artifact_route_preserves_permission_and_owner_bounds(governance_env, monkeypatch, method, permission, owner, status):
+    from copy import deepcopy
+    from api import artifacts
+    raw = deepcopy(POLICY)
+    raw["roles"]["viewer"]["grants"]["permissions"] = [permission] if permission else []
+    governance_env["set_policy"](raw)
+    governance_env["identity"] = _identity("viewer@example.test")
+    calls = []
+
+    def service(method, path, **kwargs):
+        calls.append((method, path))
+        assert method == "GET", "another person's artifact must never be shared"
+        return 200, {}, json.dumps({"artifact": {"source_profile": artifacts.owner_key(owner)}}).encode()
+
+    monkeypatch.setattr(artifacts, "_request", service)
+    monkeypatch.setattr(artifacts, "_admins", lambda: set())
+    path = "/api/artifacts/11111111-1111-1111-1111-111111111111" + ("/share" if method == "POST" else "")
+    handler = FakeHandler(path)
+    if enforce_request(handler, handler.parsed, method):
+        if method == "GET":
+            artifacts.handle_get(handler, handler.parsed)
+        else:
+            artifacts.handle_post(handler, handler.parsed, {})
+    assert handler.status == status
+    assert bool(calls) is (status != 403)
+
+
+@pytest.mark.parametrize("known", [True, False])
+def test_app_intake_reaches_organisation_identity_guard(governance_env, monkeypatch, known):
+    from api import msp_service
+    from api.governance.models import GovernanceSubject
+    policy = governance_env["set_policy"](POLICY)
+    governance_env["identity"] = _identity("viewer@example.test")
+    subject = GovernanceSubject(email="viewer@example.test" if known else "outsider@example.test", provider="oidc")
+    monkeypatch.setattr(msp_service, "context", lambda _handler: (policy, subject, None))
+    calls = []
+    monkeypatch.setattr(msp_service.control, "call", lambda *a, **kw: calls.append((a, kw)) or (200, {"ok": True}))
+    handler = FakeHandler("/api/msp/app-intake")
+    if enforce_request(handler, handler.parsed, "POST"):
+        msp_service.handle_post(handler, handler.parsed.path, {"app_id": "qa_app", "scope": "organisation", "departments": []})
+    assert handler.status == (200 if known else 403)
+    assert bool(calls) is known
+
+
 # NOTE: these deny-path tests used to POST /api/settings, which was gated on
 # config:write. Since the appearance self-service change (26 Aug 2026 report)
 # that POST rides on config:read at the route level (the config:write gate for

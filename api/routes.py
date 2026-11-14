@@ -9836,6 +9836,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_notify_locked,
     _approval_sse_notify,
     _GATEWAY_MIRROR_FLAG,
+    has_local_pending_approval,
     approval_required_approver,
     approval_choice_allowed,
     approval_entry_choice_allowed,
@@ -26093,6 +26094,10 @@ def _handle_approval_respond(handler, body):
                 "error": f"Approval requires {required_approver}",
             }, status=403)
 
+    # A matching local producer takes priority over an unrelated active stream.
+    # In-process approvals also use the engine's gateway-named queue and mirror.
+    local_approval = has_local_pending_approval(sid, approval_id)
+
     # Gateway relay: forward choice to the runs API when session has an active run,
     # or recover the run_id from the mirrored gateway approval entry if the
     # stream pointer has already been cleared.
@@ -26106,7 +26111,7 @@ def _handle_approval_respond(handler, body):
         from api.config import get_config as _get_config
         s = get_session(sid)
         _run_id = None
-        if s is not None:
+        if s is not None and not local_approval:
             active_sid = getattr(s, "active_stream_id", None)
             if active_sid:
                 _run_id = _STREAM_RUN_IDS.get(active_sid)
@@ -26130,7 +26135,7 @@ def _handle_approval_respond(handler, body):
             return j(handler, {"ok": True, "choice": choice, "relayed": True})
         # Only a still-mirrored gateway approval with a missing run should 409;
         # stale or empty gateway clicks fall through to local resolution.
-        if webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(
+        if not local_approval and webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(
             sid, approval_id
         ):
             return j(

@@ -2032,7 +2032,7 @@ def test_anchor_scene_hydration_drops_stale_live_running_thinking_when_settled_t
     )
 
 
-def test_anchor_scene_hydration_seals_unmatched_live_running_activity_rows():
+def test_anchor_scene_hydration_settles_prose_without_inventing_a_tool_result():
     from api import routes
 
     messages = [
@@ -2096,12 +2096,14 @@ def test_anchor_scene_hydration_seals_unmatched_live_running_activity_rows():
 
     rows = hydrated[1]["_anchor_activity_scene"]["activity_rows"]
     activity_rows = [row for row in rows if row.get("role") in {"thinking", "prose", "tool"}]
-    assert [row.get("status") for row in activity_rows] == ["completed", "completed", "completed"]
+    assert [row.get("status") for row in activity_rows] == ["completed", "completed", "running"]
     assert [row.get("role") for row in activity_rows] == ["thinking", "prose", "tool"]
+    # Final prose settles its own presentation. A tool without a completion
+    # event/result stays unconfirmed; the step overview must not mark it done.
     tool_row = activity_rows[-1]
-    assert tool_row["tool"]["done"] is True
-    assert tool_row["payload"]["status"] == "completed"
-    assert tool_row["payload"]["done"] is True
+    assert tool_row["tool"]["done"] is False
+    assert tool_row["payload"]["status"] == "running"
+    assert tool_row["payload"]["done"] is False
 
 
 def test_anchor_scene_settlement_does_not_reclassify_transcript_owned_tool_row():

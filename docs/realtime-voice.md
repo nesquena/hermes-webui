@@ -3,7 +3,7 @@
 Realtime voice provides a native spoken conversation while the regular SynPulse
 engine works in separate visible chats. Short conversational answers come from
 the realtime model. Requested actions and longer work use the authenticated chat
-engine, including its tools, per-user governance, manual/automatic approval, bot
+engine, including its tools, per-user governance, mandatory command approval, bot
 scope and actual `delegate_task` execution when available. The user can keep
 speaking and ask additional questions while multiple jobs run.
 
@@ -52,8 +52,9 @@ response first. Duplicate provider call IDs execute once per connection.
 Manual approval appears alongside the child chat in the voice panel. It uses the
 existing authenticated approval endpoint and stable one-shot approval ID. The
 voice model cannot approve actions on the user's behalf or expand a permission
-envelope. AI approval, if configured for that user by an administrator, happens
-inside the existing governed engine. Unknown/denied voice tool requests return a
+envelope. Per-user automatic review applies to requests for additional access
+in Governance → Approvals, not to ordinary tool calls. Mandatory command
+approvals still require a human decision. Unknown/denied voice tool requests return a
 failure while the conversation continues; revocation of the voice identity or
 parent access closes the call.
 
@@ -179,3 +180,20 @@ Official protocol references:
 - https://developers.openai.com/api/docs/guides/realtime-server-controls
 - https://developers.openai.com/api/docs/guides/realtime-conversations
 - https://developers.openai.com/api/docs/models/gpt-realtime-2.1
+
+
+### Conversation pane
+
+The native realtime call appears in a dedicated pane above the existing typed
+composer. Minimize returns to the transcript without changing a continuously
+unmuted microphone; End closes the call. The microphone still starts muted.
+Hold-to-talk releases on pointer/keyboard release, focus loss or minimizing.
+Escape within the pane minimizes it, and ending from its controls returns focus
+to the voice launcher. The typed draft and session controls remain mounted.
+
+Recent captions and background tasks use the existing bounded controller state.
+Each task shows its title and server status, with results and the child-chat link
+behind a native disclosure. Pending approvals retain the existing exact-ID
+buttons. The task count remains visible when minimized. This is presentation
+only: the server sideband, permissions and approval endpoint remain authoritative.
+The interface supports light/dark themes, narrow layouts and reduced motion.

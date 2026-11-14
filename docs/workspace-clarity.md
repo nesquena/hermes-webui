@@ -61,3 +61,50 @@ Synthetic fixture data only; no real accounts, chats or credentials appear.
 | --- | --- | --- |
 | Bot editor, desktop | ![Before bot editor](ui-ux/evidence/20261101-bots-before.png) | ![After bot editor](ui-ux/evidence/20261101-bots-after.png) |
 | Feature guide, phone | ![Before mobile guide](ui-ux/evidence/20261101-guide-before.png) | ![After mobile guide](ui-ux/evidence/20261101-guide-after.png) |
+
+## Chat welcome and reading surface
+
+The welcome and existing composer form one group on desktop windows at least
+641px wide and 700px high. Short windows and phones retain the bottom composer.
+Hiding the welcome or suggestions still follows the existing appearance settings.
+Starting or loading a conversation returns to the normal transcript layout without
+replacing the input, attachments or session controls.
+
+The three starter actions add a localized question to the current draft, preserve
+existing text and focus the input. They do not send automatically. Repeating the
+same last starter does not append it again. Draft saving and input resizing use
+the existing input handler, including after a reload.
+
+Answers, the composer and bot roster share a readable width. The default skin
+uses slightly larger body text, neutral code surfaces and proportional table
+text, while explicit text-size preferences remain effective. Bot identity text
+uses full opacity for legibility; message actions remain available with keyboard
+focus. The bot roster disclosure follows language changes without refetching its
+catalog. See [chat workspace QA](qa/chat-workspace/README.md) for evidence and
+validation limits.
+
+
+## Voice and work steps
+
+Realtime voice uses a dedicated, collapsible conversation pane with explicit
+microphone and playback states, recent captions and numbered background tasks.
+Minimizing keeps the call and typed draft intact; it releases a held push-to-talk
+control. End, page exit, session changes and transport failures retain the
+existing teardown behavior. Controls and task summaries follow English/Dutch
+locale changes. See [realtime voice](realtime-voice.md) for availability and
+runtime contracts; this presentation does not enable the provider or feature flag.
+
+Compact activity shows numbered tool actions and a count by recorded outcome.
+The existing activity scene owns ordering, identity and status; the overview adds
+no event stream, task database, completion estimate or inferred future plan.
+Collapsed historical rows remain lazy. One disclosure opens the turn's actions;
+individual technical details can be opened with pointer, Enter or Space. The
+existing Transparent Stream and Final answer only preferences remain effective.
+Counts distinguish failure, stopped work and unconfirmed completion. A completed
+parent call does not imply an asynchronous helper completed.
+
+See [voice and steps QA](qa/voice-steps/README.md) for screenshots and validation.
+
+A settled answer is not proof that every tool succeeded. Unmatched historical
+tool rows without a completion event/result remain unconfirmed in the numbered
+step overview; hydration must not synthesize a successful tool result.

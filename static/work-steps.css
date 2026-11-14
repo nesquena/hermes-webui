@@ -1,0 +1,34 @@
+/* One quiet summary per turn; numbers follow canonical tool-row order. */
+.tool-worklog-summary:has(.work-step-summary) { display: flex; flex-wrap: wrap; gap: 8px; min-height: 44px; padding: 8px 10px; }
+.work-step-summary { color: var(--muted); font: 12px/1.5 var(--font-ui); letter-spacing: 0; white-space: normal; text-align: left; }
+.tool-worklog-summary:has(.work-step-summary) .tool-call-group-chevron { margin-left: auto; }
+.tool-worklog-group:has(.work-step-summary) { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.tool-worklog-group:has(.work-step-summary) .tool-worklog-body { padding: 4px 10px 10px; }
+.work-step-number { display: inline-grid; place-items: center; width: 24px; height: 24px; flex: 0 0 24px; border: 1px solid var(--border2); border-radius: 50%; color: var(--muted); font: 11px/1 var(--font-ui); }
+.tool-card-header:has(.work-step-number) { min-height: 44px; gap: 8px; }
+.tool-card-header:has(.work-step-number) .tool-card-name { min-width: 0; }
+.tool-card-header[role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.tool-worklog-group:has(.work-step-summary) .sp-steps-head .tg-sum { opacity: 1; }
+@media (max-width: 640px) {
+  .work-step-summary { flex-basis: 100%; order: 1; }
+  .tool-card-header:has(.work-step-number) { flex-wrap: wrap; }
+}
+
+.tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]):has(.work-step-summary) .tool-worklog-summary { margin: 0; padding: 10px 12px; border-bottom: 0; border-radius: 12px; }
+.tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]):has(.work-step-summary) .tool-worklog-label { color: var(--muted); opacity: 1; font-size: 12px; }
+
+.tool-worklog-group:has(.work-step-summary) .tool-card:has(.work-step-number) { background: transparent; border-radius: 0; box-shadow: none; }
+.tool-worklog-group:has(.work-step-summary) .tool-card-name-label { color: var(--text); }
+.tool-worklog-group:has(.work-step-summary) .tool-card-preview { color: var(--muted); opacity: 1; }
+.tool-worklog-group:has(.work-step-summary) .tool-card-row + .tool-card-row { border-top: 1px solid var(--border); }
+
+.tool-worklog-group:has(.work-step-summary) :is(.tool-card-name,.sp-details-toggle) { opacity: 1; }
+@media (max-width: 640px) {
+  .tool-card-header:has(.work-step-number) { display: grid; grid-template-columns: 24px 16px minmax(0,1fr) auto; align-items: center; }
+  .tool-card-header:has(.work-step-number) .work-step-number { grid-column: 1; grid-row: 1; }
+  .tool-card-header:has(.work-step-number) .tool-card-icon { grid-column: 2; grid-row: 1; }
+  .tool-card-header:has(.work-step-number) .tool-card-name { grid-column: 3; grid-row: 1; white-space: normal; }
+  .tool-card-header:has(.work-step-number) .sp-tool-status { grid-column: 4; grid-row: 1; }
+  .tool-card-header:has(.work-step-number) .tool-card-preview { grid-column: 3; grid-row: 2; max-width: 100%; }
+  .tool-card-header:has(.work-step-number) .tool-card-toggle { grid-column: 4; grid-row: 2; }
+}

@@ -39,9 +39,10 @@ confidence is a number between 0 and 1."""
 
 
 def _access_for(email: str):
-    from api.governance.loader import get_policy
+    from api.governance.loader import get_policy, policy_etag
     from api.governance.resolver import resolve_effective_access
-    return resolve_effective_access(get_policy(), GovernanceSubject(email=email))
+    policy = get_policy()
+    return resolve_effective_access(policy, GovernanceSubject(email=email)), policy_etag(policy.raw)
 
 
 def _parse_verdict(text):
@@ -98,12 +99,12 @@ def _request_view(entry: dict) -> dict:
     return view
 
 
-def _record(key: str, review: dict) -> None:
+def _record(key: str, review: dict, request_revision: str) -> None:
     from api import approvals
     with approvals._REGISTRY_LOCK:
         registry = approvals.load()
         entry = registry.get(f"{approvals.KIND_GRANT}:{key}")
-        if entry is None:
+        if entry is None or approvals.request_revision(entry) != request_revision:
             return
         payload = entry.setdefault("payload", {})
         if isinstance(payload, dict):
@@ -118,15 +119,17 @@ def auto_review_entry(entry: dict) -> dict | None:
     when this person has no automatic approval configured. Never raises.
     """
     try:
+        from api import approvals
         from api.governance_api import decide_grant_request
 
         key = str(entry.get("key") or "")
         owner = str(entry.get("owner_email") or "").strip().lower()
         if not key or not owner:
             return None
-        access = _access_for(owner)
+        access, policy_revision = _access_for(owner)
         if not (access.approval_configured and access.approval_mode == "automatic" and access.approval_prompt):
             return None
+        request_revision = approvals.request_revision(entry)
         request = _request_view(entry)
         serialized = json.dumps(request, ensure_ascii=False)
         if len(serialized) > _MAX_REQUEST_CHARS:
@@ -149,13 +152,15 @@ def auto_review_entry(entry: dict) -> dict | None:
         if review["decision"] in {"approve", "deny"}:
             subject = GovernanceSubject(email=REVIEWER_EMAIL, display_name="Automatic review")
             decision = "approve" if review["decision"] == "approve" else "reject"
-            status, out = decide_grant_request(key, decision, subject, f"Automatic review: {review['reason']}", source="automatic")
+            status, out = decide_grant_request(
+                key, decision, subject, f"Automatic review: {review['reason']}", source="automatic",
+                expected_policy_revision=policy_revision, expected_request_revision=request_revision)
             review["decided"] = status == 200
             if status != 200:
                 # Bounds or policy refused: the row stays for a person, with the reason.
                 review["decision"] = "manual"
                 review["reason"] = f"{review['reason']} (not applied: {out.get('message') or out.get('error')})"
-        _record(key, review)
+        _record(key, review, request_revision)
         return review
     except Exception:
         logger.exception("automatic review failed")

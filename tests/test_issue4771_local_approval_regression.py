@@ -19,13 +19,14 @@ therefore returned True for that purely local approval, and the handler 409'd
 refusing to resolve an approval that resolves perfectly well locally. Users on
 the local backend hit this on *every* approval click.
 
-The fix gates the 409 on the WebUI actually running the gateway chat backend
-(``webui_gateway_chat_enabled``), so local approvals fall through to the local
-resolution path while the legitimate #4771 gateway behaviour is preserved.
+Local producer ownership takes priority over both the backend setting and an
+active remote stream. The engine's gateway-named queue is also used in process;
+only the exact matching pending callback or live producer mirror is local.
+Existing reconciliation removes orphan mirrors before selecting the target.
 
 These tests drive the real ``_handle_approval_respond`` handler and assert:
-  - LOCAL backend  -> 200, approval resolved, agent thread unblocked (the fix)
-  - GATEWAY backend -> 409 preserved when a mirrored approval has no run (#4771)
+  - matching local producer -> 200, agent thread unblocked, no remote relay
+  - unknown explicit id -> no other local producer is released
 """
 from __future__ import annotations
 
@@ -241,7 +242,8 @@ def test_local_live_head_does_not_inherit_stale_remote_run():
         _cleanup(sid)
 
 
-def test_local_live_head_beats_active_remote_candidate_run():
+@pytest.mark.parametrize("gateway_enabled", [False, True])
+def test_local_live_head_beats_active_remote_candidate_run(gateway_enabled):
     """A local approval still wins when an active remote run shares its id."""
     sid = f"local-approval-active-remote-{uuid.uuid4().hex[:8]}"
     session = _register_session(sid)
@@ -260,7 +262,7 @@ def test_local_live_head_beats_active_remote_candidate_run():
                 "command": "remote-collision",
             }, *local_entries]
         handler = _FakeHandler()
-        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=gateway_enabled), \
              patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval:
             routes._handle_approval_respond(
                 handler,
@@ -344,10 +346,9 @@ def test_local_plain_pending_exact_id_beats_remote_first_queue_order():
         assert resp.get("relayed") is not True
         respond_approval.assert_not_called()
         with ta._lock:
-            queue = ta._pending.get(sid) or []
-            assert len(queue) == 1
-            assert queue[0].get("command") == "remote"
-            assert queue[0].get(ra._GATEWAY_MIRROR_FLAG) is True
+            # The existing reconciler purges an orphan remote mirror; only
+            # live producers can keep an approval card pending.
+            assert not ta._pending.get(sid)
     finally:
         _STREAM_RUN_IDS.pop(stream_id, None)
         _cleanup(sid)
@@ -381,8 +382,8 @@ def test_local_plain_pending_without_id_beats_active_remote_candidate_run():
         _cleanup(sid)
 
 
-def test_gateway_mirrored_approval_without_run_retires_locally():
-    """A gateway mirror without a run retires instead of leaving a ghost card."""
+def test_local_producer_resolves_even_when_gateway_backend_is_enabled():
+    """A live local producer has authority even without a remote run mapping."""
     sid = f"gw-approval-{uuid.uuid4().hex[:8]}"
     _register_session(sid)  # no active_stream_id -> no _STREAM_RUN_IDS mapping
     try:
@@ -395,12 +396,63 @@ def test_gateway_mirrored_approval_without_run_retires_locally():
             )
         resp = handler.json()
         assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
-        assert resp == {"ok": True, "choice": "once", "local_retired": True}
+        assert resp == {"ok": True, "choice": "once"}
         assert entry.event.is_set()
         assert entry.result == "once"
         with ta._lock:
             assert sid not in ta._pending
             assert sid not in ta._gateway_queues
+    finally:
+        _cleanup(sid)
+
+
+@pytest.mark.parametrize("remote_active", [False, True])
+def test_unknown_explicit_id_never_resolves_another_local_producer(remote_active):
+    from api.runner_client import RunnerClientError
+
+    sid = f"local-approval-unknown-{uuid.uuid4().hex[:8]}"
+    session = _register_session(sid)
+    stream_id = f"remote-stream-{uuid.uuid4().hex[:8]}"
+    if remote_active:
+        session.active_stream_id = stream_id
+        _STREAM_RUN_IDS[stream_id] = "remote-run"
+    try:
+        entry, approval_id = _seed_local_pending_approval(sid)
+        assert ra.has_local_pending_approval(sid, approval_id)
+        assert not ra.has_local_pending_approval(sid, "different-id")
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=True), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://127.0.0.1:1"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval", side_effect=RunnerClientError("approval not active")) as relay:
+            routes._handle_approval_respond(handler, {
+                "session_id": sid, "choice": "once", "approval_id": "different-id",
+            })
+        assert handler.json()["ok"] is False
+        assert handler.status == (502 if remote_active else 200)
+        assert relay.called is remote_active
+        if remote_active:
+            relay.assert_called_once_with("remote-run", "different-id", "once")
+        assert not entry.event.is_set()
+        with ta._lock:
+            assert ta._gateway_queues[sid][0] is entry
+            assert ta._pending[sid][0]["approval_id"] == approval_id
+    finally:
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _cleanup(sid)
+
+
+def test_orphan_mirror_is_not_local_producer_evidence():
+    sid = f"orphan-approval-{uuid.uuid4().hex[:8]}"
+    try:
+        with ta._lock:
+            ta._pending[sid] = [{
+                ra._GATEWAY_MIRROR_FLAG: True,
+                ra._GATEWAY_MIRROR_TOKEN: "missing-producer",
+                "approval_id": "orphan-id",
+            }]
+        assert not ra.has_local_pending_approval(sid, "orphan-id")
+        assert not ra.has_local_pending_approval(sid)
     finally:
         _cleanup(sid)
 

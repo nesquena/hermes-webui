@@ -31,6 +31,7 @@
   };
 
   let activeRun=null;
+  let featureLoadGeneration=0;
   let popover=null;
   let settingsPromise=null;
   let pageBeforeSettings='';
@@ -921,8 +922,17 @@
   }
   function startFeatureTour(ids,opts){
     opts=opts||{};const guide=window.SynthPulseFeatureGuide;
-    if(!guide||!Array.isArray(ids)||!guidaClass())return false;
+    if(!Array.isArray(ids)||!ids.length||!guidaClass())return false;
+    if(!guide){
+      if(typeof window.loadSynthPulseFeatureGuide!=='function')return false;
+      const generation=++featureLoadGeneration,panel=currentPanel();
+      return window.loadSynthPulseFeatureGuide().then(()=>{
+        if(generation!==featureLoadGeneration||currentPanel()!==panel||opts.trigger?.isConnected===false)return false;
+        return startFeatureTour(ids,opts);
+      }).catch(()=>{if(generation===featureLoadGeneration&&typeof showToast==='function')showToast(tr('help_guide_load_failed'));return false;});
+    }
     const features=[...new Set(ids)].map(id=>guide.getFeature(id)).filter(Boolean);
+    if(!features.length&&opts.fallbackId){const fallback=guide.getFeature(opts.fallbackId);if(fallback)features.push(fallback);}
     if(!features.length)return false;
     closeAll();guide.close();closeCard();
     const locale=opts.locale==='nl'||opts.locale==='en'?opts.locale:guide.language();
@@ -936,6 +946,7 @@
 
   // ── Public actions ─────────────────────────────────────────────────────────
   function closeAll(){
+    ++featureLoadGeneration;
     if(activeRun){try{activeRun.inst.close();}catch(_){endRun(activeRun);}}
     closePopover(false);
   }

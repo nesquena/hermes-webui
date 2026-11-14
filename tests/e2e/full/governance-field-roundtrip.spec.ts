@@ -1,4 +1,4 @@
-import { test, expect, open, api, auth, capture } from './fixtures';
+import { test, expect, open, api, auth, capture, picker, selectPicker } from './fixtures';
 import type { Page } from '@playwright/test';
 
 // API calls seed disposable users and verify storage. Every operation under
@@ -25,7 +25,7 @@ const fields: [string, string[], string][] = [
 async function users(page: Page) {
   await open(page, 'governance');
   await page.locator('[data-gov-tab="users"]').click();
-  await expect(page.locator('#govUserEmail')).toBeVisible();
+  await expect(picker(page, 'govUserEmail').getByRole('combobox')).toBeVisible();
 }
 async function edit(page: Page, email: string) {
   await page.locator('#govPaneUsers tr').filter({ hasText: email })
@@ -64,26 +64,23 @@ async function save(page: Page) {
 }
 async function createWithAllFields(page: Page, email: string) {
   await users(page);
-  await page.locator('#govUserEmail').fill(email);
-  await page.locator('#govUserRolesSelInput').fill('member');
-  await page.locator('#govUserRolesSelInput').press('Enter');
+  await selectPicker(page, 'govUserEmail', email);
+  await selectPicker(page, 'govUserRolesSelInput', 'member');
   for (const [kind, index] of [['Grant', 0], ['Deny', 1]] as const) {
     await page.locator('details.gov-access-details').nth(index).locator('summary').click();
     for (const [name, , value] of fields) {
       await test.step(`Enter ${kind.toLowerCase()} ${name}`, async () => {
-        const input = page.locator(`#govUser${kind}${name}Input`);
-        await input.fill(value);
-        await input.press('Enter');
-        await expect(page.locator(`#govUser${kind}${name}Box .gov-chip-item`)).toHaveCount(1);
+        await selectPicker(page, `govUser${kind}${name}Input`, value);
+        await expect(picker(page, `govUser${kind}${name}Input`).locator('.sp-chip')).toHaveCount(1);
       });
     }
   }
-  await page.locator('#govUserDenySkillsManageInput').fill('qa-review');
-  await page.locator('#govUserDenySkillsManageInput').press('Enter');
+  await selectPicker(page, 'govUserDenySkillsManageInput', 'qa-review');
   await save(page);
 }
 
 test('US-SP-GOV-006 [field roundtrip] all 14 extra allow and 14 deny controls persist through real save and reload', async ({ page }, info) => {
+  test.setTimeout(100_000); // Exercise all 28 controls, save, reload and read back the policy.
   const email = userId('roundtrip');
   await createWithAllFields(page, email);
   await page.reload();
@@ -94,15 +91,15 @@ test('US-SP-GOV-006 [field roundtrip] all 14 extra allow and 14 deny controls pe
   expect(entry.access_level).toBe('user');
   expect(entry.approval.mode).toBe('manual');
   expect(entry.deny.skills.manage).toEqual(['qa-review']);
-  await expect(page.locator('#govUserDenySkillsManageBox .gov-chip-item')).toHaveCount(1);
-  await expect(page.locator('#govUserDenySkillsManageBox .gov-chip-item')).toContainText('qa-review');
+  await expect(picker(page, 'govUserDenySkillsManageInput').locator('.sp-chip')).toHaveCount(1);
+  await expect(picker(page, 'govUserDenySkillsManageInput').locator('.sp-chip')).toContainText('qa-review');
   for (const [kind, section, index] of [['Grant', 'grants', 0], ['Deny', 'deny', 1]] as const) {
     await page.locator('details.gov-access-details').nth(index).locator('summary').click();
     for (const [name, path, value] of fields) {
       await test.step(`Verify persisted ${kind.toLowerCase()} ${name}`, async () => {
         expect(path.reduce((node: any, key) => node[key], entry[section])).toEqual([value]);
-        await expect(page.locator(`#govUser${kind}${name}Box .gov-chip-item`)).toHaveCount(1);
-        await expect(page.locator(`#govUser${kind}${name}Box .gov-chip-item`)).toContainText(value);
+        await expect(picker(page, `govUser${kind}${name}Input`).locator('.sp-chip')).toHaveCount(1);
+        await expect(picker(page, `govUser${kind}${name}Input`).locator('.sp-chip')).toContainText(value);
       });
     }
   }
@@ -110,6 +107,7 @@ test('US-SP-GOV-006 [field roundtrip] all 14 extra allow and 14 deny controls pe
 });
 
 test('US-SP-GOV-006 [field removal] clearing all extra grants and denials removes persisted entries', async ({ page }) => {
+  test.setTimeout(100_000); // Exercise all 28 controls, save, reload and read back the policy.
   const email = userId('clear');
   await createWithAllFields(page, email);
   await edit(page, email);
@@ -117,13 +115,13 @@ test('US-SP-GOV-006 [field removal] clearing all extra grants and denials remove
     await page.locator('details.gov-access-details').nth(index).locator('summary').click();
     for (const [name] of fields) {
       await test.step(`Remove ${kind.toLowerCase()} ${name}`, async () => {
-        await expect(page.locator(`#govUser${kind}${name}Box .gov-chip-x`)).toHaveCount(1);
-        await page.locator(`#govUser${kind}${name}Box .gov-chip-x`).click();
-        await expect(page.locator(`#govUser${kind}${name}Box .gov-chip-item`)).toHaveCount(0);
+        await expect(picker(page, `govUser${kind}${name}Input`).locator('.sp-chip-x')).toHaveCount(1);
+        await picker(page, `govUser${kind}${name}Input`).locator('.sp-chip-x').click();
+        await expect(picker(page, `govUser${kind}${name}Input`).locator('.sp-chip')).toHaveCount(0);
       });
     }
   }
-  await page.locator('#govUserDenySkillsManageBox .gov-chip-x').click();
+  await picker(page, 'govUserDenySkillsManageInput').locator('.sp-chip-x').click();
   await save(page);
   await page.reload();
   await users(page);
@@ -131,10 +129,10 @@ test('US-SP-GOV-006 [field removal] clearing all extra grants and denials remove
   const entry = await stored(page, email);
   expect(entry).not.toHaveProperty('grants');
   expect(entry).not.toHaveProperty('deny');
-  await expect(page.locator('#govUserDenySkillsManageBox .gov-chip-item')).toHaveCount(0);
+  await expect(picker(page, 'govUserDenySkillsManageInput').locator('.sp-chip')).toHaveCount(0);
   for (const [name] of fields) {
-    await expect(page.locator(`#govUserGrant${name}Box .gov-chip-item`)).toHaveCount(0);
-    await expect(page.locator(`#govUserDeny${name}Box .gov-chip-item`)).toHaveCount(0);
+    await expect(picker(page, `govUserGrant${name}Input`).locator('.sp-chip')).toHaveCount(0);
+    await expect(picker(page, `govUserDeny${name}Input`).locator('.sp-chip')).toHaveCount(0);
   }
 });
 
@@ -172,8 +170,7 @@ test('US-SP-POL-013 [bootstrap affordance] typing a recovery admin identity expl
   // No bootstrap account is changed: this is a read-only form affordance test.
   const admins = (await api(page, '/api/governance/policy')).body.policy.bootstrap_admins;
   expect(admins).toContain('admin@example.test');
-  await page.locator('#govUserEmail').fill('ADMIN@example.test');
-  await page.locator('#govUserEmail').press('Tab');
+  await selectPicker(page, 'govUserEmail', 'ADMIN@example.test');
   await expect(page.locator('#govUserBootstrapHint')).toBeVisible();
   for (const id of ['govUserAccessLevel', 'govUserAccessMode', 'govUserApprovalMode', 'govUserApprovalPrompt']) {
     await expect(page.locator('#' + id)).toBeDisabled();

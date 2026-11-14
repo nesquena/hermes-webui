@@ -1,10 +1,10 @@
-import {test,expect,open,api,auth,capture} from './fixtures';
+import {test,expect,open,api,auth,capture,selectPicker,picker} from './fixtures';
 import type {Page,Browser,BrowserContext} from '@playwright/test';
 const email='bob@example.test';
 async function read(page:Page){const r=await api(page,'/api/governance/users');expect(r.status).toBe(200);return r.body.users[email];}
 async function restore(page:Page,entry:any){const state=await api(page,'/api/governance/users');const r=await page.evaluate(async({entry,etag,email})=>{const response=await fetch('/api/governance/users/update',{method:'POST',headers:{'Content-Type':'application/json','If-Match':etag},body:JSON.stringify({email,entry})});return response.status;},{entry,etag:state.body.etag,email});expect(r,'restore exact original fixture policy').toBe(200);}
 async function edit(page:Page){await open(page,'governance');await page.locator('[data-gov-tab="users"]').click();await page.locator('#govPaneUsers tr').filter({hasText:email}).getByRole('button',{name:'Edit',exact:true}).click();await expect(page.locator('#govUserEmail')).toHaveValue(email);}
-async function chip(page:Page,id:string,value:string){await page.locator('#'+id+'Input').fill(value);await page.locator('#'+id+'Input').press('Enter');await page.locator('#'+id+'Input').press('Escape');}
+async function chip(page:Page,id:string,value:string){await selectPicker(page,id+'Input',value);}
 async function save(page:Page){const pending=page.waitForResponse(r=>r.url().endsWith('/api/governance/users/update')&&r.request().method()==='POST');await page.locator('#govUserSave').click();expect((await pending).status()).toBe(200);await expect(page.locator('#govUserEmail')).toHaveValue('');}
 async function actor(browser:Browser,user:'bob'|'outsider'='bob'){
  const context=await browser.newContext({baseURL:auth.base_url});
@@ -26,7 +26,7 @@ test('US-SP-POL-REVOKE-WHITELIST direct skill grant permits actual browser read 
   await chip(page,'govUserSkillsView','qa-review');await save(page);
   expect((await read(page)).grants.skills.view).toEqual(['qa-review']);await skillStatus(member.page,200);expect((await api(member.page,'/api/sessions')).status,'neighboring capability remains unlisted').toBe(403);
   await member.page.reload();await member.page.locator('.rail-btn[data-panel="skills"]').click();const item=member.page.locator('.skill-item').filter({has:member.page.locator('.skill-name',{hasText:'qa-review'})});await expect(item).toBeVisible();await item.click();await expect(member.page.locator('#skillDetailBody')).toContainText('Summarize only the synthetic evidence supplied.');
-  await edit(page);await page.locator('#govUserSkillsViewBox .gov-chip-x').click();await save(page);await page.reload();expect((await read(page)).grants.skills?.view||[]).toEqual([]);
+  await edit(page);await picker(page,'govUserSkillsViewInput').locator('.sp-chip-x').click();await save(page);await page.reload();expect((await read(page)).grants.skills?.view||[]).toEqual([]);
   const refused=member.page.waitForResponse(r=>new URL(r.url()).pathname==='/api/skills/content'&&r.status()===403);await item.click();expect((await refused).status()).toBe(403);await skillStatus(member.page,403);
   const catalog=await api(member.page,'/api/skills');expect(catalog.status).toBe(200);expect(catalog.body.skills.some((s:any)=>s.name==='qa-review')).toBe(false);
   await policyAudit(page);await capture(page,'whitelist-revoked',info);
@@ -36,12 +36,12 @@ test('US-SP-POL-REVOKE-WHITELIST direct skill grant permits actual browser read 
 test('US-SP-POL-REVOKE-BLACKLIST group wildcard cannot override direct denial and clearing denial restores the same signed session',async({page,browser},info)=>{
  await open(page);const original=await read(page);const member=await actor(browser);
  try{
-  await edit(page);await page.locator('#govUserAccessLevel').selectOption('user');await page.locator('#govUserAccessMode').selectOption('blacklist');await expect(page.locator('#govUserGroupsSelBox')).toContainText('qa-team');await chip(page,'govUserSkillsView','qa-review');await chip(page,'govUserDenySkills','qa-review');await save(page);
+  await edit(page);await page.locator('#govUserAccessLevel').selectOption('user');await page.locator('#govUserAccessMode').selectOption('blacklist');await expect(picker(page,'govUserGroupsSelInput')).toContainText('qa-team');await chip(page,'govUserSkillsView','qa-review');await chip(page,'govUserDenySkills','qa-review');await save(page);
   expect((await read(page)).deny.skills).toMatchObject({view:['qa-review'],load:['qa-review']});
   await page.locator('[data-gov-tab="preview"]').click();await page.locator('#govPreviewEmail').fill(email);await page.locator('[onclick="_govRunPreview()"]').click();await expect(page.locator('#govPreviewResult')).toContainText('skills / view: qa-review');await expect(page.locator('#govPreviewResult')).toContainText('qa-team');
   await skillStatus(member.page,403);const catalog=await api(member.page,'/api/skills');expect(catalog.status).toBe(200);expect(catalog.body.skills.some((s:any)=>s.name==='qa-review')).toBe(false);
   expect((await api(member.page,'/api/sessions')).status).toBe(200);
-  await edit(page);await page.locator('#govUserDenySkillsBox .gov-chip-x').click();await save(page);await page.reload();expect((await read(page)).deny?.skills?.view||[]).toEqual([]);
+  await edit(page);await picker(page,'govUserDenySkillsInput').locator('.sp-chip-x').click();await save(page);await page.reload();expect((await read(page)).deny?.skills?.view||[]).toEqual([]);
   await skillStatus(member.page,200);await member.page.locator('.rail-btn[data-panel="skills"]').click();await member.page.locator('.skill-item').filter({has:member.page.locator('.skill-name',{hasText:'qa-review'})}).click();await expect(member.page.locator('#skillDetailBody')).toContainText('Summarize only the synthetic evidence supplied.');
   expect((await api(member.page,'/api/governance/users')).status).toBe(403);await policyAudit(page);await capture(page,'blacklist-denial-cleared',info);
  }finally{await cleanup(page,original,member);}

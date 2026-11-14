@@ -1,0 +1,328 @@
+{
+  "python": {
+    "passed": 36,
+    "scope": "workspace roles, navigation visibility, project folders and existing merge behavior"
+  },
+  "browser_runs": [
+    {
+      "run": "20261114-181932-51597852",
+      "source_unchanged_during_run": true,
+      "outcomes": [
+        {
+          "scenario": "BOT WORKBENCH catalog favorites and layout are personal and keep search local",
+          "status": "passed"
+        },
+        {
+          "scenario": "BOT WORKBENCH chat action selects the bot and uses the existing conversation engine",
+          "status": "passed"
+        },
+        {
+          "scenario": "BOT WORKBENCH detail sections preserve drafts and remain usable at narrow widths",
+          "status": "passed"
+        },
+        {
+          "scenario": "BOT WORKBENCH searchable switcher preserves query across refresh and restores focus on Escape",
+          "status": "passed"
+        },
+        {
+          "scenario": "CONVERSATION WORKBENCH overview preserves drafts, filters persisted pins and opens the chosen conversation",
+          "status": "passed"
+        },
+        {
+          "scenario": "CONVERSATION WORKBENCH live activity follows the existing runtime and refresh keeps keyboard focus",
+          "status": "passed"
+        },
+        {
+          "scenario": "CONVERSATION WORKBENCH clears previous bot rows during switching and handles failed refresh",
+          "status": "passed"
+        },
+        {
+          "scenario": "CONVERSATION WORKBENCH files filter locally, preview the selected file and reset on session change",
+          "status": "passed"
+        },
+        {
+          "scenario": "US-SP-UX-MOBILE approvals hamburger navigation allows actual main refresh control",
+          "status": "passed"
+        },
+        {
+          "scenario": "US-SP-UX-MOBILE integrations hamburger navigation allows actual main refresh control",
+          "status": "passed"
+        },
+        {
+          "scenario": "SUPPLEMENT SESSION ACTIVATION newer New Chat survives a delayed available saved-session restore",
+          "status": "passed"
+        },
+        {
+          "scenario": "SUPPLEMENT SESSION ACTIVATION newer New Chat survives a delayed inaccessible saved-session restore",
+          "status": "passed"
+        },
+        {
+          "scenario": "SUPPLEMENT SESSION ACTIVATION a later current sidebar choice survives a delayed New Chat response",
+          "status": "passed"
+        },
+        {
+          "scenario": "SUPPLEMENT SESSION ACTIVATION a later other sidebar choice survives a delayed New Chat response",
+          "status": "passed"
+        },
+        {
+          "scenario": "US-SP-SESS-ACTIONS pin duplicate and delete operate on chosen persisted session",
+          "status": "passed"
+        },
+        {
+          "scenario": "US-SP-UX-MOBILE drawer and chat mode remain reachable at 390px",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE NAVIGATION bot library search stays focused during refresh and starts a conversation",
+          "status": "failed"
+        },
+        {
+          "scenario": "WORKSPACE NAVIGATION keyboard search preserves drafts and unifies Projects and Spaces",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE NAVIGATION merged project folders remain reachable through the single Projects destination",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE NAVIGATION hides denied functions and handles an empty search without losing focus",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE SHELL administrator keeps every existing destination and split view",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE SHELL member retains chat, bots, drafts and responsive navigation",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE SHELL additional allowed views persist per user and never reveal denied panels",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "run": "20261114-182325-775900354",
+      "source_unchanged_during_run": true,
+      "outcomes": [
+        {
+          "scenario": "BOT WORKBENCH catalog favorites and layout are personal and keep search local",
+          "status": "passed"
+        },
+        {
+          "scenario": "BOT WORKBENCH chat action selects the bot and uses the existing conversation engine",
+          "status": "passed"
+        },
+        {
+          "scenario": "BOT WORKBENCH detail sections preserve drafts and remain usable at narrow widths",
+          "status": "passed"
+        },
+        {
+          "scenario": "BOT WORKBENCH searchable switcher preserves query across refresh and restores focus on Escape",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE NAVIGATION bot library search stays focused during refresh and starts a conversation",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE NAVIGATION keyboard search preserves drafts and unifies Projects and Spaces",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE NAVIGATION merged project folders remain reachable through the single Projects destination",
+          "status": "passed"
+        },
+        {
+          "scenario": "WORKSPACE NAVIGATION hides denied functions and handles an empty search without losing focus",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "run": "20261114-182452-382671962",
+      "source_unchanged_during_run": true,
+      "outcomes": [
+        {
+          "scenario": "US-SP-BOT-NAV profiles opens through visible navigation",
+          "status": "passed"
+        }
+      ]
+    }
+  ],
+  "contrast": [
+    {
+      "dark": false,
+      "result": [
+        {
+          "selector": ".bot-directory-head p",
+          "fg": [
+            98,
+            109,
+            124,
+            1
+          ],
+          "bg": [
+            246,
+            247,
+            249
+          ],
+          "opacity": 1,
+          "ratio": 4.900345503381091
+        },
+        {
+          "selector": ".bot-directory-create",
+          "fg": [
+            255,
+            255,
+            255,
+            1
+          ],
+          "bg": [
+            41,
+            51,
+            64
+          ],
+          "opacity": 1,
+          "ratio": 12.79047287959218
+        },
+        {
+          "selector": ".bot-start-action",
+          "fg": [
+            98,
+            109,
+            124,
+            1
+          ],
+          "bg": [
+            243,
+            245,
+            248
+          ],
+          "opacity": 1,
+          "ratio": 4.809441393149157
+        },
+        {
+          "selector": "#botDirectoryCount",
+          "fg": [
+            98,
+            109,
+            124,
+            1
+          ],
+          "bg": [
+            246,
+            247,
+            249
+          ],
+          "opacity": 1,
+          "ratio": 4.900345503381091
+        },
+        {
+          "selector": "#botDirectorySearch",
+          "fg": [
+            98,
+            109,
+            124,
+            1
+          ],
+          "bg": [
+            243,
+            245,
+            248
+          ],
+          "opacity": 1,
+          "ratio": 4.809441393149157
+        }
+      ]
+    },
+    {
+      "dark": true,
+      "result": [
+        {
+          "selector": ".bot-directory-head p",
+          "fg": [
+            163,
+            170,
+            182,
+            1
+          ],
+          "bg": [
+            32,
+            34,
+            38
+          ],
+          "opacity": 1,
+          "ratio": 6.814275781546347
+        },
+        {
+          "selector": ".bot-directory-create",
+          "fg": [
+            43,
+            45,
+            50,
+            1
+          ],
+          "bg": [
+            225,
+            228,
+            234
+          ],
+          "opacity": 1,
+          "ratio": 10.817297643049821
+        },
+        {
+          "selector": ".bot-start-action",
+          "fg": [
+            163,
+            170,
+            182,
+            1
+          ],
+          "bg": [
+            48,
+            50,
+            56
+          ],
+          "opacity": 1,
+          "ratio": 5.480512123770629
+        },
+        {
+          "selector": "#botDirectoryCount",
+          "fg": [
+            163,
+            170,
+            182,
+            1
+          ],
+          "bg": [
+            32,
+            34,
+            38
+          ],
+          "opacity": 1,
+          "ratio": 6.814275781546347
+        },
+        {
+          "selector": "#botDirectorySearch",
+          "fg": [
+            163,
+            170,
+            182,
+            1
+          ],
+          "bg": [
+            48,
+            50,
+            56
+          ],
+          "opacity": 1,
+          "ratio": 5.480512123770629
+        }
+      ]
+    }
+  ],
+  "scope": "Synthetic fixture users, real Chromium/backend/engine, deterministic loopback provider. No production deployment or full-suite claim.",
+  "intermediate_failure": "The integrated run passed 22/23. Its new contrast assertion sampled during a theme transition; final measurements resolve CSS colors through Canvas and finish theme animations. The final 8-case run includes the corrected scenario and passes. Earlier narrow-screen action placement was also corrected and passed."
+}

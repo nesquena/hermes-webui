@@ -66,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(last,str): last='QA message'
         system_text=str([m.get('content','') for m in messages if m.get('role')=='system'])
         tool_calls=None
-        is_review='You review one already-permitted tool action for an administrator.' in system_text
+        is_review='You decide one ACCESS REQUEST for an administrator:' in system_text
         review_decision=None
         clarify_marker = None
         clarify_phase = None
@@ -89,7 +89,7 @@ class Handler(BaseHTTPRequestHandler):
             review=json.loads(last)
             rules=str(review.get('administrator_rules',''))
             review_decision='approve' if 'QA_ALLOW_ONLY' in rules else 'deny' if 'QA_DENY_ONLY' in rules else 'manual'
-            answer=json.dumps({'decision':review_decision,'reason':'Deterministic QA review for this synthetic action.','confidence':.99})
+            answer=json.dumps({'decision':review_decision,'reason':'Deterministic QA review for this synthetic access request.','confidence':.99})
         elif 'QA_BOT_HANDOFF_RECEIVER' in last:
             valid_profile = 'QA_BOT_RESEARCH' in system_text
             valid_history = any('QA_BOT_HANDOFF_START' in str(m.get('content', '')) for m in messages)
@@ -102,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
                 answer = 'QA_BOT_HANDOFF_QUEUED: ' + str(results[-1])
             elif 'delegate_to_bot' in json.dumps(data.get('tools', [])):
                 direct = any(t.get('function', {}).get('name') == 'delegate_to_bot' for t in data.get('tools', []))
-                arguments = {'action': 'delegate', 'bot': 'qa-research',
+                arguments = {'action': 'delegate', 'bot': 'qa-research', 'mode': 'handoff',
                              'task': 'QA_BOT_HANDOFF_RECEIVER: report a short result here.'}
                 if not direct:
                     arguments = {'name': 'delegate_to_bot', 'arguments': arguments}
@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     # MCP tools are deferred behind the engine's real tool_call
                     # bridge. Invoking that bridge preserves schema validation
-                    # and the underlying tool's governance/action approval.
+                    # and the underlying tool's capability checks.
                     arguments = {'name': 'mcp__qa_stdio__qa_mark', 'arguments': {'marker': value}}
                 tool_calls = [{'id': 'qa-supplement-' + str(time.time_ns()), 'type': 'function',
                                'function': {'name': 'terminal' if cli else 'tool_call',
@@ -212,7 +212,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 action=last.split('QA_TODO|',1)[1].splitlines()[0].strip()
                 todos=[] if action=='clear' else [{'id':'qa-first','content':'QA todo updated' if action=='update' else 'QA todo created','status':'completed' if action=='update' else 'in_progress'},{'id':'qa-second','content':'QA next task','status':'pending'}]
-                tool_calls=[{'id':'qa-todo-'+str(time.time_ns()),'type':'function','function':{'name':'todo','arguments':json.dumps({'todos':todos})}}]
+                offered={t.get('function',{}).get('name') for t in data.get('tools',[])}
+                name=next((tool for tool in ('todo_list','todo') if tool in offered),'tool_call')
+                arguments={'todos':todos} if name!='tool_call' else {'name':'todo_list','arguments':{'todos':todos}}
+                tool_calls=[{'id':'qa-todo-'+str(time.time_ns()),'type':'function','function':{'name':name,'arguments':json.dumps(arguments)}}]
                 answer=None
         elif ('QA_GOV_READ|' in last or 'QA_GOV_WRITE|' in last) and (data.get('tools') or any(m.get('role')=='tool' for m in messages[last_index+1:])):
             results=[m.get('content','') for m in messages[last_index+1:] if m.get('role')=='tool']
@@ -225,6 +228,37 @@ class Handler(BaseHTTPRequestHandler):
                 if write: arguments['content']='QA_GOVERNANCE_EXECUTED'
                 tool_calls=[{'id':'qa-gov-action-'+str(time.time_ns()),'type':'function','function':{'name':'write_file' if write else 'read_file','arguments':json.dumps(arguments)}}]
                 answer=None
+        elif 'QA_STEP_OVERVIEW|' in last:
+            results=[m for m in messages[last_index+1:] if m.get('role')=='tool']
+            target=last.split('QA_STEP_OVERVIEW|',1)[1].splitlines()[0].strip()
+            targets=[target,target,target+'.missing']
+            if len(results)<len(targets):
+                tool_calls=[{'id':'qa-step-'+str(len(results))+'-'+str(time.time_ns()),'type':'function','function':{'name':'read_file','arguments':json.dumps({'path':targets[len(results)]})}}]
+                answer=None
+            else:
+                answer='QA_STEPS_COMPLETE: Two reads finished. The optional file was not found.'
+        elif 'QA_READING_SURFACE' in last:
+            answer="""## A clear place to start
+
+Keep the launch focused on **one useful outcome**. Bring the people, files and next steps together in the same project.
+
+### Your next steps
+1. Confirm the audience and the result you want to deliver.
+2. Ask the research bot to gather the relevant material.
+3. Review the draft together before sharing it.
+
+| Step | Owner | Status |
+| --- | --- | --- |
+| Gather context | Research bot | Ready |
+| Review the draft | Project team | Next |
+
+```text
+project: Customer onboarding
+next_step: Review the welcome guide
+```
+
+You can ask a follow-up here, or open the project to continue with your team.
+"""
         else:
             markers=re.findall(r'(?:ALICE_GROUP_QA|BOB_GROUP_QA|QA_[A-Z_]+)',last)
             if any('QA_ACTUAL_STEER' in str(m.get('content','')) for m in messages):

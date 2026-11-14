@@ -39,6 +39,11 @@ PANEL_PERMISSIONS = {
 # to work, to reach their own preferences, or to ask for help.
 ESSENTIAL_PANELS = frozenset({"chat", "settings", "approvals"})
 MEMBER_PANELS = frozenset({"modules", "chat", "profiles", "projects", "tasks", "skills", "integrations", "approvals", "memory", "settings"})
+WORKSPACE_PANELS = {
+    "member": MEMBER_PANELS,
+    "operator": MEMBER_PANELS | {"insights"},
+    "engineer": MEMBER_PANELS | {"insights", "files", "todos", "logs"},
+}
 
 
 def _permissions(access) -> frozenset:
@@ -90,6 +95,37 @@ def navigation_audience(access, policy=None) -> str:
     return "admin" if administrative_access(access) else "member"
 
 
+def workspace_kind(access) -> str:
+    """Presentation derived from resolved identity, not the allow/deny mode.
+
+    Keep nav_audience's administrator contract separate: an engineer is still
+    a member for ownership, approvals, and all backend authorization.
+    """
+    if administrative_access(access):
+        return "admin"
+    roles = set(getattr(access, "roles", ()) or ())
+    if "engineer" in roles or getattr(access, "access_level", "") == "elevated":
+        return "engineer"
+    if "operator" in roles:
+        return "operator"
+    return "member"
+
+
+def workspace_navigation(access, policy=None) -> dict:
+    """Split existing permitted destinations into primary and additional views.
+
+    Module/organisation destinations retain their independent capability gate.
+    This projection neither grants access nor changes the canonical policy.
+    """
+    kind = workspace_kind(access)
+    # Spaces live inside Projects. Kanban retains internal routes but no longer
+    # has a standalone navigation entry. Keep this presentation out of grants.
+    visible = set(visible_panels(access, policy)) - {"workspaces", "kanban"}
+    primary = visible if kind == "admin" else visible & WORKSPACE_PANELS[kind]
+    return {"kind": kind, "primary": sorted(primary),
+            "secondary": sorted(visible - primary)}
+
+
 def feature_permissions(access) -> dict[str, bool]:
     """Concrete UI decisions use the same deny/ceiling checks as HTTP routes."""
     from .catalog import ROUTE_CATALOG
@@ -116,13 +152,16 @@ def hidden_panels(access, policy=None) -> list:
         return []
     permissions = _permissions(access) or frozenset()
     panel_permissions = dict(PANEL_PERMISSIONS)
-    if capability_navigation:
+    roles = set(getattr(access, "roles", ()) or ())
+    daily_panels = (WORKSPACE_PANELS["engineer"] if "engineer" in roles else
+                    WORKSPACE_PANELS["operator"] if "operator" in roles else MEMBER_PANELS)
+    if capability_navigation or roles.intersection({"engineer", "operator"}):
         # Kanban routes and the session-backed todo state both use session read.
         # Keep the legacy daily-navigation presentation contract unchanged.
         panel_permissions.update(kanban="sessions:read", todos="sessions:read")
     return sorted(panel for panel, permission in panel_permissions.items()
                   if panel not in ESSENTIAL_PANELS
-                  and ((not capability_navigation and panel not in MEMBER_PANELS) or not
+                  and ((not capability_navigation and panel not in daily_panels) or not
                        (access.has_permission(permission) if callable(getattr(access, "has_permission", None))
                         else _has(permissions, permission))))
 

@@ -706,18 +706,53 @@ function collectSessionArtifacts(){
   return items.slice(0, 50);
 }
 
+function clearArtifactFilters(){
+  $('workspaceArtifactSearch').value = '';
+  $('workspaceArtifactType').value = 'all';
+  renderSessionArtifacts();
+  $('workspaceArtifactSearch').focus();
+}
+
 function renderSessionArtifacts(){
   const root = $('workspaceArtifacts');
   const count = $('workspaceArtifactsCount');
   if(!root) return;
-  const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
+  const detected = S.session ? collectSessionArtifacts() : [];
+  let items = detected;
+  if(count) count.textContent = String(detected.length);
+  // Controls live outside the repainting list so streaming updates preserve
+  // the search cursor. Their scope includes workspace/profile: an empty chat
+  // may reuse its session ID when switching bots.
+  const controls = $('workspaceArtifactControls');
+  if(controls){
+    const search = $('workspaceArtifactSearch'), type = $('workspaceArtifactType');
+    const scope = JSON.stringify([S.session?.session_id, S.activeProfile, S.session?.workspace]);
+    if(controls.dataset.scope !== scope){
+      controls.dataset.scope = scope; search.value = ''; type.value = 'all';
+    }
+    search.disabled = type.disabled = !S.session;
+    const words = search.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const extensions = {
+      documents: ['pdf','doc','docx','odt','rtf','txt','md','ppt','pptx','odp'],
+      images: ['png','jpg','jpeg','gif','svg','webp','avif','bmp','ico'],
+      code: ['js','ts','jsx','tsx','py','html','css','scss','sh','rs','go','java','c','cpp','h','swift','sql','vue','svelte'],
+      data: ['csv','tsv','xls','xlsx','ods','json','jsonl','yaml','yml','xml','parquet'],
+    };
+    items = detected.filter(item => {
+      const path = item.path.toLocaleLowerCase();
+      const extension = path.split('/').pop().split('.').pop();
+      const kind = Object.keys(extensions).find(key => extensions[key].includes(extension)) || 'other';
+      return words.every(word => path.includes(word)) && (type.value === 'all' || type.value === kind);
+    });
+    $('workspaceArtifactSummary').textContent = t('artifact_browser_count').replace('{shown}', String(items.length)).replace('{total}', String(detected.length));
+    $('workspaceArtifactReset').disabled = !search.value && type.value === 'all';
+  }
   if(!S.session){
-    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
+    root.innerHTML = '<div class="workspace-artifact-empty">' + esc(t('artifact_browser_open')) + '</div>';
     return;
   }
   if(!items.length){
-    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
+    root.innerHTML = '<div class="workspace-artifact-empty">' + esc(t(detected.length ? 'artifact_browser_no_results' : 'artifact_browser_empty')) + '</div>';
     return;
   }
   // Strip workspace prefix for display so long absolute paths don't clutter the list.

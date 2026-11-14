@@ -461,13 +461,13 @@ function _govUserPolicyHtml() {
       option('whitelist', 'governance_mode_whitelist', 'Whitelist — deny until allowed') +
       option('blacklist', 'governance_mode_blacklist', 'Blacklist — allow except denied') + '</select>' +
       '<div id="govUserPolicyHint" class="gov-muted"></div></div>' +
-    '<div class="gov-form-row"><label for="govUserApprovalMode">' + _govT('governance_approval_flow', 'Approval flow') + '</label>' +
+    '<div class="gov-form-row"><label for="govUserApprovalMode">' + _govT('governance_approval_flow', 'Access request review') + '</label>' +
     '<select id="govUserApprovalMode" onchange="_govUserPolicyChanged()">' +
       option('', 'governance_legacy_approval', 'Keep existing approval behavior') +
       option('manual', 'governance_approval_manual', 'Manual approval') +
       option('automatic', 'governance_approval_automatic', 'Automatic AI approval and denial') + '</select></div>' +
     '<div class="gov-form-row" id="govUserApprovalPromptRow"><label for="govUserApprovalPrompt">' +
-      _govT('governance_approval_prompt', 'What this user may and may not do') + '</label>' +
+      _govT('governance_approval_prompt', 'Rules for this user’s access requests') + '</label>' +
       '<textarea id="govUserApprovalPrompt" rows="6" maxlength="8000" aria-describedby="govUserApprovalHint"' +
       ' placeholder="' + _govEsc(_govT('governance_approval_prompt_example', 'Allow reports in the assigned workspace. Deny sending customer data outside the company. Ask for manual review when the destination is unclear.')) + '"></textarea></div>' +
     '<div class="gov-muted" id="govUserApprovalHint"></div>' +
@@ -500,9 +500,9 @@ function _govUserPolicyChanged() {
   if (prompt) prompt.required = automatic;
   const approvalHint = $('govUserApprovalHint');
   if (approvalHint) approvalHint.textContent = automatic
-    ? _govT('governance_automatic_hint', 'AI approves or denies eligible actions using this policy. Permission limits still apply. Uncertain or unavailable decisions wait for manual review.')
+    ? _govT('governance_automatic_hint', 'AI reviews requests for additional access using these rules. Explicit denials and role limits still apply. Uncertain or unavailable decisions stay pending for an administrator.')
     : approvalMode === 'manual'
-      ? _govT('governance_manual_hint', 'Actions requiring approval wait for an authorized reviewer.')
+      ? _govT('governance_manual_hint', 'Requests for additional access wait for an authorized reviewer. Already permitted actions continue normally; configured command approvals still apply.')
       : _govT('governance_legacy_approval_hint', 'Keeps the existing approval behavior until you choose a flow.');
 }
 
@@ -570,7 +570,9 @@ function _govSourceForDatalist(datalistId) {
 
 function _govChipFieldHtml(id, label, datalistId, placeholder) {
   const source = _govSourceForDatalist(datalistId);
-  const custom = (source === 'gov:cli' || source === 'gov:sso' || source.indexOf('gov:mcptools:') === 0) ? '1' : '0';
+  // Extended policy fields have no complete catalog (paths, models, env names).
+  // Preserve their custom entry flow; catalog-backed fields stay restricted.
+  const custom = (!source || source === 'gov:cli' || source === 'gov:sso' || source.indexOf('gov:mcptools:') === 0) ? '1' : '0';
   const hints = { 'gov:skills': _govT('picker_pick_skills', 'Pick skills'), 'gov:mcp': _govT('picker_pick_servers', 'Pick servers'), 'gov:cli': _govT('picker_pick_commands', 'Pick commands'),
     'gov:roles': _govT('picker_pick_roles', 'Pick roles'), 'gov:groups': _govT('picker_pick_groups', 'Pick groups'), 'gov:sso': _govT('picker_pick_sso', 'Pick SSO groups or people'), 'people': _govT('picker_pick_people', 'Pick people') };
   const hint = hints[source] || (source.indexOf('gov:mcptools:') === 0 ? _govT('picker_pick_tools', 'Pick tools') : _govT('picker_placeholder', 'Pick from the list'));

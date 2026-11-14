@@ -88,7 +88,7 @@ def test_profiles_panel_refresh_updates_dropdown_cache():
     body = _function_body(PANELS_JS, "async function loadProfilesPanel() {")
     api_idx = body.index("const data = await api('/api/profiles?fast=1');")
     cache_idx = body.index("_profileDropdownWriteStoredCache(data);")
-    render_idx = body.index("panel.innerHTML = '';")
+    render_idx = body.index("_renderProfilesList(data, true);")
     assert api_idx < cache_idx < render_idx
 
 
@@ -139,6 +139,17 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
           }}
           get innerHTML() {{ return this._innerHTML; }}
           appendChild(child) {{ this.children.push(child); return child; }}
+          append(...children) {{ children.forEach(child => this.appendChild(child)); }}
+          setAttribute(name, value) {{ this[name] = String(value); }}
+          contains(node) {{ return !!node && (this === node || this.children.some(child => child.contains(node))); }}
+          focus() {{ document.activeElement = this; }}
+          querySelector(selector) {{ return this.querySelectorAll(selector)[0] || null; }}
+          querySelectorAll(selector) {{
+            const descendants = this.children.flatMap(child => [child, ...child.querySelectorAll('*')]);
+            return descendants.filter(child => selector === '*' ||
+              (selector.startsWith('#') && child.id === selector.slice(1)) ||
+              (selector.startsWith('[data-profile-name]') && child.dataset.profileName && (!selector.includes(':not') || !child.hidden)));
+          }}
         }}
         const elements = new Map();
         for (const id of ['profileDropdown', 'profileChip', 'titlebarProfileBtn', 'titlebarProfileLabel']) {{
@@ -217,7 +228,7 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
           assert.strictEqual(dd.classList.contains('open'), true, 'dropdown shell should open from loading state');
           assert.strictEqual(localStorage.getItem(__profileTest.key), null, 'invalid stored cache should be removed before refresh');
           await new Promise((resolve) => setImmediate(resolve));
-          const profileOptions = dd.children.filter((child) => String(child.className).includes('profile-opt'));
+          const profileOptions = dd.querySelectorAll('[data-profile-name]');
           const other = profileOptions.find((child) => child.innerHTML.includes('other'));
           assert(other, 'fresh refresh should render the valid profile option');
           await other.onclick();

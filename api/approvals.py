@@ -56,6 +56,7 @@ HTTP handler code and no third-party imports live here.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -101,7 +102,10 @@ _MAX_LABEL_LEN = 200
 _MAX_PENDING_PER_OWNER = 50
 _MAX_ENTRIES = 2000
 
-_REGISTRY_LOCK = threading.Lock()
+# Grant decisions hold this across the policy write and decide(). Always
+# acquire the policy mutation lock first when both are needed. Reentrancy lets
+# the existing registry helpers participate in that one decision boundary.
+_REGISTRY_LOCK = threading.RLock()
 
 
 # ── Paths and normalisation ──────────────────────────────────────────────────
@@ -353,6 +357,20 @@ def get(kind, key) -> dict | None:
         return _skill_entry(key, skill_ownership.get(key))
     entry = load().get(f"{kind}:{key}")
     return dict(entry) if isinstance(entry, dict) else None
+
+
+def request_revision(entry: dict) -> str:
+    """Bind a delayed review to the exact pending request it examined.
+
+    A reused key, changed owner or updated request context needs a new review.
+    Reviewer annotations are excluded so recording advice does not itself
+    change the identity of the request.
+    """
+    view = {key: entry.get(key) for key in
+            ("kind", "key", "owner_email", "requested_at", "label")}
+    view["payload"] = {key: value for key, value in _payload_dict(entry.get("payload")).items()
+                       if key != "auto_review"}
+    return hashlib.sha256(json.dumps(view, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def status_of(kind, key) -> str | None:

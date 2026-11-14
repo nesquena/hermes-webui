@@ -25,10 +25,24 @@ test('US-SP-SESS-SPLIT all split counts create real independent frames and exit'
  await open(page);await session(page);await page.locator('#btnSplitView').click();await expect(page.locator('#splitOverlay')).toBeVisible();const counts=await page.locator('#splitCounts [data-count]').evaluateAll(es=>es.map(e=>Number(e.getAttribute('data-count'))));expect(counts.length).toBeGreaterThan(1);for(const count of counts){await page.locator(`#splitCounts [data-count="${count}"]`).click();await expect(page.locator('#splitGrid iframe')).toHaveCount(count);for(let i=0;i<count;i++)await expect(page.frameLocator('#splitGrid iframe').nth(i).locator('#msg')).toBeVisible();}await capture(page,'split-all-counts',info);await page.locator('#btnSplitExit').click();await expect(page.locator('#splitOverlay')).toBeHidden();await expect(page.locator('#msg')).toBeVisible();
 });
 test('US-SP-TODO-DEEP real agent todo create update clear renders live and survives session reload',async({page},info)=>{
- await open(page);const sid=await session(page);
- for(const [action,label] of [['create','QA todo created'],['update','QA todo updated'],['clear','No active task list in this session.']] as const){
-  await page.locator('.rail-btn[data-panel="chat"]').click();await page.locator('#msg').fill('QA_TODO|'+action);await page.locator('#btnSend').click();await expect(page.locator('#messages')).toContainText('QA_TODO_RESULT:');await expect.poll(async()=>(await api(page,'/health')).body.active_runs||0).toBe(0);await page.locator('.rail-btn[data-panel="todos"]').click();await expect(page.locator('#todoPanel')).toContainText(label);await page.reload();await page.locator('.rail-btn[data-panel="todos"]').click();await expect(page.locator('#todoPanel')).toContainText(label);if(action==='update')await expect(page.locator('#todoPanel')).not.toContainText('QA todo created');
- }await capture(page,'todos-cleared',info);
+ await open(page); const sid=await session(page);
+ const original=(await api(page,'/api/settings')).body.workspace_todos_tab === true;
+ async function showTodos(){
+  if(await page.locator('html').getAttribute('data-workspace-panel')==='closed') await page.locator('#btnWorkspacePanelToggle').click();
+  await page.locator('#workspaceTodosTab').click();
+ }
+ try {
+  expect((await api(page,'/api/settings',{workspace_todos_tab:true})).status).toBe(200);
+  await page.reload();
+  for(const [action,label] of [['create','QA todo created'],['update','QA todo updated'],['clear','No active task list in this session.']] as const){
+   await page.locator('#msg').fill('QA_TODO|'+action);await page.locator('#btnSend').click();
+   await expect.poll(async()=>(await api(page,'/api/session?session_id='+sid)).body.session.messages.filter((m:any)=>m.role==='assistant' && String(m.content).includes('QA_TODO_RESULT:')).length).toBe(['create','update','clear'].indexOf(action)+1);
+   await showTodos(); await expect(page.locator('#workspaceTodosPanel')).toContainText(label);
+   await page.reload(); await showTodos(); await expect(page.locator('#workspaceTodosPanel')).toContainText(label);
+   if(action==='update')await expect(page.locator('#workspaceTodosPanel')).not.toContainText('QA todo created');
+  }
+  await capture(page,'todos-cleared',info);
+ } finally { expect((await api(page,'/api/settings',{workspace_todos_tab:original})).status).toBe(200); }
 });
 test('US-SP-BOT-DEEP all editable tab fields filter select save and delete lifecycle',async({page},info)=>{
  const name=unique('qa-deep-bot');await open(page,'profiles');await page.getByRole('button',{name:'New bot',exact:true}).click();await page.locator('#builderName').fill(name);await page.locator('#builderTitle').fill(name);await page.locator('#builderDescription').fill('Initial');await page.locator('#builderNext').click();await page.locator('#builderPrompt').fill('QA deep bot instructions');await page.locator('#builderNext').click();await page.locator('#builderNext').click();await page.locator('#builderNext').click();await expect(page.locator('#profileDetailTitle')).toHaveText(name);await page.getByRole('button',{name:'Edit bot',exact:true}).click();

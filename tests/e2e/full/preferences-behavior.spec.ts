@@ -71,7 +71,7 @@ test('US-SP-PREF-BEHAVIOR-EMPTY suggestions and entire welcome panel hide indepe
   await expect(page.locator('#emptyState .suggestion-grid')).toBeVisible();
 });
 
-test('US-SP-PREF-BEHAVIOR-TODOS workspace preference controls actual tab while sidebar remains usable',async({page})=>{
+test('US-SP-PREF-BEHAVIOR-TODOS workspace preference controls the contextual task list',async({page})=>{
   await open(page);await session(page);await preferences(page,'appearance');
   for(const enabled of [true,false]){
     await toggle(page,'settingsWorkspaceTodosTab','workspace_todos_tab',enabled);
@@ -85,8 +85,7 @@ test('US-SP-PREF-BEHAVIOR-TODOS workspace preference controls actual tab while s
       await expect(page.locator('#workspaceTodosTab')).toHaveAttribute('aria-selected','true');
       await page.locator('#workspaceFilesTab').click();
     }else await expect(page.locator('#workspaceTodosTab')).toBeHidden();
-    await page.locator('.rail-btn[data-panel="todos"]').click();
-    await expect(page.locator('#panelTodos')).toBeVisible();
+    await expect(page.locator('.rail-btn[data-panel="todos"]')).toHaveCount(0);
     await preferences(page,'appearance');
   }
 });

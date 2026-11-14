@@ -144,6 +144,15 @@ if(typeof document!=='undefined') (function(){
   const label=document.getElementById('realtimeVoiceStatus'),mic=document.getElementById('realtimeVoiceMic');
   const hold=document.getElementById('realtimeVoiceHold'),captions=document.getElementById('realtimeVoiceTranscript');
   const tasksBox=document.getElementById('realtimeVoiceTasks'),warning=document.getElementById('realtimeVoiceWarning');
+  const view=document.getElementById('realtimeVoiceView'),stage=document.getElementById('realtimeVoiceStage');
+  const hint=document.getElementById('realtimeVoiceHint'),work=document.getElementById('realtimeVoiceWork');
+  const taskCount=document.getElementById('realtimeVoiceTaskCount');
+  const text=(key,...args)=>t('voice_workspace_'+key,...args);
+  const translated=(node,key)=>{node.dataset.i18n='voice_workspace_'+key;node.textContent=text(key);};
+  const compact=value=>{
+    bar.classList.toggle('is-compact',value);stage.hidden=value;
+    view.setAttribute('aria-expanded',String(!value));translated(view,value?'expand':'minimize');
+  };
   const audio=document.createElement('audio');audio.autoplay=true;
   const current=()=>typeof S!=='undefined'?S.session?.session_id:null;
   const taskRows=new Map();
@@ -157,45 +166,61 @@ if(typeof document!=='undefined') (function(){
     audio:stream=>{audio.srcObject=stream;audio.play().catch(()=>showToast('Audio playback was blocked. Use the microphone control to resume.'));},
     release:()=>{audio.pause();audio.srcObject=null;},silence:()=>{},
     status:(state,muted)=>{
+      const returnFocus=state==='off'&&bar.contains(document.activeElement);
+      if(state==='connecting'&&bar.hidden){compact(false);if(warning){warning.hidden=true;warning.textContent='';}}
       bar.hidden=state==='off';start.setAttribute('aria-pressed',String(state!=='off'));bar.dataset.state=state;
-      label.textContent=({connecting:'Connecting…',muted:'Microphone muted',listening:'Listening',thinking:'Thinking',speaking:'Speaking',off:'Voice off'})[state]||state;
-      mic.textContent=muted?'Unmute microphone':'Mute microphone';mic.setAttribute('aria-pressed',String(!muted));
+      translated(label,state);
+      translated(hint,'hint_'+state);
+      translated(mic,muted?'unmute':'mute');mic.setAttribute('aria-pressed',String(!muted));
       mic.disabled=hold.disabled=state==='connecting';
+      if(returnFocus)start.focus({preventScroll:true});
     },
     error:message=>showToast(message),
     connectionWarning:message=>{if(warning){warning.textContent=message;warning.hidden=!message;}},
     transcript:entries=>{
-      if(!captions)return;captions.replaceChildren();captions.hidden=!entries.length;
+      if(!captions)return;
+      const following=captions.scrollHeight-captions.scrollTop-captions.clientHeight<32;
+      captions.replaceChildren();captions.hidden=!entries.length;
       for(const entry of entries.slice(-4)){
         const row=document.createElement('div');row.className='realtime-voice-transcript-row';row.dataset.role=entry.role;
-        const speaker=document.createElement('strong');speaker.textContent=entry.role==='user'?'You: ':'SynthPulse: ';
+        const speaker=document.createElement('strong');speaker.textContent=entry.role==='user'?text('you')+': ':'SynthPulse: ';
         row.append(speaker,document.createTextNode(entry.text));captions.append(row);
       }
+      if(following)captions.scrollTop=captions.scrollHeight;
     },
     tasks:(tasks,controller)=>{
       if(!tasksBox)return;
       const activeIds=new Set(tasks.map(t=>t.task_id));
       for(const [id,row] of taskRows)if(!activeIds.has(id)){row.remove();taskRows.delete(id);}
       tasksBox.hidden=!tasks.length;
-      for(const task of tasks){
+      work.hidden=!tasks.length;
+      taskCount.textContent=tasks.length?text('task_count',tasks.length,tasks.filter(task=>task.status==='done').length):'';
+      const waiting=tasks.filter(task=>task.status==='waiting_approval').length;
+      if(waiting)taskCount.textContent+=' · '+text('task_waiting_count',waiting);
+      for(const [index,task] of tasks.entries()){
         if(!task.task_id)continue;
         let row=taskRows.get(task.task_id);
         if(!row){row=document.createElement('details');row.className='realtime-voice-task';row.dataset.taskId=task.task_id;row.append(document.createElement('summary'),document.createElement('div'));taskRows.set(task.task_id,row);tasksBox.append(row);}
         const title=row.firstElementChild,body=row.lastElementChild;
         const approval=task.approval,key=task.session_id+':'+approval?.approval_id;
-        const renderKey=JSON.stringify([task,controller.pendingApprovals.has(key),controller.resolvedApprovals.has(key)]);
+        const renderKey=JSON.stringify([task,index,controller.pendingApprovals.has(key),controller.resolvedApprovals.has(key)]);
         if(row.dataset.renderKey===renderKey)continue;
         row.dataset.renderKey=renderKey;
-        title.textContent=(task.title||'Background task')+' — '+(task.status||'working');body.replaceChildren();
-        const text=document.createElement('p');text.textContent=String(task.error||task.result||'').slice(0,8000);body.append(text);
+        const state=['starting','running','waiting_approval','done','error'].includes(task.status)?task.status:'unknown';
+        row.dataset.state=state;title.replaceChildren();body.replaceChildren();
+        const number=document.createElement('span');number.className='realtime-voice-step-number';number.textContent=String(index+1);number.setAttribute('aria-hidden','true');
+        const name=document.createElement('span');name.className='realtime-voice-task-title';name.textContent=task.title||text('task');
+        const status=document.createElement('span');status.className='realtime-voice-task-status';translated(status,'task_'+state);
+        title.append(number,name,status);
+        const result=document.createElement('p');result.textContent=String(task.error||task.result||'').slice(0,8000);body.append(result);
         if(task.session_id&&/^[A-Za-z0-9_-]+$/.test(task.session_id)){
-          const link=document.createElement('a');link.textContent='Open task in a new tab';link.href=new URL('session/'+encodeURIComponent(task.session_id),document.baseURI).href;link.target='_blank';link.rel='noopener';body.append(link);
+          const link=document.createElement('a');translated(link,'open_task');link.href=new URL('session/'+encodeURIComponent(task.session_id),document.baseURI).href;link.target='_blank';link.rel='noopener';body.append(link);
         }
         if(approval?.approval_id&&!controller.resolvedApprovals.has(key)){
-          row.open=true;const description=document.createElement('p');description.textContent=approval.description||approval.command||'This action needs approval.';body.append(description);
+          row.open=true;const description=document.createElement('p');description.textContent=approval.description||approval.command||text('approval');body.append(description);
           const controls=document.createElement('div');controls.className='realtime-voice-approval';
-          for(const [choice,label] of [['once','Allow once'],['deny','Deny']]){
-            const btn=document.createElement('button');btn.type='button';btn.textContent=label;btn.dataset.approvalChoice=choice;btn.disabled=controller.pendingApprovals.has(key);
+          for(const choice of ['once','deny']){
+            const btn=document.createElement('button');btn.type='button';translated(btn,choice);btn.dataset.approvalChoice=choice;btn.disabled=controller.pendingApprovals.has(key);
             btn.addEventListener('click',()=>controller.approveTask(task.task_id,approval.approval_id,choice));controls.append(btn);
           }
           body.append(controls);
@@ -204,6 +229,17 @@ if(typeof document!=='undefined') (function(){
     },
   });
   window.synPulseVoice=voice;
+  window.syncVoiceWorkspaceLocale=()=>{
+    voice.d.status(voice.state,voice.muted);
+    compact(bar.classList.contains('is-compact'));
+    voice.d.transcript([...voice.transcripts.values()]);
+    for(const row of taskRows.values())delete row.dataset.renderKey;
+    voice.d.tasks(voice.tasks,voice);
+  };
+  view.addEventListener('click',()=>{releaseHold();compact(!bar.classList.contains('is-compact'));});
+  bar.addEventListener('keydown',event=>{
+    if(event.key==='Escape'&&!bar.classList.contains('is-compact')){event.preventDefault();event.stopPropagation();releaseHold();compact(true);view.focus();}
+  });
   let launchEpoch=0,launchPending=false;
   const cancelLaunch=()=>{++launchEpoch;launchPending=false;};
   start.addEventListener('click',async()=>{
@@ -231,6 +267,7 @@ if(typeof document!=='undefined') (function(){
   for(const event of ['pointerup','pointercancel','lostpointercapture'])hold.addEventListener(event,releaseHold);
   hold.addEventListener('keydown',e=>{if(e.code==='Space'&&!e.repeat){e.preventDefault();holding=true;resumeAudio();voice.mic(true);}});
   hold.addEventListener('keyup',e=>{if(e.code==='Space'){e.preventDefault();releaseHold();}});
+  hold.addEventListener('blur',releaseHold);
   document.getElementById('realtimeVoiceInterrupt').addEventListener('click',()=>{voice.interrupt();voice.mic(false);});
   document.getElementById('realtimeVoiceEnd').addEventListener('click',()=>{cancelLaunch();voice.stop();});
   // Chat answers and tool progress never synthesize extra voice responses here.

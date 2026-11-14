@@ -97,9 +97,14 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
-          console.warn('[pwa] Service worker registration failed:', err);
-        });
+        try {
+          navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
+            console.warn('[pwa] Service worker registration failed:', err);
+          });
+        } catch (err) {
+          // Sandboxed previews can expose the property but forbid reading it.
+          console.debug('[pwa] Service worker unavailable in this context');
+        }
       });
     }
   </script>
@@ -123,6 +128,13 @@
 <link rel="stylesheet" href="static/premium.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/modules.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/workspace-clarity.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/workspace-shell.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/bot-workbench.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/conversation-workbench.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/workspace-navigation.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/chat-workspace.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/voice-workspace.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/work-steps.css?v=__WEBUI_VERSION__">
 </head>
 <body>
 <header class="app-titlebar" role="banner">
@@ -140,8 +152,12 @@
     <span class="app-titlebar-icon synthpulse-titlebar-logo-wrap" aria-hidden="true"><img class="synthpulse-titlebar-logo" src="static/synthwave-symbol.png" alt="" width="18" height="18"></span>
     <span class="app-titlebar-title is-brand" id="appTitlebarTitle">SynthPulse</span>
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
+    <span class="workspace-role-badge" id="workspaceRoleBadge">My workspace</span>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
+  <button class="workspace-navigator-trigger" id="btnWorkspaceNavigator" type="button" aria-haspopup="dialog" aria-label="Go to a feature" data-i18n-aria-label="workspace_navigation_title" aria-keyshortcuts="Control+Shift+P Meta+Shift+P">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span data-i18n="workspace_navigation_short">Go to…</span>
+  </button>
   <button class="app-titlebar-new-chat has-tooltip has-tooltip--bottom" data-tooltip="New conversation" id="btnTitlebarNewChat" onclick="$('btnNewChat') && $('btnNewChat').click()" type="button" aria-label="New conversation" data-i18n-title="new_conversation" data-i18n-aria-label="new_conversation">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16">
       <line x1="12" y1="5" x2="12" y2="19"/>
@@ -179,7 +195,6 @@
     <button class="rail-btn nav-tab has-tooltip" data-panel="projects" onclick="switchPanel('projects',{fromRailClick:true})" data-tooltip="Projects" data-i18n-title="tab_projects" aria-label="Projects"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="memory" onclick="switchPanel('memory',{fromRailClick:true})" data-tooltip="Memory" data-i18n-title="tab_memory" aria-label="Memory"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="integrations" onclick="switchPanel('integrations',{fromRailClick:true})" data-tooltip="Integrations" data-i18n-title="tab_integrations" aria-label="Integrations"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8Z"/></svg></button>
-    <button class="rail-btn nav-tab has-tooltip" data-panel="workspaces" onclick="switchPanel('workspaces',{fromRailClick:true})" data-tooltip="Spaces" data-i18n-title="tab_workspaces" aria-label="Spaces"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
     <button class="rail-btn nav-tab dashboard-link has-tooltip" id="dashboardRailBtn" data-dashboard-link style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Legacy Dashboard" data-i18n-title="tab_dashboard" aria-label="Legacy Dashboard"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="studio" onclick="switchPanel('studio',{fromRailClick:true})" data-tooltip="Studio" data-label="Studio" aria-label="Studio"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights" aria-label="Insights"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
@@ -201,11 +216,10 @@
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="profiles" data-label="Bots" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Bots" data-i18n-title="tab_profiles" aria-label="Bots" data-i18n-aria-label="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="modules" data-module-gated hidden onclick="switchPanel('modules',{fromRailClick:true})" data-tooltip="Modules" aria-label="Modules"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
 <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="tasks" data-label="Scheduled jobs" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Scheduled jobs" data-i18n-title="tab_tasks" aria-label="Scheduled jobs" data-i18n-aria-label="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
-      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="skills" data-label="Skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills" aria-label="Skills" data-i18n-aria-label="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
+    <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="skills" data-label="Skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills" aria-label="Skills" data-i18n-aria-label="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="projects" data-label="Projects" onclick="switchPanel('projects',{fromRailClick:true})" data-tooltip="Projects" data-i18n-title="tab_projects" aria-label="Projects" data-i18n-aria-label="tab_projects"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="memory" data-label="Memory" onclick="switchPanel('memory',{fromRailClick:true})" data-tooltip="Memory" data-i18n-title="tab_memory" aria-label="Memory" data-i18n-aria-label="tab_memory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="integrations" data-label="Integrations" onclick="switchPanel('integrations',{fromRailClick:true})" data-tooltip="Integrations" data-i18n-title="tab_integrations" aria-label="Integrations" data-i18n-aria-label="tab_integrations"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8Z"/></svg></button>
-      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces',{fromRailClick:true})" data-tooltip="Spaces" data-i18n-title="tab_workspaces" aria-label="Spaces" data-i18n-aria-label="tab_workspaces"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
       <button class="nav-tab dashboard-link has-tooltip has-tooltip--bottom" id="dashboardMobileBtn" data-dashboard-link data-label="Dashboard" style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Legacy Dashboard" data-i18n-title="tab_dashboard" aria-label="Legacy Dashboard" data-i18n-aria-label="tab_dashboard"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="studio" data-label="Studio" onclick="switchPanel('studio',{fromRailClick:true})" data-tooltip="Studio" aria-label="Studio"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="insights" data-label="Insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights" aria-label="Insights" data-i18n-aria-label="tab_insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
@@ -227,6 +241,7 @@
       <div class="panel-head">
         <span data-i18n="tab_chat">Chat</span>
         <div class="panel-head-actions">
+          <button type="button" class="panel-head-btn" id="btnConversationBoard" onclick="ConversationWorkbench.show()" title="Conversation overview" aria-label="Conversation overview" data-i18n-title="conversation_board_title" data-i18n-aria-label="conversation_board_title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="btnNewChat" data-tooltip="New conversation (Cmd+K)" data-i18n-title="new_conversation" aria-label="New conversation" data-tour="chat-new">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           </button>
@@ -356,7 +371,7 @@
         <div class="panel-head-actions">
           <a id="btnBotScreens" class="sm-btn" style="display:none" href="/static/bot-screens.html" target="_blank" rel="noopener" hidden>Bot Screens</a>
           <button id="btnBotOrgChart" class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openBotOrgChart()" data-tooltip="Org chart" data-i18n-title="bot_org_chart" data-i18n-aria-label="bot_org_chart" aria-label="Org chart"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="5" rx="1"/><rect x="2" y="17" width="6" height="5" rx="1"/><rect x="16" y="17" width="6" height="5" rx="1"/><path d="M12 7v5M5 17v-2.5a2.5 2.5 0 0 1 2.5-2.5h9a2.5 2.5 0 0 1 2.5 2.5V17"/></svg></button>
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openProfileCreate()" data-tooltip="New bot" data-i18n-title="new_profile" aria-label="New bot" data-tour="bots-new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openProfileCreate()" data-tooltip="New bot" data-i18n-title="new_profile" aria-label="New bot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
       <div class="sp-profile-search">
@@ -499,7 +514,33 @@
         <button class="update-btn update-primary" id="btnStaleClientRefresh" type="button" onclick="hardRefreshWebUIClient()" data-i18n="update_hard_refresh_now">Hard refresh now</button>
       </div>
     </div>
+    <section id="mainConversations" class="main-view" aria-label="Conversation overview" data-i18n-aria-label="conversation_board_title"></section>
     <div id="mainChat" class="main-view">
+    <section id="realtimeVoiceBar" class="voice-mode-bar" hidden aria-label="Voice conversation" data-i18n-aria-label="voice_workspace_title" data-tour="realtime-voice-bar">
+      <header class="realtime-voice-header">
+        <div><span class="realtime-voice-eyebrow" data-i18n="voice_workspace_title">Voice conversation</span><span id="realtimeVoiceStatus" role="status" aria-live="polite">Voice off</span><span id="realtimeVoiceTaskCount" role="status" aria-live="polite"></span></div>
+        <button type="button" id="realtimeVoiceView" aria-expanded="true" aria-controls="realtimeVoiceStage" data-i18n="voice_workspace_minimize">Minimize</button>
+      </header>
+      <div id="realtimeVoiceStage" class="realtime-voice-stage">
+        <div class="realtime-voice-presence">
+          <div class="realtime-voice-orb" aria-hidden="true"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 9v6M8 5v14M12 2v20M16 5v14M20 9v6"/></svg></div>
+          <p id="realtimeVoiceHint"></p>
+        </div>
+        <div id="realtimeVoiceTranscript" class="realtime-voice-transcript" aria-label="Voice transcript" data-i18n-aria-label="voice_workspace_transcript" aria-live="polite" hidden></div>
+        <section id="realtimeVoiceWork" hidden aria-label="Background tasks" data-i18n-aria-label="voice_workspace_tasks">
+          <div class="realtime-voice-work-heading"><h3 data-i18n="voice_workspace_tasks">Background tasks</h3></div>
+          <div id="realtimeVoiceTasks" class="realtime-voice-tasks" hidden></div>
+        </section>
+      </div>
+      <div id="realtimeVoiceWarning" class="realtime-voice-warning" role="status" hidden></div>
+      <div class="realtime-voice-controls">
+        <button type="button" id="realtimeVoiceHold" data-i18n="voice_workspace_hold">Hold to talk</button>
+        <button type="button" id="realtimeVoiceMic" aria-pressed="false">Unmute microphone</button>
+        <button type="button" id="realtimeVoiceInterrupt" data-i18n="voice_workspace_interrupt">Interrupt speech</button>
+        <button type="button" id="realtimeVoiceEnd" data-i18n="voice_workspace_end">End voice</button>
+      </div>
+    </section>
+
     <div class="messages-shell">
       <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
@@ -512,11 +553,11 @@
       <div class="empty-state" id="emptyState">
         <div class="empty-logo synthpulse-empty-logo"><img src="static/synthwave-symbol.png" alt="Synthwave Solutions" width="80" height="80"></div>
         <h2 data-i18n="empty_title">What can I help with?</h2>
-        <p data-i18n="empty_subtitle">💡 Ask a question, get a text drafted, look something up or plan your work. Just type below.</p>
-        <div class="suggestion-grid">
-          <button class="suggestion" data-msg="What files are in this workspace?"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> <span data-i18n="suggest_files">What files are in this workspace?</span></button>
-          <button class="suggestion" data-msg="What's on my schedule today?"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="12" y2="16"/></svg> <span data-i18n="suggest_schedule">What's on my schedule today?</span></button>
-          <button class="suggestion" data-msg="Help me plan a small project."><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg> <span data-i18n="suggest_plan">Help me plan a small project.</span></button>
+        <p data-i18n="empty_subtitle">A question, an idea, a task. Start here.</p>
+        <div class="suggestion-grid" role="group" aria-label="Add a starting point to your draft" data-i18n-aria-label="chat_starter_hint">
+          <button class="suggestion" data-prompt-i18n="suggest_files" data-i18n-title="chat_starter_hint" title="Add a starting point to your draft" data-msg="What files are in this workspace?"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> <span data-i18n="chat_starter_files">Explore files</span></button>
+          <button class="suggestion" data-prompt-i18n="suggest_schedule" data-i18n-title="chat_starter_hint" title="Add a starting point to your draft" data-msg="What's on my schedule today?"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="12" y2="16"/></svg> <span data-i18n="chat_starter_schedule">Plan my day</span></button>
+          <button class="suggestion" data-prompt-i18n="suggest_plan" data-i18n-title="chat_starter_hint" title="Add a starting point to your draft" data-msg="Help me plan a small project."><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg> <span data-i18n="chat_starter_plan">Start a project</span></button>
         </div>
       </div>
       <div class="messages-inner" id="msgInner"></div>
@@ -660,16 +701,6 @@
         </div>
         <div class="attach-tray" id="attachTray"></div>
         <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> <span data-i18n="voice_listening">Listening…</span></div>
-        <div id="realtimeVoiceBar" class="voice-mode-bar" hidden aria-label="Realtime voice controls" data-tour="realtime-voice-bar">
-          <span id="realtimeVoiceStatus" role="status" aria-live="polite">Voice off</span>
-          <button type="button" id="realtimeVoiceHold">Hold to talk</button>
-          <button type="button" id="realtimeVoiceMic" aria-pressed="false">Unmute microphone</button>
-          <button type="button" id="realtimeVoiceInterrupt">Interrupt speech</button>
-          <button type="button" id="realtimeVoiceEnd">End voice</button>
-          <div id="realtimeVoiceWarning" class="realtime-voice-warning" role="status" hidden></div>
-          <div id="realtimeVoiceTranscript" class="realtime-voice-transcript" aria-label="Voice transcript" aria-live="polite" hidden></div>
-          <div id="realtimeVoiceTasks" class="realtime-voice-tasks" aria-label="Voice background tasks" hidden></div>
-        </div>
         <div class="voice-mode-bar" id="voiceModeBar" style="display:none" data-tour="voice-mode-bar">
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
@@ -684,7 +715,7 @@
             <button type="button" class="icon-btn has-tooltip" id="btnSavedPrompts" data-tooltip="Saved prompts" data-i18n-title="composer_control_saved_prompts" data-i18n-aria-label="composer_control_saved_prompts" onclick="toggleSavedPromptsPopup()" aria-haspopup="menu" aria-expanded="false" aria-controls="savedPromptsPopup" aria-label="Saved prompts" data-tour="chat-saved-prompts">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
             </button>
-            <button type="button" class="icon-btn has-tooltip" id="btnRealtimeVoice" aria-label="Voice mode" aria-pressed="false" title="Voice mode" data-tooltip="Voice mode" data-tour="chat-realtime-voice"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9v6M8 5v14M12 2v20M16 5v14M20 9v6"/></svg></button>
+            <button type="button" class="icon-btn has-tooltip" id="btnRealtimeVoice" data-i18n-title="voice_workspace_title" data-i18n-aria-label="voice_workspace_title" aria-label="Voice mode" aria-pressed="false" title="Voice mode" data-tooltip="Voice mode" data-tour="chat-realtime-voice"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9v6M8 5v14M12 2v20M16 5v14M20 9v6"/></svg></button>
             <button class="icon-btn mic-btn has-tooltip" id="btnMic" aria-label="Dictate message" data-tooltip="Dictate" data-i18n-title="voice_dictate" style="display:none" data-tour="chat-dictate">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <rect x="9" y="1" width="6" height="12" rx="3"/>
@@ -1302,7 +1333,7 @@
                 <input type="checkbox" id="settingsWorkspaceTodosTab" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_workspace_todos_tab">Show Todos tab in workspace panel</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_workspace_todos_tab">When enabled, a Todos tab appears in the workspace panel (right side). The sidebar Todos panel remains available regardless.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_workspace_todos_tab">Show the task list for the current conversation in the workspace panel.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -2047,6 +2078,21 @@
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree" data-tour="workspace-file-tree"></div>
+    <div class="workspace-artifact-controls" id="workspaceArtifactControls">
+      <input type="search" id="workspaceArtifactSearch" oninput="renderSessionArtifacts()" placeholder="Find a file…" aria-label="Find a file" data-i18n-placeholder="artifact_browser_search" data-i18n-aria-label="artifact_browser_search">
+      <div class="workspace-artifact-filter-row">
+        <select id="workspaceArtifactType" onchange="renderSessionArtifacts()" aria-label="File type" data-i18n-aria-label="artifact_browser_type">
+          <option value="all" data-i18n="artifact_browser_all">All file types</option>
+          <option value="documents" data-i18n="artifact_browser_documents">Documents</option>
+          <option value="images" data-i18n="artifact_browser_images">Images</option>
+          <option value="code" data-i18n="artifact_browser_code">Code</option>
+          <option value="data" data-i18n="artifact_browser_data">Data &amp; spreadsheets</option>
+          <option value="other" data-i18n="artifact_browser_other">Other files</option>
+        </select>
+        <button type="button" class="sm-btn" id="workspaceArtifactReset" onclick="clearArtifactFilters()" data-i18n="artifact_browser_reset">Reset</button>
+      </div>
+      <p id="workspaceArtifactSummary" role="status"></p>
+    </div>
     <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
     <div class="workspace-todos" id="workspaceTodosPanel" hidden style="flex:1;overflow-y:auto;padding:8px 12px"></div>
     <div class="workspace-screens" id="workspaceScreensPanel" role="tabpanel" aria-labelledby="workspaceScreensTab" hidden></div>
@@ -2176,6 +2222,7 @@
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/split.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/realtime_voice.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/work-steps.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/vendor/guida/0.2.0/guida.umd.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/error-reporter.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/help-content.js?v=__WEBUI_VERSION__" defer></script>
@@ -2323,5 +2370,9 @@
   <div id="outlinePanel"></div>
 </div>
 <div class="profile-dropdown" id="profileDropdown"></div>
+<script src="static/workspace-shell.js?v=__WEBUI_VERSION__"></script>
+<script src="static/bot-workbench.js?v=__WEBUI_VERSION__"></script>
+<script src="static/conversation-workbench.js?v=__WEBUI_VERSION__"></script>
+<script src="static/workspace-navigation.js?v=__WEBUI_VERSION__"></script>
 </body>
 </html>
