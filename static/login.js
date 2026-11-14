@@ -169,6 +169,9 @@ document.addEventListener('DOMContentLoaded', function () {
   if (input) {
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
+        // Self-contained IME guard: this page does not load boot.js, so the
+        // shared window._isImeEnter helper is unavailable here.
+        if (e.isComposing || e.keyCode === 229) return;
         e.preventDefault();
         doLogin(e);
       }
