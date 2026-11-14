@@ -24,7 +24,10 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
-from api.agent_health import get_active_profile_gateway_running_pid
+from api.agent_health import (
+    gateway_lifecycle_capability,
+    get_active_profile_gateway_running_pid,
+)
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT
@@ -218,8 +221,8 @@ def _update_blocker_snapshot(target: str) -> dict:
     (``_ensure_gateway_restart_for_agent_update``), which ends them, so for
     ``target == 'agent'`` every live run blocks, as every active run did
     before #7293. That is one pass over the registries with no durability
-    check (``run_drain.all_active_runs``), so no run can be counted twice or
-    missed while its durable mark changes. A WebUI-only update keeps the
+    check (``run_drain.all_active_runs``), classifying runs into WebUI-owned
+    runs and resumable Gateway runs. A WebUI-only update keeps the
     #7293 exemption.
     """
     if target != 'agent':
@@ -227,6 +230,59 @@ def _update_blocker_snapshot(target: str) -> dict:
     from api import run_drain
 
     return _blocker_snapshot_from_runs(run_drain.all_active_runs())
+
+
+def _gateway_run_split(total: int) -> tuple[int, int]:
+    """Return ``(gateway_runs, webui_owned_runs)`` clamped to ``total``.
+
+    #8746: the refusal copy names both kinds of run, so it needs the split the
+    blocking census deliberately does not compute — #8660 requires
+    ``_update_blocker_snapshot`` to stay one pass over the registries with no
+    durability read, because a mark that moves between two reads can drop or
+    double a run. Here a mark that moves can only shift one run across the
+    boundary, so the split is clamped to the authoritative total instead of
+    being trusted, and a failed read reports no Gateway runs rather than
+    promising stops it cannot prove.
+    """
+    from api import run_drain
+
+    try:
+        census = run_drain.active_run_census()
+        gateway = min(len(census.get('gateway') or []), total)
+    except Exception:
+        logger.debug('Failed to split the active-run census', exc_info=True)
+        gateway = 0
+    return gateway, max(0, total - gateway)
+
+
+def _gateway_lifecycle_capability_info() -> tuple[bool, str]:
+    """Return (managed, reason) for the active profile's Gateway safely.
+
+    Calls ``gateway_lifecycle_capability()`` without caching. Returns
+    (False, reason) on unmanaged, default 'local_gateway_unproven' on exception
+    or unrecognized capability.
+    """
+    try:
+        capability = gateway_lifecycle_capability()
+        if isinstance(capability, dict) and capability.get('managed') is True:
+            return True, str(capability.get('reason') or 'local_gateway')
+        reason = str(capability.get('reason') or '') if isinstance(capability, dict) else ''
+        if reason not in ('external_gateway', 'local_gateway_unproven'):
+            reason = 'local_gateway_unproven'
+        return False, reason
+    except Exception:
+        logger.debug('Failed to resolve Gateway lifecycle capability', exc_info=True)
+        return False, 'local_gateway_unproven'
+
+
+def _is_gateway_lifecycle_managed() -> bool:
+    """Return whether the active profile's Gateway lifecycle is managed.
+
+    Calls ``gateway_lifecycle_capability()`` safely without caching. Returns
+    False on any exception or malformed result so an unproven restart is never
+    promised.
+    """
+    return _gateway_lifecycle_capability_info()[0]
 
 
 def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
@@ -239,14 +295,100 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
             'restart_blocked': bool(blocker_snapshot),
         }
     active_streams = int(blocker_snapshot.get('active_streams') or 0)
-    active_runs = int(blocker_snapshot.get('active_runs') or 0) or active_streams
-    detail = f"{active_runs} WebUI agent run{'s are' if active_runs != 1 else ' is'} active"
+    raw_active_runs = int(blocker_snapshot.get('active_runs') or 0) or active_streams
+
+    payload_extra: dict = {}
+    if target == 'agent':
+        gateway_managed, gateway_reason = _gateway_lifecycle_capability_info()
+        payload_extra['gateway_restart_managed'] = gateway_managed
+
+        if 'webui_owned_runs' in blocker_snapshot or 'gateway_runs' in blocker_snapshot:
+            gateway_runs = int(blocker_snapshot.get('gateway_runs') or 0)
+            webui_owned_runs = int(blocker_snapshot.get('webui_owned_runs') or 0)
+            n = webui_owned_runs + gateway_runs
+        else:
+            n = raw_active_runs
+            gateway_runs, webui_owned_runs = _gateway_run_split(n)
+
+        payload_extra['webui_owned_runs'] = webui_owned_runs
+        payload_extra['gateway_runs'] = gateway_runs
+        active_runs = n
+
+        plural_n = n != 1
+        w = webui_owned_runs
+        g = gateway_runs
+
+        if g > 0:
+            detail = f"{n} agent run{'s are' if plural_n else ' is'} active (WebUI and Gateway)"
+            if gateway_managed:
+                gateway_note = (
+                    ' Updating the Agent also restarts the Gateway this profile uses and '
+                    'stops every run that Gateway is executing, including runs started '
+                    'from other profiles that use the same Gateway endpoint; only the '
+                    'WebUI runs are settled as interrupted.'
+                )
+            elif gateway_reason == 'external_gateway':
+                gateway_note = (
+                    ' The Gateway this profile uses is managed outside the WebUI, '
+                    'so updating the Agent does not restart it and its Gateway runs keep running.'
+                )
+            else:
+                gateway_note = (
+                    ' The WebUI cannot prove it owns the Gateway behind this profile\'s '
+                    'endpoint, so it will not restart it and its Gateway runs keep running.'
+                )
+        else:
+            detail = f"{n} agent run{'s are' if plural_n else ' is'} active"
+            gateway_note = ''
+
+        plural_w = w != 1
+        w_suffix = 's' if plural_w else ''
+
+        if gateway_managed:
+            if w > 0:
+                force_sentence = (
+                    'Wait for the response to finish and retry, or force the update '
+                    f'to interrupt the {w} WebUI run{w_suffix} and restart the '
+                    'Gateway this profile uses.'
+                )
+            else:
+                force_sentence = (
+                    'Wait for the response to finish and retry, or force the update '
+                    'to restart the Gateway this profile uses and stop the '
+                    'Gateway runs it is executing.'
+                )
+        else:
+            if w > 0 and g > 0:
+                force_sentence = (
+                    'Wait for the response to finish and retry, or force the update '
+                    f'to interrupt the {w} WebUI run{w_suffix}; the Gateway runs '
+                    'keep running.'
+                )
+            elif w > 0 and g == 0:
+                force_sentence = (
+                    'Wait for the response to finish and retry, or force the update '
+                    f'to interrupt the {w} WebUI run{w_suffix}.'
+                )
+            else:
+                force_sentence = (
+                    'Wait for the Gateway runs to finish and retry; forcing the '
+                    'update will not stop them.'
+                )
+    else:
+        active_runs = raw_active_runs
+        plural = active_runs != 1
+        detail = f"{active_runs} WebUI agent run{'s are' if plural else ' is'} active"
+        gateway_note = ''
+        force_sentence = (
+            'Wait for the response to finish and retry, or force the update '
+            'to interrupt the active run' + ('s' if plural else '') + '.'
+        )
     return {
         'ok': False,
         'message': (
-            f'Cannot update {target} while {detail}. '
-            'Wait for the response to finish and retry, or force the update '
-            'to interrupt the active run' + ('s' if active_runs != 1 else '') + '.'
+            f'Cannot update {target} while {detail}.'
+            f'{gateway_note} '
+            f'{force_sentence}'
         ),
         'target': target,
         'restart_blocked': True,
@@ -258,6 +400,7 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
         'active_runs': active_runs,
         'blocking_stream_ids': blocker_snapshot.get('blocking_stream_ids') or [],
         'blocking_run_ids': blocker_snapshot.get('blocking_run_ids') or [],
+        **payload_extra,
     }
 
 
@@ -540,11 +683,35 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
             if blocker_snapshot.get('restart_blocked'):
                 if not force_active_runs:
                     return _restart_blocked_response(target, blocker_snapshot)
-                logger.warning(
-                    "Forced %s update with %s active WebUI run(s); they will be "
-                    "settled as interrupted before the restart",
-                    target, blocker_snapshot.get('active_runs'),
-                )
+                # #8667: name both cases — the WebUI settles its own runs, the
+                # Gateway runs end with the Gateway cycle and are settled
+                # afterwards by the worker teardown/watchdog.
+                # #8746: qualify the Agent forced log by Gateway lifecycle ownership.
+                if target == 'agent':
+                    if _is_gateway_lifecycle_managed():
+                        logger.warning(
+                            "Forced %s update with %s active run(s) (WebUI and "
+                            "Gateway); the WebUI runs are settled as interrupted "
+                            "before the restart, and the Gateway runs this "
+                            "profile's Gateway is executing end when the Gateway "
+                            "cycles, including runs started from other profiles "
+                            "that use the same Gateway endpoint",
+                            target, blocker_snapshot.get('active_runs'),
+                        )
+                    else:
+                        logger.warning(
+                            "Forced %s update with %s active run(s) (WebUI and "
+                            "Gateway); the WebUI runs are settled as interrupted "
+                            "before the restart, and the Gateway runs keep running "
+                            "because the Gateway is managed outside the WebUI",
+                            target, blocker_snapshot.get('active_runs'),
+                        )
+                else:
+                    logger.warning(
+                        "Forced %s update with %s active WebUI run(s); they will "
+                        "be settled as interrupted before the restart",
+                        target, blocker_snapshot.get('active_runs'),
+                    )
             return run()
         finally:
             run_drain.release_run_admission_hold(token)

@@ -362,6 +362,31 @@ def _collect_active_runs(*, include_resumable_gateway: bool) -> list[dict]:
     return runs
 
 
+def active_run_census() -> dict:
+    """Split every live run into WebUI-owned and Gateway-owned in one pass.
+
+    ``webui_owned`` is what ``webui_owned_active_runs`` returns (the runs a
+    WebUI-side settle reaches) and ``gateway`` is the resumable Gateway work it
+    does not; the two lists are disjoint and their union is every live run
+    (#8746). The durability mark is read once per Gateway row inside this pass.
+
+    This split is for describing the census, never for deciding it: the count
+    that blocks an update still comes from a single ``_update_blocker_snapshot``
+    pass with no durability read (#8660), so callers must clamp this split to
+    the total they already hold.
+    """
+    runs = _collect_active_runs(include_resumable_gateway=True)
+    webui_owned: list[dict] = []
+    gateway: list[dict] = []
+    for run in runs:
+        backend = str(run.get("backend") or "")
+        if backend == "gateway" and _gateway_run_durably_resumable(str(run.get("stream_id") or "")):
+            gateway.append(run)
+        else:
+            webui_owned.append(run)
+    return {"webui_owned": webui_owned, "gateway": gateway, "all": runs}
+
+
 # ── Settlement ──────────────────────────────────────────────────────────────
 
 

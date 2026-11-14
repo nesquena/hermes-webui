@@ -14980,9 +14980,9 @@ function _showUpdateError(target,res){
     clearLockBtn.style.display='inline-block';
   }
 }
-function _activeRunsUpdateText(key,count,fallback){
+function _activeRunsUpdateText(key,count,fallback,extra){
   if(typeof t==='function'){
-    const val=t(key,count);
+    const val=extra!==undefined?t(key,count,extra):(count!==undefined?t(key,count):t(key));
     if(val&&val!==key) return val;
   }
   return fallback;
@@ -15003,10 +15003,19 @@ function _renderActiveRunsForceOffer(target,res,resend){
   // way forward (on the conflict path its re-send also carries the hard reset).
   const legacyForceBtn=$('btnForceUpdate');
   if(legacyForceBtn) legacyForceBtn.style.display='none';
-  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
-  const count=Math.max(1,Math.floor(rawCount));
-  const plural=count===1?'':'s';
-  const label=_activeRunsUpdateText('update_force_active_runs',count,'Update anyway (interrupts '+count+' run'+plural+')');
+  const agentTarget=target==='agent';
+  const total=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const w=(res&&res.webui_owned_runs!==undefined)?Number(res.webui_owned_runs):total;
+  const g=Number(res&&res.gateway_runs)||0;
+  const agentExternal=agentTarget&&Boolean(res)&&res.gateway_restart_managed===false;
+  const interruptedCount=agentExternal?w:total;
+  let label;
+  if(interruptedCount===0){
+    label=_activeRunsUpdateText('update_force_active_runs_no_runs',undefined,'Update anyway (interrupts nothing)');
+  }else{
+    const plural=interruptedCount===1?'':'s';
+    label=_activeRunsUpdateText('update_force_active_runs',interruptedCount,'Update anyway (interrupts '+interruptedCount+' run'+plural+')');
+  }
   const actions=document.createElement('div');
   actions.style.marginTop='6px';
   const btn=document.createElement('button');
@@ -15020,14 +15029,37 @@ function _renderActiveRunsForceOffer(target,res,resend){
   btn.textContent=label;
   btn.onclick=async()=>{
     if(btn.disabled) return;
+    // #8667: an Agent update also cycles the Gateway that executes the
+    // resumable runs, so its confirmation names both kinds of run. A WebUI
+    // update keeps the WebUI-only copy (#7293).
+    // #8746: qualify the Agent confirmation by Gateway lifecycle ownership.
+    let confirmMessage;
+    if(agentTarget){
+      if(g>0){
+        if(agentExternal){
+          const confirmMessageKey='update_force_active_runs_message_agent_external';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working, and '+g+' Gateway run'+(g===1?' keeps':' keep')+' running because the WebUI cannot restart this profile\'s Gateway. Only the WebUI runs are saved as interrupted.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }else{
+          const confirmMessageKey='update_force_active_runs_message_agent';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working and '+g+' Gateway run'+(g===1?' is':'s are')+' running. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. The WebUI runs are saved as interrupted. Wait for them to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }
+      }else{
+        const confirmMessageKey='update_force_active_runs_message_agent_webui_only';
+        const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working. No Gateway run is active; the WebUI runs are saved as interrupted if you force the update.';
+        confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback);
+      }
+    }else{
+      const count=Math.max(1,Math.floor(total));
+      const confirmMessageKey='update_force_active_runs_message';
+      const confirmMessageFallback=count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.';
+      confirmMessage=_activeRunsUpdateText(confirmMessageKey,count,confirmMessageFallback);
+    }
     const confirmed=await showConfirmDialog({
-      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
-      message:_activeRunsUpdateText(
-        'update_force_active_runs_message',
-        count,
-        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
-      ),
-      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
+      title:_activeRunsUpdateText('update_force_active_runs_title',interruptedCount,'Interrupt active runs?'),
+      message:confirmMessage,
+      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',interruptedCount,'Interrupt and update'),
       danger:true,
       focusCancel:true,
     });
