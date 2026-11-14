@@ -31,6 +31,10 @@ def _entry(name, label="", env_var: str | None = ""):
 
 
 class _FakeRegistry:
+    @staticmethod
+    def current_scope_key():
+        return "test-scope"
+
     def __init__(self, entries=None, exc=None):
         self._entries = list(entries or [])
         self._exc = exc
@@ -245,6 +249,10 @@ def test_discover_plugins_raising_degrades_to_constant_only(monkeypatch):
 
 def test_partial_enumeration_failure_discards_partial_results(monkeypatch):
     class _HalfwayRegistry:
+        @staticmethod
+        def current_scope_key():
+            return "test-scope"
+
         def all_entries(self):
             yield _entry("telegram", "Telegram", "TELEGRAM_HOME_CHANNEL")
             raise RuntimeError("second deferred loader exploded")
@@ -274,3 +282,23 @@ def test_registry_modules_are_not_imported_at_module_top_level(module):
             assert node.module != module, f"top-level import of {module} in api/routes.py"
         elif isinstance(node, ast.Import):
             assert module not in {alias.name for alias in node.names}
+
+
+def test_per_home_manager_with_unscoped_platform_registry_is_not_discovered(monkeypatch):
+    """Agent 4e1b2e436c alone: per-home plugin managers but a global platform registry."""
+    registry = types.SimpleNamespace(all_entries=lambda: list(_PLUGIN_ENTRIES))
+    calls = _install(monkeypatch, registry=registry)
+    assert _values(_call(monkeypatch)) == ["local", "origin", "webhook", "wecom_callback"]
+    assert calls["discover"] == 0
+
+
+def test_cron_picker_does_not_cache_delivery_options_across_profiles():
+    """The delivery list is per profile now; a page-global cache would keep the first
+    profile's list after an in-page profile switch."""
+    src = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "_cronDeliveryOptionsCache" not in src
+    start = src.index("async function _populateCronDeliverOptions(")
+    body = src[start:src.index("\nasync function ", start + 10)]
+    assert "api('/api/crons/delivery-options')" in body
+    assert "requestedProfile" in body and "S.activeProfile" in body
+    assert "return _populateCronDeliverOptions(selectedValue, isEdit)" in body

@@ -33349,7 +33349,8 @@ def _handle_cron_delivery_options(handler):
     # any failure while enumerating it) degrade to the constant alone.
     #
     # Only Agents that key plugin managers by profile home (from 2026-08-12,
-    # ``hermes_cli.plugins._plugin_managers_by_home``) are enumerated. Older
+    # ``hermes_cli.plugins._plugin_managers_by_home``) with a profile-scoped
+    # platform registry (``current_scope_key``) are enumerated. Older
     # Agents share one process-wide plugin manager, so the first profile to
     # open the picker would leak its user plugin platforms into every other
     # profile's picker; some of them also run discovery under the cron env
@@ -33360,19 +33361,23 @@ def _handle_cron_delivery_options(handler):
         # import_module returns the exact registered module (tests replace it in sys.modules).
         _agent_plugins = importlib.import_module("hermes_cli.plugins")
         if hasattr(_agent_plugins, "_plugin_managers_by_home"):
-            _agent_plugins.discover_plugins()  # idempotent, scoped to the active profile home
             from gateway.platform_registry import platform_registry
-            _names, _labels = set(), {}
-            for _entry in platform_registry.all_entries():
-                _name = getattr(_entry, "name", None)
-                if not isinstance(_name, str) or not _name:
-                    continue
-                _label = getattr(_entry, "label", None)
-                if isinstance(_label, str) and _label.strip():
-                    _labels[_name] = _label.strip()
-                if getattr(_entry, "cron_deliver_env_var", None):
-                    _names.add(_name)
-            _registry_names, _registry_labels = _names, _labels
+            # The registry must be profile-scoped too (``current_scope_key``, the
+            # Agent commit right after the per-home managers); otherwise one
+            # profile's discovery can replace another's same-name adapter.
+            if callable(getattr(platform_registry, "current_scope_key", None)):
+                _agent_plugins.discover_plugins()  # idempotent, scoped to the active profile home
+                _names, _labels = set(), {}
+                for _entry in platform_registry.all_entries():
+                    _name = getattr(_entry, "name", None)
+                    if not isinstance(_name, str) or not _name:
+                        continue
+                    _label = getattr(_entry, "label", None)
+                    if isinstance(_label, str) and _label.strip():
+                        _labels[_name] = _label.strip()
+                    if getattr(_entry, "cron_deliver_env_var", None):
+                        _names.add(_name)
+                _registry_names, _registry_labels = _names, _labels
     except Exception:
         logger.debug("cron delivery options: platform registry unavailable", exc_info=True)
     platforms = [
