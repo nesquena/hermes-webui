@@ -11195,7 +11195,33 @@ function renderMd(raw){
   const _code_outer_stash=[];
   const _stashOuterCode=m=>{_code_outer_stash.push(m);return `\x00K${_code_outer_stash.length-1}\x00`;};
   s=s.replace(/`[^`\n]+`/g,m=>m.includes('![')?_stashOuterCode(m):m);
-  s=s.replace(/<code\b[^>]*>(?:(?!<\/code>)[\s\S])*?!\[(?:(?!<\/code>)[\s\S])*?<\/code>/g,_stashOuterCode);
+  // Complete rendered <code> elements are collected by one forward scan.  A
+  // tempered pattern that looks for `![` between two lazy "not </code>" runs
+  // rescans the remaining suffix for every image opener when a message opens a
+  // code element and never closes it, which is quadratic in the message length
+  // (gate G9072-CODE-QUADRATIC: 160 KB took ~32x a clean render).  indexOf
+  // locates the same spans in linear time; whether the span needs stashing is
+  // decided on the matched text, so code stays opaque, images between two
+  // separate code spans still render, and an unterminated span is left alone.
+  {
+    let out='',i=0;
+    while(i<s.length){
+      const open=s.indexOf('<code',i);
+      if(open<0){out+=s.slice(i);break;}
+      const afterTag=s.charAt(open+5);
+      if(afterTag!=='>'&&!/\s/.test(afterTag)){
+        out+=s.slice(i,open+5);i=open+5;continue;
+      }
+      const gt=s.indexOf('>',open+5);
+      const close=gt<0?-1:s.indexOf('</code>',gt+1);
+      if(close<0){out+=s.slice(i);break;}
+      const end=close+7;
+      const span=s.slice(open,end);
+      out+=s.slice(i,open)+(span.includes('![')?_stashOuterCode(span):span);
+      i=end;
+    }
+    s=out;
+  }
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.

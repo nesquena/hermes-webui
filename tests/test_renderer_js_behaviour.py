@@ -12,6 +12,7 @@ asserting the rendered HTML for the most common LLM-output shapes.
 Add a case here whenever the renderer fix targets a class of input the
 Python mirror cannot exercise faithfully.
 """
+import json
 import os
 import re
 import shutil
@@ -87,6 +88,59 @@ def driver_path(tmp_path_factory):
     p = tmp_path_factory.mktemp("renderer_driver") / "driver.js"
     p.write_text(_DRIVER_SRC, encoding="utf-8")
     return str(p)
+
+
+# Same prelude, but the driver renders several payloads inside ONE process and
+# reports how long each renderMd() call took.  Keeping the timer inside the
+# process isolates renderer cost from node startup, which matters for growth
+# comparisons where the arms are only a few milliseconds apart.
+_PERF_DRIVER_SRC = _DRIVER_SRC.replace(
+    """let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', c => { buf += c; });
+process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+""",
+    """let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', c => { buf += c; });
+process.stdin.on('end', () => {
+  const payloads = JSON.parse(buf);
+  const samples = payloads.map(p => {
+    const times = [];
+    for (let r = 0; r < 2; r++) {
+      const t0 = process.hrtime.bigint();
+      renderMd(p);
+      times.push(Number(process.hrtime.bigint() - t0) / 1e6);
+    }
+    return Math.min(...times);
+  });
+  process.stdout.write(JSON.stringify(samples));
+});
+""",
+)
+if _PERF_DRIVER_SRC == _DRIVER_SRC:  # pragma: no cover - guard against drift
+    raise RuntimeError("perf driver prelude no longer matches _DRIVER_SRC")
+
+
+@pytest.fixture(scope="module")
+def growth_driver_path(tmp_path_factory):
+    p = tmp_path_factory.mktemp("renderer_growth_driver") / "driver.js"
+    p.write_text(_PERF_DRIVER_SRC, encoding="utf-8")
+    return str(p)
+
+
+def _render_timings_ms(driver_path, payloads):
+    """Render each payload through the real renderMd and return ms per payload."""
+    result = subprocess.run(
+        [NODE, driver_path, str(UI_JS_PATH)],
+        input=json.dumps(payloads),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node perf driver failed: {result.stderr}")
+    return json.loads(result.stdout)
 
 
 def _render(driver_path, markdown: str) -> str:
@@ -1132,7 +1186,42 @@ class TestRootRelativeMarkdownImage:
         )
 
 
-class TestMarkdownTableCellLineBreaks:
+class TestUnterminatedCodeStashGrowth:
+    """Gate G9072-CODE-QUADRATIC: the selective ``<code>`` stash must stay
+    linear when a message opens a code element and never closes it.
+
+    The tempered pattern this replaces searched for ``![`` between two lazy
+    "not ``</code>``" runs, so an unterminated opener made every image opener
+    rescan the remaining suffix: four times the bytes cost about eleven times
+    the render time, and 160 KB took ~32x a clean render.  A forward scan must
+    keep that flat while preserving the code-opacity controls above."""
+
+    def test_unterminated_code_span_growth_is_linear(self, growth_driver_path):
+        def payload(openers):
+            return '<code class="language-text">' + "![x] " * openers
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(8000), payload(32000)]
+        )
+        # 4x the bytes: linear work lands near 4x, the tempered pattern ran ~11x.
+        assert large_ms < small_ms * 6, (
+            "unterminated <code> must not rescale per image opener: "
+            f"40 KB={small_ms:.1f} ms, 160 KB={large_ms:.1f} ms"
+        )
+        assert large_ms < 1500, (
+            f"160 KB unterminated <code> render is far too slow: {large_ms:.1f} ms"
+        )
+
+    def test_unterminated_code_leaves_later_images_alone(self, driver_path):
+        # Control: a span that never closes is not a code span, so the image
+        # after it keeps flowing through the outer image pass as before.
+        out = _render(
+            driver_path,
+            '<code class="language-text"> ![x](/static/charts/probe.svg)',
+        )
+        assert 'src="/static/charts/probe.svg"' in out, (
+            f"image after an unterminated code tag must still render: {out!r}"
+        )
     """<br> inside markdown table cells must be preserved and not split cells across lines."""
 
     def test_table_cell_with_br_renders_intact(self, driver_path):
