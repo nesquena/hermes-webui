@@ -14885,6 +14885,19 @@ def _session_attention_summary(session_id: str) -> dict | None:
             "count": clarify_count,
             "severity": "question",
         }
+    try:
+        from api.vault_prompts import pending_count as get_vault_pending_count
+    except ImportError:
+        get_vault_pending_count = None
+    vault_count = int((get_vault_pending_count or (lambda *a, **k: 0))(session_id) or 0)
+    if vault_count > 0:
+        # Reuse the sidebar's "clarify" attention kind: a masked credential
+        # card is user-pending work in exactly the same category.
+        return {
+            "kind": "clarify",
+            "count": vault_count,
+            "severity": "question",
+        }
     return None
 
 
@@ -19293,6 +19306,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/clarify/pending":
         return _handle_clarify_pending(handler, parsed)
 
+    if parsed.path == "/api/vault/pending":
+        return _handle_vault_pending(handler, parsed)
+
     if parsed.path == "/api/clarify/stream":
         return _handle_clarify_sse_stream(handler, parsed)
 
@@ -22326,6 +22342,10 @@ def handle_post(handler, parsed) -> bool:
     # ── Clarify (POST) ──
     if parsed.path == "/api/clarify/respond":
         return _handle_clarify_respond(handler, body)
+
+    # ── Vault prompts (POST): browser_vault unlock / save-login / code answers ──
+    if parsed.path == "/api/vault/respond":
+        return _handle_vault_respond(handler, body)
 
     # ── Commands (POST) ──
     if parsed.path == "/api/commands/bundles/resolve":
@@ -27811,6 +27831,19 @@ def _handle_approval_inject(handler, parsed):
 def _handle_clarify_pending(handler, parsed):
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     pending = get_clarify_pending(sid)
+    if pending:
+        return j(handler, {"pending": pending})
+    return j(handler, {"pending": None})
+
+
+def _handle_vault_pending(handler, parsed):
+    """Pending browser_vault prompt for a session (safe metadata only)."""
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    try:
+        from api.vault_prompts import get_pending as get_vault_pending
+    except ImportError:
+        return j(handler, {"pending": None})
+    pending = get_vault_pending(sid)
     if pending:
         return j(handler, {"pending": pending})
     return j(handler, {"pending": None})
@@ -35593,6 +35626,39 @@ def _handle_clarify_respond(handler, body):
         }, status=409)
 
     return j(handler, {"ok": True, "response": response})
+
+
+def _handle_vault_respond(handler, body):
+    """Deliver a vault-card answer to the waiting agent tool.
+
+    SECURITY: ``body["values"]`` carries the credential (master password,
+    one-time code, or identifier+password pair) typed into the masked card.
+    It is stored only on the pending entry inside the agent process and never
+    logged, journalled or echoed back — only ``ok``/``stale`` metadata is
+    returned to the browser.
+    """
+    sid = body.get("session_id", "")
+    if not sid:
+        return bad(handler, "session_id is required")
+    prompt_id = str(body.get("prompt_id", "")).strip()
+    if not prompt_id or len(prompt_id) > 64:
+        return bad(handler, "prompt_id is required")
+    values = body.get("values")
+    if not isinstance(values, dict):
+        values = {"response": body.get("response") or body.get("answer") or body.get("value") or ""}
+    values = {str(k)[:64]: str(v)[:4096] for k, v in values.items() if v is not None}
+    try:
+        from api.vault_prompts import respond_vault as respond_vault_prompt
+    except ImportError:
+        return bad(handler, "vault prompts not available", status=404)
+    ok = respond_vault_prompt(sid, prompt_id, values)
+    if not ok:
+        return j(handler, {
+            "ok": False,
+            "error": "Vault prompt expired or not found. The agent may have already proceeded.",
+            "stale": True,
+        }, status=409)
+    return j(handler, {"ok": True})
 
 
 class _ManualCompressionMemoryHandler:
