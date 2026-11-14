@@ -71,12 +71,15 @@ test('CONVERSATION WORKBENCH live activity follows the existing runtime and refr
   await page.locator('#btnConversationBoard').click();
   await page.locator('[data-conversation-filter="running"]').click();
   await expect(page.locator('[data-conversation-open="'+sid+'"] [data-state="running"]')).toBeVisible();
+  await expect(page.locator('[data-conversation-group="running"] [data-conversation-open="'+sid+'"]')).toBeVisible();
+  await expect(page.locator('[data-conversation-filter="running"] .conversation-filter-count')).not.toHaveText('0');
   await page.locator('[data-conversation-filter="all"]').click();
   const card=page.locator('[data-conversation-open="'+sid+'"]');await card.focus();
   await page.evaluate(()=>renderSessionListFromCache());await expect(card).toBeFocused();
   await expect.poll(async()=>(await api(page,'/health')).body.active_runs||0).toBe(0);
   await page.evaluate(()=>renderSessionList());
   await expect(card.locator('[data-state="running"]')).toHaveCount(0);
+  await expect(page.locator('[data-conversation-group="recent"] [data-conversation-open="'+sid+'"]')).toBeVisible();
   await card.press('Enter');await expect(page.locator('#messages')).toContainText('QA_SLOW_RESPONSE');
   await expect(page.locator('#mainConversations')).toBeHidden();
 });

@@ -1,6 +1,17 @@
 // Locale bundle; loaded on demand by static/i18n.js.
 // Dutch (nl): plain B1-level Dutch for SynthPulse. Missing keys fall back to English.
 window.__registerHermesLocale('nl', {
+  "workspace_navigation_title": "Ga naar een functie",
+  "workspace_navigation_short": "Ga naar…",
+  "workspace_navigation_close": "Navigatie sluiten",
+  "workspace_navigation_search": "Zoek een functie of pagina…",
+  "workspace_navigation_count": "{0} beschikbare bestemmingen",
+  "workspace_navigation_empty": "Geen functies gevonden. Probeer een andere naam.",
+  "workspace_navigation_hint": "↑ ↓ kiezen · Enter openen · Esc sluiten · Ctrl/⌘ Shift P openen",
+  "workspace_navigation_project_aliases": "spaces mappen projecten bestanden",
+  "bot_workspace_search": "Zoek een bot op naam, rol of specialisme…",
+  "bot_workspace_start": "Open chat",
+  "conversation_board_recent": "Recent",
   "conversation_board_title": "Gesprekkenoverzicht",
   "conversation_board_intro": "Werk verder met je bots. Dit overzicht volgt de bot-, project- en bronfilters in je gesprekkenlijst.",
   "conversation_board_back": "Terug naar chat",

@@ -41,8 +41,8 @@ ESSENTIAL_PANELS = frozenset({"chat", "settings", "approvals"})
 MEMBER_PANELS = frozenset({"modules", "chat", "profiles", "projects", "tasks", "skills", "integrations", "approvals", "memory", "settings"})
 WORKSPACE_PANELS = {
     "member": MEMBER_PANELS,
-    "operator": MEMBER_PANELS | {"kanban", "insights"},
-    "engineer": MEMBER_PANELS | {"kanban", "insights", "workspaces", "files", "todos", "logs"},
+    "operator": MEMBER_PANELS | {"insights"},
+    "engineer": MEMBER_PANELS | {"insights", "files", "todos", "logs"},
 }
 
 
@@ -118,7 +118,9 @@ def workspace_navigation(access, policy=None) -> dict:
     This projection neither grants access nor changes the canonical policy.
     """
     kind = workspace_kind(access)
-    visible = set(visible_panels(access, policy))
+    # Spaces live inside Projects. Kanban retains internal routes but no longer
+    # has a standalone navigation entry. Keep this presentation out of grants.
+    visible = set(visible_panels(access, policy)) - {"workspaces", "kanban"}
     primary = visible if kind == "admin" else visible & WORKSPACE_PANELS[kind]
     return {"kind": kind, "primary": sorted(primary),
             "secondary": sorted(visible - primary)}

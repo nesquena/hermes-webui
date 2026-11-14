@@ -30,6 +30,8 @@ const SHELL_ASSETS = [
   './static/bot-workbench.js' + VQ,
   './static/conversation-workbench.js' + VQ,
   './static/conversation-workbench.css' + VQ,
+  './static/workspace-navigation.js' + VQ,
+  './static/workspace-navigation.css' + VQ,
   './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
   './static/assistant_turn_anchors.js' + VQ,

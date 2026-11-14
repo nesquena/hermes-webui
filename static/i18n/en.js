@@ -1,5 +1,16 @@
 // Locale bundle; loaded on demand by static/i18n.js.
 window.__registerHermesLocale('en', {
+  "workspace_navigation_title": "Go to a feature",
+  "workspace_navigation_short": "Go to…",
+  "workspace_navigation_close": "Close navigation",
+  "workspace_navigation_search": "Find a feature or page…",
+  "workspace_navigation_count": "{0} available destinations",
+  "workspace_navigation_empty": "No matching features. Try a different name.",
+  "workspace_navigation_hint": "↑ ↓ to choose · Enter to open · Esc to close · Ctrl/⌘ Shift P to open",
+  "workspace_navigation_project_aliases": "spaces folders projects files",
+  "bot_workspace_search": "Find a bot by name, role or specialty…",
+  "bot_workspace_start": "Open chat",
+  "conversation_board_recent": "Recent",
   "conversation_board_title": "Conversation overview",
   "conversation_board_intro": "Continue work across your bots. This overview follows the bot, project and source filters in your conversation list.",
   "conversation_board_back": "Back to chat",

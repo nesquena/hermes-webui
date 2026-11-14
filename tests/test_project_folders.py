@@ -112,8 +112,10 @@ def test_routes_are_flag_gated_and_reuse_existing_checks():
     assert "visible_ids" in post_fn
 
 
-def test_spaces_menu_is_unchanged_and_ui_is_flag_driven():
+def test_project_entry_replaces_spaces_menu_and_folder_apis_keep_the_existing_gate():
     html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-    assert 'data-panel="workspaces"' in html
+    assert 'data-panel="projects"' in html
+    assert 'data-panel="workspaces"' not in html
+    assert 'id="mainWorkspaces"' in html  # retained for contextual/internal callers
     js = (ROOT / "static" / "projects-folders.js").read_text(encoding="utf-8")
     assert "/api/projects/folders/config" in js and "if (!(await enabled())) return;" in js

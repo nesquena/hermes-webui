@@ -37,7 +37,7 @@
     const back = button(tx('back'), async () => { await switchPanel('chat'); $('msg')?.focus(); });
     back.id = 'conversationBoardBack';
     const create = button(t('new_conversation'), () => $('btnNewChat').click());
-    create.id = 'conversationBoardNew'; actions.append(back, create); header.appendChild(actions);
+    create.id = 'conversationBoardNew'; create.classList.add('workspace-primary'); actions.append(back, create); header.appendChild(actions);
     const toolbar = document.createElement('div'); toolbar.className = 'conversation-board-toolbar';
     const search = document.createElement('input'); search.id = 'conversationBoardSearch'; search.type = 'search';
     search.placeholder = tx('search'); search.setAttribute('aria-label', tx('search'));
@@ -73,10 +73,18 @@
     }
     notice.hidden = !loading && !_sessionListLoadError;
     const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-    const matches = (loading ? [] : rows).map(s => ({s, flags:state(s)})).filter(({s,flags}) => {
+    const searched = (loading ? [] : rows).map(s => ({s, flags:state(s)})).filter(({s}) => {
       const text = [title(s), bot(s), project(s)].join(' ').toLocaleLowerCase();
-      return words.every(word => text.includes(word)) && (filter === 'all' || (filter === 'pinned' ? s.pinned : flags[filter]));
+      return words.every(word => text.includes(word));
     });
+    const accepts = ({s, flags}, key) => key === 'all' || (key === 'pinned' ? s.pinned : flags[key]);
+    root.querySelectorAll('[data-conversation-filter]').forEach(node => {
+      const key = node.dataset.conversationFilter;
+      node.innerHTML = esc(tx(key)) + '<span class="conversation-filter-count">' + searched.filter(row => accepts(row, key)).length + '</span>';
+    });
+    const group = flags => flags.attention ? 'attention' : flags.running ? 'running' : flags.unread ? 'unread' : 'recent';
+    const order = ['attention', 'running', 'unread', 'recent'];
+    const matches = searched.filter(row => accepts(row, filter)).sort((a, b) => order.indexOf(group(a.flags)) - order.indexOf(group(b.flags)));
     const shown = matches.slice(0, limit);
     $('conversationBoardCount').textContent = loading ? '' : tx('count').replace('{shown}', String(shown.length)).replace('{total}', String(matches.length));
     $('conversationBoardMore').hidden = loading || shown.length === matches.length;
@@ -84,6 +92,14 @@
     const grid = $('conversationBoardGrid');
     const focused = grid.contains(document.activeElement) ? document.activeElement.dataset.conversationOpen : null;
     grid.replaceChildren();
+    const groups = new Map();
+    for (const key of order) {
+      const count = shown.filter(row => group(row.flags) === key).length;
+      if (!count) continue;
+      const section = document.createElement('section'); section.className = 'conversation-group'; section.dataset.conversationGroup = key;
+      section.innerHTML = '<h3>' + esc(tx(key)) + '<span>' + count + '</span></h3><div class="conversation-group-grid"></div>';
+      groups.set(key, section.lastElementChild); grid.appendChild(section);
+    }
     for (const {s, flags} of shown) {
       const card = button('', async () => {
         card.disabled = true;
@@ -102,8 +118,10 @@
       if (flags.selected) tags.push('<span class="conversation-state">' + esc(tx('selected')) + '</span>');
       const source = _getChannelLabel(s);
       const stamp = _sessionTimestampMs(s);
-      card.innerHTML = '<span class="conversation-card-bot">' + esc(bot(s)) + '</span><strong>' + esc(title(s)) + '</strong><span class="conversation-card-context">' + esc([project(s), source].filter(Boolean).join(' · ') || tx('no_project')) + '</span><span class="conversation-card-signals">' + tags.join('') + '</span><span class="conversation-card-time">' + esc(stamp ? _formatRelativeSessionTime(stamp) : '') + '</span>';
-      grid.appendChild(card);
+      const profileName = _sidebarSessionProfileName(s) || S.activeProfile || 'default';
+      const profile = _profilesCache?.profiles?.find(p => p.name === profileName) || {name:profileName};
+      card.innerHTML = '<span class="conversation-card-bot">' + botAvatarHtml(profile) + '<span>' + esc(bot(s)) + '</span></span><strong>' + esc(title(s)) + '</strong><span class="conversation-card-context">' + esc([project(s), source].filter(Boolean).join(' · ') || tx('no_project')) + '</span><span class="conversation-card-signals">' + tags.join('') + '</span><span class="conversation-card-time">' + esc(stamp ? _formatRelativeSessionTime(stamp) : '') + '</span>';
+      groups.get(group(flags)).appendChild(card);
     }
     if (!shown.length && !loading) {
       const empty = document.createElement('p'); empty.className = 'conversation-board-empty';

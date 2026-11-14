@@ -65,24 +65,29 @@ test.describe('role workspace', () => {
       expect(await write({...original,access_level:'user',access_mode:'blacklist',deny:{permissions:['governance:*','logs:*']}})).toBe(200);
       await open(page);
       await expect(page.locator('html')).toHaveAttribute('data-workspace-kind','member');
-      await expect(page.locator('.rail [data-panel="workspaces"]')).toBeHidden();
+      await expect(page.locator('.rail [data-panel="insights"]')).toBeHidden();
+      await page.locator('#btnWorkspaceNavigator').click();
+      await page.locator('#workspaceNavigatorSearch').fill('insights');
+      await expect(page.locator('[data-destination="insights"]')).toBeVisible();
+      await expect(page.locator('[data-destination="governance"]')).toHaveCount(0);
+      await page.keyboard.press('Escape');
       await page.locator('.rail .workspace-more').click();
-      await expect(page.locator('.rail [data-panel="workspaces"]')).toBeVisible();
+      await expect(page.locator('.rail [data-panel="insights"]')).toBeVisible();
       await expect(page.locator('.rail [data-panel="governance"]')).toBeHidden();
       await page.reload();
       await expect(page.locator('.rail .workspace-more')).toHaveAttribute('aria-expanded','true');
-      await expect(page.locator('.rail [data-panel="workspaces"]')).toBeVisible();
+      await expect(page.locator('.rail [data-panel="insights"]')).toBeVisible();
       await page.setViewportSize({width:390,height:844});
       await page.locator('#btnHamburger').click();
-      await expect(page.locator('.sidebar-nav [data-panel="workspaces"]')).toBeVisible();
+      await expect(page.locator('.sidebar-nav [data-panel="insights"]')).toBeVisible();
       await page.locator('.sidebar-nav .workspace-more').click();
-      await expect(page.locator('.sidebar-nav [data-panel="workspaces"]')).toBeHidden();
+      await expect(page.locator('.sidebar-nav [data-panel="insights"]')).toBeHidden();
       await page.locator('.sidebar-nav .workspace-more').click();
       await page.context().addCookies([{name:auth.cookie_name,value:auth.cookies.bob,url:auth.base_url,httpOnly:true,sameSite:'Lax'}]);
       await page.reload();
       expect(await page.evaluate(()=>localStorage.getItem('synthpulse-workspace-more:bob@example.test'))).toBeNull();
       await page.setViewportSize({width:1440,height:1000});
-      await expect(page.locator('.rail [data-panel="workspaces"]')).toBeHidden();
+      await expect(page.locator('.rail [data-panel="insights"]')).toBeHidden();
     } finally { expect(await write(original)).toBe(200);await admin.close(); }
   });
 });
@@ -91,7 +96,7 @@ test('WORKSPACE SHELL administrator keeps every existing destination and split v
   await open(page);
   await expect(page.locator('html')).toHaveAttribute('data-workspace-kind','admin');
   await expect(page.locator('.rail .workspace-more')).toBeHidden();
-  for (const panel of ['profiles','projects','tasks','skills','memory','integrations','workspaces','kanban','insights','governance','settings']) {
+  for (const panel of ['profiles','projects','tasks','skills','memory','integrations','insights','governance','settings']) {
     await expect(page.locator('.rail [data-panel="'+panel+'"]')).toBeVisible();
   }
   await page.locator('#btnSplitView').click();

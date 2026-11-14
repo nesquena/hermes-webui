@@ -8,7 +8,7 @@ from resolved roles and effective permissions, not a second access policy.
 
 - Members start with daily work. A blacklist policy alone does not put every
   permitted technical destination on the primary rail.
-- Operators additionally get Kanban and Insights when permitted.
+- Operators additionally get Insights when permitted.
 - Engineers additionally get technical workspace destinations when permitted.
   An elevated access level selects the engineering presentation, while the
   existing whitelist/legacy availability contract still applies.
@@ -32,13 +32,29 @@ panels, compact controls and restrained navigation. SynthPulse identity and the
 existing theme/skin choices remain. No Herm artwork, executable code, Mac-only
 integration, or runtime was imported. Chat rendering, bots, projects, scheduled
 tasks, approvals, files, artifacts, split views and integrations keep their
-existing handlers and state owners. Kanban has a navigation entry for permitted
-technical and administrative workspaces; member access still follows policy.
+existing handlers and state owners. Projects is the single navigation destination
+for projects and spaces. The existing merged-project folders and My work view
+remain authoritative. Spaces and Kanban have no standalone rail, mobile-menu or
+quick-navigation entries, including for administrators. Their internal routes
+and backend permissions are retained; this change runs no data migration.
 
 Validation includes `tests/test_workspace_navigation.py` and the isolated
 `WORKSPACE SHELL` browser cases, alongside the existing blacklist navigation,
 chat and bot roster cases. Browser evidence uses synthetic users, conversations
 and a deterministic local model provider, never production customer data.
+
+### Quick navigation
+
+**Go to…** (Ctrl/Cmd+Shift+P) searches the existing allowed destinations, including
+additional permitted tools while More tools is collapsed. Searches for spaces
+or folders lead to Projects. This searches functions, not document content.
+The dialog supports arrow keys, Enter, Escape and focus restoration. It uses
+the existing panel-switch guard, so unsaved settings still prevent navigation.
+Ctrl/Cmd+K keeps its existing new-conversation behavior.
+
+The navigator fails closed until governance navigation is available, omits
+hidden/disabled/module-gated destinations, and checks availability again when
+opening a result. It does not issue its own API requests or store search terms.
 
 ### Conversation overview and session files
 
@@ -49,7 +65,10 @@ filters. Cards show bot and project attribution, read-only/current-chat labels
 and the existing session status signals. No idle card is described as a
 completed task. Counts explicitly describe matching loaded conversations;
 the overview is not a search of the entire archive. Results are shown in
-batches of 36 without additional requests.
+batches of 36 without additional requests. Cards are grouped by Needs attention,
+Working, Unread and Recent, in that precedence order, preserving the canonical
+order within each group. Filter counts use the loaded rows matching the search;
+group counts describe the displayed cards. Overlapping signals remain visible.
 
 `sessions.js` owns the filtered, lineage-folded projection. The overview receives
 its sorted rows before date-group collapsing and virtual rendering, and opens
@@ -83,6 +102,11 @@ local search over names, descriptions, roles, categories and models, and a
 Favorites filter. Favorites and layout preferences are stored per signed-in
 email in browser storage; they never alter the profile, visibility or grants.
 Only profiles already returned by the authorized catalog are displayed.
+Search, favorites and layout controls stay mounted in the main library while
+the cards refresh. The redundant desktop sidebar is hidden in this library and
+returns for bot details; the user's sidebar preference is not changed. Cards
+offer **Open chat** through the existing bot-switch handler. This can resume a
+bot's conversation and does not send a message or guarantee a new session.
 Favorites also sort first in the chat bot picker. Hidden profiles remain
 excluded there unless they are the active profile, following the existing rule.
 

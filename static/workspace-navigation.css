@@ -1,0 +1,35 @@
+/* Shared workbench controls: compact filters, comfortable actions, quiet surfaces. */
+:is(.bot-overview-actions, .bot-directory-head, .conversation-board-actions, .conversation-board-notice) .sm-btn,
+.bot-start-action, #conversationBoardMore, #conversationBoardReset {
+  flex:0 0 auto; min-height:40px; padding:9px 14px; border-radius:9px;
+  font:500 13px/1.4 var(--font-ui); white-space:normal;
+}
+.sm-btn.workspace-primary, .bot-overview-actions .sm-btn.bot-chat-action {
+  background:var(--text); color:var(--surface); border:1px solid var(--text);
+}
+.sm-btn.workspace-primary:hover, .bot-overview-actions .sm-btn.bot-chat-action:hover { background:var(--strong,var(--text)); color:var(--surface); border-color:var(--strong,var(--text)); }
+.workspace-navigator-trigger { display:flex; align-items:center; gap:8px; padding:7px 10px; min-height:34px; flex:0 0 auto; border:1px solid var(--border); border-radius:8px; background:var(--surface); color:var(--muted); font:500 12px var(--font-ui); cursor:pointer; }
+.workspace-navigator-trigger:hover { background:var(--hover-bg); color:var(--text); }
+.workspace-navigator-trigger:focus-visible, #workspaceNavigator :focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+#workspaceNavigator { box-sizing:border-box; width:min(580px,calc(100vw - 32px)); max-height:calc(100dvh - 64px); margin:clamp(24px,12vh,120px) auto auto; padding:20px; border:1px solid var(--border2); border-radius:16px; color:var(--text); background:var(--surface); box-shadow:0 24px 80px #0004; overflow:auto; }
+#workspaceNavigator::backdrop { background:#0007; }
+#workspaceNavigator header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }
+#workspaceNavigator h2 { margin:0; font-size:18px; letter-spacing:-.02em; }
+.workspace-navigator-close { min-width:40px; min-height:36px; border:1px solid var(--border); border-radius:7px; background:var(--surface-subtle); color:var(--muted); cursor:pointer; font:12px var(--font-ui); }
+#workspaceNavigatorSearch { box-sizing:border-box; width:100%; min-height:46px; padding:12px 14px; border:1px solid var(--border2); border-radius:9px; background:var(--input-bg); color:var(--text); font:14px var(--font-ui); }
+:is(#workspaceNavigatorSearch, #botDirectorySearch, #conversationBoardSearch)::placeholder { color:var(--muted); opacity:1; }
+#workspaceDestinationList { max-height:min(380px,48dvh); overflow:auto; margin:12px -4px; padding:4px; overscroll-behavior:contain; }
+#workspaceDestinationList [role="option"] { display:flex; align-items:center; gap:12px; min-height:44px; padding:8px 12px; box-sizing:border-box; border:1px solid transparent; border-radius:8px; font-size:14px; cursor:pointer; }
+#workspaceDestinationList [role="option"] > svg { width:18px; height:18px; flex-shrink:0; }
+#workspaceDestinationList [role="option"]:hover { background:var(--hover-bg); }
+#workspaceDestinationList [aria-selected="true"] { color:var(--text); background:var(--surface-subtle); border-color:var(--border2); }
+.workspace-destination-arrow { margin-left:auto; color:var(--muted); }
+#workspaceNavigatorStatus, #workspaceNavigator footer { color:var(--muted); font-size:12px; line-height:1.6; margin:0; }
+#workspaceNavigator footer { margin-top:12px; padding-top:12px; border-top:1px solid var(--border); }
+@media(max-width:640px) {
+  #btnReload { display:none; }
+  .workspace-navigator-trigger { min-width:44px; min-height:44px; justify-content:center; border:0; background:transparent; }
+  .workspace-navigator-trigger span { display:none; }
+  #workspaceNavigator { padding:16px; }
+  .workspace-navigator-close, :is(.bot-overview-actions, .bot-directory-head, .conversation-board-actions) .sm-btn, .bot-start-action { min-height:44px; }
+}

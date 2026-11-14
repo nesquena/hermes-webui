@@ -1,9 +1,9 @@
 import { test, expect, open, capture } from './fixtures';
 const panels: [string,string,string][] = [
- ['CHAT','chat','#chatModeHeader'], ['BOT','profiles','#profilesPanel'], ['PROJ','projects','#projNewName'],
+ ['CHAT','chat','#chatModeHeader'], ['BOT','profiles','#botDirectory'], ['PROJ','projects','#projNewName'],
  ['CRON','tasks','#cronRefreshBtn'], ['SKILL','skills','#skillsSearch'], ['CONN','integrations','#integrationsRefreshBtn'],
- ['GOV','approvals','#btnMyApprovalsRefresh'], ['MEM','memory','#panelMemory'], ['KAN','kanban','#kanbanNewTaskTitle'],
- ['WS','workspaces','#panelWorkspaces'], ['TODO','todos','#panelTodos'], ['INS','insights','#insightsPeriod'],
+ ['GOV','approvals','#btnMyApprovalsRefresh'], ['MEM','memory','#panelMemory'],
+ ['TODO','todos','#panelTodos'], ['INS','insights','#insightsPeriod'],
  ['LOG','logs','#logsFile'], ['GOV','governance','#mainGovernance'], ['PREF','settings','#settingsSearch']
 ];
 for (const [area,panel,selector] of panels) test(`US-SP-${area}-NAV ${panel} opens through visible navigation`, async ({page},info)=>{

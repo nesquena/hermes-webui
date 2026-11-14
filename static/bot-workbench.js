@@ -41,7 +41,9 @@
   }
   function reset() {
     filter = 'all'; const search = document.getElementById('profileSearch');
-    if (search) search.value = ''; filterProfilesPanel(); search?.focus();
+    if (search) search.value = ''; filterProfilesPanel();
+    const directorySearch = document.getElementById('botDirectorySearch');
+    (directorySearch?.getClientRects().length ? directorySearch : search)?.focus();
   }
   function toolbar() {
     let host = document.getElementById('botCatalogFilters');
@@ -78,18 +80,39 @@
     const empty = document.getElementById('profileDetailEmpty'); if (!empty) return;
     empty.dataset.botDirectory = '1';
     let directory = document.getElementById('botDirectory');
-    if (!directory) { directory = document.createElement('section'); directory.id = 'botDirectory'; empty.appendChild(directory); }
+    if (!directory) {
+      directory = document.createElement('section'); directory.id = 'botDirectory'; empty.appendChild(directory);
+      directory.innerHTML = '<header class="bot-directory-head"><div><h2>' + esc(tx('title')) + '</h2><p>' + esc(tx('intro')) + '</p></div></header><div class="bot-directory-toolbar"><input id="botDirectorySearch" type="search"><div class="bot-directory-controls"><div class="bot-directory-filters"></div><div class="bot-layout-controls"></div></div></div><p id="botDirectoryCount" role="status"></p><div class="bot-directory-grid"></div>';
+      const create = button(t('new_profile'), 'sm-btn bot-directory-create workspace-primary', () => openProfileCreate());
+      directory.querySelector('.bot-directory-head').appendChild(create);
+      const search = directory.querySelector('#botDirectorySearch');
+      search.placeholder = tx('search'); search.setAttribute('aria-label', search.placeholder);
+      search.oninput = () => { document.getElementById('profileSearch').value = search.value; filterProfilesPanel(); };
+      const filters = directory.querySelector('.bot-directory-filters'); filters.setAttribute('aria-label', tx('filter'));
+      for (const key of ['all', 'favorites']) {
+        const node = button(tx(key), 'bot-filter', () => { filter = key; filterProfilesPanel(); });
+        node.dataset.directoryFilter = key; filters.appendChild(node);
+      }
+      const layouts = directory.querySelector('.bot-layout-controls'); layouts.setAttribute('aria-label', tx('layout'));
+      for (const layout of ['grid', 'list']) {
+        const node = button(tx(layout), 'bot-filter', () => { preferences().layout = layout; save(); filterProfilesPanel(); });
+        node.dataset.botLayout = layout; layouts.appendChild(node);
+      }
+    }
     directory.dataset.layout = value.layout;
-    directory.innerHTML = '<header class="bot-directory-head"><div><h2>' + esc(tx('title')) + '</h2><p>' + esc(tx('intro')) + '</p></div><div class="bot-layout-controls" aria-label="' + esc(tx('layout')) + '"></div></header><div class="bot-directory-grid"></div>';
-    if (!data.single_profile_mode && _canUseFeature('profiles:admin')) {
-      const create = button(t('new_profile'), 'sm-btn bot-directory-create', () => openProfileCreate());
-      directory.querySelector('.bot-directory-head > div').appendChild(create);
-    }
-    for (const layout of ['grid', 'list']) {
-      const node = button(tx(layout), 'bot-filter', () => { preferences().layout = layout; save(); render(data, profiles); document.querySelector('[data-bot-layout="' + layout + '"]')?.focus(); });
-      node.dataset.botLayout = layout; node.setAttribute('aria-pressed', String(value.layout === layout)); directory.querySelector('.bot-layout-controls').appendChild(node);
-    }
+    directory.querySelector('h2').textContent = tx('title');
+    directory.querySelector('.bot-directory-head p').textContent = tx('intro');
+    directory.querySelector('.bot-directory-create').textContent = t('new_profile');
+    directory.querySelector('.bot-directory-create').hidden = data.single_profile_mode || !_canUseFeature('profiles:admin');
+    const search = directory.querySelector('#botDirectorySearch'), currentQuery = document.getElementById('profileSearch')?.value || '';
+    search.placeholder = tx('search'); search.setAttribute('aria-label', search.placeholder);
+    if (search.value !== currentQuery) search.value = currentQuery;
+    directory.querySelectorAll('[data-directory-filter]').forEach(node => { node.setAttribute('aria-pressed', String(filter === node.dataset.directoryFilter)); node.textContent = tx(node.dataset.directoryFilter); });
+    directory.querySelectorAll('[data-bot-layout]').forEach(node => { node.setAttribute('aria-pressed', String(value.layout === node.dataset.botLayout)); node.textContent = tx(node.dataset.botLayout); });
+    directory.querySelector('#botDirectoryCount').textContent = t('profiles_search_count', profiles.length, (data.profiles || []).length);
     const grid = directory.querySelector('.bot-directory-grid');
+    const focused = grid.contains(document.activeElement) ? {key:document.activeElement.dataset.botOpen ? 'bot-open' : document.activeElement.dataset.botStart ? 'bot-start' : 'bot-favorite', name:document.activeElement.dataset.botOpen || document.activeElement.dataset.botStart || document.activeElement.dataset.botFavorite} : null;
+    grid.replaceChildren();
     for (const p of profiles) {
       const card = document.createElement('article'); card.className = 'bot-directory-card';
       const open = button('', 'bot-directory-open', () => openProfileDetail(p.name)); open.dataset.botOpen = p.name;
@@ -97,7 +120,9 @@
       open.setAttribute('aria-label', botDisplayName(p) + ' · ' + tx('overview'));
       const footer = document.createElement('div'); footer.className = 'bot-directory-footer';
       const model = document.createElement('span'); model.className = 'bot-model-label'; model.textContent = typeof p.model === 'string' ? p.model.split('/').pop() : ''; model.title = p.model || '';
-      footer.append(model, favorite(p)); card.append(open, footer); grid.appendChild(card);
+      const start = button(tx('start'), 'sm-btn bot-start-action', () => chat(p, start)); start.dataset.botStart = p.name;
+      start.setAttribute('aria-label', tx('chat') + ': ' + botDisplayName(p));
+      footer.append(start, model, favorite(p)); card.append(open, footer); grid.appendChild(card);
     }
     if (!profiles.length) {
       const state = document.createElement('div'); state.className = 'sp-search-empty';
@@ -105,6 +130,7 @@
       const clear = button(tx('reset'), 'sm-btn', reset); clear.dataset.resetBots = '';
       state.append(message, clear); grid.appendChild(state);
     }
+    if (focused?.name) (grid.querySelector('[data-' + focused.key + '="' + CSS.escape(focused.name) + '"]') || search).focus({preventScroll:true});
   }
   function mountDetail(p) {
     const content = document.querySelector('#profileDetailBody .bot-detail-content'); if (!content) return;
@@ -148,6 +174,7 @@
         node.setAttribute('aria-selected', String(selected)); node.tabIndex = selected ? 0 : -1;
         document.getElementById(node.getAttribute('aria-controls')).hidden = !selected;
       }
+      if (key === 'overview') document.getElementById('profileDetailBody').scrollTop = 0;
     }
     tabs.onkeydown = event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;

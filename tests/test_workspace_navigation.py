@@ -26,7 +26,7 @@ def test_engineer_role_reveals_only_permitted_technical_views():
     access = caller(roles=("engineer",), permissions=("files:read", "analytics:read"))
     view = workspace_navigation(access)
     assert view["kind"] == "engineer"
-    assert {"workspaces", "insights"} <= set(view["primary"])
+    assert {"files", "insights"} <= set(view["primary"])
     assert "governance" in hidden_panels(access)
     assert "logs" in hidden_panels(access)
     assert not set(view["primary"]) & set(hidden_panels(access))
@@ -53,8 +53,8 @@ def test_admin_keeps_all_permitted_views_and_no_secondary_menu():
     assert "governance" in view["primary"]
     assert view["secondary"] == []
 
-def test_technical_roles_use_the_session_permission_for_kanban():
-    for role in ("engineer", "operator"):
-        access = caller(roles=(role,), permissions=("sessions:read",))
-        assert "kanban" in workspace_navigation(access)["primary"]
-        assert "kanban" in hidden_panels(replace(access, permissions=frozenset(), grants=GrantSet()))
+def test_merged_spaces_and_internal_kanban_never_return_as_standalone_destinations():
+    for role in ("admin", "engineer", "operator", "member"):
+        view = workspace_navigation(caller(roles=(role,), permissions=("*",)))
+        assert "projects" in view["primary"]
+        assert not {"workspaces", "kanban"} & set(view["primary"] + view["secondary"])

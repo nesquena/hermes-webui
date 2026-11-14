@@ -18,10 +18,10 @@ test('BOT WORKBENCH catalog favorites and layout are personal and keep search lo
   await page.setViewportSize({width:1440,height:1000});
   const writes:string[]=[];page.on('request',r=>{if(['POST','PUT','PATCH','DELETE'].includes(r.method()))writes.push(r.url());});
   await page.locator('[data-bot-favorite="qa-research"]').click();
-  await page.locator('[data-bot-filter="favorites"]').click();
+  await page.locator('[data-directory-filter="favorites"]').click();
   await expect(page.locator('.bot-directory-card')).toHaveCount(1);
   await expect(page.locator('.profile-card[data-name]')).toHaveCount(1);
-  await page.locator('#profileSearch').fill('does-not-exist');
+  await page.locator('#botDirectorySearch').fill('does-not-exist');
   await expect(page.locator('#botDirectory .sp-search-empty')).toBeVisible();
   await page.locator('#botDirectory [data-reset-bots]').click();
   await expect(page.locator('.bot-directory-card')).toHaveCount(2);
