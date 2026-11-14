@@ -2582,3 +2582,20 @@ format-specific fallback and download link. A 401 directs the user to reload.
   Matching empty wrappers such as `**MEDIA:**` must remain prose.
 - Recheck settled and safe/fade streaming output across callback boundaries.
   Automated coverage: renderer behavior, MEDIA consumer parity, and SMD stream tests.
+
+### Numeric inline math regression
+
+`tests/test_issue347.py` exercises `renderMd()` directly with Node, including
+numeric single-dollar math such as `$0{,}8$`, `$0.5$`, and
+`$1 - 0{,}8 = \mathbf{0{,}2}$`. Digit-leading bodies require a math signal
+(operator, braces, decimal/comma, or LaTeX command); trailing operators and a
+closing dollar followed by a digit remain currency fragments. Plain amounts
+such as `$1,000`, `costs $5 and $10`, and `$5-$10` stay literal.
+
+For browser verification, check these examples in assistant replies and workspace
+Markdown previews at desktop and mobile widths. Numeric math should render with
+KaTeX, currency should remain prose, and examples inside code and raw `<pre>` blocks should stay literal. Link
+destinations such as `[rate](https://example.test/path/$0.5$)` must retain
+their exact URLs. Check `Repeat $x + y$ 2 times.` and
+`Repeat $x + y$ 2 ($z$)` for separate formulas without leaked placeholders.
+The Node regression also caps rendering 80 KiB of repeated `R$ 5 ` at 100 ms.
