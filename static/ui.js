@@ -11700,6 +11700,62 @@ function updateSendBtn(){
   } else if(action==='disabled'){
     btn.classList.remove('visible');
   }
+  // The background control rides next to Stop: a foreground command parks the
+  // turn until it exits, so this is the way out of a long build without
+  // cancelling the run (POST /api/chat/background yields the live process).
+  const bgBtn=$('btnRunBg');
+  if(bgBtn){
+    const showBg=!!S.busy&&!!S.activeStreamId&&!chatReadOnlyReason;
+    bgBtn.style.display=showBg?'':'none';
+    bgBtn.disabled=!showBg;
+    if(showBg){
+      const bgTitle=_tt('composer_run_background','Run in background');
+      bgBtn.title=bgTitle;
+      bgBtn.setAttribute('aria-label',bgTitle);
+      bgBtn.dataset.tooltip=bgTitle;
+    }
+  }
+}
+
+function _backgroundRunLabel(){
+  return typeof t==='function'?t('composer_run_background'):'Run in background';
+}
+
+async function _runToolInBackground(btn){
+  if(btn) btn.disabled=true;
+  const ok=typeof runSessionInBackground==='function'?await runSessionInBackground():false;
+  if(!ok&&btn) btn.disabled=false;
+  return ok;
+}
+
+async function runSessionInBackground(){
+  const sid=S.session&&S.session.session_id;
+  if(!sid||!S.activeStreamId) return false;
+  const bgBtn=$('btnRunBg');
+  if(bgBtn) bgBtn.disabled=true;
+  let body=null;
+  let ok=false;
+  try{
+    const r=await fetch(new URL('api/chat/background',document.baseURI||location.href).href,{
+      method:'POST',
+      credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid})
+    });
+    ok=!!(r&&r.ok);
+    try{body=await r.json();}catch(_){}
+  }catch(e){
+    if(typeof console!=='undefined'&&console.warn) console.warn('runSessionInBackground: request failed',e);
+  }
+  if(ok&&body&&body.accepted){
+    showToast(t('composer_run_background_started'),2500);
+    return true;
+  }
+  // A refusal is not a cancel: the run keeps going, so say why and leave it.
+  if(typeof console!=='undefined'&&console.info) console.info('[background] refused',{reason:body&&body.reason,sessionId:sid});
+  showToast(t('composer_run_background_failed'),4000,'error');
+  if(bgBtn) bgBtn.disabled=false;
+  return false;
 }
 
 async function handleComposerPrimaryAction(){
@@ -24210,6 +24266,15 @@ function _toolActionKind(tc){
   if(n.includes('write')||n.includes('patch')||n.includes('edit')) return 'write';
   return 'unknown';
 }
+function _toolCanYieldToBackground(tc){
+  // Only the native terminal tool adopts its live Popen into the background
+  // registry when a yield lands (tools/terminal_tool_background.py,
+  // yield_handler, local backend). execute_code, process_manage and remote
+  // shells share the 'shell' display category but have no process to hand over,
+  // so the name is the proof and the category is not.
+  const n=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  return n==='terminal';
+}
 function _toolKindIcon(kind){
   const icons={
     shell:'terminal',
@@ -24665,6 +24730,13 @@ function buildToolCard(tc){
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
+  // The native terminal tool is the case the composer's background control
+  // exists for, but the user is looking at this card, not the composer: put the
+  // affordance where the wait is. Hidden for every other tool (nothing to
+  // adopt) and once the command settled.
+  const backgroundAction=(tc.done===false&&_toolCanYieldToBackground(tc))
+    ? `<button class="tool-card-bg" type="button" title="${esc(_backgroundRunLabel())}" aria-label="${esc(_backgroundRunLabel())}" onclick="event.stopPropagation();_runToolInBackground(this)">${li('arrow-down-to-line',12)}</button>`
+    : '';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
   const openClass='';
@@ -24689,6 +24761,7 @@ function buildToolCard(tc){
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
+        ${backgroundAction}
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
       ${hasDetail?`<div class="tool-card-detail">

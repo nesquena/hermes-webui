@@ -19280,6 +19280,120 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
         return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
 
 
+BACKGROUND_RUN_NOTE = (
+    "Move the running command to the background and keep working: do not re-run it. "
+    "Poll it with process_manage (action=\"poll\") when its result matters."
+)
+
+
+def _background_refusal(agent, stream_id: Optional[str]) -> Optional[dict]:
+    """Why *agent* cannot yield a running command, or None when it can."""
+    if agent is None:
+        return {"accepted": False, "reason": "no_agent", "stream_id": stream_id}
+    if not getattr(agent, "_executing_tools", False):
+        return {"accepted": False, "reason": "no_tool_running", "stream_id": stream_id}
+    if not callable(getattr(agent, "redirect", None)):
+        return {"accepted": False, "reason": "agent_lacks_redirect", "stream_id": stream_id}
+    return None
+
+
+def _run_ownership_refusal(sid: str, stream_id: str, run: dict,
+                           owner: Optional[str]) -> Optional[dict]:
+    """Why the run on *stream_id* is not a live local turn of *sid*, or None.
+
+    Ownership is proven positively: the stream owner and the active-run session
+    must both equal the requesting session, and the backend tag must be the
+    local one. Missing metadata is ambiguous and fails closed, so an unfenced
+    cached Agent is never redirected on absent ownership.
+    """
+    if not owner or owner != sid:
+        return {"accepted": False, "reason": "stream_dead", "stream_id": None}
+    if not run.get("session_id") or run["session_id"] != sid:
+        return {"accepted": False, "reason": "stream_dead", "stream_id": None}
+    backend = run.get("backend")
+    if backend == "gateway":
+        # The Gateway owns transport; no in-process runtime can yield this run.
+        return {"accepted": False, "reason": "gateway_run", "stream_id": stream_id}
+    if backend != WEBUI_LOCAL_CHAT_BACKEND or run.get("phase") not in _LOCAL_STEERABLE_PHASES:
+        return {"accepted": False, "reason": "stream_dead", "stream_id": None}
+    return None
+
+
+def _request_background(agent, sid: str, stream_id: Optional[str]) -> dict:
+    """Ask the live agent to yield: ``redirect()`` steers the model and flags every
+    tool-worker thread, so a foreground terminal command hands its process to the
+    background registry and returns at once instead of parking the turn (see
+    ``tools.interrupt.request_yield``). The command is never killed."""
+    refusal = _background_refusal(agent, stream_id)
+    if refusal is not None:
+        return refusal
+    try:
+        accepted = bool(agent.redirect(BACKGROUND_RUN_NOTE))
+    except Exception:
+        logger.debug("Background request failed for session %s", sid, exc_info=True)
+        return {"accepted": False, "reason": "redirect_error", "stream_id": stream_id}
+    return {"accepted": accepted, "reason": None if accepted else "refused", "stream_id": stream_id}
+
+
+def _background_bound_stream(sid: str, stream_id: str, cached_agent=None) -> dict:
+    """Yield the command *stream_id* is waiting on, behind the edge Stop uses.
+
+    The ownership proof, the tool gate and ``redirect()`` share one
+    ``STREAMS_LOCK`` hold, so a Stop cannot claim cancellation between the check
+    and the delivery. A run whose worker is missing falls back to its cached
+    Agent, but only once that same proof has established the stream is live and
+    owned: a cache entry is never accepted as evidence of a running turn.
+    """
+    from api import config as cfg
+
+    with cfg.STREAMS_LOCK:
+        if stream_id not in cfg.STREAMS:
+            return {"accepted": False, "reason": "stream_dead", "stream_id": None}
+        owner = cfg.stream_owner_session_id(stream_id)
+        with cfg.ACTIVE_RUNS_LOCK:
+            run = dict(cfg.ACTIVE_RUNS.get(stream_id) or {})
+        refusal = _run_ownership_refusal(sid, stream_id, run, owner)
+        if refusal is not None:
+            return refusal
+        return _request_background(cfg.AGENT_INSTANCES.get(stream_id) or cached_agent,
+                                   sid, stream_id)
+
+
+def _handle_chat_background(handler, body: dict) -> bool:
+    """Move the command this session's turn is waiting on to the background.
+
+    A foreground terminal call blocks the agent loop until it exits, so a five
+    minute build or a long poll freezes the chat: the user can type, but nothing
+    reaches the model. This is the WebUI counterpart of Claude Code's Ctrl+B —
+    the running process keeps going as a tracked background session (its
+    completion reaches the agent like any ``terminal(background=true)`` spawn)
+    and the turn continues immediately.
+
+    Accepts ``{"session_id": str}``. Returns 200 with ``{"accepted": bool,
+    "reason": str|None, "stream_id": str|None}``; the frontend surfaces a
+    refusal without cancelling the run.
+    """
+    from api import config as _cfg
+    from api.helpers import bad, j
+
+    sid = str((body or {}).get("session_id", "") or "").strip()
+    if not sid:
+        return bad(handler, "session_id required")
+
+    try:
+        session = get_session(sid)
+    except KeyError:
+        return j(handler, {"accepted": False, "reason": "session_not_found", "stream_id": None})
+    stream_id = getattr(session, "active_stream_id", None) or None
+    if not stream_id:
+        return j(handler, {"accepted": False, "reason": "not_running", "stream_id": None})
+
+    with _cfg.SESSION_AGENT_CACHE_LOCK:
+        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
+    cached_agent = cached[0] if cached and _cached_agent_matches_session(cached[0], sid) else None
+    return j(handler, _background_bound_stream(sid, stream_id, cached_agent))
+
+
 def _deliver_gateway_steer(sid: str, result: dict, text: str) -> dict:
     """Forward a Gateway-owned steer to its run; keep the queue fallback on refusal.
 
