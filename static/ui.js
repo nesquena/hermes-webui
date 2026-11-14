@@ -24266,6 +24266,15 @@ function _toolActionKind(tc){
   if(n.includes('write')||n.includes('patch')||n.includes('edit')) return 'write';
   return 'unknown';
 }
+function _toolCanYieldToBackground(tc){
+  // Only the native terminal tool adopts its live Popen into the background
+  // registry when a yield lands (tools/terminal_tool_background.py,
+  // yield_handler, local backend). execute_code, process_manage and remote
+  // shells share the 'shell' display category but have no process to hand over,
+  // so the name is the proof and the category is not.
+  const n=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  return n==='terminal';
+}
 function _toolKindIcon(kind){
   const icons={
     shell:'terminal',
@@ -24721,11 +24730,11 @@ function buildToolCard(tc){
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
-  // A running shell tool is exactly the case the composer's background control
+  // The native terminal tool is the case the composer's background control
   // exists for, but the user is looking at this card, not the composer: put the
-  // affordance where the wait is. Refused for every other kind (nothing to
+  // affordance where the wait is. Hidden for every other tool (nothing to
   // adopt) and once the command settled.
-  const backgroundAction=(tc.done===false&&toolKind==='shell')
+  const backgroundAction=(tc.done===false&&_toolCanYieldToBackground(tc))
     ? `<button class="tool-card-bg" type="button" title="${esc(_backgroundRunLabel())}" aria-label="${esc(_backgroundRunLabel())}" onclick="event.stopPropagation();_runToolInBackground(this)">${li('arrow-down-to-line',12)}</button>`
     : '';
   const isSubagent=tc.name==='subagent_progress';

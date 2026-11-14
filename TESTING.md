@@ -635,6 +635,59 @@ To widen the guard, fix the pre-existing intentional hits first (as of 2026-05-3
 `no-dupe-keys` ×92 i18n locale-fallback, `no-func-assign` ×2 panel override,
 `no-redeclare` ×1) then promote the rule into the config.
 
+### Background a running foreground command
+
+While a native `terminal` call is executing, the composer control next to Stop
+and the control on that running tool card both post `POST /api/chat/background`
+with the session id. The endpoint asks the live agent to redirect: the terminal
+tool adopts its live process into the background registry (status
+`yielded_to_background`) and returns at once, so the command keeps running, its
+completion arrives like a `terminal(background=true)` spawn, and the turn
+continues without Stop. The composer control acts on the session's run; the card
+control is offered only for the native `terminal` tool, because `execute_code`,
+`process_manage` and remote shells share the `shell` display category but have
+no host process to adopt.
+
+Manual verification, on a server that has the endpoint and an agent whose
+foreground command is still running:
+
+1. Ask the agent to run a bounded foreground command that outlives a reply, for
+   example `sleep 30; echo survived` through the native terminal tool.
+2. While the card shows it running, click the background control on that card
+   (and separately the composer control in another run). EXPECT: a toast says
+   the command moved to the background, the card stops running, and the model
+   continues the same turn without re-running the command.
+3. Ask the agent to `process_manage(action="poll")` the session it reported, or
+   read the log once the delay elapses. EXPECT: the process is still alive while
+   you poll it and then completes with `survived`; nothing was killed.
+4. Press Stop. EXPECT: no control remains on a settled card, and a request
+   replayed for that session answers `{"accepted": false, "reason":
+   "stream_dead"}` (or `"not_running"` once the session pointer is cleared)
+   without redirecting the cancelled runtime.
+5. Repeat step 2 on a running `execute_code` or `process_manage` card. EXPECT: no
+   background control is rendered for those tools.
+
+Check desktop, narrow, and mobile widths: the composer control sits beside Stop
+without pushing the composer rows, and the card control stays inside the card
+header at narrow width.
+
+Automated regression coverage: `tests/test_chat_background.py` pins the accepted
+live-worker path, the cache-only fallback behind a live owned stream, and the
+refusals (no tool running, Gateway-owned run, foreign owner, cancelling phase,
+missing session, no active stream, and a real `cancel_stream()` that detached the
+run before the request). It also asserts that `redirect()` is delivered while the
+stream lock is held and the stream is still registered, so a Stop cannot claim
+the turn between the ownership proof and the delivery. Run it with the repository
+test interpreter:
+
+```bash
+uv run --python "C:/Program Files/Python313/python.exe" --no-project \
+  --with-requirements requirements-dev.txt python -m pytest tests/test_chat_background.py -q
+```
+
+The adoption itself lives in hermes-agent
+(`tests/tools/test_terminal_yield_to_background.py`), not in this repository.
+
 ---
 
 ## How to Use This Document
