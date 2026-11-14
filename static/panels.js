@@ -2349,7 +2349,7 @@ function _renderCronDetail(job){
 }
 
 function _setCronHeaderButtons(mode, job) {
-  window.CronAgenda?.mode(mode);
+  globalThis.CronAgenda?.mode(mode);
   const runBtn = $('btnRunTaskDetail');
   const pauseBtn = $('btnPauseTaskDetail');
   const resumeBtn = $('btnResumeTaskDetail');
