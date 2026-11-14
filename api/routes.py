@@ -2769,6 +2769,9 @@ _OPENAI_COMPAT_ENDPOINTS = {
 _LIVE_MODELS_CACHE_TTL = 60.0
 _LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
+# #6919: bumped by POST /api/models/refresh; responses that captured an older
+# generation must not repopulate the cache with pre-refresh bytes.
+_LIVE_MODELS_CACHE_GENERATION = 0
 
 
 def _active_profile_for_live_models_cache() -> str:
@@ -2806,9 +2809,64 @@ def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
         _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
 
 
+def _publish_live_models(key: tuple[str, str], payload: dict, expected_generation: int) -> bool:
+    """Fence-and-publish a live-models payload atomically (#6919).
+
+    The expected-generation comparison and the cache publication share one
+    ``_LIVE_MODELS_CACHE_LOCK`` hold. With separate acquisitions a refresh
+    can land between a worker's generation check and its cache write, after
+    which the worker repopulates the just-evicted entry with pre-refresh
+    bytes. Returns True when the payload was published.
+
+    Provider work and JSON response I/O stay outside this helper. The lock
+    is an RLock, so the nested ``_live_models_generation()`` and
+    ``_set_cached_live_models()`` calls re-enter the same hold.
+    """
+    with _LIVE_MODELS_CACHE_LOCK:
+        if _live_models_generation() != expected_generation:
+            return False
+        _set_cached_live_models(key, payload)
+        return True
+
+
 def _clear_live_models_cache() -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
+
+
+def _invalidate_live_models_cache(provider: str) -> None:
+    """Evict the live-models entry for the active profile + provider (#6919)."""
+    key = _live_models_cache_key(provider)
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE.pop(key, None)
+
+
+def _invalidate_live_models_cache_and_bump(provider: str) -> int:
+    """Evict a provider's live-models entry and advance the cache generation
+    in ONE critical section (#6919).
+
+    Separate eviction/bump acquisitions leave a pop-to-bump interval where
+    an in-flight worker that already passed its generation check can
+    publish, resurrecting the entry the refresh just evicted. The lock is
+    an RLock, so the nested calls re-enter the same hold.
+    """
+    with _LIVE_MODELS_CACHE_LOCK:
+        _invalidate_live_models_cache(provider)
+        return _bump_live_models_generation()
+
+
+def _live_models_generation() -> int:
+    with _LIVE_MODELS_CACHE_LOCK:
+        return _LIVE_MODELS_CACHE_GENERATION
+
+
+def _bump_live_models_generation() -> int:
+    """Fence in-flight live-model responses: a response started before a
+    refresh must not write its stale payload back into the cache."""
+    global _LIVE_MODELS_CACHE_GENERATION
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE_GENERATION += 1
+        return _LIVE_MODELS_CACHE_GENERATION
 
 
 from api import route_session_list_cache as _route_session_list_cache
@@ -20750,6 +20808,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
         invalidate_provider_models_cache(provider_id)
+        # #6919: also evict the live-models cache (normalized key) and fence
+        # in-flight responses against repopulation — eviction and generation
+        # advance share one critical section.
+        from api.config import _resolve_provider_alias
+        _invalidate_live_models_cache_and_bump(_resolve_provider_alias(provider_id))
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
@@ -28189,13 +28252,37 @@ def _handle_live_models(handler, parsed):
     qs = parse_qs(parsed.query)
     provider = (qs.get("provider", [""])[0] or "").lower().strip()
 
+    # #6919 (empty-membership remainder): an EMPTY model list is only
+    # "this provider really has no models" when a discovery step actually
+    # SUCCEEDED. Every fallback path below degrades to an empty list too, so
+    # an empty list alone cannot be read as authoritative membership — the
+    # frontend would prune live choices on what is really a discovery
+    # failure. Track whether a discovery step completed successfully; when
+    # none did, the empty answer is published with an ``error`` marker so the
+    # client can tell the two apart (the endpoint's existing failure shape).
+    _discovery_succeeded = False
+    # #6919 (gate C63-F1): membership AUTHORITY and COMPLETENESS are carried
+    # separately from list non-emptiness — ``len(models)`` is not an oracle
+    # for "the provider still offers exactly this". Only a validated,
+    # complete live catalog may authorize the picker to REMOVE options. A
+    # config/static fallback served after a failed probe, or a catalog sliced
+    # to the display budget, would otherwise read as "everything else was
+    # removed upstream" and delete live-only choices that are still valid.
+    # Every payload below states both flags explicitly:
+    #   authoritative — a live discovery produced this membership (not a
+    #                   config/static fallback);
+    #   complete      — the list is the full catalog, not a display slice.
+    _membership_authoritative = False
+    _membership_complete = True
+
     try:
         from api.config import get_config as _gc
         cfg = _gc()
         if not provider:
             provider = cfg.get("model", {}).get("provider") or ""
         if not provider:
-            return j(handler, {"error": "no_provider", "models": []})
+            return j(handler, {"error": "no_provider", "models": [],
+                               "authoritative": False, "complete": True})
 
         # Normalize provider alias so 'z.ai' -> 'zai', 'x.ai' -> 'xai', etc.
         # The browser sends whatever active_provider the static endpoint returned;
@@ -28210,12 +28297,18 @@ def _handle_live_models(handler, parsed):
             return j(handler, {"provider": provider, "models": [], "count": 0})
 
         cache_key = _live_models_cache_key(provider)
+        generation = _live_models_generation()
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
             return j(handler, cached)
 
         def _finish(payload: dict):
-            _set_cached_live_models(cache_key, payload)
+            # #6919 generation fence: a response that started before a
+            # models refresh must not repopulate the cache with stale
+            # bytes. The comparison and the cache write share one lock
+            # hold (_publish_live_models); the JSON response stays
+            # outside the critical section.
+            _publish_live_models(cache_key, payload, generation)
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
@@ -28234,6 +28327,41 @@ def _handle_live_models(handler, parsed):
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
+
+        # #6919 (gate C63-F1, variant: degraded placeholder): a non-empty
+        # resolver result is not by itself the account's catalog. The
+        # producer's contract marks a curated list served BECAUSE the live
+        # catalog was unavailable: ``hermes_cli.models_catalog_static``
+        # defines ``CuratedFallbackModels(list[str])`` — "a curated list
+        # served because the provider's live catalog was unavailable. The
+        # disk cache treats it as a placeholder, never as the account's
+        # real catalog (#107391)" — and ``_static_catalog`` returns exactly
+        # that subclass when a provider HAS a live fetcher that declined
+        # ("A provider with a live fetcher that declined is serving a
+        # placeholder; one without any live source is serving its
+        # authoritative catalog"). ``get_codex_model_ids`` documents the
+        # same contract. Deriving authority from ``len(ids)`` dropped that
+        # provenance and let an outage placeholder prune live-only
+        # options, so keep the distinction the producer already makes.
+        # The marker is read through its own defensive import: an agent
+        # build without the class degrades to the previous behaviour
+        # instead of discarding the resolver's answer entirely.
+        _degraded_placeholder = False
+        if ids:
+            try:
+                from hermes_cli.models_catalog_static import CuratedFallbackModels as _CuratedFallbackModels
+                _degraded_placeholder = isinstance(ids, _CuratedFallbackModels)
+            except Exception as _marker_err:
+                logger.debug("CuratedFallbackModels marker unavailable for %s: %s", provider, _marker_err)
+                _degraded_placeholder = False
+
+        if ids:
+            # #6919: the agent's resolver produced a real catalog, so this
+            # response is authoritative membership — unless the producer
+            # labelled it an outage placeholder (see above), which still
+            # ENRICHES the picker but never authorizes removals.
+            _discovery_succeeded = True
+            _membership_authoritative = not _degraded_placeholder
 
         if not ids:
             custom_provider_entry = None
@@ -28363,12 +28491,78 @@ def _handle_live_models(handler, parsed):
                             _body = json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
+                        # #6919 (gate C63-F1, variant: mixed rows): count the
+                        # rows that yield no usable ID as well as the ones
+                        # that do. A catalog with SOME malformed rows still
+                        # has usable survivors, but the survivors are no
+                        # longer the provider's complete membership — the
+                        # dropped rows may have been real models this parser
+                        # failed to read — so the answer may ENRICH the
+                        # picker without claiming authority.
+                        _member_rows = 0
+                        _dropped_member_rows = 0
                         if isinstance(_body, dict):
                             _data = _body.get("data", [])
                             if isinstance(_data, list):
-                                ids = [m.get("id", "") for m in _data if m.get("id")]
+                                _member_rows = len(_data)
+                                ids = []
+                                for _row in _data:
+                                    _mid = _row.get("id") if isinstance(_row, dict) else None
+                                    if isinstance(_mid, str) and _mid.strip():
+                                        ids.append(_mid)
+                                    else:
+                                        _dropped_member_rows += 1
                         elif isinstance(_body, list):
-                            ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
+                            # A bare list is row-shaped too: keep only rows that
+                            # yield a usable string ID (a bare dict row without
+                            # an ``id`` is not membership).
+                            _member_rows = len(_body)
+                            ids = []
+                            for _row in _body:
+                                _mid = _row.get("id") if isinstance(_row, dict) else _row
+                                if isinstance(_mid, str) and _mid.strip():
+                                    ids.append(_mid.strip())
+                                else:
+                                    _dropped_member_rows += 1
+
+                        # #6919: the endpoint answered, but an HTTP 200 alone
+                        # does not make the answer a MODEL LIST. A body like
+                        # {"error": "temporarily unavailable"}, {}, {"data":
+                        # null}, {"data": "unavailable"} or a bare JSON string
+                        # is a failed/wrong-shaped discovery, and treating it
+                        # as successful would publish an authoritative EMPTY
+                        # membership — the client would then prune live
+                        # choices on what is really an upstream failure.
+                        #
+                        # Only the two SUPPORTED model-list shapes count as a
+                        # successful discovery: {"data": [...]} (an empty list
+                        # included — that is genuine "no models") and a bare
+                        # [...]. Everything else leaves discovery unsuccessful.
+                        #
+                        # #6919 (gate C63-F1): a list CONTAINER alone does not
+                        # establish membership either. Rows that yield no
+                        # usable model ID (e.g. {"data": [{}]}) are a malformed
+                        # catalog, NOT an authoritative empty one — publishing
+                        # that as a plain empty membership made the picker
+                        # prune live choices the provider still offers. The
+                        # same validation applies when only SOME rows are
+                        # malformed ({"data": [{"id": "fresh"}, {}]}): the
+                        # surviving rows enrich the picker, but a catalog we
+                        # had to filter is not a complete membership and must
+                        # not authorize removals.
+                        _valid_model_list_shape = (
+                            (isinstance(_body, dict) and isinstance(_body.get("data"), list))
+                            or isinstance(_body, list)
+                        )
+                        _malformed_member_rows = bool(_member_rows) and not ids
+                        if _valid_model_list_shape and not _malformed_member_rows:
+                            _discovery_succeeded = True
+                            if ids:
+                                _membership_authoritative = True
+                        if _dropped_member_rows:
+                            # Partially malformed catalog: enrich, never prune.
+                            _membership_authoritative = False
+                            _membership_complete = False
 
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
@@ -28450,8 +28644,57 @@ def _handle_live_models(handler, parsed):
                         )
                         with urllib.request.urlopen(_req, timeout=8) as _resp:
                             _body = json.loads(_resp.read())
-                        ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
-                        logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        # #6919: same shape contract as the custom-provider
+                        # probe — only {"data": [...]} or a bare [...] is a
+                        # successful model-list discovery. A 200 with the wrong
+                        # shape is a failed discovery, not an authoritative
+                        # empty membership. Rows that yield no usable ID are a
+                        # malformed catalog too (gate C63-F1), not an
+                        # authoritative empty one — and a PARTIALLY malformed
+                        # catalog (mixed valid/malformed rows) only enriches:
+                        # the surviving rows are usable, but the filtered
+                        # catalog is not a complete membership.
+                        _compat_rows = 0
+                        _compat_dropped_rows = 0
+                        _compat_valid = False
+                        if isinstance(_body, dict) and isinstance(_body.get("data"), list):
+                            _compat_rows = len(_body.get("data") or [])
+                            ids = []
+                            for _row in _body.get("data") or []:
+                                _mid = _row.get("id") if isinstance(_row, dict) else None
+                                if isinstance(_mid, str) and _mid.strip():
+                                    ids.append(_mid)
+                                else:
+                                    _compat_dropped_rows += 1
+                            _compat_valid = True
+                        elif isinstance(_body, list):
+                            _compat_rows = len(_body)
+                            ids = []
+                            for _row in _body:
+                                _mid = _row.get("id") if isinstance(_row, dict) else _row
+                                if isinstance(_mid, str) and _mid.strip():
+                                    ids.append(_mid.strip())
+                                else:
+                                    _compat_dropped_rows += 1
+                            _compat_valid = True
+                        if _compat_valid and not (_compat_rows and not ids):
+                            _discovery_succeeded = True
+                            if ids:
+                                _membership_authoritative = True
+                            logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        elif not _compat_valid:
+                            # A 200 with an unsupported shape: not a model list.
+                            # Leave discovery unsuccessful so the empty answer
+                            # is published as a failure rather than as an
+                            # authoritative membership.
+                            logger.debug(
+                                "Live fetch from %s returned an unsupported model-list shape",
+                                provider,
+                            )
+                        if _compat_dropped_rows:
+                            # Partially malformed catalog: enrich, never prune.
+                            _membership_authoritative = False
+                            _membership_complete = False
                 except Exception as _fetch_err:
                     logger.debug("Live fetch from %s failed: %s", provider, _fetch_err)
                     # Fall through to static list below
@@ -28461,7 +28704,19 @@ def _handle_live_models(handler, parsed):
             from api.config import _PROVIDER_MODELS as _pm
             ids = [m["id"] for m in _pm.get(provider, [])]
         if not ids:
-            return _finish({"provider": provider, "models": [], "count": 0})
+            # #6919: nothing discovered. When no discovery step actually
+            # completed, this empty list is NOT authoritative membership —
+            # it means "we could not find out". Publish it in the endpoint's
+            # existing failure shape (``error`` marker) so the client does
+            # not reconcile the picker to an empty set on a discovery
+            # failure. A completed discovery that genuinely found no models
+            # stays a plain, authoritative empty list.
+            if not _discovery_succeeded:
+                return _finish({"provider": provider, "models": [], "count": 0,
+                                "error": "no_models_discovered",
+                                "authoritative": False, "complete": True})
+            return _finish({"provider": provider, "models": [], "count": 0,
+                            "authoritative": True, "complete": True})
 
         # Match the same dropdown visibility budget that /api/models uses so
         # background enrichment via _fetchLiveModels() does not re-append an
@@ -28473,12 +28728,21 @@ def _handle_live_models(handler, parsed):
                 from api.config import _build_nous_featured_set
                 _default_model = (cfg.get("model", {}) or {}).get("model") if isinstance(cfg.get("model"), dict) else None
                 _featured, _ = _build_nous_featured_set(ids, selected_model_id=_default_model)
+                # #6919 (gate C63-F1): the featured set is a DISPLAY slice —
+                # a trimmed list is not evidence that the provider removed
+                # the omitted models.
+                if len(_featured) < len(ids):
+                    _membership_complete = False
                 ids = _featured
             except Exception:
                 logger.debug("Failed to apply Nous featured-set cap for /api/models/live")
         else:
             from api.config import _MODEL_PICKER_OVERFLOW_THRESHOLD, _MODEL_PICKER_VISIBLE_TARGET
             if len(ids) > _MODEL_PICKER_OVERFLOW_THRESHOLD:
+                # #6919 (gate C63-F1): a display-budget slice must not
+                # authorize deletions downstream — absence from the window is
+                # not evidence of an upstream removal.
+                _membership_complete = False
                 ids = ids[:_MODEL_PICKER_VISIBLE_TARGET]
 
         # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
@@ -28524,12 +28788,19 @@ def _handle_live_models(handler, parsed):
             if annotate_fast_tier:
                 entry["supports_fast_tier"] = _model_supports_fast_tier_for_provider(mid, provider)
             models_out.append(entry)
+        # #6919 (gate C63-F1): authority and completeness ride with the list.
+        # A non-empty config/static fallback (``authoritative: False``) or a
+        # display-budget slice (``complete: False``) still ENRICHES the picker,
+        # but the client must not read its omissions as removals.
         return _finish({"provider": provider, "models": models_out,
-                        "count": len(models_out)})
+                        "count": len(models_out),
+                        "authoritative": _membership_authoritative,
+                        "complete": _membership_complete})
 
     except Exception as _e:
         logger.debug("_handle_live_models failed for %s: %s", provider, _e)
-        return j(handler, {"error": str(_e), "models": []})
+        return j(handler, {"error": str(_e), "models": [],
+                           "authoritative": False, "complete": True})
 
 
 def _handle_cron_history(handler, parsed):
