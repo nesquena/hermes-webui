@@ -126,6 +126,7 @@ from api.session_ops import mark_session_title_generated, session_has_manual_tit
 from api.process_event_utils import (
     build_active_turn_token,
     claim_async_delegation_delivery,
+    claim_heartbeat_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
     release_async_delegation_delivery,
@@ -4274,16 +4275,16 @@ def _stale_completion_max_age_seconds() -> float:
 
 
 def _format_process_notification(evt: dict) -> str:
-    """Format a completed background process notification for agent input."""
+    """Format a background process/delegation notification for agent input."""
     if not isinstance(evt, dict):
         return ''
-    if evt.get('type') == 'async_delegation':
+    if evt.get('type') in {'async_delegation', 'heartbeat'}:
         try:
             from tools.process_registry import format_process_notification
 
             return format_process_notification(evt) or ''
         except Exception:
-            logger.debug("Failed to format async delegation notification", exc_info=True)
+            logger.debug("Failed to format process notification", exc_info=True)
             return ''
     if evt.get('type') != 'completion':
         return ''
@@ -4375,9 +4376,11 @@ def _drain_webui_process_notifications(
         is_async_delegation = (
             isinstance(evt, dict) and evt.get('type') == 'async_delegation'
         )
+        is_heartbeat = isinstance(evt, dict) and evt.get('type') == 'heartbeat'
         try:
             if (
                 not is_async_delegation
+                and not is_heartbeat
                 and process_registry.is_completion_consumed(evt_sid)
             ):
                 continue
@@ -4478,6 +4481,14 @@ def _drain_webui_process_notifications(
                     "(age %.0fs > cap %.0fs)",
                     evt_sid, stale_age, stale_completion_max_age,
                 )
+            continue
+
+        if is_heartbeat:
+            # Claim the same per-event identity as the background dispatcher.
+            # Never read/write the process's terminal-completion marker here.
+            notification = _format_process_notification(evt)
+            if notification and claim_heartbeat_delivery(evt, session_id) and not is_stale:
+                notifications.append(notification)
             continue
 
         if is_stale:

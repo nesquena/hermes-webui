@@ -1,6 +1,7 @@
 """Shared helpers for WebUI completion/delegation delivery."""
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import dataclass
 import inspect
@@ -137,11 +138,12 @@ class AsyncDelegationDeliveryClaim:
 
 
 def completion_delivery_id(evt: Any) -> str:
-    """Return the stable WebUI delivery/dedupe id for a completion event.
+    """Return the stable process/delegation id, not a heartbeat tick identity.
 
     Terminal background-process events use ``session_id`` for the process id.
     Async ``delegate_task`` completions carry ``delegation_id`` instead, so both
-    WebUI delivery paths must key those events by ``delegation_id``.
+    WebUI delivery paths must key those events by ``delegation_id``. Heartbeat
+    delivery additionally uses ``seq`` via ``claim_heartbeat_delivery``.
     """
     if not isinstance(evt, dict):
         return ""
@@ -153,6 +155,57 @@ def completion_delivery_id(evt: Any) -> str:
             or ""
         ).strip()
     return str(evt.get("session_id") or "").strip()
+
+
+# Heartbeats have independent identities, not the registry's terminal-completion
+# marker. Both WebUI queue consumers share these per-owner/per-process inclusive
+# sequence ranges until session deletion. Contiguous ticks cost one range;
+# unrelated traffic never evicts claims, and gaps remain eligible for delivery.
+_HEARTBEAT_DELIVERY_LOCK = threading.Lock()
+_HEARTBEAT_DELIVERIES: dict[str, dict[str, list[tuple[int, int]]]] = {}
+
+
+def claim_heartbeat_delivery(evt: dict, session_id: str) -> str:
+    """Claim one (owner, process, seq), returning its delivery id or empty.
+
+    The returned id can key the existing deferred-wakeup/retry machinery, but
+    is NOT a process lookup id and must never be written to the core registry's
+    completion-consumed set. Keep the actual process id for routing and SSE.
+    Call only after resolving ownership and successfully formatting the event.
+    """
+    process_id = completion_delivery_id(evt)
+    seq = evt.get("seq")
+    if (
+        evt.get("type") != "heartbeat" or not session_id or not process_id
+        or type(seq) is not int or seq <= 0
+    ):
+        return ""
+    delivery_id = f"{process_id}:heartbeat:{seq}"
+    with _HEARTBEAT_DELIVERY_LOCK:
+        ranges = _HEARTBEAT_DELIVERIES.setdefault(session_id, {}).setdefault(process_id, [])
+        index = bisect_left(ranges, (seq, seq))
+        if index and ranges[index - 1][1] >= seq:
+            return ""
+        if index < len(ranges) and ranges[index][0] == seq:
+            return ""
+        # Insert a new singleton or merge it with either/both adjacent ranges.
+        # Ranges stay sorted, disjoint and non-adjacent, without losing holes.
+        start = end = seq
+        stop = index
+        if index and ranges[index - 1][1] == seq - 1:
+            index -= 1
+            start = ranges[index][0]
+        if stop < len(ranges) and ranges[stop][0] == seq + 1:
+            end = ranges[stop][1]
+            stop += 1
+        ranges[index:stop] = [(start, end)]
+    return delivery_id
+
+
+def forget_heartbeat_deliveries(session_id: str) -> None:
+    """Release only the deleted session's heartbeat sequence ranges."""
+    with _HEARTBEAT_DELIVERY_LOCK:
+        _HEARTBEAT_DELIVERIES.pop(session_id, None)
 
 
 # ── process-wakeup display metadata (#6345) ────────────────────────────────
