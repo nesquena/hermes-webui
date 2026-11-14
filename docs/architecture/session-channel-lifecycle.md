@@ -99,6 +99,27 @@ finding 5).
   `streams_lock_held=True`.
 - Settle the decision and the mutation on the same lock edge: emit, stall record, claim, close.
 
+## Retry settlement
+
+A turn that fails without an answer is retried once inside the **same** stream: the stream id, the
+subscriber channel and the terminal frame are reused, and no second stream is registered. The
+settlement rules therefore apply identically before and after the retry:
+
+- The retry settles as the turn's answer only when it produced a **new** answer owned by the current
+  turn (`_silent_retry_added_a_new_answer`, checkpoint identity, not text novelty). A replayed
+  transcript is not a recovery, and an answer that legitimately repeats an earlier one verbatim is
+  still a recovery.
+- A Stop that lands while the retry runs settles the turn as a cancel
+  (`_settle_cancel_after_retry`, partials preserved) exactly like the pre-retry cancel checks: a
+  cancelled turn must never persist the answer the user refused, nor the retry's provider error.
+- Both retries run through a rebuilt Agent that is republished under the same stream id, so a later
+  Stop or Steer reaches the live turn; a steer accepted before the rebuild is replayed into the
+  Agent that produces the answer.
+- The retry can rotate the session (the pre-request compression migration runs again): settlement,
+  writeback ownership and the turn-journal event follow the rotated id.
+- Every settlement is generation-guarded (`_stream_writeback_is_current`,
+  `_finalize_cancelled_turn`): a result whose stream was superseded no-ops instead of writing.
+
 ## Invariants
 
 | # | Invariant | Enforced in | Pinned by |
@@ -110,6 +131,8 @@ finding 5).
 | I5 | A subscriber that just proved liveness is never closed by a decision taken on stale state. | revalidation under the channel lock | same file |
 | I6 | Only the exact stream id is cleared, and the whole stream-owned set goes together. | `release_stream_owned_registries()` | `tests/test_reaper_drain_progress.py`, `tests/test_session_channel_explicit_close.py` |
 | I7 | An orphan is reaped only while it is still an orphan: the decision and the release share one `STREAMS_LOCK` edge. | `release_orphaned_stream_if_still_orphaned()` | `tests/test_7302_orphan_stream_predicate.py` |
+| I8 | A retry settles as the turn's answer only when it produced a new answer owned by the current turn; a replay is not a recovery. | `_silent_retry_added_a_new_answer` | `tests/test_silent_failure_worker_retry.py` |
+| I9 | A Stop that lands during a retry settles as a cancel, never as the retry's result or its provider error. | `_settle_cancel_after_retry` | `tests/test_silent_failure_worker_retry.py` |
 
 ## What not to do
 
