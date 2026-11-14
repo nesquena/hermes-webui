@@ -1234,7 +1234,7 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
 def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     if not path:
         return False
-    if method == "GET" and path == "/api/session":
+    if method == "GET" and path in {"/api/session", "/api/session/turns"}:
         # Detail-load owns profile mismatch handling so the frontend can switch
         # to the session's profile instead of treating a valid cross-profile
         # deep link as a deleted/stale session.
@@ -17458,8 +17458,37 @@ def _render_index_shell_base() -> str:
     return base
 
 
-def _handle_session_get(handler, parsed) -> bool:
-    """GET /api/session — full session payload (messages, tool calls, lineage...). Extracted verbatim from handle_get; every early-return path calls _diag.finish() (see the tier2c note inside)."""
+def _session_turn_index(messages):
+    """Build a lightweight turn index over the authoritative merged message list."""
+    starts = [
+        idx for idx, message in enumerate(messages)
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and not is_hidden_transcript_row(message)
+    ]
+    turns = []
+    for k, start in enumerate(starts):
+        message = messages[start]
+        text = _session_search_message_text(message)
+        preview = _redact_text(re.sub(r"\s+", " ", text).strip()[:80])
+        timestamp = message.get("timestamp")
+        try:
+            timestamp = float(timestamp) if timestamp is not None else None
+        except (TypeError, ValueError):
+            timestamp = None
+        end = starts[k + 1] if k + 1 < len(starts) else len(messages)
+        turns.append({
+            "k": k,
+            "msg_idx": start,
+            "ts": timestamp,
+            "preview": preview,
+            "n_msgs": end - start - 1,
+        })
+    return {"turns": turns, "total_messages": len(messages)}
+
+
+def _handle_session_get(handler, parsed, *, turn_index=False) -> bool:
+    """GET /api/session, or its lightweight per-turn index; all request exits finish diagnostics."""
     import time as _time
     _t0 = _time.monotonic()
     _debug_slow = os.environ.get("HERMES_DEBUG_SLOW", "")
@@ -17484,9 +17513,9 @@ def _handle_session_get(handler, parsed) -> bool:
     # The frontend uses this when switching conversations in the sidebar
     # (only needs metadata). The full message array is loaded lazily
     # via ?messages=1 when the message panel opens.
-    load_messages = query.get("messages", ["1"])[0] != "0"
+    load_messages = turn_index or query.get("messages", ["1"])[0] != "0"
     resolve_model_default = "1" if load_messages else "0"
-    resolve_model = query.get("resolve_model", [resolve_model_default])[0] != "0"
+    resolve_model = not turn_index and query.get("resolve_model", [resolve_model_default])[0] != "0"
     # ?msg_limit=N returns a tail window containing the last N visible
     # transcript rows. Hidden tool-result rows do not consume the budget;
     # they are included only when they sit inside the selected window and
@@ -17511,6 +17540,8 @@ def _handle_session_get(handler, parsed) -> bool:
     msg_limit, _msg_limit_explicit_all = _resolve_effective_msg_limit(
         _raw_msg_limit,
     )
+    if turn_index:
+        msg_before = msg_limit = None
     # ?expand_renderable=1 is retained for compatibility with older
     # frontends. msg_limit now counts visible transcript rows by default, so
     # the flag no longer changes the server-side pagination semantics.
@@ -17749,6 +17780,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 _summary_message_count = metadata_summary["message_count"]
                 _summary_last_message_at = metadata_summary["last_message_at"]
                 _all_msgs = []
+        if turn_index:
+            payload = _session_turn_index(_all_msgs)
+            payload["session_id"] = sid
+            if _diag: _diag.finish()
+            return j(handler, payload)
         if not load_messages:
             if metadata_summary is None:
                 metadata_summary = _message_summary(_all_msgs)
@@ -18835,6 +18871,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/session":
         return _handle_session_get(handler, parsed)
+
+    if parsed.path == "/api/session/turns":
+        return _handle_session_get(handler, parsed, turn_index=True)
 
     if parsed.path == "/api/session/lineage/report":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
