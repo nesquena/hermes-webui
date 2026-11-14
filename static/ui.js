@@ -6031,7 +6031,6 @@ function _configuredModelIdentity(modelId,providerId){
 }
 
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
-  const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
   // A row synthesized from an ungrouped top-level OPTION (temporary/custom
   // entries added by _ensureModelOptionInDropdown) is stored with providerId:''
@@ -6043,8 +6042,22 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const _entryProvider=(entry)=>String(
     (entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)||''
   ).toLowerCase();
+  const _matchesConfiguredKey=(entry,candidate)=>{
+    if(provider&&_entryProvider(entry)===provider){
+      const configuredIdentity=_configuredModelIdentity(candidate,provider);
+      const entryIdentity=_configuredModelIdentity(entry.value,provider);
+      // Routing wrappers do not create another choice for the same model.
+      if(configuredIdentity===entryIdentity) return true;
+      // A vendor-qualified config is not the bare catalog model. This matters
+      // when the active provider emits bare ids instead of @provider: ids:
+      // loose normalization must not hide the unbadged configured fallback.
+      // Keep the existing bare-config -> vendor-row policy separate.
+      if(configuredIdentity.includes('/')&&!entryIdentity.includes('/')) return false;
+    }
+    return _normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(candidate);
+  };
   const matchingEntries=(entries||[]).filter(existing=>
-    _normalizeConfiguredModelKey(existing.value)===normalized
+    _matchesConfiguredKey(existing,modelId)
   );
   if(matchingEntries.some(existing=>{
     const entryProvider=_entryProvider(existing);
@@ -6073,7 +6086,7 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
     const slashRoutedId=rawId.slice(slashPrefix.length);
     if(slashRoutedId&&(entries||[]).some(entry=>
       _entryProvider(entry)===provider
-      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
+      &&_matchesConfiguredKey(entry,slashRoutedId)
     )) return true;
   }
   const prefix=provider?`@${provider}:`:'';
@@ -6081,7 +6094,7 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const routedId=rawId.slice(prefix.length);
   return (entries||[]).some(entry=>
     _entryProvider(entry)===provider
-    &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    &&_matchesConfiguredKey(entry,routedId)
   );
 }
 

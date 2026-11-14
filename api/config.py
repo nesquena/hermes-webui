@@ -8062,8 +8062,8 @@ def _configured_badge_provider_match(
     The other direction is deliberately not matched: a configured
     ``anthropic/claude-sonnet-4`` on a relay that lists only
     ``claude-sonnet-4`` badges no row. Nothing proves the relay routes the
-    two strings to the same model, and the frontend does not dedupe the
-    configured key against the bare row, so badging it would show two
+    two strings to the same model. The frontend preserves that distinction
+    for both bare active-provider rows and provider-wrapped rows; badging it would show two
     "Configured" choices that save different ids. Left unbadged, the picker
     keeps one choice that saves the configured id under its own provider,
     as it does on master. OpenRouter is excluded from the vendor-spelling

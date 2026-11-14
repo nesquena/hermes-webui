@@ -669,6 +669,14 @@ function makeNode(tag) {
       }
       return child;
     },
+    removeChild(child) {
+      this.children = this.children.filter(n => n !== child);
+      if (this._ownerSelect) {
+        this._ownerSelect.options = this._ownerSelect.options.filter(n => n !== child);
+      }
+      child.parentElement = null;
+      return child;
+    },
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
@@ -711,7 +719,9 @@ function makeSelect(groups) {
   Object.defineProperty(sel, 'value', { get() { return sel._value; }, set(v) { sel._value = String(v || ''); } });
   Object.defineProperty(sel, 'selectedOptions', { get() { const o = sel.options.find(x => x.value === sel._value); return o ? [o] : []; } });
   sel.appendChild = function (option) { option.parentElement = sel; sel.children.push(option); sel.options.push(option); };
-  sel.querySelectorAll = function () { return []; };
+  sel.querySelectorAll = function (selector) {
+    return selector === 'optgroup' ? sel.children.filter(n => n.tagName === 'OPTGROUP') : [];
+  };
   for (const group of groups || []) {
     const og = makeNode('optgroup');
     og.label = group.provider || '';
@@ -725,7 +735,6 @@ function makeSelect(groups) {
       og.appendChild(opt);
     }
     sel.children.push(og);
-    sel.options.push(...og.children);
   }
   return sel;
 }
@@ -752,11 +761,12 @@ function getModelLabel(v) { return String(v || ''); }
 function closeModelDropdown() {}
 function syncModelChip() {}
 function _refreshOpenModelDropdown() {}
-function _deduplicateModelPickerOptions() { return 0; }
 
 for (const name of [
   '_normalizeConfiguredModelKey',
   '_configuredModelIdentity',
+  '_modelPickerOptionIdentity',
+  '_deduplicateModelPickerOptions',
   '_getConfiguredModelBadge',
   '_providerFromModelValue',
   '_readModelOverflowData',
@@ -836,6 +846,55 @@ def _relay_choices(picker: dict) -> list[tuple[str, list]]:
 
 REVERSE_SERVED = ["claude-sonnet-4", "openai/gpt-4o"]
 FORWARD_SERVED = ["anthropic/claude-sonnet-4", "openai/gpt-4o"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("live", [False, True], ids=["static", "live"])
+@pytest.mark.parametrize("active", [False, True], ids=["inactive-provider", "active-provider"])
+@pytest.mark.parametrize("provider", ["relay", "custom:relay"])
+@pytest.mark.parametrize("target", ["anthropic/claude-sonnet-4", "claude-sonnet-4"], ids=["reverse", "exact"])
+def test_production_catalog_preserves_configured_fallback_choice(
+    monkeypatch, tmp_path, live, active, provider, target,
+):
+    # The 14 November gate pins the active-provider config, including a bare
+    # catalog row. Use the real catalog producer, not a hand-built group whose
+    # @custom: wrapper would miss the active-provider spelling.
+    import api.providers
+
+    monkeypatch.setattr(api.providers, "_provider_has_key", lambda *_args, **_kwargs: False)
+    primary = {"provider": provider, "default": "fixture-primary"} if active else {
+        "provider": "openai-codex", "default": "gpt-5.4",
+    }
+    custom = {**RELAY, "models": ["fixture-primary", "claude-sonnet-4"]}
+    fallback = [{"provider": provider, "model": target}]
+    if live:
+        result = _live_models(
+            monkeypatch, tmp_path, custom_providers=[custom],
+            fallback_providers=fallback,
+            served={"relay.example": custom["models"]}, model=primary,
+        )
+    else:
+        monkeypatch.setattr(config, "cfg", {
+            "model": primary, "custom_providers": [custom],
+            "fallback_providers": fallback, "providers": {},
+        })
+        monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+        result = config._static_models_catalog_without_live_probes()
+    group = _group(result, "custom:relay")
+    ids = _option_ids(group)
+    bare_row = next(i for i in ids if i == "claude-sonnet-4" or i.endswith(":claude-sonnet-4"))
+    if not live and active:
+        assert "fixture-primary" in ids and "claude-sonnet-4" in ids
+    badges = result["configured_model_badges"]
+    if target.startswith("anthropic/"):
+        assert bare_row not in badges
+    picker = _render_picker(tmp_path, result["groups"], badges)
+    fallback_choices = [c for c in _relay_choices(picker) if "fixture-primary" not in c[0]]
+    assert len(fallback_choices) == 1, picker
+    choice_id, clicks = fallback_choices[0]
+    assert choice_id.removeprefix("@custom:relay:") == target
+    assert clicks == [[choice_id, "custom:relay"]]
+    assert bare_row in picker["allRows"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

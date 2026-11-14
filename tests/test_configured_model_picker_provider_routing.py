@@ -560,6 +560,7 @@ for (const name of [
   '_modelPickerOptionIdentity',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_configuredModelIdentity',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
   '_modelStateForSelect',
@@ -901,6 +902,7 @@ async function selectModelFromDropdown(value, provider) {
 for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_configuredModelIdentity',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
   '_modelStateForSelect',
@@ -1034,6 +1036,7 @@ function extractFunction(source, name) {
 eval([
   '_normalizeConfiguredModelKey',
   '_getOptionProviderId',
+  '_configuredModelIdentity',
   '_isEquivalentConfiguredModelEntry',
 ].map(name => extractFunction(ui, name)).join('\n'));
 
@@ -1234,6 +1237,7 @@ for (const name of [
   '_appendOverflowOptionsToGroup',
   '_providerFromModelValue',
   '_modelPickerOptionIdentity',
+  '_configuredModelIdentity',
   '_isEquivalentConfiguredModelEntry',
   '_getOptionProviderId',
   '_modelStateForSelect',

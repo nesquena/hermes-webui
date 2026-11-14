@@ -14,6 +14,15 @@ Do not replace dashes with dots, split a vendor path, or remove a suffix such as
 
 Other providers keep their existing identity normalization for custom-provider compatibility.
 
+For a named custom provider, a vendor-qualified configured fallback remains a
+separate Configured choice when the catalog only lists the bare model ID.
+For example, `anthropic/claude-sonnet-4` must not disappear merely because
+`claude-sonnet-4` is listed under that provider, including when it is active.
+The bare catalog model stays selectable without borrowing the fallback badge.
+An exact model ID and its own provider routing wrapper still represent one
+choice. This does not change the separate policy for a bare configured ID
+with multiple vendor-qualified catalog candidates.
+
 ## Overflow restoration
 
 When a saved OpenRouter model is present in a provider group's overflow catalog, the picker promotes the exact matching entry into that group and removes the same entry from the hidden overflow list. Later restorations must reuse the promoted option.
