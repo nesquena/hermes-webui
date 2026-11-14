@@ -208,7 +208,7 @@ def test_set_auxiliary_model_persists_provider_native_model(
     monkeypatch.setattr(
         config,
         "resolve_model_provider",
-        lambda model: (model, provider, None),
+        lambda model, **_kwargs: (model, provider, None),
     )
 
     result = config.set_auxiliary_model("vision", provider, requested_model)
