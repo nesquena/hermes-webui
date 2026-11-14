@@ -30,11 +30,18 @@
   function project(s) { return _allProjects.find(p => p.project_id === s.project_id)?.name || ''; }
   function mount() {
     const root = $('mainConversations');
-    if (root.childElementCount) return root;
+    if ($('conversationBoardSearch')) return root;
     const header = document.createElement('header'); header.className = 'conversation-board-head';
     header.innerHTML = '<div><h2>' + esc(tx('title')) + '</h2><p>' + esc(tx('intro')) + '</p></div>';
     const actions = document.createElement('div'); actions.className = 'conversation-board-actions';
-    const back = button(tx('back'), async () => { await switchPanel('chat'); $('msg')?.focus(); });
+    const back = button(tx('back'), async () => {
+      const previous = history.state?.returnSession;
+      if (!(await switchPanel('chat'))) return;
+      if (S.session?.session_id) _setActiveSessionUrl(S.session.session_id);
+      else if (previous) await loadSession(previous);
+      else history.pushState(null, '', new URL('?view=chat', document.baseURI));
+      $('msg')?.focus();
+    });
     back.id = 'conversationBoardBack';
     const create = button(t('new_conversation'), () => $('btnNewChat').click());
     create.id = 'conversationBoardNew'; create.classList.add('workspace-primary'); actions.append(back, create); header.appendChild(actions);
@@ -54,7 +61,7 @@
     const grid = document.createElement('div'); grid.id = 'conversationBoardGrid'; grid.className = 'conversation-board-grid';
     const more = button(tx('more'), () => { limit += 36; render(); }); more.id = 'conversationBoardMore';
     const reset = button(tx('reset'), () => { search.value = query = ''; filter = 'all'; limit = 36; render(); search.focus(); }); reset.id = 'conversationBoardReset';
-    root.append(header, toolbar, notice, count, grid, reset, more); return root;
+    root.replaceChildren(header, toolbar, notice, count, grid, reset, more); return root;
   }
   function render() {
     if (!active()) return;
@@ -129,12 +136,15 @@
     }
     if (focused) (grid.querySelector('[data-conversation-open="' + CSS.escape(focused) + '"]') || $('conversationBoardSearch')).focus({preventScroll:true});
   }
-  async function show() {
-    if (!(await switchPanel('conversations'))) return;
+  function show() { return switchPanel('conversations'); }
+  function enter() {
+    if (window.HermesPWA.workspaceView() !== 'conversations') {
+      history.pushState({returnSession:S.session?.session_id}, '', new URL('?view=conversations', document.baseURI));
+    }
     closeMobileSidebar();
     if (_sessionListSkeletonActive) setLoading();
     else { renderSessionListFromCache(); render(); }
-    $('conversationBoardSearch')?.focus({preventScroll:true});
+    if (!matchMedia('(pointer: coarse)').matches) $('conversationBoardSearch')?.focus({preventScroll:true});
   }
   function recent() {
     return rows.slice().sort((a,b) => _sessionTimestampMs(b) - _sessionTimestampMs(a)).slice(0,4).map(s =>
@@ -146,5 +156,5 @@
   }
   function sync(sessions) { rows = sessions; loading = false; render(); window.SPWorkplace?.refreshRecent(); }
   function setLoading() { rows = []; loading = true; render(); window.SPWorkplace?.refreshRecent(); }
-  window.ConversationWorkbench = {show, sync, setLoading, recent, openRecent};
+  window.ConversationWorkbench = {show, enter, sync, setLoading, recent, openRecent};
 })();

@@ -8,7 +8,7 @@ async function boot(page) {
   await page.addLocatorHandler(tour, async()=>{await tour.click();});
 }
 
-test('WORK VIEWS Overview opens on a plain visit and respects the personal Chat preference', async ({page}, info) => {
+test('WORK VIEWS Overview opens on a plain visit and provides access to Chat', async ({page}, info) => {
   await boot(page);
   await page.screenshot({path:info.outputPath('entry.png')});
   await expect(page.locator('#mainStudio .wp-hero')).toBeVisible();
@@ -32,10 +32,9 @@ test('WORK VIEWS Overview opens on a plain visit and respects the personal Chat 
   await page.setViewportSize({width:1440,height:900});
   await page.locator('[data-wp-go="chart"]').click();
   await expect(page.locator('.bot-org-view')).toBeVisible();
-  await page.locator('.rail [data-panel="settings"]').click();
-  await page.locator('#settingsStartPage').selectOption('chat');
-  await boot(page);
-  await expect(page.locator('#mainStudio .wp-hero')).toBeHidden();
+  await page.locator('.rail [data-panel="chat"]').click();
+  await expect(page.locator('#conversationBoardSearch')).toBeVisible();
+  await page.locator('#conversationBoardBack').click();
   await expect(page.locator('#msg')).toBeVisible();
 });
 

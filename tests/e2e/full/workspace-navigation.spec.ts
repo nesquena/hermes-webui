@@ -78,6 +78,8 @@ test('WORKSPACE NAVIGATION keyboard search preserves drafts and unifies Projects
   await expect(page.locator('#botDirectorySearch')).toBeFocused();
   await page.keyboard.press('Control+Shift+P');await page.locator('#workspaceNavigatorSearch').fill('chat');
   await page.keyboard.press('ArrowDown');await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
+  await expect(page.locator('#conversationBoardSearch')).toBeVisible();
+  await page.locator('#conversationBoardBack').click();
   await expect(page.locator('#msg')).toHaveValue('Keep this navigation draft');
   await page.setViewportSize({width:390,height:844});
   await expect(page.locator('#btnWorkspaceNavigator')).toBeInViewport();
@@ -117,11 +119,11 @@ test('WORKSPACE NAVIGATION merged project folders remain reachable through the s
     await expect(page.locator('#mainProjects')).toBeVisible();
     await page.locator('.proj-row-mywork').click();
     await expect(page.locator('#projSummary')).toContainText('My work');
-    await expect(page.locator('#projSections .sp-folders-card')).toBeVisible();
-    await expect(page.locator('#projSections .sp-folders-card')).toContainText('Files and folders');
+    await expect(page.locator('#projSections [data-project-section="folders"]')).toBeVisible();
+    await expect(page.locator('#projSections [data-project-section="folders"]')).toContainText('Files and folders');
     await page.screenshot({path:info.outputPath('projects-folders.png')});
     await page.setViewportSize({width:390,height:844});await page.evaluate(()=>closeMobileSidebar());
-    await expect(page.locator('#projSections .sp-folders-card')).toBeVisible();
+    await expect(page.locator('#projSections [data-project-section="folders"]')).toBeVisible();
     await expect(page.locator('.sidebar-nav [data-panel="kanban"], .sidebar-nav [data-panel="workspaces"]')).toHaveCount(0);
   } finally { if(previous)fs.writeFileSync(marker,previous);else fs.unlinkSync(marker); }
 });

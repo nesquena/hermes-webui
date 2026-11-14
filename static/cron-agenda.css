@@ -1,4 +1,4 @@
-#cronAgenda[hidden],#cronAgendaBack[hidden],#workspaceStartField[hidden]{display:none!important}
+#cronAgenda[hidden],#cronAgendaBack[hidden]{display:none!important}
 #cronAgenda{color:var(--text);overflow:auto;min-width:0}
 .agenda-sheet{box-sizing:border-box;max-width:1060px;padding:clamp(16px,3vw,36px);margin:auto}
 .agenda-sheet h2{font-size:clamp(22px,3vw,30px);margin:0}

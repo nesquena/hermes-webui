@@ -31,6 +31,19 @@
     try{window.dispatchEvent(new CustomEvent(name,{detail:detail||{}}));}catch(_){}
   }
 
+  // Resolve launch intent before the chat shell can paint or restore a saved session.
+  function workspaceView(){
+    if(window !== window.top) return null;
+    const url=new URL(window.location.href);
+    const base=new URL(document.baseURI);
+    if(url.hash || (url.pathname!==base.pathname && url.pathname!==base.pathname+'index.html')) return null;
+    const keys=Array.from(url.searchParams.keys()).filter(key=>key!=='source' && !key.startsWith('utm_'));
+    if(!keys.length) return 'overview';
+    return keys.length===1 && keys[0]==='view' && url.searchParams.get('view')==='conversations' ? 'conversations' : null;
+  }
+  const initialWorkspaceView=workspaceView();
+  if(initialWorkspaceView) root.dataset.workspaceEntry=initialWorkspaceView;
+
   syncMode();
   window.addEventListener('online',function(){syncMode();dispatch('hermes:pwa-connection-change',{online:true});});
   window.addEventListener('offline',function(){syncMode();dispatch('hermes:pwa-connection-change',{online:false});});
@@ -66,6 +79,8 @@
   });
 
   window.HermesPWA={
+    initialWorkspaceView:initialWorkspaceView,
+    workspaceView:workspaceView,
     isStandalone:isStandalone,
     syncMode:syncMode,
     launchAction:function(){

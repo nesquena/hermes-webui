@@ -107,7 +107,9 @@ test('CONVERSATION WORKBENCH clears previous bot rows during switching and handl
   await page.unroute('**/api/sessions?**');await page.locator('#conversationBoardNotice button').click();
   await expect(page.locator('#conversationBoardNotice')).toBeHidden();
   await page.context().addCookies([{name:auth.cookie_name,value:auth.cookies.bob,url:auth.base_url,httpOnly:true,sameSite:'Lax'}]);
-  await page.goto('/');await page.locator('#btnConversationBoard').click();
+  await page.goto('/');
+  await page.locator('.rail [data-panel="chat"]').click();
+  await expect(page.locator('#conversationBoardSearch')).toBeVisible();
   await expect(page.locator('[data-conversation-open="'+sid+'"]')).toHaveCount(0);
 });
 

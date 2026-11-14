@@ -1921,6 +1921,7 @@ async function loadSession(sid){
   // failed loadSession killed; no-ops on real switches.
   _rearmActiveSessionStream();
   if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){
+    if(typeof _currentPanel!=='undefined' && _currentPanel==='chat') _setActiveSessionUrl(sid);
     // Staying on the current chat also supersedes a pending New Chat request.
     if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight) ++_loadSessionGeneration;
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
@@ -4451,6 +4452,7 @@ function _sessionUrlForSid(sid){
   catch(_e){base=new URL(`/session/${encoded}`, window.location.origin);}
   try{
     const current=new URL(window.location.href);
+    if(['chat','conversations'].includes(current.searchParams.get('view'))) current.searchParams.delete('view');
     current.searchParams.delete('session');
     current.searchParams.delete('session_id');
     current.searchParams.delete('q');
@@ -4467,6 +4469,7 @@ function _sessionUrlForSid(sid){
 }
 function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
+  if(typeof _currentPanel!=='undefined' && ['studio','conversations'].includes(_currentPanel)) return;
   const next=_sessionUrlForSid(sid);
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
     let consumeLaunchAction=false;
@@ -9346,17 +9349,24 @@ if(typeof window!=='undefined'){
     void _handleActiveSessionStorageEvent(e);
     void _handleShowAllProfilesStorageEvent(e);
   });
-  window.addEventListener('popstate', () => {
+  window.addEventListener('popstate', async () => {
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
-    if(!sid || (S.session && S.session.session_id===sid)) return;
+    if(!sid){
+      const view=window.HermesPWA?.workspaceView();
+      if(view==='overview') void window.SynthPulseWorkspace?.openHome();
+      else if(view==='conversations') void window.ConversationWorkbench?.show();
+      else if(new URLSearchParams(window.location.search).get('view')==='chat') void switchPanel('chat');
+      return;
+    }
     // Refuse to switch sessions mid-stream — same UX guard the storage-event
     // handler had. A user mid-turn who hits browser Back should NOT lose the
     // active stream. They can hit Back again once the turn ends.
-    if(S.busy){
+    if(S.busy && S.session?.session_id!==sid){
       if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
       return;
     }
-    void loadSession(sid);
+    if(typeof _currentPanel!=='undefined' && _currentPanel!=='chat' && !(await switchPanel('chat'))) return;
+    if(S.session?.session_id!==sid) void loadSession(sid);
   });
 }
 

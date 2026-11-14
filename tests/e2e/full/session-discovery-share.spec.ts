@@ -72,7 +72,8 @@ test('US-SP-SESS-SHARE create public snapshot read anonymously cancel revoke the
     const crossOrigin=await page.context().request.post(auth.base_url+'/api/share/revoke',{data:{session_id:sid},headers:{Origin:'https://cross-origin.invalid'}});
     expect(crossOrigin.status()).toBe(403);
     const followup='QA_SHARE_LATER_'+Date.now();
-    await page.locator('.rail-btn[data-panel="chat"]').click();await page.locator('#msg').fill(followup);await page.locator('#btnSend').click();
+    await page.locator('.rail-btn[data-panel="chat"]').click();
+    await page.locator('#conversationBoardBack').click();await page.locator('#msg').fill(followup);await page.locator('#btnSend').click();
     await expect(page.locator('#messages')).toContainText('QA_REPLY: QA_SHARE_LATER_');
     await expect.poll(async()=>(await api(page,'/api/session/status?session_id='+sid)).body.agent_running).toBe(false);
     expect((await (await anonymous.request.get(publicAPI)).json()).share).toEqual(firstSnapshot);

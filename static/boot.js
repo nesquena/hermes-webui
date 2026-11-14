@@ -321,6 +321,8 @@ function _isRestoredPersonalScratchSession(session, urlSession){
 
 async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
   if(_prefillHasDraftText(prefillIntent)) return false;
+  if(typeof window!=='undefined' && window.HermesPWA?.initialWorkspaceView &&
+      (document.documentElement.dataset.workspaceEntry || _currentPanel!=='chat')) return false;
   if(S.session) return false;
   if(_workspacePanelMode!=='browse') return false;
   if(!S._profileDefaultWorkspace) return false;
@@ -3874,7 +3876,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   }
   // Split-view panes must not inherit the parent window's "last session":
   // eight panes booting without a ?session= would all restore the same chat.
-  const savedLocal=window.__HERMES_PANE_MODE?null:localStorage.getItem('hermes-webui-session');
+  // Both overview pages list conversations without opening or acknowledging one.
+  const savedLocal=(window.__HERMES_PANE_MODE || window.HermesPWA?.initialWorkspaceView)
+    ? null : localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
   if(saved){
     try{

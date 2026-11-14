@@ -161,6 +161,7 @@ async function virtualizedLongHistory(page: Page, info: TestInfo, holdDock: bool
   await expect(page.locator('#messages')).toContainText('SUPPLEMENT_ANSWER_119');
   await preference(page, 'preferences', 'settingsVirtualizeTranscript', 'virtualize_transcript', false);
   await page.locator('.rail-btn[data-panel="chat"]').click();
+  await page.locator('#conversationBoardBack').click();
   await page.locator('#outlineToggleBtn').click();
   await expect(page.locator('#outlinePanel .outline-entry')).toHaveCount(120);
   await page.locator('#outlinePanel .outline-entry').filter({hasText: 'SUPPLEMENT_QUESTION_000'}).click();

@@ -166,10 +166,10 @@ def test_no_saved_session_branch_restores_panel_pref_before_bind_attempt():
 
 def test_ephemeral_blank_session_branch_restores_panel_pref_before_bind_attempt():
     src = BOOT_JS.read_text(encoding="utf-8")
-    marker = "if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){"
+    marker = "if(_isRestoredPersonalScratchSession(S.session, urlSession) && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){"
     marker_idx = src.find(marker)
     assert marker_idx >= 0, "ephemeral blank-session path not found"
-    return_idx = src.find("return;", marker_idx)
+    return_idx = src.index("return;", src.index("await _finalizeComposerPrefillOnBoot(prefillIntent);", marker_idx))
     assert return_idx > marker_idx, "ephemeral blank-session path must still return early"
     segment = src[marker_idx:return_idx]
     eph_pref = "if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';"

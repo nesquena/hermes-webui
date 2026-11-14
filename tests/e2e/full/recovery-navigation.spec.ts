@@ -29,6 +29,7 @@ test('US-SP-NAV-PANEL-CLICKS rail labels and workspace edge toggle preserve draf
     await field.setChecked(enabled);
     await expect.poll(()=>page.evaluate(()=>localStorage.getItem('hermes-webui-workspace-panel-pref'))).toBe(enabled?'open':'closed');
     await page.locator('.rail-btn[data-panel="chat"]').click();
+    await page.locator('#conversationBoardBack').click();
     await page.reload();await expect(page.locator('#msg')).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('data-workspace-panel',enabled?'open':'closed');
     await session(page);

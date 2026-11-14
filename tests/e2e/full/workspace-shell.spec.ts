@@ -22,6 +22,8 @@ test.describe('role workspace', () => {
     await page.locator('.sidebar-nav [data-panel="profiles"]').click();
     await expect(page.locator('#profilesPanel')).toBeVisible();
     await page.locator('.sidebar-nav [data-panel="chat"]').click();
+    await expect(page.locator('#conversationBoardSearch')).toBeVisible();
+    await page.locator('#conversationBoardBack').click();
     await expect(page.locator('#msg')).toHaveValue('Draft stays in my workspace');
     for (const [name,width,height] of [['mobile',390,844],['laptop',1024,768],['desktop',1440,1000]] as const) {
       await page.setViewportSize({width,height});

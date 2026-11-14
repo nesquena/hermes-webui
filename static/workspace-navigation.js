@@ -12,8 +12,10 @@
       if (node.hidden || node.disabled || node.classList.contains('nav-tab-hidden') || hidden.has(panel)) return;
       if (window.SynthPulseModules && !window.SynthPulseModules.canOpen(panel)) return;
       // workspace-secondary-hidden is a personal disclosure, not a permission denial.
-      entries.push({panel, label:node.dataset.tooltip || node.getAttribute('aria-label') || panel, aliases:panel === 'projects' ? tx('project_aliases') : '', icon:node.querySelector('svg')});
-      if (panel === 'chat') entries.push({panel:'conversations', label:t('conversation_board_title'), icon:document.querySelector('#btnConversationBoard svg')});
+      const label = node.dataset.tooltip || node.getAttribute('aria-label') || panel;
+      entries.push({panel:panel === 'chat' ? 'conversations' : panel, label,
+        aliases:panel === 'chat' ? 'chat ' + t('conversation_board_title') : panel === 'projects' ? tx('project_aliases') : '',
+        icon:node.querySelector('svg')});
     });
     return entries;
   }
@@ -52,8 +54,7 @@
       if (innerWidth <= 640 && panel !== 'chat' && !MAIN_VIEW_PANELS.includes(panel)) {
         document.querySelector('.sidebar')?.classList.add('mobile-panel-drawer', 'mobile-open');
       } else closeMobileSidebar();
-      if (panel === 'chat') $('msg')?.focus();
-      else if (panel === 'profiles') $('botDirectorySearch')?.focus();
+      if (panel === 'profiles') $('botDirectorySearch')?.focus();
       else {
         const heading = [...document.querySelectorAll('main h2, .panel-view.active .panel-head')].find(node => node.getClientRects().length);
         if (heading) { heading.tabIndex = -1; heading.focus({preventScroll:true}); }

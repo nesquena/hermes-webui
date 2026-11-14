@@ -283,9 +283,11 @@ protects the delegation listing; authority records are never included in it.
 
 ### Workspace overview, projects and schedule
 
-An ordinary visit opens the Studio Overview. Preferences offers a personal start
-page on this device. The title-bar symbol returns to Overview. Conversation
-links, active runs and restored drafts open in Chat.
+Opening SynthPulse in the browser or as an installed app starts on the Studio
+Overview for every role. The title-bar symbol returns to that same homepage.
+Choosing Chats from navigation opens the searchable conversation overview.
+Selecting a card or a recent conversation opens its original chat, including saved drafts and
+in-progress runs. Direct conversation links and the New Chat shortcut open Chat.
 
 Overview reuses the conversation list and scheduler's visible records. Its
 recent task list shows the last recorded run per task in the selected scope.

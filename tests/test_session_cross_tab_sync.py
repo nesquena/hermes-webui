@@ -41,7 +41,9 @@ def test_session_switch_updates_url_path_for_tab_local_anchor():
 
 def test_boot_prefers_url_session_over_local_storage_session():
     assert "const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;" in BOOT_JS
-    assert "const savedLocal=localStorage.getItem('hermes-webui-session');" in BOOT_JS
+    saved_local = BOOT_JS.split("const savedLocal=", 1)[1].split(";", 1)[0]
+    assert "initialWorkspaceView" in saved_local
+    assert "localStorage.getItem('hermes-webui-session')" in saved_local
     assert "const saved=urlSession||savedLocal;" in BOOT_JS
     assert "const savedSidebarOnlyState=(!urlSession&&savedLocal)" in BOOT_JS
     assert "? await _savedSessionSidebarOnlyState(savedLocal)" in BOOT_JS
