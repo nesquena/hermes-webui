@@ -16520,6 +16520,469 @@ def _handle_insights(handler, parsed) -> bool:
     })
 
 
+def _parse_nginx_date(dt_str):
+    """Parse nginx log date string like '28/Oct/2026:15:09:36 +0700'.
+
+    Returns an AWARE datetime in server-local time. The logged offset is
+    honoured (nginx may log in a different timezone than the server): the
+    parsed instant is converted to local time but keeps its tzinfo, so
+    callers compare ABSOLUTE INSTANTS rather than clock faces. Returning a
+    naive local value instead would make a wall-clock comparison reorder
+    entries across a DST transition. A string carrying no offset is read as
+    server-local time.
+    """
+    import datetime as _dt_mod
+    try:
+        dt = _dt_mod.datetime.strptime(dt_str, "%d/%b/%Y:%H:%M:%S %z")
+        return dt.astimezone()
+    except (ValueError, OverflowError):
+        pass
+    try:
+        return _dt_mod.datetime.strptime(
+            dt_str.split()[0], "%d/%b/%Y:%H:%M:%S"
+        ).astimezone()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _get_outbound_domains(start_dt, end_dt):
+    """Query Hermes state.db for top 10 outbound provider domains in the window.
+
+    Each ``session_model_usage`` row is a cumulative per-key total
+    (session, model, provider, url, mode, task) carrying its own
+    ``first_seen``/``last_seen`` activity timestamps.  Attribute the row to
+    the window containing its own most recent activity rather than the
+    SESSION's ``started_at``: a session started before the window can still
+    have made requests inside it (it would otherwise contribute nothing),
+    and a session started inside the window must not dump its whole
+    lifetime total into a window it has already outlived.  This mirrors
+    ``/api/insights``, which stamps a session as
+    ``COALESCE(ended_at, started_at, 0)`` — its last activity, not its
+    birth.  ``last_seen`` is NULL only for rows written before that column
+    was backfilled; those fall back to the session start.  A state DB from
+    before the column existed at all falls back the same way rather than
+    failing the query (which would silently empty both outbound cards).
+    """
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if not db_path or not db_path.exists():
+            return []
+        
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            # Older agent state DBs may predate the per-row activity
+            # timestamps; pick the expression on what is actually there.
+            _usage_cols = {
+                r[1] for r in cur.execute("PRAGMA table_info(session_model_usage)").fetchall()
+            }
+            _activity_ts = (
+                "COALESCE(smu.last_seen, s.started_at)"
+                if "last_seen" in _usage_cols
+                else "s.started_at"
+            )
+            cur.execute(f"""
+                SELECT RTRIM(smu.billing_base_url, '/') as billing_base_url, SUM(smu.api_call_count) as calls
+                FROM session_model_usage smu
+                JOIN sessions s ON s.id = smu.session_id
+                WHERE smu.billing_base_url IS NOT NULL
+                  AND smu.billing_base_url != ''
+                  AND {_activity_ts} >= ?
+                  AND {_activity_ts} <= ?
+                GROUP BY RTRIM(smu.billing_base_url, '/')
+            """, (start_dt.timestamp(), end_dt.timestamp()))
+            rows = cur.fetchall()
+
+            # Aggregate by domain before limiting: several full URLs can
+            # share one provider domain (…/v1, …/v2), and grouping/limiting
+            # in SQL by full URL would split their counts across rows.
+            from urllib.parse import urlparse as _urlparse
+            by_domain = {}
+            for r in rows:
+                url = r["billing_base_url"]
+                try:
+                    domain = _urlparse(url).netloc or url
+                except Exception:
+                    domain = url
+                entry = by_domain.setdefault(domain, {"domain": domain, "url": url, "calls": 0})
+                entry["calls"] += r["calls"] or 0
+            return sorted(by_domain.values(), key=lambda e: e["calls"], reverse=True)[:10]
+    except Exception:
+        return []
+
+
+# Reverse-DNS for the traffic panel is best-effort. `socket.gethostbyaddr`
+# is a blocking C call with no timeout, so it must never run on the request
+# path: it runs on short-lived DAEMON threads (daemon threads cannot hold up
+# process exit) under a global cap of outstanding lookups. The cap is
+# released when a lookup actually FINISHES, not when the request returns —
+# otherwise a stalled resolver lets every refresh add more live workers.
+# At the cap, or when a worker cannot be started, the handler keeps the raw
+# IP.
+_REVERSE_DNS_MAX_OUTSTANDING = 40
+_REVERSE_DNS_OUTSTANDING = 0
+_REVERSE_DNS_OUTSTANDING_LOCK = threading.Lock()
+_REVERSE_DNS_TIMEOUT = 1.0
+
+
+def _resolve_inbound_domains(ips):
+    """Best-effort reverse-DNS for `ips`; raw IP for anything unresolved."""
+    import socket as _socket
+    import threading as _threading
+
+    fallback = {ip: ip for ip in ips}
+    if not ips:
+        return fallback
+
+    global _REVERSE_DNS_OUTSTANDING
+    with _REVERSE_DNS_OUTSTANDING_LOCK:
+        if _REVERSE_DNS_OUTSTANDING + len(ips) > _REVERSE_DNS_MAX_OUTSTANDING:
+            return fallback
+        _REVERSE_DNS_OUTSTANDING += len(ips)
+
+    names = {}
+
+    def _lookup(ip):
+        try:
+            names[ip] = _socket.gethostbyaddr(ip)[0]
+        except Exception:
+            names[ip] = ip
+        finally:
+            with _REVERSE_DNS_OUTSTANDING_LOCK:
+                global _REVERSE_DNS_OUTSTANDING
+                _REVERSE_DNS_OUTSTANDING -= 1
+
+    workers = []
+    started = 0
+    try:
+        for ip in ips:
+            worker = _threading.Thread(target=_lookup, args=(ip,), daemon=True)
+            worker.start()
+            workers.append(worker)
+            started += 1
+    except RuntimeError:
+        # Thread creation failed under pressure: release the slots for the
+        # lookups that never started, so the cap tracks live work only.
+        with _REVERSE_DNS_OUTSTANDING_LOCK:
+            _REVERSE_DNS_OUTSTANDING -= (len(ips) - started)
+
+    deadline = time.monotonic() + _REVERSE_DNS_TIMEOUT
+    for worker in workers:
+        worker.join(max(0.0, deadline - time.monotonic()))
+    return names
+
+
+def _handle_insights_traffic(handler, parsed) -> bool:
+    """Return top 10 inbound IPs and outbound domains for a given time window."""
+    import collections as _collections
+    import math as _math
+    from datetime import datetime as _datetime, timedelta as _timedelta
+    
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    
+    def _window_ts(vals):
+        if not vals:
+            return None
+        v = vals[0]
+        if not isinstance(v, str):
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            try:
+                y, mo, d = map(int, v.split("-"))
+                ts = time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+                lt = time.localtime(ts)
+                if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, mo, d):
+                    return None
+                return ("date", ts)
+            except (OverflowError, ValueError, OSError):
+                return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not _math.isfinite(f):
+            return None
+        return ("num", f)
+    
+    start_meta = _window_ts(query.get("start", []))
+    end_meta = _window_ts(query.get("end", []))
+    
+    now = time.time()
+    start_ts = None
+    end_ts = None
+
+    start_kind = start_meta[0] if start_meta else None
+    end_kind = end_meta[0] if end_meta else None
+    start_ts_v = start_meta[1] if start_meta else None
+    end_ts_v = end_meta[1] if end_meta else None
+
+    if start_meta is not None or end_meta is not None:
+        # Mirror /api/insights' normalization contract: clamp the supplied end
+        # to now, default a missing start from the end (30 CALENDAR days for a
+        # date end, 30*86400 for a numeric one), then SWAP inverted endpoints
+        # instead of discarding the selection. Both parts of the Insights page
+        # send the same dates, so a reversed range must serve the interval the
+        # usage cards serve, not silently fall back to the trailing month.
+        if end_ts_v is not None:
+            end_ts = min(end_ts_v, now)
+            if start_ts_v is not None:
+                start_ts = start_ts_v
+            elif end_kind == "date":
+                # End-only date: a fixed 86400 back-step drifts across DST, so
+                # step back 30 calendar days from the end's local midnight.
+                try:
+                    _end_day_tmp = _datetime.fromtimestamp(
+                        min(end_ts_v, 4102444800)).date()
+                    start_ts = time.mktime(
+                        (_end_day_tmp - _timedelta(days=30)).timetuple())
+                    start_kind = "date"
+                except (OverflowError, ValueError, OSError):
+                    start_ts = end_ts - 30 * 86400
+            else:
+                start_ts = end_ts_v - 30 * 86400
+        else:
+            start_ts = start_ts_v
+            end_ts = now
+
+        # Platform-range guard: an absurd-but-finite timestamp must not reach
+        # fromtimestamp(). Fail closed to the trailing window.
+        try:
+            _datetime.fromtimestamp(start_ts)
+            _datetime.fromtimestamp(end_ts)
+        except (OverflowError, ValueError, OSError):
+            start_ts = None
+            end_ts = None
+            start_kind = None
+            end_kind = None
+
+        # Reversal. A DATE end means the WHOLE calendar day and is served as an
+        # exclusive bound at the NEXT local midnight, so the comparison must use
+        # that same resolved bound; equality counts as reversed for a whole-day
+        # end. The kinds travel with the values, so a swapped date end still
+        # expands to its whole day below.
+        if start_ts is not None and end_ts is not None:
+            _cmp_end = end_ts
+            _end_is_whole_day = False
+            if end_kind == "date":
+                try:
+                    _cmp_day = _datetime.fromtimestamp(end_ts).date()
+                    _cmp_end = time.mktime(
+                        (_cmp_day + _timedelta(days=1)).timetuple())
+                    _end_is_whole_day = True
+                except (OverflowError, ValueError, OSError):
+                    _cmp_end = end_ts
+            if start_ts > _cmp_end or (_end_is_whole_day and start_ts == _cmp_end):
+                start_ts, end_ts = end_ts, start_ts
+                start_kind, end_kind = end_kind, start_kind
+
+        # A custom window must never extend into the future; the swap can
+        # re-introduce a future value as the new end.
+        if end_ts is not None and end_ts > now:
+            end_ts = now
+
+        # A strictly-future window is wholly ahead of the clock: fail closed to
+        # the trailing window rather than serving an empty custom interval. The
+        # one exemption is a zero-length window anchored exactly on the clock,
+        # which is what an explicit `start == now` asks for.
+        clock_zero_window = (
+            start_ts is not None and end_ts is not None
+            and start_ts >= now and end_ts >= now
+            and not (start_ts_v is not None and start_ts_v > now)
+            and not (end_ts_v is not None and end_ts_v > now)
+        )
+        if start_ts is not None and start_ts >= now and not clock_zero_window:
+            start_ts = None
+            end_ts = None
+            start_kind = None
+            end_kind = None
+
+        # A calendar-DATE end selects the WHOLE end day: the inclusive bound the
+        # windows below compare against is the NEXT LOCAL MIDNIGHT, not
+        # `end + 86400`. A DST fall-back day is 25 hours long, so a fixed 86400
+        # stops one hour short and silently drops the tail of that day; a
+        # spring-forward day is 23 hours, so it would admit an extra hour of the
+        # next day. mktime() on the next calendar day resolves the offset the
+        # same way /api/insights does. The `- 0.001` keeps the bound just inside
+        # the day, since the window comparisons below are inclusive.
+        if end_kind == "date" and end_ts is not None:
+            try:
+                _end_day = _datetime.fromtimestamp(end_ts).date()
+                end_ts = time.mktime(
+                    (_end_day + _timedelta(days=1)).timetuple()
+                ) - 0.001
+            except (OverflowError, ValueError, OSError):
+                pass
+    else:
+        # Trailing mode: last N days. Empty/non-integer `days`
+        # (?days=, ?days=abc) is a controlled 400, never an exception.
+        raw_days = query.get("days", ["30"])[0]
+        try:
+            days = int(str(raw_days).strip())
+        except (TypeError, ValueError):
+            return j(handler, {"error": "days must be an integer between 1 and 365"}, status=400)
+        if not 1 <= days <= 365:
+            return j(handler, {"error": "days must be an integer between 1 and 365"}, status=400)
+        end_ts = now
+        # Full `days` of history (not days-1): days=30 covers 30 days and
+        # days=1 covers the last 24h instead of collapsing to one instant.
+        start_ts = end_ts - days * 86400
+
+    # Derive every window from `now` (time.time()), not _datetime.now(), so
+    # an injected clock (tests) drives the day/month windows consistently.
+    # Every bound is an EPOCH SECOND: subtracting timedelta(days=1) from the
+    # local wall-clock is wrong across a DST spring-forward, where the
+    # clock-face "1 day ago" is only 23 epoch hours back, so the window
+    # silently drops its first hour (and a fall-back day would over-count
+    # by one).
+    if start_ts is None or end_ts is None:
+        req_start_ts = now - 30 * 86400
+        req_end_ts = now
+    else:
+        req_start_ts = start_ts
+        req_end_ts = end_ts
+
+    # Rolling windows (Past Day = last 24h, Past Month = last 30d),
+    # intersected with the requested interval when one was supplied, so
+    # a custom range bounds what the traffic cards count.
+    day_start_ts = max(now - 86400, req_start_ts)
+    day_end_ts = min(now, req_end_ts)
+    month_start_ts = max(now - 30 * 86400, req_start_ts)
+    month_end_ts = min(now, req_end_ts)
+    
+    ip_counts_day = _collections.Counter()
+    ip_counts_month = _collections.Counter()
+
+    # Inbound rankings come from a HOST-LEVEL nginx log. A profile-bound
+    # session (SSO group->profile mapping, `bound_profile` on the trusted
+    # session) shares that one log with every other user of the proxy, so
+    # its entries cannot be attributed to the requesting profile: serving
+    # them would expose other users' client IPs and hostnames. Suppress the
+    # global inbound rankings in that mode; the outbound cards are unaffected
+    # because they are read from this profile's own state.db.
+    try:
+        from api.auth import ensure_trusted_auth_session
+        _session_info = ensure_trusted_auth_session(handler)
+    except Exception:
+        _session_info = None
+    inbound_suppressed = bool(
+        str((_session_info or {}).get("bound_profile") or "").strip()
+    )
+
+    # Inbound IPs from nginx logs. Read with the server's own permissions
+    # first (the production image has no sudo); fall back to `sudo cat`
+    # only when the log is present but unreadable. Rotated .gz files are
+    # decompressed instead of being silently skipped.
+    log_base = os.getenv("HERMES_WEBUI_ACCESS_LOG", "/var/log/nginx/access.log")
+    log_dir = os.path.dirname(log_base) or "."
+    stem = os.path.basename(log_base)
+    # Rotated siblings derive from the CONFIGURED filename (hermes.log.1,
+    # hermes.log.2.gz), so a custom log path keeps its history and never
+    # sweeps up an unrelated site's access.log.* files.
+    rotated_logs = sorted(
+        str(p) for p in Path(log_dir).glob(stem + ".*") if str(p) != log_base
+    )
+    log_files = [log_base] + rotated_logs
+    readable = [f for f in log_files if Path(f).exists()]
+    # Attempt the default path even when nothing registered as readable
+    # (e.g. present but permission-denied to exists()): the direct read
+    # then the sudo fallback decide, and a genuinely absent log simply
+    # yields no lines.
+    candidates = readable or [log_base]
+
+    def _iter_log_lines(filepath):
+        # Stream line-by-line: full-file reads (+ gzip expansion) would
+        # spike memory on busy nginx hosts and repeat on every refresh.
+        if filepath.endswith(".gz"):
+            with gzip.open(filepath, "rt", errors="ignore") as fh:
+                yield from fh
+            return
+        try:
+            with Path(filepath).open(errors="ignore") as fh:
+                yield from fh
+            return
+        except OSError:
+            pass
+        result = subprocess.run(
+            ["sudo", "cat", filepath],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return
+        yield from result.stdout.splitlines()
+
+    nginx_date_re = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
+
+    # Sort files: current first (most recent), then rotated by number descending
+    def sort_key(p):
+        m = re.search(r'\.(\d+)(?:\.gz)?$', p)
+        if m:
+            return (-int(m.group(1)), p)
+        return (0, p)
+
+    inbound_source = (
+        "unavailable" if inbound_suppressed
+        else ("ok" if readable else "missing")
+    )
+    if not inbound_suppressed:
+        for filepath in sorted(candidates, key=sort_key):
+            try:
+                for line in _iter_log_lines(filepath):
+                    m = nginx_date_re.match(line)
+                    if m:
+                        ip = m.group(1)
+                        dt = _parse_nginx_date(m.group(2))
+                        if dt:
+                            # Compare ABSOLUTE INSTANTS. `_parse_nginx_date`
+                            # keeps tzinfo so the log's own offset survives
+                            # the conversion to local; a wall-clock comparison
+                            # would reorder entries across a DST transition.
+                            dt_ts = dt.timestamp()
+                            if day_start_ts <= dt_ts <= day_end_ts:
+                                ip_counts_day[ip] += 1
+                            if month_start_ts <= dt_ts <= month_end_ts:
+                                ip_counts_month[ip] += 1
+            except Exception:
+                continue
+
+    # Outbound domains from Hermes state.db
+    # `_get_outbound_domains` works in datetimes (its state.db rows are epoch
+    # seconds); `fromtimestamp(...).astimezone()` round-trips the epoch
+    # exactly, including inside a DST-ambiguous local hour.
+    out_day = _get_outbound_domains(
+        _datetime.fromtimestamp(day_start_ts).astimezone(),
+        _datetime.fromtimestamp(day_end_ts).astimezone(),
+    )
+    out_month = _get_outbound_domains(
+        _datetime.fromtimestamp(month_start_ts).astimezone(),
+        _datetime.fromtimestamp(month_end_ts).astimezone(),
+    )
+
+    def _format_ips(counter, names):
+        return [{"ip": ip, "count": count, "domain": names.get(ip, ip)}
+                for ip, count in counter.most_common(10)]
+
+    # One resolution pass covers both cards' candidates (<= 20 lookups).
+    _seen = set()
+    _resolve_queue = []
+    for _ip, _count in ip_counts_day.most_common(10) + ip_counts_month.most_common(10):
+        if _ip not in _seen:
+            _seen.add(_ip)
+            _resolve_queue.append(_ip)
+    _names = _resolve_inbound_domains(_resolve_queue)
+
+    return j(handler, {
+        "inbound_ips_day": _format_ips(ip_counts_day, _names),
+        "inbound_ips_month": _format_ips(ip_counts_month, _names),
+        "outbound_domains_day": out_day,
+        "outbound_domains_month": out_month,
+        "inbound_source": inbound_source,
+    })
+
+
 def _project_os_workspace_read(repo_root: Path, rel: str) -> dict | None:
     try:
         return read_file_content(repo_root, rel)
@@ -18490,6 +18953,8 @@ def handle_get(handler, parsed) -> bool:
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
+    if parsed.path == "/api/insights/traffic":
+        return _handle_insights_traffic(handler, parsed)
     if parsed.path == "/api/project-os/dashboard":
         return _handle_project_os_dashboard(handler, parsed)
 

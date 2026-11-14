@@ -486,11 +486,11 @@ def test_insights_refresh_restored_by_latest_request_runtime():
         // --- Scenario SUCCESS: animated A, then non-animated B supersedes ---
         curBox = { innerHTML: '' };
         curBtn = { style: {}, disabled: false };
-        const pa = loadInsights(true);           // A: 3 api() calls
+        const pa = loadInsights(true);           // A: 4 api() calls
         if (curBtn.disabled !== true) throw new Error('A should disable the button');
-        const aDeferreds = snapshotLatest(3);
-        const pb = loadInsights();               // B: 3 api() calls (supersedes A)
-        const bDeferreds = snapshotLatest(3);
+        const aDeferreds = snapshotLatest(4); // 4 api() calls since traffic panel landed
+        const pb = loadInsights();               // B: 4 api() calls (supersedes A)
+        const bDeferreds = snapshotLatest(4);
         // Resolve B (latest) FIRST...
         resolveAll(bDeferreds);
         await pb;
@@ -504,11 +504,11 @@ def test_insights_refresh_restored_by_latest_request_runtime():
         curBox = { innerHTML: '' };
         curBtn = { style: {}, disabled: false };
         global._insightsReqToken = 0;
-        const pa2 = loadInsights(true);          // A2 (animated): disables
+        const pa2 = loadInsights(true);          // A2 (animated): 4 api() calls, disables
         if (curBtn.disabled !== true) throw new Error('A2 should disable the button');
-        const a2d = snapshotLatest(3);
-        const pb2 = loadInsights();              // B2 (non-animated, latest)
-        const b2d = snapshotLatest(3);
+        const a2d = snapshotLatest(4);
+        const pb2 = loadInsights();              // B2 (non-animated, latest): 4 api() calls
+        const b2d = snapshotLatest(4);
         rejectAll(b2d);                          // latest errors first
         await pb2;
         if (curBtn.disabled) throw new Error('latest (non-animated, erroring) B must restore the button');
@@ -2509,22 +2509,23 @@ def test_insights_absolute_range_end_only_dst_calendar_arithmetic(monkeypatch, t
 # ---------------------------------------------------------------------------
 
 
-def test_dst_tests_save_and_restore_the_ambient_tz():
-    """P2: the DST tests overwrote TZ and then DELETED it, so a developer who
+def test_tz_pinning_tests_save_and_restore_the_ambient_tz():
+    """Every test that pins TZ must restore the ambient value.
+
+    P2: the DST tests overwrote TZ and then DELETED it, so a developer who
     started the suite with TZ set had it clobbered for the rest of the process
     and later results depended on test order.
 
-    Greptile P2 (2026-10-09T22:21:55Z): the first version of this check searched
-    the whole file for the cleanup call — including the call it was asserting
-    on, since that literal lives in this very test — so deleting every real
-    cleanup would still have passed. It now inspects the four DST test bodies
-    only, and the searched strings are assembled at runtime so this test's own
-    text cannot satisfy them.
+    The first version of this check searched the whole file for the cleanup
+    call — including the call it was asserting on, since that literal lives in
+    this very test — so deleting every real cleanup would still have passed.
+    It now finds the test bodies that ASSIGN to os.environ["TZ"] structurally
+    (excluding the restore assignments), and the searched strings are assembled
+    at runtime so this test's own text cannot satisfy them.
     """
     import ast
 
     src = pathlib.Path(__file__).read_text(encoding="utf-8")
-    write = 'os.environ[' + '"TZ"' + '] = "America/New_York"'
     save = "_saved_tz = os.environ." + 'get("TZ")'
     restore = 'os.environ[' + '"TZ"' + '] = _saved_tz'
     pop = "os.environ." + 'pop("TZ", None)'
@@ -2535,14 +2536,50 @@ def test_dst_tests_save_and_restore_the_ambient_tz():
         "            " + restore + "\n"
     )
 
+    tree = ast.parse(src)
+
+    def _pins_env_tz(node):
+        # An assignment to os.environ["TZ"] whose value is NOT the saved
+        # ambient value is a pin; `= _saved_tz` is the restore.
+        if not isinstance(node, ast.Assign):
+            return False
+        tgt = node.targets[0]
+        if not (
+            isinstance(tgt, ast.Subscript)
+            and isinstance(tgt.value, ast.Attribute)
+            and tgt.value.attr == "environ"
+            and isinstance(tgt.value.value, ast.Name)
+            and tgt.value.value.id == "os"
+        ):
+            return False
+        return not (isinstance(node.value, ast.Name) and node.value.id == "_saved_tz")
+
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
     bodies = {
         node.name: ast.get_source_segment(src, node) or ""
-        for node in ast.walk(ast.parse(src))
+        for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef)
     }
-    dst = {name: body for name, body in bodies.items() if write in body}
-    assert len(dst) == 4, f"expected the four DST tests, found {sorted(dst)}"
-    for name, body in dst.items():
+
+    checked = set()
+    for node in ast.walk(tree):
+        if not _pins_env_tz(node):
+            continue
+        fn = node
+        while fn in parents and not isinstance(fn, ast.FunctionDef):
+            fn = parents[fn]
+        assert isinstance(fn, ast.FunctionDef), "a TZ pin must live in a test"
+        checked.add(fn.name)
+
+    assert len(checked) >= 5, (
+        f"expected the DST and reversed-range tests, found {sorted(checked)}"
+    )
+    for name in sorted(checked):
+        body = bodies[name]
         assert save in body, f"{name} must snapshot the ambient TZ"
         assert guarded in body, (
             f"{name} must unset TZ only when it was unset before, and otherwise "
@@ -2838,3 +2875,687 @@ def test_insights_range_fallback_note_is_localized_at_runtime():
     for loc, rec in sorted(out.items()):
         assert rec["val"].count("{days}") == 1, \
             f"{loc} must carry exactly one {{days}} placeholder: {rec['val']!r}"
+
+
+def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch, tmp_path):
+    """New /api/insights/traffic endpoint returns top 10 inbound IPs and outbound domains."""
+    import api.routes as routes
+    from unittest.mock import MagicMock
+    import pathlib
+
+    fake_nginx_logs = (
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] \"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+        "192.168.1.1 - - [28/Oct/2026:11:00:00 +0700] \"GET /api/hello HTTP/1.1\" 200 567 \"-\" \"curl/7.68\"\n"
+        "10.0.0.5 - - [28/Oct/2026:12:00:00 +0700] \"POST /api/test HTTP/1.1\" 201 89 \"-\" \"python-requests/2.28\"\n"
+        "10.0.0.5 - - [28/Oct/2026:13:00:00 +0700] \"GET /api/test HTTP/1.1\" 200 45 \"-\" \"python-requests/2.28\"\n"
+        "172.16.0.1 - - [01/Oct/2026:08:00:00 +0700] \"GET /api/foo HTTP/1.1\" 200 12 \"-\" \"Mozilla/5.0\"\n"
+    )
+
+    # Hermetic log source: write the fake logs to a tmp file and point the
+    # endpoint at it, so the result cannot depend on a real nginx log on
+    # the host (readable or not) or on the sudo fallback path.
+    log_file = tmp_path / "access.log"
+    log_file.write_text(fake_nginx_logs)
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+
+    # Fixed fake clock as a UTC epoch (2026-10-28 07:00 UTC = 14:00 at
+    # +07, matching the log offsets). Using an absolute instant instead
+    # of mktime() on local clock fields makes the test independent of
+    # the host timezone: both the clock and the parsed log instants are
+    # absolute, so they shift together under any local zone. No TZ
+    # mutation needed. Stub reverse DNS so no real resolver is used.
+    import socket as _socket
+
+    monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+
+    class FakeRow:
+        def __init__(self, data):
+            self._data = data
+        def __getitem__(self, key):
+            return self._data[key]
+
+    # _get_outbound_domains selects SUM(smu.api_call_count) AS calls, so the
+    # rows expose "calls" (not "api_call_count").
+    fake_db_rows = [
+        FakeRow({"billing_base_url": "https://inference-api.nousresearch.com/v1/", "calls": 100}),
+        FakeRow({"billing_base_url": "http://localhost:11434/v1/", "calls": 50}),
+    ]
+
+    real_cursor = MagicMock()
+    real_cursor.fetchall.return_value = fake_db_rows
+    fake_conn = MagicMock()
+    fake_conn.row_factory = None
+    fake_conn.cursor.return_value = real_cursor
+    fake_conn.__enter__ = MagicMock(return_value=fake_conn)
+    fake_conn.__exit__ = MagicMock(return_value=False)
+    real_cursor.__enter__ = MagicMock(return_value=real_cursor)
+    real_cursor.__exit__ = MagicMock(return_value=False)
+
+    import api.models as models
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: pathlib.Path("/tmp/fake_state.db"))
+    monkeypatch.setattr(routes, "open_state_db_readonly", lambda db_path: fake_conn)
+    monkeypatch.setattr(pathlib.Path, "exists", lambda self: str(self) == "/tmp/fake_state.db" or pathlib.Path.__bases__[0].__name__ == 'PurePath' and True)
+
+    def mock_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "sudo" and cmd[1] == "cat":
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = fake_nginx_logs
+            return result
+        return MagicMock(returncode=1)
+
+    monkeypatch.setattr(routes.subprocess, "run", mock_subprocess_run)
+
+    import calendar as _calendar
+    import types
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    routes._handle_insights_traffic(handler, parsed)
+
+    assert handler.status == 200
+    data = handler.json_body()
+
+    # Inbound IPs (day)
+    assert "inbound_ips_day" in data
+    assert len(data["inbound_ips_day"]) <= 10
+    day_ips = {r["ip"] for r in data["inbound_ips_day"]}
+    assert "192.168.1.1" in day_ips or "10.0.0.5" in day_ips
+
+    # Inbound IPs (month) - includes the Oct 1 entry
+    assert "inbound_ips_month" in data
+    month_ips = {r["ip"] for r in data["inbound_ips_month"]}
+    assert "172.16.0.1" in month_ips
+
+    # Outbound domains
+    assert "outbound_domains_day" in data
+    assert "outbound_domains_month" in data
+    day_domains = {r["domain"] for r in data["outbound_domains_day"]}
+    assert "inference-api.nousresearch.com" in day_domains
+
+    day_nous = next(r for r in data["outbound_domains_day"] if r["domain"] == "inference-api.nousresearch.com")
+    assert day_nous["calls"] == 100
+
+
+def test_insights_traffic_rejects_malformed_days():
+    """?days=, ?days=abc and out-of-range days return 400, never raise."""
+    import types
+
+    import api.routes as routes
+
+    for query in ("days=", "days=abc", "days=0", "days=9999"):
+        handler = _FakeHandler()
+        parsed = types.SimpleNamespace(query=query)
+        routes._handle_insights_traffic(handler, parsed)
+        assert handler.status == 400, query
+        assert "error" in handler.json_body(), query
+
+
+def test_insights_traffic_swaps_reversed_range_like_insights(monkeypatch, tmp_path):
+    """A reversed range must be SWAPPED, not discarded.
+
+    `/api/insights` normalizes an inverted selection by swapping the endpoints,
+    and the Insights page sends both endpoints the same dates. Clearing the
+    range instead made the traffic cards silently serve the trailing month,
+    outside the selected interval.
+
+    Maintainer review (2026-11-12): "silently showing unrelated dates is not a
+    repair". Distinct in-range/out-of-range rows prove the swap.
+    """
+    import os
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.models as models
+    import api.routes as routes
+
+    # The handler derives its day bounds in LOCAL time, while the log carries
+    # an explicit offset. Pin the zone and render the log lines in that zone so
+    # the in/out-of-range split is deterministic on any host.
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for the timezone-pinned test")
+
+    _saved_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        def _log_line(ip, local_dt):
+            ts = time.strftime(
+                "%d/%b/%Y:%H:%M:%S %z",
+                time.localtime(time.mktime(local_dt)),
+            )
+            return f"{ip} - - [{ts}] " '"GET / HTTP/1.1" 200 1 "-" "t"\n'
+
+        log_file = tmp_path / "access.log"
+        log_file.write_text(
+            # In range: midday Nov 9. Out of range: midday Nov 11.
+            _log_line("10.0.0.1", (2026, 11, 9, 12, 0, 0, 0, 0, -1))
+            + _log_line("10.0.0.2", (2026, 11, 11, 12, 0, 0, 0, 0, -1))
+        )
+        monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+        monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+        monkeypatch.setattr(
+            models, "_active_state_db_path",
+            lambda: pathlib.Path("/nonexistent/state.db"),
+        )
+        # A clock safely after both endpoints, in the pinned zone.
+        clock_ts = time.mktime((2026, 11, 12, 12, 0, 0, 0, 0, -1))
+        monkeypatch.setattr(routes.time, "time", lambda _ts=clock_ts: _ts)
+
+        def _ips(query):
+            handler = _FakeHandler()
+            routes._handle_insights_traffic(
+                handler, types.SimpleNamespace(query=query))
+            assert handler.status == 200, handler.json_body()
+            return [r["ip"] for r in handler.json_body()["inbound_ips_month"]]
+
+        # The ordered selection: only the in-range client.
+        assert _ips("start=2026-11-08&end=2026-11-10") == ["10.0.0.1"]
+        # The SAME selection reversed must serve the SAME interval, not the
+        # trailing month (which would include 10.0.0.2).
+        assert _ips("start=2026-11-10&end=2026-11-08") == ["10.0.0.1"]
+    finally:
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
+def test_insights_traffic_whole_end_day_spans_dst_transitions(monkeypatch, tmp_path):
+    """A date-valued `end` must cover the WHOLE local day, across DST.
+
+    The old bound was ``end_midnight + 86400 - 0.001``. A spring-forward day
+    is 23 hours long, so a fixed 86400 lands one hour PAST the next local
+    midnight and admits an extra hour of the following date; a fall-back day
+    is 25 hours, so it stops one hour short and silently drops the final hour
+    of the selected day. The bound must come from ``mktime()`` on the next
+    calendar day, the same way /api/insights derives its whole-day end.
+
+    Greptile P1 (2026-11-11): "Traffic counts the wrong dates".
+    """
+    import os
+    import pathlib
+    import socket as _socket
+
+    import api.models as models
+    import api.routes as routes
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for DST test (not available on Windows)")
+
+    _saved_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        def _log_line(epoch):
+            return (
+                "192.168.1.1 - - "
+                f"[{time.strftime('%d/%b/%Y:%H:%M:%S %z', time.localtime(epoch))}] "
+                '"GET / HTTP/1.1" 200 10 "-" "t"\n'
+            )
+
+        # (end day, last local hour of that day, first local hour of the next)
+        cases = (
+            ((2026, 3, 8), (2026, 3, 8, 23, 30), (2026, 3, 9, 0, 30)),    # 23h day
+            ((2026, 11, 1), (2026, 11, 1, 23, 30), (2026, 11, 2, 0, 30)),  # 25h day
+        )
+        for end_day, last_hour, next_hour in cases:
+            end_day_end = time.mktime(end_day + (0, 0, 0, 0, 0, -1))
+            last_hour_ts = time.mktime(last_hour + (0, 0, 0, -1))
+            next_hour_ts = time.mktime(next_hour + (0, 0, 0, -1))
+            assert last_hour_ts > end_day_end  # probe really is inside the day
+            assert next_hour_ts > last_hour_ts
+
+            log_file = tmp_path / "access.log"
+            log_file.write_text(_log_line(last_hour_ts) + _log_line(next_hour_ts))
+            monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+            monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+            monkeypatch.setattr(
+                models, "_active_state_db_path",
+                lambda: pathlib.Path("/nonexistent/state.db"),
+            )
+            # A clock safely after the selected end day.
+            clock_ts = time.mktime(
+                (end_day[0], end_day[1], end_day[2] + 3, 12, 0, 0, 0, 0, -1)
+            )
+            monkeypatch.setattr(routes.time, "time", lambda _ts=clock_ts: _ts)
+
+            handler = _FakeHandler()
+            routes._handle_insights_traffic(
+                handler, SimpleNamespace(query=f"start=2026-01-01&end={end_day[0]:04d}-{end_day[1]:02d}-{end_day[2]:02d}")
+            )
+
+            assert handler.status == 200
+            rows = handler.json_body()["inbound_ips_month"]
+            # The last hour of the selected day counts once; the next day's
+            # first hour must NOT leak into a whole-day selection.
+            assert rows[0]["count"] == 1, (end_day, rows)
+    finally:
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
+def test_insights_traffic_rolling_day_window_spans_spring_forward(monkeypatch, tmp_path):
+    """The rolling `Past Day` window must be 24 EPOCH hours, not 24 clock hours.
+
+    On a spring-forward day the clock-face "1 day ago" is only 23 epoch hours
+    back, so deriving the bound by subtracting ``timedelta(days=1)`` from the
+    local wall-clock silently drops the first hour of the window. Both rolling
+    cards are affected.
+
+    Greptile P2 (2026-11-12): "Daily traffic misses an hour".
+    """
+    import os
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.models as models
+    import api.routes as routes
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() required for the DST test")
+
+    _saved_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        def _log_line(ip, local_dt):
+            ts = time.strftime(
+                "%d/%b/%Y:%H:%M:%S %z",
+                time.localtime(time.mktime(local_dt)),
+            )
+            return f"{ip} - - [{ts}] " '"GET / HTTP/1.1" 200 1 "-" "t"\n'
+
+        log_file = tmp_path / "access.log"
+        log_file.write_text(
+            # 11:30 EST is inside the true last-24h window, which starts at
+            # 11:00 EST; 10:30 is outside it.
+            _log_line("10.0.0.1", (2026, 3, 7, 11, 30, 0, 0, 0, -1))
+            + _log_line("10.0.0.2", (2026, 3, 7, 10, 30, 0, 0, 0, -1))
+        )
+        monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+        monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+        monkeypatch.setattr(
+            models, "_active_state_db_path",
+            lambda: pathlib.Path("/nonexistent/state.db"),
+        )
+        # Noon Mar 8 2026 (EDT) — the spring-forward day.
+        clock_ts = time.mktime((2026, 3, 8, 12, 0, 0, 0, 0, -1))
+        monkeypatch.setattr(routes.time, "time", lambda _ts=clock_ts: _ts)
+
+        handler = _FakeHandler()
+        routes._handle_insights_traffic(handler, types.SimpleNamespace(query=""))
+        assert handler.status == 200, handler.json_body()
+        body = handler.json_body()
+        day = {r["ip"] for r in body["inbound_ips_day"]}
+        month = {r["ip"] for r in body["inbound_ips_month"]}
+        # The hour the old wall-clock bound dropped must count in BOTH cards.
+        assert "10.0.0.1" in day
+        assert "10.0.0.1" in month
+        assert "10.0.0.2" not in day
+    finally:
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
+def test_parse_nginx_date_honours_logged_offset():
+    """A logged +0700 instant must compare correctly against local windows."""
+    import api.routes as routes
+    from datetime import timedelta
+
+    dt = routes._parse_nginx_date("28/Oct/2026:15:09:36 +0000")
+    # tzinfo is RETAINED so callers compare absolute instants, not clock
+    # faces (a naive local value reorders entries across a DST transition).
+    assert dt is not None and dt.tzinfo is not None
+    # Same instant written in +0700 is 7h earlier on the clock face.
+    dt2 = routes._parse_nginx_date("28/Oct/2026:22:09:36 +0700")
+    assert dt2 == dt
+    # One hour after the +0000 instant exceeds a 30-minute window check.
+    assert dt + timedelta(minutes=30) < dt2 + timedelta(hours=1)
+    # An offset-less string is read as server-local time, still aware.
+    dt3 = routes._parse_nginx_date("28/Oct/2026:15:09:36")
+    assert dt3 is not None and dt3.tzinfo is not None
+
+
+def test_get_outbound_domains_aggregates_by_domain_on_real_sqlite(tmp_path, monkeypatch):
+    """Real SQLite: counts combine by domain before the top-10 limit."""
+    import sqlite3
+    from datetime import datetime, timedelta
+
+    import api.models as models
+    import api.routes as routes
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL)")
+    conn.execute(
+        "CREATE TABLE session_model_usage "
+        "(session_id TEXT, billing_base_url TEXT, api_call_count INTEGER)"
+    )
+    now = datetime.now()
+    in_window = now.timestamp()
+    out_window = (now - timedelta(days=90)).timestamp()
+    rows = [
+        ("s1", in_window, "https://api.example.com/v1", 30),
+        ("s2", in_window, "https://api.example.com/v2", 25),
+        ("s3", in_window, "https://other.test/v1", 10),
+        ("s4", out_window, "https://api.example.com/v1", 999),
+    ]
+    for sid, started, url, calls in rows:
+        conn.execute("INSERT INTO sessions VALUES (?, ?)", (sid, started))
+        conn.execute(
+            "INSERT INTO session_model_usage VALUES (?, ?, ?)", (sid, url, calls)
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    result = routes._get_outbound_domains(
+        now - timedelta(days=1), now + timedelta(days=1)
+    )
+    domains = {r["domain"]: r["calls"] for r in result}
+    # /v1 + /v2 combine under one domain; the out-of-window 999 is excluded.
+    assert domains == {"api.example.com": 55, "other.test": 10}
+
+
+def test_get_outbound_domains_attributes_by_row_last_seen(tmp_path, monkeypatch):
+    """Window attribution uses the usage row's own activity, not session start.
+
+    A session started long before the window can still have made requests
+    inside it (it must not vanish from the card), and a session started
+    inside the window must not dump calls it made after the window closed
+    into that card.
+    """
+    import sqlite3
+    from datetime import datetime, timedelta
+
+    import api.models as models
+    import api.routes as routes
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL)")
+    conn.execute(
+        "CREATE TABLE session_model_usage "
+        "(session_id TEXT, billing_base_url TEXT, api_call_count INTEGER, "
+        "first_seen REAL, last_seen REAL)"
+    )
+    now = datetime.now()
+    old = (now - timedelta(days=90)).timestamp()
+    recent = now.timestamp()
+    future = (now + timedelta(days=90)).timestamp()
+    rows = [
+        # Session started before the window, but its calls land inside it.
+        ("old_session_active_now", old, "https://active.example/v1", 7, old, recent),
+        # Session started inside the window, calls continued past the end.
+        ("new_session_still_running", recent, "https://overrun.example/v1", 500, recent, future),
+        # No activity in the window at all.
+        ("stale", old, "https://stale.example/v1", 999, old, old),
+    ]
+    for sid, started, url, calls, first_seen, last_seen in rows:
+        conn.execute("INSERT INTO sessions VALUES (?, ?)", (sid, started))
+        conn.execute(
+            "INSERT INTO session_model_usage VALUES (?, ?, ?, ?, ?)",
+            (sid, url, calls, first_seen, last_seen),
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    result = routes._get_outbound_domains(
+        now - timedelta(days=1), now + timedelta(days=1)
+    )
+    domains = {r["domain"]: r["calls"] for r in result}
+    assert domains == {"active.example": 7}
+
+
+def test_insights_traffic_suppresses_inbound_for_profile_bound_session(monkeypatch, tmp_path):
+    """A profile-bound SSO session gets no global inbound rankings.
+
+    The nginx log is host-level and shared by every user of the proxy, so
+    its entries cannot be attributed to the requesting profile; serving them
+    would expose other users' client IPs and hostnames.
+    """
+    import calendar as _calendar
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.auth as auth
+    import api.models as models
+    import api.routes as routes
+
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] "
+        "\"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+    monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+
+    # Profile-bound trusted session (SSO group -> profile mapping).
+    monkeypatch.setattr(
+        auth,
+        "ensure_trusted_auth_session",
+        lambda handler: {
+            "auth_type": "trusted",
+            "username": "alice",
+            "bound_profile": "alice",
+        },
+    )
+    # Keep the outbound half hermetic too.
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: pathlib.Path("/nonexistent/state.db")
+    )
+
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    routes._handle_insights_traffic(handler, parsed)
+
+    assert handler.status == 200
+    data = handler.json_body()
+    assert data["inbound_ips_day"] == []
+    assert data["inbound_ips_month"] == []
+    assert data["inbound_source"] == "unavailable"
+
+
+def test_insights_traffic_keeps_inbound_for_unbound_session(monkeypatch, tmp_path):
+    """An unbound session (no profile binding) still gets inbound rankings.
+
+    Only profile-bound SSO sessions share the host log with other users;
+    without a group->profile mapping there is no cross-profile boundary to
+    protect, so the rankings stay available.
+    """
+    import calendar as _calendar
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.auth as auth
+    import api.models as models
+    import api.routes as routes
+
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] "
+        "\"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+    monkeypatch.setattr(_socket, "gethostbyaddr", lambda ip: (ip, [], [ip]))
+
+    # Trusted session with no group -> profile mapping: bound_profile is None.
+    monkeypatch.setattr(
+        auth,
+        "ensure_trusted_auth_session",
+        lambda handler: {
+            "auth_type": "trusted",
+            "username": "alice",
+            "bound_profile": None,
+        },
+    )
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: pathlib.Path("/nonexistent/state.db")
+    )
+
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    routes._handle_insights_traffic(handler, parsed)
+
+    assert handler.status == 200
+    data = handler.json_body()
+    assert data["inbound_source"] == "ok"
+    assert [r["ip"] for r in data["inbound_ips_day"]] == ["192.168.1.1"]
+
+
+def test_insights_traffic_slow_resolver_does_not_stall_request(monkeypatch, tmp_path):
+    """A resolver slower than the deadline must not stall the request.
+
+    The old per-lookup ``with ThreadPoolExecutor(...)`` ran
+    ``shutdown(wait=True)`` on exit, so ``result(timeout=1)`` still waited
+    out the in-flight lookup. The handler must now return on its own
+    deadline and keep the raw-IP fallback.
+    """
+    import calendar as _calendar
+    import pathlib
+    import socket as _socket
+    import time as _time
+    import types
+
+    import api.models as models
+    import api.routes as routes
+
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] "
+        "\"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+
+    def _slow_gethostbyaddr(ip):
+        _time.sleep(1.6)
+        return (ip, [], [ip])
+
+    monkeypatch.setattr(_socket, "gethostbyaddr", _slow_gethostbyaddr)
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: pathlib.Path("/nonexistent/state.db")
+    )
+
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    started = _time.monotonic()
+    routes._handle_insights_traffic(handler, parsed)
+    elapsed = _time.monotonic() - started
+
+    assert handler.status == 200
+    data = handler.json_body()
+    assert elapsed < 1.5, f"request stalled {elapsed:.2f}s on a slow resolver"
+    assert data["inbound_ips_day"][0]["ip"] == "192.168.1.1"
+    # Unanswered lookup keeps the raw IP as the displayed domain.
+    assert data["inbound_ips_day"][0]["domain"] == "192.168.1.1"
+
+
+def test_insights_traffic_returns_raw_ips_when_dns_pool_is_busy(monkeypatch, tmp_path):
+    """At the outstanding-lookup cap the handler keeps raw IPs immediately.
+
+    The pool is shared and bounded, so a busy resolver must degrade to the
+    raw-IP fallback instead of queueing more work.
+    """
+    import calendar as _calendar
+    import pathlib
+    import socket as _socket
+    import types
+
+    import api.models as models
+    import api.routes as routes
+
+    log_file = tmp_path / "access.log"
+    log_file.write_text(
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] "
+        "\"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_ACCESS_LOG", str(log_file))
+    monkeypatch.setattr(
+        routes, "_REVERSE_DNS_OUTSTANDING", routes._REVERSE_DNS_MAX_OUTSTANDING
+    )
+
+    def _boom(ip):
+        raise AssertionError("resolver must not run when the pool is busy")
+
+    monkeypatch.setattr(_socket, "gethostbyaddr", _boom)
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: pathlib.Path("/nonexistent/state.db")
+    )
+
+    now_ts = _calendar.timegm((2026, 10, 28, 7, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    routes._handle_insights_traffic(handler, parsed)
+
+    assert handler.status == 200
+    data = handler.json_body()
+    assert data["inbound_ips_day"][0]["ip"] == "192.168.1.1"
+    assert data["inbound_ips_day"][0]["domain"] == "192.168.1.1"
+
+
+def test_resolve_inbound_domains_releases_cap_on_completion(monkeypatch):
+    """The outstanding cap tracks live lookups, not returned requests.
+
+    Releasing the slot when the request gives up would let a stalled
+    resolver accumulate one live worker per refresh.
+    """
+    import socket as _socket
+    import time as _time
+
+    import api.routes as routes
+
+    def _slow_gethostbyaddr(ip):
+        _time.sleep(1.5)
+        return ("host-" + ip, [], [ip])
+
+    monkeypatch.setattr(_socket, "gethostbyaddr", _slow_gethostbyaddr)
+
+    # Let a lookup left behind by an earlier test release its slot first, so
+    # the accounting below starts from a clean slate (the counter is
+    # process-global by design).
+    settle = _time.monotonic() + 3.0
+    while routes._REVERSE_DNS_OUTSTANDING != 0 and _time.monotonic() < settle:
+        _time.sleep(0.02)
+    monkeypatch.setattr(routes, "_REVERSE_DNS_OUTSTANDING", 0)
+
+    names = routes._resolve_inbound_domains(["10.0.0.1"])
+    # The request returned at its deadline, but the lookup is still running,
+    # so its slot must still be held and the raw IP shown.
+    assert routes._REVERSE_DNS_OUTSTANDING == 1
+    assert names.get("10.0.0.1", "10.0.0.1") == "10.0.0.1"
+
+    deadline = _time.monotonic() + 3.0
+    while routes._REVERSE_DNS_OUTSTANDING > 0 and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert routes._REVERSE_DNS_OUTSTANDING == 0
+
