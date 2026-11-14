@@ -74,8 +74,11 @@ ok "Hermes Agent CLI detected ($(command -v hermes))"
 if [ -d "$DEST/.git" ]; then
   say ""
   say "Updating existing checkout at ${B}$DEST${R} ..."
-  git -C "$DEST" pull --ff-only || warn "Could not fast-forward $DEST — leaving it as-is."
-  ok "Repository up to date"
+  if git -C "$DEST" pull --ff-only; then
+    ok "Repository up to date"
+  else
+    warn "Could not fast-forward $DEST. Starting the existing version; update was not applied."
+  fi
 elif [ -e "$DEST" ]; then
   die "$DEST already exists but is not a git checkout. Move it aside or set HERMES_WEBUI_DIR, then re-run."
 else

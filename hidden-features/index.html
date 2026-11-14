@@ -269,6 +269,7 @@
 :root, :root[data-theme="dark"] { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-2: #9198a1; --gold: #f0a500; --gold-text: #f0a500; --bg-primary: #0d1117; --bg-secondary: #161b22; --bg-card: #161b22; --text-primary: #e6edf3; --text-secondary: #9198a1; --text-muted: #9198a1; --accent: #f0a500; --ink: #e6edf3; --muted: #9198a1; --line: #30363d; --nav-height: var(--header); }
 :root[data-theme="light"] { --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de; --text: #1f2328; --text-2: #59636e; --gold: #c07800; --gold-text: #8a5800; --bg-primary: #ffffff; --bg-secondary: #f6f8fa; --bg-card: #f6f8fa; --text-primary: #1f2328; --text-secondary: #59636e; --text-muted: #59636e; --accent: #8a5800; --ink: #1f2328; --muted: #59636e; --line: #d0d7de; --nav-height: var(--header); }
 :root[data-theme="light"] :is(.btn-primary) { background-color: var(--gold); }
+.tip-body p a:not([class]) { color: var(--gold-text); }
 main p a:not([class]) { text-decoration: underline; text-underline-offset: 2px; }
 body { font-family: var(--font); }
 code, pre, kbd, samp { font-family: var(--mono); }
@@ -345,13 +346,13 @@ hermes -c "my project"   <span class="c"># most recent in a named lineage</span>
       </div>
     </div>
     <div class="tip-body">
-      <p>That little clamp in the status bar is the <strong>compression count</strong>: how many times Hermes has auto-summarized the session to stay under the context limit. It kicks in around <strong>50% full</strong> by default.</p>
-      <p>When compression fires, it keeps your <strong>first 3 turns</strong> and your <strong>last ~20</strong>, and summarizes everything in between. A detail from the middle of a long session can then drop out — and the agent may repeat work it already did, even though the opening goal and the recent turns are intact.</p>
-      <p>Three levers when it bites, all in <code>config.yaml</code>, hot-reloading on a running gateway:</p>
+      <p>That little clamp in the status bar is the <strong>compression count</strong>: how many times Hermes has auto-summarized the session to stay under the context limit. By default it kicks in around <strong>50% full</strong> (higher for some models).</p>
+      <p>When compression fires, it keeps your <strong>first 3</strong> and <strong>last ~20</strong> messages by default, and summarizes everything in between. A detail from the middle of a long session can then drop out, and the agent may repeat work it already did.</p>
+      <p>For anything you can&rsquo;t afford to lose, have Hermes write a checkpoint to a project file. Three levers in <code>config.yaml</code>, hot-reloading on a running gateway:</p>
       <ul class="levers">
         <li><code>protect_last_n</code> — keep more recent turns uncompressed</li>
         <li><code>auxiliary.compression.model</code> — point the summarizer at a cheap, fast model so it doesn't burn main-model tokens</li>
-        <li><code>model.context_length</code> — raise the ceiling so compression fires later</li>
+        <li><code>model.context_length</code> — match the model's documented context limit; increasing this value does not add model capacity</li>
       </ul>
       <a class="tip-more" href="https://hermes-agent.nousresearch.com/docs/developer-guide/context-compression-and-caching" target="_blank">Read the docs →</a>
     </div>
@@ -379,23 +380,10 @@ hermes -c "my project"   <span class="c"># most recent in a named lineage</span>
 
   <!-- 5 -->
   <div class="tip" id="rest-api">
-    <div class="tip-head">
-      <div class="tip-num">5</div>
-      <div class="tip-title">
-        <h2>Hermes has its own REST API</h2>
-        <span class="tip-kicker">Automation</span>
-      </div>
-    </div>
-    <div class="tip-body">
-      <p>The web dashboard (<code>hermes dashboard</code>) exposes a REST API that the frontend consumes — and <strong>you can call those endpoints directly</strong> for automation.</p>
-      <p>Pull session history, run full-text search across every message, read and update <code>config.yaml</code>, manage environment variables — all over plain HTTP. Management endpoints accept an optional <code>?profile=&lt;name&gt;</code> to scope reads and writes to a specific profile.</p>
-      <pre><code>GET  /api/status                      <span class="c"># version, gateway, active sessions</span>
-GET  /api/sessions                    <span class="c"># 20 most recent + metadata</span>
-GET  /api/sessions/search?q=...       <span class="c"># full-text message search</span>
-GET  /api/config   PUT /api/config    <span class="c"># read / write config</span>
-GET/PUT/DELETE /api/env               <span class="c"># manage env vars</span></code></pre>
-      <a class="tip-more" href="https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard#rest-api" target="_blank">Read the docs →</a>
-    </div>
+    <div class="tip-head"><div class="tip-num">5</div><div class="tip-title"><h2>The WebUI has its own API</h2><span class="tip-kicker">Automation</span></div></div>
+    <div class="tip-body"><p>Hermes WebUI exposes a Bridge API for sessions, chat streaming, memory, skills and cron. Start with the <a href="/api-docs/">Bridge API</a> overview and its <a href="/api-docs/authentication/">authentication guide</a>.</p>
+    <p>Upstream&rsquo;s <code>hermes dashboard</code> has a separate REST API; its paths and tokens don&rsquo;t carry over.</p>
+    <a class="tip-more" href="https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard#rest-api" target="_blank" rel="noopener">Upstream dashboard API docs →</a></div>
   </div>
 
   <!-- 6 -->
@@ -445,7 +433,7 @@ GET/PUT/DELETE /api/env               <span class="c"># manage env vars</span></
     </div>
     <div class="tip-body">
       <p>The bundled <strong>claude-code</strong> skill lets Hermes delegate coding tasks to Anthropic's Claude Code CLI through the terminal — including running whole skill workflows.</p>
-      <p>Because Anthropic left print mode (<code>-p</code>) available, Hermes can hand Claude a one-shot task and get the result back. If you already have Claude set up, adding it to the fleet is basically free — and a real boon for autonomous coding.</p>
+      <p>Because Anthropic left print mode (<code>-p</code>) available, Hermes can hand Claude a one-shot task and get the result back. If you already have Claude set up, delegated work is billed to that account. It&rsquo;s a real boon for autonomous coding.</p>
       <pre><code>claude -p 'Add error handling to all API calls in src/' \
   --allowedTools 'Read,Edit' --max-turns 10</code></pre>
       <a class="tip-more" href="https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-claude-code" target="_blank">Read the docs →</a>
