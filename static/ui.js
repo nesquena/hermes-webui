@@ -2638,9 +2638,10 @@ function _openImgLightbox(imgEl) {
     let container = imgEl.closest('.msg-row, .assistant-turn-blocks, .assistant-turn, .user-turn');
     if(!container) container = imgEl.parentElement;
     if(container){
-      const siblings = container.querySelectorAll('.msg-media-img');
-      if(siblings.length>1){
-        allImages = Array.from(siblings);
+      const siblings = Array.from(container.querySelectorAll('.msg-media-img'))
+        .filter(image=>!image.closest('.tool-card-image-preview'));
+      if(siblings.length>1&&!imgEl.closest('.tool-card-image-preview')){
+        allImages = siblings;
         startIndex = allImages.indexOf(imgEl);
         if(startIndex===-1) startIndex=0;
       }
@@ -24613,7 +24614,34 @@ function _toolCardPreviewText(tc, displaySnippet){
   if(tc&&tc.is_error) return 'Failed';
   return 'Completed';
 }
+// Preview only explicit absolute paths from Hermes read_file, never an inferred
+// working-directory path. /api/media remains the authority on file access.
+function _readFileImageRef(tc){
+  const name=String(tc&&tc.name||'').toLowerCase();
+  if(name!=='read_file'&&name!=='mcp__hermes__read_file') return '';
+  if(!tc||tc.done===false) return '';
+  const args=tc.args||{};
+  const path=args.path||args.file_path;
+  if(typeof path!=='string'||path.length>4000||!path.startsWith('/')||path.startsWith('//')) return '';
+  if(/[\\?\#\x00-\x1f\x7f]/.test(path)||path.endsWith('...')) return '';
+  if(!/\.(?:png|jpe?g|gif|webp|bmp|ico)$/i.test(path)) return '';
+  if(typeof _redactToolTargetLabel==='function'&&_redactToolTargetLabel(path)!==path) return '';
+  return path;
+}
+function _readFileImagePreviewHtml(tc){
+  const ref=_readFileImageRef(tc);
+  if(!ref||typeof _inlineMediaHtmlForRef!=='function') return '';
+  return '<div class="tool-card-image-preview">'+_inlineMediaHtmlForRef(ref)+'</div>';
+}
+// /api/media may deny or not find a file. Preserve the textual tool result.
+document.addEventListener('error',event=>{
+  const target=event.target;
+  if(!target||!target.matches||!target.matches('.tool-card-image-preview img')) return;
+  const preview=target.closest('.tool-card-image-preview');
+  if(preview) preview.style.display='none';
+},true);
 function _toolCardAllowsDetail(kind, tc){
+  if(_readFileImageRef(tc)) return true;
   const infoKinds={read:1,search:1,list:1,web:1};
   if(infoKinds[kind]&&!(tc&&tc.is_error)) return false;
   return true;
@@ -24680,6 +24708,7 @@ function buildToolCard(tc){
   const detailLeadText=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
   const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind):(toolKind==='shell'?'Shell':'Input');
   const detailLead=detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
+  const imagePreviewHtml=_readFileImagePreviewHtml(tc);
   const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`
@@ -24692,6 +24721,7 @@ function buildToolCard(tc){
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
       ${hasDetail?`<div class="tool-card-detail">
+        ${imagePreviewHtml}
         ${detailLead}
         ${visibleArgs.length?`<div class="tool-card-args">${
           visibleArgs.map(([k,v])=>{
