@@ -322,19 +322,28 @@ def test_configured_chip_shows_role_label_never_the_routing_key(tmp_path):
         )
 
 
+# The chip's title keeps master's old chip text: the matched key plus its provider.
+_EXPECTED_TITLES = {
+    "gpt-4o": "gpt-4o (openai)",
+    "gpt-4o-mini": "openai/gpt-4o-mini (openai)",
+    "codex/gpt-6.1-sol": "@custom:magpie:codex/gpt-6.1-sol (magpie)",
+}
+
+
 def test_configured_chip_keeps_raw_key_in_title_and_leaves_the_subtitle_alone(tmp_path):
     """#8733 takes the routing key out of the chip, so the chip's title carries the
-    matched config key and nothing is lost. The row subtitle stays the option id
-    the select holds: master's Configured rows are identified by that id (#8756),
-    so rewriting the subtitle would make the rendered row disagree with the option.
+    matched config key and its provider (master's old chip text) and nothing is lost.
+    The row subtitle stays the option id the select holds: master's Configured rows
+    are identified by that id (#8756), so rewriting the subtitle would make the
+    rendered row disagree with the option.
     """
     rows = _render_dropdown(tmp_path, _PAYLOAD)
 
     for name, raw_key, _expected_chip, expected_subtitle in _CASES:
         row = _row(rows, name)
-        assert row["chipTitle"] == raw_key, (
-            f"the chip's title must preserve the matched config key {raw_key!r} "
-            f"so removing it from the label loses nothing (got {row['chipTitle']!r})"
+        assert row["chipTitle"] == _EXPECTED_TITLES[name], (
+            f"the chip's title must preserve the matched config key {raw_key!r} and its "
+            f"provider, so removing them from the label loses nothing (got {row['chipTitle']!r})"
         )
         assert row["subtitle"] == expected_subtitle, (
             f"the row subtitle must stay the option id {expected_subtitle!r} "

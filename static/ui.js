@@ -7159,13 +7159,18 @@ function renderModelDropdown(){
           // ("Primary", "Fallback 2") instead of the matched config key. That key
           // can be an '@provider:model' routing spelling, which wraps the chip onto
           // its own line on desktop and breaks mid-string on ~320px phones. The key
-          // stays reachable on the row subtitle and on the chip's title attribute.
+          // stays reachable on the row subtitle, and the chip's title keeps master's
+          // full "key (provider)" text, so the provider the chip used to name isn't lost.
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
           const roleLabel = String(m.badge.role||'').replace(/^./,c=>c.toUpperCase());
           badgeLabel = (m.badge.label && !String(m.badge.label).includes('@'))
             ? String(m.badge.label)
             : (roleLabel || 'Configured');
           badgeTitle = rawId;
+          if(m.badge.provider){
+            const providerName=String(m.badge.provider).replace(/^custom:/,'').split('/')[0];
+            badgeTitle += ` (${providerName})`;
+          }
         }
         const badgeAttrs = badgeTitle ? ` title="${esc(badgeTitle)}"` : '';
         const badgeHtml=m.badge?`<span${badgeAttrs} class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
