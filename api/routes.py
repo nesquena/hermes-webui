@@ -31107,6 +31107,8 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
         return action
     if action in ("clear", "stop", "done"):
         return "clear"
+    if action.split(None, 1)[0] == "gate":
+        return "gate"
     return "set"
 
 
@@ -31899,6 +31901,12 @@ def _handle_goal_command(handler, body):
     )
 
     goal_adapter_action = _runtime_adapter_goal_action(goal_args)
+    if goal_adapter_action == "gate":
+        # Refuse before any kickoff setup or adapter dispatch: the goal, its
+        # gates and the session's model state stay exactly as they were.
+        from api.goals import goal_gate_refusal_payload
+
+        return j(handler, goal_gate_refusal_payload(), status=400)
     runner_goal_owned = runtime_adapter_runner_enabled()
     if runner_goal_owned and goal_adapter_action == "set":
         # Separate set and kickoff calls cannot restore the runner's prior goal

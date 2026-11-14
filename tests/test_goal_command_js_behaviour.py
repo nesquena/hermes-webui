@@ -128,6 +128,8 @@ function extractFunc(name) {
   return src.slice(start, i);
 }
 eval(extractFunc('cmdGoal'));
+eval(extractFunc('parseCommand'));
+eval(extractFunc('cmdPersonality'));
 
 // ---- scenario state ----
 const SID = 'sid-6705-behaviour';
@@ -189,6 +191,42 @@ const S = {
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
     out.markerAfter = readPending(SID);
+  } else if (scenario === 'gate_refused_shows_message') {
+    // The server refuses /goal gate with HTTP 400; api() throws with the body.
+    _nextResponse = () => {
+      const body = JSON.stringify({ ok: false, error: 'unsupported_gate', message: 'gate refused, goal unchanged' });
+      const err = new Error('unsupported_gate');
+      err.status = 400;
+      err.body = body;
+      throw err;
+    };
+    await cmdGoal('gate add uv run pytest');
+    out.lastMessage = S.messages[S.messages.length - 1];
+  } else if (scenario === 'kickoff_failed_shows_error') {
+    // Goal set succeeded, the kickoff was refused and rolled back: the body still
+    // carries the goal-set `message`, and api() throws with `error` as e.message.
+    _nextResponse = () => {
+      const body = JSON.stringify({
+        ok: false, action: 'set', message: 'Goal set (20-turn budget)', kickoff_prompt: 'ship it',
+        error: 'This model alias needs the in-process backend', type: 'provider_unroutable',
+      });
+      const parsed = JSON.parse(body);
+      const err = new Error(parsed.error || parsed.message || body);
+      err.status = 400;
+      err.body = body;
+      throw err;
+    };
+    await cmdGoal('ship it');
+    out.lastMessage = S.messages[S.messages.length - 1];
+  } else if (scenario === 'parse_multiline_goal') {
+    out.parsed = parseCommand('/goal  Ship it\noutcome: CSV\n\nstop when:  a migration');
+    out.singleLine = parseCommand('/goal   ship   the feature ');
+    out.personality = parseCommand('/personality Alpha\nBeta');
+  } else if (scenario === 'personality_multiline_name') {
+    _nextResponse = () => ({ ok: true });
+    const parsed = parseCommand('/personality Alpha\nBeta');
+    await cmdPersonality(parsed.args);
+    out.calls = _apiCalls;
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -258,3 +296,35 @@ def test_goal_kickoff_without_marker_sends_no_explicit_pick(driver_path):
     out = _run_scenario(driver_path, "no_marker_no_pick")
     assert "explicit_model_pick" not in out["payload"]
     assert out["markerAfter"] is None
+
+
+def test_goal_refusal_shows_server_message_not_error_code(driver_path):
+    """A refused /goal gate shows the server's explanation, not the bare error code."""
+    out = _run_scenario(driver_path, "gate_refused_shows_message")
+    assert out["lastMessage"]["content"] == "**Goal command failed:** gate refused, goal unchanged"
+
+
+def test_goal_failed_kickoff_shows_error_not_goal_set_message(driver_path):
+    """A failed kickoff shows the runtime's error, not the stale goal-set message."""
+    out = _run_scenario(driver_path, "kickoff_failed_shows_error")
+    assert out["lastMessage"]["content"] == (
+        "**Goal command failed:** This model alias needs the in-process backend"
+    )
+
+
+def test_parse_command_keeps_line_boundaries_for_goal_contract_lines(driver_path):
+    """The /goal contract parser works line by line, so parseCommand must not flatten newlines."""
+    out = _run_scenario(driver_path, "parse_multiline_goal")
+    assert out["parsed"] == {"name": "goal", "args": "Ship it\noutcome: CSV\nstop when: a migration"}
+    # Single-line arguments are still whitespace-collapsed as before.
+    assert out["singleLine"] == {"name": "goal", "args": "ship the feature"}
+    # Other commands keep the old normalization, so a multi-word name still matches its config key.
+    assert out["personality"] == {"name": "personality", "args": "Alpha Beta"}
+
+
+def test_personality_multiline_name_reaches_set_endpoint_normalized(driver_path):
+    """`/personality Alpha\\nBeta` still selects the configured `Alpha Beta` personality."""
+    out = _run_scenario(driver_path, "personality_multiline_name")
+    assert out["calls"] == [
+        {"url": "/api/personality/set", "body": {"session_id": "sid-6705-behaviour", "name": "Alpha Beta"}}
+    ]

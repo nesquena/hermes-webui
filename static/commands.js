@@ -51,7 +51,11 @@ function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
   const name=parts[0].toLowerCase();
-  const args=parts.slice(1).join(' ').trim();
+  if(name!=='goal')return {name,args:parts.slice(1).join(' ').trim()};
+  // Keep line boundaries: /goal reads inline contract fields line by line.
+  const args=text.slice(1).replace(/^\S*/,'').split('\n')
+    .map(line=>line.split(/\s+/).filter(Boolean).join(' '))
+    .filter(Boolean).join('\n');
   return {name,args};
 }
 
@@ -1673,7 +1677,11 @@ async function cmdGoal(args){
     attachLiveStream(activeSid,r.stream_id,[]);
     if(typeof renderSessionList==='function')void renderSessionList();
   }catch(e){
-    const err=String((e&&e.message)||e||'Goal command failed');
+    let err=String((e&&e.message)||e||'Goal command failed');
+    // The /goal gate refusal explains itself in `message`; `error` is only its
+    // code. Other failures keep `error`: a failed kickoff's `message` is still
+    // the goal-set text from the step that succeeded.
+    try{const body=JSON.parse((e&&e.body)||'');if(body&&body.error==='unsupported_gate'&&body.message)err=String(body.message);}catch(_){}
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});
     showToast(err,3000);
