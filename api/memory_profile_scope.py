@@ -984,7 +984,9 @@ def call_as_session_owner(
 # ``claim_instance(provider, hermes_home)`` (agent/memory_caller_scope.py, looked up
 # through the ``agent.memory_manager`` module global) for every external provider,
 # drops the provider when the claim is refused, and only then calls
-# ``provider.initialize(hermes_home=...)``. The Agent refuses a second profile only on
+# ``provider.initialize(hermes_home=...)``. Agent c9de6070+ also passes
+# ``manager=self``; the guard hands every argument after ``home`` to the Agent's
+# claim unchanged (#9060). The Agent refuses a second profile only on
 # a multiplexed gateway; WebUI serves several profiles in one process without that
 # flag (turning it on breaks the second profile's memory and WebUI credential reads),
 # so an instance shared by the plugin would be re-pointed by every construction.
@@ -1018,8 +1020,13 @@ def _prune_dead_owners() -> None:
             del _instance_owners[pid]
 
 
-def _claim_for_profile(original: Callable[[Any, Any], bool], provider: Any, home: Any) -> bool:
-    """``claim_instance`` that also refuses a cross-profile rebind without multiplexing."""
+def _claim_for_profile(
+    original: Callable[..., bool], provider: Any, home: Any, *args: Any, **kwargs: Any
+) -> bool:
+    """``claim_instance`` that also refuses a cross-profile rebind without multiplexing.
+
+    Arguments after ``home`` are the Agent's own and go to ``original`` unchanged
+    (#9060: Agent c9de6070+ passes ``manager=``; an Agent before it passes none)."""
     key = profile_home_key(home) or str(home or "")
     pid = id(provider)
     # #8613: the acquisition half of the instance-lifetime protocol. An instance a
@@ -1052,7 +1059,7 @@ def _claim_for_profile(original: Callable[[Any, Any], bool], provider: Any, home
         if owner is None or owner == key:
             # The Agent's own claim keeps its bookkeeping and multiplex refusal; only an
             # accepted claim makes this home the owner.
-            if not original(provider, home):
+            if not original(provider, home, *args, **kwargs):
                 return False
             if owner is None:
                 _prune_dead_owners()
@@ -1107,8 +1114,8 @@ def install_shared_provider_instance_guard() -> bool:
             return True
 
         @functools.wraps(current)
-        def claim_instance(provider: Any, home: Any) -> bool:
-            return _claim_for_profile(current, provider, home)
+        def claim_instance(provider: Any, home: Any, *args: Any, **kwargs: Any) -> bool:
+            return _claim_for_profile(current, provider, home, *args, **kwargs)
 
         setattr(claim_instance, _GUARD_MARK, True)
         mm.claim_instance = claim_instance
