@@ -12841,6 +12841,9 @@ def _upsert_current_turn_partial(
             if isinstance(messages[index], dict)
             and messages[index].get('role') == 'assistant'
             and not messages[index].get('_error')
+            # Sealed display commentary is not a snapshot of the open answer,
+            # even when both segments contain identical text.
+            and messages[index].get('_recovered_display_only') is not True
             and str(messages[index].get('content') or '') == candidate_content
         ),
         None,
@@ -12852,6 +12855,7 @@ def _upsert_current_turn_partial(
         and messages[index].get('role') == 'assistant'
         and messages[index].get('_partial') is True
         and not messages[index].get('_error')
+        and messages[index].get('_recovered_display_only') is not True
     ]
     if canonical_idx is None and partial_indices:
         canonical_idx = partial_indices[-1]
