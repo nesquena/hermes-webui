@@ -81,3 +81,33 @@ def test_invoice_proxy_keeps_customer_scope_and_hides_provider_choices(write_pol
     for extra in [{'org_id':'other'},{'invoice_id':'invoice_other'},{'url':'https://other.test'},{'paid':True}]:
         h=_Handler();msp_service.handle_post(h,'/api/msp/invoice',{'request_id':'br_example',**extra});assert h.status==422
     assert len(calls)==1
+
+
+def test_cloud_requires_personal_session_even_for_local_admin(write_policy,caller,monkeypatch):
+    from api import auth, msp_service
+    write_policy()
+    caller.email=PLATFORM[0]
+    monkeypatch.setenv('SP_CLOUD_PERSONAL_MSP','1')
+    monkeypatch.setattr(auth,'cloud_msp_proof',lambda handler:None)
+    monkeypatch.setattr(control_plane_client,'call',lambda *a,**k: __import__('pytest').fail('A shared credential cannot contact MSP'))
+    status, error=msp_service.fetch(_Handler(),'/v1/customer/overview')
+    assert status==403 and error['error']['code']=='personal_login_required'
+
+
+def test_personal_handoff_keeps_secret_out_of_identity(monkeypatch):
+    from api import auth
+    monkeypatch.setattr(auth,'_save_sessions',lambda sessions:None)
+    proof='a'*64
+    cookie=auth.create_session({'method':'synthpulse_cloud','email':'tester@example.com','_cloud_msp_proof':proof})
+    assert '_cloud_msp_proof' not in auth.get_session_identity(cookie)
+    monkeypatch.setattr(auth,'parse_cookie',lambda handler:cookie)
+    assert auth.cloud_msp_proof(object())==proof
+
+
+def test_cloud_login_refuses_another_origin_before_exchange(monkeypatch):
+    from api import cloud_login
+    monkeypatch.setenv('SP_CLOUD_PERSONAL_MSP','1')
+    monkeypatch.setattr(cloud_login,'j',lambda handler,payload,status: setattr(handler,'status',status))
+    handler=SimpleNamespace(headers={'Host':'work.example','Origin':'https://evil.example','X-SynthPulse-Login':'1'})
+    assert cloud_login.redeem(handler,{'code':'b'*64})
+    assert handler.status==403

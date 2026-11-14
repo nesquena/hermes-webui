@@ -428,7 +428,7 @@ def _encode_body(body) -> bytes:
     return json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
-def call(method: str, path: str, *, body=None, acting=None, timeout: float | None = None) -> tuple[int, Any]:
+def call(method: str, path: str, *, body=None, acting=None, timeout: float | None = None, cloud_session: str | None = None) -> tuple[int, Any]:
     """Send one control-key request signed per Appendix B. Never raises.
 
     ``path`` starts with ``/v1/`` and may carry a query string, already
@@ -470,6 +470,10 @@ def call(method: str, path: str, *, body=None, acting=None, timeout: float | Non
         if acting_values is not None:
             for name, value in zip(ACTING_HEADERS, acting_values, strict=True):
                 headers[name] = value
+        if cloud_session is not None:
+            if not re.fullmatch(r'[a-f0-9]{64}',cloud_session):
+                return _local_error("invalid_request","Invalid personal Cloud session.")
+            headers["X-SP-Cloud-Session"] = cloud_session
         return _send(method, base + path, headers, payload, _timeout(timeout))
     except Exception:
         logger.debug("control-api call failed", exc_info=False)

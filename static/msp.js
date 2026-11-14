@@ -62,7 +62,30 @@
   for(const row of data.jobs)box.append(el('p',row.title+' · '+hours(row.annual_support_minutes)+(nl?' supporturen/jaar · ':' support hours/year · ')+(row.annual_support_cents==null?c().quote:amount(row.annual_support_cents)+(nl?' per jaar excl. btw':' per year excl. VAT'))+' · '+(row.support_enabled?(nl?'Ingeschakeld':'Enabled'):(nl?'Niet ingeschakeld':'Not enabled'))));
   box.append(el('small',nl?'Ingeschakelde job-uren tellen automatisch mee. Alleen je MSP kan support uitschakelen.':'Enabled job hours count automatically. Only your MSP can disable support.'));root.append(box);
  }
+ function renderMaintenance(root){
+  const cardData=overview.maintenance_card;
+  if(!cardData || !overview.permissions?.billing)return;
+  const nl=lang()==='nl', section=card(nl?'Onderhoudsuren':'Maintenance hours');
+  section.append(el('p', hours(cardData.available_minutes)+(nl?' uur beschikbaar':' hours available')));
+  if(cardData.reserved_minutes>0)section.append(el('p',hours(cardData.reserved_minutes)+(nl?' uur gereserveerd':' hours reserved')));
+  for(const entry of cardData.automation_cards||[]){
+   const credit=entry.ledger_credit;
+   if(!credit && !entry.reversed_at)continue;
+   const details=fold(entry.name);
+   if(entry.reversed_at){
+    details.append(el('p',nl?'Teruggeboekt':'Reversed'));
+    section.append(details);continue;
+   }
+   details.append(el('p',hours(credit.minutes)+(nl?' uur bijgeschreven':' hours credited')));
+   if(entry.source_ref)details.append(el('p',(nl?'Oplevering ':'Delivery ')+entry.source_ref));
+   if(entry.installation_name)details.append(el('p',entry.installation_name));
+   if(credit.expires_at)details.append(el('p',(nl?'Geldig tot ':'Valid until ')+String(credit.expires_at).slice(0,10)));
+   section.append(details);
+  }
+  root.append(section);
+ }
  function renderOverview(root){
+  renderMaintenance(root);
   renderAnnual(root);const nl=lang()==='nl',open=tickets.filter(t=>!['resolved','closed'].includes(t.status)).length;
   const box=card(nl?'Tickets & aanvragen':'Tickets & requests');box.append(button(open+' '+(nl?'openstaande tickets':'open tickets'),()=>{tab='tickets';render();}));
   const offers=(overview.service_orders||[]).filter(o=>o.status==='offered'&&!o.expired);

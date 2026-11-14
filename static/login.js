@@ -7,6 +7,21 @@ document.addEventListener('DOMContentLoaded', function () {
   var input = document.getElementById('pw');
   var passkeyBtn = document.getElementById('passkey-login');
 
+  var cloud = /^#sp-cloud=([a-f0-9]{64})$/.exec(location.hash);
+  if (cloud) {
+    history.replaceState(null, '', location.pathname);
+    fetch('/api/auth/cloud-session', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-SynthPulse-Login': '1'},
+      body: JSON.stringify({code: cloud[1]})
+    }).then(function (result) {
+      if (!result.ok) throw new Error();
+      location.replace('/');
+    }).catch(function () {
+      showErr('Deze inloglink is verlopen. Open de werkplek opnieuw vanuit je SynthPulse Cloud-account.');
+    });
+    return;
+  }
   if (!form || !input) return;
 
   var invalidPw = form.getAttribute('data-invalid-pw') || 'Invalid password';

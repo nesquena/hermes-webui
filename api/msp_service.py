@@ -1,5 +1,6 @@
 """Self-service proxy. Only server-resolved identities reach the signed MSP API."""
 from urllib.parse import parse_qs, quote, urlencode
+import os
 import re
 from api import control_plane_client as control
 from api.org_modules import context
@@ -14,7 +15,8 @@ def identity(handler):
     policy,subject,scope=context(handler)
     email=subject.normalized_email
     known=set(policy.users)|set(policy.bootstrap_admins)|set(delegation.organization_people(policy))
-    if not email or subject.provider=='auth_disabled' or email not in known:
+    personal = subject.provider=='synthpulse_cloud' and os.environ.get('SP_CLOUD_PERSONAL_MSP')=='1'
+    if not email or subject.provider=='auth_disabled' or (email not in known and not personal):
         raise PermissionError('Sign in with an organisation account')
     return {'user':email,'member_of':delegation.member_departments(policy,email),
             'admin_of':delegation.admin_departments(policy,email)}
@@ -30,6 +32,12 @@ def fetch(handler,path,method='GET',body=None):
     except PermissionError:return 403,{'error':{'code':'forbidden','message':'Organisation sign-in required'}}
     except Exception:return 503,{'error':{'code':'policy_unavailable','message':'Account permissions unavailable'}}
     options={'timeout':60} if path.endswith('/download') else {}
+    if os.environ.get('SP_CLOUD_PERSONAL_MSP')=='1':
+        from api.auth import cloud_msp_proof
+        proof=cloud_msp_proof(handler)
+        if not proof:
+            return 403,{'error':{'code':'personal_login_required','message':'Open SynthPulse vanuit je persoonlijke Cloud-account.'}}
+        options['cloud_session']=proof
     status,data=control.call(method,path,body=body,acting=acting,**options)
     return status or 503,data
 

@@ -5993,6 +5993,7 @@ def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
     return path in {
         "/api/auth/login",
+        "/api/auth/cloud-session",
         "/api/auth/passkey/options",
         "/api/auth/passkey/login",
         "/api/csp-report",
@@ -17602,6 +17603,10 @@ def handle_post(handler, parsed) -> bool:
         return _handle_session_import_cli(handler, body)
 
     # ── Auth endpoints (POST) ──
+    if parsed.path == "/api/auth/cloud-session":
+        from api.cloud_login import redeem
+        return redeem(handler, body)
+
     if parsed.path == "/api/auth/login":
         from api.auth import (
             verify_password,

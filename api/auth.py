@@ -50,7 +50,7 @@ def _resolve_session_ttl() -> int:
 # ── Public paths (no auth required) ─────────────────────────────────────────
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
-    '/api/auth/login', '/api/auth/status',
+    '/api/auth/login', '/api/auth/cloud-session', '/api/auth/status',
     '/api/auth/oidc/start', '/api/auth/oidc/callback',
     '/api/auth/passkey/options', '/api/auth/passkey/login',
     '/manifest.json', '/manifest.webmanifest',
@@ -812,7 +812,17 @@ def get_session_identity(cookie_value: str) -> dict | None:
         entry = _sessions.get(token)
     if not isinstance(entry, dict):
         return None
-    return {k: v for k, v in entry.items() if k != 'exp'}
+    return {k: v for k, v in entry.items() if k not in ('exp','_cloud_msp_proof')}
+
+
+def cloud_msp_proof(handler):
+    """Read the private MSP proof without exposing it in the session identity."""
+    cookie = parse_cookie(handler)
+    if not cookie or not verify_session(cookie):
+        return None
+    with _SESSIONS_LOCK:
+        entry = _sessions.get(_session_token_from_cookie_value(cookie))
+        return entry.get('_cloud_msp_proof') if isinstance(entry,dict) and entry.get('method')=='synthpulse_cloud' else None
 
 
 def _session_token_from_cookie_value(cookie_value: str) -> str | None:
