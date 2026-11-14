@@ -102,6 +102,10 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Fatto, riavviato il servizio e ora è attivo.", "it"),
         ("Ok", ""),
         ("Sì", ""),
+        # #9065: French, Spanish and Portuguese no longer vote Italian.
+        ("Le chat est là, et la maison est très belle.", ""),
+        ("La casa es muy grande y tiene un jardín con flores.", ""),
+        ("Ela é uma pessoa muito boa e você sabe disso.", ""),
         ("", ""),
     ],
 )
@@ -132,13 +136,66 @@ def test_unresolved_env_reference_is_treated_as_absent(monkeypatch):
     # load_profile_config leaves an unresolvable ${VAR} literal; forwarding it
     # would trip the allowlist, so it must degrade to the built-in default.
     _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "${REVIEW_VOICE}"}}})
-    assert routes._default_edge_voice("Ok") == "it-IT-ElsaNeural"
+    assert routes._default_edge_voice("Ok") == "en-US-AvaMultilingualNeural"
 
 
 @pytest.mark.parametrize("cfg", [{}, {"tts": "edge"}, {"tts": {"edge": True}}, {"tts": {"edge": {"voice": 7}}}])
 def test_malformed_config_shapes_never_crash(monkeypatch, cfg):
     _patch_profile_config(monkeypatch, cfg)
-    assert routes._default_edge_voice("Ok") == "it-IT-ElsaNeural"
+    assert routes._default_edge_voice("Ok") == "en-US-AvaMultilingualNeural"
+
+
+# #9065: a configured voice outranks the built-in per-language defaults,
+# unless it speaks the other language the detector knows.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Le chat est là, et la maison est très belle.",
+        # Detected as Italian, still read with the configured French voice:
+        # the detector cannot tell French from Italian reliably.
+        "Questo è un test con abbastanza parole.",
+        "Ok",
+    ],
+)
+def test_configured_voice_in_another_language_always_wins(monkeypatch, text):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "fr-FR-DeniseNeural"}}})
+    assert routes._default_edge_voice(text) == "fr-FR-DeniseNeural"
+
+
+def test_configured_english_voice_yields_to_italian_text(monkeypatch):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "en-US-GuyNeural"}}})
+    assert routes._default_edge_voice("Questo è un test con abbastanza parole.") == "it-IT-ElsaNeural"
+    assert routes._default_edge_voice("This is a test with enough words here.") == "en-US-GuyNeural"
+
+
+def test_configured_multilingual_voice_always_wins(monkeypatch):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "en-US-AndrewMultilingualNeural"}}})
+    assert (
+        routes._default_edge_voice("Questo è un test con abbastanza parole.")
+        == "en-US-AndrewMultilingualNeural"
+    )
+
+
+def test_per_language_config_wins_over_configured_voice(monkeypatch):
+    cfg = {"tts": {"edge": {"voice": "fr-FR-DeniseNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    assert routes._default_edge_voice("Questo è un test con abbastanza parole.") == "it-IT-IsabellaNeural"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("La casa es muy grande y tiene un jardín con flores.", "en-US-AvaMultilingualNeural"),
+        ("Ok", "en-US-AvaMultilingualNeural"),
+        ("Questo è un test con abbastanza parole.", "it-IT-ElsaNeural"),
+        ("This is a test with enough words here.", "en-US-AvaNeural"),
+    ],
+)
+def test_no_configured_voice(monkeypatch, text, expected):
+    _patch_profile_config(monkeypatch, {})
+    assert routes._default_edge_voice(text) == expected
 
 
 # ── handler: ordering regressions ─────────────────────────────────────────
