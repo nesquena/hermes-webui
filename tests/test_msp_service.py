@@ -1,6 +1,29 @@
 from types import SimpleNamespace
 from api import control_plane_client
-from tests.test_org_api_read import home,write_policy,caller,_Handler,_raw,PLATFORM,NOBODY
+from tests import test_org_api_read as org_fixture
+from tests.test_org_api_read import _Handler, PLATFORM
+
+home = org_fixture.home
+write_policy = org_fixture.write_policy
+caller = org_fixture.caller
+
+
+def test_app_intake_uses_policy_departments_and_signed_identity(write_policy, caller, monkeypatch):
+    from api import msp_service
+    import uuid
+    caller.email = 'owner@acme.example'; calls = []
+    monkeypatch.setattr(control_plane_client, 'call', lambda *a, **k: (calls.append((a, k)) or (201, {'id': 'tkt_test'})))
+    body = {'app_id': 'opendesign', 'scope': 'departments', 'departments': ['sales', 'finance'],
+            'note': 'Shared design for both teams.', 'request_key': str(uuid.uuid4())}
+    h = _Handler(); assert msp_service.handle_post(h, '/api/msp/app-intake', body)
+    assert h.status == 201
+    assert calls[0][0] == ('POST', '/v1/customer/apps/opendesign/intake')
+    assert calls[0][1]['body']['departments'] == ['finance', 'sales']
+    assert calls[0][1]['acting']['user'] == caller.email
+    for extra in ({'departments': ['unknown']}, {'departments': [True]}, {'org_id': 'other'}, {'scope': 'organisation'}):
+        h = _Handler(); msp_service.handle_post(h, '/api/msp/app-intake', {**body, **extra})
+        assert h.status == 422
+    assert len(calls) == 1
 
 
 def test_msp_proxy_binds_identity_not_browser_body(write_policy,caller,monkeypatch):

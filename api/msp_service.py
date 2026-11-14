@@ -7,7 +7,7 @@ from api.governance import delegation
 from api.helpers import j
 
 ROUTES=('/api/msp/invoice','/api/msp/order','/api/msp/job-cost','/api/msp/package','/api/msp/overview','/api/msp/tickets','/api/msp/ticket','/api/msp/comment',
-        '/api/msp/app-state','/api/msp/app-request','/api/msp/app-support')
+        '/api/msp/app-state','/api/msp/app-request','/api/msp/app-intake','/api/msp/app-support')
 
 
 def identity(handler):
@@ -79,14 +79,32 @@ def handle_post(handler,path,body):
         allowed={'ticket_id','body'};tid=body.get('ticket_id','')
         if not isinstance(tid,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',tid):return respond(handler,(422,{'error':'Invalid ticket ID'}))
         target='/v1/tickets/'+tid+'/comments'
-    elif path in ('/api/msp/app-state','/api/msp/app-request','/api/msp/app-support'):
-        action={'/api/msp/app-state':'state','/api/msp/app-request':'request','/api/msp/app-support':'support'}[path]
-        allowed={'app_id',{'state':'enabled','request':'note','support':'level'}[action]}
+    elif path in ('/api/msp/app-state','/api/msp/app-request','/api/msp/app-intake','/api/msp/app-support'):
+        action={'/api/msp/app-state':'state','/api/msp/app-request':'request','/api/msp/app-intake':'intake','/api/msp/app-support':'support'}[path]
+        allowed={'app_id','note','scope','departments','request_key'} if action=='intake' else {'app_id',{'state':'enabled','request':'note','support':'level'}[action]}
         app_id=body.get('app_id','')
         if not isinstance(app_id,str) or not re.fullmatch(r'[a-z][a-z0-9_]{1,60}',app_id):return respond(handler,(422,{'error':'Invalid app ID'}))
         target='/v1/customer/apps/'+app_id+'/'+action
     else:return False
     if set(body)-allowed:return respond(handler,(422,{'error':'Unknown request fields'}))
+    if path=='/api/msp/app-intake':
+        try:
+            identity(handler)
+            policy, _, _ = context(handler)
+            # This is a request for a proposal. Central org roles still decide
+            # whether it may be created; local policy owns department names.
+            departments = body.get('departments', [])
+            if (not isinstance(departments, list) or len(departments)>64 or
+                    any(not isinstance(key,str) or key not in policy.departments for key in departments)):
+                return respond(handler,(422,{'error':'Choose departments from this organisation'}))
+            scope=body.get('scope')
+            if scope not in ('organisation','departments','environment') or (scope=='departments') != bool(departments):
+                return respond(handler,(422,{'error':'Choose the request scope and its departments'}))
+            body={**body,'departments':sorted(set(departments))}
+        except PermissionError:
+            return respond(handler,(403,{'error':'Organisation sign-in required'}))
+        except Exception:
+            return respond(handler,(503,{'error':'Account permissions unavailable'}))
     if path=='/api/msp/job-cost':
         if not isinstance(body.get('job_id'),str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,120}',body['job_id']):return respond(handler,(422,{'error':'Invalid job ID'}))
         from api.profiles import get_active_profile_name, cron_profile_context

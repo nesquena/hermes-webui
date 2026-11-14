@@ -14993,32 +14993,32 @@ window.SynthPulseFeatureCatalog = {
       ],
       "locales": {
         "nl": {
-          "title": "App-uitbreiding kopen",
-          "purpose": "Bekijk en beheer app-uitbreiding kopen.",
-          "when": "Als een app in de catalogus staat maar nog niet voor jouw installatie is gekoppeld.",
+          "title": "Een app samen aanvragen",
+          "purpose": "Vraag een voorstel aan voor een app die je organisatie of meerdere afdelingen samen gebruiken.",
+          "when": "Als je een app centraal wilt gebruiken of deze omgeving wilt uitbreiden.",
           "steps": [
             "Open Apps en zoek de gewenste app.",
-            "Kies Aanbod bekijken bij Support & uitbreidingen.",
-            "Support toont het beschikbare aanbod voor deze app.",
-            "Controleer inhoud en prijs, betaal en dien de aanvraag na betaalbevestiging in."
+            "Kies App aanvragen bij Support & uitbreidingen.",
+            "Kies de hele organisatie, één of meer afdelingen, of deze AI-omgeving.",
+            "Beschrijf je wens en vraag een voorstel aan. Je volgt de gezamenlijke aanvraag bij Support."
           ],
-          "permissions": "Organisatie- en financiële beheerders betalen en dienen uitbreidingen in. Supporttickets volgen je ticketrechten.",
-          "limits": "Een bevestigde livebetaling is vereist voor betaalde aanvragen. Betalen alleen dient nog geen aanvraag in. Supporttickets vereisen resterende uren; factuurvragen blijven bereikbaar. Tarieven en de betaalkoppeling moeten door je MSP zijn ingesteld.",
-          "example": "Koop 2 uur, betaal, kies Uren toevoegen en dien daarna je supportticket in."
+          "permissions": "Organisatiebeheerders kunnen een appvoorstel aanvragen. Betaalde uitbreidingen behouden hun eigen betaal- en bevestigingsstappen.",
+          "limits": "Een voorstel aanvragen kost niets en geeft nog geen app- of gegevenstoegang. Dezelfde open aanvraag wordt organisatiebreed samengevoegd. Inrichting, rechten en kosten worden eerst afgesproken.",
+          "example": "Vraag één gedeelde ondertekenapp aan voor Finance en Sales."
         },
         "en": {
-          "title": "Buy an app upgrade",
-          "purpose": "Review and manage buy an app upgrade.",
-          "when": "When an app is in the catalogue but not yet connected for your installation.",
+          "title": "Request a shared app",
+          "purpose": "Request a proposal for an app shared by your organisation or departments.",
+          "when": "When you want one central app or an addition to this environment.",
           "steps": [
             "Open Apps and find the app.",
-            "Select View offers under Support & upgrades.",
-            "Support shows offers for this app.",
-            "Check scope and price, pay and submit after payment is verified."
+            "Select Request app under Support & upgrades.",
+            "Choose the whole organisation, one or more departments, or this AI environment.",
+            "Describe your needs and request a proposal. Follow the shared request in Support."
           ],
-          "permissions": "Organisation and billing administrators pay and submit upgrades. Support tickets follow your ticket permissions.",
-          "limits": "Paid requests require a verified live payment. Payment alone does not submit a request. Support tickets require remaining hours; invoice questions remain available. Your MSP must configure prices and the payment connection.",
-          "example": "Buy 2 hours, pay, select Add hours, then submit your support ticket."
+          "permissions": "Organisation administrators can request an app proposal. Paid upgrades keep their payment and confirmation steps.",
+          "limits": "A proposal request is free and does not grant app or data access. Matching open requests are combined across the organisation. Setup, permissions and costs are agreed first.",
+          "example": "Request one shared signing app for Finance and Sales."
         }
       }
     },

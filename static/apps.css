@@ -13,3 +13,11 @@ main.main.showing-apps>#mainApps{display:block;overflow:auto}
 @media(max-width:640px){#mainApps{padding:18px}.apps-toolbar{gap:12px}.apps-toolbar label{width:100%}.apps-heading h1{width:100%}.app-button{min-height:44px}}
 
 #mainApps .apps-heading select{width:auto;max-width:100%}.app-card h3{color:var(--text)}
+.app-shared-label{font-size:12px;line-height:1.5;color:var(--accent);margin:0 0 14px}
+.apps-request{max-width:680px;border:1px solid var(--border);border-radius:12px;background:var(--surface);padding:20px;margin:20px 0}
+.apps-request h2{font-size:17px;margin:0 0 10px}.apps-request p{font-size:13px;line-height:1.6;color:var(--muted)}
+.apps-request fieldset{border:0;padding:0;margin:0;min-width:0}.apps-request label{display:flex;flex-direction:column;gap:8px;font-size:13px;margin:14px 0}
+.apps-request textarea{font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:12px;box-sizing:border-box;width:100%;resize:vertical}
+.apps-request .app-request-departments{margin:16px 0}.app-request-departments label{flex-direction:row;align-items:center;gap:10px}
+#mainApps .app-request-departments input{width:18px;height:18px;min-height:18px;padding:0;flex:none;accent-color:var(--accent)}
+.apps-request .app-request-note{font-size:12px}.apps-request .app-actions{margin-top:16px}.apps-request button:disabled{opacity:.55;cursor:default}
