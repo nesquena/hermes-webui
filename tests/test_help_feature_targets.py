@@ -82,7 +82,10 @@ def test_every_feature_is_mapped_once_with_existing_navigation_names():
             for action in re.findall(r"\[data-help-action='([^']+)'\]", selector):
                 assert 'data-help-action="' + action + '"' in SOURCE, (feature_id, selector)
             for tour in re.findall(r"\[data-tour='([^']+)'\]", selector):
-                assert 'data-tour="' + tour + '"' in SOURCE, (feature_id, selector)
+                # A JS-created control has the same DOM attribute as an HTML
+                # data-tour. Require a literal assignment, not a mention of the target.
+                assert ('data-tour="' + tour + '"' in SOURCE or
+                        re.search(r'''\.dataset\.tour\s*=\s*(['"])''' + re.escape(tour) + r'\1', SOURCE)), (feature_id, selector)
 
 
 def test_static_settings_controls_use_their_real_pane():
