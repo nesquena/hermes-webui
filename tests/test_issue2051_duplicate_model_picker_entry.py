@@ -75,7 +75,7 @@ def test_provider_qualified_badge_alias_is_not_a_second_picker_row():
     """All three spellings of one configured model collapse to one row (#2051)."""
     script = HARNESS + js(
         "_normalizeConfiguredModelKey",
-        "_configuredModelIdentity",
+        "_modelPickerOptionIdentity",
         "_isEquivalentConfiguredModelEntry",
     ) + f"""
 const entries=[{CATALOG_ROW}];
@@ -98,7 +98,7 @@ def test_a_genuinely_different_model_is_never_suppressed():
     """The new rule must not hide a model the catalog does not have."""
     script = HARNESS + js(
         "_normalizeConfiguredModelKey",
-        "_configuredModelIdentity",
+        "_modelPickerOptionIdentity",
         "_isEquivalentConfiguredModelEntry",
     ) + f"""
 const entries=[{CATALOG_ROW}];

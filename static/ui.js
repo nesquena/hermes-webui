@@ -6044,8 +6044,10 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   ).toLowerCase();
   const _matchesConfiguredKey=(entry,candidate)=>{
     if(provider&&_entryProvider(entry)===provider){
-      const configuredIdentity=_configuredModelIdentity(candidate,provider);
-      const entryIdentity=_configuredModelIdentity(entry.value,provider);
+      // Use the select's identity: @provider: is routing syntax, but a typed
+      // provider/model path may be a different upstream model (OpenRouter).
+      const configuredIdentity=_modelPickerOptionIdentity(candidate,provider);
+      const entryIdentity=_modelPickerOptionIdentity(entry.value,provider);
       // Routing wrappers do not create another choice for the same model.
       if(configuredIdentity===entryIdentity) return true;
       // A vendor-qualified config is not the bare catalog model. This matters

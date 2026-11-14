@@ -540,6 +540,7 @@ def _picker_rows(badge_map: dict, rows: list[dict]) -> dict:
         extract_function(UI_JS, name)
         for name in (
             "_normalizeConfiguredModelKey",
+            "_modelPickerOptionIdentity",
             "_configuredModelIdentity",
             "_isEquivalentConfiguredModelEntry",
             "_getConfiguredModelBadge",
