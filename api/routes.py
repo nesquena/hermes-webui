@@ -11534,6 +11534,15 @@ _CLI_LOOKUP_FALLBACK_SOURCES = tuple(
     source for source in _INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES
     if source not in _BACKGROUND_CLI_SOURCES
 )
+# Local interactive sources the recency window CAPS rather than excludes: they
+# stay in the default projection, but once enough newer runs exist a session the
+# user explicitly opens sits past CLI_VISIBLE_SESSION_LIMIT and the enumeration
+# alone 404s it. Listing them here routes the by-id lookup through the exact
+# probe, which has no window at all (#8061).
+_CLI_AGED_OUT_LOOKUP_SOURCES = ("desktop", "tui", "cli", "acp")
+_CLI_LOOKUP_BY_ID_SOURCES = tuple(
+    dict.fromkeys(_CLI_LOOKUP_FALLBACK_SOURCES + _CLI_AGED_OUT_LOOKUP_SOURCES)
+)
 
 
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
@@ -11560,7 +11569,7 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
         for row in get_cli_sessions(all_profiles=all_profiles):
             if row.get("session_id") == session_id:
                 return row
-        for source in _CLI_LOOKUP_FALLBACK_SOURCES:
+        for source in _CLI_LOOKUP_BY_ID_SOURCES:
             row = get_cli_session_by_id(session_id, source, all_profiles=all_profiles)
             if row:
                 return row
