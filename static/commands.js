@@ -1,5 +1,5 @@
 const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
-  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits','loop',
   'moa','sessions','resume','pet'
 ]);
 // ── Slash commands ──────────────────────────────────────────────────────────
@@ -694,7 +694,7 @@ async function _runAgentCommandTransport(text,_meta){
   const transportCommand=_canonicalizeSlashCommandToken(command,_meta);
   const data=await api('/api/commands/exec',{
     method:'POST',
-    body:JSON.stringify({command:transportCommand})
+    body:JSON.stringify(/^\/?loop(\s|$)/i.test(transportCommand)?{command:transportCommand,session_id:S.session&&S.session.session_id||''}:{command:transportCommand})  // only /loop is session-scoped
   });
   return String(data&&data.output||'(no output)');
 }
