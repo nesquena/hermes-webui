@@ -113,7 +113,7 @@ def test_copy_link_i18n_keys_have_english_and_german_labels():
     ]:
         assert I18N_JS.count(key) >= 2, f"{key} should be defined in English and German"
     assert "Copy conversation link" in I18N_JS
-    assert "Unterhaltungslink kopieren" in I18N_JS
+    assert "Chat-Link kopieren" in I18N_JS
 
 
 def test_rendered_session_reference_is_internal_link():
