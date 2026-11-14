@@ -514,7 +514,7 @@ class TestRemoveProviderKey:
         stale = yaml.safe_load(stale_config.read_text(encoding="utf-8"))
         active = yaml.safe_load(active_config.read_text(encoding="utf-8"))
         assert stale["providers"]["openai"]["api_key"] == "stale-secret"
-        assert "api_key" not in active["providers"]["openai"]
+        assert "providers" not in active
         assert active["model"] == {"provider": "openai"}
 
     def test_clean_custom_provider_key_matches_safe_name_slug(self, monkeypatch, tmp_path):
@@ -546,6 +546,146 @@ class TestRemoveProviderKey:
         custom_provider = reloaded["custom_providers"][0]
         assert custom_provider["name"] == "Local (127.0.0.1:15721)"
         assert "api_key" not in custom_provider
+
+    def test_clean_provider_key_removes_empty_provider_and_empty_providers_section(
+        self, monkeypatch, tmp_path
+    ):
+        """When the only key in providers.<id> is api_key, remove the provider and section."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "providers": {
+                    "openai": {
+                        "api_key": "secret-key",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        assert "providers" not in reloaded
+
+    def test_clean_provider_key_preserves_other_keys_in_provider_entry(
+        self, monkeypatch, tmp_path
+    ):
+        """When providers.<id> has non-api_key fields, preserve them and the section."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "providers": {
+                    "openai": {
+                        "api_key": "secret-key",
+                        "base_url": "https://api.openai.com/v1",
+                        "organization_id": "org-123",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "providers" in reloaded
+        assert "openai" in reloaded["providers"]
+        assert "api_key" not in reloaded["providers"]["openai"]
+        assert reloaded["providers"]["openai"]["base_url"] == "https://api.openai.com/v1"
+        assert reloaded["providers"]["openai"]["organization_id"] == "org-123"
+
+    def test_clean_provider_key_preserves_sibling_providers(
+        self, monkeypatch, tmp_path
+    ):
+        """When one provider becomes empty, prune only it while preserving siblings."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "providers": {
+                    "openai": {
+                        "api_key": "secret-key-openai",
+                    },
+                    "anthropic": {
+                        "api_key": "secret-key-anthropic",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "providers" in reloaded
+        assert "openai" not in reloaded["providers"]
+        assert reloaded["providers"]["anthropic"] == {"api_key": "secret-key-anthropic"}
+
+    def test_clean_provider_key_with_env_var_removes_entry_and_reports_env_source(
+        self, monkeypatch, tmp_path
+    ):
+        """Removing config key preserves detection when env var is present."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "providers": {
+                    "openai": {
+                        "api_key": "sk-config-secret",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env-test-key")
+        monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+        orig_invalidate = providers.invalidate_providers_cache
+        monkeypatch.setattr(providers, "invalidate_providers_cache", lambda: None)
+
+        try:
+            providers._clean_provider_key_from_config("openai")
+
+            reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            assert "providers" not in reloaded
+            assert providers._provider_has_key("openai") is True
+
+            result = providers.get_providers()
+            openai_entry = next(p for p in result["providers"] if p["id"] == "openai")
+            assert openai_entry["has_key"] is True
+            assert openai_entry["key_source"] == "env_var"
+        finally:
+            orig_invalidate()
 
     def test_remove_provider_key_calls_set_with_none(self, monkeypatch, tmp_path):
         """remove_provider_key should delegate to set_provider_key(id, None)."""
