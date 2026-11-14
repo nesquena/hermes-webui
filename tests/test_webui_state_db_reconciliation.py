@@ -189,11 +189,15 @@ def test_sidebar_state_db_overlay_reclassifies_authoritative_subagent_rows():
             )
         return row
 
+    fork_like_subagent = sidebar_row(
+        "row-02", "fork", session_source="fork", source_label="Fork"
+    )
+    fork_like_subagent["parent_session_id"] = "row-parent"
     sessions = [
         sidebar_row(
             "row-01", "webui", session_source="webui", source_label="WebUI", is_cli_session=False
         ),
-        sidebar_row("row-02", "fork", session_source="other", source_label="Fork"),
+        fork_like_subagent,
         sidebar_row("row-03"),
         sidebar_row("row-04", "tui", session_source="cli", source_label="TUI"),
     ]
