@@ -1091,6 +1091,40 @@ class TestRootRelativeMarkdownImage:
         )
         assert '<code>chart</code>' in out, f"label must stay code: {out!r}"
 
+    def test_image_between_two_inline_code_spans_still_renders(self, driver_path):
+        # #9072 review: code spans pair up the way inlineMd() pairs them, so a
+        # stash may never run from the closing backtick of one span to the
+        # opening backtick of the next -- that would swallow the image sitting
+        # between them and leave it as literal Markdown.
+        out = _render(
+            driver_path, "see `before` ![chart](/static/charts/probe.svg) `after` here"
+        )
+        assert 'src="/static/charts/probe.svg"' in out, (
+            f"image between two code spans must render: {out!r}"
+        )
+        assert '<code>before</code>' in out and '<code>after</code>' in out, (
+            f"both code spans must stay literal: {out!r}"
+        )
+
+    def test_root_relative_image_in_list_item_inline_code_stays_literal(self, driver_path):
+        # List item text is rendered to <code> before the outer image pass and
+        # then re-entered through inlineMd() by the paragraph splitter, so the
+        # second pass must not render image syntax inside an existing <code>
+        # element either.
+        out = _render(driver_path, "- see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, (
+            f"image inside inline code in a list item must stay literal: {out!r}"
+        )
+        assert '<code>![chart](/static/charts/probe.svg)</code>' in out, (
+            f"list-item inline code content must be preserved verbatim: {out!r}"
+        )
+
+    def test_root_relative_image_in_heading_inline_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "## see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, (
+            f"image inside inline code in a heading must stay literal: {out!r}"
+        )
+
     def test_absolute_https_image_still_renders(self, driver_path):
         out = _render(driver_path, "![x](https://example.com/x.png)")
         assert '<img' in out and 'src="https://example.com/x.png"' in out, (

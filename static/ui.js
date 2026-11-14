@@ -10979,8 +10979,13 @@ function renderMd(raw){
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
   function inlineMd(t){
-    // Stash backtick code spans first so bold/italic never esc() their content
+    // Stash code spans first so bold/italic never esc() their content.
+    // Already-rendered <code> elements arrive here from list / heading / table
+    // text when the paragraph splitter re-enters inlineMd(); they are stashed
+    // as well so a second pass cannot render image syntax inside them.
     const _code_stash=[];
+    const _html_code_stash=[];
+    t=t.replace(/<code\b[^>]*>[\s\S]*?<\/code>/g,m=>{_html_code_stash.push(m);return `\x00H${_html_code_stash.length-1}\x00`;});
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
@@ -10996,6 +11001,7 @@ function renderMd(raw){
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
+    t=t.replace(/\x00H(\d+)\x00/g,(_,i)=>_html_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
@@ -11182,9 +11188,14 @@ function renderMd(raw){
   // text is still raw backticks here (the paragraph splitter runs inlineMd()
   // later), while list / heading / table text already carries rendered <code>.
   // Only spans that actually contain `![` are stashed, so a code-wrapped link
-  // label still flows through the outer link pass as before.
+  // label still flows through the outer link pass as before.  Spans pair up
+  // exactly the way inlineMd() pairs them (`([^`\n]+)`) and a rendered <code>
+  // match never crosses its own closing tag: otherwise an image sitting
+  // between two code spans would be swallowed as one chunk and stay literal.
   const _code_outer_stash=[];
-  s=s.replace(/`[^`\n]*!\[[^`\n]*`|<code\b[^>]*>[\s\S]*?!\[[\s\S]*?<\/code>/g,m=>{_code_outer_stash.push(m);return `\x00K${_code_outer_stash.length-1}\x00`;});
+  const _stashOuterCode=m=>{_code_outer_stash.push(m);return `\x00K${_code_outer_stash.length-1}\x00`;};
+  s=s.replace(/`[^`\n]+`/g,m=>m.includes('![')?_stashOuterCode(m):m);
+  s=s.replace(/<code\b[^>]*>(?:(?!<\/code>)[\s\S])*?!\[(?:(?!<\/code>)[\s\S])*?<\/code>/g,_stashOuterCode);
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
