@@ -27683,7 +27683,7 @@ function renderTray(){ // non-media files use paperclip chip
         chip.innerHTML=`<span class="attach-chip-media">🎬 ${esc(f.name)}</span><video controls preload="metadata" src="${esc(blobUrl)}"></video><button title="${t('remove_title')}">${li('x',12)}</button>`;
       }
     } else {
-      chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
+      chip.innerHTML=`${li('paperclip',12)}<span class="attach-chip-name" title="${esc(f.name)}">${esc(f.name)}</span><button title="${t('remove_title')}">${li('x',12)}</button>`;
     }
     chip.querySelector('button').onclick=()=>{
       // Revoke blob URL to avoid memory leak before removing
