@@ -6,16 +6,16 @@
 // label in the rail with labels. It only arranges what is already there:
 // who may see which destination stays with governance and the tab settings.
 //
-// A saved personal order always wins. Separators only appear while the groups
+// A personal order applies after Studio and Chats. Separators only appear while the groups
 // are still contiguous, so a custom order never gets misleading headings.
 (function(){
   'use strict';
   const GROUPS = [
-    { key: 'work', nl: 'Werk', en: 'Work', panels: ['chat', 'studio', 'profiles', 'tasks', 'kanban', 'projects'] },
+    { key: 'work', nl: 'Werk', en: 'Work', panels: ['studio', 'chat', 'profiles', 'tasks', 'kanban', 'projects'] },
     { key: 'build', nl: 'Bouwstenen', en: 'Building blocks', panels: ['modules', 'skills', 'memory', 'integrations', 'workspaces', 'files', 'todos'] },
     { key: 'org', nl: 'Organisatie', en: 'Organisation', panels: ['organisation', 'management', 'insights', 'approvals', 'governance', 'logs'] }
   ];
-  const DEFAULT_ORDER = GROUPS.flatMap(g => g.panels).filter(p => p !== 'chat');
+  const DEFAULT_ORDER = GROUPS.flatMap(g => g.panels);
   const groupOf = panel => (GROUPS.find(g => g.panels.includes(panel)) || {}).key || '';
   const lang = () => ((document.documentElement.lang || 'nl').toLowerCase().startsWith('en') ? 'en' : 'nl');
   const isMember = () => window._navAudience === 'member' && !window._capabilityNavigation;
@@ -24,7 +24,7 @@
   const original = window._applyTabOrder;
   if (typeof original === 'function') {
     window._applyTabOrder = function(order){
-      let custom = Array.isArray(order) ? order : [];
+      let custom = Array.isArray(order) ? _sanitizeTabPanelList(order) : [];
       if (!Array.isArray(order)) { try { custom = typeof _getTabOrder === 'function' ? _getTabOrder() : []; } catch (_e) { custom = []; } }
       const result = original.call(this, !isMember() && !custom.length ? DEFAULT_ORDER : order);
       schedule();

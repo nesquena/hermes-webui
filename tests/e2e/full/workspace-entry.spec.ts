@@ -3,6 +3,29 @@ import {test, expect, api} from './fixtures';
 for (const user of ['admin', 'alice'] as const) {
   test.describe(user, () => {
     test.use({user});
+    test('STUDIO FIRST keeps Studio and Chats first in desktop and mobile navigation', async ({page}, info) => {
+      const savedOrder = ['tasks', 'profiles', 'studio'];
+      await page.addInitScript(order => {
+        if (window === window.top) localStorage.setItem('hermes-webui-tab-order', JSON.stringify(order));
+      }, savedOrder);
+      await page.goto('/');
+      await expect(page.locator('#mainStudio .wp-hero')).toBeVisible();
+      await page.waitForFunction(() => S._bootReady && window.__GOV_ME__?.workspace_navigation);
+      // Reapply a legacy personal order, as happens when profile settings arrive.
+      await page.evaluate(order => _applyTabOrder(order), savedOrder);
+      const tour = page.locator('#spHelpCard[data-kind="tour_offer"] .sp-help-btn').first();
+      await page.addLocatorHandler(tour, () => tour.click());
+      for (const width of [1440, 900, 390]) {
+        await page.setViewportSize({width, height:900});
+        if (width === 390) await page.locator('#btnHamburger').click();
+        const nav = page.locator(width === 390 ? '.sidebar-nav' : '.rail');
+        const tabs = nav.locator('.nav-tab[data-panel]:visible');
+        await expect(tabs.first()).toBeVisible();
+        await nav.screenshot({path:info.outputPath('navigation-' + width + '.png')});
+        expect.soft(await tabs.evaluateAll(nodes => nodes.slice(0, 2).map(n => n.getAttribute('data-panel')))).toEqual(['studio', 'chat']);
+      }
+    });
+
     test('HOME ENTRY opens the dashboard for a returning user in the browser and installed app', async ({page}, info) => {
       await page.goto('/?view=chat');
       await page.waitForFunction(() => window.__GOV_ME__?.email && S._bootReady);

@@ -9811,6 +9811,8 @@ let _settingsPreferencesAutosaveRetryPayload = null;
 
 // ── Sidebar tab visibility/order ────────────────────────────────────────────
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
+// Studio has a fixed position. Governance still controls its visibility.
+const _FIXED_NAV_TABS = new Set(['studio', ..._ALWAYS_VISIBLE_TABS]);
 const _HIDDEN_TABS_LS_KEY = 'hermes-webui-hidden-tabs';
 const _TAB_ORDER_LS_KEY = 'hermes-webui-tab-order';
 const _COMPOSER_CONTROL_ORDER_LS_KEY = 'hermes-webui-composer-control-order';
@@ -9824,7 +9826,7 @@ function _sanitizeTabPanelList(panels){
   panels.forEach(function(panel){
     if(typeof panel!=='string') return;
     panel=panel.trim();
-    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;
+    if(!panel||_FIXED_NAV_TABS.has(panel)) return;
     if(out.indexOf(panel)===-1) out.push(panel);
   });
   return out;
@@ -9853,7 +9855,7 @@ function _availableSidebarPanels(){
   var tabs=document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel], .sidebar-nav .nav-tab[data-panel]');
   tabs.forEach(function(tab){
     var panel=tab.dataset.panel;
-    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;
+    if(!panel||_FIXED_NAV_TABS.has(panel)) return;
     if(tab.classList.contains('dashboard-link')||tab.hasAttribute('data-dashboard-link')) return;
     if(out.indexOf(panel)===-1) out.push(panel);
   });
@@ -9992,7 +9994,7 @@ async function loadGovernanceNavVisibility(){
 window.loadGovernanceNavVisibility=loadGovernanceNavVisibility;
 
 function _applyTabVisibility(hidden){
-  hidden=_sanitizeTabPanelList(hidden).filter(panel=>panel!=='studio');
+  hidden=_sanitizeTabPanelList(hidden);
   const govHidden=(Array.isArray(window._govHiddenNav)?window._govHiddenNav:[]).concat(window._moduleHiddenNav||[]);
   if(govHidden.length) hidden=hidden.concat(govHidden.filter(p=>hidden.indexOf(p)===-1));
   _applyTabOrder(window._navAudience==='member'&&!window._capabilityNavigation?_MEMBER_NAV_ORDER:_getTabOrder());
@@ -10025,7 +10027,7 @@ function _renderTabVisibilityChips(){
   panels.forEach(function(panel){
     var tab=document.querySelector('.rail .rail-btn.nav-tab[data-panel="'+panel+'"]')
       ||document.querySelector('.sidebar-nav .nav-tab[data-panel="'+panel+'"]');
-    if(panel==='studio' || (tab && tab.hasAttribute('data-module-gated')))return;
+    if(tab && tab.hasAttribute('data-module-gated'))return;
     var label=(tab&&(tab.dataset.tooltip||tab.dataset.label))||panel;
     // Capitalize first letter
     label=label.charAt(0).toUpperCase()+label.slice(1);

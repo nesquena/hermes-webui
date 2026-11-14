@@ -34,7 +34,7 @@ def test_backend_round_trip_and_validation_for_tab_order(monkeypatch, tmp_path):
     bad = config.save_settings({"tab_order": "logs,tasks"})
     assert bad["tab_order"] == ["logs", "tasks", "kanban"], "non-list payload is ignored"
 
-    saved = config.save_settings({"tab_order": ["chat", "logs", "", "logs", "settings", "  ", "tasks"]})
+    saved = config.save_settings({"tab_order": ["chat", "logs", "", "studio", "logs", "settings", "  ", "tasks"]})
     assert saved["tab_order"] == ["logs", "tasks"], \
         "tab_order must strip fixed tabs, blanks, and duplicates while preserving order"
 
