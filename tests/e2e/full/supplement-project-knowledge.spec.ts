@@ -164,17 +164,13 @@ test('SUPPLEMENT PROJECT KNOWLEDGE retained project pages lose files conversatio
   const originalMember = await grantProjectWorkspace(page, team.workspace);
   let member: Awaited<ReturnType<typeof actor>> | undefined;
   try {
-  // Project state is outside the fixture's private OS home, so use the normal
-  // admin workspace registration and assignment forms for this exact directory.
-  await open(page, 'workspaces');
-  await page.getByRole('button', {name: 'Add space', exact: true}).click();
-  await page.locator('#workspaceFormPath').fill(team.workspace);
-  await page.locator('#workspaceFormName').fill(name);
-  await page.locator('#btnSaveWorkspaceDetail').click();
-  await expect(page.locator('#workspaceDetailTitle')).toHaveText(name);
+  // Register the synthetic folder through the authenticated workspace API.
+  // Projects owns navigation. The old standalone Spaces rail entry is retired.
+  expect((await api(page, '/api/workspaces/add', {path:team.workspace})).status).toBe(200);
   await open(page, 'governance'); await page.locator('[data-gov-tab="workspaces"]').click();
   const workspaceRow = page.locator('#govPaneWorkspaces tbody tr').filter({has: page.getByText(team.workspace, {exact: true})});
-  await workspaceRow.locator('[id^="govWsMembers_"]').fill('bob@example.test');
+  const memberInput = await workspaceRow.locator('[id^="govWsMembers_"]').getAttribute('id');
+  await selectPicker(page, memberInput!, 'bob@example.test');
   const workspaceAssigned = response(page, '/api/workspaces/assign');
   await workspaceRow.getByRole('button', {name: 'Save', exact: true}).click();
   expect((await workspaceAssigned).status()).toBe(200);
