@@ -1143,12 +1143,14 @@ def test_slash_autocomplete_treats_underscore_like_hyphen():
     assert result["neighbour_hit"] is False
 
 
-def test_slash_plain_prefix_keeps_master_order():
-    """A prefix without `_`/`-` must keep the original row order (#8203 gate).
+def test_slash_plain_prefix_ranks_name_matches_ahead_of_description_matches():
+    """A prefix without `_`/`-` ranks name matches ahead of loose matches (#9035).
 
-    Literal-first re-ranking exists for dual spellings only; applied to a plain
-    prefix it moved prefix-matched skills above substring/description matches
-    and changed the first row of the menu versus master.
+    The #8203 gate kept master's raw order for plain prefixes, which meant a
+    substring-named skill (`incident-review`) stayed above a prefix-named one
+    (`review-pr`) and a description-only row could sit at row zero — the row
+    Enter runs. #9035 replaced that with match-quality bands: name prefix,
+    then name substring, then description-only.
     """
     result = _run_commands_js(
         """
@@ -1166,7 +1168,9 @@ def test_slash_plain_prefix_keeps_master_order():
         """
     )
 
-    assert result["review"] == ["incident-review", "review-pr"]
+    # 'review-pr' prefixes the query, 'incident-review' only contains it.
+    assert result["review"] == ["review-pr", "incident-review"]
+    # 'knowledge-loop' contains it, 'alpha-notes' matches on its description.
     assert result["loop"] == ["knowledge-loop", "alpha-notes"]
 
 
