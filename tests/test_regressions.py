@@ -342,6 +342,17 @@ def test_deleted_session_does_not_appear_in_list(cleanup_test_sessions):
     assert sid not in ids_after,         f"Deleted session {sid} still appears in list -- index not invalidated on delete"
 
 
+def _delete_handler_block(routes_src: str, delete_idx: int) -> str:
+    """Return the session/delete handler body, bounded by the next route branch.
+
+    Anchors on the following `if parsed.path ==` instead of a fixed character
+    window, so adding lines inside the handler can never push assertions out
+    of the visible slice.
+    """
+    nxt = routes_src.find("if parsed.path ==", delete_idx + 1)
+    return routes_src[delete_idx:nxt if nxt > 0 else len(routes_src)]
+
+
 def _session_delete_handler_block(text):
     """Return the source of the session/delete route handler, or None if absent.
 
