@@ -21,3 +21,4 @@ main.main.showing-apps>#mainApps{display:block;overflow:auto}
 .apps-request .app-request-departments{margin:16px 0}.app-request-departments label{flex-direction:row;align-items:center;gap:10px}
 #mainApps .app-request-departments input{width:18px;height:18px;min-height:18px;padding:0;flex:none;accent-color:var(--accent)}
 .apps-request .app-request-note{font-size:12px}.apps-request .app-actions{margin-top:16px}.apps-request button:disabled{opacity:.55;cursor:default}
+#mainApps .apps-request select{width:100%;min-width:0}

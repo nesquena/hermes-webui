@@ -13,6 +13,7 @@ class AppSpec:
     module: str = 'design_studio'
     category: str = 'creative'
     access: str = 'member'
+    requestable: bool = True
 
 
 _ROWS = (
@@ -49,23 +50,23 @@ _ROWS = (
     AppSpec('n8n', 'n8n', 'Bouw en beheer geautomatiseerde workflows.',
             'Build and manage automated workflows.', 'workflows', 'automation', 'platform'),
     AppSpec('omniroute', 'OmniRoute', 'Beheer modelroutes en verbindingen met AI-aanbieders.',
-            'Manage model routing and AI provider connections.', 'workspace', 'platform', 'platform'),
+            'Manage model routing and AI provider connections.', 'workspace', 'platform', 'platform', requestable=False),
     AppSpec('nango', 'App-connectors', 'Beheer integraties en verbindingen met externe diensten.',
-            'Manage integrations and connections to external services.', 'workspace', 'platform', 'platform'),
+            'Manage integrations and connections to external services.', 'workspace', 'platform', 'platform', requestable=False),
     AppSpec('docuseal', 'DocuSeal', 'Bereid documenten voor en volg digitale ondertekening.',
             'Prepare documents and follow digital signing.', 'e_signing', 'productivity'),
     AppSpec('ragflow', 'RAGFlow', 'Beheer kennisbanken, verwerk documenten en test antwoorden met bronverwijzingen.',
             'Manage knowledge bases, process documents and test answers with source references.', 'knowledge_base', 'productivity', 'platform'),
     AppSpec('langfuse', 'Langfuse', 'Bekijk AI-traces, gebruik, kosten en evaluaties van gekoppelde toepassingen.',
-            'Inspect AI traces, usage, costs and evaluations from connected applications.', 'workspace', 'platform', 'platform'),
+            'Inspect AI traces, usage, costs and evaluations from connected applications.', 'workspace', 'platform', 'platform', requestable=False),
     AppSpec('hermes_docs', 'SynthPulse Office Docs (Word)', 'Schrijf en bewerk Word-documenten met opmaak, tabellen en AI-hulp.',
             'Write and edit Word documents with formatting, tables and AI assistance.', 'office_apps', 'productivity', 'platform'),
     AppSpec('hermes_sheets', 'SynthPulse Office Sheets (Excel)', 'Bewerk Excel-werkboeken met cellen, formules en AI-hulp.',
             'Edit Excel workbooks with cells, formulas and AI assistance.', 'office_apps', 'productivity', 'platform'),
     AppSpec('hermes_slides', 'SynthPulse Office Slides (PowerPoint)', 'Maak en bewerk PowerPoint-presentaties met dia’s en AI-hulp.',
             'Create and edit PowerPoint presentations with slides and AI assistance.', 'office_apps', 'productivity', 'platform'),
-    AppSpec('hermes_pdf', 'SynthPulse Office PDF', 'Open pdf-documenten op de VPS en gebruik de beschikbare annotatie- en AI-functies.',
-            'Open PDF documents on the VPS and use the available annotation and AI features.', 'office_apps', 'productivity', 'platform'),
+    AppSpec('hermes_pdf', 'SynthPulse Office PDF', 'Open pdf-documenten in je AI-omgeving en gebruik de beschikbare annotatie- en AI-functies.',
+            'Open PDF documents in your AI environment and use the available annotation and AI features.', 'office_apps', 'productivity', 'platform'),
     AppSpec('hermes_markdown', 'SynthPulse Office Markdown', 'Schrijf en bewerk Markdown met een teksteditor en AI-hulp.',
             'Write and edit Markdown with a text editor and AI assistance.', 'office_apps', 'productivity', 'platform'),
 )

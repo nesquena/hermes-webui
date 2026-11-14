@@ -16,12 +16,21 @@
   function validUrl(value){try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&!u.search&&!u.hash?u.href:null;}catch(_){return null;}}
   function guide(id,trigger){const feature='webui.apps.'+id;const known=window.SynthPulseFeatureCatalog?.features?.some(f=>f.id===feature);window.SynthPulseHelp?.startFeatureTour(id==='overview'&&msp.connected?['webui.apps.overview','webui.apps.availability','webui.apps.request','webui.apps.support']:[known?feature:'webui.modules.apps'],{locale:lang(),trigger});}
   const categories=['creative','marketing','sales','automation','productivity','platform'];
+  function startRequest(id=''){
+    if(requestBusy||mutation||draft||!msp.request_apps)return;
+    draft={app_id:id,scope:'organisation',departments:[],note:''};requestError='';render();$('appRequestApp')?.focus();
+  }
   function renderRequest(root){
     if(!draft||!msp.request_apps||loading||failed)return;
     const nl=lang()==='nl',form=el('form',null,'apps-request'),fields=el('fieldset');fields.disabled=requestBusy;
-    const row=(rows||[]).find(r=>appId(r)===draft.app_id);
-    form.append(el('h2',(nl?'App aanvragen: ':'Request app: ')+localized(row?.name||draft.app_id)));
+    form.append(el('h2',nl?'App aanvragen':'Request app'));
     form.append(el('p',nl?'Eén gedeelde inrichting voor de organisatie of meerdere afdelingen, of een uitbreiding van deze AI-omgeving.':'One shared setup for your organisation or departments, or an addition to this AI environment.'));
+    const appLabel=el('label',nl?'Welke app wil je gebruiken?':'Which app would you like to use?'),appSelect=el('select');appSelect.id='appRequestApp';appSelect.required=true;
+    const placeholder=el('option',nl?'Kies een app':'Choose an app');placeholder.value='';appSelect.append(placeholder);
+    for(const app of msp.requestable_apps||[]){const option=el('option',localized(app.name));option.value=app.id;appSelect.append(option);}
+    appSelect.value=draft.app_id;appSelect.addEventListener('change',()=>{draft.app_id=appSelect.value;requestError='';render();$('appRequestApp')?.focus();});appLabel.append(appSelect);fields.append(appLabel);
+    const pending=(msp.app_intakes||[]).filter(item=>item.app_id===draft.app_id);
+    if(pending.length)fields.append(el('p',(nl?'Deze app heeft al openstaande aanvragen: ':'This app already has open requests: ')+pending.map(item=>'#'+item.number).join(', ')+(nl?'. Voor dezelfde groep voegen we je toelichting toe aan de bestaande aanvraag.':'. For the same group, we add your note to the existing request.')));
     const scopeLabel=el('label',nl?'Wie gaan dit gebruiken?':'Who will use this?'),select=el('select');select.id='appRequestScope';
     for(const [value,label] of [['organisation',nl?'Hele organisatie':'Whole organisation'],['departments',nl?'Eén of meer afdelingen':'One or more departments'],['environment',nl?'Deze AI-omgeving':'This AI environment']]){const o=el('option',label);o.value=value;select.append(o);}
     select.value=draft.scope;select.addEventListener('change',()=>{draft.scope=select.value;draft.departments=[];render();$('appRequestScope')?.focus();});scopeLabel.append(select);fields.append(scopeLabel);
@@ -35,9 +44,10 @@
     fields.append(el('p',nl?'Je ontvangt eerst een voorstel voor inrichting, toegangsrechten en kosten. Aanvragen activeert nog geen app of betaling.':'You receive a proposal for setup, access and costs first. A request does not activate an app or payment.','app-request-note'));
     if(requestError){const error=el('p',requestError);error.setAttribute('role','alert');fields.append(error);}
     const actions=el('div',null,'app-actions'),submit=el('button',requestBusy?(nl?'Aanvraag opslaan…':'Saving request…'):(nl?'Vraag een voorstel aan':'Request a proposal'),'app-button app-open');submit.type='submit';
-    actions.append(submit,btn(nl?'Annuleren':'Cancel',()=>{const id=draft.app_id;draft=null;requestError='';render();document.querySelector('[data-app-id="'+id+'"]')?.focus();}));fields.append(actions);form.append(fields);
+    actions.append(submit,btn(nl?'Annuleren':'Cancel',()=>{draft=null;requestError='';render();$('appsRequest')?.focus();}));fields.append(actions);form.append(fields);
     form.addEventListener('submit',async event=>{
       event.preventDefault();if(requestBusy||!draft)return;
+      if(!(msp.requestable_apps||[]).some(app=>app.id===draft.app_id)){requestError=nl?'Kies een app uit de lijst.':'Choose an app from the list.';render();return;}
       if(draft.scope==='departments'&&!draft.departments.length){requestError=nl?'Kies minimaal één afdeling.':'Choose at least one department.';render();return;}
       const payload={app_id:draft.app_id,scope:draft.scope,departments:draft.departments,note:draft.note.trim()},fingerprint=JSON.stringify(payload);
       if(fingerprint!==draft.fingerprint){draft.key=crypto.randomUUID();draft.fingerprint=fingerprint;}
@@ -79,8 +89,8 @@
           }
           const support=el('div',null,'app-support'),sub=r.support;
           support.append(el('strong',nl?'Support & uitbreidingen':'Support & upgrades'));
-          if(msp.request_apps){
-            const request=btn(nl?'App aanvragen':'Request app',()=>{draft={app_id:id,scope:'organisation',departments:[],note:''};requestError='';render();$('appRequestScope')?.focus();});request.disabled=requestBusy||!!draft;support.append(request);
+          if(msp.request_apps&&(msp.requestable_apps||[]).some(app=>app.id===id)){
+            const request=btn(nl?'App aanvragen':'Request app',()=>startRequest(id));request.disabled=requestBusy||mutation||!!draft;support.append(request);
             const pending=(msp.app_intakes||[]).filter(item=>item.app_id===id);
             if(pending.length)support.append(el('p',(nl?'Openstaande aanvragen: ':'Open requests: ')+pending.map(item=>'#'+item.number+' · '+(item.scope==='organisation'?(nl?'organisatiebreed':'organisation'):item.scope==='departments'?item.departments.join(', '):(nl?'AI-omgeving':'AI environment'))).join('; ')));
           }
@@ -99,6 +109,7 @@
     const locale=el('select');locale.id='appsLanguage';locale.setAttribute('aria-label',c.language);
     for(const [value,text] of [['nl','Nederlands'],['en','English']]){const o=el('option',text);o.value=value;locale.append(o);}locale.value=lang();locale.addEventListener('change',()=>{language=locale.value;feedback='';try{localStorage.setItem('sp-apps-language',language);}catch(_){}render();$('appsLanguage')?.focus();});
     const guideButton=btn(c.guide,()=>guide('overview',guideButton));head.append(guideButton,locale);root.append(head,el('p',c.intro,'apps-intro'));
+    if(!loading&&!failed&&msp.request_apps&&(msp.requestable_apps||[]).length){const request=btn(lang()==='nl'?'App aanvragen':'Request app',()=>startRequest());request.id='appsRequest';request.disabled=requestBusy||mutation||!!draft;root.append(request);}
     if(!loading&&!failed&&!msp.connected){const requestLink=el('a',lang()==='nl'?'Functionaliteit aanvragen':'Request functionality','app-button');requestLink.href='https://www.synthwave.solutions/synthpulse/account?tab=packages';requestLink.target='_blank';requestLink.rel='noopener noreferrer';root.append(requestLink);}
     renderRequest(root);
     const toolbar=el('div',null,'apps-toolbar'),searchLabel=el('label',c.search),search=el('input');search.id='appsSearch';search.type='search';search.placeholder=c.search;search.value=query;search.addEventListener('input',()=>{query=search.value;renderList();});searchLabel.append(search);
