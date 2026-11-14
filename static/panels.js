@@ -1936,7 +1936,6 @@ let _cronSelectedSkills=[];
 let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
 let _cronProfilesCache=null;
-let _cronDeliveryOptionsCache=null;
 
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
@@ -2071,7 +2070,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
           <select id="cronFormDeliver">
-            <option value="" disabled>loading...</option>
+            <option value="${esc(deliver || 'local')}" selected>loading...</option>
           </select>
         </div>
         <div class="detail-form-row">
@@ -2121,29 +2120,35 @@ async function _populateCronDeliverOptions(selectedValue, isEdit) {
   var sel = $('cronFormDeliver');
   if (!sel) return;
   sel.disabled = true;
+  // #9058: the list depends on the active profile's enabled platform plugins, so it is
+  // fetched for every form instead of cached for the page (a profile switch does not reload).
+  var requestedProfile = S.activeProfile || 'default';
   try {
-    if (!_cronDeliveryOptionsCache) {
-      var res = await api('/api/crons/delivery-options');
-      _cronDeliveryOptionsCache = res && res.platforms ? res.platforms : [];
+    var res = await api('/api/crons/delivery-options');
+    if ($('cronFormDeliver') !== sel) return;  // this form was replaced; its successor fills itself
+    if ((S.activeProfile || 'default') !== requestedProfile) {
+      // The profile changed while the request was in flight: refill for the current one.
+      return _populateCronDeliverOptions(selectedValue, isEdit);
     }
+    var options = res && res.platforms ? res.platforms : [];
     sel.innerHTML = '';
-    for (var i = 0; i < _cronDeliveryOptionsCache.length; i++) {
-      var p = _cronDeliveryOptionsCache[i];
+    for (var i = 0; i < options.length; i++) {
+      var p = options[i];
       var opt = document.createElement('option');
       opt.value = p.value;
       opt.textContent = p.label;
       if (p.value === selectedValue) opt.selected = true;
       sel.appendChild(opt);
     }
-    if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
-      var opt = document.createElement('option');
-      opt.value = selectedValue;
-      opt.textContent = selectedValue + ' *';
-      opt.selected = true;
-      sel.prepend(opt);
-    }
   } catch (e) {
     sel.innerHTML = '<option value="local">Local (save output only)</option>';
+  }
+  if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
+    var opt = document.createElement('option');
+    opt.value = selectedValue;
+    opt.textContent = selectedValue + ' *';
+    opt.selected = true;
+    sel.prepend(opt);
   }
   sel.disabled = false;
 }

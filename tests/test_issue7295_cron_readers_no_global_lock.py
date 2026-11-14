@@ -285,6 +285,12 @@ GET_READERS = [
 def test_cron_readers_answer_promptly_with_own_profile_while_job_holds_lock(
     world, monkeypatch, holder_kind, reader_profile
 ):
+    # #9058: the first delivery-options request in a process loads the Agent's platform
+    # adapters (about 1-2 s cold). Pay that one-time cost before timing, without the lock
+    # held, so the deadline below still measures only what this test is for: readers
+    # never wait on the running job's lock.
+    warm = _finish(*_request("GET", "/api/crons/delivery-options", reader_profile, deadline=HOLD_MAX_S))
+    assert warm["status"] == 200, warm
     results = []
     with HOLDERS[holder_kind](world, monkeypatch, world["alpha"]) as holder:
         for path, check in GET_READERS:
