@@ -24,6 +24,33 @@ MSP notes are never included in the customer response.
 
 ## Availability and support
 
+### Shared app proposals
+
+Organisation administrators can use **Apps > App aanvragen / Request app** to
+request a non-binding proposal for the whole organisation, selected departments,
+or the current environment. The local server validates department keys against
+the installation policy; the signed installation fixes the organisation and the
+central API checks the organisation administrator role again. Browser identity,
+organisation IDs, prices, payment status and deployment targets are refused.
+
+`POST /api/msp/app-intake` forwards to the separate `/v1/customer/apps/{id}/intake`
+route. Matching open app/scope requests share one native ticket across the
+organisation's installations. A later request adds its note to that ticket.
+Durable request keys prevent retries from adding another note or ticket, even
+after closure. Open requests appear on the app card and in Support. Text survives
+a failed submission; signing out or changing the visible account discards it.
+
+Intake grants no app access, creates no deployment, order or invoice, and spends
+no support hours. The existing paid app fulfillment endpoint and pay-then-submit
+service offer workflow retain their payment requirement. The proposal must agree
+which teams share one installation, which data remains private, app permissions,
+and any capacity, licence or maintenance costs. Do not quote one copy per
+department merely because several departments use a central app.
+
+An installation without the signed MSP connection links to the authenticated
+Cloud functionality request page. It does not infer an organisation from an
+email address or reuse an HQ control key.
+
 Availability is stored per organisation and app. Turning an app off removes its
 launch destination from `/api/apps`, across reloads and users. It preserves files
 and subscriptions. This is a launcher setting, not infrastructure shutdown or

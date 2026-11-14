@@ -68,7 +68,38 @@ def clean_app_links(monkeypatch):
     monkeypatch.delenv('SP_MODULE_LINKS', raising=False)
     monkeypatch.delenv('SP_ENABLED_MODULES', raising=False)
     monkeypatch.delenv('SP_WORKFLOWS_CLIENT_EDITOR', raising=False)
+    monkeypatch.delenv('SP_SHARED_APPS', raising=False)
+    monkeypatch.delenv('SP_SHARED_APP_HOSTS', raising=False)
     modules.clear_cache()
+
+
+def test_one_shared_app_filters_departments_and_never_activates_local_modules(write_policy, caller, monkeypatch):
+    monkeypatch.setenv('SP_ENABLED_MODULES', '')
+    monkeypatch.setenv('SP_SHARED_APP_HOSTS', '["shared.acme.example"]')
+    spec = {'org_id': 'org_acme', 'scope': 'departments', 'departments': ['sales'], 'url': 'https://shared.acme.example/office'}
+    monkeypatch.setenv('SP_SHARED_APPS', json.dumps({'docuseal': spec}))
+    sales = get(caller, 'rep.sales@acme.example').body['apps']
+    assert len(sales) == 1 and sales[0]['id'] == 'docuseal'
+    assert sales[0]['placement'] == 'shared' and sales[0]['shared_scope'] == 'departments'
+    assert sales[0]['shared_departments'] == ['Sales']
+    assert 'e_signing' not in modules.current_state().active
+    assert get(caller, 'clerk.finance@acme.example').body == {'apps': []}
+    assert get(caller, 'stranger@elsewhere.example').body == {'apps': []}
+    monkeypatch.setenv('SP_SHARED_APPS', json.dumps({'docuseal': {**spec, 'scope': 'organisation', 'departments': []}}))
+    assert len(get(caller, 'clerk.finance@acme.example').body['apps']) == 1
+    assert get(caller, 'stranger@elsewhere.example').body == {'apps': []}
+
+
+@pytest.mark.parametrize('change', [
+    {'org_id': 'other'}, {'scope': 'unknown'}, {'departments': ['unknown']},
+    {'url': 'https://shared.acme.example.evil.test'}, {'url': 'https://shared.acme.example:9443'},
+    {'url': 'https://user:secret@shared.acme.example'}, {'url': 'https://shared.acme.example?token=secret'},
+])
+def test_shared_app_configuration_fails_closed(write_policy, caller, monkeypatch, change):
+    monkeypatch.setenv('SP_SHARED_APP_HOSTS', '["shared.acme.example"]')
+    spec = {'org_id': 'org_acme', 'scope': 'departments', 'departments': ['sales'], 'url': 'https://shared.acme.example/office'}
+    monkeypatch.setenv('SP_SHARED_APPS', json.dumps({'docuseal': {**spec, **change}}))
+    assert get(caller, 'owner@acme.example').body == {'apps': []}
 
 
 def test_complete_craft_studio_registry(write_policy, caller, monkeypatch):

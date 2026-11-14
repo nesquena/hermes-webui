@@ -54,6 +54,32 @@ in the directory do not relax hostname validation.
 
 ## Access and module behavior
 
+### Shared organisation space
+
+An operator can point department installations at one already configured app
+using deployment-owned `SP_SHARED_APPS` JSON. Entries use a known app ID with
+`org_id` equal to the local governance organisation, `scope` equal to
+`organisation` or `departments`, a `departments` list of policy keys (empty for
+organisation scope), and a credential-free HTTPS `url`. The exact destination
+hostname must also be in the deployment-owned `SP_SHARED_APP_HOSTS` JSON list.
+Only standard HTTPS port 443 is accepted, without query strings or fragments.
+
+The launcher validates current organisation identity and department membership
+on every read. Organisation/platform administrators can see their organisation's
+shared entries; other users see only their selected departments or organisation
+entries. Unknown users, tenants, departments, scopes and hosts fail closed.
+Platform-only app restrictions and managed app availability continue to apply.
+A shared external app needs no second local module installation. The directory
+does not activate local routes or modules. The UI labels these entries as the
+**Gedeelde organisatieruimte / Shared organisation space**, with a workspace filter.
+
+This directory controls discovery only. Before configuring an entry, provision
+the central app inside the customer's organisation, configure and verify its own
+authentication and permissions, and use individual accounts. Never reuse HQ
+owner workspaces, credentials or data. Private networking and a visible launcher
+link alone do not protect app data. There is no automatic conversion of existing
+department apps into shared apps, and the directory adds no subscription.
+
 Members see only member entries whose associated module is active. Creative
 apps use `design_studio`; DocuSeal uses `e_signing` and SynthPulse Office uses `office_apps`. n8n requires platform scope
 unless `SP_WORKFLOWS_CLIENT_EDITOR=1` explicitly permits member access; it still
