@@ -6,6 +6,21 @@ If your symptom isn't listed and the diagnostics don't narrow it down, file a bu
 
 ---
 
+## Update refused because ignored local files would be overwritten
+
+Normal and force updates stop before checkout, clean, or reset when an ignored
+local path conflicts with a file in the selected target tree, including file
+versus directory conflicts. Move those files outside the checkout and retry.
+Unrelated ignored build/cache files remain in place. For non-ignored local
+changes, the updater requires complete path enumeration and a verified recovery
+snapshot; an enumeration or verification failure aborts the update. Recovery
+refs preserve leading dots and whitespace in Git-relative filenames.
+Captured file bytes retain their original line endings despite Git text attributes.
+
+`/api/updates/diagnose` redacts credentials and secret query parameters from
+remote URLs and returns matching process IDs without command-line arguments.
+The standalone `scripts/diagnose_agent_checkout.py` uses the same redaction policy.
+
 ## Requests succeed but access records disappear during agent work
 
 The server emits `[webui]` JSON access records to its original process stdout,
