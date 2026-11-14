@@ -33,6 +33,15 @@ the installation policy; the signed installation fixes the organisation and the
 central API checks the organisation administrator role again. Browser identity,
 organisation IDs, prices, payment status and deployment targets are refused.
 
+The page-level request button includes customer apps that have no launch tile yet,
+including Twenty CRM, RAGFlow and SynthPulse Office. Its catalogue intersects the
+central app list with the local registry's explicit `requestable` flag. It carries
+only app IDs and names, never destinations or launch permissions. Internal routing,
+connector administration and tracing consoles are excluded from this chooser.
+An organisation administrator can request a customer app without gaining platform
+access or activating a local module. Users without the central request permission
+receive no request catalogue. Existing app cards offer the same form where allowed.
+
 `POST /api/msp/app-intake` forwards to the separate `/v1/customer/apps/{id}/intake`
 route. Matching open app/scope requests share one native ticket across the
 organisation's installations. A later request adds its note to that ticket.

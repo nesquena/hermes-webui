@@ -256,6 +256,27 @@ def test_managed_app_off_hides_destination_and_fails_closed(write_policy,caller,
     h=get(caller,PLATFORM[0]);assert h.status==503 and 'apps' not in h.body
 
 
+@pytest.mark.parametrize('can_request', [True, False])
+def test_request_catalog_is_separate_from_launch_permissions(write_policy, caller, monkeypatch, can_request):
+    from api import control_plane_client, msp_service
+    monkeypatch.setattr(control_plane_client, 'configured', lambda: True)
+    ids = ('twenty', 'ragflow', 'n8n', 'omniroute', 'nango', 'langfuse', 'unknown')
+    monkeypatch.setattr(msp_service, 'overview', lambda h: (200, {
+        'apps': [{'id': ident, 'enabled': False, 'support_levels': [], 'support': None} for ident in ids],
+        'permissions': {'manage_apps': True, 'request_apps': can_request},
+    }))
+    body = get(caller, 'owner@acme.example').body
+    assert not set(ids).intersection(row['id'] for row in body['apps'])
+    if not can_request:
+        assert 'requestable_apps' not in body['msp']
+        return
+    catalog = body['msp']['requestable_apps']
+    assert {row['id'] for row in catalog} == {'twenty', 'ragflow', 'n8n'}
+    assert next(row['name'] for row in catalog if row['id'] == 'twenty') == 'Twenty CRM'
+    assert all(set(row) == {'id', 'name'} for row in catalog)
+    assert not modules.module_active('knowledge_base')
+
+
 def test_pi_loopback_apps_are_explicit_and_port_limited():
     env={'SP_LOCAL_PI_APPS':'1'}
     for url in ('http://127.0.0.1:5220/photocraft/', 'http://127.0.0.1:16081/vnc.html', 'http://127.0.0.1:20128'):

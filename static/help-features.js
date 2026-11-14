@@ -14997,8 +14997,8 @@ window.SynthPulseFeatureCatalog = {
           "purpose": "Vraag een voorstel aan voor een app die je organisatie of meerdere afdelingen samen gebruiken.",
           "when": "Als je een app centraal wilt gebruiken of deze omgeving wilt uitbreiden.",
           "steps": [
-            "Open Apps en zoek de gewenste app.",
-            "Kies App aanvragen bij Support & uitbreidingen.",
+            "Open Apps en kies App aanvragen.",
+            "Selecteer de gewenste app, ook als die nog niet in je omgeving staat.",
             "Kies de hele organisatie, één of meer afdelingen, of deze AI-omgeving.",
             "Beschrijf je wens en vraag een voorstel aan. Je volgt de gezamenlijke aanvraag bij Support."
           ],
@@ -15011,8 +15011,8 @@ window.SynthPulseFeatureCatalog = {
           "purpose": "Request a proposal for an app shared by your organisation or departments.",
           "when": "When you want one central app or an addition to this environment.",
           "steps": [
-            "Open Apps and find the app.",
-            "Select Request app under Support & upgrades.",
+            "Open Apps and select Request app.",
+            "Choose the app, including apps not yet available in your environment.",
             "Choose the whole organisation, one or more departments, or this AI environment.",
             "Describe your needs and request a proposal. Follow the shared request in Support."
           ],

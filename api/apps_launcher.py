@@ -163,6 +163,11 @@ def handle_get(handler, parsed):
         result['msp'] = {'connected': True, 'manage_apps': customer.get('permissions', {}).get('manage_apps', False),
                          'request_apps': request_apps}
         if request_apps:
+            result['msp']['requestable_apps'] = [
+                {'id': app_id, 'name': spec.name}
+                for app_id, spec in app_catalog.REGISTRY.items()
+                if spec.requestable and app_id in customer_apps
+            ]
             result['msp']['departments'] = [{'id': key, 'name': department.name} for key, department in sorted(policy.departments.items())]
             result['msp']['app_intakes'] = customer.get('app_intakes', [])
     j(handler, result)
