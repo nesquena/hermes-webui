@@ -8,6 +8,8 @@ tokens stay server-side and are persisted to the active Hermes profile's
 
 from __future__ import annotations
 
+import contextlib
+import inspect
 import json
 import logging
 import os
@@ -64,6 +66,21 @@ _OAUTH_START_LOCKS_LOCK = threading.Lock()
 _ANTHROPIC_ENV_KEYS = ("ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")
 
 
+def _agent_auth_lock_timeout_seconds() -> float:
+    """How long to wait for the Agent auth lock.
+
+    The Agent's Codex refresh holds that lock for up to its refresh timeout
+    (``HERMES_CODEX_REFRESH_TIMEOUT_SECONDS``, 20 s by default) + 5 s and waits
+    that long itself; the lock's 15 s default would fail a login that finishes
+    during a slow refresh. Same rule as the Agent.
+    """
+    try:
+        refresh_timeout = float(os.environ.get("HERMES_CODEX_REFRESH_TIMEOUT_SECONDS") or 20.0)
+    except ValueError:
+        refresh_timeout = 20.0
+    return max(15.0, refresh_timeout + 5.0)
+
+
 def _oauth_start_key(provider: str, hermes_home: Path) -> tuple[str, str]:
     """Return the canonical single-flight key for onboarding OAuth starts."""
     return (_normalize_onboarding_oauth_provider(provider), str(Path(hermes_home)))
@@ -98,7 +115,8 @@ def _pending_oauth_flow_for_locked(provider: str, hermes_home: Path) -> tuple[st
             continue
         if str(flow.get("hermes_home") or "") != canonical_home:
             continue
-        if flow.get("status") != "pending":
+        # A committed flow already used its code; a new start gets a new flow.
+        if not _flow_is_open(flow):
             continue
         if float(flow.get("expires_at") or 0) <= now:
             flow["status"] = "expired"
@@ -144,6 +162,68 @@ def _normalize_onboarding_oauth_provider(provider: str) -> str:
     if provider in _ANTHROPIC_PROVIDER_ALIASES:
         return "anthropic"
     return provider or "openai-codex"
+
+
+def _get_active_profile_name() -> str | None:
+    """Return the active profile name for this request, or None if unknown."""
+    try:
+        from api.profiles import get_active_profile_name
+
+        return get_active_profile_name()
+    except Exception:
+        logger.debug("Could not resolve the active profile name", exc_info=True)
+        return None
+
+
+def _check_expected_profile(body: dict[str, Any] | None) -> None:
+    """Refuse a start whose page shows another profile than this request's.
+
+    The profile cookie is shared by every tab: after another tab switches it,
+    a card still showing the old profile would log in to the new one. The page
+    sends the profile it shows; a start without one keeps the old behaviour.
+    """
+    from api.profiles import _profiles_match
+
+    expected = str((body or {}).get("profile") or "").strip()[:64]
+    if not expected:
+        return
+    active = _get_active_profile_name()
+    if active is None:
+        # The request's profile could not be resolved; nothing to compare with.
+        return
+    if not _profiles_match(expected, active):
+        raise ValueError(
+            f"This page shows profile '{expected}', but the browser is now on profile "
+            f"'{active}' (switched in another tab). Reload the page and start the login again."
+        )
+
+
+@contextlib.contextmanager
+def _worker_profile_scope(profile: str | None):
+    """Bind ``profile`` to this worker thread's request-profile slot.
+
+    Profile-keyed caches (the credential-pool cache) resolve the profile from
+    the request thread-local; the OAuth worker thread has none and would clear
+    the server default profile's entry instead of the flow's. Restores the
+    thread's previous profile on exit, like ``profile_scope_for_detached_worker``.
+    """
+    if not profile:
+        yield
+        return
+    try:
+        from api import profiles
+    except ImportError:
+        yield
+        return
+    previous = getattr(profiles._tls, "profile", None)
+    profiles.set_request_profile(profile)
+    try:
+        yield
+    finally:
+        if previous is None:
+            profiles.clear_request_profile()
+        else:
+            profiles.set_request_profile(previous)
 
 
 def _get_active_hermes_home() -> Path:
@@ -238,66 +318,178 @@ def _invalidate_provider_state_caches(provider: str) -> None:
         logger.debug("Failed to invalidate providers cache after %s credential change", provider, exc_info=True)
 
 
-def _persist_codex_credentials(hermes_home: Path, token_data: dict[str, Any]) -> Path:
-    """Persist Codex OAuth credentials to active-profile auth.json."""
+@contextlib.contextmanager
+def _agent_auth_store_lock(auth_path: Path):
+    """Hold the Agent's cross-process auth.json lock for ``auth_path``.
+
+    The Agent refreshes Codex tokens under ``_auth_store_lock``; a WebUI
+    read-modify-write outside it can replace a refresh committed in between,
+    and refresh tokens are single-use. Without an importable Agent, or with one
+    whose lock cannot target a profile's auth.json (``target_path``, added
+    after the lock itself), nothing is written: an unlocked write would bring
+    that loss back, so the login fails with a message instead.
+    """
+    try:
+        from hermes_cli.auth import _auth_store_lock
+    except ImportError as exc:
+        reason = str(exc)
+    else:
+        reason = ""
+        try:
+            params = inspect.signature(_auth_store_lock).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if not {"timeout_seconds", "target_path"} <= set(params):
+            reason = "this Agent's _auth_store_lock has no timeout_seconds/target_path"
+    if reason:
+        logger.warning(
+            "Codex credentials not saved to %s: Agent auth store lock unavailable (%s)",
+            auth_path,
+            reason,
+        )
+        raise RuntimeError(
+            "This Hermes Agent cannot lock the saved credentials, so the login was not saved. "
+            "Update Hermes Agent and start the login again."
+        )
+
+    lock = _auth_store_lock(timeout_seconds=_agent_auth_lock_timeout_seconds(), target_path=auth_path)
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(lock)
+        except TimeoutError as exc:
+            # The Agent's message names the lock path and the holder's pid;
+            # keep those in the log, not in the browser.
+            logger.warning("Codex credentials not saved: %s", exc)
+            raise RuntimeError(
+                "Another Hermes process is updating the saved credentials. Start the login again."
+            ) from exc
+        except OSError as exc:
+            # e.g. no permission on the lock file; its path stays in the log.
+            logger.warning("Codex credentials not saved: %s", exc)
+            raise RuntimeError(
+                "The saved credentials could not be locked, so the login was not saved. Check the server logs."
+            ) from exc
+        yield
+
+
+# Same fields, cleared the same way, as the Agent's ``hermes auth reset``.
+_CLEARED_POOL_STATUS = {
+    "last_status": None,
+    "last_status_at": None,
+    "last_error_code": None,
+    "last_error_reason": None,
+    "last_error_message": None,
+    "last_error_reset_at": None,
+}
+
+
+def _is_webui_codex_entry(entry: Any) -> bool:
+    """True for pool entries WebUI created itself.
+
+    The Agent CLI (``hermes auth add openai-codex``) also writes
+    ``source: manual:device_code``, so the source alone does not tell whose
+    entry it is. WebUI ids have always started with ``codex-oauth-``,
+    including the older ``source: oauth_device`` entries.
+    """
+    return (
+        isinstance(entry, dict)
+        and str(entry.get("id") or "").startswith("codex-oauth-")
+        and entry.get("source") in {"manual:device_code", "oauth_device"}
+    )
+
+
+def _persist_codex_credentials(
+    hermes_home: Path, token_data: dict[str, Any], flow_id: str | None = None
+) -> Path | None:
+    """Persist Codex OAuth credentials to active-profile auth.json.
+
+    With ``flow_id``, the write happens only if that flow is still open, and in
+    the same step the flow is marked committed so a later cancel or expiry
+    cannot move it; returns None when a cancel or expiry got there first. The
+    flow becomes ``success`` only after the provider caches are cleared (for
+    the flow's profile), so the refresh the browser starts on success reads the
+    new credential. Lock order: the Agent auth lock first (it can wait up to
+    25 s), ``_OAUTH_FLOWS_LOCK`` second, so cancel and poll are not blocked
+    during that wait; no lock is held while clearing the caches, which can wait
+    behind a model rebuild.
+    """
     access_token = str(token_data.get("access_token") or "").strip()
     refresh_token = str(token_data.get("refresh_token") or "").strip()
     if not access_token:
         raise RuntimeError("Codex token exchange did not return an access_token")
 
     auth_path = Path(hermes_home) / "auth.json"
-    auth = _read_auth_json(auth_path)
-    auth.setdefault("version", 1)
-    pool = auth.setdefault("credential_pool", {})
-    if not isinstance(pool, dict):
-        pool = {}
-        auth["credential_pool"] = pool
-    entries = pool.setdefault("openai-codex", [])
-    if not isinstance(entries, list):
-        entries = []
-        pool["openai-codex"] = entries
+    profile = None
+    with _agent_auth_store_lock(auth_path), (
+        _OAUTH_FLOWS_LOCK if flow_id else contextlib.nullcontext()
+    ):
+        if flow_id:
+            flow = _OAUTH_FLOWS.get(flow_id)
+            if not _flow_is_open(flow):
+                return None
+        auth = _read_auth_json(auth_path)
+        auth.setdefault("version", 1)
+        pool = auth.setdefault("credential_pool", {})
+        if not isinstance(pool, dict):
+            pool = {}
+            auth["credential_pool"] = pool
+        entries = pool.setdefault("openai-codex", [])
+        if not isinstance(entries, list):
+            entries = []
+            pool["openai-codex"] = entries
 
-    now = _now_iso()
-    entry = None
-    # Per Opus advisor on stage-296: also accept the legacy `source ==
-    # "oauth_device"` value so users with prior Codex OAuth credentials
-    # (written by older WebUI versions before this PR's source-key change)
-    # get their existing entry updated in-place rather than accumulating a
-    # stale duplicate pool entry.
-    _accept_sources = {"manual:device_code", "oauth_device"}
-    for candidate in entries:
-        if isinstance(candidate, dict) and candidate.get("source") in _accept_sources:
-            entry = candidate
-            break
-    if entry is None:
-        entry = {
-            "id": "codex-oauth-" + uuid.uuid4().hex[:12],
-            "label": "Codex OAuth",
-            "auth_type": "oauth",
-            "priority": 0,
-            "source": "manual:device_code",
-            "base_url": CODEX_BASE_URL,
-            "created_at": now,
-        }
-        entries.insert(0, entry)
+        now = _now_iso()
+        entry = next((candidate for candidate in entries if _is_webui_codex_entry(candidate)), None)
+        if entry is not None:
+            # Fresh tokens make a dead or rate-limited entry usable again; the
+            # Agent's pools only pick that up from ``status_cleared_at`` newer
+            # than the old status, the marker ``hermes auth reset`` writes.
+            entry.update(_CLEARED_POOL_STATUS)
+            entry.pop("model_cooldowns", None)
+            entry.pop("failure_reason", None)
+            entry["status_cleared_at"] = time.time()
+        else:
+            # Accounts added with the Agent CLI stay untouched; WebUI's own
+            # credential goes after them, like a CLI add would.
+            priorities = [
+                c.get("priority") for c in entries
+                if isinstance(c, dict) and isinstance(c.get("priority"), int)
+            ]
+            entry = {
+                "id": "codex-oauth-" + uuid.uuid4().hex[:12],
+                "priority": max(priorities, default=-1) + 1,
+                "created_at": now,
+            }
+            entries.append(entry)
 
-    entry.update(
-        {
-            "label": "Codex OAuth",
-            "auth_type": "oauth",
-            "priority": 0,
-            "source": "manual:device_code",
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "base_url": CODEX_BASE_URL,
-            "last_refresh": now,
-            "updated_at": now,
-        }
-    )
-    auth["updated_at"] = now
-    path = _write_auth_json(auth, auth_path)
+        entry.update(
+            {
+                "label": "Codex OAuth",
+                "auth_type": "oauth",
+                "source": "manual:device_code",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "base_url": CODEX_BASE_URL,
+                "last_refresh": now,
+                "updated_at": now,
+            }
+        )
+        auth["updated_at"] = now
+        path = _write_auth_json(auth, auth_path)
+        if flow_id:
+            # Inline: _set_flow_status would take _OAUTH_FLOWS_LOCK again.
+            flow["_committed"] = True
+            flow["updated_at"] = time.time()
+            _drop_sensitive_flow_fields(flow)
+            profile = flow.get("profile")
 
-    _invalidate_provider_state_caches("openai-codex")
+    try:
+        with _worker_profile_scope(profile):
+            _invalidate_provider_state_caches("openai-codex")
+    finally:
+        if flow_id:
+            # The credential is saved; a committed flow can only end in success.
+            _set_flow_status(flow_id, "success")
 
     return path
 
@@ -645,6 +837,16 @@ def _drop_sensitive_flow_fields(flow: dict[str, Any]) -> None:
         flow.pop(key, None)
 
 
+def _flow_is_open(flow: dict[str, Any] | None) -> bool:
+    """True while a flow can still be cancelled, expired or failed.
+
+    A Codex flow whose credential is already written stays ``pending`` until
+    the provider caches are cleared, then becomes ``success``; in that window
+    it is decided and nothing may move it elsewhere.
+    """
+    return bool(flow) and flow.get("status") == "pending" and not flow.get("_committed")
+
+
 def _cleanup_oauth_flows(now: float | None = None) -> None:
     """Expire pending flows past their deadline and purge terminal flows older than 300 seconds from memory."""
     now = now or time.time()
@@ -652,7 +854,7 @@ def _cleanup_oauth_flows(now: float | None = None) -> None:
     with _OAUTH_FLOWS_LOCK:
         for fid, flow in list(_OAUTH_FLOWS.items()):
             status = flow.get("status")
-            if status == "pending" and float(flow.get("expires_at") or 0) <= now:
+            if _flow_is_open(flow) and float(flow.get("expires_at") or 0) <= now:
                 flow["status"] = "expired"
                 _drop_sensitive_flow_fields(flow)
             if status in {"success", "expired", "cancelled", "error"} and float(flow.get("updated_at") or 0) < cutoff:
@@ -710,19 +912,20 @@ def _run_codex_oauth_worker(flow_id: str) -> None:
             if not authorization_code or not code_verifier:
                 raise RuntimeError("Device auth response missing authorization_code or code_verifier")
             tokens = _exchange_codex_authorization(authorization_code, code_verifier)
-            # Re-check status under lock before persisting: a cancel/expire that
-            # raced with the device-token + token-exchange network calls must
-            # win, so we don't persist credentials the user explicitly aborted.
-            with _OAUTH_FLOWS_LOCK:
-                current = _OAUTH_FLOWS.get(flow_id)
-                if not current or current.get("status") != "pending":
-                    return
-            _persist_codex_credentials(Path(live["hermes_home"]), tokens)
-            _set_flow_status(flow_id, "success")
+            # A cancel/expire that raced with the network calls, or with the wait
+            # for the Agent auth lock, must win: persist re-checks the flow and
+            # writes in one step, so aborted credentials are never saved.
+            _persist_codex_credentials(Path(live["hermes_home"]), tokens, flow_id=flow_id)
             return
         except Exception as exc:
             logger.warning("Codex OAuth onboarding flow failed: %s", exc)
-            _set_flow_status(flow_id, "error", error=str(exc))
+            with _OAUTH_FLOWS_LOCK:
+                current = _OAUTH_FLOWS.get(flow_id)
+                if _flow_is_open(current):
+                    current["status"] = "error"
+                    current["updated_at"] = time.time()
+                    current["error"] = str(exc)
+                    _drop_sensitive_flow_fields(current)
             return
 
 
@@ -787,6 +990,7 @@ def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
         return _start_anthropic_flow(_get_active_hermes_home())
 
     # Codex flow
+    _check_expected_profile(body)
     hermes_home = _get_active_hermes_home()
     # Serialize check -> device-code request -> flow insertion -> worker spawn
     # for this provider/profile. The global flow lock is still held only for
@@ -821,6 +1025,7 @@ def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
             "expires_at": expires_at,
             "poll_interval_seconds": interval,
             "hermes_home": str(hermes_home),
+            "profile": _get_active_profile_name(),
             "created_at": time.time(),
             "updated_at": time.time(),
         }
@@ -845,7 +1050,7 @@ def poll_onboarding_oauth_flow(flow_id: str) -> dict[str, Any]:
         flow = _OAUTH_FLOWS.get(fid)
         if not flow:
             raise KeyError("OAuth flow not found")
-        if flow.get("status") == "pending" and float(flow.get("expires_at") or 0) <= time.time():
+        if _flow_is_open(flow) and float(flow.get("expires_at") or 0) <= time.time():
             flow["status"] = "expired"
             flow["updated_at"] = time.time()
             _drop_sensitive_flow_fields(flow)
@@ -864,7 +1069,7 @@ def cancel_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
         flow = _OAUTH_FLOWS.get(fid)
         if not flow:
             return {"ok": True, "provider": requested_provider, "flow_id": fid, "status": "cancelled"}
-        if flow.get("status") == "pending":
+        if _flow_is_open(flow):
             flow["status"] = "cancelled"
             flow["updated_at"] = time.time()
             _drop_sensitive_flow_fields(flow)
