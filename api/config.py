@@ -1099,6 +1099,28 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
+    # Display reads deliberately fail open to {}, but that fallback must never
+    # authorize replacing an existing file. Re-read the actual bytes on EVERY
+    # save (not the mtime/size parse cache), including clears/no-op updates and
+    # callers other than the reasoning setter. Only a genuinely missing file or
+    # an empty YAML document may be initialized without an existing mapping.
+    try:
+        existing_text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            existing_data = _yaml.safe_load(existing_text)
+        except Exception as exc:
+            raise ValueError(
+                "Refusing to overwrite config.yaml: existing YAML is invalid; "
+                "repair the file before saving settings."
+            ) from exc
+        if existing_data is not None and not isinstance(existing_data, dict):
+            raise ValueError(
+                "Refusing to overwrite config.yaml: existing YAML must be a mapping."
+            )
+
     config_path.parent.mkdir(parents=True, exist_ok=True)
     _paths._atomic_write_text(
         config_path,
