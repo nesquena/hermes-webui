@@ -134,6 +134,58 @@ def test_codex_shaped_partial_durations_fall_back_to_most_constrained():
         assert _chip_label(windows, mode)["label"] == "5%"
 
 
+def _scoped(label, remaining, scope, seconds=None):
+    w = _w(label, remaining, seconds)
+    w["scope"] = scope
+    return w
+
+
+# Anthropic: the Agent tags the per-model weekly caps scope="model"; none of the
+# windows reports a duration. A depleted model-only cap must not hide a healthy
+# account.
+ANTHROPIC = [
+    _scoped("Current session", 80, "account"),
+    _scoped("Current week", 60, "account"),
+    _scoped("Opus week", 0, "model"),
+    _scoped("Sonnet week", 90, "model"),
+]
+
+
+def test_model_only_windows_do_not_drive_the_chip_when_account_windows_exist():
+    for mode in ("most_constrained", "shortest", "longest"):
+        text = _chip_label(ANTHROPIC, mode)
+        assert text["label"] == "60%", mode
+        # The hover still lists every window, model-only ones included.
+        assert text["title"].split("\n")[1:] == [
+            "Current session: 80% remaining", "Current week: 60% remaining",
+            "Opus week: 0% remaining", "Sonnet week: 90% remaining",
+        ]
+
+
+def test_fixed_modes_order_account_windows_only():
+    windows = [
+        _scoped("Session", 70, "account", SESSION), _scoped("Weekly", 40, "account", WEEK),
+        _scoped("Model day", 5, "model", 86_400),
+    ]
+    assert _chip_label(windows, "shortest")["label"] == "70%"
+    assert _chip_label(windows, "longest")["label"] == "40%"
+    assert _chip_label(windows, "most_constrained")["label"] == "40%"
+
+
+def test_all_model_scoped_windows_keep_todays_selection():
+    windows = [_scoped("Opus week", 30, "model"), _scoped("Sonnet week", 70, "model")]
+    for mode in ("most_constrained", "shortest", "longest"):
+        assert _chip_label(windows, mode)["label"] == "30%", mode
+
+
+def test_windows_without_scope_count_as_account():
+    # Providers (and older Agents) that send no scope are unchanged.
+    windows = [_w("Weekly", 70, WEEK), _w("Session", 90, SESSION), _scoped("Monthly", 10, "", 30 * 86_400)]
+    assert _chip_label(windows, "shortest")["label"] == "90%"
+    assert _chip_label(windows, "longest")["label"] == "10%"
+    assert _chip_label(windows, "most_constrained")["label"] == "10%"
+
+
 @pytest.mark.parametrize("bad", [None, 0, -5, "", "abc", "0", True])
 def test_fixed_modes_fall_back_to_most_constrained_without_valid_durations(bad):
     windows = [_w("A", 60, bad), _w("B", 20, bad), _w("C", 40)]

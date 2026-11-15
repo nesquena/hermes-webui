@@ -978,6 +978,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "reset_at": "2030-03-17T17:30:00Z",
                 "detail": None,
                 "limit_window_seconds": None,
+                "scope": "account",
             },
             {
                 "label": "Weekly",
@@ -986,6 +987,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "reset_at": "2030-03-24T12:30:00Z",
                 "detail": None,
                 "limit_window_seconds": None,
+                "scope": "account",
             },
         ],
         "details": ["Credits balance: $12.50"],
@@ -1807,8 +1809,71 @@ def test_account_usage_snapshot_without_window_duration_remains_compatible():
             "reset_at": "2030-03-17T17:30:00Z",
             "detail": None,
             "limit_window_seconds": None,
+            "scope": "account",
         }
     ]
+
+
+def test_account_usage_window_scope_survives_serialization():
+    """Model-only windows keep their scope; a missing or empty scope means account."""
+    import api.providers as providers
+
+    def _win(label, used, **extra):
+        return SimpleNamespace(label=label, used_percent=used, reset_at=None, detail=None, **extra)
+
+    snapshot = SimpleNamespace(
+        provider="anthropic", source="oauth_usage_api", title="Account limits", plan=None,
+        windows=(
+            _win("Current week", 40, scope="account"),
+            _win("Opus week", 100, scope="model"),
+            _win("Sonnet week", 10, scope=" Model "),
+            _win("Older agent", 20),
+            _win("Empty scope", 30, scope=""),
+        ),
+        details=(), available=True, unavailable_reason=None, fetched_at=None,
+    )
+
+    serialized = providers._serialize_account_usage_snapshot(snapshot)
+
+    assert [w["scope"] for w in serialized["windows"]] == ["account", "model", "model", "account", "account"]
+
+
+def test_model_window_scope_survives_the_probe_worker_round_trip(monkeypatch, capsys):
+    """Scope crosses the worker JSON and the parent's reconstruction intact."""
+    import api.providers as providers
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    account_usage_mod = types.ModuleType("agent.account_usage")
+
+    def fake_fetch_account_usage(provider, *, base_url=None, api_key=None):
+        def win(label, used, **extra):
+            return SimpleNamespace(label=label, used_percent=used, reset_at=None, detail=None, **extra)
+
+        return SimpleNamespace(
+            provider="anthropic", source="oauth_usage_api", title="Account limits", plan=None,
+            windows=(
+                win("Current session", 20, scope="account"),
+                win("Current week", 40, scope="account"),
+                win("Opus week", 100, scope="model"),
+                win("Older agent", 50),
+            ),
+            details=(), available=True, unavailable_reason=None, fetched_at=None,
+        )
+
+    account_usage_mod.fetch_account_usage = fake_fetch_account_usage
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "anthropic", ""])
+
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, {"__name__": "__main__"})
+    worker_payload = json.loads(capsys.readouterr().out.strip())
+
+    assert [w["scope"] for w in worker_payload["windows"]] == ["account", "account", "model", "account"]
+    serialized = providers._serialize_account_usage_snapshot(
+        providers._account_usage_payload_to_snapshot(worker_payload)
+    )
+    assert [w["scope"] for w in serialized["windows"]] == ["account", "account", "model", "account"]
 
 
 def test_codex_agent_snapshot_with_duration_propagates_limit_window_seconds(monkeypatch, tmp_path):

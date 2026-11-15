@@ -224,6 +224,7 @@ def _snapshot_payload(snapshot):
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
             "limit_window_seconds": _number(getattr(window, "limit_window_seconds", None)),
+            "scope": str(getattr(window, "scope", "") or "").strip().lower() or "account",
         })
     payload = {
         "provider": str(getattr(snapshot, "provider", "") or ""),
@@ -1890,6 +1891,9 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
             "reset_at": _isoformat_utc(getattr(window, "reset_at", None)),
             "detail": str(getattr(window, "detail", "") or "").strip() or None,
             "limit_window_seconds": _quota_number(getattr(window, "limit_window_seconds", None)),
+            # "model" windows cap one model family, not the account; older
+            # Agents carry no scope, which means account.
+            "scope": str(getattr(window, "scope", "") or "").strip().lower() or "account",
         })
 
     details = [
@@ -1981,6 +1985,7 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
             reset_at=window.get("reset_at"),
             detail=window.get("detail"),
             limit_window_seconds=window.get("limit_window_seconds"),
+            scope=window.get("scope"),
         )
         for window in (payload.get("windows") or ())
         if isinstance(window, dict)
