@@ -25,6 +25,10 @@ def _reset_cache(monkeypatch, **overrides):
     cache.update(overrides)
     monkeypatch.setattr(updates, '_update_cache', dict(cache))
     monkeypatch.setattr(updates, '_check_in_progress', False)
+    if hasattr(updates, '_running_key'):
+        monkeypatch.setattr(updates, '_running_key', None)
+    if hasattr(updates, '_refresh_queue'):
+        monkeypatch.setattr(updates, '_refresh_queue', [])
     # Pre-fix heads have no background-refresh state at all: only reset what exists
     # so the RED lands on the timing assertion rather than on an AttributeError.
     for attribute in ('_refresh_event', '_refresh_thread'):
@@ -35,9 +39,15 @@ def _reset_cache(monkeypatch, **overrides):
 
 def _drain_background():
     """Join the refresh thread so a straggler cannot leak into the next test."""
-    thread = getattr(updates, '_refresh_thread', None)
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=10)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        thread = getattr(updates, '_refresh_thread', None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.1, deadline - time.time()))
+        elif not getattr(updates, '_check_in_progress', False):
+            break
+        else:
+            time.sleep(0.01)
 
 
 def _call(monkeypatch, **kwargs):
@@ -126,11 +136,7 @@ def test_concurrent_checks_do_not_start_two_refreshes(monkeypatch):
 
     assert active['peak'] == 1, f'{active["peak"]} refreshes ran at the same time'
     assert len(results) == 2
-    # A refresh is already in flight, so the second caller must NOT queue another
-    # one behind it: exactly one repo scan runs for the whole pair (the lock alone
-    # would serialise two scans and pay the fetch twice).
-    time.sleep(0.8)
-    assert seen == ['webui'], f'the second caller started its own refresh: {seen}'
+    assert seen == ['webui', 'webui'], f'the second caller started its own refresh: {seen}'
 
 
 def test_fast_refresh_still_returns_fresh_data(monkeypatch):

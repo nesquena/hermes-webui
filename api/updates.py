@@ -54,6 +54,8 @@ _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 _check_in_progress = False
+_running_key = None
+_refresh_queue: list[tuple[str, bool]] = []
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
 
@@ -1934,24 +1936,55 @@ def _ignored_agent_update_info() -> dict:
 
 def cached_update_status(*, include_agent=True, channel=None):
     """Return cached update status without performing network or git mutations."""
+    global _running_key, _refresh_queue
     include_agent = bool(include_agent)
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
     with _cache_lock:
         cached = dict(_update_cache)
-    # If the cache was populated for a different channel, it is not a valid
-    # answer for this channel — signal that so callers don't render stale
-    # cross-channel data as authoritative.
-    if cached.get('channel') != channel:
-        cached['channel'] = channel
-        cached['stale_channel'] = True
-    if cached.get('include_agent') != include_agent:
-        cached['include_agent'] = include_agent
-        if not include_agent:
-            cached['agent'] = _ignored_agent_update_info()
-    cached['cached'] = True
-    return cached
+        cached_channel = cached.get('channel')
+        # If the cache was populated for a different channel, it belongs to
+        # another key and is not a valid answer for this channel.
+        if cached_channel is not None and cached_channel != channel:
+            return {
+                'pending': True,
+                'cached': True,
+                'pending_key': {'channel': channel, 'include_agent': include_agent},
+                'channel': channel,
+                'include_agent': include_agent,
+                'webui': None,
+                'agent': None,
+                'stale_key': True,
+                'checked_at': cached.get('checked_at', 0),
+            }
+        if _check_in_progress and (
+            _running_key == (channel, include_agent)
+            or (channel, include_agent) in _refresh_queue
+        ):
+            pending = {
+                'pending': True,
+                'cached': True,
+                'pending_key': {'channel': channel, 'include_agent': include_agent},
+                'channel': channel,
+                'include_agent': include_agent,
+                'checked_at': cached.get('checked_at', 0),
+            }
+            if cached.get('channel') == channel and cached.get('include_agent') == include_agent:
+                pending['webui'] = cached.get('webui')
+                pending['agent'] = cached.get('agent')
+            else:
+                pending['webui'] = None
+                pending['agent'] = None
+                pending['stale_key'] = True
+            return pending
+
+        if cached.get('include_agent') != include_agent:
+            cached['include_agent'] = include_agent
+            if not include_agent:
+                cached['agent'] = _ignored_agent_update_info()
+        cached['cached'] = True
+        return cached
 
 
 def _update_check_wait_budget():
@@ -1977,7 +2010,7 @@ def _publish_update_cache(webui_info, agent_info, include_agent, channel):
 
 def _refresh_updates_in_background(include_agent, channel, done):
     """Fetch both repos, publish the answer, and never raise into the caller."""
-    global _check_in_progress
+    global _check_in_progress, _running_key, _refresh_queue, _refresh_event, _refresh_thread
     try:
         with _refresh_lock:
             webui_info = _check_repo(REPO_ROOT, 'webui', channel)
@@ -1998,8 +2031,23 @@ def _refresh_updates_in_background(include_agent, channel, done):
         logger.exception('background update check failed')
     finally:
         with _cache_lock:
-            _check_in_progress = False
-        done.set()
+            done.set()
+            if _refresh_queue:
+                next_channel, next_include_agent = _refresh_queue.pop(0)
+                _running_key = (next_channel, next_include_agent)
+                next_done = threading.Event()
+                _refresh_event = next_done
+                thread = threading.Thread(
+                    target=_refresh_updates_in_background,
+                    args=(next_include_agent, next_channel, next_done),
+                    name='hermes-update-check',
+                    daemon=True,
+                )
+                _refresh_thread = thread
+                thread.start()
+            else:
+                _running_key = None
+                _check_in_progress = False
 
 
 def check_for_updates(force=False, *, include_agent=True, channel=None, wait=None):
@@ -2008,13 +2056,15 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
     The git work runs in a background thread: the caller waits at most ``wait``
     seconds (default ``DEFAULT_UPDATE_CHECK_WAIT``) and otherwise receives the
     cached payload marked ``pending``, which keeps a slow fetch out of the
-    request path (#9055).
+    request path (#9055). Distinct (channel, include_agent) keys arriving
+    while a refresh is in progress are queued and served (#9056).
     """
-    global _check_in_progress, _refresh_thread, _refresh_event
+    global _check_in_progress, _running_key, _refresh_queue, _refresh_thread, _refresh_event
     include_agent = bool(include_agent)
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    requested_key = (channel, include_agent)
     budget = _update_check_wait_budget() if wait is None else max(0.0, float(wait))
 
     with _cache_lock:
@@ -2029,20 +2079,27 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
         if (
             not force
             and cache_matches
-            and time.time() - _update_cache['checked_at'] < CACHE_TTL
+            and time.time() - float(_update_cache.get('checked_at') or 0) < CACHE_TTL
         ):
             cached = dict(_update_cache)
             cached['cached'] = True
             return cached
-        # A refresh already in flight answers every key: never start a second one.
+
         snapshot = dict(_update_cache)
-        done = _refresh_event
         owns_refresh = False
+
         if not _check_in_progress:
             _check_in_progress = True
-            owns_refresh = True
+            _running_key = requested_key
+            _refresh_queue.clear()
             done = threading.Event()
             _refresh_event = done
+            owns_refresh = True
+        else:
+            if requested_key != _running_key:
+                if requested_key not in _refresh_queue:
+                    _refresh_queue.append(requested_key)
+            done = _refresh_event
 
     if owns_refresh:
         thread = threading.Thread(
@@ -2061,13 +2118,32 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
         refreshed = (
             _update_cache.get('include_agent') == include_agent
             and _update_cache.get('channel') == channel
-            and _update_cache['checked_at'] > float(snapshot.get('checked_at') or 0)
+            and float(_update_cache.get('checked_at') or 0) > float(snapshot.get('checked_at') or 0)
         )
         if refreshed:
-            return dict(_update_cache)
-        pending = dict(_update_cache)
-        pending['cached'] = True
-        pending['pending'] = True
+            res = dict(_update_cache)
+            res['cached'] = False
+            return res
+
+        pending = {
+            'pending': True,
+            'cached': True,
+            'pending_key': {'channel': channel, 'include_agent': include_agent},
+            'channel': channel,
+            'include_agent': include_agent,
+            'checked_at': _update_cache.get('checked_at', 0),
+        }
+        cache_matches_key = (
+            _update_cache.get('include_agent') == include_agent
+            and _update_cache.get('channel') == channel
+        )
+        if not cache_matches_key:
+            pending['webui'] = None
+            pending['agent'] = None
+            pending['stale_key'] = True
+        else:
+            pending['webui'] = _update_cache.get('webui')
+            pending['agent'] = _update_cache.get('agent')
         return pending
 
 

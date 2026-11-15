@@ -13315,7 +13315,21 @@ async function checkUpdatesNow(channelOverride){
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
     const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
+    let data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
+    if(data&&data.pending===true){
+      const pollChannel=encodeURIComponent(data.channel||(channelOverride==='experimental'?'experimental':'stable'));
+      const pollIncludeAgent=data.include_agent===false?'0':'1';
+      const pollUrl=`/api/updates/check?channel=${pollChannel}&include_agent=${pollIncludeAgent}`;
+      for(let attempt=0;attempt<12;attempt++){
+        await new Promise(r=>setTimeout(r,1500));
+        data=await api(pollUrl,{method:'GET'});
+        if(!data||data.pending!==true) break;
+      }
+    }
+    if(data&&data.pending===true){
+      if(status){status.textContent=t('settings_checking');status.style.color='var(--muted)';}
+      return;
+    }
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {

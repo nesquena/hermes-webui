@@ -19190,7 +19190,21 @@ def handle_get(handler, parsed) -> bool:
             )
         from api.updates import cached_update_status
 
-        return j(handler, cached_update_status(include_agent=include_agent_updates))
+        channel_param = qs.get("channel", [None])[0]
+        query_channel = channel_param if channel_param in ("stable", "experimental") else None
+
+        include_agent_param = qs.get("include_agent", [None])[0]
+        if include_agent_param == "1":
+            include_agent_val = True
+        elif include_agent_param == "0":
+            include_agent_val = False
+        else:
+            include_agent_val = include_agent_updates
+
+        kwargs = {"include_agent": include_agent_val}
+        if query_channel is not None:
+            kwargs["channel"] = query_channel
+        return j(handler, cached_update_status(**kwargs))
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
