@@ -322,7 +322,7 @@ def test_api_session_metadata_only_passes_session_profile_to_summary(
         updated_at=1001.0,
     )
     session.save(touch_updated_at=False)
-    monkeypatch.setattr(routes_mod, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_mod, "_lookup_cli_session_metadata", lambda _sid, **_kw: {})
     monkeypatch.setattr(routes_mod, "_get_active_profile_name", lambda: "maiko")
 
     class Handler:

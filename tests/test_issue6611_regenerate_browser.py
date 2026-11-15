@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 from tests._issue6611_fixture import load_issue6611_fixture
+from tests.js_source_extract import extract_function
 
 
 ROOT = Path(__file__).parents[1]
@@ -143,3 +144,59 @@ def test_regenerate_response_loads_the_full_session_before_requiring_revision():
     assert body.index("await _ensureAllMessagesLoaded()") < body.index(
         "if(!S.session.regeneration_revision)"
     )
+
+
+def test_metadata_without_revision_loads_messages_before_regenerating():
+    sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    functions = "\n".join([
+        extract_function(sessions, "_adoptRegenerationRevision"),
+        extract_function(sessions, "_ensureMessagesLoaded", "async function"),
+        extract_function(sessions, "_ensureAllMessagesLoaded", "async function"),
+        extract_function(ui, "regenerateResponse", "async function"),
+    ])
+    script = f"""
+const assert=require('node:assert/strict');
+const window={{}}, INFLIGHT={{}};
+let S, _messagesTruncated, _oldestIdx, _loadingOlder=false;
+let _loadingSessionId='s1', _loadSessionGeneration=1, _msgLimitMax=500;
+const _MSG_LIMIT_MAX=500;
+function _clearSameSessionForceReloadHint(){{}}
+function _messageReloadLimitForSession(){{return 30;}}
+function _syncToolCallsForLoadedMessages(){{}}
+function clearLiveToolCards(){{}}
+function _setSessionViewedCount(){{}}
+function _bumpMessagesGeneration(){{}}
+function t(key){{return key;}}
+function setStatus(message){{throw new Error(message);}}
+const rows=[{{role:'user',content:'prompt'}},{{role:'assistant',content:'answer'}}];
+let requests, accepted, truncated;
+async function api(path){{
+  requests.push(path);
+  if(path.includes('messages=0')) return {{session:{{session_id:'s1',messages:[],message_count:2}}}};
+  const tail=truncated&&!path.includes('msg_limit=all');
+  return {{session:{{session_id:'s1',messages:tail?rows.slice(1):rows,message_count:2,
+    _messages_truncated:tail,_messages_offset:tail?1:0,
+    ...(tail?{{}}:{{regeneration_revision:'full-revision'}})}}}};
+}}
+async function startRegeneration(sid,revision){{accepted.push([sid,revision]);}}
+{functions}
+(async()=>{{
+  for(truncated of [false,true]){{
+    requests=[]; accepted=[]; _messagesTruncated=false; _oldestIdx=0;
+    const metadata=await api('/api/session?session_id=s1&messages=0&resolve_model=0');
+    S={{session:metadata.session,messages:[],busy:false}};
+    assert.equal(S.session.regeneration_revision,undefined);
+    await _ensureMessagesLoaded('s1');
+    assert.equal(S.session.regeneration_revision,truncated?undefined:'full-revision');
+    await regenerateResponse({{closest:()=>({{dataset:{{msgIdx:String(S.messages.length-1)}}}})}});
+    assert.deepEqual(accepted,[['s1','full-revision']]);
+    assert.equal(requests.length,truncated?3:2);
+    if(truncated) assert.ok(requests[2].includes('messages=1&resolve_model=0&msg_limit=all'));
+    assert.equal(_loadingOlder,false);
+  }}
+  process.stdout.write('metadata -> messages -> regenerate ok (complete and truncated)');
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, check=True)
+    assert result.stdout == "metadata -> messages -> regenerate ok (complete and truncated)"

@@ -184,6 +184,7 @@ function renderMessages() {{ now += 200; container.scrollHeight = 1300; }}
 function _captureMessageViewportAnchor() {{ return null; }}
 function _restoreMessageViewportAnchor() {{ return false; }}
 function _messageVirtualPrependedHeightDelta() {{ return null; }}
+function _advanceVisibleBaselineForServerKnownRows() {{}}
 function requestAnimationFrame() {{ return 0; }}
 {_function_body('_freshProgrammaticScrollActive')}
 {_function_body('_loadOlderMessages', SESSIONS_JS)}

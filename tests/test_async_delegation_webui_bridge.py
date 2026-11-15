@@ -21,6 +21,7 @@ import pytest
 
 from api import background_process as bp
 from api import config as cfg
+from api import delegation_ledger_owner
 from api import process_event_utils as peu
 from api import streaming
 
@@ -484,7 +485,7 @@ def test_formatting_failure_stays_bounded_not_keep_legacy_retrying(monkeypatch):
     _install_fake_legacy_delivery_api(monkeypatch)
     calls = {"n": 0}
 
-    def _spy(process_registry, evt, *, keep_legacy_retrying=False):
+    def _spy(process_registry, evt, *, keep_legacy_retrying=False, claim=None):
         calls["n"] += 1
         calls["keep_legacy_retrying"] = keep_legacy_retrying
 
@@ -940,6 +941,12 @@ def test_delivered_or_legacy_event_is_not_scheduled_for_lease_retry(monkeypatch)
 def test_async_delivery_retry_uses_one_lossless_restore_sweep(monkeypatch):
     _reset_wakeup_state()
     delivery = _install_fake_durable_delivery_api(monkeypatch)
+    # Coalescing is under test, not ownership: per-call owner lookup I/O can make
+    # this loop outlast the 0.2s sweep on slow runners, and this fake restore
+    # (unlike the Agent's) re-offers every pending id on each sweep.
+    monkeypatch.setattr(
+        peu, "resolve_ledger_owner", lambda _evt: delegation_ledger_owner.LedgerOwner("missing")
+    )
     retry_queue = queue.Queue()
     cap = peu.LEGACY_ASYNC_DELIVERY_DEDUPE_MAX
     try:
@@ -1581,7 +1588,14 @@ def test_busy_predicate_covers_stream_publication_window_before_active_runs(
     active turn. Otherwise a sibling same-origin completion would pass the busy
     pre-check, reserve, claim, and 409 against the already-published stream,
     burning the finite delivery-attempt budget. With the fix, completions that
-    arrive in that window defer WITHOUT claiming (zero claims, zero attempts)."""
+    arrive in that window defer WITHOUT claiming (zero claims, zero attempts).
+
+    The window carries its launch-phase claim: every registration edge publishes
+    the claim in the SAME ``STREAMS_LOCK`` critical section that creates the
+    ``STREAMS`` entry (api/routes.py, #7302 finding 5), so a published stream that
+    is still launching always holds one. Bare ``STREAMS`` membership is not
+    liveness on its own -- a worker that died before admission leaves the entry
+    behind, and that shape must not defer a sibling completion."""
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
@@ -1593,6 +1607,14 @@ def test_busy_predicate_covers_stream_publication_window_before_active_runs(
         cfg,
         "STREAM_SESSION_OWNERS",
         {"stream-preactive": "webui-session-1"},
+    )
+    # The publication window carries its launch-phase claim (see the docstring:
+    # the entry and its claim are published on ONE STREAMS_LOCK edge), so this
+    # fixture models the launching stream, not a worker-less orphan.
+    monkeypatch.setattr(
+        cfg,
+        "PRE_ADMISSION_CLAIMS",
+        {"stream-preactive": "publication-window-claim"},
     )
     monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
     monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)

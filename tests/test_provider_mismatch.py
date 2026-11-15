@@ -1633,7 +1633,9 @@ class TestFrontendModelProviderState:
     def test_boot_session_update_sends_model_provider(self):
         src = _read("static/boot.js")
         assert "_modelStateForSelect" in src
-        assert "model_provider:modelState.model_provider||null" in src
+        # Whitespace-tolerant: the boot session update must send the picker's
+        # provider (falling back to null), however the object literal is spaced.
+        assert re.search(r"model_provider\s*:\s*modelState\.model_provider\s*\|\|\s*null", src)
 
     def test_new_session_carries_visible_picker_model_into_create_request(self):
         src = _read("static/sessions.js")

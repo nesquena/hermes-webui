@@ -657,6 +657,34 @@ anchor after `/api/chat/start` succeeds and returns `stream_id`. Reconstruction
 is for reload, reconnect, session switch, SSE replay, and recovery cases where
 the local anchor is missing or incomplete.
 
+Current WebUI run-journal reconstruction also restores server-emitted
+`state_saved` events into `anchor.side_effects[]`. Recovery accepts only an
+exact durable journal envelope whose session id, run id, event id, and sequence
+agree, and it projects only bounded `session_id` / `kind` / `action` / `name`
+metadata. Extra producer payload is not copied into the Anchor scene. A
+`state_saved` row with an unrepresentable timestamp (including an integer too
+large for a float), a non-finite timestamp, or unencodable metadata is skipped
+individually; valid side effects and the rest of the live snapshot survive.
+The durable journal is not rewritten by this projection. Recovery
+keeps at most 128 side effects and 64KB of their canonical encoded envelopes per
+run; exceeding either limit stops side-effect projection and sets
+`side_effects_truncated=true` on the scene. Session recovery hydrates recovered
+side effects back into the live Anchor registry before replay resumes, and a
+truncated selected recovery snapshot shows a one-per-snapshot warning toast so
+bounded recovery is not mistaken for a complete outcome list. This does not
+authorize reconstruction of `artifact_reference` until a server-owned artifact
+producer/authority contract is present on the current mainline.
+
+At the anchor-scene persistence boundary, the existing 256,000-byte canonical
+UTF-8 JSON budget and 1,000-row limit remain in force. If adding recovered
+outcomes puts a scene over the byte budget, remove only `side_effects` from the
+scene copy and re-measure before rejecting it. A rows-only scene that fits keeps
+its complete Worklog rows and other metadata; a scene that still exceeds the
+budget is rejected without trimming rows or raising the limit. Scenes already
+within the budget retain their side effects. This fallback does not mutate the
+recovery snapshot, provider history, or durable journal; outcomes omitted from
+that saved scene remain available in the journal.
+
 During migration, `INFLIGHT` remains a recovery cache until an anchor-backed
 field takes over. The handoff order should be:
 

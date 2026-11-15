@@ -43,7 +43,7 @@ def _history(session, prompt):
     )
     rows = models.reconciled_state_db_messages_for_session(session, prefer_context=True, state_messages=[])
     rows = _new_turn_context_from_messages(rows, prompt)
-    rows = _dedupe_replayed_context_messages(rows, rows, prompt)
+    rows, _protected = _dedupe_replayed_context_messages(rows, rows, prompt)
     rows = _dedupe_replayed_active_context(rows, rows, prompt)
     return _sanitize_messages_for_agent(rows)
 

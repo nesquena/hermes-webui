@@ -117,7 +117,16 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
         def __enter__(self):
             session.active_stream_id = existing_stream_id
             session.pending_user_message = "prompt already claimed by another start"
-            session.pending_started_at = 123.0
+            # Fresh timestamp on purpose: this models the REGISTRATION WINDOW — a
+            # start that published its stream and its pending turn microseconds
+            # ago. A pending turn past the grace window is what a CRASHED turn
+            # leaves behind, and that is an orphan the guard must clear (#7302).
+            # Pinning an epoch-1970 timestamp here modelled the bug (a stale
+            # stream blocking forever) instead of the race this test protects;
+            # with the orphan reaper in place it also spins the caller's
+            # while-loop, because this fake lock re-mutates the session on every
+            # entry while the reaper clears it every pass.
+            session.pending_started_at = time.time()
             routes.STREAMS[existing_stream_id] = queue.Queue()
             return self
 
