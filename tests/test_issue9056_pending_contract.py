@@ -586,3 +586,186 @@ setTimeout = (fn, ms) => setImmediate(fn);
     result = _run_node(harness)
     assert result['marker'] is None, "hermes-update-checked must remain unset after bound expires"
     assert result['bannerCalls'] == 0, "no banner may fire when all answers are pending"
+
+
+# ── Test 10: Retain completed answers per channel across queued runs ─────────
+
+
+def test_completed_answers_retained_per_channel_after_queue_drain(monkeypatch):
+    """Case 1: stable+agent enabled published first, experimental queued.
+
+    After queue drain, both completed keys must be retained: cached_update_status
+    and check_for_updates must serve each key's distinct answer without starting
+    any new repo scans.
+    """
+    _reset_cache(monkeypatch)
+    active = {'lock': threading.Lock(), 'now': 0, 'peak': 0}
+    scans = []
+    barrier = threading.Barrier(2)
+    ready = threading.Event()
+
+    def fake_check(path, name, channel=updates.DEFAULT_UPDATE_CHANNEL):
+        with active['lock']:
+            active['now'] += 1
+            active['peak'] = max(active['peak'], active['now'])
+            scans.append((name, channel))
+        if channel == 'stable' and not ready.is_set():
+            ready.set()
+            barrier.wait(timeout=5)
+        try:
+            behind = 1 if channel == 'stable' else 3
+            return {'name': name, 'behind': behind, 'channel': channel, 'stub': True}
+        finally:
+            with active['lock']:
+                active['now'] -= 1
+
+    monkeypatch.setattr(updates, '_check_repo', fake_check)
+
+    res1 = {}
+
+    def run_stable():
+        res1['out'] = _call(monkeypatch, force=True, include_agent=True, channel='stable', wait=0.1)
+
+    t1 = threading.Thread(target=run_stable)
+    t1.start()
+    assert ready.wait(timeout=5), 'stable worker never started'
+
+    # While stable is in flight, experimental arrives:
+    res2 = _call(monkeypatch, force=True, include_agent=True, channel='experimental', wait=0.05)
+    assert res2.get('pending') is True
+    assert res2.get('channel') == 'experimental'
+    assert res2.get('webui') is None
+    assert res2.get('agent') is None
+    assert res2.get('stale_key') is True
+
+    barrier.wait(timeout=5)
+    t1.join(timeout=10)
+    _drain_background()
+
+    # 4 scans during background refresh: (webui, stable), (agent, default), (webui, experimental), (agent, default)
+    assert len(scans) == 4
+    drain_scans = len(scans)
+
+    # 1. Consume stable key: must serve completed stable answer, not pending/stale_key
+    cached_stable = updates.cached_update_status(channel='stable', include_agent=True)
+    assert cached_stable.get('pending') is not True
+    assert cached_stable.get('channel') == 'stable'
+    assert cached_stable.get('include_agent') is True
+    assert cached_stable.get('webui', {}).get('behind') == 1
+    assert cached_stable.get('webui', {}).get('channel') == 'stable'
+    assert cached_stable.get('agent', {}).get('behind') == 1
+    assert cached_stable.get('agent', {}).get('ignored') is not True
+
+    polled_stable = updates.check_for_updates(force=False, channel='stable', include_agent=True)
+    assert polled_stable.get('pending') is not True
+    assert polled_stable.get('channel') == 'stable'
+    assert polled_stable.get('include_agent') is True
+    assert polled_stable.get('webui', {}).get('behind') == 1
+    assert polled_stable.get('agent', {}).get('behind') == 1
+
+    # 2. Consume experimental key: must serve completed experimental answer
+    cached_exp = updates.cached_update_status(channel='experimental', include_agent=True)
+    assert cached_exp.get('pending') is not True
+    assert cached_exp.get('channel') == 'experimental'
+    assert cached_exp.get('include_agent') is True
+    assert cached_exp.get('webui', {}).get('behind') == 3
+    assert cached_exp.get('webui', {}).get('channel') == 'experimental'
+    assert cached_exp.get('agent', {}).get('behind') == 1
+
+    polled_exp = updates.check_for_updates(force=False, channel='experimental', include_agent=True)
+    assert polled_exp.get('pending') is not True
+    assert polled_exp.get('channel') == 'experimental'
+    assert polled_exp.get('include_agent') is True
+    assert polled_exp.get('webui', {}).get('behind') == 3
+
+    # Assert no new repo scans were triggered by the polls
+    assert len(scans) == drain_scans, f'polls triggered {len(scans) - drain_scans} unexpected scans'
+
+
+# ── Test 11: Retain completed answers per include_agent across queued runs ────
+
+
+def test_completed_answers_retained_per_include_agent_after_queue_drain(monkeypatch):
+    """Case 2: stable+agent disabled queued behind stable+agent enabled.
+
+    After queue drain, both completed keys must be retained: the enabled key
+    must carry the real Agent payload (not the disabled key's ignored payload),
+    the disabled key must carry the ignored payload, and neither poll may start
+    a new refresh.
+    """
+    _reset_cache(monkeypatch)
+    active = {'lock': threading.Lock(), 'now': 0, 'peak': 0}
+    scans = []
+    barrier = threading.Barrier(2)
+    ready = threading.Event()
+
+    def fake_check(path, name, channel=updates.DEFAULT_UPDATE_CHANNEL):
+        with active['lock']:
+            active['now'] += 1
+            active['peak'] = max(active['peak'], active['now'])
+            scans.append((name, channel))
+        if name == 'webui' and not ready.is_set():
+            ready.set()
+            barrier.wait(timeout=5)
+        try:
+            return {'name': name, 'behind': 5, 'channel': channel, 'stub': True}
+        finally:
+            with active['lock']:
+                active['now'] -= 1
+
+    monkeypatch.setattr(updates, '_check_repo', fake_check)
+
+    res1 = {}
+
+    def run_agent_enabled():
+        res1['out'] = _call(monkeypatch, force=True, include_agent=True, channel='stable', wait=0.1)
+
+    t1 = threading.Thread(target=run_agent_enabled)
+    t1.start()
+    assert ready.wait(timeout=5), 'first worker never started'
+
+    # While include_agent=True is in flight, include_agent=False arrives:
+    res2 = _call(monkeypatch, force=True, include_agent=False, channel='stable', wait=0.05)
+    assert res2.get('pending') is True
+    assert res2.get('channel') == 'stable'
+    assert res2.get('include_agent') is False
+    assert res2.get('webui') is None
+    assert res2.get('agent') is None
+    assert res2.get('stale_key') is True
+
+    barrier.wait(timeout=5)
+    t1.join(timeout=10)
+    _drain_background()
+
+    # Enabled did 2 scans (webui + agent), disabled did 1 scan (webui only)
+    assert len(scans) == 3
+    drain_scans = len(scans)
+
+    # 1. Consume enabled key: must carry the REAL Agent payload, NOT ignored
+    cached_enabled = updates.cached_update_status(channel='stable', include_agent=True)
+    assert cached_enabled.get('pending') is not True
+    assert cached_enabled.get('include_agent') is True
+    assert cached_enabled.get('agent', {}).get('behind') == 5
+    assert cached_enabled.get('agent', {}).get('ignored') is not True
+    assert cached_enabled.get('webui', {}).get('behind') == 5
+
+    polled_enabled = updates.check_for_updates(force=False, channel='stable', include_agent=True)
+    assert polled_enabled.get('pending') is not True
+    assert polled_enabled.get('include_agent') is True
+    assert polled_enabled.get('agent', {}).get('behind') == 5
+    assert polled_enabled.get('agent', {}).get('ignored') is not True
+
+    # 2. Consume disabled key: must carry the ignored Agent payload
+    cached_disabled = updates.cached_update_status(channel='stable', include_agent=False)
+    assert cached_disabled.get('pending') is not True
+    assert cached_disabled.get('include_agent') is False
+    assert cached_disabled.get('agent', {}).get('ignored') is True
+    assert cached_disabled.get('webui', {}).get('behind') == 5
+
+    polled_disabled = updates.check_for_updates(force=False, channel='stable', include_agent=False)
+    assert polled_disabled.get('pending') is not True
+    assert polled_disabled.get('include_agent') is False
+    assert polled_disabled.get('agent', {}).get('ignored') is True
+
+    # Assert no new repo scans were triggered by the polls
+    assert len(scans) == drain_scans, f'polls triggered {len(scans) - drain_scans} unexpected scans'

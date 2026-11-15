@@ -50,9 +50,17 @@ except ImportError:
     _AGENT_DIR = None
 
 _update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}
+_update_cache_by_key: dict[tuple[str, bool], dict] = {}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
+
+
+def _invalidate_update_cache():
+    """Invalidate the flat cache mirror and clear all retained per-key entries."""
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+        _update_cache_by_key.clear()
 _check_in_progress = False
 _running_key = None
 _refresh_queue: list[tuple[str, bool]] = []
@@ -496,8 +504,7 @@ def _apply_clear_lock_inner(target: str) -> dict:
         # records. Pass the configured channel through — otherwise an
         # experimental-channel WebUI lock-recovery retry silently falls back
         # to stable (Codex gate: _apply_update_inner defaults to stable).
-        with _cache_lock:
-            _update_cache['checked_at'] = 0
+        _invalidate_update_cache()
         retry_result = _apply_update_inner(target, _read_update_channel())
         retry_result = dict(retry_result)
         retry_result['lock_recovery'] = {
@@ -1941,7 +1948,47 @@ def cached_update_status(*, include_agent=True, channel=None):
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    requested_key = (channel, include_agent)
     with _cache_lock:
+        if float(_update_cache.get('checked_at') or 0) == 0:
+            _update_cache_by_key.clear()
+
+        key_in_flight = _check_in_progress and (
+            _running_key == requested_key
+            or requested_key in _refresh_queue
+        )
+        if key_in_flight:
+            pending = {
+                'pending': True,
+                'cached': True,
+                'pending_key': {'channel': channel, 'include_agent': include_agent},
+                'channel': channel,
+                'include_agent': include_agent,
+                'checked_at': _update_cache.get('checked_at', 0),
+            }
+            if requested_key in _update_cache_by_key:
+                entry = _update_cache_by_key[requested_key]
+                pending['webui'] = entry.get('webui')
+                pending['agent'] = entry.get('agent')
+                pending['checked_at'] = entry.get('checked_at', 0)
+            elif (
+                _update_cache.get('include_agent') == include_agent
+                and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+            ):
+                pending['webui'] = _update_cache.get('webui')
+                pending['agent'] = _update_cache.get('agent')
+                pending['checked_at'] = _update_cache.get('checked_at', 0)
+            else:
+                pending['webui'] = None
+                pending['agent'] = None
+                pending['stale_key'] = True
+            return pending
+
+        if requested_key in _update_cache_by_key:
+            res = dict(_update_cache_by_key[requested_key])
+            res['cached'] = True
+            return res
+
         cached = dict(_update_cache)
         cached_channel = cached.get('channel')
         # If the cache was populated for a different channel, it belongs to
@@ -1958,33 +2005,43 @@ def cached_update_status(*, include_agent=True, channel=None):
                 'stale_key': True,
                 'checked_at': cached.get('checked_at', 0),
             }
-        if _check_in_progress and (
-            _running_key == (channel, include_agent)
-            or (channel, include_agent) in _refresh_queue
-        ):
-            pending = {
-                'pending': True,
-                'cached': True,
-                'pending_key': {'channel': channel, 'include_agent': include_agent},
-                'channel': channel,
-                'include_agent': include_agent,
-                'checked_at': cached.get('checked_at', 0),
-            }
-            if cached.get('channel') == channel and cached.get('include_agent') == include_agent:
-                pending['webui'] = cached.get('webui')
-                pending['agent'] = cached.get('agent')
-            else:
-                pending['webui'] = None
-                pending['agent'] = None
-                pending['stale_key'] = True
-            return pending
 
-        if cached.get('include_agent') != include_agent:
+        if cached.get('include_agent') == include_agent:
+            cached['channel'] = channel
+            cached['cached'] = True
+            return cached
+
+        # Re-enable adaptation on legacy flat entry (pinned by test_security_review_fixes.py):
+        if (
+            include_agent
+            and cached.get('include_agent') is False
+            and not cached.get('agent', {}).get('ignored')
+        ):
+            cached['include_agent'] = True
+            if cached_channel is None:
+                cached['channel'] = channel
+            cached['cached'] = True
+            return cached
+
+        if float(cached.get('checked_at') or 0) == 0:
+            cached['channel'] = channel
             cached['include_agent'] = include_agent
             if not include_agent:
                 cached['agent'] = _ignored_agent_update_info()
-        cached['cached'] = True
-        return cached
+            cached['cached'] = True
+            return cached
+
+        return {
+            'pending': True,
+            'cached': True,
+            'pending_key': {'channel': channel, 'include_agent': include_agent},
+            'channel': channel,
+            'include_agent': include_agent,
+            'webui': None,
+            'agent': None,
+            'stale_key': True,
+            'checked_at': cached.get('checked_at', 0),
+        }
 
 
 def _update_check_wait_budget():
@@ -2000,9 +2057,26 @@ def _update_check_wait_budget():
 
 def _publish_update_cache(webui_info, agent_info, include_agent, channel):
     with _cache_lock:
+        now = time.time()
+        expired_keys = [
+            k for k, v in _update_cache_by_key.items()
+            if now - float(v.get('checked_at') or 0) >= CACHE_TTL
+        ]
+        for k in expired_keys:
+            del _update_cache_by_key[k]
+
+        entry = {
+            'webui': webui_info,
+            'agent': agent_info,
+            'checked_at': now,
+            'include_agent': include_agent,
+            'channel': channel,
+        }
+        _update_cache_by_key[(channel, include_agent)] = dict(entry)
+
         _update_cache['webui'] = webui_info
         _update_cache['agent'] = agent_info
-        _update_cache['checked_at'] = time.time()
+        _update_cache['checked_at'] = now
         _update_cache['include_agent'] = include_agent
         _update_cache['channel'] = channel
         return dict(_update_cache)
@@ -2068,24 +2142,44 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
     budget = _update_check_wait_budget() if wait is None else max(0.0, float(wait))
 
     with _cache_lock:
+        if float(_update_cache.get('checked_at') or 0) == 0:
+            _update_cache_by_key.clear()
+
         # Cache is only valid when BOTH the channel AND include_agent match —
         # a channel switch must not serve the previous channel's answer, and an
         # in-progress check for the other channel must not short-circuit this one
         # with a stale cross-channel payload (Codex SILENT #5).
-        cache_matches = (
-            _update_cache.get('include_agent') == include_agent
-            and _update_cache.get('channel') == channel
-        )
-        if (
-            not force
-            and cache_matches
-            and time.time() - float(_update_cache.get('checked_at') or 0) < CACHE_TTL
-        ):
-            cached = dict(_update_cache)
-            cached['cached'] = True
-            return cached
+        if not force:
+            if requested_key in _update_cache_by_key:
+                entry = _update_cache_by_key[requested_key]
+                if time.time() - float(entry.get('checked_at') or 0) < CACHE_TTL:
+                    cached = dict(entry)
+                    cached['cached'] = True
+                    return cached
+            else:
+                cache_matches = (
+                    _update_cache.get('include_agent') == include_agent
+                    and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+                )
+                if (
+                    cache_matches
+                    and time.time() - float(_update_cache.get('checked_at') or 0) < CACHE_TTL
+                ):
+                    cached = dict(_update_cache)
+                    cached['cached'] = True
+                    cached['channel'] = channel
+                    cached['include_agent'] = include_agent
+                    return cached
 
-        snapshot = dict(_update_cache)
+        prior_checked_at = 0.0
+        if requested_key in _update_cache_by_key:
+            prior_checked_at = float(_update_cache_by_key[requested_key].get('checked_at') or 0)
+        elif (
+            _update_cache.get('include_agent') == include_agent
+            and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+        ):
+            prior_checked_at = float(_update_cache.get('checked_at') or 0)
+
         owns_refresh = False
 
         if not _check_in_progress:
@@ -2115,15 +2209,26 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
         done.wait(budget)
 
     with _cache_lock:
-        refreshed = (
+        if float(_update_cache.get('checked_at') or 0) == 0:
+            _update_cache_by_key.clear()
+
+        refreshed_entry = None
+        if requested_key in _update_cache_by_key:
+            entry = _update_cache_by_key[requested_key]
+            if float(entry.get('checked_at') or 0) > prior_checked_at:
+                refreshed_entry = dict(entry)
+        elif (
             _update_cache.get('include_agent') == include_agent
-            and _update_cache.get('channel') == channel
-            and float(_update_cache.get('checked_at') or 0) > float(snapshot.get('checked_at') or 0)
-        )
-        if refreshed:
-            res = dict(_update_cache)
-            res['cached'] = False
-            return res
+            and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+            and float(_update_cache.get('checked_at') or 0) > prior_checked_at
+        ):
+            refreshed_entry = dict(_update_cache)
+            refreshed_entry['channel'] = channel
+            refreshed_entry['include_agent'] = include_agent
+
+        if refreshed_entry is not None:
+            refreshed_entry['cached'] = False
+            return refreshed_entry
 
         pending = {
             'pending': True,
@@ -2133,17 +2238,22 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
             'include_agent': include_agent,
             'checked_at': _update_cache.get('checked_at', 0),
         }
-        cache_matches_key = (
+        if requested_key in _update_cache_by_key:
+            entry = _update_cache_by_key[requested_key]
+            pending['webui'] = entry.get('webui')
+            pending['agent'] = entry.get('agent')
+            pending['checked_at'] = entry.get('checked_at', 0)
+        elif (
             _update_cache.get('include_agent') == include_agent
-            and _update_cache.get('channel') == channel
-        )
-        if not cache_matches_key:
+            and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+        ):
+            pending['webui'] = _update_cache.get('webui')
+            pending['agent'] = _update_cache.get('agent')
+            pending['checked_at'] = _update_cache.get('checked_at', 0)
+        else:
             pending['webui'] = None
             pending['agent'] = None
             pending['stale_key'] = True
-        else:
-            pending['webui'] = _update_cache.get('webui')
-            pending['agent'] = _update_cache.get('agent')
         return pending
 
 
@@ -2813,8 +2923,7 @@ def _apply_force_update_inner(target: str, channel) -> dict:
     if not _discard_local_changes(path, compare_ref):
         return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
-    with _cache_lock:
-        _update_cache['checked_at'] = 0
+    _invalidate_update_cache()
 
     if target == 'agent':
         gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
@@ -3126,8 +3235,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                     ),
                     'stash_conflict': True,
                 }
-            with _cache_lock:
-                _update_cache['checked_at'] = 0
+            _invalidate_update_cache()
 
             if target == 'agent':
                 gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
@@ -3158,8 +3266,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             return response
 
     # Invalidate cache
-    with _cache_lock:
-        _update_cache['checked_at'] = 0
+    _invalidate_update_cache()
 
     if target == 'agent':
         gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
