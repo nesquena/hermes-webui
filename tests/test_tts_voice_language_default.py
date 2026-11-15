@@ -113,6 +113,10 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Ele já fez o almoço na casa da avó.", ""),
         ("Alle Dateien wurden gespeichert. Alle Dienste laufen wieder.", ""),
         ("Alla filer har sparats och alla tjänster körs igen.", ""),
+        # Shared la/le/un/una/con back up only a strongly Italian word.
+        ("Il a fini la configuration.", ""),
+        ("Di la verdad con una sonrisa.", ""),
+        ("Je ne sais pas, non, la build est verte.", ""),
         # ...while short Italian replies that lost la/un/con still vote Italian.
         *[(text, "it") for text in [
             "La connessione è stata ripristinata.",
@@ -120,6 +124,9 @@ def _patch_profile_config(monkeypatch, cfg):
             "Ho trovato un errore nella funzione di login.",
             "Fatto! Ho sistemato il bug con una patch.",
             "Ecco la configurazione aggiornata.",
+            "Le modifiche sono pronte.",
+            "Va bene, procedo con le modifiche.",
+            "Perfetto, la build è verde.",
         ]],
         ("", ""),
     ],
@@ -296,6 +303,9 @@ _SHORT_ITALIAN_REPLIES = [
     "Ho aggiornato la configurazione e riavviato il server.",
     "Ho trovato un errore nella funzione di login.",
     "Fatto! Ho sistemato il bug con una patch.",
+    "Le modifiche sono pronte.",
+    "Va bene, procedo con le modifiche.",
+    "Perfetto, la build è verde.",
 ]
 
 

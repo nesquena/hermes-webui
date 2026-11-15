@@ -26393,7 +26393,18 @@ def _detect_text_lang(text: str) -> str:
         "adesso", "oggi", "molto", "così", "ma",
         "ho", "hai", "abbiamo", "hanno", "stato", "stata", "stati", "fatto",
         "ecco", "ancora", "nel", "nella", "nelle", "negli", "della", "dello",
-        "delle", "degli", "sulla", "dalla",
+        "delle", "degli", "sulla", "dalla", "bene", "perfetto",
+    }
+    # Words Italian shares with French/Spanish. They only back up a strong
+    # Italian vote, and only when no French/Spanish/Portuguese word
+    # is present, so "Le modifiche sono pronte." is Italian while
+    # "Il est allé à la maison" (il + la) stays inconclusive.
+    shared_words = {"la", "le", "un", "una", "con"}
+    other_romance_words = {
+        "est", "et", "les", "des", "du", "une", "je", "nous", "vous", "avec",
+        "pas", "dans", "très", "mais", "es", "el", "los", "las", "y", "muy",
+        "pero", "para", "está", "tiene", "en", "su", "sus", "uma", "um",
+        "você", "não", "ele", "ela", "já", "os",
     }
     en_words = {
         "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
@@ -26411,6 +26422,12 @@ def _detect_text_lang(text: str) -> str:
     it_votes += accented_it
     # -zione/-zioni is Italian only (French -tion, Spanish -ción).
     it_votes += sum(1 for w in words if w.endswith(("zione", "zioni")))
+    # il/di/non/ma/come are also French or Spanish words, so they can't be
+    # the Italian vote that shared words back up ("Il a fini la ...").
+    weak_it_words = {"il", "di", "non", "ma", "come"}
+    strong_it_votes = it_votes - sum(1 for w in words if w in weak_it_words)
+    if strong_it_votes and not any(w in other_romance_words for w in words):
+        it_votes += sum(1 for w in words if w in shared_words)
     if it_votes >= 2 and it_votes > en_votes:
         return "it"
     if en_votes >= 2 and en_votes > it_votes:
