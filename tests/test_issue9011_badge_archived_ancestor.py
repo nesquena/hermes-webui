@@ -1,35 +1,136 @@
 """Issue #9011: the sidebar badge counted children the renderer drops.
 
-With Show archived off, a ``child_session`` row whose chain ends at an archived
-ancestor gets no sidebar row: ``_attachChildSessionsToSidebarRows`` suppresses
-it (``hasHiddenArchivedAncestor``, #4293). ``webui_session_count`` still counted
-it, so a chain ``A (archived) <- B <- C`` showed a badge of 3 over a list of 1,
-and every new gateway session chained onto the archived root added one more.
+With Show archived off, ``_attachChildSessionsToSidebarRows`` drops a child that
+no visible row holds when its exact parent chain reaches an archived ancestor
+(``hasHiddenArchivedAncestor``, #4293). ``webui_session_count`` still counted
+it, so a chain ``A (archived) <- B <- C`` showed a badge of 3 over a list of 1.
 
-These tests build the real server payload, feed its rows and reference rows
-through the production partition/attachment helpers (node), and check that the
-badge total equals the rows the sidebar renders (top-level plus nested), in
-both Show archived states. Orphan promotion is deliberately unchanged.
+The server now decides which rows that drop removes with the browser's own
+rules (``_sidebar_rows_dropped_by_archived_ancestors``): per tab and profile, a
+visible holder first (resolved parent, compression segments, lineage tip, root
+and key), then the exact-id chain through the tab's rendered and archived
+reference rows. Compression-lineage aliases never make an archived row an
+ancestor the browser does not reach.
+
+The tests compose the whole path: rows (seeded, or projected from a real
+``state.db`` in an isolated process) -> ``_build_session_list_cache_payload``
+for each tab -> the serialized response -> the browser's real partition and
+render entry points under node, and check that each tab's badge equals the rows
+that tab renders (top-level, nested and collapsed segments), with Show archived
+off and on. Orphan promotion (#5305) is deliberately unchanged.
 """
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from tests.test_issue8141_subagent_bucket import (
     NODE,
-    _PREAMBLE,
-    SESSIONS_JS,
     _cli_parent_row,
     _payload,
     _routes,
-    _run,
     _subagent_child_row,
     _webui_parent_row,
 )
+from tests.test_issue8762_desktop_sidebar_rows import _EXTRACT_FUNC
 
-pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+REPO = Path(__file__).resolve().parent.parent
+SESSIONS_JS = REPO / "static" / "sessions.js"
+
+needs_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+
+# ── the browser: real partition + render entry points under node ──────────
+
+_SIDEBAR = _EXTRACT_FUNC + r"""
+const src = require('fs').readFileSync(process.argv[1], 'utf8');
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+// Load the real partition/render entry points plus every top-level helper they reach.
+const topLevel = new Set([...src.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(m => m[1]));
+const stubbed = new Set(['_hasUnreadForSession']);
+const loaded = new Set();
+const queue = ['_partitionSidebarSessionRows', '_renderSidebarRowsFromPartition', '_isCliSession'];
+while (queue.length) {
+  const name = queue.pop();
+  if (loaded.has(name) || stubbed.has(name)) continue;
+  const body = extractFunc(src, name);
+  eval(body.replace('function ' + name, 'global.' + name + ' = function'));
+  loaded.add(name);
+  for (const m of body.matchAll(/[A-Za-z_$][\w$]*/g)) if (topLevel.has(m[0]) && !loaded.has(m[0])) queue.push(m[0]);
+}
+eval(src.match(/const _MESSAGING_RAW_SOURCES = [^;]*;/)[0].replace('const ', 'global.'));
+global._hasUnreadForSession = s => !!(s && s.has_unread);
+Object.assign(global, {
+  INFLIGHT: {}, NO_PROJECT_FILTER: '__no_project__', window: {_showCliSessions: true},
+  _archivedCliCount: 0, _archivedWebuiCount: 0, _serverWebuiSessionCount: null, _serverCliSessionCount: null,
+  S: {session: null, busy: false, activeStreamId: null, activeProfile: 'default'},
+  _activeProject: null, _showArchived: !!input.showArchived,
+});
+global.$ = () => ({value: ''});
+const key = r => (r.profile || 'default') + ':' + r.session_id;
+const out = {};
+for (const tab of ['webui', 'cli']) {
+  const response = input.tabs[tab];
+  global._sessionSourceFilter = tab;
+  global._allSessions = response.sessions;
+  global._sidebarReferenceSessions = response.sidebar_reference_sessions || [];
+  const rendered = {};
+  const visit = (row, parent) => {
+    if (key(row) in rendered) throw new Error('rendered twice: ' + key(row));
+    rendered[key(row)] = parent;
+    for (const seg of row._lineage_segments || []) {
+      if (key(seg) !== key(row) && !(key(seg) in rendered)) rendered[key(seg)] = 'segment:' + key(row);
+    }
+    for (const child of row._child_sessions || []) visit(child, key(row));
+  };
+  for (const row of _renderSidebarRowsFromPartition(_partitionSidebarSessionRows(response.sessions, null))) {
+    visit(row, row._orphan_child_session ? 'orphan' : 'top');
+  }
+  out[tab] = rendered;
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def _render_tabs(tabs: dict, show_archived: bool) -> dict:
+    proc = subprocess.run(
+        [NODE, "-e", _SIDEBAR, str(SESSIONS_JS)],
+        input=json.dumps({"tabs": tabs, "showArchived": show_archived}),
+        cwd=REPO, capture_output=True, text=True, encoding="utf-8", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _assert_badges_match(tabs: dict, rendered: dict) -> None:
+    """Each tab's badge equals the rows that tab renders."""
+    for tab, count_key in (("webui", "webui_session_count"), ("cli", "cli_session_count")):
+        badge = tabs[tab][count_key]
+        assert badge == len(rendered[tab]), (tab, badge, rendered[tab])
+
+
+# ── seeded rows through the real payload builder ──────────────────────────
+
+
+def _seeded_tabs(monkeypatch, rows, **over) -> dict:
+    routes = _routes()
+    tabs = {}
+    for tab in ("webui", "cli"):
+        payload = _payload(monkeypatch, routes, rows, sidebar_source=tab, **over)
+        tabs[tab] = routes._session_list_payload_to_response(payload)
+    return tabs
+
+
+def _seeded_render(monkeypatch, rows, show_archived=False, **over):
+    tabs = _seeded_tabs(monkeypatch, rows, include_archived=show_archived, **over)
+    rendered = _render_tabs(tabs, show_archived)
+    _assert_badges_match(tabs, rendered)
+    return tabs, rendered
 
 
 def _webui_child_row(sid, parent, **over):
@@ -71,189 +172,305 @@ def _messaging_chain():
     ]
 
 
-_RENDER = """
-global._showArchived = %(show_archived)s;
-const payload = %(payload)s;
-global._sessionSourceFilter = 'webui';
-global.window._showCliSessions = true;
-global._activeProject = NO_PROJECT_FILTER;
-global._sidebarReferenceSessions = payload.sidebar_reference_sessions || [];
-const part = _partitionSidebarSessionRows(payload.sessions, null);
-const out = _renderSidebarRowsFromRawSessions(part.sessionsRaw,
-  [...part.webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, part.projectIdFor)]);
-const nested = [];
-const walk = (rows) => { for (const r of rows) { nested.push(r.session_id); walk(r._child_sessions || []); } };
-walk(out);
-process.stdout.write(JSON.stringify({ top: out.map(r => r.session_id), rendered: nested }));
-"""
-
-
-def _render(payload: dict, show_archived: bool) -> dict:
-    return _run(_RENDER % {"show_archived": "true" if show_archived else "false",
-                           "payload": json.dumps(payload)})
-
-
-# ── the reported symptom ──────────────────────────────────────────────────
-
-
+@needs_node
 @pytest.mark.parametrize("rows_factory,show_previous", [(_chain, False), (_messaging_chain, True)])
-def test_badge_matches_rendered_rows_with_show_archived_off(monkeypatch, rows_factory, show_previous):
-    routes = _routes()
-    payload = _payload(monkeypatch, routes, rows_factory(), show_cli_sessions=False,
-                       show_previous_messaging_sessions=show_previous)
+def test_reported_chain_is_neither_rendered_nor_counted(monkeypatch, rows_factory, show_previous):
+    tabs, rendered = _seeded_render(monkeypatch, rows_factory(), show_cli_sessions=False,
+                                    show_previous_messaging_sessions=show_previous)
 
-    rendered = _render(payload, show_archived=False)
-
-    assert rendered["rendered"] == ["other"], rendered
-    assert payload["webui_session_count"] == len(rendered["rendered"]) == 1, payload["webui_session_count"]
+    assert rendered["webui"] == {"default:other": "top"}, rendered
+    assert tabs["webui"]["webui_session_count"] == 1
     # The children are still in the payload; only the count changes.
-    assert {"B", "C"} <= {r["session_id"] for r in payload["sessions"]}
-    assert [r["session_id"] for r in payload["sidebar_reference_sessions"]] == ["A"]
+    assert {"B", "C"} <= {r["session_id"] for r in tabs["webui"]["sessions"]}
+    assert [r["session_id"] for r in tabs["webui"]["sidebar_reference_sessions"]] == ["A"]
 
 
+@needs_node
 @pytest.mark.parametrize("rows_factory,show_previous", [(_chain, False), (_messaging_chain, True)])
-def test_badge_matches_rendered_rows_with_show_archived_on(monkeypatch, rows_factory, show_previous):
-    routes = _routes()
-    payload = _payload(monkeypatch, routes, rows_factory(), show_cli_sessions=False,
-                       show_previous_messaging_sessions=show_previous, include_archived=True)
+def test_show_archived_on_counts_and_renders_the_whole_chain(monkeypatch, rows_factory, show_previous):
+    tabs, rendered = _seeded_render(monkeypatch, rows_factory(), show_archived=True, show_cli_sessions=False,
+                                    show_previous_messaging_sessions=show_previous)
 
-    rendered = _render(payload, show_archived=True)
-
-    # A renders with B and C nested under it, and the badge counts all four rows.
-    assert sorted(rendered["top"]) == ["A", "other"], rendered
-    assert sorted(rendered["rendered"]) == ["A", "B", "C", "other"], rendered
-    assert payload["webui_session_count"] == 4, payload["webui_session_count"]
+    # Nested children attach under the top-level row that holds the chain.
+    assert rendered["webui"]["default:B"] == "default:A", rendered
+    assert rendered["webui"]["default:C"] == "default:A", rendered
+    assert tabs["webui"]["webui_session_count"] == 4
 
 
+@needs_node
 def test_unarchived_root_keeps_its_children_counted(monkeypatch):
-    routes = _routes()
-    payload = _payload(monkeypatch, routes, _chain(root_archived=False), show_cli_sessions=False)
-
-    rendered = _render(payload, show_archived=False)
-
-    assert sorted(rendered["rendered"]) == ["A", "B", "C", "other"], rendered
-    assert payload["webui_session_count"] == 4
+    tabs, rendered = _seeded_render(monkeypatch, _chain(root_archived=False), show_cli_sessions=False)
+    assert len(rendered["webui"]) == tabs["webui"]["webui_session_count"] == 4
 
 
-# ── regression guards ─────────────────────────────────────────────────────
-
-
+@needs_node
 def test_cli_parent_subagent_child_still_buckets_cli_and_counts_once(monkeypatch):
     """#8141: a delegated child of a CLI parent counts under CLI, once."""
-    routes = _routes()
-    payload = _payload(
-        monkeypatch, routes,
-        [_cli_parent_row(), _subagent_child_row("cli_sub1", "cli_parent"), _webui_parent_row()],
+    tabs, rendered = _seeded_render(
+        monkeypatch, [_cli_parent_row(), _subagent_child_row("cli_sub1", "cli_parent"), _webui_parent_row()],
         show_cli_sessions=True,
     )
-    assert payload["webui_session_count"] == 1, payload
-    assert payload["cli_session_count"] == 2, payload
+    assert tabs["webui"]["webui_session_count"] == 1
+    assert tabs["cli"]["cli_session_count"] == 2
+    assert rendered["cli"]["default:cli_sub1"] == "default:cli_parent", rendered
 
 
+@needs_node
 def test_child_of_a_visible_parent_is_still_counted(monkeypatch):
-    routes = _routes()
-    payload = _payload(
-        monkeypatch, routes,
-        [_webui_parent_row("p"), _webui_child_row("kid", "p")],
-        show_cli_sessions=False,
+    tabs, rendered = _seeded_render(
+        monkeypatch, [_webui_parent_row("p"), _webui_child_row("kid", "p")], show_cli_sessions=False,
     )
-    rendered = _render(payload, show_archived=False)
-    assert sorted(rendered["rendered"]) == ["kid", "p"], rendered
-    assert payload["webui_session_count"] == 2
+    assert rendered["webui"] == {"default:p": "top", "default:kid": "default:p"}, rendered
+
+
+# ── holders the browser finds that an alias-based walk misses ─────────────
+
+
+@needs_node
+def test_an_archived_reference_child_attached_to_a_visible_row_holds_its_own_child(monkeypatch):
+    """P <- Z (archived child) <- kid: Z is sent as a reference, attaches under P, and holds kid."""
+    rows = [
+        _webui_parent_row("P", last_message_at=100, updated_at=100),
+        _webui_child_row("Z", "P", archived=True, last_message_at=110, updated_at=110),
+        _webui_child_row("kid", "Z", last_message_at=120, updated_at=120),
+    ]
+    tabs, rendered = _seeded_render(monkeypatch, rows, show_cli_sessions=False)
+    assert rendered["webui"] == {"default:P": "top", "default:kid": "default:P"}, rendered
+    assert tabs["webui"]["webui_session_count"] == 2
+
+
+@needs_node
+def test_a_visible_top_level_row_holds_a_child_by_its_lineage_key(monkeypatch):
+    """A visible non-child row whose parent is archived A keys its lineage by A, so a child of A nests there."""
+    rows = [
+        _webui_parent_row("A", archived=True, last_message_at=90, updated_at=90),
+        _webui_parent_row("P", parent_session_id="A", last_message_at=100, updated_at=100),
+        _webui_child_row("kid", "A", last_message_at=120, updated_at=120),
+    ]
+    tabs, rendered = _seeded_render(monkeypatch, rows, show_cli_sessions=False)
+    assert rendered["webui"] == {"default:P": "top", "default:kid": "default:P"}, rendered
+
+
+@needs_node
+def test_a_visible_lineage_tip_holds_a_child_of_its_archived_old_segment(monkeypatch):
+    """The archived pre-compression row is a reference; the child nests under the visible tip."""
+    rows = [
+        _webui_parent_row("old", archived=True, pre_compression_snapshot=True, last_message_at=90, updated_at=90),
+        _webui_parent_row("tip", parent_session_id="old", _lineage_root_id="old", _lineage_tip_id="tip",
+                          last_message_at=130, updated_at=130),
+        _webui_child_row("kid", "old", _parent_lineage_root_id="old", last_message_at=120, updated_at=120),
+    ]
+    tabs, rendered = _seeded_render(monkeypatch, rows, show_cli_sessions=False)
+    assert rendered["webui"] == {"default:tip": "top", "default:kid": "default:tip"}, rendered
+    assert tabs["webui"]["webui_session_count"] == 2
+
+
+@needs_node
+def test_an_archived_tip_reached_only_through_a_lineage_alias_does_not_hide_the_child(monkeypatch):
+    """old is represented by archived tip; a child naming old gets no reference row and renders as an orphan."""
+    rows = [
+        _webui_parent_row("tip", archived=True, parent_session_id="old", _lineage_root_id="old",
+                          _lineage_tip_id="tip", last_message_at=130, updated_at=130),
+        _webui_child_row("kid", "old", _parent_lineage_root_id="old", last_message_at=120, updated_at=120),
+    ]
+    tabs, rendered = _seeded_render(monkeypatch, rows, show_cli_sessions=False)
+    assert rendered["webui"] == {"default:kid": "orphan"}, rendered
+    assert tabs["webui"]["webui_session_count"] == 1
+
+
+@needs_node
+def test_a_fork_of_an_archived_session_is_neither_rendered_nor_counted(monkeypatch):
+    rows = [
+        _webui_parent_row("A", archived=True, last_message_at=90, updated_at=90),
+        _webui_parent_row("F", session_source="fork", parent_session_id="A", last_message_at=120, updated_at=120),
+        _webui_parent_row("other", last_message_at=130, updated_at=130),
+    ]
+    tabs, rendered = _seeded_render(monkeypatch, rows, show_cli_sessions=False)
+    assert rendered["webui"] == {"default:other": "top"}, rendered
+
+
+@needs_node
+def test_each_profile_decides_its_own_rows_with_all_profiles_on(monkeypatch):
+    """Two profiles share ids: alpha's root is archived, beta's is not."""
+    rows = [
+        _webui_parent_row("A", profile="alpha", archived=True, last_message_at=90, updated_at=90),
+        _webui_child_row("kid", "A", profile="alpha", last_message_at=110, updated_at=110),
+        _webui_parent_row("A", profile="beta", last_message_at=95, updated_at=95),
+        _webui_child_row("kid", "A", profile="beta", last_message_at=115, updated_at=115),
+        _webui_parent_row("B", profile="alpha", last_message_at=100, updated_at=100),
+        _webui_parent_row("Z", profile="alpha", archived=True, last_message_at=80, updated_at=80),
+        _webui_child_row("kid2", "Z", profile="alpha", last_message_at=120, updated_at=120),
+    ]
+    tabs, rendered = _seeded_render(monkeypatch, rows, show_cli_sessions=False, all_profiles=True)
+    assert rendered["webui"]["beta:kid"] == "beta:A", rendered
+    assert "alpha:kid2" not in rendered["webui"], rendered
+    # The reference rows are chosen profile-blind (an existing limitation): beta's
+    # visible A stops the walk, alpha's archived A is never sent, and alpha's kid
+    # renders as an orphan. The badge follows what renders.
+    assert rendered["webui"]["alpha:kid"] == "orphan", rendered
+
+
+# ── real state.db projection in an isolated process ───────────────────────
+
+_PROBE = r'''
+import json, sqlite3, sys
+from pathlib import Path
+from api import models, routes
+
+scenario, source, home = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+db = sqlite3.connect(home / "state.db")
+db.executescript("""CREATE TABLE sessions(id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT,
+  started_at REAL, message_count INTEGER, parent_session_id TEXT, model_config TEXT, end_reason TEXT,
+  ended_at REAL, archived INTEGER DEFAULT 0);
+CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL);""")
+T = 1800000000.0
+
+
+def add(sid, start, parent=None, end_reason=None, ended=None, archived=0):
+    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (sid, source, "Title " + sid, "m", T + start, 2, parent, None, end_reason,
+                T + ended if ended else None, archived))
+    for i, role in enumerate(("user", "assistant")):
+        db.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES (?,?,?,?)",
+                   (sid, role, "x", T + start + i))
+
+
+add("other", 300)
+if scenario == "alias":
+    # old ends by compression and is represented by tip; tip is archived. kid ran
+    # concurrently with old and still names it.
+    add("old", 100, end_reason="compression", ended=200)
+    add("tip", 210, parent="old", archived=1)
+    add("kid", 150, parent="old")
+elif scenario == "visible-tip":
+    # The same lineage with the tip visible and the pre-compression segment kept
+    # as an archived WebUI snapshot, which the payload sends as a reference row.
+    add("old", 100, end_reason="compression", ended=200)
+    add("tip", 210, parent="old")
+    add("kid", 150, parent="old")
+elif scenario == "chain":
+    add("A", 100, archived=1)
+    add("B", 110, parent="A")
+    add("C", 120, parent="B")
+db.commit()
+db.close()
+if scenario == "visible-tip":
+    ts = T + 100
+    models.Session("old", title="Old snapshot", workspace=str(home), profile="default",
+                   pre_compression_snapshot=True, archived=True,
+                   messages=[{"role": "user", "content": "x", "timestamp": ts}] * 3,
+                   created_at=ts, updated_at=ts, session_source="webui").save(touch_updated_at=False)
+models.clear_cli_sessions_cache()
+tabs = {}
+for tab in ("webui", "cli"):
+    tabs[tab] = routes._session_list_payload_to_response(routes._build_session_list_cache_payload(
+        active_profile="default", all_profiles=False, show_cli_sessions=True, include_archived=False,
+        show_previous_messaging_sessions=True, show_cron_sessions=False, show_claude_code_sessions=False,
+        sidebar_source=tab,
+    ))
+print(json.dumps(tabs, default=str))
+'''
+
+
+def _projected_tabs(scenario: str, source: str, tmp_path: Path) -> dict:
+    home = tmp_path / "home"
+    state = tmp_path / "webui"
+    (state / "sessions").mkdir(parents=True)
+    home.mkdir()
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(tmp_path),
+        "HERMES_HOME": str(home),
+        "HERMES_BASE_HOME": str(home),
+        "HERMES_WEBUI_STATE_DIR": str(state),
+        "HERMES_WEBUI_ISOLATED_PROFILE": "0",
+        "HERMES_DISABLE_LAZY_INSTALLS": "1",
+        "HERMES_WEBUI_TEST_NETWORK_BLOCK": "1",
+        "PYTHONPATH": str(REPO),
+    })
+    proc = subprocess.run(
+        [sys.executable, "-c", _PROBE, scenario, source, str(home)],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _tab_of(source: str) -> str:
+    return "cli" if source == "cli" else "webui"
+
+
+@needs_node
+@pytest.mark.parametrize("source", ["cli", "whatsapp"])
+def test_projection_child_of_an_archived_alias_tip_renders_and_counts(source, tmp_path):
+    tabs = _projected_tabs("alias", source, tmp_path)
+    rendered = _render_tabs(tabs, show_archived=False)
+    _assert_badges_match(tabs, rendered)
+    assert rendered[_tab_of(source)] == {"default:other": "top", "default:kid": "orphan"}, rendered
+
+
+@needs_node
+@pytest.mark.parametrize("source", ["cli", "whatsapp"])
+def test_projection_visible_tip_holds_the_child_of_its_archived_old_segment(source, tmp_path):
+    tabs = _projected_tabs("visible-tip", source, tmp_path)
+    rendered = _render_tabs(tabs, show_archived=False)
+    _assert_badges_match(tabs, rendered)
+    assert rendered[_tab_of(source)]["default:kid"] == "default:tip", rendered
+
+
+@needs_node
+@pytest.mark.parametrize("source", ["cli", "whatsapp"])
+def test_projection_chain_under_an_archived_root_is_neither_rendered_nor_counted(source, tmp_path):
+    tabs = _projected_tabs("chain", source, tmp_path)
+    rendered = _render_tabs(tabs, show_archived=False)
+    _assert_badges_match(tabs, rendered)
+    assert rendered[_tab_of(source)] == {"default:other": "top"}, rendered
 
 
 # ── the server helper ─────────────────────────────────────────────────────
 
 
-def _by_id(rows):
-    return {r["session_id"]: r for r in rows}
+class _CountingRow(dict):
+    """A row that counts field reads, to bound the work of one decision pass."""
+
+    reads = 0
+
+    def get(self, *args):
+        type(self).reads += 1
+        return super().get(*args)
 
 
-def test_helper_walks_through_child_rows_to_the_archived_root():
-    routes = _routes()
-    rows = _chain()
-    by_id = _by_id(rows)
-    hidden = {r["session_id"] for r in rows if routes._sidebar_child_hidden_by_archived_ancestor(r, by_id)}
-    assert hidden == {"B", "C"}
-
-
-def test_helper_stops_at_a_visible_top_level_parent():
-    routes = _routes()
-    rows = [
-        _webui_parent_row("A", archived=True),
-        _webui_parent_row("P", parent_session_id="A"),  # top-level row (no child_session link)
-        _webui_child_row("kid", "P"),
-    ]
-    assert not routes._sidebar_child_hidden_by_archived_ancestor(rows[2], _by_id(rows))
-
-
-def test_helper_keeps_missing_or_cyclic_parents_counted():
-    routes = _routes()
-    missing = _webui_child_row("orphan", "gone")
-    assert not routes._sidebar_child_hidden_by_archived_ancestor(missing, {"orphan": missing})
-
-    x = _webui_child_row("x", "y")
-    y = _webui_child_row("y", "x")
-    assert not routes._sidebar_child_hidden_by_archived_ancestor(x, {"x": x, "y": y})
-
-
-def test_helper_ignores_archived_rows_and_non_children():
-    routes = _routes()
-    rows = _chain()
-    by_id = _by_id(rows)
-    assert not routes._sidebar_child_hidden_by_archived_ancestor(by_id["A"], by_id)
-    assert not routes._sidebar_child_hidden_by_archived_ancestor(by_id["other"], by_id)
-    archived_child = _webui_child_row("Z", "A", archived=True)
-    assert not routes._sidebar_child_hidden_by_archived_ancestor(archived_child, {**by_id, "Z": archived_child})
-
-
-def test_server_predicate_mirrors_the_browser_child_check():
-    assert "return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');" in SESSIONS_JS
-    assert "_PREAMBLE" and _PREAMBLE  # shared harness imported from the #8141 tests
-
-
-# ── memoised walk (one payload build) ─────────────────────────────────────
-
-
-def _long_chain(n, root_archived=True):
-    rows = [_webui_parent_row("root", archived=root_archived)]
-    parent = "root"
+def _long_chain(n, root):
+    rows = [_CountingRow(r) for r in root]
+    parent = rows[0]["session_id"] if rows else "gone"
     for i in range(n):
-        rows.append(_webui_child_row(f"c{i}", parent))
+        rows.append(_CountingRow(_webui_child_row(f"c{i}", parent)))
         parent = f"c{i}"
     return rows
 
 
-@pytest.mark.parametrize("root_archived", [True, False])
-def test_memo_gives_the_same_verdicts_as_separate_walks(root_archived):
+@pytest.mark.parametrize("root,expected", [
+    ([_webui_parent_row("root", archived=True)], True),
+    ([], False),  # the root is missing: every child renders as an orphan
+])
+def test_one_pass_stays_linear_on_a_long_chain(root, expected):
     routes = _routes()
-    x = _webui_child_row("x", "y")
-    y = _webui_child_row("y", "x")
-    rows = [*_long_chain(20, root_archived=root_archived), *_chain(), x, y,
-            _webui_parent_row("P"), _webui_child_row("kid", "P")]
-    by_id = {r["session_id"]: r for r in _long_chain(0)}
-    by_id.update({r["session_id"]: r for r in rows})
-    memo: dict[int, bool] = {}
-    for row in rows:
-        fresh = routes._sidebar_child_hidden_by_archived_ancestor(row, by_id)
-        assert routes._sidebar_child_hidden_by_archived_ancestor(row, by_id, memo) == fresh, row["session_id"]
+    n = 400
+    rows = _long_chain(n, root)
+    visible = [r for r in rows if not r.get("archived")]
+    references = routes._hidden_archived_sidebar_reference_sessions(visible, [r for r in rows if r.get("archived")])
+    _CountingRow.reads = 0
+    dropped = routes._sidebar_rows_dropped_by_archived_ancestors(visible, references)
+
+    assert (len(dropped) == n) is expected and (len(dropped) == 0) is not expected
+    # One walk per chain, not one per child: a quadratic walk reads ~n²/2 rows.
+    assert _CountingRow.reads < 100 * n, _CountingRow.reads
 
 
-def test_memo_keeps_a_long_chain_linear(monkeypatch):
-    routes = _routes()
-    rows = _long_chain(300)
-    by_id = {r["session_id"]: r for r in rows}
-    calls = 0
-    real_parent = routes._sidebar_delegation_parent
-
-    def counting_parent(row, rows_by_id):
-        nonlocal calls
-        calls += 1
-        return real_parent(row, rows_by_id)
-
-    monkeypatch.setattr(routes, "_sidebar_delegation_parent", counting_parent)
-    memo: dict[int, bool] = {}
-    hidden = [routes._sidebar_child_hidden_by_archived_ancestor(r, by_id, memo) for r in rows]
-
-    assert hidden == [False] + [True] * 300
-    assert calls <= 2 * len(rows), calls  # ~45,000 lookups without the memo
+def test_server_helpers_mirror_the_browser_predicates():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    assert "return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');" in src
+    assert "return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));" in src
+    assert "if(!parentRow&&hasHiddenArchivedAncestor(child)){" in src
+    assert ("const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', "
+            "'wecom_callback', 'matrix', 'signal', 'feishu', 'dingtalk']);") in src
