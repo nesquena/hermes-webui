@@ -1838,6 +1838,69 @@ def test_account_usage_window_scope_survives_serialization():
     assert [w["scope"] for w in serialized["windows"]] == ["account", "model", "model", "account", "account"]
 
 
+def _probe_worker_payload(monkeypatch, capsys, snapshot):
+    """Run the probe worker's code (what the subprocess executes) on a fake Agent snapshot
+    and return the JSON it prints."""
+    import api.providers as providers
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    usage_mod = types.ModuleType("agent.account_usage")
+    usage_mod.fetch_account_usage = lambda provider, *, base_url=None, api_key=None: snapshot
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", usage_mod)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", snapshot.provider, ""])
+    capsys.readouterr()
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, {"__name__": "__main__"})
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_anthropic_windows_get_nominal_lengths_only_when_none_is_reported(monkeypatch, capsys):
+    """Anthropic reports no window lengths; the serializer fills nominal ones for the Agent's labels."""
+    import api.providers as providers
+
+    def snapshot(provider, windows):
+        return SimpleNamespace(
+            provider=provider, source="oauth_usage_api", title="Account limits", plan=None,
+            windows=tuple(SimpleNamespace(used_percent=10, reset_at=None, detail=None, **w) for w in windows),
+            details=(), available=True, unavailable_reason=None, fetched_at=None,
+        )
+
+    def seconds(payload):
+        return {w["label"]: w["limit_window_seconds"] for w in payload["windows"]}
+
+    anthropic = providers._serialize_account_usage_snapshot(snapshot("anthropic", [
+        {"label": "Current session"}, {"label": "Current week"},
+        {"label": "Opus week", "scope": "model"}, {"label": "Sonnet week", "scope": "model"},
+        {"label": "Some new window"},
+    ]))
+    assert seconds(anthropic) == {
+        "Current session": 18000, "Current week": 604800, "Opus week": 604800, "Sonnet week": 604800,
+        # An unknown label stays untimed, so the chip keeps its most-constrained fallback.
+        "Some new window": None,
+    }
+    # A length the Agent reports wins over the nominal one.
+    reported = providers._serialize_account_usage_snapshot(snapshot("anthropic", [
+        {"label": "Current session", "limit_window_seconds": 3600},
+    ]))
+    assert seconds(reported) == {"Current session": 3600}
+    # A length it reports but that isn't a usable number stays untimed (the chip's fallback),
+    # directly and after the probe worker's JSON round trip.
+    for bad in (float("nan"), float("inf"), "garbage", False):
+        windows = [{"label": "Current session", "limit_window_seconds": bad}, {"label": "Current week"}]
+        direct = providers._serialize_account_usage_snapshot(snapshot("anthropic", windows))
+        assert seconds(direct) == {"Current session": None, "Current week": 604800}, bad
+        rebuilt = providers._account_usage_payload_to_snapshot(
+            _probe_worker_payload(monkeypatch, capsys, snapshot("anthropic", windows)))
+        assert seconds(providers._serialize_account_usage_snapshot(rebuilt)) == {
+            "Current session": None, "Current week": 604800}, bad
+    # Other providers' windows are never given Anthropic's lengths.
+    other = providers._serialize_account_usage_snapshot(snapshot("openai-codex", [
+        {"label": "Current session"}, {"label": "Current week"},
+    ]))
+    assert seconds(other) == {"Current session": None, "Current week": None}
+
+
 def test_model_window_scope_survives_the_probe_worker_round_trip(monkeypatch, capsys):
     """Scope crosses the worker JSON and the parent's reconstruction intact."""
     import api.providers as providers

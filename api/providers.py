@@ -224,6 +224,9 @@ def _snapshot_payload(snapshot):
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
             "limit_window_seconds": _number(getattr(window, "limit_window_seconds", None)),
+            # Whether the Agent reported a length at all, so the parent can tell a missing
+            # length (eligible for a nominal one) from a rejected one (stays untimed).
+            "limit_window_seconds_reported": getattr(window, "limit_window_seconds", None) is not None,
             "scope": str(getattr(window, "scope", "") or "").strip().lower() or "account",
         })
     payload = {
@@ -1872,14 +1875,36 @@ def _isoformat_utc(value: Any) -> str | None:
     return text or None
 
 
+# Anthropic's usage API names its windows but reports no length, so the composer chip's
+# shortest / longest choices could not order them. These nominal lengths cover only the
+# Agent's own labels for Anthropic (agent/account_usage.py) and apply only when a window
+# reports no length at all, so a length the Agent reports later always wins, and a length it
+# reports but that is invalid stays untimed. Any other label stays untimed too and keeps the
+# chip's most-constrained fallback.
+_ANTHROPIC_NOMINAL_WINDOW_SECONDS = {
+    "Current session": 5 * 3600,
+    "Current week": 7 * 86400,
+    "Opus week": 7 * 86400,
+    "Sonnet week": 7 * 86400,
+}
+
+
 def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     if snapshot is None:
         return None
+    provider = str(getattr(snapshot, "provider", "") or "").strip().lower()
+    nominal_seconds = _ANTHROPIC_NOMINAL_WINDOW_SECONDS if provider == "anthropic" else {}
     windows: list[dict[str, Any]] = []
     for window in getattr(snapshot, "windows", ()) or ():
         label = str(getattr(window, "label", "") or "").strip()
         if not label:
             continue
+        raw_seconds = getattr(window, "limit_window_seconds", None)
+        limit_window_seconds = _quota_number(raw_seconds)
+        # Windows rebuilt from the probe worker carry whether a length was reported.
+        reported = getattr(window, "limit_window_seconds_reported", raw_seconds is not None)
+        if limit_window_seconds is None and not reported:
+            limit_window_seconds = nominal_seconds.get(label)
         used_percent = _quota_number(getattr(window, "used_percent", None))
         remaining_percent = None
         if used_percent is not None:
@@ -1890,7 +1915,7 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
             "remaining_percent": remaining_percent,
             "reset_at": _isoformat_utc(getattr(window, "reset_at", None)),
             "detail": str(getattr(window, "detail", "") or "").strip() or None,
-            "limit_window_seconds": _quota_number(getattr(window, "limit_window_seconds", None)),
+            "limit_window_seconds": limit_window_seconds,
             # "model" windows cap one model family, not the account; older
             # Agents carry no scope, which means account.
             "scope": str(getattr(window, "scope", "") or "").strip().lower() or "account",
@@ -1985,6 +2010,7 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
             reset_at=window.get("reset_at"),
             detail=window.get("detail"),
             limit_window_seconds=window.get("limit_window_seconds"),
+            limit_window_seconds_reported=window.get("limit_window_seconds_reported") is True,
             scope=window.get("scope"),
         )
         for window in (payload.get("windows") or ())
