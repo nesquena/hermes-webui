@@ -285,7 +285,7 @@ def pytest_sessionfinish(session, exitstatus):
     problems = _hermes_root_guard.finish()
     if problems:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
-        message = "REAL HERMES ROOT TOUCHED BY THIS TEST RUN:\n  " + "\n  ".join(problems)
+        message = "REAL HERMES ROOT CHANGED DURING THIS TEST RUN:\n  " + "\n  ".join(problems)
         reporter = session.config.pluginmanager.get_plugin('terminalreporter')
         if reporter is not None:
             reporter.write_sep('!', 'real Hermes root guard', red=True, bold=True)

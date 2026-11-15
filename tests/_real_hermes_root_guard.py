@@ -208,7 +208,9 @@ def _profiles_listing():
 def install(allowed) -> None:
     """Protect the real roots (minus *allowed*) for the rest of this process."""
     PROTECTED[:] = real_roots()
-    ALLOWED[:] = sorted({os.path.realpath(os.fspath(p)) for p in allowed})
+    # Union, never replace: conftest.py can run again mid-session (a test loads it by path), and a path
+    # allowed earlier, such as --basetemp from pytest_configure, must stay allowed.
+    ALLOWED[:] = sorted(set(ALLOWED) | {os.path.realpath(os.fspath(p)) for p in allowed})
     _STATE["profiles"] = _profiles_listing()
     _STATE["active"] = True
     if not _STATE["installed"]:  # audit hooks cannot be removed; never stack a second one
@@ -262,5 +264,6 @@ def finish() -> list:
     for root, before in _STATE["profiles"].items():
         after = _profiles_listing().get(root)
         if after != before:
-            problems.append(f"{root}/profiles changed during the run: {before} -> {after}")
+            problems.append(f"{root}/profiles changed during the run (by this run or by another process on this host):"
+                            f" {before} -> {after}")
     return problems

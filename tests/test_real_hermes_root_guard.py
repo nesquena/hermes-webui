@@ -132,6 +132,19 @@ def test_reads_allowed_subtrees_and_bytecode_are_not_refused(tmp_path):
         assert len(guard.VIOLATIONS) == before
 
 
+def test_installing_again_keeps_paths_allowed_earlier(tmp_path, monkeypatch):
+    """conftest.py can run again mid-session (a test loads it by path), which calls install() again. That must
+    not drop a path allowed earlier, such as the --basetemp that pytest_configure adds under a real root."""
+    with _simulated_real_root(tmp_path) as root:
+        basetemp = root / "scratch" / "bt"
+        guard.allow(basetemp)
+        monkeypatch.setattr(guard, "real_roots", lambda: [os.path.realpath(root)])
+        monkeypatch.setitem(guard._STATE, "profiles", dict(guard._STATE["profiles"]))
+        guard.install([tmp_path / "repo"])
+        assert guard.violation(basetemp / "pytest-0" / "test_x0") is None
+        assert guard.violation(root / "profiles" / "new") is not None
+
+
 def test_bytecode_under_a_discovered_agent_checkout_is_not_refused(tmp_path):
     """Discovery prefers <HERMES_HOME>/hermes-agent, so a profile home's checkout sits at
     <root>/profiles/<name>/hermes-agent; importing it writes bytecode there."""
