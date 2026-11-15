@@ -69,8 +69,6 @@
 
 - **Async-delegation completions in a named profile are claimed and acknowledged against that profile's own ledger (#8977, related to #7214).** A completion could be claimed and acknowledged against the root profile's ledger while its own row stayed pending, so it was delivered again after a restart, or a restore could read the wrong profile's ledger. WebUI now resolves the completion's owning profile once when it claims it (from the origin session's profile, or the one ledger that holds the row) and runs every claim, acknowledgement, release and retry against that profile, through the Agent's context-local home override and never by changing `HERMES_HOME`. At startup, other profiles' ledgers are replayed read-only: only completions for sessions that run in this WebUI process are offered, never ones that belong to the Gateway or a runner, and nothing in another profile's ledger is written. A completion whose ownership, session or backend can't be settled (an unreadable ledger or profile config, for example) is retried every 5 s instead of being acknowledged in the wrong place. Agents without the override API keep the previous behaviour. Thanks @yehsi2000!
 
-- **New Chat now shows why it could not create a session (#9027 by @pxxD1998).** When `POST /api/session/new` fails, for example because the default workspace is outside the user home directory and not in the saved workspace list, the New Chat button used to do nothing visible: the server's message only reached the browser console. It now shows that message in a toast ("Failed: …"), re-enables the button, and still rejects, so callers that stop on a failed create still stop. Thanks @pxxD1998.
-
 - **Deleted Desktop conversations no longer linger in the sidebar.** A Desktop-origin row whose session was deleted from its owning profile's `state.db` is pruned from the sidebar index, with either CLI-visibility setting. Pruning only happens when that profile's own database is readable and confirms the deletion; a missing, corrupt, unreadable or inaccessible database keeps the row. Thanks @pxxD1998.
 
 - **Post-compression tool-result pruning follows the context engine that actually owns the turn.** Pruning was gated on the configured engine name, so a fallback to the built-in compressor (empty, unavailable or edited engine setting) skipped it and kept large tool results in context. The gate now reads the active engine object. Thanks @eringerli.
@@ -339,6 +337,12 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.679] — 2026-11-15
+
+### Fixed
+
+- **New Chat now shows why it could not create a session (#9027 by @pxxD1998).** When `POST /api/session/new` fails, for example because the default workspace is outside the user home directory and not in the saved workspace list, the New Chat button used to do nothing visible: the server's message only reached the browser console. It now shows that message in a toast ("Failed: …"), re-enables the button, and still rejects, so callers that stop on a failed create still stop. Thanks @pxxD1998.
 
 ## [v0.52.678] — 2026-11-15
 
