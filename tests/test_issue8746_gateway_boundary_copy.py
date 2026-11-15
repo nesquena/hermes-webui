@@ -25,6 +25,7 @@ import pytest
 
 import api.config as cfg
 import api.gateway_chat as gateway_chat
+import api.run_drain as run_drain
 import api.updates as upd
 from tests.js_source_extract import extract_function
 
@@ -480,3 +481,171 @@ def test_all_fifteen_locales_keys_and_signatures():
         # 4. no_runs() returns a non-empty string
         no_runs = keys["no_runs"]
         assert isinstance(no_runs, str) and len(no_runs) > 0, f"{code}: empty no_runs"
+
+
+# ── 9. Late Gateway registration preserves live WebUI run in split ───────────
+
+
+def _run_force_label(tmp_path, payload):
+    ui_src = UI_JS.read_text(encoding="utf-8")
+    snippet_content = "\n".join(
+        extract_function(ui_src, name, prefix=prefix) for prefix, name in _UI_FUNCTIONS
+    )
+    snippet_path = tmp_path / "snippet_late_reg.js"
+    snippet_path.write_text(snippet_content, encoding="utf-8")
+    scenario = {"target": "agent", "res": payload}
+    proc = subprocess.run(
+        [NODE, "-e", _HARNESS_JS, json.dumps(scenario), str(I18N_JS), str(snippet_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    return out["label"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node required for ui.js harness")
+def test_late_gateway_registration_keeps_the_live_webui_run_in_the_split(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        gateway_chat, "gateway_run_durably_resumable", lambda stream_id: True
+    )
+
+    with cfg.ACTIVE_RUNS_LOCK:
+        old_active = dict(cfg.ACTIVE_RUNS)
+        cfg.ACTIVE_RUNS.clear()
+    with cfg.STREAMS_LOCK:
+        old_streams = dict(cfg.STREAMS)
+        cfg.STREAMS.clear()
+
+    try:
+        cfg.register_active_run("W", backend="legacy")
+
+        orig_all_active = run_drain.all_active_runs
+
+        def _late_register():
+            runs = orig_all_active()
+            cfg.register_active_run("G", backend="gateway")
+            return runs
+
+        monkeypatch.setattr(run_drain, "all_active_runs", _late_register)
+
+        blocker = upd._update_blocker_snapshot("agent")
+        assert blocker["active_runs"] == 1
+
+        webui_runs = run_drain.webui_owned_active_runs()
+        assert [r["stream_id"] for r in webui_runs] == ["W"]
+
+        for managed in (True, False):
+            monkeypatch.setattr(
+                upd, "gateway_lifecycle_capability", lambda profile=None, m=managed: {"managed": m}
+            )
+            res = upd._restart_blocked_response("agent", blocker)
+            assert res["active_runs"] == 1
+            assert res["webui_owned_runs"] == 1
+            assert res["gateway_runs"] == 0
+            assert res["webui_owned_runs"] + res["gateway_runs"] == res["active_runs"]
+            assert "only the WebUI runs are settled as interrupted" not in res["message"]
+            assert "interrupt the 1 WebUI run" in res["message"]
+            assert "_blocking_run_identities" not in res
+            label = _run_force_label(tmp_path, res)
+            assert label == "Update anyway (interrupts 1 run)"
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.clear()
+            cfg.ACTIVE_RUNS.update(old_active)
+        with cfg.STREAMS_LOCK:
+            cfg.STREAMS.clear()
+            cfg.STREAMS.update(old_streams)
+
+
+@pytest.mark.skipif(NODE is None, reason="node required for ui.js harness")
+def test_stable_control_without_late_registration(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        gateway_chat, "gateway_run_durably_resumable", lambda stream_id: True
+    )
+
+    with cfg.ACTIVE_RUNS_LOCK:
+        old_active = dict(cfg.ACTIVE_RUNS)
+        cfg.ACTIVE_RUNS.clear()
+    with cfg.STREAMS_LOCK:
+        old_streams = dict(cfg.STREAMS)
+        cfg.STREAMS.clear()
+
+    try:
+        cfg.register_active_run("W", backend="legacy")
+
+        blocker = upd._update_blocker_snapshot("agent")
+        assert blocker["active_runs"] == 1
+
+        webui_runs = run_drain.webui_owned_active_runs()
+        assert [r["stream_id"] for r in webui_runs] == ["W"]
+
+        for managed in (True, False):
+            monkeypatch.setattr(
+                upd, "gateway_lifecycle_capability", lambda profile=None, m=managed: {"managed": m}
+            )
+            res = upd._restart_blocked_response("agent", blocker)
+            assert res["active_runs"] == 1
+            assert res["webui_owned_runs"] == 1
+            assert res["gateway_runs"] == 0
+            assert res["webui_owned_runs"] + res["gateway_runs"] == res["active_runs"]
+            assert "interrupt the 1 WebUI run" in res["message"]
+            assert "_blocking_run_identities" not in res
+            label = _run_force_label(tmp_path, res)
+            assert label == "Update anyway (interrupts 1 run)"
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.clear()
+            cfg.ACTIVE_RUNS.update(old_active)
+        with cfg.STREAMS_LOCK:
+            cfg.STREAMS.clear()
+            cfg.STREAMS.update(old_streams)
+
+
+def test_split_is_identity_scoped_rather_than_count_scoped(monkeypatch):
+    """Two counted runs (W and G2) give webui_owned_runs=1, gateway_runs=1,
+    and a third durable Gateway registration (G3) after the blocking pass does not move those numbers."""
+    monkeypatch.setattr(
+        gateway_chat, "gateway_run_durably_resumable", lambda stream_id: True
+    )
+
+    with cfg.ACTIVE_RUNS_LOCK:
+        old_active = dict(cfg.ACTIVE_RUNS)
+        cfg.ACTIVE_RUNS.clear()
+    with cfg.STREAMS_LOCK:
+        old_streams = dict(cfg.STREAMS)
+        cfg.STREAMS.clear()
+
+    try:
+        cfg.register_active_run("W", backend="legacy")
+        cfg.register_active_run("G2", backend="gateway")
+
+        orig_all_active = run_drain.all_active_runs
+
+        def _late_register():
+            runs = orig_all_active()
+            cfg.register_active_run("G3", backend="gateway")
+            return runs
+
+        monkeypatch.setattr(run_drain, "all_active_runs", _late_register)
+
+        blocker = upd._update_blocker_snapshot("agent")
+        assert blocker["active_runs"] == 2
+
+        monkeypatch.setattr(
+            upd, "gateway_lifecycle_capability", lambda profile=None: {"managed": True}
+        )
+        res = upd._restart_blocked_response("agent", blocker)
+        assert res["active_runs"] == 2
+        assert res["webui_owned_runs"] == 1
+        assert res["gateway_runs"] == 1
+        assert res["webui_owned_runs"] + res["gateway_runs"] == res["active_runs"]
+        assert "_blocking_run_identities" not in res
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.clear()
+            cfg.ACTIVE_RUNS.update(old_active)
+        with cfg.STREAMS_LOCK:
+            cfg.STREAMS.clear()
+            cfg.STREAMS.update(old_streams)

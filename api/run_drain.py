@@ -362,6 +362,34 @@ def _collect_active_runs(*, include_resumable_gateway: bool) -> list[dict]:
     return runs
 
 
+def classify_run_identities(identities: list[dict]) -> dict:
+    """Split an ALREADY COUNTED run identity set into gateway and WebUI-owned rows.
+
+    Does not touch ``STREAMS`` or ``ACTIVE_RUNS`` (no registry read): a refusal
+    must classify the identity set it already counted, never a second registry
+    read (#8746). For each row, a run is Gateway-owned only when backend == 'gateway'
+    and ``_gateway_run_durably_resumable(stream_id)`` is true; every other row
+    (legacy, non-gateway, missing/blank ``stream_id``, durability read raising)
+    is WebUI-owned.
+    """
+    webui_owned: list[dict] = []
+    gateway: list[dict] = []
+    for row in identities or []:
+        sid = str(row.get("stream_id") or "") if isinstance(row, dict) else ""
+        backend = str(row.get("backend") or "") if isinstance(row, dict) else ""
+        is_gw = False
+        if backend == "gateway" and sid:
+            try:
+                is_gw = bool(_gateway_run_durably_resumable(sid))
+            except Exception:
+                is_gw = False
+        if is_gw:
+            gateway.append(row)
+        else:
+            webui_owned.append(row)
+    return {"webui_owned": webui_owned, "gateway": gateway}
+
+
 def active_run_census() -> dict:
     """Split every live run into WebUI-owned and Gateway-owned in one pass.
 
@@ -370,21 +398,14 @@ def active_run_census() -> dict:
     does not; the two lists are disjoint and their union is every live run
     (#8746). The durability mark is read once per Gateway row inside this pass.
 
-    This split is for describing the census, never for deciding it: the count
-    that blocks an update still comes from a single ``_update_blocker_snapshot``
-    pass with no durability read (#8660), so callers must clamp this split to
-    the total they already hold.
+    This split is for describing a fresh census snapshot, never for deciding
+    or splitting an update refusal: a refusal must classify the identity set it
+    already counted, never a second registry read (#8746).
     """
     runs = _collect_active_runs(include_resumable_gateway=True)
-    webui_owned: list[dict] = []
-    gateway: list[dict] = []
-    for run in runs:
-        backend = str(run.get("backend") or "")
-        if backend == "gateway" and _gateway_run_durably_resumable(str(run.get("stream_id") or "")):
-            gateway.append(run)
-        else:
-            webui_owned.append(run)
-    return {"webui_owned": webui_owned, "gateway": gateway, "all": runs}
+    census = classify_run_identities(runs)
+    census["all"] = runs
+    return census
 
 
 # ── Settlement ──────────────────────────────────────────────────────────────

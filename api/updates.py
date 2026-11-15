@@ -177,16 +177,22 @@ def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
     return f'fetch failed: {detail}'
 
 
-def _blocker_snapshot_from_runs(runs: list[dict]) -> dict:
+def _blocker_snapshot_from_runs(runs: list[dict], *, include_identities: bool = False) -> dict:
     stream_ids = [r['stream_id'] for r in runs if r.get('registered_stream')]
     run_ids = [r['stream_id'] for r in runs]
-    return {
+    snapshot = {
         'active_streams': len(stream_ids),
         'active_runs': len(run_ids),
         'blocking_stream_ids': stream_ids[:10],
         'blocking_run_ids': run_ids[:10],
         'restart_blocked': bool(run_ids),
     }
+    if include_identities:
+        snapshot['_blocking_run_identities'] = [
+            {'stream_id': r.get('stream_id'), 'backend': r.get('backend')}
+            for r in runs
+        ]
+    return snapshot
 
 
 def _restart_blocker_snapshot() -> dict:
@@ -229,28 +235,36 @@ def _update_blocker_snapshot(target: str) -> dict:
         return _restart_blocker_snapshot()
     from api import run_drain
 
-    return _blocker_snapshot_from_runs(run_drain.all_active_runs())
+    return _blocker_snapshot_from_runs(run_drain.all_active_runs(), include_identities=True)
 
 
-def _gateway_run_split(total: int) -> tuple[int, int]:
+def _gateway_run_split(blocker_snapshot: dict | None, total: int) -> tuple[int, int]:
     """Return ``(gateway_runs, webui_owned_runs)`` clamped to ``total``.
 
     #8746: the refusal copy names both kinds of run, so it needs the split the
     blocking census deliberately does not compute — #8660 requires
     ``_update_blocker_snapshot`` to stay one pass over the registries with no
     durability read, because a mark that moves between two reads can drop or
-    double a run. Here a mark that moves can only shift one run across the
-    boundary, so the split is clamped to the authoritative total instead of
-    being trusted, and a failed read reports no Gateway runs rather than
-    promising stops it cannot prove.
+    double a run.
+
+    The split is derived from the run identity set already counted in
+    ``blocker_snapshot`` via ``classify_run_identities``, never a second
+    registry read, so a run registering later cannot take over a counted slot.
+    Missing identities or a failed classification reports no Gateway runs rather
+    than inventing them.
     """
     from api import run_drain
 
+    identities = blocker_snapshot.get('_blocking_run_identities') if isinstance(blocker_snapshot, dict) else None
+    if not isinstance(identities, list):
+        return 0, total
+
     try:
-        census = run_drain.active_run_census()
-        gateway = min(len(census.get('gateway') or []), total)
+        classified = run_drain.classify_run_identities(identities)
+        gateway_rows = classified.get('gateway') or []
+        gateway = min(len(gateway_rows), total)
     except Exception:
-        logger.debug('Failed to split the active-run census', exc_info=True)
+        logger.debug('Failed to split the active-run identities', exc_info=True)
         gateway = 0
     return gateway, max(0, total - gateway)
 
@@ -308,7 +322,7 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
             n = webui_owned_runs + gateway_runs
         else:
             n = raw_active_runs
-            gateway_runs, webui_owned_runs = _gateway_run_split(n)
+            gateway_runs, webui_owned_runs = _gateway_run_split(blocker_snapshot, n)
 
         payload_extra['webui_owned_runs'] = webui_owned_runs
         payload_extra['gateway_runs'] = gateway_runs
