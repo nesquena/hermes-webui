@@ -3661,6 +3661,16 @@
 .model-opt-id{display:block;font-size:10px;color:var(--muted);line-height:1.3;opacity:.72;word-break:break-word;}
 .model-provider-hint{margin:2px 14px 6px;padding:7px 9px;border:1px solid var(--border2);border-radius:7px;background:color-mix(in srgb,var(--surface) 90%,var(--warning));color:var(--muted);font-size:11px;line-height:1.35;}
 .model-opt-provider{display:inline-flex;align-items:center;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:600;letter-spacing:.03em;color:var(--muted);background:rgba(255,255,255,.05);border:1px solid var(--border2);margin-left:auto;white-space:nowrap;flex-shrink:0;}
+/* #9074: on Configured rows a long custom provider name ellipsizes instead of
+   wrapping the row onto a second line on narrow phones. A zero basis keeps the
+   pill from forcing a wrap; it grows into the line's free space up to its own
+   width, and margin-left:auto still right-aligns it. */
+.model-opt-provider--configured{display:block;flex:1 1 0;min-width:3.5em;max-width:max-content;overflow:hidden;text-overflow:ellipsis;}
+/* #9074: the dark-theme chip colours measured ~1.1:1 on the light dropdown.
+   Mixed from the theme tokens, they stay >=4.5:1 on plain, hover and active rows. */
+:root:not(.dark) .model-opt-badge--primary{color:color-mix(in srgb,var(--info) 60%,var(--text));}
+:root:not(.dark) .model-opt-badge--fallback{color:color-mix(in srgb,var(--warning) 50%,var(--text));}
+:root:not(.dark) .model-opt-badge--selected{color:color-mix(in srgb,var(--blue) 60%,var(--text));}
 /* "Show N more" group expander — deliberately distinct from a real model row:
    no model-id line, indented, muted italic label + a subtle + affordance, so it
    reads as an action that expands the list rather than a selectable model. */
