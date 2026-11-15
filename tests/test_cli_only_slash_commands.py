@@ -2,17 +2,50 @@
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import textwrap
 from types import SimpleNamespace
 
-from api.commands import list_commands
+from api.commands import list_commands, _ALLOWED_AGENT_COMMANDS, _AGENT_COMMAND_ALIASES
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+
+
+def _extract_js_set_members(source: str, varname: str) -> set[str]:
+    """Return the string members of a `const NAME=new Set([...])` literal."""
+    m = re.search(rf"const\s+{re.escape(varname)}\s*=\s*new Set\(\[(.*?)\]\)", source, re.S)
+    assert m, f"could not find const {varname}=new Set([...]) in source"
+    return set(re.findall(r"'([^']*)'", m.group(1)))
+
+
+def _canonical_agent_names(names: set[str]) -> set[str]:
+    """Map underscore alias forms to canonical names via api/commands.py's map."""
+    return {_AGENT_COMMAND_ALIASES.get(n, n) for n in names}
+
+
+def _extract_busy_intercept_block() -> str:
+    """Extract the busy-path slash intercept `if` block verbatim from send()."""
+    marker = "Busy-control slash commands must be intercepted"
+    marker_idx = MESSAGES_JS.find(marker)
+    assert marker_idx != -1
+    start = MESSAGES_JS.find("if(text.startsWith('/')&&!literalSlash){", marker_idx)
+    assert start != -1
+    depth = 0
+    for i in range(start, len(MESSAGES_JS)):
+        if MESSAGES_JS[i] == "{":
+            depth += 1
+        elif MESSAGES_JS[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[start : i + 1]
+    raise AssertionError("unbalanced braces while extracting busy intercept block")
 
 
 def test_api_commands_exposes_cli_only_metadata_for_webui_intercept():
@@ -62,7 +95,10 @@ def test_frontend_fetches_bundle_command_metadata_lazily():
 def test_frontend_matches_agent_command_aliases():
     helper_idx = COMMANDS_JS.find("async function getAgentCommandMetadata")
     assert helper_idx != -1
-    helper = COMMANDS_JS[helper_idx : helper_idx + 700]
+    # #8203's name-first -> alias -> slug-variant structure (with its three
+    # explanatory comment blocks) pushes the pins ~60 chars past the old 700
+    # bound; the assertions below are unchanged, only the window is wider.
+    helper = COMMANDS_JS[helper_idx : helper_idx + 800]
     assert "cmd.aliases" in helper
     assert "some(a=>String(a||'').toLowerCase()===needle)" in helper
 
@@ -75,15 +111,34 @@ def test_frontend_can_execute_agent_commands_via_api_endpoint():
     assert COMMANDS_JS.count("api('/api/commands/exec'") == 1
 
 
-def test_cli_only_response_mentions_webui_and_cli_scope():
+def test_cli_only_response_mentions_webui_scope():
     assert "function cliOnlyCommandResponse" in COMMANDS_JS
-    assert "Hermes CLI-only command" in COMMANDS_JS
-    assert "cannot run inside the WebUI" in COMMANDS_JS
+    # #7683 review: "is only available in the Hermes CLI" replaced the longer
+    # "is a Hermes CLI-only command and cannot run inside the WebUI" (UX gate copy).
+    assert "is only available in the Hermes CLI" in COMMANDS_JS
+    assert "cannot run inside the WebUI" not in COMMANDS_JS
+
+
+def test_prompt_style_cli_only_response_points_at_a_bare_prompt():
+    """Prompt-style registry commands (/plan, /review, /learn) tell the user
+    their request is ALREADY in the composer, reworded to keep the command's
+    intent, and to send it (#7683 review round 3 + UX gate)."""
+    assert "const PROMPT_STYLE_CLI_ONLY_COMMANDS=new Set(['plan','review','learn']);" in COMMANDS_JS
+    response_idx = COMMANDS_JS.find("function cliOnlyCommandResponse")
+    response = COMMANDS_JS[response_idx : COMMANDS_JS.index("\n}\n", response_idx)]
+    assert "PROMPT_STYLE_CLI_ONLY_COMMANDS.has(name)" in response
+    # The old wording ("Send it without the slash...") read as an
+    # instruction to retype the whole prompt, and following it literally
+    # produced "plan write a migration plan…".
+    assert "Send it without the slash to ask the agent directly." not in response
+    assert "Your request is in the composer, reworded as a normal message." in response
+    assert "Edit it if needed, then send it." in response
+    assert "Press Send to ask the agent directly." not in response
 
 
 def test_browser_cli_only_response_explains_server_side_browser_tools():
     response_idx = COMMANDS_JS.find("function cliOnlyCommandResponse")
-    response = COMMANDS_JS[response_idx : response_idx + 900]
+    response = COMMANDS_JS[response_idx : COMMANDS_JS.index("\n}\n", response_idx)]
     assert "if(name==='browser')" in response
     assert "configured server-side" in response
     assert "`/browser` itself only works in `hermes chat`" in response
@@ -161,6 +216,30 @@ def _run_commands_js(script_body: str) -> dict:
                   description: 'Run plugin review',
                   category: 'Plugin',
                   aliases: ['plugin_review'],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'agents',
+                  description: 'Manage background agents',
+                  category: 'Session',
+                  aliases: ['tasks'],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'sessions',
+                  description: 'List sessions',
+                  category: 'Session',
+                  aliases: [],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'resume',
+                  description: 'Resume a session',
+                  category: 'Session',
+                  aliases: [],
                   cli_only: false,
                   gateway_only: false
                 }}
@@ -261,10 +340,13 @@ def test_agent_command_metadata_helper_resolves_name_and_alias():
         const byAlias = await getAgentCommandMetadata('browse');
         const unknown = await getAgentCommandMetadata('does-not-exist');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true,
-          unknown: unknown === null
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true,
+          available: byName && byName.available === true
+            && byAlias && byAlias.available === true
+            && unknown && unknown.available === true,
+          unknown: unknown && unknown.command === null
         };
         """
     )
@@ -273,6 +355,7 @@ def test_agent_command_metadata_helper_resolves_name_and_alias():
         "by_name": "browser",
         "by_alias": "browser",
         "cli_only": True,
+        "available": True,
         "unknown": True,
     }
 
@@ -282,12 +365,12 @@ def test_cli_only_response_helper_uses_canonical_command_name():
         """
         const meta = await getAgentCommandMetadata('browse');
         return {
-          response: cliOnlyCommandResponse('browse', meta)
+          response: cliOnlyCommandResponse('browse', meta && meta.command)
         };
         """
     )
 
-    assert "`/browser` is a Hermes CLI-only command" in result["response"]
+    assert "`/browser` is only available in the Hermes CLI" in result["response"]
     assert "Attach browser tools" in result["response"]
     assert "configured server-side" in result["response"]
 
@@ -356,8 +439,8 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert result["delegate_names"] == []
     assert result["incident_names"] == ["incident-review"]
     assert result["incident_sources"] == ["bundle"]
-    assert result["triage_names"] == ["triage-review"]
-    assert result["triage_sources"] == ["agent"]
+    assert result["triage_names"] == []
+    assert result["triage_sources"] == []
     assert result["plugin_names"] == ["plugin-review"]
     assert result["plugin_sources"] == ["plugin"]
     assert "skills" in result["skills_names"]
@@ -541,7 +624,7 @@ def test_send_intercepts_cli_only_commands_before_agent_round_trip():
 
     assert "await getAgentCommandMetadata(_parsedCmd.name)" in intercept
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
-    assert "cliOnlyCommandResponse(_parsedCmd.name,_agentCmd)" in intercept
+    assert "cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args)" in intercept
     assert "return;" in intercept
 
 
@@ -598,9 +681,9 @@ def test_reload_skills_agent_command_metadata_resolves_alias():
         const byName = await getAgentCommandMetadata('reload-skills');
         const byAlias = await getAgentCommandMetadata('reload_skills');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true
         };
         """
     )
@@ -618,9 +701,9 @@ def test_codex_runtime_agent_command_metadata_resolves_alias():
         const byName = await getAgentCommandMetadata('codex-runtime');
         const byAlias = await getAgentCommandMetadata('codex_runtime');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true
         };
         """
     )
@@ -659,3 +742,696 @@ def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():
     assert optout_idx != -1
     assert metadata_idx != -1
     assert "if(_parsedCmd&&!_cmd)" in intercept[optout_idx:metadata_idx + 120]
+
+
+# ── #6951: autocomplete must only announce commands the WebUI dispatches ─────
+
+
+def test_non_dispatchable_agent_command_hidden_from_autocomplete():
+    """#6951: registry commands the WebUI does not dispatch (e.g. /agents) must
+    not be advertised, since submitting them would fall through to plain chat."""
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        const agents = await getSlashAutocompleteMatches('/agents');
+        const ag = await getSlashAutocompleteMatches('/ag');
+        return {
+          agents_names: agents.map(item => item.name),
+          ag_names: ag.map(item => item.name)
+        };
+        """
+    )
+    assert result["agents_names"] == []
+    assert result["ag_names"] == []
+
+
+def test_dispatchable_agent_commands_stay_in_autocomplete():
+    """#6951: commands the WebUI does dispatch -- backend exec allowlist and
+    native WebUI behaviors -- must keep appearing in autocomplete."""
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        const reload = await getSlashAutocompleteMatches('/reload');
+        const sessions = await getSlashAutocompleteMatches('/sessions');
+        const resume = await getSlashAutocompleteMatches('/resume');
+        const plugin = await getSlashAutocompleteMatches('/plugin');
+        return {
+          reload_names: reload.map(item => item.name),
+          reload_sources: reload.map(item => item.source),
+          sessions_names: sessions.map(item => item.name),
+          resume_names: resume.map(item => item.name),
+          plugin_names: plugin.map(item => item.name)
+        };
+        """
+    )
+    assert result["reload_names"] == ["reload-skills"]
+    assert result["reload_sources"] == ["agent"]
+    assert result["sessions_names"] == ["sessions"]
+    assert result["resume_names"] == ["resume"]
+    assert result["plugin_names"] == ["plugin-review"]
+
+
+def test_autocomplete_allowlist_is_exact_parity_with_dispatchers():
+    """#6951 (re-gate): the announced allowlist must be in exact agreement with
+    BOTH real dispatch authorities -- api/commands.py's _ALLOWED_AGENT_COMMANDS
+    (the /api/commands/exec allowlist) and messages.js's
+    _AGENT_COMMANDS_RUN_ON_WEBUI (the send() dispatch set). This compares the
+    actual parsed sets, so drift in ANY authority fails the test: a command
+    added to one allowlist but not the others, a renamed alias, or a removed
+    entry all break parity here."""
+    announced = _extract_js_set_members(COMMANDS_JS, "_WEBUI_DISPATCHABLE_AGENT_COMMANDS")
+    dispatched = _extract_js_set_members(MESSAGES_JS, "_AGENT_COMMANDS_RUN_ON_WEBUI")
+
+    # The backend-exec family must agree exactly across all three authorities
+    # (canonical names after alias normalization).
+    backend_allowed = set(_ALLOWED_AGENT_COMMANDS)
+    assert _canonical_agent_names(dispatched) == backend_allowed
+    assert _canonical_agent_names(announced) & backend_allowed == backend_allowed
+
+    # Announced backend-exec commands are exactly the backend-exec allowlist
+    # (no announced exec command outside /api/commands/exec, none missing).
+    announced_backend = _canonical_agent_names(announced) & backend_allowed
+    assert announced_backend == backend_allowed
+
+    # Every remaining announced command must be a native WebUI behavior that
+    # send() handles without an agent round-trip (moa/sessions/resume/pet).
+    native = announced - announced_backend
+    assert native == {"moa", "sessions", "resume", "pet"}
+
+    # The plugin transport is parity by rule, not by list: the filter accepts
+    # category==='Plugin' and the dispatcher routes the exact same value.
+    assert "category==='Plugin'" in COMMANDS_JS
+    assert "_agentCmd.category==='Plugin'" in MESSAGES_JS
+
+
+def _run_shared_classic_realm_js() -> dict:
+    """Evaluate commands.js then messages.js in ONE vm realm -- exactly how
+    static/index.html loads them (consecutive non-module `defer` classic
+    scripts share a single global lexical realm). A duplicate top-level
+    `const` across the two files throws during the second script's
+    declaration instantiation and aborts it before any statement runs, so the
+    second script's dispatch consts would never bind. Browser-only globals
+    referenced at load time are stubbed; runtime (call-time) references are
+    out of scope for this guard.
+    """
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const ctx = vm.createContext({{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          document: {{ addEventListener(){{}}, getElementById(){{ return null; }}, hidden: false }},
+          window: {{ addEventListener(){{}}, speechSynthesis: {{ speaking: false, paused: false }} }},
+          location: {{ href: 'http://localhost/', protocol: 'http:', host: 'localhost' }},
+          navigator: {{ userAgent: 'test' }},
+          setTimeout: () => 0, clearTimeout: () => 0,
+          setInterval: () => 0, clearInterval: () => 0,
+          requestAnimationFrame: () => 0, cancelAnimationFrame: () => 0,
+          fetch: async () => ({{}}),
+          EventSource: function(){{}},
+          MutationObserver: function(){{ this.observe=()=>{{}}; }},
+          Blob: function(){{}}, FileReader: function(){{ this.readAsText=()=>{{}}; }},
+          URL: function(){{ this.href=''; }}, FormData: function(){{}},
+          WebSocket: function(){{}},
+          crypto: {{ getRandomValues: (arr) => arr }},
+          CustomEvent: function(){{}}
+        }});
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        let secondError = null;
+        try {{
+          vm.runInContext({json.dumps(MESSAGES_JS)}, ctx);
+        }} catch (e) {{
+          secondError = String(e && e.message || e);
+        }}
+        const bound = vm.runInContext(`({{
+          runOnWebui: typeof _AGENT_COMMANDS_RUN_ON_WEBUI,
+          dispatchable: typeof _WEBUI_DISPATCHABLE_AGENT_COMMANDS,
+          backendConst: typeof _BACKEND_EXECUTED_AGENT_COMMANDS
+        }})`, ctx);
+        process.stdout.write(JSON.stringify({{ secondError, ...bound }}));
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
+
+
+def test_commands_and_messages_evaluate_in_one_shared_classic_script_realm():
+    """#6962 (re-gate): commands.js and messages.js must coexist as classic
+    scripts in the same global realm (static/index.html loads them back to
+    back). A duplicate top-level `const _BACKEND_EXECUTED_AGENT_COMMANDS`
+    across both files previously threw
+    `SyntaxError: Identifier ... has already been declared` on messages.js,
+    aborting its evaluation entirely. Both files must evaluate cleanly in one
+    realm, the dispatch consts of BOTH files must be bound, and the removed
+    duplicate authority mirror must not exist in the shared namespace."""
+    out = _run_shared_classic_realm_js()
+    assert out["secondError"] is None, (
+        f"messages.js failed to evaluate after commands.js in the shared realm: "
+        f"{out['secondError']}"
+    )
+    assert out["runOnWebui"] == "object", (
+        "messages.js dispatch const _AGENT_COMMANDS_RUN_ON_WEBUI not bound in "
+        "the shared realm -- declaration instantiation was aborted"
+    )
+    assert out["dispatchable"] == "object", (
+        "commands.js dispatch const _WEBUI_DISPATCHABLE_AGENT_COMMANDS not "
+        "bound in the shared realm"
+    )
+    assert out["backendConst"] == "undefined", (
+        "duplicate/unused _BACKEND_EXECUTED_AGENT_COMMANDS mirror must not be "
+        "declared in the shared realm (declared once -> it would collide; "
+        "declared in one file -> it is dead authority drift)"
+    )
+
+
+def test_busy_path_intercepts_stop_before_mode_routing():
+    """#6951: while busy, /stop must cancel the active run immediately instead
+    of being steered/queued as the literal text '/stop'."""
+    busy_idx = MESSAGES_JS.find("Busy-control slash commands must be intercepted")
+    assert busy_idx != -1
+    mode_idx = MESSAGES_JS.find("const defaultMessageMode=", busy_idx)
+    assert mode_idx != -1
+    busy_block = MESSAGES_JS[busy_idx:mode_idx]
+    assert "['steer','interrupt','queue','terminal','goal','yolo','stop']" in busy_block
+    assert "cmdStop" in busy_block or "COMMANDS.find(c=>c.name===_pc.name)" in busy_block
+
+
+def _run_production_autocomplete_js(commands_payload: list[dict], script_body: str) -> dict:
+    """Run the REAL getMatchingCommands/autocomplete pipeline from commands.js
+    against a /api/commands payload (defaults to the real hermes_cli registry
+    serialized exactly as list_commands() produces it)."""
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const ctx = {{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          api: async (path) => {{
+            if (path === '/api/commands') return {{ commands: {json.dumps(commands_payload)} }};
+            if (path === '/api/commands/bundles') return {{ bundles: [] }};
+            if (path === '/api/skills') return {{ skills: [] }};
+            throw new Error('unexpected api path: ' + path);
+          }}
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        (async () => {{
+          const result = await vm.runInContext(`(async () => {{
+            {script_body}
+          }})()`, ctx);
+          process.stdout.write(JSON.stringify(result));
+        }})().catch(err => {{
+          console.error(err && err.stack || err);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
+
+
+def _real_registry_payload() -> list[dict] | None:
+    """Serialize the real hermes_cli COMMAND_REGISTRY via the production
+    list_commands() path. Returns None when hermes_cli is unavailable."""
+    try:
+        return list_commands()
+    except Exception:
+        return None
+
+
+def test_real_registry_announced_commands_are_all_dispatchable():
+    """#6951 (re-gate): with the REAL hermes_cli registry as /api/commands
+    payload, every command the production autocomplete announces must be
+    dispatchable -- backend-exec via /api/commands/exec, a native WebUI
+    behavior, or a plugin command. /agents (in the registry, NOT dispatched)
+    must not be announced. This is the announced <= dispatched invariant
+    exercised against the real production data path."""
+    payload = _real_registry_payload()
+    if payload is None:
+        pytest.skip("hermes_cli registry unavailable")
+    announced_by_prefix = {}
+    for cmd in payload:
+        name = str(cmd.get("name") or "")
+        if not name:
+            continue
+        result = _run_production_autocomplete_js(
+            payload,
+            f"""
+            await loadAgentCommandMetadata(true);
+            const matches = await getSlashAutocompleteMatches('/{name}');
+            return matches.map(item => ({{ name: item.name, source: item.source }}));
+            """,
+        )
+        announced_by_prefix[name] = result
+
+    backend_allowed = set(_ALLOWED_AGENT_COMMANDS)
+    for name, rows in announced_by_prefix.items():
+        for row in rows:
+            if row["source"] not in ("agent", "plugin"):
+                continue  # builtin/subarg/skill rows are out of scope
+            assert row["name"] in backend_allowed or row["name"] in (
+                "moa",
+                "sessions",
+                "resume",
+                "pet",
+            ), f"{row['name']} announced but not dispatchable"
+
+    # /agents is in the real registry but must not be announced (it is neither
+    # backend-exec nor a native WebUI behavior nor a plugin).
+    assert announced_by_prefix.get("agents", []) == [], announced_by_prefix.get("agents")
+
+
+def test_alias_typed_text_reaches_exec_dispatch():
+    """#6951 (re-gate): typing an underscore alias (/reload_skills) must
+    resolve through getAgentCommandMetadata to the canonical name, which is
+    what the dispatcher allowlist tests -- so alias forms dispatch without
+    needing their own autocomplete row."""
+    result = _run_commands_js(
+        """
+        const byAlias = await getAgentCommandMetadata('reload_skills');
+        const canonical = byAlias && byAlias.command && byAlias.command.name;
+        return { canonical, dispatched: canonical === 'reload-skills' };
+        """
+    )
+    assert result["canonical"] == "reload-skills"
+    assert result["dispatched"] is True
+
+
+def _run_busy_intercept_js(script_body: str) -> dict:
+    """Execute the REAL busy-path slash intercept block from messages.js with
+    the REAL COMMANDS table + parseCommand from commands.js. This exercises the
+    production routing branch -- not just its source text.
+
+    The harness defines `async function busyIntercept(text, literalSlash)` in
+    the vm context (so it closes over the real COMMANDS/parseCommand) and the
+    script_body then calls it. The block's inner `return;` exits run() early
+    when the command is intercepted, so `intercepted: true` is returned."""
+    block = _extract_busy_intercept_block()
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const calls = [];
+        const ctx = {{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          S: {{
+            busy: true,
+            activeStreamId: 'stream-1',
+            session: {{ session_id: 'sess-1' }},
+            pendingFiles: []
+          }},
+          cancelStream: async (reason) => {{ calls.push('cancelStream:' + reason); return true; }},
+          showToast: () => {{}},
+          $: () => ({{ value: '' }}),
+          autoResize: () => {{}},
+          api: async () => ({{}}),
+          _trySteer: async () => {{ calls.push('steer'); }},
+          queueSessionMessage: () => {{ calls.push('queue'); }}
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        vm.runInContext(`async function busyIntercept(text, literalSlash){{
+          let reachedModeRouting = false;
+          const run = async () => {{
+            {block}
+            reachedModeRouting = true;
+          }};
+          await run();
+          return {{ intercepted: !reachedModeRouting }};
+        }}`, ctx);
+        (async () => {{
+          const result = await vm.runInContext(`(async () => {{
+            {script_body}
+          }})()`, ctx);
+          process.stdout.write(JSON.stringify({{ result, calls }}));
+        }})().catch(err => {{
+          console.error(err && err.stack || err);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
+
+
+def test_busy_stop_executes_real_cancel_branch():
+    """#6951 (re-gate): executing the real busy-intercept branch from messages.js
+    with the real COMMANDS table must route /stop to cmdStop -> cancelStream,
+    and must NOT fall through to steer/queue routing."""
+    out = _run_busy_intercept_js(
+        """
+        const r1 = await busyIntercept('/stop', false);
+        const r2 = await busyIntercept('/agents', false);
+        return { stop: r1, agents: r2 };
+        """
+    )
+    # /stop is intercepted by the busy branch (cmdStop -> cancelStream ran,
+    # mode routing never reached), /agents is NOT a busy-control command so it
+    # falls through to mode routing (documented: it is no longer announced).
+    assert out["result"]["stop"] == {"intercepted": True}
+    assert out["result"]["agents"] == {"intercepted": False}
+    assert any(c.startswith("cancelStream:slash-stop") for c in out["calls"]), out["calls"]
+    assert not any(c.startswith("steer") for c in out["calls"]), out["calls"]
+
+
+def test_slash_autocomplete_treats_underscore_like_hyphen():
+    """A typed underscore prefix must still suggest hyphenated commands (#8143).
+
+    The agent-side skill/bundle resolver documents `_` ≡ `-` for command
+    slugs, but the WebUI autocomplete compared the typed prefix literally,
+    so `/knowledge_` found nothing while `/knowledge-` matched.
+    """
+    result = _run_commands_js(
+        """
+        // master holds plain skills until bundle metadata settles (#8050-era gate)
+        _bundleCommandCacheReady = true;
+        _skillCommandCache.length = 0;
+        _skillCommandCache.push({name: 'knowledge-loop', desc: 'Loop', source: 'skill', skillName: 'knowledge-loop'});
+        _skillCommandCache.push({name: 'knowledgebase', desc: 'Base', source: 'skill', skillName: 'knowledgebase'});
+        return {
+          hyphen_prefix: getMatchingCommands('knowledge-').map(c => c.name),
+          underscore_prefix: getMatchingCommands('knowledge_').map(c => c.name),
+          neighbour_hit: getMatchingCommands('knowledge_').map(c => c.name).includes('knowledgebase')
+        };
+        """
+    )
+
+    assert result["hyphen_prefix"] == ["knowledge-loop"]
+    assert result["underscore_prefix"] == ["knowledge-loop"]
+    # The alias must not widen into neighbouring slugs.
+    assert result["neighbour_hit"] is False
+
+
+def test_slash_plain_prefix_keeps_master_order():
+    """A prefix without `_`/`-` must keep the original row order (#8203 gate).
+
+    Literal-first re-ranking exists for dual spellings only; applied to a plain
+    prefix it moved prefix-matched skills above substring/description matches
+    and changed the first row of the menu versus master.
+    """
+    result = _run_commands_js(
+        """
+        _bundleCommandCacheReady = true;
+        _skillCommandCache.length = 0;
+        _skillCommandCache.push({name: 'incident-review', desc: 'Incident review', source: 'skill', skillName: 'incident-review'});
+        _skillCommandCache.push({name: 'review-pr', desc: 'Review PR', source: 'skill', skillName: 'review-pr'});
+        _skillCommandCache.push({name: 'knowledge-loop', desc: 'Loop', source: 'skill', skillName: 'knowledge-loop'});
+        _skillCommandCache.push({name: 'alpha-notes', desc: 'Loop notes', source: 'skill', skillName: 'alpha-notes'});
+        const mine = new Set(['incident-review', 'review-pr', 'knowledge-loop', 'alpha-notes']);
+        return {
+          review: getMatchingCommands('review').map(c => c.name).filter(n => mine.has(n)),
+          loop: getMatchingCommands('loop').map(c => c.name).filter(n => mine.has(n))
+        };
+        """
+    )
+
+    assert result["review"] == ["incident-review", "review-pr"]
+    assert result["loop"] == ["knowledge-loop", "alpha-notes"]
+
+
+def test_slash_alias_matching_covers_skill_and_agent_rounds():
+    """Skill and agent/plugin command rounds both honour the underscore alias."""
+    result = _run_commands_js(
+        """
+        _bundleCommandCacheReady = true;
+        _skillCommandCache.length = 0;
+        _skillCommandCache.push({name: 'some-skill', desc: 'S', source: 'skill', skillName: 'some-skill'});
+        _agentCommandCache = [{name: 'plugin-review', description: 'Review', cli_only: false, category: 'Plugin'}];
+        return {
+          skill: getMatchingCommands('some_').map(c => c.name),
+          agent: getMatchingCommands('plugin_').map(c => c.name),
+          agent_canonical: getMatchingCommands('plugin-').map(c => c.name)
+        };
+        """
+    )
+
+    assert result["skill"] == ["some-skill"]
+    assert result["agent"] == ["plugin-review"]
+    # Both spellings surface the same command set.
+    assert result["agent"] == result["agent_canonical"]
+
+
+def test_slash_underscore_prefix_does_not_collapse_to_empty_or_global():
+    """A trailing underscore must not degrade into an empty (match-all) prefix."""
+    result = _run_commands_js(
+        """
+        _bundleCommandCacheReady = true;
+        _skillCommandCache.length = 0;
+        _skillCommandCache.push({name: 'knowledge-loop', desc: 'Loop', source: 'skill', skillName: 'knowledge-loop'});
+        _skillCommandCache.push({name: 'other-thing', desc: 'Other', source: 'skill', skillName: 'other-thing'});
+        return getMatchingCommands('knowledge_').map(c => c.name);
+        """
+    )
+
+    assert result == ["knowledge-loop"]
+
+
+def test_slash_alias_matching_covers_bundle_rows():
+    """Bundle rows are prefix-matched, so they honour the alias too."""
+    result = _run_commands_js(
+        """
+        _agentCommandCacheReady = true;
+        _bundleCommandCacheReady = true;
+        _bundleCommandCache.length = 0;
+        _bundleCommandCache.push({name: 'knowledge-loop', desc: 'Bundle', source: 'bundle'});
+        return {
+          underscore: getMatchingCommands('knowledge_').map(c => c.name),
+          hyphen: getMatchingCommands('knowledge-').map(c => c.name)
+        };
+        """
+    )
+
+    assert result["underscore"] == ["knowledge-loop"]
+    assert result["hyphen"] == ["knowledge-loop"]
+
+
+def test_slash_dual_spelling_registry_dispatches_literal_spelling_exactly():
+    """When both `_` and `-` spellings are registered, the row an Enter would
+    dispatch (row zero) must be the literal spelling the user typed, in either
+    registration order (#8203 round 2).
+
+    Round 1 made the matcher treat `_` ≡ `-`, which surfaced BOTH spellings
+    for either typed prefix; the dropdown then took row zero in registry
+    order, so `/plugin_review` could dispatch `/plugin-review` (and reversing
+    the registration broke the hyphen spelling instead).
+    """
+    script = """
+        _bundleCommandCacheReady = true;
+        _skillCommandCache.length = 0;
+        _agentCommandCache = %s;
+        return {
+          underscore_typed: getMatchingCommands('plugin_review').map(c => c.name),
+          hyphen_typed: getMatchingCommands('plugin-review').map(c => c.name)
+        };
+    """
+    for reg_order in (
+        # hyphen-first registration
+        "[{name: 'plugin-review', description: 'Review A', cli_only: false, category: 'Plugin'}, {name: 'plugin_review', description: 'Review B', cli_only: false, category: 'Plugin'}]",
+        # underscore-first registration
+        "[{name: 'plugin_review', description: 'Review B', cli_only: false, category: 'Plugin'}, {name: 'plugin-review', description: 'Review A', cli_only: false, category: 'Plugin'}]",
+    ):
+        result = _run_commands_js(script % reg_order)
+        # The literal spelling typed must own row zero regardless of registry order.
+        assert result["underscore_typed"] == ["plugin_review", "plugin-review"], reg_order
+        assert result["hyphen_typed"] == ["plugin-review", "plugin_review"], reg_order
+
+
+def test_bundle_command_metadata_resolves_underscore_spelling_of_hyphenated_bundle():
+    """The submit-time bundle lookup must normalise `_`/`-` like the matcher.
+
+    With only the hyphenated bundle registered, `getBundleCommandMetadata(
+    'incident_review')` returned null on the round-1 head (literal `===`
+    compare), so the send path posted `/incident_review ...` as plain chat
+    instead of dispatching it — the #8143 symptom (e.g. `/knowledge_loop do X`).
+    """
+    result = _run_commands_js(
+        """
+        const byHyphen = await getBundleCommandMetadata('incident-review');
+        const byUnderscore = await getBundleCommandMetadata('incident_review');
+        const byHyphenUnderscore = await getBundleCommandMetadata('triage_review');
+        const missing = await getBundleCommandMetadata('does-not-exist');
+        // Reverse direction: an underscore-named bundle resolved by the hyphen spelling.
+        _bundleCommandCacheReady = true;
+        _bundleCommandCache.length = 0;
+        _bundleCommandCache.push({name: 'knowledge_loop', desc: 'Underscore bundle', source: 'bundle'});
+        const reverse = await getBundleCommandMetadata('knowledge-loop');
+        return {
+          hyphen: byHyphen && byHyphen.name,
+          underscore: byUnderscore && byUnderscore.name,
+          hyphen_underscore: byHyphenUnderscore === null,  // reserved bundles must stay unresolvable under the alias too
+          missing: missing === null,
+          reverse: reverse && reverse.name
+        };
+        """
+    )
+
+    assert result == {
+        "hyphen": "incident-review",
+        "underscore": "incident-review",
+        "hyphen_underscore": True,
+        "missing": True,
+        "reverse": "knowledge_loop",
+    }
+
+
+# ── #8203 re-gate: advertised `_`/`-` alias must resolve at submit time ──────
+
+
+def test_agent_command_metadata_resolves_implicit_underscore_spelling():
+    """A typed underscore spelling of a hyphenated agent command must resolve
+    the registered native name even when it is NOT an explicit alias
+    (aliases: []), and vice versa (#8203 re-gate). Without this,
+    `/leaf_review do X` reached the ordinary-chat fallthrough and made zero
+    /api/commands/exec requests."""
+    result = _run_commands_js(
+        """
+        _agentCommandCacheReady = true;
+        _agentCommandCache = [
+          {name: 'leaf-review', description: 'Run leaf review', aliases: [], cli_only: false, category: 'Plugin'},
+          {name: 'knowledge_loop', description: 'Loop', aliases: [], cli_only: false, category: 'Tools'}
+        ];
+        const leafByUnderscore = await getAgentCommandMetadata('leaf_review');
+        const leafByHyphen = await getAgentCommandMetadata('leaf-review');
+        const reverse = await getAgentCommandMetadata('knowledge-loop');
+        const missing = await getAgentCommandMetadata('does-not-exist');
+        return {
+          leaf_by_underscore: leafByUnderscore && leafByUnderscore.command && leafByUnderscore.command.name,
+          leaf_by_hyphen: leafByHyphen && leafByHyphen.command && leafByHyphen.command.name,
+          reverse: reverse && reverse.command && reverse.command.name,
+          missing: missing && missing.command === null
+        };
+        """
+    )
+
+    assert result == {
+        "leaf_by_underscore": "leaf-review",
+        "leaf_by_hyphen": "leaf-review",
+        "reverse": "knowledge_loop",
+        "missing": True,
+    }
+
+
+def test_agent_command_metadata_dual_spelling_keeps_literal_precedence():
+    """When both `_` and `-` spellings are registered as native names, the
+    submit-time resolver must return the literal spelling the user typed, in
+    either registration order (#8203 re-gate)."""
+    script = """
+        _agentCommandCacheReady = true;
+        _agentCommandCache = %s;
+        const u = await getAgentCommandMetadata('plugin_review');
+        const h = await getAgentCommandMetadata('plugin-review');
+        return {
+          underscore_typed: u && u.command && u.command.name,
+          hyphen_typed: h && h.command && h.command.name
+        };
+    """
+    for reg_order in (
+        # hyphen-first registration
+        "[{name: 'plugin-review', description: 'Review A', cli_only: false, category: 'Plugin'}, {name: 'plugin_review', description: 'Review B', cli_only: false, category: 'Plugin'}]",
+        # underscore-first registration
+        "[{name: 'plugin_review', description: 'Review B', cli_only: false, category: 'Plugin'}, {name: 'plugin-review', description: 'Review A', cli_only: false, category: 'Plugin'}]",
+    ):
+        result = _run_commands_js(script % reg_order)
+        assert result["underscore_typed"] == "plugin_review", reg_order
+        assert result["hyphen_typed"] == "plugin-review", reg_order
+
+
+def _run_exec_transport_js(script_body: str) -> dict:
+    """Run the REAL _runAgentCommandTransport with a stub api that records
+    every /api/commands/exec payload it receives."""
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const execCalls = [];
+        const ctx = {{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          api: async (path, options) => {{
+            if (path === '/api/commands/exec') {{
+              const command = JSON.parse(options.body).command;
+              execCalls.push(command);
+              return {{ output: 'ran ' + command }};
+            }}
+            throw new Error('unexpected api path: ' + path);
+          }}
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        (async () => {{
+          const result = await vm.runInContext(`(async () => {{ {script_body} }})()`, ctx);
+          process.stdout.write(JSON.stringify({{ result, execCalls }}));
+        }})().catch(err => {{
+          console.error(err && err.stack || err);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
+
+
+def test_exec_transport_canonicalizes_alias_token_and_keeps_args():
+    """The transport must POST the resolved native command name, not the typed
+    alias token, while retaining the user's arguments verbatim (#8203 re-gate).
+    An already-canonical native spelling must be posted exactly as typed."""
+    out = _run_exec_transport_js(
+        """
+        _agentCommandCacheReady = true;
+        _agentCommandCache = [
+          {name: 'leaf-review', description: 'Run leaf review', aliases: [], cli_only: false, category: 'Plugin'},
+          {name: 'plugin_review', description: 'Review B', aliases: [], cli_only: false, category: 'Plugin'},
+          {name: 'browser', description: 'Attach browser tools', aliases: ['browse'], cli_only: true, gateway_only: false}
+        ];
+        const leaf = await getAgentCommandMetadata('leaf_review');
+        const plugin = await getAgentCommandMetadata('plugin_review');
+        const browser = await getAgentCommandMetadata('browse');
+        const outLeaf = await _runAgentCommandTransport('/leaf_review do X with args', leaf.command);
+        const outPlugin = await _runAgentCommandTransport('/plugin_review do Y', plugin.command);
+        const outBare = await _runAgentCommandTransport('/leaf_review', leaf.command);
+        const outAlias = await _runAgentCommandTransport('/browse connect', browser.command);
+        const outUnknown = await _runAgentCommandTransport('/mystery foo', {name: 'mystery'});
+        return { outLeaf, outPlugin, outBare, outAlias, outUnknown };
+        """
+    )
+
+    assert out["execCalls"] == [
+        "/leaf-review do X with args",
+        "/plugin_review do Y",
+        "/leaf-review",
+        "/browser connect",
+        "/mystery foo",
+    ]
+    assert out["result"]["outLeaf"] == "ran /leaf-review do X with args"
+    assert out["result"]["outPlugin"] == "ran /plugin_review do Y"
+    assert out["result"]["outBare"] == "ran /leaf-review"
+    assert out["result"]["outAlias"] == "ran /browser connect"
+    assert out["result"]["outUnknown"] == "ran /mystery foo"
+

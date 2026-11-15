@@ -8,8 +8,13 @@ import tempfile
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
-from api.helpers import j
-from api.models import get_session
+from api.helpers import (
+    arm_connection_close_if_body_pending,
+    j,
+    unreadable_content_length,
+    unsupported_transfer_encoding,
+)
+from api.models import UNVERIFIABLE_SESSION_OWNER, get_session, session_owner_readings_readonly
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
     safe_resolve_ws,
@@ -43,6 +48,94 @@ def _max_extracted_bytes() -> int:
 # Back-compat module constant (some call sites / tests reference it). The
 # authoritative value is _max_extracted_bytes(), read at extraction time.
 _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
+
+# Member-count cap: a tiny archive with millions of (possibly empty) members
+# slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
+# Module-level (read at call time) so tests can lower it.
+_MAX_ARCHIVE_MEMBERS = 10000
+
+
+def _reject_before_read(handler, message, status):
+    """Reject without reading the body; close so unread bytes can't poison HTTP/1.1 reuse.
+
+    Framing decides, exactly as at the other reject-before-read sites: every
+    rejection raised by the preflight above (any ``Transfer-Encoding``, an
+    unreadable or conflicting ``Content-Length``, an over-cap length) already
+    declares a body and still closes. Only the boundary/`parse_multipart` rejection
+    can fire on a request that declares none, and closing there dropped a healthy
+    pooled connection -- on the wire, ``POST /api/upload`` with
+    ``Content-Type: application/json`` and no ``Content-Length`` answered 400
+    "No boundary in Content-Type" WITH ``Connection: close`` and the pipelined
+    ``GET /api/health/agent`` was never served.
+    """
+    arm_connection_close_if_body_pending(handler)
+    return j(handler, {'error': message}, status=status)
+
+
+class _RejectBeforeRead(ValueError):
+    """A rejection raised before any byte of the request body was consumed.
+
+    Carries the status the caller must answer with. Subclasses ``ValueError`` so
+    that if one ever escapes an unusual call path, each handler's existing
+    ``except ValueError`` still answers 400 with the same message instead of
+    turning it into a 500.
+    """
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _read_multipart_or_reject(handler):
+    """Framing preflight + body read, shared by all four multipart handlers.
+
+    Returns ``(fields, files)``. Raises ``_RejectBeforeRead`` when the request
+    must be refused before its body is read -- the caller answers through
+    ``_reject_before_read()``, which arms ``Connection: close`` first, because the
+    declared body is still queued in ``rfile`` and a reused HTTP/1.1 connection
+    would parse those bytes as the next request line.
+
+    Framing is judged from the headers, not from a present ``Content-Length``:
+
+    * ANY ``Transfer-Encoding`` is refused, ``identity`` included: ``http.server``
+      decodes none of them (``rfile`` is the raw socket) and RFC 9112 section 6.3
+      says a request whose final coding is not ``chunked`` has a length no
+      recipient can determine. A coded request carries no usable Content-Length,
+      so the old code read it as length 0, found no parts, and answered "No file
+      field in request" with keep-alive intact -- leaving every payload byte on
+      the socket to poison the next pooled request. A Content-Length sent BESIDE a
+      coding does not rescue it: that pairing is the smuggling shape 6.3 rejects,
+      and the coding still hides how the body is framed.
+    * a non-numeric or oversized Content-Length cannot be read either, and
+      ``parse_multipart()`` validates the boundary and the length before its
+      first ``rfile.read()`` — so every raise below is still pre-read.
+    * two DISAGREEING Content-Length headers read back as whichever came first,
+      so ``Content-Length: 0`` ahead of the real length made the body invisible
+      and left every byte of it on the socket. There is no honest length to
+      drain, so the request is refused before ``rfile`` is touched.
+    """
+    content_type = handler.headers.get('Content-Type', '')
+    coding = unsupported_transfer_encoding(handler)
+    if coding is not None:
+        raise _RejectBeforeRead(
+            f'Unsupported Transfer-Encoding: {coding} '
+            '(uploads must send an undecoded body with a Content-Length)',
+            411,
+        )
+    if unreadable_content_length(handler):
+        raise _RejectBeforeRead('Invalid Content-Length', 400)
+    try:
+        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+    except (TypeError, ValueError):
+        raise _RejectBeforeRead('Invalid Content-Length', 400) from None
+    if content_length > MAX_UPLOAD_BYTES:
+        raise _RejectBeforeRead(
+            f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)', 413)
+    try:
+        return parse_multipart(handler.rfile, content_type, content_length)
+    except ValueError as exc:
+        raise _RejectBeforeRead(str(exc), 400) from None
 
 
 def parse_multipart(rfile, content_type, content_length) -> tuple:
@@ -122,8 +215,32 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
-def _upload_destination(session_id: str, safe_name: str) -> Path:
-    dest_dir = _session_attachment_dir(session_id)
+_SHARE_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
+
+
+def _share_attachment_root() -> Path | None:
+    """The attachment root as trusted by public shares, or None (#8590).
+
+    Resolved once per configured spelling -- at import, i.e. server startup,
+    since STATE_DIR and HERMES_WEBUI_ATTACHMENT_DIR are process-wide -- and
+    never by name again: shares walk it no-follow, so a symlink planted later
+    (e.g. inside a workspace that contains it) cannot move it.  A root that
+    cannot be resolved is None (fail closed).  Uploads keep _attachment_root().
+    """
+    key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
+    if key not in _SHARE_ATTACHMENT_ROOTS:
+        try:
+            _SHARE_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            _SHARE_ATTACHMENT_ROOTS[key] = None
+    return _SHARE_ATTACHMENT_ROOTS[key]
+
+
+_share_attachment_root()
+
+
+def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
+    dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = (dest_dir / safe_name).resolve()
     if not dest.is_relative_to(dest_dir):
@@ -149,16 +266,53 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
-def _session_visible_to_active_profile(session) -> bool:
-    """Return whether an upload target session belongs to the active profile."""
-    session_profile = getattr(session, 'profile', None)
+def _profile_visible_to_active_profile(session_profile) -> bool:
+    """Return whether a recorded session owner is the active profile."""
     if not isinstance(session_profile, str):
         session_profile = None
     return _profiles_match(session_profile, _get_active_profile_name())
 
 
+def _session_visible_to_active_profile(session) -> bool:
+    """Return whether an upload target session belongs to the active profile."""
+    return _profile_visible_to_active_profile(getattr(session, 'profile', None))
+
+
 def _reject_invisible_session(handler, session) -> bool:
     if _session_visible_to_active_profile(session):
+        return False
+    j(handler, {'error': 'Session not found'}, status=404)
+    return True
+
+
+def _reject_invisible_session_before_load(handler, session_id) -> bool:
+    """#8855: refuse another profile's upload target before ``get_session`` loads it.
+
+    The upload routes take the session id from a multipart field, so the
+    generic request-session guard never sees it, and each handler decided
+    ownership on the loaded session. ``get_session`` runs ``Session.load``,
+    which can collapse duplicate partials and save (a ``.bak`` too), and caches
+    what it loads, so an upload refused with 404 still rewrote and cached
+    another profile's session. A refused request must never write (#8094).
+
+    This reads the owner of every stored copy a full load could serve
+    (``session_owner_readings_readonly``, as #8834 does for the session routes)
+    and answers the same 404 as the check after the load when none of them is
+    visible; ownership it can't verify counts as not visible (fail closed). The
+    refusal never depends on which copy the load would serve, because every
+    invisible copy gets this one answer. Any visible copy, or no stored session
+    at all (an unsafe id included), leaves the decision to the load as before,
+    and the check after it stays as the backstop. True when a refusal was sent.
+    """
+    if not isinstance(session_id, str):
+        return False
+    readings = session_owner_readings_readonly(
+        session_id, full_load=True, visible=_profile_visible_to_active_profile,
+    )
+    if not readings or any(
+        reading is not UNVERIFIABLE_SESSION_OWNER and _profile_visible_to_active_profile(reading)
+        for reading in readings
+    ):
         return False
     j(handler, {'error': 'Session not found'}, status=404)
     return True
@@ -206,17 +360,18 @@ def _write_office_upload_sidecar(workspace: Path, dest: Path, file_bytes: bytes)
 def handle_upload(handler):
     import traceback as _tb
     try:
-        content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        try:
+            fields, files = _read_multipart_or_reject(handler)
+        except _RejectBeforeRead as rejection:
+            return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             s = get_session(session_id)
         except KeyError:
@@ -224,8 +379,20 @@ def handle_upload(handler):
         if _reject_invisible_session(handler, s):
             return True
         safe_name = _sanitize_upload_name(filename)
-        dest = _upload_destination(session_id, safe_name)
-        dest.write_bytes(file_bytes)
+        dest_dir = _session_attachment_dir(session_id)
+        dest = _upload_destination(session_id, safe_name, dest_dir)
+        # #3398-style TOCTOU hardening, mirrored from the workspace upload
+        # path: O_CREAT|O_EXCL|O_NOFOLLOW anchored open so a raced duplicate
+        # cannot be silently overwritten and a raced symlink subpath cannot
+        # redirect the write outside the attachment dir.
+        try:
+            _wfd = open_anchored_create_fd(dest_dir, dest)
+        except FileExistsError:
+            return j(handler, {'error': f'Upload destination already exists: {safe_name}'}, status=409)
+        except (ValueError, OSError):
+            return j(handler, {'error': 'Upload destination rejected'}, status=403)
+        with os.fdopen(_wfd, 'wb', closefd=True) as _wfh:
+            _wfh.write(file_bytes)
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
         return j(handler, {
             'filename': dest.name,
@@ -276,17 +443,24 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     # #3398: create the extraction root race-safely under the true workspace root.
     make_anchored_dir(workspace, dest_dir)
 
-    # Member-count cap: a tiny archive with millions of (possibly empty) members
-    # slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
-    _MAX_ARCHIVE_MEMBERS = 10000
-
     extracted_files = []
     total_extracted = 0
 
     try:
         if _mode == 'zip':
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-                for member in zf.infolist():
+                members = zf.infolist()
+                # #8823: the central directory is already fully parsed, so count
+                # the file members the loop below would extract and reject an
+                # over-cap archive BEFORE creating a single member file (the
+                # in-loop check stays as defence in depth). Inside the try, so
+                # the cleanup below still removes the empty dest_dir.
+                if sum(1 for m in members if not m.is_dir()) > _MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                        f'Possible archive bomb.'
+                    )
+                for member in members:
                     # Skip directories
                     if member.is_dir():
                         continue
@@ -329,7 +503,15 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
 
         elif _mode == 'tar':
             with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
-                for member in tf.getmembers():
+                members = tf.getmembers()
+                # #8823: same up-front member-count precheck as the zip branch,
+                # counting exactly what the loop extracts (regular files).
+                if sum(1 for m in members if m.isfile()) > _MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                        f'Possible archive bomb.'
+                    )
+                for member in members:
                     if not member.isfile():
                         continue
                     if len(extracted_files) >= _MAX_ARCHIVE_MEMBERS:
@@ -384,17 +566,18 @@ def handle_upload_extract(handler):
     """Handle archive upload and extraction."""
     import traceback as _tb
     try:
-        content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        try:
+            fields, files = _read_multipart_or_reject(handler)
+        except _RejectBeforeRead as rejection:
+            return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             s = get_session(session_id)
         except KeyError:
@@ -412,15 +595,38 @@ def handle_upload_extract(handler):
         return j(handler, {'error': 'Archive extraction failed'}, status=500)
 
 
+# The only outcome that means "the provider ran cleanly and returned nothing to
+# transcribe" is the message transcription_tools raises *after* the exit code has
+# been checked:
+#   Command STT provider wrote no output file at <path> and produced no stdout
+# Match that complete message form and nothing else. A crash-shaped error embeds
+# the child's stderr, which can quote the same words ("produced no stdout"), so a
+# substring match would turn real failures into a successful silent clip. This is
+# also not proof the audio was decoded and found silent: it is only proof the
+# provider exited cleanly without producing a transcript.
+_NO_SPEECH_ERROR_RE = _re.compile(
+    r"^command stt provider wrote no output file at \S(?:.*\S)? and produced no stdout\.?$",
+    _re.IGNORECASE,
+)
+
+
+def _is_no_speech_error(message):
+    # A trailing/leading newline in a wrapped diagnostic would turn the form match
+    # into a miss, so compare the stripped single-line message only.
+    text = (message or "").strip()
+    if not text:
+        return False
+    return _NO_SPEECH_ERROR_RE.match(text) is not None
+
+
 def handle_transcribe(handler):
     import traceback as _tb
     temp_path = None
     try:
-        content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        try:
+            fields, files = _read_multipart_or_reject(handler)
+        except _RejectBeforeRead as rejection:
+            return _reject_before_read(handler, rejection.message, rejection.status)
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -438,6 +644,12 @@ def handle_transcribe(handler):
         result = transcribe_audio(temp_path)
         if not result.get('success'):
             msg = str(result.get('error') or 'Transcription failed')
+            if _is_no_speech_error(msg):
+                # The provider ran cleanly and produced no transcript — a normal
+                # outcome when the mic opens before the user speaks or auto-stop
+                # fires on an empty room. Answering 400 here made the client report
+                # a failure for a clip that never had anything to transcribe.
+                return j(handler, {'ok': True, 'transcript': '', 'no_speech': True})
             status = 503 if 'unavailable' in msg.lower() or 'not configured' in msg.lower() else 400
             return j(handler, {'error': msg}, status=status)
         transcript = str(result.get('transcript') or '').strip()
@@ -496,7 +708,17 @@ def _stt_provider_capability_from_module(stt):
                 return False
 
         def has_browser_audio_converter():
+            # Older agents define the ffmpeg resolver on transcription_tools itself.
+            # Current agents moved it to tools.transcription_audio (which
+            # transcription_tools imports, so it's already loaded) without
+            # re-exporting it. Ask the Agent's own resolver in either layout, so
+            # the probe agrees with what /api/transcribe will do (#8909).
             helper = getattr(stt, "_find_ffmpeg_binary", None)
+            if not callable(helper):
+                try:
+                    from tools.transcription_audio import _find_ffmpeg_binary as helper
+                except Exception:
+                    helper = None
             try:
                 return bool(helper()) if callable(helper) else False
             except Exception:
@@ -600,12 +822,10 @@ def handle_workspace_upload(handler):
     """
     import traceback as _tb
     try:
-        content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        try:
+            fields, files = _read_multipart_or_reject(handler)
+        except _RejectBeforeRead as rejection:
+            return _reject_before_read(handler, rejection.message, rejection.status)
         session_id = fields.get('session_id', '')
         subpath = fields.get('path', '')
 
@@ -615,7 +835,9 @@ def handle_workspace_upload(handler):
         if not files:
             return j(handler, {'error': 'No file field in request'}, status=400)
 
-        # Validate session
+        # Validate session (#8855: ownership first, so a refusal never loads it)
+        if _reject_invisible_session_before_load(handler, session_id):
+            return True
         try:
             session = get_session(session_id)
         except KeyError:
@@ -623,8 +845,13 @@ def handle_workspace_upload(handler):
         if _reject_invisible_session(handler, session):
             return True
 
-        # Resolve workspace root from session
-        workspace = resolve_trusted_workspace(session.workspace)
+        # Resolve workspace root using the session profile, not the ambient request profile.
+        try:
+            workspace = resolve_trusted_workspace(
+                session.workspace, profile=getattr(session, "profile", None)
+            )
+        except TypeError:
+            workspace = resolve_trusted_workspace(session.workspace)
 
         # Resolve target subdirectory within workspace
         target_dir = safe_resolve_ws(workspace, subpath) if subpath else workspace

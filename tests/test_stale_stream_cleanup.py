@@ -48,7 +48,7 @@ class _FakeSession:
 
 
 def test_stale_stream_cleanup_helper_exists():
-    assert "def _clear_stale_stream_state(session)" in ROUTES_SRC
+    assert "def _clear_stale_stream_state(session, *, wait_for_writer: bool = False)" in ROUTES_SRC
     assert "stream_id in STREAMS" in ROUTES_SRC
     assert "session.active_stream_id = None" in ROUTES_SRC
     assert "session.pending_user_message = None" in ROUTES_SRC
@@ -117,7 +117,16 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
         def __enter__(self):
             session.active_stream_id = existing_stream_id
             session.pending_user_message = "prompt already claimed by another start"
-            session.pending_started_at = 123.0
+            # Fresh timestamp on purpose: this models the REGISTRATION WINDOW — a
+            # start that published its stream and its pending turn microseconds
+            # ago. A pending turn past the grace window is what a CRASHED turn
+            # leaves behind, and that is an orphan the guard must clear (#7302).
+            # Pinning an epoch-1970 timestamp here modelled the bug (a stale
+            # stream blocking forever) instead of the race this test protects;
+            # with the orphan reaper in place it also spins the caller's
+            # while-loop, because this fake lock re-mutates the session on every
+            # entry while the reaper clears it every pass.
+            session.pending_started_at = time.time()
             routes.STREAMS[existing_stream_id] = queue.Queue()
             return self
 
@@ -134,7 +143,7 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
 
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: MutatingSessionLock())
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(routes.threading, "Thread", NoopThread)
 
@@ -199,7 +208,7 @@ def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id
             return None
 
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(routes.threading, "Thread", NoopThread)
 
@@ -257,7 +266,7 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
             return None
 
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(routes.threading, "Thread", NoopThread)
 
@@ -332,7 +341,7 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
             return None
 
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(routes.threading, "Thread", NoopThread)
 

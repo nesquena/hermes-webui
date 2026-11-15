@@ -85,6 +85,7 @@ const m = src.match(/function _toolArgsSnapshot\([^]*?\n}/m);
 if (!m) throw new Error('_toolArgsSnapshot not found');
 eval(m[0]);
 let buf = '';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => {
   const payload = JSON.parse(buf || '{}');
@@ -151,6 +152,7 @@ global._decodeToolLabelEntities = (s) => s;
 eval(grab('_redactToolTargetLabel'));
 eval(grab('_transparentToolDetailHtml'));
 let buf = '';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => {
   const payload = JSON.parse(buf || '{}');

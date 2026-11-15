@@ -408,16 +408,23 @@ def test_transparent_raw_content_fallback_exits_for_anchor_owned_messages():
     }
 
 
-def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds():
-    """Drive the real renderMessages() gate, not only source-order assertions."""
+def _render_messages_harness() -> str:
+    """Node prelude that evaluates the real renderMessages() over a minimal fake DOM."""
 
-    render_source = _function_source(_ui_js(), "renderMessages")
-    transparent_source = _function_source(_ui_js(), "_transparentStreamOrderedParts")
-    legacy_metadata_source = _function_source(
-        _ui_js(), "_legacySettledFallbackHasToolMetadata"
-    )
-    script = textwrap.dedent(
-        f"""
+    ui = _ui_js()
+    transparent_source = _function_source(ui, "_transparentStreamOrderedParts")
+    legacy_metadata_source = _function_source(ui, "_legacySettledFallbackHasToolMetadata")
+    # #2051: renderMessages() inserts a message block through this helper, so it is
+    # evaluated with it. The shim's createElement() returns no template `content`, so the
+    # helper takes its insertAdjacentHTML fallback here, exactly as before.
+    insert_block_source = _function_source(ui, "_insertSegmentBlock")
+    sessions_js = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    # renderMessages() delegates to these on every settled worklog pass.
+    evals = "".join(f"eval({json.dumps(_function_source(src, n))});" for src, n in (
+        (ui, "_isDelegatedSubagentTranscript"), (ui, "_worklogGroupKey"),
+        (ui, "_subagentOpenWorklogTurn"), (sessions_js, "_isChildSession"),
+        (sessions_js, "_isDelegatedSubagentRow"), (ui, "renderMessages")))
+    return f"""
         class FakeClassList {{
           constructor(el) {{ this.el = el; }}
           _set() {{ return new Set(String(this.el.className || '').split(/\\s+/).filter(Boolean)); }}
@@ -458,6 +465,11 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
             if (idx < 0) this.children.push(child);
             else this.children.splice(idx, 0, child);
             return child;
+          }}
+          get previousElementSibling() {{
+            const sibs = this.parentElement ? this.parentElement.children : [];
+            const idx = sibs.indexOf(this);
+            return idx > 0 ? sibs[idx - 1] : null;
           }}
           remove() {{
             if (!this.parentElement) return;
@@ -571,6 +583,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         let _messageUserUnpinned = false;
         let _programmaticScroll = false;
         let _programmaticScrollSetAt = 0;
+        let _messageRenderScrollRestoreDepth = 0;
         let _sessionHtmlCacheSid = null;
         let _messagesTruncated = false;
         let _oldestIdx = 0;
@@ -599,6 +612,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _compressionAnchorIndex() {{ return null; }}
         function _assistantTurnFinalVisibleContentMap() {{ return new Map(); }}
         function _assistantTurnVisibleContentMap() {{ return new Map(); }}
+        function _rawTurnBoundaryByRawIdx() {{ return new Map(); }}
         function _isPreservedCompressionTaskListMessage() {{ return false; }}
         function _preservedCompressionTaskListCardsHtml() {{ return ''; }}
         function _isContextCompactionMessage() {{ return false; }}
@@ -652,6 +666,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           const group = new FakeElement('div');
           group.className = 'tool-worklog-group tool-call-group agent-activity-group';
           group.setAttribute('data-legacy-fallback-owner', '1');
+          group.setAttribute('data-collapsed', String(!!(opts && opts.collapsed)));
           const anchor = opts && opts.anchor;
           if (parent && anchor && anchor.parentElement === parent) parent.insertBefore(group, anchor);
           else if (parent) parent.appendChild(group);
@@ -674,7 +689,9 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _restoreWorklogDetailDisclosureState() {{}}
         function _scrollAfterMessageRender() {{}}
         function _maybeRecoverVirtualizedBlankViewport() {{ return false; }}
+        function _captureMessageRecoveryOwnership() {{ return {{ programmatic:false, jumpOwner:false }}; }}
         function _updateMessageVirtualMeasurements() {{}}
+        function _resetMessageVirtualMeasurementBurst() {{}}
         function postProcessRenderedMessages() {{}}
         function _postProcessWithAnchorSuppression() {{}}
         function _formatGatewayModelLabel() {{ return ''; }}
@@ -682,6 +699,15 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _gatewayModelWarningText() {{ return ''; }}
         function _usedModelTurnChipLabel() {{ return ''; }}
         function _formatTurnDuration() {{ return ''; }}
+        function _loadedCompactionMarkerRawIdxs() {{ return []; }}
+        function _selectCompactionCardPlacements() {{
+          return {{ preWindowMarkers: [], inlineMarkers: [], taskOwner: null }};
+        }}
+        function _insertCompactionCardNodes() {{
+          return {{ insertedNodes: [], taskOwnerNode: null }};
+        }}
+        function _insertPreservedCompressionTaskFallback() {{ return false; }}
+        function _pinCompactionCardAtTop() {{ return false; }}
         function _renderSettledAnchorSceneForMessage(message, segment, rawIdx) {{
           const group = new FakeElement('div');
           group.className = 'tool-worklog-group agent-activity-group';
@@ -693,7 +719,16 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
 
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
-        eval({json.dumps(render_source)});
+        eval({json.dumps(insert_block_source)});
+        {evals}
+"""
+
+
+def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds():
+    """Drive the real renderMessages() gate, not only source-order assertions."""
+
+    script = textwrap.dedent(
+        f"""{_render_messages_harness()}
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
         const selectorSanityElement = new FakeElement('div');
