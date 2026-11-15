@@ -34,6 +34,7 @@ class FakeTask:
     claim_expires: float | None = None
     worker_pid: int | None = None
     unfinished_parents: bool = False
+    current_run_id: int | None = None
 
 
 @dataclass
@@ -248,7 +249,10 @@ class FakeKanbanDB:
             return _ret(False, "task is not in running/ready")
         if task.unfinished_parents:
             return _ret(False, "cannot request review: unfinished dependencies")
-        if task.status == "running" and task.claim_lock is not None and not force:
+        if expected_run_id is not None and task.current_run_id != expected_run_id:
+            # Native adds ``AND current_run_id = ?`` to the handoff UPDATE.
+            return _ret(False, "task is not in running/ready (or expected_run_id did not match the current run)")
+        if task.status == "running" and task.claim_lock is not None and not force and expected_run_id is None:
             # Native kanban_db refuses to hand off a live-claimed card without
             # an explicit human override. The bridge always passes force=True
             # for dashboard review drops; reproduce the fence so ordering and
@@ -258,8 +262,8 @@ class FakeKanbanDB:
                 f"cannot request review for {task_id}: currently running (claimed). "
                 "Wait for completion or reclaim the stale lock first.",
             )
-        if force:
-            # A dashboard review drop is a human override: the live claim is
+        if force or expected_run_id is not None:
+            # A forced handoff or one with ownership proof releases the live claim; the claim is
             # released as part of the handoff (dashboard plugin parity).
             # Native clears claim_lock, claim_expires and worker_pid together;
             # mirror all three so a partial clear would fail the oracles below.
@@ -1561,7 +1565,7 @@ def test_review_drop_routes_through_request_review(monkeypatch):
     assert direct_writes == [], "review entry must never fall back to a raw status write"
     assert calls == [(
         "t_ready_review",
-        {"summary": "Please review", "metadata": None, "reviewer": "bob", "force": True},
+        {"summary": "Please review", "metadata": None, "reviewer": "bob", "expected_run_id": None},
     )]
     assert task.status == "review"
     assert task.assignee == "bob", "an explicit reviewer must reassign the card"
@@ -1773,17 +1777,17 @@ def test_bulk_null_assignee_without_status_is_noop(monkeypatch):
 def test_claimed_running_handoff_to_review_clears_live_claim(monkeypatch):
     """A claimed Running card handed to Review must release the live claim.
 
-    Native ``request_review(..., force=True)`` clears the claim as a human
-    override (dashboard plugin parity). The bridge already passes
-    ``force=True``; the handoff must land in review, drop the live claim
-    (not just flip the status string), and keep implementer provenance in
-    the durable ``review_requested`` event.
+    The bridge proves ownership with the run it read (``expected_run_id``),
+    which native ``request_review`` accepts in place of ``force=True``; the
+    handoff must land in review, drop the live claim (not just flip the
+    status string), and keep implementer provenance in the durable
+    ``review_requested`` event.
     """
     bridge = _load_bridge(monkeypatch)
     fake_kanban = sys.modules["hermes_cli.kanban_db"]
     task = FakeTask(
         "t_claimed_review", "Worker holding the card", "running", "alice",
-        claim_lock="worker-1", claim_expires=1793400000.0, worker_pid=12345,
+        claim_lock="worker-1", claim_expires=1793400000.0, worker_pid=12345, current_run_id=11,
     )
     fake_kanban.tasks.append(task)
 
@@ -1874,7 +1878,7 @@ def test_implementer_run_to_review_still_uses_request_review(monkeypatch):
     """The ordinary Running -> Review handoff (an implementer run) is unchanged."""
     bridge = _load_bridge(monkeypatch)
     fake_kanban = sys.modules["hermes_cli.kanban_db"]
-    task = FakeTask("t_impl_run", "Implementing", "running", "alice", claim_lock="worker-alice")
+    task = FakeTask("t_impl_run", "Implementing", "running", "alice", claim_lock="worker-alice", current_run_id=12)
     fake_kanban.tasks.append(task)
     monkeypatch.setattr(fake_kanban, "_retry_status_for_run", lambda conn, task_id: "ready", raising=False)
     monkeypatch.setattr(fake_kanban, "reclaim_task",
@@ -1885,3 +1889,81 @@ def test_implementer_run_to_review_still_uses_request_review(monkeypatch):
     assert task.status == "review" and task.assignee == "bob"
     event = next(e for e in fake_kanban.events if e.task_id == "t_impl_run" and e.kind == "review_requested")
     assert event.payload["implementer"] == "alice" and event.payload["reviewer"] == "bob"
+
+
+def test_running_handoff_is_bound_to_the_run_it_read(monkeypatch):
+    """#8650: a card read as Running under Alice's run, whose run then
+    finished and was claimed for review by Bob before the handoff, must be refused
+    (native ``AND current_run_id = ?``), not re-handed with Bob as implementer.
+    Through PATCH and Bulk."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    real_request_review = fake_kanban.request_review
+    seen = []
+
+    def _swap_then_request(conn, task_id, *, summary=None, metadata=None, reviewer=None,
+                           expected_run_id=None, force=False, with_reason=False):
+        seen.append(expected_run_id)
+        swapped = fake_kanban.get_task(conn, task_id)
+        swapped.current_run_id, swapped.assignee, swapped.claim_lock = 22, "bob", "worker-bob"
+        return real_request_review(conn, task_id, summary=summary, metadata=metadata, reviewer=reviewer,
+                                   expected_run_id=expected_run_id, force=force, with_reason=with_reason)
+
+    monkeypatch.setattr(fake_kanban, "request_review", _swap_then_request)
+    for tid, call in (("t_swap_patch", "patch"), ("t_swap_bulk", "bulk")):
+        task = FakeTask(tid, "Implementing", "running", "alice", claim_lock="worker-alice", current_run_id=11)
+        fake_kanban.tasks.append(task)
+        if call == "patch":
+            with bridge._conn() as conn:
+                with pytest.raises(ValueError, match="expected_run_id did not match"):
+                    bridge._patch_task(conn, tid, {"status": "review", "assignee": "bob"})
+        else:
+            entry, = bridge._bulk_tasks_payload({"ids": [tid], "status": "review"})["results"]
+            assert entry["ok"] is False and "expected_run_id did not match" in entry["error"]
+        assert (task.status, task.assignee, task.current_run_id, task.claim_lock) == \
+            ("running", "bob", 22, "worker-bob")
+        assert not [e for e in fake_kanban.events if e.task_id == tid and e.kind == "review_requested"]
+    assert seen == [11, 11], "the handoff must carry the run id read with the card"
+
+
+def test_card_read_without_a_run_goes_through_the_live_claim_fence(monkeypatch):
+    """A card read as Ready that a worker claimed before the handoff is refused by the
+    native live-claim fence (no force); an unclaimed Ready card still hands off."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    real_request_review = fake_kanban.request_review
+
+    def _claim_then_request(conn, task_id, **kwargs):
+        assert kwargs.get("expected_run_id") is None and "force" not in kwargs
+        claimed = fake_kanban.get_task(conn, task_id)
+        if claimed.id == "t_ready_claimed":
+            claimed.status, claimed.claim_lock, claimed.current_run_id = "running", "worker-x", 31
+        return real_request_review(conn, task_id, **kwargs)
+
+    monkeypatch.setattr(fake_kanban, "request_review", _claim_then_request)
+    claimed = FakeTask("t_ready_claimed", "Ready", "ready", "alice")
+    free = FakeTask("t_ready_free", "Ready", "ready", "alice")
+    fake_kanban.tasks.extend([claimed, free])
+    with bridge._conn() as conn:
+        with pytest.raises(ValueError):
+            bridge._patch_task(conn, "t_ready_claimed", {"status": "review", "assignee": "bob"})
+        bridge._patch_task(conn, "t_ready_free", {"status": "review", "assignee": "bob"})
+    assert (claimed.status, claimed.assignee, claimed.claim_lock) == ("running", "alice", "worker-x")
+    assert (free.status, free.assignee) == ("review", "bob")
+
+
+def test_card_read_as_review_is_refused_before_any_write(monkeypatch):
+    """A card already in Review (and possibly claimed by its reviewer right after the
+    read) is refused up front."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_in_review", "In review", "review", "bob")
+    fake_kanban.tasks.append(task)
+    monkeypatch.setattr(fake_kanban, "request_review",
+                        lambda *a, **k: pytest.fail("a card read as Review must not reach request_review"))
+    with bridge._conn() as conn:
+        with pytest.raises(ValueError, match="already being reviewed"):
+            bridge._patch_task(conn, "t_in_review", {"status": "review", "assignee": "carol"})
+    entry, = bridge._bulk_tasks_payload({"ids": ["t_in_review"], "status": "review"})["results"]
+    assert entry["ok"] is False and "already being reviewed" in entry["error"]
+    assert (task.status, task.assignee) == ("review", "bob")

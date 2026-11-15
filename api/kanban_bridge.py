@@ -476,10 +476,8 @@ def _patch_task(conn, task_id: str, body: dict):
             raise ValueError(f"cannot schedule task from status: {current.status}")
     elif status == "review":
         # Review is a handoff, not a plain status flip: request_review records
-        # the implementer/reviewer provenance, emits review_requested, and
-        # clears any live claim with force=True (a dashboard action is a human
-        # override, same contract as the Agent dashboard plugin). Accepts
-        # running/ready only; anything else is refused below with a 400.
+        # the implementer/reviewer provenance and emits review_requested.
+        # Accepts running/ready only; anything else is refused with a 400.
         if not hasattr(kb, "request_review"):
             raise RuntimeError("review requires a newer Hermes Agent")
         # A Running card claimed FROM Review is a reviewer run. Handing it to
@@ -490,21 +488,38 @@ def _patch_task(conn, task_id: str, body: dict):
         # reviewer finishes through the review verbs (approve/request changes),
         # and an operator reclaim still returns the run to Review natively.
         retry_status = getattr(kb, "_retry_status_for_run", None)
-        if task.status == "running" and callable(retry_status) and retry_status(conn, task_id) == "review":
+        if task.status == "review" or (
+            task.status == "running" and callable(retry_status) and retry_status(conn, task_id) == "review"
+        ):
             raise ValueError(
                 "this card is already being reviewed; a review run cannot be sent for review again"
             )
         reviewer = body.get("assignee") or None
         try:
-            use_reason = "with_reason" in inspect.signature(kb.request_review).parameters
+            review_params = inspect.signature(kb.request_review).parameters
         except (TypeError, ValueError):
-            use_reason = False
+            review_params = {}
+        use_reason = "with_reason" in review_params
         review_kwargs = {
             "summary": body.get("summary"),
             "metadata": body.get("metadata"),
             "reviewer": reviewer,
-            "force": True,
         }
+        if "expected_run_id" in review_params or any(
+            param.kind is inspect.Parameter.VAR_KEYWORD for param in review_params.values()
+        ):
+            # Bind the handoff to the card this request read, inside the native
+            # transaction, instead of force=True: a Running card hands off only
+            # the run it was read with (native adds ``AND current_run_id = ?``,
+            # so a run that finished and was claimed for review in between is
+            # refused, not re-handed); a card read without a run goes through
+            # the native live-claim fence, so a worker that claimed it in
+            # between is not cut off. Ready -> Review keeps working.
+            review_kwargs["expected_run_id"] = (
+                getattr(task, "current_run_id", None) if task.status == "running" else None
+            )
+        else:
+            review_kwargs["force"] = True  # older Agents: no ownership proof to give
         if use_reason:
             review_kwargs["with_reason"] = True
         result = kb.request_review(conn, task_id, **review_kwargs)
