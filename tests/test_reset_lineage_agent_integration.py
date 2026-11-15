@@ -1,5 +1,8 @@
 """Opt-in production composition with an explicitly selected Hermes Agent checkout.
 
+Runs only with HERMES_WEBUI_TEST_REAL_AGENT=1; a runtime Agent location alone
+does not opt in.
+
 No Agent implementation is mocked. The subprocess isolates Agent imports and
 state from the WebUI suite's stubs. Only the clock is fixed for historical rows.
 See TESTING.md for the known markerless-branch failure and --runxfail command.
@@ -126,9 +129,14 @@ print(json.dumps(results))
 
 @pytest.fixture(scope="module")
 def real_agent_scenarios(tmp_path_factory):
-    configured = os.environ.get("HERMES_WEBUI_AGENT_DIR")
-    if configured is None:
-        pytest.skip("set HERMES_WEBUI_AGENT_DIR to run the real SessionDB integration")
+    # HERMES_WEBUI_AGENT_DIR also configures the normal runtime, so it must not
+    # opt the suite in. Only the dedicated test flag does.
+    if os.environ.get("HERMES_WEBUI_TEST_REAL_AGENT") != "1":
+        pytest.skip(
+            "set HERMES_WEBUI_TEST_REAL_AGENT=1 (with HERMES_WEBUI_AGENT_DIR and "
+            "HERMES_WEBUI_PYTHON) to run the real SessionDB integration"
+        )
+    configured = os.environ.get("HERMES_WEBUI_AGENT_DIR", "")
     agent_dir = Path(configured).expanduser().resolve()
     if not configured or not (agent_dir / "hermes_state.py").is_file():
         pytest.fail(f"HERMES_WEBUI_AGENT_DIR must contain hermes_state.py: {agent_dir}")

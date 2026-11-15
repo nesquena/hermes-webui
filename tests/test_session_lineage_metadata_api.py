@@ -1887,3 +1887,86 @@ def test_used_branch_stays_visible_after_original_archived(
         assert json.loads(before)["session_source"] == "fork"
     finally:
         conn.close()
+
+
+_OWNER_OVERLAY_CASES = {
+    # profile-a is active. profile-b's older editable fork has no owner-side
+    # Agent mirror, while profile-a's state.db holds an unrelated same-id row.
+    "foreign_collision": dict(owner="profile-b", active_row="subagent", owner_db=None, expected="fork"),
+    "foreign_collision_unmirrored_owner_db": dict(
+        owner="profile-b", active_row="subagent", owner_db="empty", expected="fork",
+    ),
+    "foreign_no_collision": dict(owner="profile-b", active_row=None, owner_db=None, expected="fork"),
+    # The owner's own state.db is the authority for the owner's fork.
+    "foreign_owner_mirror": dict(owner="profile-b", active_row="subagent", owner_db="webui", expected="webui"),
+    # The active profile's own mirrored fork is still normalized.
+    "local_authority": dict(owner="profile-a", active_row="webui", owner_db=None, expected="webui"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OWNER_OVERLAY_CASES))
+def test_content_search_beyond_cap_fork_source_comes_from_row_owner(_isolate, monkeypatch, tmp_path, case):
+    """Beyond the lineage cap, a fork's source is read from its owning profile only."""
+    from urllib.parse import urlparse
+    import api.profiles as profiles
+    from tests.test_465_session_branching import _FakeHandler, _capture_route
+
+    spec = _OWNER_OVERLAY_CASES[case]
+    fork_id, phrase = "owner_overlay_fork", "owner bound fork phrase"
+    homes = {"profile-a": _isolate.parent, "profile-b": tmp_path / "profiles" / "profile-b"}
+    homes["profile-b"].mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_LINEAGE_TOP_N", "1")
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "profile-a")
+    monkeypatch.setattr(
+        profiles, "get_hermes_home_for_profile",
+        lambda name: homes.get(name, tmp_path / "unresolved-profile"),
+    )
+    conn = _ensure_state_db(_isolate)  # active profile-a's state.db
+    try:
+        t0 = time.time() - 1000
+        fork = Session(
+            session_id=fork_id, title="Editable branch",
+            messages=[{"role": "user", "content": f"{phrase} continues here"},
+                      {"role": "assistant", "content": "noted"}],
+            updated_at=t0, profile=spec["owner"],
+        )
+        fork.session_source = "fork"
+        fork.parent_session_id = "owner_overlay_original"
+        fork.save(touch_updated_at=False)
+        Session(
+            session_id="owner_overlay_newer", title="Newer unrelated",
+            messages=[{"role": "user", "content": "something else"},
+                      {"role": "assistant", "content": "ok"}],
+            updated_at=t0 + 100, profile="profile-a",
+        ).save(touch_updated_at=False)  # consumes HERMES_WEBUI_LINEAGE_TOP_N=1
+        if spec["active_row"]:
+            _insert_state_row(conn, fork_id, source=spec["active_row"], started_at=t0)
+        if spec["owner_db"]:
+            owner_conn = _ensure_state_db(homes["profile-b"] / "state.db")
+            try:
+                if spec["owner_db"] != "empty":
+                    _insert_state_row(owner_conn, fork_id, source=spec["owner_db"], started_at=t0)
+            finally:
+                owner_conn.close()
+        before = (models.SESSION_DIR / f"{fork_id}.json").read_bytes()
+
+        monkeypatch.setattr(routes, "all_sessions", models.all_sessions)
+        monkeypatch.setattr(routes, "_enrich_sidebar_lineage_metadata", models._enrich_sidebar_lineage_metadata)
+        response = _capture_route(monkeypatch)
+        routes._handle_sessions_search(
+            _FakeHandler(),
+            urlparse("/api/sessions/search?q=owner+bound+fork+phrase&all_profiles=1&content=1&depth=0"),
+        )
+        assert response["status"] == 200
+        hits = {row["session_id"]: row for row in response["ok"]["sessions"]}
+        hit = hits[fork_id]
+        assert hit["match_type"] == "content"
+        assert hit["profile"] == spec["owner"]
+        assert hit["session_source"] == spec["expected"], hit
+        assert not hit.get("read_only"), hit
+        # The response projection never rewrites the saved fork.
+        assert (models.SESSION_DIR / f"{fork_id}.json").read_bytes() == before
+    finally:
+        conn.close()

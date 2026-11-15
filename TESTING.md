@@ -2607,12 +2607,15 @@ read-only projection and sidebar grouping. Only the historical clock is fixed.
 It does not send platform messages or run a model.
 
 ```bash
+HERMES_WEBUI_TEST_REAL_AGENT=1 \
 HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent \
 HERMES_WEBUI_PYTHON=/path/to/hermes-agent/venv/bin/python \
   ./scripts/test.sh tests/test_reset_lineage_agent_integration.py -q -rxX
 ```
 
-Set both variables explicitly. `HERMES_WEBUI_PYTHON` selects the Agent probe's
+`HERMES_WEBUI_TEST_REAL_AGENT=1` is the only opt-in. `HERMES_WEBUI_AGENT_DIR`
+also configures the normal WebUI runtime, so setting it alone never activates
+this module. With the flag, set both location variables explicitly. `HERMES_WEBUI_PYTHON` selects the Agent probe's
 interpreter, using the existing runtime override; point it at the environment
 with that checkout's dependencies installed (`.venv/bin/python` or
 `venv/Scripts/python.exe` are also valid layouts). The WebUI runner still uses
@@ -2622,8 +2625,9 @@ silently uses that interpreter for the probe. Its subprocess environment sets
 `HERMES_DISABLE_LAZY_INSTALLS=1` so Agent bootstrap cannot install dependencies
 into the disposable home. Node must also be on `PATH` for the real sidebar checks.
 
-Only omitting `HERMES_WEBUI_AGENT_DIR` skips the integration. Once opted in,
-missing or invalid checkout/interpreter settings, missing dependencies, probe
+Without `HERMES_WEBUI_TEST_REAL_AGENT=1` the module skips, even when
+`HERMES_WEBUI_AGENT_DIR` is set. Once opted in, missing or invalid
+checkout/interpreter settings, missing dependencies, probe
 failures, and invalid probe output are fixture **errors**, not expected failures
 or skips. `tests/test_reset_lineage_agent_fixture.py` runs by default without
 an Agent installation and verifies this distinction against the marked test.
@@ -2642,6 +2646,7 @@ does not detect an upstream fix by itself.
 Run it without expected-failure handling to see the unresolved assertion:
 
 ```bash
+HERMES_WEBUI_TEST_REAL_AGENT=1 \
 HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent \
 HERMES_WEBUI_PYTHON=/path/to/hermes-agent/venv/bin/python \
   ./scripts/test.sh tests/test_reset_lineage_agent_integration.py \
