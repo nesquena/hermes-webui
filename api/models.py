@@ -2202,11 +2202,20 @@ class Session:
                 self._share_token_saved = self.share_token
                 self._share_created_at_saved = self.share_created_at
             elif not touch_updated_at:
-                # #8950: adopt the durable pair only when the snapshot is definitively
-                # absent. Inconclusive I/O ('unknown') is not proof that the snapshot
-                # was never published; clearing it removed any token that could
-                # revoke a live public link.
-                if _share_snapshot_state_for_session(self.share_token, self.session_id) == "absent":
+                # #8950: an explicit pending clear (self.share_token is empty,
+                # e.g. the (None, None) pair handed back by recovery when revoke
+                # tombstoned the snapshot but sidecar replacement failed) is its
+                # own change against the durable baseline. An empty token must not
+                # reach the classifier, which unconditionally answers 'absent'
+                # and would adopt the durable pair, restoring the old revoked
+                # token. For a nonempty pending token, adopt the durable pair only
+                # when the snapshot is definitively absent ('absent'); 'present'
+                # and inconclusive I/O ('unknown') keep the pending pair so a
+                # revocable token is not dropped.
+                if (
+                    self.share_token
+                    and _share_snapshot_state_for_session(self.share_token, self.session_id) == "absent"
+                ):
                     self.share_token, self.share_created_at = on_disk_share
                     self._share_token_saved = self.share_token
                     self._share_created_at_saved = self.share_created_at
