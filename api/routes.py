@@ -26385,14 +26385,15 @@ def _detect_text_lang(text: str) -> str:
     # (la, le, un, una, con): they made French/Spanish text vote Italian.
     # Their place is taken by words only Italian uses (ho, stata, nella,
     # fatto...), so short replies such as "Ho trovato un errore nella
-    # funzione di login." still reach two votes.
+    # funzione di login." still reach two votes. Not alla/alle: German and
+    # Swedish use them for "all".
     it_words = {
         "il", "lo", "gli", "di", "che", "non", "per", "è", "sono", "questo",
         "questa", "anche", "più", "già", "perché", "cosa", "come", "quando",
         "adesso", "oggi", "molto", "così", "ma",
         "ho", "hai", "abbiamo", "hanno", "stato", "stata", "stati", "fatto",
         "ecco", "ancora", "nel", "nella", "nelle", "negli", "della", "dello",
-        "delle", "degli", "alla", "alle", "sulla", "dalla",
+        "delle", "degli", "sulla", "dalla",
     }
     en_words = {
         "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",

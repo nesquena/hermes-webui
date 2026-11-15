@@ -111,6 +111,8 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Ella ha estado en la casa todo el día con su familia.", ""),
         ("He encontrado un error en la función del inicio.", ""),
         ("Ele já fez o almoço na casa da avó.", ""),
+        ("Alle Dateien wurden gespeichert. Alle Dienste laufen wieder.", ""),
+        ("Alla filer har sparats och alla tjänster körs igen.", ""),
         # ...while short Italian replies that lost la/un/con still vote Italian.
         *[(text, "it") for text in [
             "La connessione è stata ripristinata.",
