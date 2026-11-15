@@ -14220,9 +14220,13 @@ def _sidebar_rows_with_count_lineage(rows: list[dict], enriched_ids: set[int], i
         tab_rows = [r for r in rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
         if any(id(r) in enriched_ids for r in tab_rows):
             continue  # the requested tab: its rows were enriched for the response
-        owned = [r for r in tab_rows if _profiles_match(r.get("profile") or "default", active_profile)]
-        for r in owned[:top_n] if top_n > 0 else owned:
-            if r.get("session_id") and r.get("parent_session_id"):
+        # The same window the tab's own request enriches: the first top_n rows
+        # of the whole tab, then only the active profile's rows within it.
+        for r in tab_rows[:top_n] if top_n > 0 else tab_rows:
+            if (
+                r.get("session_id") and r.get("parent_session_id")
+                and _profiles_match(r.get("profile") or "default", active_profile)
+            ):
                 wanted[id(r)] = str(r["session_id"])
     if not wanted:
         return list(rows)

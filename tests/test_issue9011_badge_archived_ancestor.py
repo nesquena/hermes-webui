@@ -502,3 +502,31 @@ def test_projection_native_webui_chain_counts_after_the_lineage_enrichment(tmp_p
     assert tabs["webui"]["webui_session_count"] == 1
     # The CLI tab's payload enriches only its own rows (#4766), yet it carries the WebUI badge too.
     assert tabs["cli"]["webui_session_count"] == 1
+
+
+def test_other_tab_lineage_read_uses_the_same_window_as_that_tabs_enrichment(monkeypatch):
+    """Greptile on #9089: the top-N window covers the whole tab, other profiles included, before the owner check."""
+    import api.agent_sessions as agent_sessions
+    from api import profiles
+
+    routes = _routes()
+    monkeypatch.setenv("HERMES_WEBUI_LINEAGE_TOP_N", "2")
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    asked: list[set] = []
+
+    def fake_read(_path, ids):
+        asked.append(set(ids))
+        return {}
+
+    monkeypatch.setattr(agent_sessions, "read_session_lineage_metadata", fake_read)
+    rows = [
+        _webui_child_row("beta-new-1", "x", profile="beta"),
+        _webui_child_row("beta-new-2", "x", profile="beta"),
+        _webui_child_row("own-old", "A"),  # third in the tab: outside its own request's window
+        _webui_child_row("own-new", "A"),
+    ]
+    rows = [rows[3], *rows[:3]]  # own-new is the newest, then beta's two, then own-old
+
+    routes._sidebar_rows_with_count_lineage(rows, set(), lambda r: False)
+
+    assert asked == [{"own-new"}], asked
