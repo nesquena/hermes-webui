@@ -24,6 +24,10 @@ def _reset_cache(monkeypatch, **overrides):
     cache = dict(CACHE)
     cache.update(overrides)
     monkeypatch.setattr(updates, '_update_cache', dict(cache))
+    # The per-key retention map of #9056 is process-wide too: swap in a scratch dict so a
+    # published entry cannot answer a later test file's flat-cache fixture.
+    if hasattr(updates, '_update_cache_by_key'):
+        monkeypatch.setattr(updates, '_update_cache_by_key', {})
     monkeypatch.setattr(updates, '_check_in_progress', False)
     if hasattr(updates, '_running_key'):
         monkeypatch.setattr(updates, '_running_key', None)

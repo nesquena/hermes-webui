@@ -9,6 +9,7 @@ The maintainer review on #9055 requires:
 4. Manual caller (checkUpdatesNow in static/panels.js) and startup caller (static/boot.js)
    must poll completion when receiving pending: true, render/banner only from completed data,
    and never treat pending as final (e.g. settings_up_to_date or premature checked marker).
+The test reset helper must isolate the per-key map, not only the flat one.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ def _reset_cache(monkeypatch, **overrides):
     cache = dict(CACHE)
     cache.update(overrides)
     monkeypatch.setattr(updates, '_update_cache', dict(cache))
+    monkeypatch.setattr(updates, '_update_cache_by_key', {})
     monkeypatch.setattr(updates, '_check_in_progress', False)
     if hasattr(updates, '_running_key'):
         monkeypatch.setattr(updates, '_running_key', None)
@@ -769,3 +771,37 @@ def test_completed_answers_retained_per_include_agent_after_queue_drain(monkeypa
 
     # Assert no new repo scans were triggered by the polls
     assert len(scans) == drain_scans, f'polls triggered {len(scans) - drain_scans} unexpected scans'
+
+
+# ── Test 12: Test helper reset isolates per-key update cache map ──────────────
+
+
+def test_reset_cache_isolates_per_key_update_cache_map(monkeypatch):
+    """Publish into the per-key cache, then reset with a flat fixture and verify isolation."""
+    process_wide_by_key = updates._update_cache_by_key
+    # Another test file may already have left entries behind: what matters here is that
+    # this file never writes into the process-wide map, not that the map is empty.
+    process_wide_before = dict(process_wide_by_key)
+    _reset_cache(monkeypatch)
+
+    updates._publish_update_cache(
+        webui_info={'name': 'webui', 'behind': 5, 'channel': 'stable', 'stub': True},
+        agent_info={'name': 'agent', 'behind': 5, 'channel': 'stable', 'stub': True},
+        include_agent=True,
+        channel='stable',
+    )
+    assert ('stable', True) in updates._update_cache_by_key
+    assert updates._update_cache_by_key[('stable', True)]['agent']['behind'] == 5
+
+    flat_agent = {'name': 'agent', 'behind': 2}
+    _reset_cache(
+        monkeypatch,
+        agent=flat_agent,
+        checked_at=123,
+        include_agent=False,
+    )
+
+    result = updates.cached_update_status(include_agent=True)
+    assert result['agent'] == flat_agent
+    assert dict(process_wide_by_key) == process_wide_before
+
