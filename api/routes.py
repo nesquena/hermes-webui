@@ -3723,7 +3723,7 @@ def _build_session_list_cache_payload(
         count_view = _sidebar_rows_with_count_lineage(
             visible_scoped, _response_row_ids, _sidebar_bucket_is_cli
         )
-        original_of = {id(view): row for view, row in zip(count_view, visible_scoped)}
+        original_of = {id(view): row for view, row in zip(count_view, visible_scoped, strict=True)}
         dropped_by_archived = {
             id(original_of[row_id])
             for row_id in _sidebar_rows_dropped_by_archived_ancestors_for_payload(
