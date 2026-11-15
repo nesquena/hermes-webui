@@ -1,0 +1,11 @@
+/* Concrete guide layouts; main-site chrome remains in chrome.css. */
+.recipe-summary{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px 20px;padding:24px;border:1px solid var(--line);border-radius:12px;background:var(--surface);margin:28px 0 0}
+.recipe-summary dt{font-weight:600}.recipe-summary dd{margin:0;color:var(--muted)}
+article{min-width:0}pre{max-width:100%;overflow:auto;padding:20px;background:var(--surface);border:1px solid var(--line);border-radius:10px;line-height:1.6;font-size:.86rem;tab-size:2}
+pre code{white-space:pre;overflow-wrap:normal;word-break:normal;font-size:inherit}pre:focus-visible,.table-scroll:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
+.table-scroll{max-width:100%;overflow:auto;margin:24px 0;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:collapse;min-width:560px}th,td{padding:14px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}caption{text-align:left;padding:14px;font-weight:600;background:var(--surface)}
+dt{font-weight:600}dd{margin:6px 0 18px}kbd{font:inherit;font-size:.85em;border:1px solid var(--line);border-radius:4px;padding:1px 5px}a{overflow-wrap:anywhere}
+.guide-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;list-style:none;padding:0}.guide-list li{margin:0;padding:24px;background:var(--surface);border:1px solid var(--line);border-radius:12px}.guide-list h3{margin:0 0 12px}.guide-list p{margin:0 0 12px}.guide-list .outcome{font-size:.9rem;color:var(--muted)}
+.guide-list>li:last-child:nth-child(odd){grid-column:1/-1}
+@media(max-width:600px){.recipe-summary{grid-template-columns:minmax(0,1fr);gap:4px;padding:18px}.recipe-summary dd{margin:0 0 12px}.recipe-summary dd:last-child{margin:0}.guide-list{grid-template-columns:minmax(0,1fr)}pre{padding:14px}}
+@media(max-width:600px){.table-scroll table{min-width:0}.table-scroll thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.table-scroll tr{display:block;padding:12px 0;border-top:1px solid var(--line)}.table-scroll th,.table-scroll td{display:block;padding:4px 14px}.table-scroll td:before{content:attr(data-label);display:block;font-weight:600;font-size:.85rem;color:var(--ink)}}

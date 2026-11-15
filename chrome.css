@@ -121,3 +121,7 @@ html { scroll-padding-top: calc(var(--header) + 16px); }
 @media (prefers-reduced-motion: reduce) { .site-header *, .site-footer * { transition: none !important; } }
 main[tabindex="-1"]:focus { outline: none; }
 main [data-scroll-region]:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+/* One prominent setup action in the phone drawer, agreed with Local/Fable. */
+.site-header .menu li a.menu-cta{background:var(--gold);color:var(--on-gold);font-weight:600}
+.site-header .menu li a.menu-cta:hover{filter:brightness(1.06);background:var(--gold)}
