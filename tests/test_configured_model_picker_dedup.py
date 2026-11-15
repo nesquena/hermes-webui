@@ -31,8 +31,9 @@ function extractFunc(name) {
   }
   return ui.slice(start, i);
 }
-eval(extractFunc('_normalizeConfiguredModelKey'));
 eval(extractFunc('_modelPickerOptionIdentity'));
+eval(extractFunc('_normalizeConfiguredModelKey'));
+eval(extractFunc('_configuredModelIdentity'));
 eval(extractFunc('_isEquivalentConfiguredModelEntry'));
 const cases = JSON.parse(process.argv[3]);
 const result = cases.map(c => _isEquivalentConfiguredModelEntry(c.modelId, c.badge, c.entries));
