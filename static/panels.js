@@ -10428,6 +10428,9 @@ async function loadSettingsPanel(){
     if(quotaChipWindowSel){
       quotaChipWindowSel.value=_normalizeQuotaChipWindow(settings.quota_chip_window);
       window._quotaChipWindow=quotaChipWindowSel.value;
+      // Only meaningful while the chip is shown; the saved choice is kept either way.
+      quotaChipWindowSel.disabled=showQuotaChipCb?!showQuotaChipCb.checked:false;
+      if(showQuotaChipCb){showQuotaChipCb.addEventListener('change',function(){quotaChipWindowSel.disabled=!showQuotaChipCb.checked;},{once:false});}
       quotaChipWindowSel.addEventListener('change',()=>{
         window._quotaChipWindow=_normalizeQuotaChipWindow(quotaChipWindowSel.value);
         if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator(typeof _currentQuotaProvider==='function'?_currentQuotaProvider():undefined);

@@ -10,6 +10,9 @@ UI_JS = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text(
 
 NOW_MS = 1_800_000_000_000
 HOUR_MS = 3_600_000
+# With several windows, the hover marks the one the chip shows and indents the rest.
+MARK = "\u25b8 "
+PAD = "\u2002 "
 
 
 def _run_chip(statuses, mode="most_constrained"):
@@ -53,9 +56,9 @@ def test_hover_lists_all_windows_with_reset_countdown():
     assert text["label"] == "40%"
     assert text["title"].split("\n") == [
         "OpenCode Go — loaded",
-        "Rolling: 82% remaining · resets in 2h 14m",
-        "Weekly: 61% remaining · resets in 3d 5h",
-        "Monthly: 40% remaining · resets in 12d",
+        PAD + "Rolling: 82% remaining · resets in 2h 14m",
+        PAD + "Weekly: 61% remaining · resets in 3d 5h",
+        MARK + "Monthly: 40% remaining · resets in 12d",
         "Credits remaining: $12.5",
     ]
 
@@ -68,7 +71,7 @@ def test_hover_omits_reset_when_missing_past_or_unparseable():
         {"label": "D", "remaining_percent": 30},
     ])])
     assert text["title"].split("\n") == [
-        "OpenCode Go — loaded", "B: 10% remaining", "C: 20% remaining", "D: 30% remaining",
+        "OpenCode Go — loaded", MARK + "B: 10% remaining", PAD + "C: 20% remaining", PAD + "D: 30% remaining",
     ]
 
 
@@ -157,8 +160,8 @@ def test_model_only_windows_do_not_drive_the_chip_when_account_windows_exist():
         assert text["label"] == "60%", mode
         # The hover still lists every window, model-only ones included.
         assert text["title"].split("\n")[1:] == [
-            "Current session: 80% remaining", "Current week: 60% remaining",
-            "Opus week: 0% remaining", "Sonnet week: 90% remaining",
+            PAD + "Current session: 80% remaining", MARK + "Current week: 60% remaining",
+            PAD + "Opus week: 0% remaining", PAD + "Sonnet week: 90% remaining",
         ]
 
 
@@ -170,6 +173,47 @@ def test_fixed_modes_order_account_windows_only():
     assert _chip_label(windows, "shortest")["label"] == "70%"
     assert _chip_label(windows, "longest")["label"] == "40%"
     assert _chip_label(windows, "most_constrained")["label"] == "40%"
+
+
+def test_hover_marks_only_the_window_the_chip_shows():
+    windows = [_w("Session", 90, SESSION), _w("Weekly", 70, WEEK)]
+    assert _chip_label(windows, "shortest")["title"].split("\n")[1:] == [
+        MARK + "Session: 90% remaining", PAD + "Weekly: 70% remaining"]
+    assert _chip_label(windows, "longest")["title"].split("\n")[1:] == [
+        PAD + "Session: 90% remaining", MARK + "Weekly: 70% remaining"]
+    # One window keeps its unmarked single-line title.
+    assert _chip_label([_w("Weekly", 70, WEEK)], "shortest")["title"] == "OpenCode Go — loaded — Weekly: 70% remaining"
+
+
+def _anthropic_status_from_agent_snapshot(windows):
+    """The Agent's Anthropic snapshot shape, through the server's serializer."""
+    from types import SimpleNamespace
+
+    from api.providers import _serialize_account_usage_snapshot
+
+    snapshot = SimpleNamespace(
+        provider="anthropic", source="oauth_usage_api", title="Account limits", plan=None,
+        windows=tuple(SimpleNamespace(reset_at=None, detail=None, **w) for w in windows),
+        details=(), available=True, unavailable_reason=None, fetched_at=None,
+    )
+    return {"status": "available", "display_name": "Anthropic", "message": "loaded",
+            "account_limits": _serialize_account_usage_snapshot(snapshot)}
+
+
+def test_anthropic_shortest_and_longest_change_the_chip():
+    """Anthropic reports no window lengths; the server's nominal lengths let the fixed modes work."""
+    status = _anthropic_status_from_agent_snapshot([
+        {"label": "Current session", "used_percent": 20, "scope": "account"},
+        {"label": "Current week", "used_percent": 40, "scope": "account"},
+        {"label": "Opus week", "used_percent": 100, "scope": "model"},
+        {"label": "Sonnet week", "used_percent": 10, "scope": "model"},
+    ])
+    chosen = {}
+    for mode in ("shortest", "longest", "most_constrained"):
+        (text,) = _run_chip([status], mode=mode)
+        chosen[mode] = text["label"]
+        assert len(text["title"].split("\n")) == 5, text  # every window stays in the hover
+    assert chosen == {"shortest": "80%", "longest": "60%", "most_constrained": "60%"}
 
 
 def test_all_model_scoped_windows_keep_todays_selection():
@@ -206,7 +250,7 @@ def test_fixed_mode_keeps_tooltip_order_and_skips_invalid_measurements():
     windows = [_w("Weekly", 70, WEEK), _w("Broken", None, 60), _w("Session", 90, SESSION)]
     text = _chip_label(windows, "shortest")
     assert text["label"] == "90%"
-    assert text["title"].split("\n")[1:] == ["Weekly: 70% remaining", "Session: 90% remaining"]
+    assert text["title"].split("\n")[1:] == [PAD + "Weekly: 70% remaining", MARK + "Session: 90% remaining"]
     # No usable measurement at all: the account-window chip is not rendered.
     assert _chip_label([_w("A", None, WEEK)], "shortest") is None
 

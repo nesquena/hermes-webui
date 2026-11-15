@@ -4587,14 +4587,18 @@ function _formatQuotaResetIn(value,now){
 }
 // Hover text: one line per account window (all periods), each with its remaining
 // share and time to reset when the provider reports one, then any detail lines.
-function _providerQuotaWindowLines(accountLimits,now){
+// With several windows, "▸ " marks the one the chip shows (`chosen`) and the other
+// window lines are indented to match.
+function _providerQuotaWindowLines(accountLimits,now,chosen){
   const windows=accountLimits&&Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+  const shown=windows.filter(w=>w&&_isQuotaMeasurement(w.remaining_percent));
+  const mark=chosen&&shown.length>1&&shown.includes(chosen);
   const lines=[];
-  for(const w of windows){
-    if(!w||!_isQuotaMeasurement(w.remaining_percent)) continue;
+  for(const w of shown){
     const name=typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
     const reset=_formatQuotaResetIn(w.reset_at,now);
-    lines.push(name+_formatQuotaPercentShort(w.remaining_percent)+' remaining'+(reset?' · resets in '+reset:''));
+    const prefix=mark?(w===chosen?'\u25B8 ':'\u2002 '):'';
+    lines.push(prefix+name+_formatQuotaPercentShort(w.remaining_percent)+' remaining'+(reset?' · resets in '+reset:''));
   }
   const details=accountLimits&&Array.isArray(accountLimits.details)?accountLimits.details:[];
   for(const detail of details){
@@ -4613,7 +4617,7 @@ function _providerQuotaIndicatorText(status){
     const remaining=w?_formatQuotaPercentShort(w.remaining_percent):'';
     const windowLabel=w&&typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
     if(remaining){
-      const lines=_providerQuotaWindowLines(accountLimits);
+      const lines=_providerQuotaWindowLines(accountLimits,undefined,w);
       const head=provider+' — '+(status.message||'Provider usage loaded');
       // One window keeps the single-line form; several list every period on its own line.
       if(lines.length<=1) return {label:remaining, title:head+' — '+(lines[0]||windowLabel+remaining+' remaining')};
