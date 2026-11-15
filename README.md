@@ -318,6 +318,13 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 
+#### Standing goals in `/goal`
+
+- `/goal <text>` sets a standing goal and starts its first turn; `/goal status`, `pause`, `resume`, and `clear` control it.
+- `/goal draft <text>` runs Hermes Agent's own contract drafter (the `goal_judge` auxiliary model), then sets the goal with that completion contract and starts it. The per-turn judge then decides against the contract. When no contract can be drafted, the goal runs free-form exactly as in the Hermes CLI/TUI, with a warning toast. The request waits up to 90 seconds and is never retried.
+- `/goal show` is read-only: the goal status plus its completion contract.
+- WebUI does not parse inline contract fields (`verify:` and similar lines are part of the goal text); to change a drafted contract, run `/goal draft` again.
+
 #### Model aliases in `/model`
 
 `/model <alias>` accepts any alias configured for the profile, in either of Hermes's two formats:
@@ -367,10 +374,10 @@ leaves the session pointing at a route nothing owns. That send fails closed — 
 in-process worker, the gateway and the runner alike — with a controlled "model alias unavailable"
 error instead of quietly falling back to another provider; pick the model again to store a live route.
 
-With `HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`, `/goal <text>` returns HTTP 501
+With `HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`, `/goal <text>` and `/goal draft <text>` return HTTP 501
 (`status: unsupported`) without changing an existing goal or starting a run. The
 runner contract does not yet provide atomic goal replacement and kickoff; WebUI
-never substitutes local goal execution. `/goal status`, `pause`, `resume`, and
+never substitutes local goal execution. `/goal status` (and read-only `/goal show`), `pause`, `resume`, and
 `clear` delegate to the runner when supported. Legacy-direct and legacy-journal
 goal kickoff behavior is unchanged for supported routes. Normal runner chat supports provider-only model aliases.
 

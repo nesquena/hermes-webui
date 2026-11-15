@@ -85,7 +85,8 @@ const _clearPendingSessionModel = clearPending;
 
 // ---- command helpers the extracted cmdGoal references ----
 const t = k => k;
-const showToast = () => {};
+const _toasts = [];
+const showToast = (...a) => { _toasts.push(a); };
 const renderMessages = () => {};
 const clearLiveToolCards = () => {};
 const appendThinking = () => {};
@@ -106,7 +107,9 @@ const INFLIGHT = {};
 const _apiCalls = [];
 let _nextResponse = () => ({});
 async function api(url, opts) {
-  _apiCalls.push({ url, body: JSON.parse(opts.body) });
+  _apiCalls.push({ url, body: JSON.parse(opts.body),
+    timeoutMs: opts.timeoutMs === undefined ? null : opts.timeoutMs,
+    retries: opts.retries === undefined ? null : opts.retries });
   return _nextResponse();
 }
 
@@ -189,6 +192,36 @@ const S = {
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
     out.markerAfter = readPending(SID);
+  } else if (scenario === 'draft_fallback') {
+    // Server set a free-form goal because no contract could be drafted.
+    _nextResponse = () => ({ ok: true, action: 'draft', stream_id: 's5', pending_started_at: 1,
+      message: '⊙ Goal set (20-turn budget): ship it\nCouldn\'t draft a contract (aux model unavailable) — running as a free-form goal.',
+      toast_type: 'warning', toast_message: 'Couldn\'t draft a contract (aux model unavailable) — running as a free-form goal.' });
+    await cmdGoal('draft ship it');
+    out.calls = _apiCalls;
+    out.toasts = _toasts;
+    out.messages = S.messages.map(m => m.content);
+    out.activeStreamId = S.activeStreamId;
+  } else if (scenario === 'draft_usage_error') {
+    // /api/goal 400: api() throws with the server's message.
+    _nextResponse = () => { throw new Error('Usage: /goal draft <objective in plain language>'); };
+    await cmdGoal('draft');
+    out.calls = _apiCalls;
+    out.toasts = _toasts;
+    out.messages = S.messages.map(m => m.content);
+  } else if (scenario === 'show_detail') {
+    _nextResponse = () => ({ ok: true, action: 'show',
+      message: '⊙ Goal (active, 0/20 turns): ship it', message_key: 'goal_status_active',
+      message_args: [0, 20, 'ship it'], detail: '- Verification: pytest -q passes' });
+    await cmdGoal('show');
+    out.calls = _apiCalls;
+    out.toasts = _toasts;
+    out.messages = S.messages.map(m => m.content);
+  } else if (scenario === 'plain_set_options') {
+    _nextResponse = () => ({ stream_id: 's6', pending_started_at: 1, message: '⊙ Goal set (20-turn budget): ship it' });
+    await cmdGoal('ship it');
+    out.calls = _apiCalls;
+    out.toasts = _toasts;
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -258,3 +291,38 @@ def test_goal_kickoff_without_marker_sends_no_explicit_pick(driver_path):
     out = _run_scenario(driver_path, "no_marker_no_pick")
     assert "explicit_model_pick" not in out["payload"]
     assert out["markerAfter"] is None
+
+
+def test_goal_draft_is_sent_once_with_long_budget_and_warns_on_fallback(driver_path):
+    """`/goal draft` waits on the contract drafter and starts a run: one request,
+    90s budget, no retry. A free-form fallback toasts the server's warning text."""
+    out = _run_scenario(driver_path, "draft_fallback")
+    assert len(out["calls"]) == 1
+    assert out["calls"][0]["body"]["args"] == "draft ship it"
+    assert out["calls"][0]["timeoutMs"] == 90000
+    assert out["calls"][0]["retries"] == 0
+    assert out["toasts"] == [[
+        "Couldn't draft a contract (aux model unavailable) — running as a free-form goal.", None, "warning",
+    ]]
+    assert out["messages"][0].startswith("⊙ Goal set (20-turn budget): ship it\nCouldn't draft a contract")
+    assert out["activeStreamId"] == "s5"
+
+
+def test_goal_draft_usage_error_toasts_as_error(driver_path):
+    out = _run_scenario(driver_path, "draft_usage_error")
+    assert len(out["calls"]) == 1
+    assert out["toasts"] == [["Usage: /goal draft <objective in plain language>", 3000, "error"]]
+    assert out["messages"] == ["**Goal command failed:** Usage: /goal draft <objective in plain language>"]
+
+
+def test_goal_show_appends_contract_detail_to_status_line(driver_path):
+    out = _run_scenario(driver_path, "show_detail")
+    assert out["calls"][0]["timeoutMs"] is None and out["calls"][0]["retries"] is None
+    assert out["messages"] == ["⊙ Goal (active, 0/20 turns): ship it\n- Verification: pytest -q passes"]
+    assert out["toasts"] == [["⊙ Goal (active, 0/20 turns): ship it", 2600]]
+
+
+def test_plain_goal_request_options_and_toast_are_unchanged(driver_path):
+    out = _run_scenario(driver_path, "plain_set_options")
+    assert out["calls"][0]["timeoutMs"] is None and out["calls"][0]["retries"] is None
+    assert out["toasts"] == [["⊙ Goal set (20-turn budget): ship it", 2600]]
