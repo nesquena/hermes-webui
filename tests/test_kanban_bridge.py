@@ -18,6 +18,8 @@ import types
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 
 @dataclass
 class FakeTask:
@@ -1832,3 +1834,54 @@ def test_review_refused_for_unfinished_dependencies_returns_native_reason(monkey
     assert "from status: ready" not in str(exc_info.value)
     assert task.status == "ready"
     assert [e for e in fake_kanban.events if e.task_id == "t_ready_deps" and e.kind == "review_requested"] == []
+
+
+def test_reviewer_run_sent_to_review_is_refused_and_left_untouched(monkeypatch):
+    """#8650 gate (REVIEW-PROVENANCE-F1): a Running card claimed FROM Review is a
+    reviewer run. request_review would record the reviewer as the implementer and
+    route the next request_changes to the reviewer, so the move is refused (master
+    refused every Review move) before anything is written: no handoff, no
+    reassignment, claim kept. This covers drag, detail and Bulk, which all patch
+    through _patch_task."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_reviewer_run", "Under review", "running", "bob",
+                    claim_lock="worker-bob", claim_expires=1793400000.0, worker_pid=4321)
+    fake_kanban.tasks.append(task)
+    monkeypatch.setattr(fake_kanban, "_retry_status_for_run", lambda conn, task_id: "review", raising=False)
+    monkeypatch.setattr(fake_kanban, "request_review",
+                        lambda *a, **k: pytest.fail("a reviewer run must not get a new review handoff"))
+    monkeypatch.setattr(fake_kanban, "assign_task",
+                        lambda *a, **k: pytest.fail("a refused move must not reassign the card"))
+
+    for body in ({"status": "review"},
+                 {"status": "review", "assignee": "carol", "summary": "again", "metadata": {"artifacts": ["a.txt"]}},
+                 {"status": "review", "assignee": None}):
+        with bridge._conn() as conn:
+            with pytest.raises(ValueError, match="already being reviewed"):
+                bridge._patch_task(conn, "t_reviewer_run", dict(body))
+        assert (task.status, task.assignee, task.claim_lock, task.worker_pid) == \
+            ("running", "bob", "worker-bob", 4321)
+    assert not [e for e in fake_kanban.events if e.task_id == "t_reviewer_run"]
+
+    result = bridge._bulk_tasks_payload({"ids": ["t_reviewer_run"], "status": "review", "assignee": "carol"})
+    entry, = result["results"]
+    assert entry["ok"] is False and "already being reviewed" in entry.get("error", "")
+    assert (task.status, task.assignee) == ("running", "bob")
+
+
+def test_implementer_run_to_review_still_uses_request_review(monkeypatch):
+    """The ordinary Running -> Review handoff (an implementer run) is unchanged."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_impl_run", "Implementing", "running", "alice", claim_lock="worker-alice")
+    fake_kanban.tasks.append(task)
+    monkeypatch.setattr(fake_kanban, "_retry_status_for_run", lambda conn, task_id: "ready", raising=False)
+    monkeypatch.setattr(fake_kanban, "reclaim_task",
+                        lambda *a, **k: pytest.fail("an implementer run is handed off, not reclaimed"),
+                        raising=False)
+    with bridge._conn() as conn:
+        bridge._patch_task(conn, "t_impl_run", {"status": "review", "assignee": "bob"})
+    assert task.status == "review" and task.assignee == "bob"
+    event = next(e for e in fake_kanban.events if e.task_id == "t_impl_run" and e.kind == "review_requested")
+    assert event.payload["implementer"] == "alice" and event.payload["reviewer"] == "bob"

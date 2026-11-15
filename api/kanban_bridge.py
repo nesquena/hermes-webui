@@ -482,6 +482,18 @@ def _patch_task(conn, task_id: str, body: dict):
         # running/ready only; anything else is refused below with a 400.
         if not hasattr(kb, "request_review"):
             raise RuntimeError("review requires a newer Hermes Agent")
+        # A Running card claimed FROM Review is a reviewer run. Handing it to
+        # request_review would record the reviewer as the implementer, and the
+        # next request_changes would route the implementation work to the
+        # reviewer instead of the original implementer. Refuse it, as master
+        # refused every Review move, and leave the card untouched: the
+        # reviewer finishes through the review verbs (approve/request changes),
+        # and an operator reclaim still returns the run to Review natively.
+        retry_status = getattr(kb, "_retry_status_for_run", None)
+        if task.status == "running" and callable(retry_status) and retry_status(conn, task_id) == "review":
+            raise ValueError(
+                "this card is already being reviewed; a review run cannot be sent for review again"
+            )
         reviewer = body.get("assignee") or None
         try:
             use_reason = "with_reason" in inspect.signature(kb.request_review).parameters
