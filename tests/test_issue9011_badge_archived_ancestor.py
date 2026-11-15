@@ -352,8 +352,23 @@ elif scenario == "chain":
     add("A", 100, archived=1)
     add("B", 110, parent="A")
     add("C", 120, parent="B")
+elif scenario == "native":
+    # Native WebUI conversations: state.db rows plus WebUI sidecars. A sidecar
+    # keeps parent_session_id but not relationship_type, which only the lineage
+    # enrichment adds from state.db; A is archived in the WebUI.
+    add("A", 100)
+    add("B", 110, parent="A")
+    add("C", 120, parent="B")
 db.commit()
 db.close()
+if scenario == "native":
+    for sid, start, parent in (("A", 100, None), ("B", 110, "A"), ("C", 120, "B"), ("other", 300, None)):
+        ts = T + start
+        models.Session(sid, title="Title " + sid, workspace=str(home), profile="default",
+                       parent_session_id=parent, archived=sid == "A",
+                       messages=[{"role": "user", "content": "x", "timestamp": ts},
+                                 {"role": "assistant", "content": "x", "timestamp": ts + 1}],
+                       created_at=ts, updated_at=ts, session_source="webui").save(touch_updated_at=False)
 if scenario == "visible-tip":
     ts = T + 100
     models.Session("old", title="Old snapshot", workspace=str(home), profile="default",
@@ -364,7 +379,8 @@ models.clear_cli_sessions_cache()
 tabs = {}
 for tab in ("webui", "cli"):
     tabs[tab] = routes._session_list_payload_to_response(routes._build_session_list_cache_payload(
-        active_profile="default", all_profiles=False, show_cli_sessions=True, include_archived=False,
+        active_profile="default", all_profiles=False, show_cli_sessions=scenario != "native",
+        include_archived=False,
         show_previous_messaging_sessions=True, show_cron_sessions=False, show_claude_code_sessions=False,
         sidebar_source=tab,
     ))
@@ -474,3 +490,15 @@ def test_server_helpers_mirror_the_browser_predicates():
     assert "if(!parentRow&&hasHiddenArchivedAncestor(child)){" in src
     assert ("const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', "
             "'wecom_callback', 'matrix', 'signal', 'feishu', 'dingtalk']);") in src
+
+
+@needs_node
+def test_projection_native_webui_chain_counts_after_the_lineage_enrichment(tmp_path):
+    """Greptile on #9089: native sidecars learn they are children only from the enrichment, which ran after the count."""
+    tabs = _projected_tabs("native", "webui", tmp_path)
+    rendered = _render_tabs(tabs, show_archived=False)
+    _assert_badges_match(tabs, rendered)
+    assert rendered["webui"] == {"default:other": "top"}, rendered
+    assert tabs["webui"]["webui_session_count"] == 1
+    # The CLI tab's payload enriches only its own rows (#4766), yet it carries the WebUI badge too.
+    assert tabs["cli"]["webui_session_count"] == 1

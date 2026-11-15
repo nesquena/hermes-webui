@@ -3670,26 +3670,20 @@ def _build_session_list_cache_payload(
         return list(rows)
 
     full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
+    # Every counted row's bucket is decided here, before the lineage enrichment
+    # below, as it always was: the verdict is memoised and published on the row.
+    for s in full_scoped_all_sources:
+        _sidebar_bucket_is_cli(s)
     # #9011: with Show archived off, the browser drops a child that no visible
     # row holds when its chain reaches an archived ancestor (#4293), so it must
     # not count either. Each tab's badge is decided from what that tab renders:
-    # the tab's own visible rows and archived reference rows, per profile.
-    if include_archived:
-        counted_rows = full_scoped_all_sources
-    else:
-        dropped_by_archived = _sidebar_rows_dropped_by_archived_ancestors_for_payload(
-            visible_scoped, archived_scoped, _sidebar_bucket_is_cli
-        )
-        counted_rows = [
-            s for s in full_scoped_all_sources if id(s) not in dropped_by_archived
-        ]
-    webui_session_count = sum(
-        1 for s in counted_rows
-        if not _sidebar_bucket_is_cli(s)
-    )
-    cli_session_count = sum(
-        1 for s in counted_rows
-        if _sidebar_bucket_is_cli(s)
+    # the tab's own visible rows and the archived reference rows that tab is
+    # sent (chosen here, before enrichment, exactly as for the response), per
+    # profile. The decision itself waits for the enrichment: a native WebUI
+    # sidecar only learns it is a child (relationship_type) from state.db.
+    count_references_by_tab = (
+        None if include_archived
+        else _sidebar_archived_references_by_tab(visible_scoped, archived_scoped, _sidebar_bucket_is_cli)
     )
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
@@ -3719,6 +3713,36 @@ def _build_session_list_cache_payload(
         diag_stage("filter_archived_sessions")
     diag_stage("visible_lineage_metadata")
     _enrich_sidebar_lineage_metadata(scoped)
+    if include_archived:
+        counted_rows = full_scoped_all_sources
+    else:
+        # The response rows are enriched above (only the requested tab, #4766).
+        # The other tab's badge reads the same lineage for the rows that could
+        # be children, on copies (see _sidebar_rows_with_count_lineage).
+        _response_row_ids = {id(s) for s in scoped}
+        count_view = _sidebar_rows_with_count_lineage(
+            visible_scoped, _response_row_ids, _sidebar_bucket_is_cli
+        )
+        original_of = {id(view): row for view, row in zip(count_view, visible_scoped)}
+        dropped_by_archived = {
+            id(original_of[row_id])
+            for row_id in _sidebar_rows_dropped_by_archived_ancestors_for_payload(
+                count_view,
+                count_references_by_tab,
+                lambda r: _sidebar_bucket_is_cli(original_of.get(id(r), r)),
+            )
+        }
+        counted_rows = [
+            s for s in full_scoped_all_sources if id(s) not in dropped_by_archived
+        ]
+    webui_session_count = sum(
+        1 for s in counted_rows
+        if not _sidebar_bucket_is_cli(s)
+    )
+    cli_session_count = sum(
+        1 for s in counted_rows
+        if _sidebar_bucket_is_cli(s)
+    )
     # Delegated subagent children (#5307) are view-only, owned by the delegate
     # runner. The model-layer batch overlay above has already applied the
     # authoritative source and view-only flags before this route runs.
@@ -14169,27 +14193,97 @@ def _sidebar_rows_dropped_by_archived_ancestors(
     return dropped
 
 
-def _sidebar_rows_dropped_by_archived_ancestors_for_payload(
+def _sidebar_rows_with_count_lineage(rows: list[dict], enriched_ids: set[int], is_cli) -> list[dict]:
+    """``rows`` with the lineage the other tab's own request would see, for its badge (#9011).
+
+    The payload enriches only the requested tab's rows (#4766). A native WebUI
+    sidecar learns it is a child (``relationship_type``) only from that
+    enrichment, so the other tab's badge would count such a child as a
+    top-level row. For that tab, read the same state.db lineage for the rows
+    whose child status it can change (rows naming a parent), within the same
+    top-N window its own request enriches, and apply it to copies: the rows
+    themselves, and what the response sends, are unchanged. Like the response
+    enrichment, only the active profile's rows read the active state.db.
+    Returns a list aligned with ``rows``.
+    """
+    try:
+        top_n = int(os.environ.get("HERMES_WEBUI_LINEAGE_TOP_N", "300"))
+    except (TypeError, ValueError):
+        top_n = 300
+    try:
+        from api.profiles import _profiles_match, get_active_profile_name
+        active_profile = get_active_profile_name()
+    except Exception:
+        return list(rows)
+    wanted: dict[int, str] = {}
+    for cli_tab in (False, True):
+        tab_rows = [r for r in rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
+        if any(id(r) in enriched_ids for r in tab_rows):
+            continue  # the requested tab: its rows were enriched for the response
+        owned = [r for r in tab_rows if _profiles_match(r.get("profile") or "default", active_profile)]
+        for r in owned[:top_n] if top_n > 0 else owned:
+            if r.get("session_id") and r.get("parent_session_id"):
+                wanted[id(r)] = str(r["session_id"])
+    if not wanted:
+        return list(rows)
+    try:
+        from api import models as _models
+        from api.agent_sessions import read_session_lineage_metadata
+        metadata = read_session_lineage_metadata(_models._active_state_db_path(), set(wanted.values()))
+    except Exception:
+        return list(rows)
+    view: list[dict] = []
+    for r in rows:
+        entry = metadata.get(wanted.get(id(r), ""))
+        if not entry:
+            view.append(r)
+            continue
+        lineage = {k: v for k, v in entry.items() if not k.startswith("_state_db_")}
+        if "parent_source" in r:
+            lineage.pop("parent_source", None)
+        view.append({**r, **lineage})
+    return view
+
+
+def _sidebar_archived_references_by_tab(
     visible_rows: list[dict], archived_rows: list[dict], is_cli
+) -> dict[bool, list[dict]]:
+    """The archived reference rows each tab is sent, keyed by ``is_cli`` (#9011).
+
+    Each tab is requested with its own ``sidebar_source``, so its references
+    come from that tab's rows alone (``_hidden_archived_sidebar_reference_sessions``
+    on the source-filtered lists). Taken before the lineage enrichment, as the
+    response's references are.
+    """
+    references: dict[bool, list[dict]] = {}
+    for cli_tab in (False, True):
+        tab_visible = [r for r in visible_rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
+        tab_archived = [r for r in archived_rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
+        references[cli_tab] = (
+            _hidden_archived_sidebar_reference_sessions(tab_visible, tab_archived) if tab_visible else []
+        )
+    return references
+
+
+def _sidebar_rows_dropped_by_archived_ancestors_for_payload(
+    visible_rows: list[dict], references_by_tab: dict[bool, list[dict]], is_cli
 ) -> set[int]:
     """``id()`` of the visible rows the default sidebar drops, over both tabs (#9011).
 
-    Each tab is requested with its own ``sidebar_source``, so its archived
-    references come from that tab's rows alone; the browser then renders each
-    profile on its own. Decide every tab and profile the same way.
+    The browser renders each tab from that tab's rows and references, and each
+    profile on its own. Decide every tab and profile the same way, on the
+    enriched rows the browser receives.
     """
     dropped: set[int] = set()
     for cli_tab in (False, True):
         tab_visible = [r for r in visible_rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
         if not tab_visible:
             continue
-        tab_archived = [r for r in archived_rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
-        references = _hidden_archived_sidebar_reference_sessions(tab_visible, tab_archived)
         visible_by_group: dict[str, list[dict]] = defaultdict(list)
         refs_by_group: dict[str, list[dict]] = defaultdict(list)
         for r in tab_visible:
             visible_by_group[_sidebar_profile_group_key(r.get("profile"))].append(r)
-        for r in references:
+        for r in references_by_tab.get(cli_tab) or []:
             refs_by_group[_sidebar_profile_group_key(r.get("profile"))].append(r)
         for group, rows in visible_by_group.items():
             dropped |= _sidebar_rows_dropped_by_archived_ancestors(rows, refs_by_group.get(group, []))
