@@ -3670,12 +3670,27 @@ def _build_session_list_cache_payload(
         return list(rows)
 
     full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
+    # #9011: with Show archived off, a child whose chain ends at an archived
+    # ancestor gets no row in the sidebar (#4293), so it must not count either.
+    # Resolved in the full scoped payload, like the bucket verdict above.
+    if include_archived:
+        counted_rows = full_scoped_all_sources
+    else:
+        counted_rows = [
+            s for s in full_scoped_all_sources
+            if not _sidebar_child_hidden_by_archived_ancestor(
+                s,
+                _sidebar_scoped_rows_by_profile.get(
+                    _sidebar_profile_group_key(s.get("profile")), {}
+                ),
+            )
+        ]
     webui_session_count = sum(
-        1 for s in full_scoped_all_sources
+        1 for s in counted_rows
         if not _sidebar_bucket_is_cli(s)
     )
     cli_session_count = sum(
-        1 for s in full_scoped_all_sources
+        1 for s in counted_rows
         if _sidebar_bucket_is_cli(s)
     )
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
@@ -13868,6 +13883,43 @@ def _sidebar_delegation_parent(row: dict, rows_by_id: dict) -> dict | None:
         if parent is not None and parent is not row:
             return parent
     return None
+
+
+def _sidebar_child_hidden_by_archived_ancestor(row: dict, rows_by_id: dict) -> bool:
+    """True when the default sidebar (Show archived off) drops this row (#9011).
+
+    The browser never shows a ``child_session`` row at the top level: it nests
+    it under its parent's row. When no visible row holds the chain, and the
+    chain reaches an archived ancestor, ``_attachChildSessionsToSidebarRows``
+    suppresses the child (``hasHiddenArchivedAncestor``, #4293) and gives it no
+    row at all. Walk the same chain here: through non-archived child rows,
+    stopping at a visible top-level parent (the child nests there and renders)
+    or an archived one (the child is dropped). A missing or cyclic parent keeps
+    the row counted, as the browser then treats it as an orphan or nests it.
+    """
+    if not isinstance(row, dict) or row.get("archived") or not _is_sidebar_child_session(row):
+        return False
+    current = row
+    seen = {id(row)}
+    while True:
+        parent = _sidebar_delegation_parent(current, rows_by_id)
+        if parent is None or id(parent) in seen:
+            return False
+        if parent.get("archived"):
+            return True
+        if not _is_sidebar_child_session(parent):
+            return False
+        seen.add(id(parent))
+        current = parent
+
+
+def _is_sidebar_child_session(row: dict) -> bool:
+    """Mirror of the browser's ``_isChildSession``: a parent link plus ``child_session``."""
+    return bool(
+        isinstance(row, dict)
+        and row.get("parent_session_id")
+        and row.get("relationship_type") == "child_session"
+    )
 
 
 def _sidebar_rows_by_profile(rows) -> dict[str, dict[str, dict]]:
