@@ -11908,7 +11908,11 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             updated_at=(cli_meta or {}).get("updated_at") or 0,
             # Messages come from the active profile's state.db; without a CLI
             # metadata profile, the session is the active profile's (#9093).
-            profile=(cli_meta or {}).get("profile") or _active_profile_for_cli_import(),
+            # A profile-agnostic row (Claude Code JSONL) belongs to no profile.
+            profile=(cli_meta or {}).get("profile") or (
+                None if _is_profile_agnostic_foreign_session(cli_meta)
+                else _active_profile_for_cli_import()
+            ),
             # ``is_cli_flag`` is True for genuine CLI/TUI/Desktop sessions so the
             # sidebar renders the source badge and the client's external-session
             # gating applies. It is False for delegated subagent children (#5307):
@@ -37456,10 +37460,11 @@ def _handle_session_import_cli(handler, body):
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
-    if not profile:
+    if not profile and not _is_profile_agnostic_foreign_session(cli_meta):
         # #9093: the messages above came from the active profile's state.db, so
         # the session is the active profile's even when it is outside the
-        # bounded CLI listing and has no metadata row.
+        # bounded CLI listing and has no metadata row. A profile-agnostic row
+        # (Claude Code transcripts, read from global JSONL) stays profile-less.
         profile = _active_profile_for_cli_import()
 
     # Get profile, model, timestamps, and title from CLI session metadata
