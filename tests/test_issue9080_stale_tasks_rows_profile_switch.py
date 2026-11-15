@@ -457,3 +457,45 @@ process.stdout.write(JSON.stringify({ active: S.activeProfile, rows: rowIds(), l
     assert result["crons"] == 2, "expected exactly Alpha's initial load and Beta's reload"
     assert result["list"] == ["beta-job"], "the new profile's Tasks list did not publish after the switch"
     assert result["rows"] == ["cron-beta-job"]
+
+
+def test_picker_switch_drops_stale_rows_at_accept_not_after_the_list_render():
+    """The picker switch must drop the previous profile's rows as soon as the
+    server accepts the switch, not only in ``_profileSwitchPanelLoad`` after
+    ``await renderSessionList()``. Hold that render (a slow /api/sessions): in
+    the window the cookie already serves Beta, so a stale Alpha row + Duplicate
+    + Save would create Alpha's job in Beta."""
+    result = _run_node(_script(r"""
+await primeAlpha();
+let releaseList;
+renderSessionList = () => new Promise(resolve => { releaseList = resolve; });
+const done = switchToProfile('beta');
+await _tick();
+const staleRows = cronRows();
+for (const row of staleRows) if (typeof row.onclick === 'function') row.onclick();
+duplicateCurrentCron();
+const inWindow = {
+  held: typeof releaseList === 'function',
+  active: S.activeProfile,
+  rows: staleRows.map(r => r.id),
+  list: listIds(),
+  forms: calls.renderCronForm.slice(),
+  dup: _cronIsDuplicate,
+};
+await Promise.race([saveCronForm().catch(() => {}), _tick()]);
+await _tick();
+inWindow.creates = calls.cronCreate.slice();
+if (releaseList) releaseList();
+const ok = await done;
+await _tick();
+process.stdout.write(JSON.stringify({ inWindow, ok, settled: { rows: rowIds(), list: listIds() } }));
+"""))
+    w = result["inWindow"]
+    assert w["held"] is True, "precondition: the switch is parked inside renderSessionList()"
+    assert w["active"] == "beta"
+    assert w["rows"] == [], "previous profile's rows were still clickable while the switch rendered the session list"
+    assert w["list"] == []
+    assert w["forms"] == [] and w["dup"] is False
+    assert w["creates"] == [], f"Save in the window created the previous profile's job in the new profile: {w['creates']}"
+    assert result["ok"] is not False
+    assert result["settled"] == {"rows": ["cron-beta-job"], "list": ["beta-job"]}

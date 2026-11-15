@@ -7859,6 +7859,14 @@ async function switchToProfile(name) {
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
+    // #9080: the server serves the new profile from here on, so drop the previous
+    // profile's Tasks rows/list/detail/form state NOW, as the session-load switch
+    // does at accept. Waiting for _profileSwitchPanelLoad() at the end left the
+    // old rows clickable across the awaited session-list render below, and a
+    // Duplicate + Save in that window created the old profile's job in this one.
+    // The later call there is idempotent (and retires any Tasks load started
+    // in between before reloading a visible panel).
+    if (typeof _resetProfileScopedPanelState === 'function') _resetProfileScopedPanelState();
     // #7685 finding 3/4/5: the switch is accepted, so the Scripts pane's
     // owner is now this profile. If it was the visible subtab, refresh it for
     // the new owner (its rows were cleared at switch start). The load's own
