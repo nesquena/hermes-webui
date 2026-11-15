@@ -3667,10 +3667,11 @@
    width, and margin-left:auto still right-aligns it. */
 .model-opt-provider--configured{display:block;flex:1 1 0;min-width:3.5em;max-width:max-content;overflow:hidden;text-overflow:ellipsis;}
 /* #9074: the dark-theme chip colours measured ~1.1:1 on the light dropdown.
-   Mixed from the theme tokens, they stay >=4.5:1 on plain, hover and active rows. */
-:root:not(.dark) .model-opt-badge--primary{color:color-mix(in srgb,var(--info) 60%,var(--text));}
-:root:not(.dark) .model-opt-badge--fallback{color:color-mix(in srgb,var(--warning) 50%,var(--text));}
-:root:not(.dark) .model-opt-badge--selected{color:color-mix(in srgb,var(--blue) 60%,var(--text));}
+   Mixed from the theme tokens, they stay >=4.5:1 on plain, hover and active rows
+   in every light skin (the tightest are Catppuccin's active row and neon-paint). */
+:root:not(.dark) .model-opt-badge--primary{color:color-mix(in srgb,var(--info) 40%,var(--text));}
+:root:not(.dark) .model-opt-badge--fallback{color:color-mix(in srgb,var(--warning) 30%,var(--text));}
+:root:not(.dark) .model-opt-badge--selected{color:color-mix(in srgb,var(--blue) 40%,var(--text));}
 /* "Show N more" group expander — deliberately distinct from a real model row:
    no model-id line, indented, muted italic label + a subtle + affordance, so it
    reads as an action that expands the list rather than a selectable model. */

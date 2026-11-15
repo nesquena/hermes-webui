@@ -146,17 +146,36 @@ def test_every_locale_translates_both_roles():
 # ── 3. light-theme contrast ───────────────────────────────────────────────
 
 
-def _hex(value):
-    value = value.strip().lstrip("#")
-    return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
+def _decls(body):
+    return dict(re.findall(r"--([a-z0-9-]+)\s*:\s*([^;]+);", body))
 
 
-def _light_token(name):
-    root = re.search(r"^  :root \{(.*?)\}", STYLE_CSS, re.M | re.S)
-    assert root, "light :root block not found"
-    match = re.search(rf"--{name}:(#[0-9A-Fa-f]{{6}})", root.group(1))
-    assert match, f"--{name} not a hex colour in the light :root block"
-    return _hex(match.group(1))
+def _light_palettes():
+    """The default light palette, and each skin's light palette on top of it."""
+    base = _decls(re.search(r"^  :root \{(.*?)\}", STYLE_CSS, re.M | re.S).group(1))
+    overrides = {"default": {}}
+    for pattern in (
+        r':root\[data-skin="([a-z-]+)"\]\s*\{([^}]*)\}',
+        r':root\[data-skin="([a-z-]+)"\]:not\(\.dark\)\s*\{([^}]*)\}',
+    ):
+        for match in re.finditer(pattern, STYLE_CSS):
+            overrides.setdefault(match.group(1), {}).update(_decls(match.group(2)))
+    return {name: dict(base, **values) for name, values in overrides.items()}
+
+
+LIGHT_PALETTES = _light_palettes()
+
+
+def _color(value):
+    """(rgb, alpha) for #rgb, #rrggbb or rgba(...)."""
+    value = value.strip()
+    if value.startswith("#"):
+        digits = value[1:]
+        if len(digits) == 3:
+            digits = "".join(c * 2 for c in digits)
+        return tuple(int(digits[i : i + 2], 16) for i in (0, 2, 4)), 1.0
+    r, g, b, a = (float(x) for x in re.match(r"rgba\(([^)]*)\)", value).group(1).split(","))
+    return (r, g, b), a
 
 
 def _luminance(rgb):
@@ -177,28 +196,33 @@ def _over(rgb, alpha, base):
     return tuple(c * alpha + b * (1 - alpha) for c, b in zip(rgb, base))
 
 
-def _rgba(text):
-    r, g, b, a = (float(x) for x in re.match(r"rgba\(([^)]*)\)", text).group(1).split(","))
-    return (r, g, b), a
+def test_light_palettes_cover_the_skins():
+    assert len(LIGHT_PALETTES) >= 10, sorted(LIGHT_PALETTES)
+    assert "catppuccin" in LIGHT_PALETTES
 
 
+@pytest.mark.parametrize("skin", sorted(LIGHT_PALETTES))
 @pytest.mark.parametrize("role", ["primary", "fallback", "selected"])
-def test_light_theme_chip_text_meets_aa_contrast(role):
+def test_light_theme_chip_text_meets_aa_contrast(role, skin):
     light = re.search(
         rf":root:not\(\.dark\) \.model-opt-badge--{role}\{{color:color-mix\(in srgb,var\(--([a-z]+)\) (\d+)%,var\(--text\)\);\}}",
         STYLE_CSS,
     )
     assert light, f"no light-theme colour for the {role} chip"
-    token, percent = _light_token(light.group(1)), int(light.group(2)) / 100
-    text = tuple(t * percent + x * (1 - percent) for t, x in zip(token, _light_token("text")))
+    palette = LIGHT_PALETTES[skin]
+    token, _ = _color(palette[light.group(1)])
+    percent = int(light.group(2)) / 100
+    text_rgb, _ = _color(palette["text"])
+    text = tuple(t * percent + x * (1 - percent) for t, x in zip(token, text_rgb))
 
-    tint, alpha = _rgba(re.search(rf"\.model-opt-badge--{role}\{{background:(rgba\([^)]*\))", STYLE_CSS).group(1))
-    surface = _light_token("surface")  # .model-dropdown background
+    tint, alpha = _color(re.search(rf"\.model-opt-badge--{role}\{{background:(rgba\([^)]*\))", STYLE_CSS).group(1))
+    surface, _ = _color(palette["surface"])  # .model-dropdown background
+    accent_bg, accent_alpha = _color(palette["accent-bg"])  # .model-opt.active
     rows = {
         "plain": surface,
-        "hover": _over((255, 255, 255), 0.07, surface),
-        "active": _over((184, 134, 11), 0.08, surface),  # light --accent-bg
+        "hover": _over((255, 255, 255), 0.07, surface),  # .model-opt:hover
+        "active": _over(accent_bg, accent_alpha, surface),
     }
     for state, row_bg in rows.items():
         ratio = _contrast(text, _over(tint, alpha, row_bg))
-        assert ratio >= 4.5, f"{role} chip on a {state} light row: {ratio:.2f}:1"
+        assert ratio >= 4.5, f"{role} chip on a {state} row, {skin} light skin: {ratio:.2f}:1"
