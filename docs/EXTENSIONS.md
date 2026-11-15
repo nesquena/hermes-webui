@@ -736,10 +736,13 @@ the text's language, in this order:
 4. `en-US-AvaMultilingualNeural`.
 
 Language detection is a stopword **vote**: an `it`/`en` word list plus the
-accented letters `à ì ò ù`, where a language needs at least two votes and a
-strict majority to win. What Italian shares with French and Spanish (the
-words `la`, `le`, `un`, `una`, `con`, and `é`/`è` inside a word) casts no vote,
-so text in those languages usually resolves to no language. Mixed text is
+accented letters `à ì ò ù` and the Italian-only ending `-zione`/`-zioni`, where
+a language needs at least two votes and a strict majority to win. What Italian
+shares with French and Spanish (the words `la`, `le`, `un`, `una`, `con`, the
+French `à`/`là`/`déjà`/`voilà`, and `é`/`è` inside a word) casts no vote, so
+text in those languages usually resolves to no language. Words only Italian
+uses (`ho`, `stata`, `nella`, `fatto`, ...) keep short Italian replies voting
+Italian. Mixed text is
 decided by the vote — the winner is used, a single language does not have to
 own the whole string. Only a tie, or a text too short to cast two votes,
 resolves to no language at all, and that skips steps 1 and 3. An explicit

@@ -26383,10 +26383,16 @@ def _detect_text_lang(text: str) -> str:
         return ""
     # No articles or prepositions Italian shares with French and Spanish
     # (la, le, un, una, con): they made French/Spanish text vote Italian.
+    # Their place is taken by words only Italian uses (ho, stata, nella,
+    # fatto...), so short replies such as "Ho trovato un errore nella
+    # funzione di login." still reach two votes.
     it_words = {
         "il", "lo", "gli", "di", "che", "non", "per", "è", "sono", "questo",
         "questa", "anche", "più", "già", "perché", "cosa", "come", "quando",
         "adesso", "oggi", "molto", "così", "ma",
+        "ho", "hai", "abbiamo", "hanno", "stato", "stata", "stati", "fatto",
+        "ecco", "ancora", "nel", "nella", "nelle", "negli", "della", "dello",
+        "delle", "degli", "alla", "alle", "sulla", "dalla",
     }
     en_words = {
         "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
@@ -26396,9 +26402,14 @@ def _detect_text_lang(text: str) -> str:
     it_votes = sum(1 for w in words if w in it_words)
     en_votes = sum(1 for w in words if w in en_words)
     # é/è are as common in French, Spanish and Portuguese; the word "è" is
-    # counted as a stopword instead.
-    accented_it = sum(1 for w in words if any(c in "àìòù" for c in w))
+    # counted as a stopword instead. French à/là/déjà/voilà carry à too.
+    french_grave = {"à", "là", "déjà", "voilà"}
+    accented_it = sum(
+        1 for w in words if w not in french_grave and any(c in "àìòù" for c in w)
+    )
     it_votes += accented_it
+    # -zione/-zioni is Italian only (French -tion, Spanish -ción).
+    it_votes += sum(1 for w in words if w.endswith(("zione", "zioni")))
     if it_votes >= 2 and it_votes > en_votes:
         return "it"
     if en_votes >= 2 and en_votes > it_votes:

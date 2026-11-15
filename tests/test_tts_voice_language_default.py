@@ -106,6 +106,19 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Le chat est là, et la maison est très belle.", ""),
         ("La casa es muy grande y tiene un jardín con flores.", ""),
         ("Ela é uma pessoa muito boa e você sabe disso.", ""),
+        ("Il est allé à la maison avec son ami.", ""),
+        ("Nous avons déjà réglé la connexion et la configuration.", ""),
+        ("Ella ha estado en la casa todo el día con su familia.", ""),
+        ("He encontrado un error en la función del inicio.", ""),
+        ("Ele já fez o almoço na casa da avó.", ""),
+        # ...while short Italian replies that lost la/un/con still vote Italian.
+        *[(text, "it") for text in [
+            "La connessione è stata ripristinata.",
+            "Ho aggiornato la configurazione e riavviato il server.",
+            "Ho trovato un errore nella funzione di login.",
+            "Fatto! Ho sistemato il bug con una patch.",
+            "Ecco la configurazione aggiornata.",
+        ]],
         ("", ""),
     ],
 )
@@ -274,6 +287,37 @@ def test_omitted_voice_synthesizes_in_english(monkeypatch):
     routes._handle_tts(h, None)
     assert h.status == 200, h.payload()
     assert captured["voice"] == "en-US-AvaNeural"
+
+
+_SHORT_ITALIAN_REPLIES = [
+    "La connessione è stata ripristinata.",
+    "Ho aggiornato la configurazione e riavviato il server.",
+    "Ho trovato un errore nella funzione di login.",
+    "Fatto! Ho sistemato il bug con una patch.",
+]
+
+
+@pytest.mark.parametrize("text", _SHORT_ITALIAN_REPLIES)
+def test_short_italian_reply_uses_configured_italian_voice(monkeypatch, text):
+    cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.4")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "it-IT-IsabellaNeural"
+
+
+def test_english_reply_keeps_configured_voice_next_to_italian_entry(monkeypatch):
+    cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": "The connection was restored and the server is up."}, client="10.42.1.5")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "en-US-GuyNeural"
 
 
 def test_explicit_voice_override_still_wins(monkeypatch):
