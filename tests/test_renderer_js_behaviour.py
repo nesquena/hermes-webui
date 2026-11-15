@@ -1222,6 +1222,9 @@ class TestUnterminatedCodeStashGrowth:
         assert 'src="/static/charts/probe.svg"' in out, (
             f"image after an unterminated code tag must still render: {out!r}"
         )
+
+
+class TestMarkdownTableCellLineBreaks:
     """<br> inside markdown table cells must be preserved and not split cells across lines."""
 
     def test_table_cell_with_br_renders_intact(self, driver_path):
@@ -1351,3 +1354,114 @@ class TestRendererGateRegressions7618:
         out = _render(driver_path, "  | a | b |\n  |---|---|\n  | x<br>y | z |")
         assert "<table>" in out
         assert "x<br>y" in out
+
+
+class TestImageQuadraticGrowth:
+    """Gate G9072-ROOTIMAGE-QUADRATIC / G9072-INLINECODE-QUADRATIC.
+
+    Accepting a root-relative url made the image regex scan the remaining
+    suffix for every ``![`` opener whenever the closing parenthesis is missing:
+    96 KB of ``![x](/`` rendered in ~1.5 s against ~2 ms on frozen master.  The
+    same shape lived in inlineMd()'s block-local ``<code>`` stash, where a
+    heading or list line that opens code elements and never closes them
+    searched the whole line once per opener.  Both passes now walk the input
+    once, and a delimiter that never appears ends the search immediately.
+    """
+
+    def test_unclosed_root_relative_image_growth_is_linear(self, growth_driver_path):
+        unit = "![x](" + "/"
+
+        def payload(openers):
+            return unit * openers
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(4000), payload(16000)]
+        )
+        # 4x the bytes: linear work lands near 4x, the regex form ran ~75x.
+        assert large_ms < small_ms * 6, (
+            "unclosed root-relative images must not rescale per opener: "
+            f"24 KB={small_ms:.1f} ms, 96 KB={large_ms:.1f} ms"
+        )
+        assert large_ms < 200, (
+            f"96 KB of unclosed images renders far too slowly: {large_ms:.1f} ms"
+        )
+
+    def test_unclosed_root_relative_image_stays_literal(self, driver_path):
+        out = _render(driver_path, "![x](/static/charts/probe.png")
+        assert "<img" not in out, f"unclosed image must stay literal: {out!r}"
+
+    def test_unclosed_inline_code_heading_growth_is_linear(self, growth_driver_path):
+        def payload(openers):
+            return "# " + '<code class="language-text">' * openers + "\n</code>"
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(2000), payload(8000)]
+        )
+        assert large_ms < small_ms * 6, (
+            "unclosed <code> in a heading must not rescan per opener: "
+            f"56 KB={small_ms:.1f} ms, 224 KB={large_ms:.1f} ms"
+        )
+        assert large_ms < 600, (
+            f"224 KB heading with unclosed <code> renders too slowly: {large_ms:.1f} ms"
+        )
+
+    def test_unclosed_inline_code_list_growth_is_linear(self, growth_driver_path):
+        def payload(openers):
+            return "- " + '<code class="language-text">' * openers + "\n\npara\n</code>"
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(2000), payload(8000)]
+        )
+        assert large_ms < small_ms * 6, (
+            "unclosed <code> in a list item must not rescan per opener: "
+            f"56 KB={small_ms:.1f} ms, 232 KB={large_ms:.1f} ms"
+        )
+
+
+class TestImageAltCodeSpans:
+    """Gate G9072-IMAGEALT-STASH: code spans in an image alt must reach the
+    attribute as plain text.
+
+    Stash placeholders leaked into the alt as raw NUL tokens (list / heading
+    text arrives with code already rendered), and restoring ``<code>`` markup
+    into the attribute string ended the attribute early, spilling the rest of
+    the tag into the paragraph ("![</code>\" class=...").  Formatted alt text
+    now renders as ``alt="logo"`` in every context, and image syntax written
+    inside a code span never produces markup inside an attribute.
+    """
+
+    def test_formatted_alt_in_paragraph(self, driver_path):
+        out = _render(driver_path, "![`logo`](/static/logo.png)")
+        assert 'alt="logo"' in out, f"alt must be the plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_formatted_alt_in_list(self, driver_path):
+        out = _render(driver_path, "- ![`logo`](/static/logo.png)")
+        assert 'alt="logo"' in out, f"list alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_formatted_alt_in_heading(self, driver_path):
+        out = _render(driver_path, "## ![`logo`](/static/logo.png)")
+        assert 'alt="logo"' in out, f"heading alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_formatted_alt_in_table(self, driver_path):
+        src = "| a | b |\n| --- | --- |\n| ![`logo`](/static/logo.png) | x |"
+        out = _render(driver_path, src)
+        assert 'alt="logo"' in out, f"table alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_image_syntax_inside_code_alt_stays_plain(self, driver_path):
+        out = _render(driver_path, "![`![`](/static/logo.png)")
+        assert 'alt="!["' in out, f"code content must stay plain text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+        assert "<code>" not in out, f"code markup must not enter the tag: {out!r}"
+        assert 'class="msg-media-img"' in out, (
+            f"the img tag must stay well formed: {out!r}"
+        )
+
+    def test_code_alt_on_https_image_stays_plain(self, driver_path):
+        # Same control on the scheme the renderer supported before this PR.
+        out = _render(driver_path, "![`logo`](https://example.com/x.png)")
+        assert 'alt="logo"' in out, f"https alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"

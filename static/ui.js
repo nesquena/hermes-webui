@@ -10975,6 +10975,63 @@ function renderMd(raw){
     }
     return out+run.slice(cursor);
   }
+  // Image pass: ![alt](url) for http(s), file, data:image/ and root-relative
+  // sources.  Parsed with a forward scan rather than a regex: in the regex
+  // form the url class `[^\)]+` rescans the remaining suffix for every `![`
+  // opener when a message opens an image and never closes the parenthesis,
+  // which is quadratic in the message length (gate G9072-ROOTIMAGE-QUADRATIC:
+  // 96 KB of `![x](/` rendered in ~1.5 s against 2 ms on frozen master).  The
+  // scan below visits the input once, remembers opener positions, and a `)`
+  // that does not exist at all ends the search for the whole remainder.
+  // `altText` maps stash placeholders in the alt back to plain text: an alt
+  // string is an attribute value, so restoring <code> markup there would end
+  // the attribute early and spill the rest into the tag (G9072-IMAGEALT-STASH).
+  function _mdImagePass(str,altText){
+    if(str.indexOf('![')<0)return str;
+    const scheme=/^(?:https?:\/\/|file:\/\/|data:image\/|\/(?!\/|\\))/;
+    let out='',copy=0,i=0,rp=-2,rpFrom=-1;
+    const pend=[];
+    // Position of the next `)`, cached across candidates: queries only move
+    // forward, so the total indexOf work stays linear.
+    const nextRParen=p=>{
+      if(rp!==-2){
+        if(rp===-1){if(p>=rpFrom)return -1;}
+        else if(rp>=p)return rp;
+      }
+      rpFrom=p;rp=str.indexOf(')',p);return rp;
+    };
+    while(i<str.length){
+      if(str.charAt(i)==='!'&&str.charAt(i+1)==='['){pend.push(i);i+=2;continue;}
+      if(str.charAt(i)!==']'){i++;continue;}
+      const us=i+2;
+      let matched=false;
+      while(pend.length){
+        const open=pend.shift();
+        if(str.charAt(i+1)!=='('||!scheme.test(str.slice(us,us+11)))continue;
+        const close=nextRParen(us);
+        if(close<0)return out+str.slice(copy);
+        if(close<=us)continue;
+        const rawAlt=altText?String(altText(str.slice(open+2,i))):str.slice(open+2,i);
+        // Attribute value: drop code-span markup and decode the entities the
+        // fence stash already escaped, so the single esc() below is the only
+        // escaping this text ever gets.  The pipeline only emits the bare
+        // `<code>`/`</code>` pair into an alt, so these string splits stay
+        // linear (a lazy tag regex here would be another ReDoS candidate).
+        const alt=rawAlt.split('<code>').join('').split('</code>').join('')
+          .replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&');
+        const url=str.slice(us,close);
+        out+=str.slice(copy,open)+((typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+        copy=close+1;i=close+1;matched=true;
+        break;
+      }
+      if(matched)continue;
+      // Alt text may not contain `]`, so every opener seen before this one is
+      // dead once this bracket did not complete an image.
+      pend.length=0;
+      i++;
+    }
+    return out+str.slice(copy);
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -10984,9 +11041,33 @@ function renderMd(raw){
     // text when the paragraph splitter re-enters inlineMd(); they are stashed
     // as well so a second pass cannot render image syntax inside them.
     const _code_stash=[];
+    const _code_plain=[];
     const _html_code_stash=[];
-    t=t.replace(/<code\b[^>]*>[\s\S]*?<\/code>/g,m=>{_html_code_stash.push(m);return `\x00H${_html_code_stash.length-1}\x00`;});
-    t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
+    const _html_code_plain=[];
+    // One forward scan collects complete <code> elements.  A lazy
+    // `[\s\S]*?</code>` rescans the rest of the line for every opener when a
+    // message opens a code element and never closes it, which is quadratic
+    // (gate G9072-INLINECODE-QUADRATIC); an unmatched opener stays literal.
+    {
+      let out='',i=0;
+      while(i<t.length){
+        const open=t.indexOf('<code',i);
+        if(open<0){out+=t.slice(i);break;}
+        const afterTag=t.charAt(open+5);
+        if(afterTag!=='>'&&!/\s/.test(afterTag)){out+=t.slice(i,open+5);i=open+5;continue;}
+        const gt=t.indexOf('>',open+5);
+        const close=gt<0?-1:t.indexOf('</code>',gt+1);
+        if(close<0){out+=t.slice(i);break;}
+        const end=close+7;
+        const span=t.slice(open,end);
+        _html_code_stash.push(span);
+        _html_code_plain.push(span.replace(/^<code\b[^>]*>/,'').replace(/<\/code>$/,'').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&'));
+        out+=t.slice(i,open)+`\x00H${_html_code_stash.length-1}\x00`;
+        i=end;
+      }
+      t=out;
+    }
+    t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);_code_plain.push(x);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
@@ -10995,8 +11076,9 @@ function renderMd(raw){
     // #487: Image pass — runs while code stash is active so ![x](url) inside
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
-    // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/|\/(?!\/|\\))[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    // is not consumed by the [label](url) link regex.  Code content in the alt
+    // comes back as plain text, never as markup inside the attribute.
+    t=_mdImagePass(t,alt=>String(alt).replace(/\x00H(\d+)\x00/g,(_,i)=>_html_code_plain[+i]).replace(/\x00C(\d+)\x00/g,(_,i)=>_code_plain[+i]));
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -11225,7 +11307,14 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/|\/(?!\/|\\))[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  // A stashed code span (only spans containing `![` reach the stash) or a raw
+  // backtick span sitting in the alt is flattened to its text: alt is an
+  // attribute value, so markup there would break the tag.
+  s=_mdImagePass(s,alt=>String(alt).replace(/\x00K(\d+)\x00/g,(_,i)=>{
+    const span=String(_code_outer_stash[+i]);
+    if(/^<code\b/i.test(span))return span.replace(/^<code\b[^>]*>/i,'').replace(/<\/code>$/i,'');
+    return /^`/.test(span)?span.slice(1,-1):span;
+  }).replace(/`([^`\n]+)`/g,(_,x)=>x));
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
