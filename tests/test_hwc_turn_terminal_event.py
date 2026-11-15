@@ -231,3 +231,294 @@ def test_stale_worker_after_stop_rename_keeps_title_and_emits_apperror(tmp_path,
     assert apperrors, "terminal apperror was not emitted"
     assert apperrors[-1].get("stale_writeback_skipped") is True
     assert apperrors[-1].get("session_id") == sid
+
+
+def test_post_success_title_thread_failure_keeps_published_done(tmp_path, monkeypatch):
+    """A failure after a published ``done`` must not add a stale ``apperror``.
+
+    The success path clears ``active_stream_id`` and emits ``done`` and
+    ``stream_end`` before it schedules the adaptive title refresh. If that
+    thread cannot start, the exception reaches the stale-writeback branch.
+    It must keep the published outcome: no ``apperror`` frame, and the run
+    journal still settles on ``done`` / ``completed``. Real worker, real title
+    refresh scheduling and real run journal; only the provider Agent and the
+    title-refresh thread's ``Thread.start`` are replaced.
+    """
+    from api import run_journal
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    index_file = session_dir / "_index.json"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(models, "_sync_sidecar_from_state_db_if_newer", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        "api.state_sync.sync_session_cwd_background",
+        lambda *_a, **_k: None,
+    )
+
+    registries = (
+        models.SESSIONS, config.STREAMS, config.CANCEL_FLAGS,
+        config.AGENT_INSTANCES, config.ACTIVE_RUNS,
+        config.SESSION_AGENT_LOCKS, config.SESSION_WRITEBACK_OWNERS,
+    )
+    for registry in registries:
+        registry.clear()
+
+    sid = "post_success_title_refresh"
+    stream_id = "stream-post-success"
+    msg_text = "hello after a generated title"
+    session = Session(
+        session_id=sid,
+        title="Weekly planning notes",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = msg_text
+    session.pending_started_at = time.time()
+    session.pending_user_source = "webui"
+    session.manual_title = False
+    session.llm_title_generated = True
+    session.save()
+    models.SESSIONS[sid] = session
+    event_queue = queue.Queue()
+    config.STREAMS[stream_id] = event_queue
+    config.register_stream_owner(stream_id, sid)
+
+    provider_calls = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs.get("session_id") or sid
+            self.stream_delta_callback = kwargs.get("stream_delta_callback")
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **_kwargs):
+            provider_calls.append("run")
+            return {"messages": [
+                {"role": "user", "content": msg_text},
+                {"role": "assistant", "content": "Finished."},
+            ]}
+
+        def interrupt(self, _message=None):
+            return None
+
+    title_thread_starts = []
+    original_start = threading.Thread.start
+
+    def _fail_only_title_refresh_start(thread):
+        if getattr(thread, "_target", None) is streaming._run_background_title_refresh:
+            title_thread_starts.append(thread.name)
+            raise RuntimeError("can't start new thread")
+        return original_start(thread)
+
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = lambda *_a, **_k: object()
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(
+        streaming,
+        "resolve_model_provider",
+        lambda *_a, **_k: ("gpt-4o", "openai", None),
+    )
+    monkeypatch.setattr("api.config.get_config", lambda *_a, **_k: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda *_a, **_k: [])
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(streaming, "_get_title_refresh_interval", lambda: 1)
+    monkeypatch.setattr(threading.Thread, "start", _fail_only_title_refresh_start)
+
+    try:
+        streaming._run_agent_streaming(
+            session_id=sid,
+            msg_text=msg_text,
+            model="gpt-4o",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+    finally:
+        for registry in registries:
+            registry.clear()
+
+    frames = []
+    while not event_queue.empty():
+        frames.append(event_queue.get_nowait())
+    names = [item[0] for item in frames]
+
+    assert provider_calls == ["run"]
+    # The failure really happened, once, at the title-refresh thread start.
+    assert len(title_thread_starts) == 1, names
+    terminal_frames = [n for n in names if n in {"done", "stream_end", "cancel", "apperror"}]
+    assert terminal_frames == ["done", "stream_end"], names
+
+    journal = run_journal.read_run_events(sid, stream_id, session_dir=session_dir)
+    assert not [row for row in journal["events"] if row.get("event") == "apperror"]
+    terminal = run_journal.select_authoritative_terminal_event(journal["events"])
+    assert terminal is not None and terminal["event"] == "done", terminal
+    assert terminal.get("terminal_state") == "completed", terminal
+    summary = run_journal.find_run_summary(stream_id, session_dir=session_dir)
+    assert summary["terminal_state"] == "completed", summary
+
+    sidecar = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert sidecar.get("active_stream_id") is None
+    assert any(
+        m.get("role") == "assistant" and m.get("content") == "Finished."
+        for m in sidecar["messages"]
+    )
+
+
+def test_post_success_initial_title_thread_failure_still_closes_the_stream(tmp_path, monkeypatch):
+    """The initial title thread owns ``stream_end``; if it can't start, close anyway.
+
+    When the first exchange is eligible for background title generation, the
+    success path emits ``done`` and hands ``stream_end`` to the title thread.
+    If that thread cannot start, the exception reaches the stale-writeback
+    branch after ``done`` but before any ``stream_end``. Keeping the published
+    ``done`` must not leave the transport open: the branch emits the missing
+    ``stream_end`` (with the original session id), still no ``apperror``.
+    """
+    from api import run_journal
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    index_file = session_dir / "_index.json"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(models, "_sync_sidecar_from_state_db_if_newer", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        "api.state_sync.sync_session_cwd_background",
+        lambda *_a, **_k: None,
+    )
+
+    registries = (
+        models.SESSIONS, config.STREAMS, config.CANCEL_FLAGS,
+        config.AGENT_INSTANCES, config.ACTIVE_RUNS,
+        config.SESSION_AGENT_LOCKS, config.SESSION_WRITEBACK_OWNERS,
+    )
+    for registry in registries:
+        registry.clear()
+
+    sid = "post_success_initial_title"
+    stream_id = "stream-post-success-initial"
+    msg_text = "hello after a generated title"
+    session = Session(
+        session_id=sid,
+        title="Weekly planning notes",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = msg_text
+    session.pending_started_at = time.time()
+    session.pending_user_source = "webui"
+    session.manual_title = False
+    session.llm_title_generated = True
+    session.save()
+    models.SESSIONS[sid] = session
+    event_queue = queue.Queue()
+    config.STREAMS[stream_id] = event_queue
+    config.register_stream_owner(stream_id, sid)
+
+    provider_calls = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs.get("session_id") or sid
+            self.stream_delta_callback = kwargs.get("stream_delta_callback")
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **_kwargs):
+            provider_calls.append("run")
+            return {"messages": [
+                {"role": "user", "content": msg_text},
+                {"role": "assistant", "content": "Finished."},
+            ]}
+
+        def interrupt(self, _message=None):
+            return None
+
+    title_thread_starts = []
+    original_start = threading.Thread.start
+
+    def _fail_only_title_refresh_start(thread):
+        if getattr(thread, "_target", None) is streaming._run_background_title_update:
+            title_thread_starts.append(thread.name)
+            raise RuntimeError("can't start new thread")
+        return original_start(thread)
+
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = lambda *_a, **_k: object()
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(
+        streaming,
+        "resolve_model_provider",
+        lambda *_a, **_k: ("gpt-4o", "openai", None),
+    )
+    monkeypatch.setattr("api.config.get_config", lambda *_a, **_k: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda *_a, **_k: [])
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(streaming, "_background_title_generation_eligible", lambda _s: True)
+    monkeypatch.setattr(threading.Thread, "start", _fail_only_title_refresh_start)
+
+    try:
+        streaming._run_agent_streaming(
+            session_id=sid,
+            msg_text=msg_text,
+            model="gpt-4o",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+    finally:
+        for registry in registries:
+            registry.clear()
+
+    frames = []
+    while not event_queue.empty():
+        frames.append(event_queue.get_nowait())
+    names = [item[0] for item in frames]
+
+    assert provider_calls == ["run"]
+    # The failure really happened, once, at the initial title thread start.
+    assert len(title_thread_starts) == 1, names
+    terminal_frames = [n for n in names if n in {"done", "stream_end", "cancel", "apperror"}]
+    assert terminal_frames == ["done", "stream_end"], names
+    stream_end = [item[1] for item in frames if item[0] == "stream_end"]
+    assert stream_end == [{"session_id": sid}], stream_end
+
+    journal = run_journal.read_run_events(sid, stream_id, session_dir=session_dir)
+    assert not [row for row in journal["events"] if row.get("event") == "apperror"]
+    terminal = run_journal.select_authoritative_terminal_event(journal["events"])
+    assert terminal is not None and terminal["event"] == "done", terminal
+    assert terminal.get("terminal_state") == "completed", terminal
+    summary = run_journal.find_run_summary(stream_id, session_dir=session_dir)
+    assert summary["terminal_state"] == "completed", summary
+
+    sidecar = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert sidecar.get("active_stream_id") is None
+    assert any(
+        m.get("role") == "assistant" and m.get("content") == "Finished."
+        for m in sidecar["messages"]
+    )

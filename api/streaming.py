@@ -14547,6 +14547,8 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _success_terminal_published = False
+    _stream_end_published = False
     _steer_settled = False
     _returned_pending_steer = []
 
@@ -14581,6 +14583,7 @@ def _run_agent_streaming(
             })
 
     def put(event, data):
+        nonlocal _stream_end_published
         if event in ('done', 'apperror', 'stream_end'):
             _settle_pending_steer()
         # If cancelled, drop all further events except the cancel event itself
@@ -14608,6 +14611,8 @@ def _run_agent_streaming(
         try:
             queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
+            if event == 'stream_end':
+                _stream_end_published = True
         except Exception:
             logger.debug("Failed to put event to queue")
 
@@ -18415,6 +18420,7 @@ def _run_agent_streaming(
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
                 put('done', _done_payload)
+                _success_terminal_published = True
                 # Emit one last metering packet for the live message-header TPS label.
                 meter_stats = meter().get_stats(stream_id)
                 meter_stats['session_id'] = session_id
@@ -18996,7 +19002,16 @@ def _run_agent_streaming(
                     _error_payload['session_id'] = getattr(s, 'session_id', session_id)
                     _error_payload['old_session_id'] = session_id
                     _error_payload['stale_writeback_skipped'] = True
-                    put('apperror', _error_payload)
+                    # The success path clears active_stream_id and publishes
+                    # ``done`` before post-success housekeeping (title thread
+                    # start). If that fails, keep the published outcome: a
+                    # later apperror would turn a completed run into errored.
+                    # The initial title thread owns ``stream_end``, so when its
+                    # start failed, close the transport here instead.
+                    if not _success_terminal_published:
+                        put('apperror', _error_payload)
+                    elif not _stream_end_published:
+                        put('stream_end', {'session_id': session_id})
                     return
 
                 if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
