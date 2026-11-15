@@ -61,7 +61,7 @@
   }
 
   // The drawer opens on the page's nested panel; its title is the back control to the root panel (where the
-  // Site links are). Material leaves it out of the tab order, though it handles Enter on a focused label.
+  // home link is). Material leaves it out of the tab order, though it handles Enter on a focused label.
   // Going back from it moves focus to the panel now showing. Material replaces the sidebar on every instant
   // navigation, so this runs on each document$ emission; data-site-back keeps it to one binding per label.
   // Drawer mode only: the section openers (labels) become tab stops, and Enter on one moves focus to the new
@@ -99,7 +99,7 @@
         if (e.key === " ") { e.preventDefault(); l.click(); }
         var panel = document.getElementById(l.getAttribute("for"));
         // Back always lands on the panel one level up: focus its first control (the root panel's is the logo link,
-        // then the Site links). Direct, since a hit test would race the slide.
+        // then the home link). Direct, since a hit test would race the slide.
         setTimeout(function () {
           if (!panel || panel.checked || !drawerOpen()) return;
           var up = l.closest(".md-nav").parentElement.closest(".md-nav");
