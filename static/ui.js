@@ -10977,18 +10977,24 @@ function renderMd(raw){
   }
   // Placeholder tokens.  `\x00K0\x00` is also valid message text, and the
   // restore replace cannot tell the caller's characters from a placeholder it
-  // wrote: a message containing one lost its text to the stash.  Pick once per
-  // render the shortest `\x00K`, `\x00KK`, ... the input does not contain.  The
-  // longest run of the letter after a NUL bounds the choice, so one forward
-  // scan decides it and an input full of NULs costs nothing extra.
+  // wrote: a message containing one lost its text to the stash.  Each pass
+  // therefore picks, once per render, a lead character the text does not
+  // contain at all, so `<lead>K<digits>\x00` cannot appear in the caller's
+  // text.  The marker length is constant.  It used to be the shortest run of
+  // `K` / `H` after a NUL, which grew with the message: one NUL followed by a
+  // long letter run made a regex of that size, and every stashed code span
+  // copied the whole prefix into the temporary text, so the stash could grow
+  // quadratically in the message length (greptile P1 on #9072).
+  // Whitespace controls stay out of the candidate list: `\s`-shaped regexes
+  // in the later passes must not treat a marker as layout.
+  const _MARK_LEADS='\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f';
   const _tokPrefix=(base,text)=>{
     const ch=base.slice(-1);
-    let n=0;
-    for(let at=text.indexOf('\x00');at>=0;at=text.indexOf('\x00',at+1)){
-      let k=1;while(text.charAt(at+k)===ch)k++;
-      if(k-1>n)n=k-1;
+    for(let i=0;i<_MARK_LEADS.length;i++){
+      const lead=_MARK_LEADS.charAt(i);
+      if(text.indexOf(lead)<0)return lead+ch;
     }
-    return base+ch.repeat(n);
+    return '\x00'+ch;
   };
   // Image pass: ![alt](url) for http(s), file, data:image/ and root-relative
   // sources.  Parsed with a forward scan rather than a regex: in the regex

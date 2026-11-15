@@ -1571,3 +1571,25 @@ class TestPlaceholderTokens:
             f"image syntax inside inline code stays literal: {out!r}"
         )
         assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_nul_letter_run_does_not_size_the_marker(self, growth_driver_path):
+        # The marker used to be the shortest run of `K` / `H` after a NUL, so a
+        # single NUL plus a long letter run made a marker as long as that run:
+        # every stashed code span then copied the whole prefix into the
+        # temporary text, and the stash grew with spans x run.  A marker whose
+        # length ignores the message keeps this linear.  Four times the run and
+        # four times the spans is sixteen times the linear cost, so the ratio
+        # gate below only passes once the prefix stops scaling with the input.
+        def payload(run, spans):
+            return "\x00" + "K" * run + " " + "`![doc](/a.png)` " * spans
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(5000, 100), payload(20000, 400)]
+        )
+        assert large_ms < small_ms * 6, (
+            "a letter run after a NUL must not size the stash marker: "
+            f"{small_ms:.1f} ms -> {large_ms:.1f} ms"
+        )
+        assert large_ms < 600, (
+            f"letter run plus code spans renders too slowly: {large_ms:.1f} ms"
+        )
