@@ -3676,6 +3676,7 @@ def _build_session_list_cache_payload(
     if include_archived:
         counted_rows = full_scoped_all_sources
     else:
+        hidden_by_archived_memo: dict[int, bool] = {}
         counted_rows = [
             s for s in full_scoped_all_sources
             if not _sidebar_child_hidden_by_archived_ancestor(
@@ -3683,6 +3684,7 @@ def _build_session_list_cache_payload(
                 _sidebar_scoped_rows_by_profile.get(
                     _sidebar_profile_group_key(s.get("profile")), {}
                 ),
+                hidden_by_archived_memo,
             )
         ]
     webui_session_count = sum(
@@ -13885,7 +13887,9 @@ def _sidebar_delegation_parent(row: dict, rows_by_id: dict) -> dict | None:
     return None
 
 
-def _sidebar_child_hidden_by_archived_ancestor(row: dict, rows_by_id: dict) -> bool:
+def _sidebar_child_hidden_by_archived_ancestor(
+    row: dict, rows_by_id: dict, memo: dict[int, bool] | None = None
+) -> bool:
     """True when the default sidebar (Show archived off) drops this row (#9011).
 
     The browser never shows a ``child_session`` row at the top level: it nests
@@ -13896,21 +13900,38 @@ def _sidebar_child_hidden_by_archived_ancestor(row: dict, rows_by_id: dict) -> b
     stopping at a visible top-level parent (the child nests there and renders)
     or an archived one (the child is dropped). A missing or cyclic parent keeps
     the row counted, as the browser then treats it as an orphan or nests it.
+
+    Every row the walk passes through reaches the same verdict, so ``memo``
+    (keyed by row identity, shared across one payload build) stores it for each
+    of them: a chain of N children costs N lookups instead of N²/2.
     """
     if not isinstance(row, dict) or row.get("archived") or not _is_sidebar_child_session(row):
         return False
-    current = row
+    if memo is not None and id(row) in memo:
+        return memo[id(row)]
+    path = [row]
     seen = {id(row)}
+    verdict = False
+    current = row
     while True:
         parent = _sidebar_delegation_parent(current, rows_by_id)
         if parent is None or id(parent) in seen:
-            return False
+            break
+        if memo is not None and id(parent) in memo:
+            verdict = memo[id(parent)]
+            break
         if parent.get("archived"):
-            return True
+            verdict = True
+            break
         if not _is_sidebar_child_session(parent):
-            return False
+            break
         seen.add(id(parent))
+        path.append(parent)
         current = parent
+    if memo is not None:
+        for visited in path:
+            memo[id(visited)] = verdict
+    return verdict
 
 
 def _is_sidebar_child_session(row: dict) -> bool:

@@ -210,3 +210,50 @@ def test_helper_ignores_archived_rows_and_non_children():
 def test_server_predicate_mirrors_the_browser_child_check():
     assert "return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');" in SESSIONS_JS
     assert "_PREAMBLE" and _PREAMBLE  # shared harness imported from the #8141 tests
+
+
+# ── memoised walk (one payload build) ─────────────────────────────────────
+
+
+def _long_chain(n, root_archived=True):
+    rows = [_webui_parent_row("root", archived=root_archived)]
+    parent = "root"
+    for i in range(n):
+        rows.append(_webui_child_row(f"c{i}", parent))
+        parent = f"c{i}"
+    return rows
+
+
+@pytest.mark.parametrize("root_archived", [True, False])
+def test_memo_gives_the_same_verdicts_as_separate_walks(root_archived):
+    routes = _routes()
+    x = _webui_child_row("x", "y")
+    y = _webui_child_row("y", "x")
+    rows = [*_long_chain(20, root_archived=root_archived), *_chain(), x, y,
+            _webui_parent_row("P"), _webui_child_row("kid", "P")]
+    by_id = {r["session_id"]: r for r in _long_chain(0)}
+    by_id.update({r["session_id"]: r for r in rows})
+    memo: dict[int, bool] = {}
+    for row in rows:
+        fresh = routes._sidebar_child_hidden_by_archived_ancestor(row, by_id)
+        assert routes._sidebar_child_hidden_by_archived_ancestor(row, by_id, memo) == fresh, row["session_id"]
+
+
+def test_memo_keeps_a_long_chain_linear(monkeypatch):
+    routes = _routes()
+    rows = _long_chain(300)
+    by_id = {r["session_id"]: r for r in rows}
+    calls = 0
+    real_parent = routes._sidebar_delegation_parent
+
+    def counting_parent(row, rows_by_id):
+        nonlocal calls
+        calls += 1
+        return real_parent(row, rows_by_id)
+
+    monkeypatch.setattr(routes, "_sidebar_delegation_parent", counting_parent)
+    memo: dict[int, bool] = {}
+    hidden = [routes._sidebar_child_hidden_by_archived_ancestor(r, by_id, memo) for r in rows]
+
+    assert hidden == [False] + [True] * 300
+    assert calls <= 2 * len(rows), calls  # ~45,000 lookups without the memo
