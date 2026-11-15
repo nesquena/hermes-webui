@@ -7765,23 +7765,27 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             yield path, obj
 
     def _corroborated_residue_match(raw_item, new_item) -> bool:
-        """True if *raw_item* has ownership evidence beyond a single ${...} leaf (#8740 CR r6).
+        """True if *raw_item* has ownership evidence beyond a single ${...} leaf (#8740 CR r6, r8).
 
-        Adoption requires either that *raw_item* is the sole row in *raw_list*
-        with this key set (no other row could own or dispute the bindings), or
-        that at least one additional reference corresponds (>= 2 matching
-        reference leaves total). Equal plain literals, booleans, and numbers
-        must not corroborate anything.
+        Adoption requires either that *raw_item* carries the submitted key set and is
+        the sole row in *raw_list* with it (no other row could own or dispute the
+        bindings), or that at least one additional reference corresponds (>= 2
+        matching reference leaves of *raw_item* itself). A row whose key set differs
+        from the submission never corroborates through the single-row shortcut: the
+        key-set count only speaks about OTHER rows, so it cannot prove this one owns
+        the submitted row. Equal plain literals, booleans, and numbers must not
+        corroborate anything.
         """
         if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
             return False
-        same_keys_count = sum(
-            1
-            for r in raw_list
-            if isinstance(r, dict) and set(r.keys()) == set(new_item.keys())
-        )
-        if same_keys_count == 1:
-            return True
+        if set(raw_item.keys()) == set(new_item.keys()):
+            same_keys_count = sum(
+                1
+                for r in raw_list
+                if isinstance(r, dict) and set(r.keys()) == set(new_item.keys())
+            )
+            if same_keys_count == 1:
+                return True
         matching_refs = 0
         for path, raw_val in _iter_env_ref_leaves(raw_item):
             exists, new_val = _get_at_path(new_item, path)
@@ -7863,11 +7867,15 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
 
         # 2.d: a row edited at exactly one leaf, so a row made only of
         # references still keeps the siblings the edit did not touch.
+        # A single candidate still goes through the shared ownership decision:
+        # a one-leaf difference is correspondence, not proof of ownership, so a
+        # candidate whose other leaves tie with another row is refused instead of
+        # lending that row's references to the submitted literal (#8740 CR r8).
         cands_2d = _edited_row_candidates(new_item)
         if len(cands_2d) > 1:
             raise ValueError(ambiguous_err)
         if len(cands_2d) == 1:
-            matches[new_idx] = cands_2d[0]
+            matches[new_idx] = _decide_candidate_adoption(cands_2d[0], new_item)
             continue
 
         # 2.e: Preserved references: every ${...} leaf the raw row holds
