@@ -10975,6 +10975,21 @@ function renderMd(raw){
     }
     return out+run.slice(cursor);
   }
+  // Placeholder tokens.  `\x00K0\x00` is also valid message text, and the
+  // restore replace cannot tell the caller's characters from a placeholder it
+  // wrote: a message containing one lost its text to the stash.  Pick once per
+  // render the shortest `\x00K`, `\x00KK`, ... the input does not contain.  The
+  // longest run of the letter after a NUL bounds the choice, so one forward
+  // scan decides it and an input full of NULs costs nothing extra.
+  const _tokPrefix=(base,text)=>{
+    const ch=base.slice(-1);
+    let n=0;
+    for(let at=text.indexOf('\x00');at>=0;at=text.indexOf('\x00',at+1)){
+      let k=1;while(text.charAt(at+k)===ch)k++;
+      if(k-1>n)n=k-1;
+    }
+    return base+ch.repeat(n);
+  };
   // Image pass: ![alt](url) for http(s), file, data:image/ and root-relative
   // sources.  Parsed with a forward scan rather than a regex: in the regex
   // form the url class `[^\)]+` rescans the remaining suffix for every `![`
@@ -11050,6 +11065,10 @@ function renderMd(raw){
     const _code_plain=[];
     const _html_code_stash=[];
     const _html_code_plain=[];
+    // A prefix this line does not contain, so the restore below only ever sees
+    // placeholders this pass wrote (see _tokPrefix).
+    const _hPre=_tokPrefix('\x00H',t);
+    const _hTok=new RegExp(_hPre+'(\\d+)\x00','g');
     // One forward scan collects complete <code> elements.  A lazy
     // `[\s\S]*?</code>` rescans the rest of the line for every opener when a
     // message opens a code element and never closes it, which is quadratic
@@ -11068,7 +11087,7 @@ function renderMd(raw){
         const span=t.slice(open,end);
         _html_code_stash.push(span);
         _html_code_plain.push(span.replace(/^<code\b[^>]*>/,'').replace(/<\/code>$/,'').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&'));
-        out+=t.slice(i,open)+`\x00H${_html_code_stash.length-1}\x00`;
+        out+=t.slice(i,open)+_hPre+(_html_code_stash.length-1)+'\x00';
         i=end;
       }
       t=out;
@@ -11084,12 +11103,12 @@ function renderMd(raw){
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.  Code content in the alt
     // comes back as plain text, never as markup inside the attribute.
-    t=_mdImagePass(t,alt=>String(alt).replace(/\x00H(\d+)\x00/g,(_,i)=>_html_code_plain[+i]).replace(/\x00C(\d+)\x00/g,(_,i)=>_code_plain[+i]));
+    t=_mdImagePass(t,alt=>String(alt).replace(_hTok,(_,i)=>_html_code_plain[+i]).replace(/\x00C(\d+)\x00/g,(_,i)=>_code_plain[+i]));
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
-    t=t.replace(/\x00H(\d+)\x00/g,(_,i)=>_html_code_stash[+i]);
+    t=t.replace(_hTok,(_,i)=>_html_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
@@ -11281,7 +11300,11 @@ function renderMd(raw){
   // match never crosses its own closing tag: otherwise an image sitting
   // between two code spans would be swallowed as one chunk and stay literal.
   const _code_outer_stash=[];
-  const _stashOuterCode=m=>{_code_outer_stash.push(m);return `\x00K${_code_outer_stash.length-1}\x00`;};
+  // Same rule as the block-local H stash: a prefix this message does not
+  // contain, so a literal `\x00K0\x00` in the caller's text stays text.
+  const _kPre=_tokPrefix('\x00K',s);
+  const _kTok=new RegExp(_kPre+'(\\d+)\x00','g');
+  const _stashOuterCode=m=>{_code_outer_stash.push(m);return _kPre+(_code_outer_stash.length-1)+'\x00';};
   s=s.replace(/`[^`\n]+`/g,m=>m.includes('![')?_stashOuterCode(m):m);
   // Complete rendered <code> elements are collected by one forward scan.  A
   // tempered pattern that looks for `![` between two lazy "not </code>" runs
@@ -11316,7 +11339,7 @@ function renderMd(raw){
   // A stashed code span (only spans containing `![` reach the stash) or a raw
   // backtick span sitting in the alt is flattened to its text: alt is an
   // attribute value, so markup there would break the tag.
-  s=_mdImagePass(s,alt=>String(alt).replace(/\x00K(\d+)\x00/g,(_,i)=>{
+  s=_mdImagePass(s,alt=>String(alt).replace(_kTok,(_,i)=>{
     const span=String(_code_outer_stash[+i]);
     if(/^<code\b/i.test(span))return span.replace(/^<code\b[^>]*>/i,'').replace(/<\/code>$/i,'');
     return /^`/.test(span)?span.slice(1,-1):span;
@@ -11328,7 +11351,7 @@ function renderMd(raw){
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
   s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
-  s=s.replace(/\x00K(\d+)\x00/g,(_,i)=>_code_outer_stash[+i]);
+  s=s.replace(_kTok,(_,i)=>_code_outer_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
   s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);

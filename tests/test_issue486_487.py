@@ -316,13 +316,26 @@ class TestIssue487ImageRendering:
 
     def test_inlinemd_has_image_pass(self):
         """inlineMd() must also handle ![alt](url) for images inside table cells."""
-        # inlineMd is called for table cells, list items, blockquotes
-        # Find inlineMd function body
+        # inlineMd is called for table cells, list items, blockquotes.
+        # Extract the whole function by brace matching: a fixed window ran out
+        # before the image pass once the function grew, and failed on source
+        # that renders images perfectly well.
         start = UI_JS.find('function inlineMd(')
         assert start != -1, "inlineMd function not found"
-        # Get a generous window covering the function
-        fn_window = UI_JS[start:start+1500]
-        assert '![' in fn_window or r'!\[' in fn_window, (
+        depth = 0
+        end = -1
+        for i in range(start, len(UI_JS)):
+            ch = UI_JS[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        assert end != -1, "inlineMd function body is not closed"
+        fn_source = UI_JS[start:end]
+        assert '_mdImagePass(' in fn_source, (
             "inlineMd() must handle image syntax for images in table cells"
         )
 

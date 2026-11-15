@@ -1391,6 +1391,13 @@ class TestImageQuadraticGrowth:
         assert "<img" not in out, f"unclosed image must stay literal: {out!r}"
 
     def test_unclosed_inline_code_heading_growth_is_linear(self, growth_driver_path):
+        # This gates the heading shape, not the whole complexity class: on
+        # `<code>`-heavy input a pass outside this PR is already superlinear on
+        # frozen master (8.3x-10.7x for 4x the bytes, measured on 2000/8000
+        # openers with and without a trailing </code>), so a gate tight enough
+        # to fail ac7d6d6 (~10.3x) fails master as well.  The shape below stays
+        # at ~3.6x for both the scan and the regex it replaced, and it trips if
+        # the stash ever starts rescanning its suffix again.
         def payload(openers):
             return "# " + '<code class="language-text">' * openers + "\n</code>"
 
@@ -1505,4 +1512,62 @@ class TestImageAltCodeSpans:
         # Same control on the scheme the renderer supported before this PR.
         out = _render(driver_path, "![`logo`](https://example.com/x.png)")
         assert 'alt="logo"' in out, f"https alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+
+class TestPlaceholderTokens:
+    """Regression: a message that already contains a placeholder keeps its text.
+
+    The bounded code stashes wrote fixed ``\\x00K0\\x00`` (outer) and
+    ``\\x00H0\\x00`` (block-local) markers, and the restore replace could not
+    tell them from the caller's own characters: a link whose url held such a
+    token lost its href to the stash, and the code span beside it was replaced
+    with the stash index (``undefined``).  Each pass now picks, once per render,
+    a prefix the text does not contain.
+    """
+
+    TOKEN = "\x00K0\x00"
+    LINE = "[x](https://localhost/" + TOKEN + ") `![doc](/a.png)`"
+
+    def _assert_preserved(self, out, where):
+        assert 'href="https://localhost/' + self.TOKEN + '"' in out, (
+            f"{where}: the link must keep its own url: {out!r}"
+        )
+        assert "<code>![doc](/a.png)</code>" in out, (
+            f"{where}: the code span must round-trip unchanged: {out!r}"
+        )
+        assert "undefined" not in out, f"{where}: a stash index leaked: {out!r}"
+
+    def test_literal_placeholder_in_a_paragraph(self, driver_path):
+        self._assert_preserved(_render(driver_path, self.LINE), "paragraph")
+
+    def test_literal_placeholder_in_a_list(self, driver_path):
+        self._assert_preserved(_render(driver_path, "- " + self.LINE), "list")
+
+    def test_literal_placeholder_in_a_heading(self, driver_path):
+        self._assert_preserved(_render(driver_path, "# " + self.LINE), "heading")
+
+    def test_literal_placeholder_in_a_table(self, driver_path):
+        table = "| h |\n|---|\n| " + self.LINE + " |"
+        self._assert_preserved(_render(driver_path, table), "table")
+
+    def test_literal_block_token_in_an_alt_stays_text(self, driver_path):
+        out = _render(
+            driver_path, "| ![lit \x00H0\x00 <code>c</code>](/a.png) |\n|---|"
+        )
+        assert "undefined" not in out, f"a stash index leaked: {out!r}"
+        alt = out.split('alt="', 1)[1].split('"', 1)[0]
+        assert alt.startswith("lit") and alt.endswith("c"), (
+            f"alt must keep the message text and the code's text: {out!r}"
+        )
+        assert "<code" not in alt, f"code markup must not enter the tag: {out!r}"
+
+    def test_normal_image_and_code_still_render(self, driver_path):
+        out = _render(driver_path, "![doc](/a.png) and `![doc](/a.png)`")
+        assert out.count('class="msg-media-img"') == 1, (
+            f"the image must render exactly once: {out!r}"
+        )
+        assert "<code>![doc](/a.png)</code>" in out, (
+            f"image syntax inside inline code stays literal: {out!r}"
+        )
         assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
