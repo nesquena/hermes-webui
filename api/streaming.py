@@ -19002,6 +19002,24 @@ def _run_agent_streaming(
                     _error_payload['session_id'] = getattr(s, 'session_id', session_id)
                     _error_payload['old_session_id'] = session_id
                     _error_payload['stale_writeback_skipped'] = True
+                    # Stop won the race (it landed after this worker's cancel check).
+                    # cancel_stream queues its live ``cancel`` frame without journaling
+                    # it (possibly only after this put), so this apperror is the run's
+                    # only journaled terminal. Make it a cancel: the run settles as
+                    # interrupted-by-user and a replay shows the cancel, not an error.
+                    # Drop the provider fields (the cancel marker says no provider
+                    # failure occurred) and name the server when it settled the run,
+                    # as _worker_cancel_event_payload does.
+                    if cancel_event.is_set():
+                        for _provider_key in ('hint', 'details', 'reason'):
+                            _error_payload.pop(_provider_key, None)
+                        _error_payload['type'] = 'cancelled'
+                        _server_reason = _server_settle_reason(stream_id)
+                        if _server_reason:
+                            _error_payload['message'] = _server_reason
+                            _error_payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+                        else:
+                            _error_payload['message'] = 'Task cancelled.'
                     # The success path clears active_stream_id and publishes
                     # ``done`` before post-success housekeeping (title thread
                     # start). If that fails, keep the published outcome: a
