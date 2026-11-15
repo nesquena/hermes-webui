@@ -73,7 +73,7 @@ html { scroll-padding-top: calc(var(--header) + 16px); }
 .site-header .container, .site-footer .container { max-width: var(--container); margin: 0 auto; padding: 0 var(--gutter); }
 .site-header .container { display: flex; align-items: center; gap: 24px; height: var(--header); }
 .site-header .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; font-size: 18px; text-decoration: none; flex: none; }
-.site-header .brand img { width: 28px; height: 28px; border-radius: 6px; display: block; }
+.site-header .brand img { width: 28px; height: 28px; border-radius: 0; display: block; }
 .site-header .brand-name { white-space: nowrap; }
 /* Pages keep their own body CSS; these resets stop bare nav/li/a rules there from reaching the chrome */
 .site-header .site-nav { padding: 0; margin: 0; }

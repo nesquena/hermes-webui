@@ -52,7 +52,7 @@
 .md-grid { max-width: 1100px; }
 .md-header, .md-tabs { box-shadow: none; border-bottom: 1px solid var(--hermes-border); }
 .md-header__inner { height: 3.2rem; }
-.md-header__button.md-logo img, .md-nav__button.md-logo img { width: 28px; height: 28px; border-radius: 6px; }
+.md-header__button.md-logo img, .md-nav__button.md-logo img { width: 28px; height: 28px; }
 .md-header__topic:first-child { font-weight: 700; }
 .hermes-sitenav { display: none; gap: 20px; margin-right: 16px; }
 .hermes-sitenav a { color: var(--md-default-fg-color--light); font-size: .75rem; font-weight: 400; }
