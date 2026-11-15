@@ -3462,8 +3462,11 @@ async function bulkUpdateKanban(){
   const status = $('kanbanBulkStatus') ? $('kanbanBulkStatus').value : '';
   if (!ids.length || !status) return;
   try {
-    await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
-    showToast(t('kanban_bulk_action'));
+    const res = await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
+    // The endpoint answers 200 with a per-card result; a refused card must not read as success.
+    const refused = (res && Array.isArray(res.results)) ? res.results.filter(r => r && r.ok === false) : [];
+    if (refused.length) showToast(t('kanban_bulk_refused', refused.length, ids.length, refused[0].error || ''), 'error');
+    else showToast(t('kanban_bulk_action'));
     await loadKanban(true);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }

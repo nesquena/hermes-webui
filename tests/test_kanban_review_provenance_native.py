@@ -166,3 +166,68 @@ def test_ready_card_with_a_stale_claim_still_hands_off(board):
     task = kb.get_task(conn, tid)
     assert (task.status, task.assignee, task.claim_lock) == ("review", "bob", None)
     assert _review_events(conn, tid) == [("review_requested", "alice", "bob")]
+
+
+
+def _alice_task_in_review_for_bob(conn):
+    tid = kb.create_task(conn, title="leave review", body="details", assignee="alice", created_by="test")
+    assert kb.claim_task(conn, tid, claimer="worker-alice") is not None
+    assert kb.request_review(conn, tid, reviewer="bob", summary="done",
+                             expected_run_id=kb.get_task(conn, tid).current_run_id)
+    task = kb.get_task(conn, tid)
+    assert (task.status, task.assignee) == ("review", "bob")
+    return tid
+
+
+def _snapshot(conn, tid):
+    row = tuple(conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
+    events = [(e.kind, e.payload) for e in kb.list_events(conn, tid)]
+    return row, events
+
+
+@pytest.mark.parametrize("target", ["ready", "todo", "triage"])
+@pytest.mark.parametrize("shape", ["patch", "bulk", "dialog"])
+def test_review_card_raw_exit_is_refused_before_any_write(board, target, shape):
+    """A card read as Review moved to Ready/Todo/Triage would be a raw status write that
+    keeps the reviewer as assignee. It is refused with nothing written: no row change,
+    no event, no assignee change. The dialog shape is the edit dialog's save: every
+    field plus the unchanged assignee, and the status because the user changed it."""
+    bridge, conn = board
+    tid = _alice_task_in_review_for_bob(conn)
+    before = _snapshot(conn, tid)
+    if shape == "bulk":
+        entry, = bridge._bulk_tasks_payload({"ids": [tid], "status": target})["results"]
+        assert entry["ok"] is False and "in review" in entry["error"], entry
+    else:
+        body = {"status": target}
+        if shape == "dialog":
+            body = {"title": "edited title", "body": "edited", "assignee": "bob", "tenant": None,
+                    "status": target, "priority": 3}
+        with pytest.raises(ValueError, match="in review"):
+            bridge._patch_task(conn, tid, body)
+    assert _snapshot(conn, tid) == before
+
+
+def test_review_card_bulk_with_an_assignee_is_refused_without_the_assignee(board):
+    bridge, conn = board
+    tid = _alice_task_in_review_for_bob(conn)
+    before = _snapshot(conn, tid)
+    entry, = bridge._bulk_tasks_payload({"ids": [tid], "status": "ready", "assignee": "carol"})["results"]
+    assert entry["ok"] is False and "in review" in entry["error"], entry
+    assert _snapshot(conn, tid) == before
+
+
+def test_review_to_done_still_completes(board):
+    bridge, conn = board
+    tid = _alice_task_in_review_for_bob(conn)
+    bridge._patch_task(conn, tid, {"status": "done", "result": "approved"})
+    assert kb.get_task(conn, tid).status == "done"
+
+
+def test_review_card_edit_without_a_status_change_still_saves(board):
+    """The refusal is only for a status move: editing a Review card's text still works."""
+    bridge, conn = board
+    tid = _alice_task_in_review_for_bob(conn)
+    bridge._patch_task(conn, tid, {"title": "renamed", "body": "new body", "assignee": "bob"})
+    task = kb.get_task(conn, tid)
+    assert (task.status, task.assignee, task.title) == ("review", "bob", "renamed")

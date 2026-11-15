@@ -378,12 +378,25 @@ def _create_task_payload(body: dict, *, board=None):
         return {"task": _task_dict(kb.get_task(conn, task_id)), "read_only": False}
 
 
+_REVIEW_RAW_EXITS = ("ready", "todo", "triage")
+
+
 def _patch_task(conn, task_id: str, body: dict):
     """Apply a partial update to a task, routing status transitions through structured verbs (complete, block, archive)."""
     kb = _kb()
     task = kb.get_task(conn, task_id)
     if not task:
         raise LookupError("task not found")
+    # A card in Review leaves it through the review verbs: Done approves it here,
+    # and changes are requested from the reviewer's flow. Ready/Todo/Triage would be
+    # a raw status write that keeps the reviewer as assignee, so the requested work
+    # would run in the reviewer's lane. Refuse those before any write (title, body,
+    # assignee included), so the edit dialog's combined save changes nothing either.
+    if task.status == "review" and str(body.get("status") or "").strip().lower() in _REVIEW_RAW_EXITS:
+        raise ValueError(
+            "this card is in review: send it back for changes from the reviewer's flow, "
+            "or approve it (Done) here"
+        )
 
     updates = {}
     if "title" in body:

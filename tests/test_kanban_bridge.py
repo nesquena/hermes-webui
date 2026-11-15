@@ -1967,3 +1967,20 @@ def test_card_read_as_review_is_refused_before_any_write(monkeypatch):
     entry, = bridge._bulk_tasks_payload({"ids": ["t_in_review"], "status": "review"})["results"]
     assert entry["ok"] is False and "already being reviewed" in entry["error"]
     assert (task.status, task.assignee) == ("review", "bob")
+
+
+
+def test_review_card_raw_exit_is_refused_before_any_write_on_the_fake_board(monkeypatch):
+    """Ready/Todo/Triage out of Review is refused before the title, assignee or status writes."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_review_exit", "In review", "review", "bob")
+    fake_kanban.tasks.append(task)
+    monkeypatch.setattr(fake_kanban, "assign_task", lambda *a, **k: pytest.fail("no assignee write"))
+    monkeypatch.setattr(bridge, "_set_status_direct", lambda *a, **k: pytest.fail("no status write"))
+    for target in ("ready", "todo", "triage"):
+        with bridge._conn() as conn:
+            with pytest.raises(ValueError, match="in review"):
+                bridge._patch_task(conn, "t_review_exit",
+                                   {"title": "edited", "assignee": "bob", "status": target})
+    assert (task.title, task.status, task.assignee) == ("In review", "review", "bob")
