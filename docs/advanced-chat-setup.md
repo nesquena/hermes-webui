@@ -420,6 +420,8 @@ Native API session YOLO is tracked in [Hermes Agent PR #61946](https://github.co
 
 Some WebUI entry points still execute the agent in the WebUI process and have no Gateway transport yet. In gateway mode they answer `409` with `{"error": "<route> is unavailable on gateway-backed sessions", "code": "gateway_mode_unsupported", "feature": "<route>"}` instead of attempting an in-process turn: `POST /api/btw`, `POST /api/background`, `POST /api/session/compress/start` and `POST /api/session/compress`, `POST /api/chat` (the non-streaming fallback), `POST /api/updates/summary`, and `POST /api/git/commit-message` / `POST /api/git/commit-message-selected`. Before this refusal they either failed with provider-credential errors (when the WebUI has no model key, which is the recommended gateway deployment) or silently ran a turn outside the Gateway. The refusal happens before any session, stream or compression job is created. Routing these features through the Gateway is separate work.
 
+`POST /api/session/handoff-summary` is the exception. It exists specifically for gateway sessions, so in gateway mode it returns its deterministic local fallback (`"fallback": true`, computed from the WebUI's transcript copy) instead of constructing an in-process agent or answering `409`.
+
 `HERMES_WEBUI_CHAT_BACKEND` is intentionally strict: only `gateway`,
 `api_server`, or `api-server` enable the bridge. Generic truthy values such as
 `1` or `true` are ignored so existing deployments do not change execution
