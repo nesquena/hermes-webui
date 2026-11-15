@@ -129,7 +129,7 @@ def test_all_three_badge_renderers_go_through_the_translated_label():
 
 def _locale_blocks():
     starts = list(re.finditer(r"^  (?:([a-z]{2})|'([a-zA-Z-]+)'): \{", I18N_JS, re.M))
-    for match, nxt in zip(starts, starts[1:] + [None]):
+    for match, nxt in zip(starts, starts[1:] + [None], strict=True):
         yield match.group(1) or match.group(2), I18N_JS[match.end() : nxt.start() if nxt else len(I18N_JS)]
 
 
@@ -193,7 +193,7 @@ def _contrast(a, b):
 
 
 def _over(rgb, alpha, base):
-    return tuple(c * alpha + b * (1 - alpha) for c, b in zip(rgb, base))
+    return tuple(c * alpha + b * (1 - alpha) for c, b in zip(rgb, base, strict=True))
 
 
 def test_light_palettes_cover_the_skins():
@@ -213,7 +213,7 @@ def test_light_theme_chip_text_meets_aa_contrast(role, skin):
     token, _ = _color(palette[light.group(1)])
     percent = int(light.group(2)) / 100
     text_rgb, _ = _color(palette["text"])
-    text = tuple(t * percent + x * (1 - percent) for t, x in zip(token, text_rgb))
+    text = tuple(t * percent + x * (1 - percent) for t, x in zip(token, text_rgb, strict=True))
 
     tint, alpha = _color(re.search(rf"\.model-opt-badge--{role}\{{background:(rgba\([^)]*\))", STYLE_CSS).group(1))
     surface, _ = _color(palette["surface"])  # .model-dropdown background
