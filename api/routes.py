@@ -26422,9 +26422,10 @@ def _detect_text_lang(text: str) -> str:
     it_votes += accented_it
     # -zione/-zioni is Italian only (French -tion, Spanish -ción).
     it_votes += sum(1 for w in words if w.endswith(("zione", "zioni")))
-    # il/di/non/ma/come are also French or Spanish words, so they can't be
-    # the Italian vote that shared words back up ("Il a fini la ...").
-    weak_it_words = {"il", "di", "non", "ma", "come"}
+    # These are also French, Spanish or Portuguese words, so they can't be
+    # the Italian vote that shared words back up ("Il a fini la ...",
+    # "Lo hago con una ...").
+    weak_it_words = {"il", "lo", "di", "non", "ma", "come", "cosa", "quando"}
     strong_it_votes = it_votes - sum(1 for w in words if w in weak_it_words)
     if strong_it_votes and not any(w in other_romance_words for w in words):
         it_votes += sum(1 for w in words if w in shared_words)

@@ -116,6 +116,8 @@ def _patch_profile_config(monkeypatch, cfg):
         # Shared la/le/un/una/con back up only a strongly Italian word.
         ("Il a fini la configuration.", ""),
         ("Di la verdad con una sonrisa.", ""),
+        ("Lo hago con una herramienta.", ""),
+        ("Cosa hago con una herramienta?", ""),
         ("Je ne sais pas, non, la build est verte.", ""),
         # ...while short Italian replies that lost la/un/con still vote Italian.
         *[(text, "it") for text in [
