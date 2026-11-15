@@ -62,8 +62,8 @@ def test_settings_preferences_expose_virtualize_toggle_default_on():
 
 def test_boot_applies_saved_virtualize_preference_default_on():
     js = BOOT.read_text(encoding="utf-8")
-    # #6151 default-on semantics: !==false (only an explicit false disables it).
-    assert "window._virtualizeTranscript=s.virtualize_transcript!==false" in js
+    # #6151 / #6155 strict boolean contract: ===true.
+    assert "window._virtualizeTranscript=s.virtualize_transcript===true" in js
     # #6151 review: a settings-load failure must fail CLOSED — never enable the
     # long-transcript renderer when the user's saved preference cannot be
     # recovered (an explicit saved false is not fail-safe otherwise).
@@ -149,9 +149,9 @@ def test_panels_round_trip_and_hot_apply_virtualize_toggle():
     assert "payload.virtualize_transcript=virtualizeTranscriptCb.checked;" in js
     # #6151: the #4343 opt-in save marker is gone (no force-off migration).
     assert "payload.virtualize_transcript_optin" not in js
-    # #6151: checkbox load reflects the default-on contract (!==false), so a
-    # default-on user sees it checked and a saved opt-out shows unchecked.
-    assert "virtualizeTranscriptCb.checked=settings.virtualize_transcript!==false;" in js
+    # #6151 / #6155: checkbox load reflects the strict boolean contract (===true),
+    # so a default-on user sees it checked and a saved opt-out shows unchecked.
+    assert "virtualizeTranscriptCb.checked=settings.virtualize_transcript===true;" in js
     assert "window._virtualizeTranscript=virtualizeTranscriptCb.checked;" in js
     # Hot-apply: toggling re-renders the open transcript immediately.
     assert "renderMessages({preserveScroll:true})" in js
@@ -250,3 +250,135 @@ def test_migration_legacy_optin_marker_dropped_and_optout_preserved(_settings_en
     raw = json.loads(sf.read_text(encoding="utf-8"))
     assert "virtualize_transcript_optin" not in raw, "legacy marker must not be re-persisted on save"
     assert raw.get("virtualize_transcript") is False, "opt-out must survive a save"
+
+
+# ── #6155 strict boolean authority regressions ─────────────────────────────
+
+
+def _extract_boot_op_rhs() -> str:
+    js = BOOT.read_text(encoding="utf-8")
+    for line in js.splitlines():
+        line = line.strip()
+        if "window._virtualizeTranscript=s.virtualize_transcript" in line:
+            return line.split("s.virtualize_transcript")[1].split(";")[0].strip()
+    raise AssertionError("Hydration assignment line for boot not found in static/boot.js")
+
+
+def _extract_panels_op_rhs() -> str:
+    js = PANELS.read_text(encoding="utf-8")
+    for line in js.splitlines():
+        line = line.strip()
+        if "virtualizeTranscriptCb.checked=settings.virtualize_transcript" in line:
+            return line.split("settings.virtualize_transcript")[1].split(";")[0].strip()
+    raise AssertionError("Hydration assignment line for panels not found in static/panels.js")
+
+
+def _eval_boot_decision(node_path: str, val: object, op_rhs: str) -> bool:
+    val_json = json.dumps(val)
+    expr = f"const s = {{ virtualize_transcript: {val_json} }}; console.log(Boolean(s.virtualize_transcript {op_rhs}));"
+    proc = subprocess.run([node_path, "-e", expr], capture_output=True, text=True, check=True)
+    return proc.stdout.strip() == "true"
+
+
+def _eval_panels_decision(node_path: str, val: object, op_rhs: str) -> bool:
+    val_json = json.dumps(val)
+    expr = f"const settings = {{ virtualize_transcript: {val_json} }}; console.log(Boolean(settings.virtualize_transcript {op_rhs}));"
+    proc = subprocess.run([node_path, "-e", expr], capture_output=True, text=True, check=True)
+    return proc.stdout.strip() == "true"
+
+
+NINE_SHAPES = [
+    ("key omitted (control)", False, None, True, True, True),
+    ("true (control)", True, True, True, True, True),
+    ("false (control)", True, False, False, False, False),
+    ('"false"', True, "false", False, False, False),
+    ('"true"', True, "true", False, False, False),
+    ("null", True, None, False, False, False),
+    ("0", True, 0, False, False, False),
+    ("[]", True, [], False, False, False),
+    ("{}", True, {}, False, False, False),
+]
+
+
+def test_strict_boolean_authority_nine_shapes_table(_settings_env):
+    """#6155: verify real load_settings() and both surfaces (boot and Settings
+    hydration evaluated via node from extracted production source lines) across
+    all nine shapes: controls (omitted, true, false) and malformed shapes
+    ("false", "true", null, 0, [], {})."""
+    node = shutil.which("node")
+    assert node is not None, "node is required for the frontend behavior harness"
+    boot_op_rhs = _extract_boot_op_rhs()
+    panels_op_rhs = _extract_panels_op_rhs()
+
+    config, sf = _settings_env
+
+    results = []
+    for label, has_key, stored_val, expected_loaded, expected_boot, expected_panels in NINE_SHAPES:
+        payload = {"onboarding_completed": True}
+        if has_key:
+            payload["virtualize_transcript"] = stored_val
+        _write(sf, payload)
+
+        loaded = config.load_settings()
+        actual_loaded = loaded["virtualize_transcript"]
+        assert type(actual_loaded) is bool, (
+            f"{label}: load_settings must return real bool, got {type(actual_loaded).__name__} ({actual_loaded!r})"
+        )
+        assert actual_loaded is expected_loaded, (
+            f"{label}: expected {expected_loaded!r}, got {actual_loaded!r}"
+        )
+
+        boot_decision = _eval_boot_decision(node, actual_loaded, boot_op_rhs)
+        assert boot_decision is expected_boot, (
+            f"{label}: boot decision expected {expected_boot}, got {boot_decision}"
+        )
+
+        panels_decision = _eval_panels_decision(node, actual_loaded, panels_op_rhs)
+        assert panels_decision is expected_panels, (
+            f"{label}: panels checkbox expected {expected_panels}, got {panels_decision}"
+        )
+
+        results.append((label, actual_loaded, boot_decision, panels_decision))
+
+    # All malformed shapes must be OFF on both surfaces; controls match expected.
+    for label, loaded_val, boot_on, panels_checked in results:
+        if "control" in label and (loaded_val is True):
+            assert boot_on is True and panels_checked is True
+        else:
+            assert boot_on is (loaded_val is True)
+            assert panels_checked is (loaded_val is True)
+
+
+def test_autosave_regression_malformed_stored_value_persists_boolean_false(_settings_env):
+    """Seed a malformed stored value, call save_settings for an unrelated key
+    only, and assert the re-read document holds boolean False for this key."""
+    config, sf = _settings_env
+    _write(sf, {"onboarding_completed": True, "virtualize_transcript": "false"})
+    saved = config.save_settings({"show_tps": True})
+    assert saved["virtualize_transcript"] is False
+    assert type(saved["virtualize_transcript"]) is bool
+    raw = json.loads(sf.read_text(encoding="utf-8"))
+    assert raw.get("virtualize_transcript") is False, "persisted value must be boolean False"
+    assert type(raw.get("virtualize_transcript")) is bool, "persisted value must be a real boolean"
+
+
+def test_rejection_regression_string_true_never_persists_true(_settings_env):
+    """Submit 'true' for virtualize_transcript in save_settings and assert the
+    persisted value is never True (malformed submission rejected)."""
+    config, sf = _settings_env
+    # Case A: Seed with explicit False opt-out; submitting 'true' must be rejected and leave False
+    _write(sf, {"onboarding_completed": True, "virtualize_transcript": False})
+    saved = config.save_settings({"virtualize_transcript": "true"})
+    assert saved["virtualize_transcript"] is False
+    raw = json.loads(sf.read_text(encoding="utf-8"))
+    assert raw.get("virtualize_transcript") is False
+    assert raw.get("virtualize_transcript") is not True
+
+    # Case B: Seed with malformed stored value; submitting 'true' must not launder into True
+    _write(sf, {"onboarding_completed": True, "virtualize_transcript": "false"})
+    saved = config.save_settings({"virtualize_transcript": "true"})
+    assert saved["virtualize_transcript"] is False
+    raw = json.loads(sf.read_text(encoding="utf-8"))
+    assert raw.get("virtualize_transcript") is False
+    assert raw.get("virtualize_transcript") is not True
+

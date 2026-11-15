@@ -10441,10 +10441,10 @@ async function loadSettingsPanel(){
     }
     const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
     if(virtualizeTranscriptCb){
-      // #6151: DOM virtualization is ON by default. The checkbox reflects the
-      // server value (!==false), so a default-on user sees it checked and a
-      // saved opt-out (stored false) shows unchecked.
-      virtualizeTranscriptCb.checked=settings.virtualize_transcript!==false;
+      // #6151 / #6155: DOM virtualization is ON by default. The checkbox reflects
+      // the strict server boolean (===true), so a default-on user sees it checked
+      // and saved opt-outs or malformed stored values show unchecked.
+      virtualizeTranscriptCb.checked=settings.virtualize_transcript===true;
       window._virtualizeTranscript=virtualizeTranscriptCb.checked;
       virtualizeTranscriptCb.addEventListener('change',()=>{
         window._virtualizeTranscript=virtualizeTranscriptCb.checked;

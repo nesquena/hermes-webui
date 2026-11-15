@@ -14817,6 +14817,11 @@ def _settings_payload_for_write(settings: dict, persisted_speech_keys: set[str])
     return persisted
 
 
+_SETTINGS_STRICT_BOOL_KEYS = {
+    "virtualize_transcript",
+}
+
+
 def load_settings() -> dict:
     """Load settings from disk, merging with defaults for any missing keys."""
     settings = dict(_SETTINGS_DEFAULTS)
@@ -14870,6 +14875,16 @@ def load_settings() -> dict:
         # and a stored True (matches the new default), so no reset is needed.
         # A stale `virtualize_transcript_optin` marker from the #4343 era is
         # dropped on load via _SETTINGS_LEGACY_DROP_KEYS (never re-persisted).
+        #
+        # Strict boolean authority (#6155): non-boolean stored values must not
+        # turn virtualization on. An omitted key keeps the default True, a
+        # stored True/False passes through, and any malformed shape (string,
+        # null, 0, list, dict) falls back to False.
+        for strict_bool_key in _SETTINGS_STRICT_BOOL_KEYS:
+            if strict_bool_key in stored and not isinstance(
+                stored[strict_bool_key], bool
+            ):
+                settings[strict_bool_key] = False
     # Fall back to the DEFAULTS, not to None, when nothing is stored.
     #
     # `_read_raw_settings_file()` returns {} for a MISSING settings.json, and {}
@@ -15148,6 +15163,8 @@ def save_settings(settings: dict) -> dict:
         if k == "dashboard_plugins":
             continue
         if k in _SETTINGS_ALLOWED_KEYS:
+            if k in _SETTINGS_STRICT_BOOL_KEYS and not isinstance(v, bool):
+                continue
             if k == "theme":
                 if isinstance(v, str) and v.strip():
                     pending_theme = v

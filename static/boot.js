@@ -4109,7 +4109,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // tall tool-call rows. #4346 Phase B (footer-jitter suppression during
     // virtual-scroll measurement re-renders) resolved the root cause, so we
     // re-enable it as the default. Users can still opt out via Settings.
-    window._virtualizeTranscript=s.virtualize_transcript!==false;
+    // #6155: strict boolean hydration (===true).
+    window._virtualizeTranscript=s.virtualize_transcript===true;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=s.show_cli_sessions!==false;
