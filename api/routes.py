@@ -11824,6 +11824,23 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     return True, ""
 
 
+def _cli_read_owner_profile(sid: str, read_profile=None):
+    """Return the profile owning the state.db a CLI import/claim reads ``sid`` from (#9093).
+
+    ``read_profile`` comes from the CLI listing row or an authorized all-profiles
+    request. Without one, ``get_cli_session_messages`` reads the ACTIVE profile's
+    state.db, so the session is the active profile's: the listing row (and its
+    tag) only exists for the newest-N window, and an untagged copy was backfilled
+    to ``default`` and left its own profile's sidebar. Claude Code transcripts are
+    global, not read from any profile's state.db, so they stay untagged.
+    """
+    if read_profile:
+        return read_profile
+    if str(sid or "").startswith(f"{CLAUDE_CODE_SOURCE}_"):
+        return None
+    return _get_active_profile_name()
+
+
 def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     """Resolve a session_id that has no WebUI sidecar.
 
@@ -11906,7 +11923,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             messages=msgs,
             created_at=(cli_meta or {}).get("created_at") or 0,
             updated_at=(cli_meta or {}).get("updated_at") or 0,
-            profile=(cli_meta or {}).get("profile"),
+            profile=_cli_read_owner_profile(sid, (cli_meta or {}).get("profile")),
             # ``is_cli_flag`` is True for genuine CLI/TUI/Desktop sessions so the
             # sidebar renders the source badge and the client's external-session
             # gating applies. It is False for delegated subagent children (#5307):
@@ -37435,7 +37452,10 @@ def _handle_session_import_cli(handler, body):
         requested_profile=requested_profile,
         allow_all_profiles=allow_all_profiles,
     )
-    profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
+    profile = _cli_read_owner_profile(
+        sid,
+        cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None),
+    )
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
