@@ -6581,14 +6581,15 @@ def _share_snapshot_state_for_session(token: str, session_id: str) -> str:
     """Return 'present', 'absent', or 'unknown' for *token* and *session_id*.
 
     - 'present': snapshot was read, parsed, and its source_session_id names this session.
-    - 'absent': definitive: no token/session id, not a regular file, unparseable,
-      not a dict, or names another session.
-    - 'unknown': the read itself failed with an OSError/PermissionError (or the
-      existence check raised), so the outcome cannot be decided.
+    - 'absent': definitive: no token/session id, path does not exist, unreadable payload,
+      not a dict, or foreign owner (names another session).
+    - 'unknown': non-regular present path is inconclusive, or the stat/read itself failed
+      with an OSError/PermissionError, so the outcome cannot be decided.
     """
     if not token or not session_id:
         return "absent"
     try:
+        import stat
         from api import shares
 
         try:
@@ -6597,9 +6598,13 @@ def _share_snapshot_state_for_session(token: str, session_id: str) -> str:
             return "absent"
 
         try:
-            if not path.is_file():
-                return "absent"
+            st = path.stat()
+        except FileNotFoundError:
+            return "absent"
         except OSError:
+            return "unknown"
+
+        if not stat.S_ISREG(st.st_mode):
             return "unknown"
 
         try:
