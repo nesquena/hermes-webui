@@ -18,7 +18,8 @@ production alphabetical sort is part of the fixture — and assert the whole
 match order, not just the first row:
 
     (0) exact name, (1) name prefix, (2) name substring, (3) description only
-    — ``localeCompare`` inside each band.
+    — inside each band, literal as-typed spelling decides first (the #8203
+    `_`/`-` rule), then the original assembly order.
 
 The inclusion criterion is deliberately NOT under test here: description
 matches must stay in the list, they only drop to the last band.
@@ -322,14 +323,31 @@ def test_partial_separator_spelling_keeps_typed_spelling_in_both_orders():
           { name: 'plugin-review', description: 'Review A', cli_only: false, category: 'Plugin' },
           { name: 'plugin_review', description: 'Review B', cli_only: false, category: 'Plugin' },
         ];
-        const reversed = getMatchingCommands('plugin-rev').map(m => m.name);
+        const hyphenFirstTypedHyphen = getMatchingCommands('plugin-rev').map(m => m.name);
+        const hyphenFirstTypedUnderscore = getMatchingCommands('plugin_rev').map(m => m.name);
         _agentCommandCache = [
           { name: 'plugin_review', description: 'Review B', cli_only: false, category: 'Plugin' },
           { name: 'plugin-review', description: 'Review A', cli_only: false, category: 'Plugin' },
         ];
-        const reversedUnderscore = getMatchingCommands('plugin_rev').map(m => m.name);
-        return { reversed, reversedUnderscore };
+        const underscoreFirstTypedHyphen = getMatchingCommands('plugin-rev').map(m => m.name);
+        const underscoreFirstTypedUnderscore = getMatchingCommands('plugin_rev').map(m => m.name);
+        return {
+          hyphen_first_typed_hyphen: hyphenFirstTypedHyphen,
+          hyphen_first_typed_underscore: hyphenFirstTypedUnderscore,
+          underscore_first_typed_hyphen: underscoreFirstTypedHyphen,
+          underscore_first_typed_underscore: underscoreFirstTypedUnderscore,
+        };
         """
     )
-    assert out["reversed"][0] == "plugin-review", out["reversed"]
-    assert out["reversedUnderscore"][0] == "plugin_review", out["reversedUnderscore"]
+    assert out["hyphen_first_typed_hyphen"] == ["plugin-review", "plugin_review"], (
+        f"registration order: plugin-review first, typed: plugin-rev; got {out['hyphen_first_typed_hyphen']!r}"
+    )
+    assert out["hyphen_first_typed_underscore"] == ["plugin_review", "plugin-review"], (
+        f"registration order: plugin-review first, typed: plugin_rev; got {out['hyphen_first_typed_underscore']!r}"
+    )
+    assert out["underscore_first_typed_hyphen"] == ["plugin-review", "plugin_review"], (
+        f"registration order: plugin_review first, typed: plugin-rev; got {out['underscore_first_typed_hyphen']!r}"
+    )
+    assert out["underscore_first_typed_underscore"] == ["plugin_review", "plugin-review"], (
+        f"registration order: plugin_review first, typed: plugin_rev; got {out['underscore_first_typed_underscore']!r}"
+    )
