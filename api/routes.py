@@ -11906,7 +11906,9 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             messages=msgs,
             created_at=(cli_meta or {}).get("created_at") or 0,
             updated_at=(cli_meta or {}).get("updated_at") or 0,
-            profile=(cli_meta or {}).get("profile"),
+            # Messages come from the active profile's state.db; without a CLI
+            # metadata profile, the session is the active profile's (#9093).
+            profile=(cli_meta or {}).get("profile") or _active_profile_for_cli_import(),
             # ``is_cli_flag`` is True for genuine CLI/TUI/Desktop sessions so the
             # sidebar renders the source badge and the client's external-session
             # gating applies. It is False for delegated subagent children (#5307):
@@ -12108,6 +12110,21 @@ def _load_branch_source_or_refuse(handler, sid: str):
         bad(handler, "Read-only sessions cannot be branched from WebUI", 403)
         return None
     return source
+
+
+def _active_profile_for_cli_import():
+    """The profile an imported CLI session belongs to when its metadata names none (#9093).
+
+    The CLI metadata row exists only for the bounded CLI listing (newest rows)
+    plus a by-id fallback for a few sources. An older session still loads its
+    messages from the ACTIVE profile's state.db, so it is that profile's
+    session: stamp it like ``new_session`` does, instead of saving ``None``,
+    which the sidebar backfills to the root profile.
+    """
+    try:
+        return get_active_profile_name() or None
+    except Exception:
+        return None
 
 
 def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
@@ -37439,6 +37456,11 @@ def _handle_session_import_cli(handler, body):
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
+    if not profile:
+        # #9093: the messages above came from the active profile's state.db, so
+        # the session is the active profile's even when it is outside the
+        # bounded CLI listing and has no metadata row.
+        profile = _active_profile_for_cli_import()
 
     # Get profile, model, timestamps, and title from CLI session metadata
     created_at = cli_meta.get("created_at") if cli_meta else None

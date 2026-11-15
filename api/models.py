@@ -9798,6 +9798,21 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     history panel. Issue #38914 / 2026-06-21 triage: /api/sessions was spending
     4.9s on lineage_metadata across 2400+ rows.
     """
+    # #9093: the metadata comes from the ACTIVE profile's state.db, keyed by bare
+    # session id. With All profiles on, another profile's row can share an id
+    # with an active-profile row (a copied or cloned profile), and it inherited
+    # the active row's lineage and relationship. Read and apply it only for rows
+    # the active profile owns; a foreign row keeps its own projection. An
+    # unknown active profile enriches nothing rather than guess an owner.
+    try:
+        from api.profiles import _profiles_match, get_active_profile_name
+        _active_profile = get_active_profile_name()
+    except Exception:
+        return
+    sessions = [
+        s for s in sessions
+        if isinstance(s, dict) and _profiles_match(s.get('profile') or 'default', _active_profile)
+    ]
     # 2026-06-21: configurable via env to ease A/B and rollback without a redeploy.
     import os as _os
     try:
