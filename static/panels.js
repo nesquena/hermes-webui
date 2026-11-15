@@ -7248,7 +7248,8 @@ async function _profileSwitchPanelLoad(){
 
 // Synchronous half of the profile-switch panel reset: drops the previous
 // profile's Tasks state (detail, edit id, pre-form snapshot, duplicate flag,
-// cross-profile view) without any network. Shared by the canonical switch
+// cross-profile view, cached list and rendered rows, cron skill cache) without
+// any network. Shared by the canonical switch
 // (through _profileSwitchPanelLoad) and the session-load switch in
 // sessions.js (#9069), which must not leave a Duplicate/Edit form that would
 // write the previous profile's job under the new profile's cookie.
@@ -7265,6 +7266,18 @@ function _resetProfileScopedPanelState(){
   _editingCronId = null;
   _cronIsDuplicate = false;
   _clearCronDetail();
+  // #9080: the previous profile's rows stayed rendered (and clickable, their
+  // handlers holding that profile's jobs) until the new /api/crons reply
+  // landed, so Duplicate + Save on one created it in this profile. Drop the
+  // cached list (an empty array: its readers call .find on it) and the rows.
+  _cronList = [];
+  // typeof-tolerant like the counter ops in switchToProfile: frontend test
+  // harnesses eval this helper in isolation, without ui.js's $().
+  const cronListBox = typeof $ === 'function' ? $('cronList') : null;
+  if (cronListBox) cronListBox.innerHTML = '';
+  // The cron form's skill autocomplete cache is per profile too; the next
+  // Duplicate/Edit form open refetches /api/skills for this profile.
+  _cronSkillsCache = null;
 }
 
 // ── Tab-visibility reconciliation guard ────────────────────────────────────
