@@ -562,7 +562,7 @@ def goal_gate_refusal_payload(state: Any = None) -> Dict[str, Any]:
         message=(
             "/goal gate is not supported in WebUI: gates run shell commands after every "
             "turn without another approval. The current goal is unchanged. "
-            "To set a goal that starts with the word gate, use /goal -- <text>."
+            "To set a goal that starts with the word gate, use /goal -- followed by your goal text."
         ),
         state=state,
     )
