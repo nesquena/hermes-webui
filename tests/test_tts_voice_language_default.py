@@ -333,3 +333,52 @@ def test_explicit_voice_override_still_wins(monkeypatch):
     routes._handle_tts(h, None)
     assert h.status == 200, h.payload()
     assert captured["voice"] == "fr-FR-DeniseNeural"
+
+
+# ── gate EDGE-B1: a configured voice outside the allowlist is skipped ─────
+# With no voice in the request, the configured voice is chosen before the
+# built-in default, but the handler then rejects a voice outside the Edge
+# allowlist: working TTS turned into 400 "invalid voice". Selection now skips
+# such a voice and keeps the normal fallback. An explicit request voice is
+# still validated as before.
+
+
+@pytest.mark.parametrize(
+    "configured,text,expected,client",
+    [
+        ("en-US-ChristopherNeural", "The connection was restored and the server is up.",
+         "en-US-AvaNeural", "10.42.9.1"),
+        ("de-DE-KatjaNeural", "Questo è un test con abbastanza parole.", "it-IT-ElsaNeural", "10.42.9.2"),
+        ("de-DE-KatjaNeural", "Ok", "en-US-AvaMultilingualNeural", "10.42.9.3"),
+    ],
+)
+def test_unsupported_configured_voice_falls_back_instead_of_failing(monkeypatch, configured, text, expected, client):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": configured}}})
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client=client)
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == expected
+
+
+def test_unsupported_per_language_voice_falls_back_to_the_configured_voice(monkeypatch):
+    cfg = {"tts": {"edge": {"voice": "fr-FR-DeniseNeural", "voices": {"it": "it-IT-GianniNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    assert routes._default_edge_voice("Questo è un test con abbastanza parole.") == "fr-FR-DeniseNeural"
+
+
+def test_explicit_unsupported_voice_is_still_rejected(monkeypatch):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "it-IT-ElsaNeural"}}})
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": "The connection was restored and the server is up.", "voice": "en-US-ChristopherNeural"},
+              client="10.42.9.4")
+    routes._handle_tts(h, None)
+    assert h.status == 400, h.payload()
+    assert "voice" not in captured
+
+
+def test_selection_and_handler_share_one_allowlist():
+    assert "it-IT-ElsaNeural" in routes._EDGE_TTS_ALLOWED_VOICES
+    assert "en-US-ChristopherNeural" not in routes._EDGE_TTS_ALLOWED_VOICES

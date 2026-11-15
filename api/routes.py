@@ -26418,6 +26418,25 @@ def _detect_text_lang(text: str) -> str:
     return ""
 
 
+# Edge voices /api/tts accepts. An explicit request voice outside this set is
+# rejected; a configured default outside it is skipped (_default_edge_voice).
+_EDGE_TTS_ALLOWED_VOICES = frozenset({
+    "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
+    "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
+    "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
+    "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
+    "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
+    "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
+    "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
+    "it-IT-GiuseppeMultilingualNeural",
+    "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
+    "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
+    "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
+    "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
+    "id-ID-GadisNeural",
+})
+
+
 def _default_edge_voice(text: str = "") -> str:
     """Default Edge voice for /api/tts, picked by the text's language.
 
@@ -26429,6 +26448,9 @@ def _default_edge_voice(text: str = "") -> str:
     en-* voice for Italian text). A voice in any other language, or a
     multilingual one, is kept: the detector only knows it/en, so it must not
     replace a French voice because French text looked Italian (#9065).
+    A configured voice outside ``_EDGE_TTS_ALLOWED_VOICES`` is skipped, so a
+    request that named no voice falls through to the next default instead of
+    failing the allowlist check after selection.
     """
     cfg: dict = {}
     try:
@@ -26444,10 +26466,14 @@ def _default_edge_voice(text: str = "") -> str:
         edge_cfg = {}
 
     def _usable(value) -> str:
-        # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
-        # would trip the voice allowlist, so treat it as absent.
+        # An unresolved ${VAR} stays literal (load_profile_config), and a voice
+        # outside the allowlist would be rejected after selection: treat both as
+        # absent so the next default applies instead of a 400 "invalid voice"
+        # on a request that named no voice.
         if isinstance(value, str) and value.strip() and not _has_env_ref(value):
-            return value.strip()
+            voice = value.strip()
+            if voice in _EDGE_TTS_ALLOWED_VOICES:
+                return voice
         return ""
 
     builtins = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}
@@ -26788,22 +26814,7 @@ def _handle_tts(handler, parsed):
     # request rejected earlier never reads profile config.
     if not voice:
         voice = _default_edge_voice(text)
-    allowed = {
-        "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
-        "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
-        "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
-        "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
-        "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
-        "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
-        "it-IT-GiuseppeMultilingualNeural",
-        "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
-        "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
-        "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
-        "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
-        "id-ID-GadisNeural",
-    }
-    if voice not in allowed:
+    if voice not in _EDGE_TTS_ALLOWED_VOICES:
         from api.helpers import bad as _bad
         return _bad(handler, "invalid voice", 400)
 

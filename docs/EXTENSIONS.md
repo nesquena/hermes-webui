@@ -746,10 +746,11 @@ Italian. Mixed text is
 decided by the vote — the winner is used, a single language does not have to
 own the whole string. Only a tie, or a text too short to cast two votes,
 resolves to no language at all, and that skips steps 1 and 3. An explicit
-`voice` in the request overrides the whole chain, and the voice that comes out
-of it still has to pass the allowlist. A malformed `tts` block, or a `${VAR}`
-reference that did not resolve, is treated as absent and degrades to the next
-step rather than failing the request.
+`voice` in the request overrides the whole chain and must be on the endpoint's
+Edge voice allowlist, or the request fails with `invalid voice`. A configured
+voice (steps 1 and 2) that is not on the allowlist, a malformed `tts` block, or
+a `${VAR}` reference that did not resolve, is treated as absent and degrades to
+the next step rather than failing the request.
 
 ## Registering a custom TTS engine
 
