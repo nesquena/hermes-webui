@@ -9803,16 +9803,18 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     # with an active-profile row (a copied or cloned profile), and it inherited
     # the active row's lineage and relationship. Read and apply it only for rows
     # the active profile owns; a foreign row keeps its own projection. An
-    # unknown active profile enriches nothing rather than guess an owner.
+    # unknown active profile enriches nothing rather than guess an owner. The
+    # top-N window still covers every row, as before, so which rows are read
+    # does not change with how many other-profile rows are newer.
     try:
         from api.profiles import _profiles_match, get_active_profile_name
         _active_profile = get_active_profile_name()
     except Exception:
         return
-    sessions = [
-        s for s in sessions
-        if isinstance(s, dict) and _profiles_match(s.get('profile') or 'default', _active_profile)
-    ]
+
+    def _owned(s) -> bool:
+        return isinstance(s, dict) and _profiles_match(s.get('profile') or 'default', _active_profile)
+
     # 2026-06-21: configurable via env to ease A/B and rollback without a redeploy.
     import os as _os
     try:
@@ -9820,9 +9822,10 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     except (TypeError, ValueError):
         _cap = 300
     if _cap > 0 and len(sessions) > _cap:
-        candidates = sessions[:_cap]
+        candidates = [s for s in sessions[:_cap] if _owned(s)]
     else:
-        candidates = sessions
+        candidates = [s for s in sessions if _owned(s)]
+    sessions = [s for s in sessions if _owned(s)]
     try:
         metadata = read_session_lineage_metadata(
             _active_state_db_path(),

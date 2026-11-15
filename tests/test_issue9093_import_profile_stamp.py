@@ -243,3 +243,66 @@ def test_an_unknown_active_profile_enriches_nothing(owned_lineage_db, monkeypatc
     models._enrich_sidebar_lineage_metadata([row])
 
     assert row == before
+
+
+def test_the_top_n_window_still_covers_every_profile(owned_lineage_db, active_profile, monkeypatch):
+    """Newer foreign rows still take window slots, so the rows read do not depend on the owner filter."""
+    from api import models
+
+    active_profile("owned")
+    monkeypatch.setenv("HERMES_WEBUI_LINEAGE_TOP_N", "2")
+    rows = [_row("x1", "beta"), _row("x2", "beta"), _row("shared", "owned")]
+
+    models._enrich_sidebar_lineage_metadata(rows)
+
+    assert "_lineage_root_id" not in rows[2]  # third row: outside the window, as on master
+
+
+# ── profile-agnostic rows (Claude Code JSONL) stay profile-less ───────────
+
+_CLAUDE_META = {"profile": None, "source_tag": "claude_code", "raw_source": "claude_code",
+                "session_source": "claude_code", "title": "Claude Code session", "read_only": True}
+_MSGS = [{"role": "user", "content": "x", "timestamp": 1.0}, {"role": "assistant", "content": "y", "timestamp": 2.0}]
+
+
+@pytest.fixture
+def claude_code_import(monkeypatch, active_profile):
+    from api import routes
+
+    active_profile("owned")
+    monkeypatch.setattr(routes, "_refuse_cross_profile_import_cli_before_load", lambda *a, **k: False)
+    monkeypatch.setattr(routes.Session, "load", classmethod(lambda cls, sid, *a, **k: None))
+    monkeypatch.setattr(routes, "_resolve_cli_import_metadata", lambda sid, **k: dict(_CLAUDE_META))
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid, profile=None: list(_MSGS))
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **k: {"status": status, **payload})
+    monkeypatch.setattr(routes, "bad", lambda handler, msg, status=400, **k: {"status": status, "error": msg})
+    return routes
+
+
+@pytest.mark.parametrize("body", [
+    {"session_id": "cc-1"},
+    {"session_id": "cc-1", "all_profiles": True, "profile": "default"},
+])
+def test_a_claude_code_import_gets_no_owner_in_a_named_profile(claude_code_import, monkeypatch, body):
+    routes = claude_code_import
+    monkeypatch.setattr(routes, "_request_wants_all_profiles_import", lambda b: bool(b.get("all_profiles")))
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+
+    response = routes._handle_session_import_cli(None, body)
+
+    assert response["status"] == 200, response
+    # Profile-less, as on master: never the active named profile.
+    assert response["session"]["profile"] is None
+
+
+def test_a_claimed_claude_code_session_gets_no_owner_in_a_named_profile(claude_code_import, monkeypatch, tmp_path):
+    from api import models
+
+    routes = claude_code_import
+    monkeypatch.setattr(routes, "_session_index_marks_was_webui", lambda sid: False)
+    monkeypatch.setattr(routes, "_session_deleted_tombstone_marks_was_webui", lambda sid: False)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "missing.db")
+
+    session, _reason = routes._claim_or_synthesize_cli_session("cc-2", dict(_CLAUDE_META))
+
+    assert session is not None and session.profile is None
