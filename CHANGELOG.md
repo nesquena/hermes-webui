@@ -41,6 +41,8 @@
 
 ### Fixed
 
+- **Turns on a non-default profile keep plugin-discovered secrets on newer Agents (#9085, closes #9084).** On Agents whose secret-scope refresh honours a `profile_home` stamp, WebUI installed the per-turn secret scope unstamped, so a refresh during a WebUI turn on a non-default profile dropped plugin-discovered secrets. `api/profiles.py` now stamps the scope with the profile home when the installed Agent's `set_secret_scope` accepts a `profile_home` parameter (a cached signature check). Older Agents, and a bare `**kwargs` wrapper, keep the unstamped install as before.
+
 - **Going back to a session from another profile no longer leaves the previous profile's Tasks job open, so Duplicate or Edit can't write it into the new profile** (#9076, fixes #9069). When a session load switches profiles (browser Back/Forward, a `/session/<id>` link, boot restore), the WebUI now clears the previous profile's Tasks detail, edit and duplicate state exactly as the profile picker does. It reloads the Tasks list if it is open, and drops the cached Skills list so the next Skills open refetches. A Tasks list still loading for the previous profile can no longer appear under the new one.
 
 - **The model picker's Configured rows show the model's role (Primary, Fallback 1) instead of the raw routing key (#8739, #8733).** A configured model matched by an `@provider:` routing key showed that key in its chip, e.g. `@CUSTOM:MAGPIE:CODEX/GPT-6.1-SOL (MAGPIE)`, which wrapped onto its own line on desktop and broke mid-string on narrow phones. The chip now shows the same role label as the group rows, and the matched key stays in the chip's tooltip; the row's subtitle still shows the model id. Thanks @webtecnica.
