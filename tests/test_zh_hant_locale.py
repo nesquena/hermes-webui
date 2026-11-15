@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
 from tests.scripts_fallback_keys import scripts_fallback_keys
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -130,7 +131,7 @@ def template_arg_refs(value: str, arg_names: list[str] | None) -> list[str]:
 
 
 def test_english_locale_remains_english_source_text():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     en_block = locale_block(src, "\n  en: {")
     cjk_lines = [
         line.strip()
@@ -140,14 +141,14 @@ def test_english_locale_remains_english_source_text():
     assert not cjk_lines, cjk_lines
 
 def test_zh_hant_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     assert "\n  'zh-Hant': {" in src
     assert "_label: '繁體中文'" in src
     assert "_speech: 'zh-TW'" in src
 
 
 def test_zh_hant_locale_covers_english_keys_without_duplicates():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     en_block = locale_block(src, "\n  en: {")
     zh_block = locale_block(src, "\n  'zh-Hant': {")
     en_keys = set(keys(en_block))
@@ -164,7 +165,7 @@ def test_zh_hant_locale_covers_english_keys_without_duplicates():
 
 
 def test_zh_hant_locale_preserves_function_and_placeholder_shapes():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     en_values = value_map(locale_block(src, "\n  en: {"))
     zh_values = value_map(locale_block(src, "\n  'zh-Hant': {"))
 
@@ -199,7 +200,7 @@ def test_zh_hant_locale_preserves_function_and_placeholder_shapes():
     assert not template_var_mismatches, template_var_mismatches
 
 def test_zh_hant_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     expected = [
         "approval_heading: '需要核准'",
         "settings_label_language: '語言'",
@@ -213,7 +214,7 @@ def test_zh_hant_locale_includes_representative_translations():
 
 
 def test_zh_hant_locale_has_no_known_untranslated_strings():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     block = locale_block(src, "\n  'zh-Hant': {")
     untranslated = [
         "Summarize What's New with AI",

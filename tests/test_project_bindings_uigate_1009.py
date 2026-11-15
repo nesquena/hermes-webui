@@ -32,6 +32,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ELLIPSIS = chr(8230)  # the U+2026 glyph used by "Type a path…"
@@ -275,7 +276,7 @@ _BINDINGS_TOAST_TEXT = (
 def test_the_save_toasts_are_project_settings_not_bindings():
     """Item 2: "Use 'Project settings saved' / 'Could not save project settings'
     for the toasts" — in every locale, not just English."""
-    i18n = _read_static("i18n.js")
+    i18n = _i18n_catalog_source()
     assert "pb_updated: 'Project settings saved'," in i18n
     assert "pb_update_failed: 'Could not save project settings: '," in i18n
     for literal in _BINDINGS_TOAST_TEXT:
@@ -397,7 +398,7 @@ def test_the_dialog_uses_one_noun_for_chats():
     user-visible string is the default-workspace tooltip — same rule, and its
     keys must be GONE from every locale's text (not merely unreferenced).
     """
-    src = _read_static("i18n.js")
+    src = _i18n_catalog_source()
     en = _locale_chunks(src)["en"]
     title = _locale_value(en, "pb_set_default_title")
     assert "sessions" not in title, title
@@ -410,7 +411,7 @@ def test_the_dialog_uses_one_noun_for_chats():
 
 
 def test_every_locale_speaks_the_sidebar_noun():
-    chunks = _locale_chunks(_read_static("i18n.js"))
+    chunks = _locale_chunks(_i18n_catalog_source())
     for loc, (session_word, chat_word) in _CHAT_NOUNS.items():
         # The default-workspace tooltip is user-visible text: it kept saying the
         # locale's "sessions" word in 12 locales (maintainer LOW,

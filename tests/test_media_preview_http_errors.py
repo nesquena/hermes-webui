@@ -8,10 +8,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = Path(__file__).resolve().parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")

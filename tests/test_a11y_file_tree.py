@@ -7,12 +7,13 @@ keep the pieces that gate depends on from being dropped silently.
 
 import re
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = Path(__file__).resolve().parent.parent
 STATIC = REPO / "static"
 A11Y_JS = (STATIC / "a11y-helpers.js").read_text(encoding="utf-8")
 UI_JS = (STATIC / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (STATIC / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 SW_JS = (STATIC / "sw.js").read_text(encoding="utf-8")
 

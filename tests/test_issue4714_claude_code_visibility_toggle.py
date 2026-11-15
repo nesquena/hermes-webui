@@ -14,6 +14,7 @@ import api.routes as routes
 import api.models as models
 import api.profiles as profiles
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT = Path(__file__).resolve().parents[1]
 PANELS_JS = ROOT / "static" / "panels.js"
@@ -486,7 +487,7 @@ console.log(JSON.stringify(body));
 
 def test_locale_keys_exist_in_every_locale_block():
     """Every locale block should carry the Claude Code label and description keys."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = _i18n_catalog_source()
 
     assert i18n.count("settings_label_claude_code_sessions:") == i18n.count("settings_label_api_redact:")
     assert i18n.count("settings_desc_claude_code_sessions:") == i18n.count("settings_desc_previous_messaging_sessions:")

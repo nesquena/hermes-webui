@@ -29,11 +29,12 @@ Fix verified by these tests:
 import pathlib
 
 from tests.js_source_extract import extract_function
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = pathlib.Path(__file__).parent.parent
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 
 def _sync_workspace_panel_state_body() -> str:

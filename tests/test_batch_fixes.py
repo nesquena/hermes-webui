@@ -10,6 +10,7 @@ Covers:
 
 import pathlib
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -215,13 +216,13 @@ class TestSystemTheme:
         )
 
     def test_i18n_cmd_theme_includes_system_english(self):
-        src = read("static/i18n.js")
+        src = _i18n_catalog_source()
         assert "system/dark/light" in src, (
             "English cmd_theme i18n key must include 'system' in the theme list"
         )
 
     def test_i18n_cmd_theme_all_locales(self):
-        src = read("static/i18n.js")
+        src = _i18n_catalog_source()
         count = src.count("system/dark/light")
         assert count >= 5, (
             f"cmd_theme description should mention 'system' in all 5 locales; "

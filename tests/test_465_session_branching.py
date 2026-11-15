@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import api.routes as routes
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -910,7 +911,7 @@ def test_parent_indicator_hover_only_style():
 
 def test_i18n_branch_keys():
     """Verify all branch-related i18n keys exist in English locale."""
-    src = _read('static/i18n.js')
+    src = _i18n_catalog_source()
     required_keys = [
         'cmd_branch',
         'cmd_branch_usage',

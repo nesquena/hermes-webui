@@ -1,5 +1,6 @@
 """Test: SVG, audio, video inline rendering (#481)"""
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 def test_media_extension_regexes_exist():
@@ -138,8 +139,7 @@ def test_media_label_class():
 
 def test_i18n_keys():
     """Verify media rendering i18n keys exist in all locales."""
-    with open('static/i18n.js', encoding="utf-8") as f:
-        src = f.read()
+    src = _i18n_catalog_source()
     required_keys = [
         'media_audio_label',
         'media_svg_label',

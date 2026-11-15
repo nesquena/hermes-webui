@@ -37,11 +37,12 @@ from urllib.parse import urlparse
 import pytest
 
 from tests.js_source_extract import extract_function
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 NODE = shutil.which("node")
 
 _REMOTE_ENV_VARS = (

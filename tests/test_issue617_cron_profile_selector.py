@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -214,7 +215,7 @@ def test_manual_cron_run_uses_execution_profile_but_persists_to_owning_store(mon
 def test_cron_profile_selector_source_hooks_present():
     panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     css = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-    i18n = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = _i18n_catalog_source()
 
     assert "async function loadCronProfiles()" in panels
     assert "api('/api/profiles')" in panels

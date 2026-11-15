@@ -10,6 +10,7 @@ import re
 from types import SimpleNamespace
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 
 def test_kanban_header_exposes_accessible_view_toggle():

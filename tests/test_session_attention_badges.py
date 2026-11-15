@@ -4,6 +4,7 @@ import pathlib
 import sys
 from types import SimpleNamespace
 from urllib.parse import urlparse
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 if str(REPO_ROOT) not in sys.path:
@@ -250,7 +251,7 @@ def test_session_sidebar_renders_attention_badge_and_semantic_classes():
     assert "s.attention" in sessions_js
     assert "_sessionAttentionState(s) ||" in sessions_js
 
-    i18n_js = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n_js = _i18n_catalog_source()
     assert "session_attention_approval" in i18n_js
     assert "session_attention_clarify" in i18n_js
     assert "session_attention_approval_title" in i18n_js

@@ -1,7 +1,8 @@
 from pathlib import Path
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
-I18N_JS = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 
 def _extract_locale_block(locale: str, src: str) -> str:

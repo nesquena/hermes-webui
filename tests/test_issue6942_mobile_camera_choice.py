@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 import subprocess
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -42,7 +43,7 @@ def test_camera_reselection_is_collision_safe_without_changing_global_dedupe():
 def test_choice_accessibility_layout_and_locale_parity():
     html = read("static/index.html")
     css = read("static/style.css")
-    i18n = read("static/i18n.js")
+    i18n = _i18n_catalog_source()
 
     assert 'role="menu"' in html
     assert 'role="menuitem"' in html

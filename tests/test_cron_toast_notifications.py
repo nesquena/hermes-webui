@@ -11,10 +11,11 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = Path(__file__).resolve().parents[1]
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 NODE = shutil.which("node")
 
 

@@ -1,5 +1,6 @@
 """Regression coverage for issue #2351 CLI session list separation."""
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = ROOT / "static" / "sessions.js"
@@ -19,7 +20,7 @@ def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
 def test_session_source_labels_are_locale_keys_with_number_placeholder():
     """Issue #7580: source tab labels must come from t() with {0}-interpolated
     counts, not hardcoded English template literals."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = _i18n_catalog_source()
     assert "sessions_source_webui: 'WebUI sessions ({0})'" in i18n  # en bundle
     assert "sessions_source_cli: 'CLI sessions ({0})'" in i18n  # en bundle
     assert "sessions_source_webui: 'Сеансы WebUI ({0})'" in i18n  # ru bundle

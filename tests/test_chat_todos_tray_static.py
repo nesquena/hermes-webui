@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -81,7 +82,7 @@ def test_chat_todos_checkbox_handler_does_not_autosave_the_appearance_payload():
 
 
 def test_i18n_keys_registered_in_english_locale():
-    i18n = _read_static("static/i18n.js")
+    i18n = _i18n_catalog_source()
     assert "settings_label_chat_todos_in_chat: 'Show task list in chat'" in i18n
     assert "settings_desc_chat_todos_in_chat: 'Show a collapsible task list" in i18n
 
@@ -265,7 +266,7 @@ def test_chat_todos_tray_strings_are_localized():
     assert 'id="chatTodosSummary" data-i18n' not in idx
     assert 'id="chatTodosCounter"' not in idx
     assert "todos_tray_open_count" not in ui
-    assert "todos_tray_open_count" not in _read_static("static/i18n.js")
+    assert "todos_tray_open_count" not in _i18n_catalog_source()
 
 
 def test_chat_todos_closed_chevron_points_down():
@@ -312,7 +313,7 @@ def test_chat_todos_hidden_tab_collision():
 
 
 def test_chat_todos_i18n_keys_in_all_locales():
-    src = _read_static("static/i18n.js")
+    src = _i18n_catalog_source()
     # Extract en block keys that are chat-todos specific
     expected = {
         "settings_label_chat_todos_in_chat",
@@ -585,7 +586,7 @@ def test_sync_chat_todos_expanded_keeps_aria_in_sync(tmp_path):
 def test_chat_todos_locales_keep_diacritics():
     # [SHOULD-FIX] "Eight locales ship diacritic-stripped text (it, es, pt, fr,
     # cs, tr, pl, vi). Vietnamese is unreadable as shipped."
-    src = _read_static("static/i18n.js")
+    src = _i18n_catalog_source()
     required = {
         "attività": "it",
         "attivo": "it",
@@ -661,7 +662,7 @@ def test_apply_locale_repaints_the_chat_todos_summary():
     # [SILENT] static/index.html:446 — "Opening Settings erases the task summary:
     # applyLocaleToDOM() overwrites the dynamic summary through
     # data-i18n=\"tab_todos\"." The live value must be repainted after restamping.
-    src = _read_static("static/i18n.js")
+    src = _i18n_catalog_source()
     start = src.find("function applyLocaleToDOM() {")
     end = src.find("// Apply saved locale immediately", start)
     assert start != -1 and end != -1, "missing applyLocaleToDOM"
@@ -769,7 +770,7 @@ console.log('ok');
 
 
 def test_apply_locale_repaint_probe(tmp_path):
-    src = _read_static("static/i18n.js")
+    src = _i18n_catalog_source()
     helper = _extract(
         src, "function applyLocaleToDOM() {", "// Apply saved locale immediately"
     )
@@ -1483,7 +1484,7 @@ def test_workspace_todos_desc_drops_the_contradictory_sidebar_sentence():
     the sidebar Todos panel "remains available regardless", directly under a card
     that says it is hidden. The sentence is gone in EVERY locale, not just
     English."""
-    i18n = _read_static("static/i18n.js")
+    i18n = _i18n_catalog_source()
     idx = _read_static("static/index.html")
     for tail in _REMOVED_TODOS_DESC_TAILS:
         assert tail not in i18n, f"locale tail still present: {tail!r}"

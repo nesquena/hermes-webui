@@ -15,9 +15,10 @@ import re
 from pathlib import Path
 
 from tests.test_russian_locale import extract_locale_block
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = Path(__file__).resolve().parent.parent
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 EN_BLOCK = extract_locale_block(I18N_JS, "en")
 RU_BLOCK = extract_locale_block(I18N_JS, "ru")
 

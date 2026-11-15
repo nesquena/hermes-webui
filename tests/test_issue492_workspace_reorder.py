@@ -2,6 +2,7 @@
 import json, pytest
 from unittest.mock import patch, MagicMock, call
 from api.routes import _handle_workspace_reorder
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 def _make_handler():
@@ -116,8 +117,7 @@ class TestWorkspaceReorderFrontend:
 
     def test_i18n_keys_present_in_all_locales(self):
         """workspace_drag_hint and workspace_reorder_failed must exist in all locales."""
-        with open("static/i18n.js", "r", encoding="utf-8") as f:
-            content = f.read()
+        content = _i18n_catalog_source()
         for key in ("workspace_drag_hint", "workspace_reorder_failed"):
             count = content.count(key)
             assert count >= 7, f"{key} found {count} times, expected >= 7"

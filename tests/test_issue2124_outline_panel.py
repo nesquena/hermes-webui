@@ -2,11 +2,12 @@
 
 from pathlib import Path
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT        = Path(__file__).parent.parent
 STATIC      = ROOT / "static"
 INDEX_HTML  = (STATIC / "index.html").read_text(encoding="utf-8")
-I18N_JS     = (STATIC / "i18n.js").read_text(encoding="utf-8")
+I18N_JS     = _i18n_catalog_source()
 OUTLINE_JS  = (STATIC / "outline.js").read_text(encoding="utf-8")
 STYLE_CSS   = (STATIC / "style.css").read_text(encoding="utf-8")
 BOOT_JS     = (STATIC / "boot.js").read_text(encoding="utf-8")

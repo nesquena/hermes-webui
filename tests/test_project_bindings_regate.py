@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +249,7 @@ def test_project_bindings_ui_strings_are_localized():
 
 def test_project_bindings_i18n_keys_present_in_all_locales():
     """Every locale block defines the full pb_* key set (i18n.js parity)."""
-    src = _read_static("i18n.js")
+    src = _i18n_catalog_source()
     assert len(I18N_LOCALES) == 15
     for loc in I18N_LOCALES:
         chunk = _i18n_locale_chunk(src, loc)
@@ -637,7 +638,7 @@ def test_chip_menu_holds_a_single_project_settings_row():
     assert "_showProjectBindingsDialog(proj);" in seg
     # ...and the dialog title/menu label say "Project settings", not "Bindings"
     # (the maintainer's wording: "Bindings" is implementer vocabulary).
-    i18n = _read_static("i18n.js")
+    i18n = _i18n_catalog_source()
     assert "pb_bindings_title: 'Project settings — {0}'" in i18n
     assert "pb_bindings_menu: 'Project settings…'" in i18n
 
@@ -699,7 +700,7 @@ def test_bindings_dialog_hides_the_reasoning_effort_row():
 
 def test_retired_bindings_i18n_keys_are_gone_from_every_locale():
     """The keys the menu/effort cleanup retired must not linger anywhere."""
-    src = _read_static("i18n.js")
+    src = _i18n_catalog_source()
     for loc in I18N_LOCALES:
         chunk = _i18n_locale_chunk(src, loc)
         leftover = [k for k in PB_I18N_KEYS_RETIRED if ("%s: '" % k) in chunk]

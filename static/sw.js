@@ -152,7 +152,12 @@ self.addEventListener('fetch', (event) => {
     ? url.pathname.slice(scopePath.length)
     : url.pathname.replace(/^\/+/, '');
   const shellPath = './' + relPath.replace(/^\/+/, '') + url.search;
-  if (!SHELL_ASSETS.includes(shellPath)) return;
+  // Locale bundles under static/locales/ are fetched on demand by
+  // ensureLocale() (see static/i18n.js). Pre-caching all of them here would
+  // restore the exact all-languages download this split removes, so they are
+  // cached only once requested — network-first, same as the shell.
+  const isLazyLocale = shellPath.startsWith('./static/locales/');
+  if (!SHELL_ASSETS.includes(shellPath) && !isLazyLocale) return;
 
   // Shell assets: network-first with cache fallback. This keeps offline support
   // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION

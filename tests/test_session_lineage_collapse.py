@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
@@ -2225,7 +2226,7 @@ console.log(JSON.stringify({{lineage:[..._expandedLineageKeys], child:[..._expan
 
 
 def test_lineage_segment_locale_keys_are_defined_for_sidebar_locales():
-    i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = _i18n_catalog_source()
     required = [
         "session_meta_segments:",
         "session_lineage_segment_untitled:",

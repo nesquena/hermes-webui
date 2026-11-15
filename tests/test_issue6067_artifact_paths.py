@@ -4,6 +4,7 @@ import re
 import sys
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT = Path(os.environ.get("ISSUE6067_REPO_ROOT") or Path(__file__).resolve().parents[1])
 sys.path.insert(0, str(ROOT / "tests"))
@@ -12,7 +13,7 @@ from _layout_helpers import assert_layout_sane
 
 WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 EXPECT_VISIBLE = os.environ.get("ISSUE6067_EXPECT_VISIBLE", "1") != "0"
 HEADLESS = os.environ.get("ISSUE6067_HEADLESS", "1") != "0"
 SCREENSHOT_PATH = os.environ.get("ISSUE6067_SCREENSHOT_PATH")

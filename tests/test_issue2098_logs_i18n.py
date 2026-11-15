@@ -1,8 +1,9 @@
 import re
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
-I18N_PATH = Path(__file__).resolve().parent.parent / "static" / "i18n.js"
+I18N_PATH = _i18n_catalog_source()
 
 
 LOGS_FILTER_KEYS = {
@@ -66,7 +67,7 @@ LOGS_FILTER_KEYS = {
 
 
 def _i18n_locale_block(locale: str) -> str:
-    src = I18N_PATH.read_text(encoding="utf-8")
+    src = I18N_PATH
     if "-" in locale:
         head = re.compile(rf"^  '{re.escape(locale)}':\s*\{{", re.M)
     else:

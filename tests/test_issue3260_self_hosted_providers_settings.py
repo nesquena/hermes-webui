@@ -18,6 +18,7 @@ import pytest
 from tests.conftest import TEST_STATE_DIR
 from tests.js_source_extract import extract_function
 from tests.test_provider_management import _install_fake_hermes_cli, _post
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -587,7 +588,7 @@ def test_saved_provider_payload_has_no_singular_model_authority(monkeypatch, tmp
 
 
 def test_configured_status_key_is_present_once_in_all_locale_blocks():
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = _i18n_catalog_source()
     locale_blocks = re.findall(
         r"(?ms)^  (?P<locale>'[^']+'|[A-Za-z-]+): \{(?P<body>.*?)(?=^  (?:'[^']+'|[A-Za-z-]+): \{|\Z)",
         i18n,
@@ -745,7 +746,7 @@ def test_provider_card_status_keys_are_translated_alongside_the_new_label():
     """Fable UX gate r3 (2026-10-06): es/de/ko translated only the new configured label, so
     a card mixed one native word with English siblings. The four sibling status keys the
     card header uses are translated in those blocks too."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = _i18n_catalog_source()
     blocks = dict(re.findall(
         r"(?ms)^  (?P<locale>'[^']+'|[A-Za-z-]+): \{(?P<body>.*?)(?=^  (?:'[^']+'|[A-Za-z-]+): \{|\Z)",
         i18n,

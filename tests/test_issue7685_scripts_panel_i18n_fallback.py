@@ -38,9 +38,10 @@ import re
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = Path(__file__).resolve().parent.parent
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 # The locale blocks defined in static/i18n.js. `en` is the source of truth
 # and is exempt from the no-English-paste rule by definition.

@@ -22,6 +22,7 @@ Covers:
 
 import pathlib
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -203,7 +204,7 @@ def test_sse_cancel_handler_calls_set_busy():
 
 def test_cancel_failed_i18n_key_exists_in_all_locales():
     """cancel_failed key must still exist in i18n.js for all locales."""
-    src = read("static/i18n.js")
+    src = _i18n_catalog_source()
     # Should appear once per locale (en, es, de, ru, zh, zh-Hant)
     locale_count = _locale_count(src)
     count = src.count("cancel_failed:")

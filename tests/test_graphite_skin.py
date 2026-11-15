@@ -1,13 +1,14 @@
 """Graphite skin registration and neutral workbench palette."""
 
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = Path(__file__).parent.parent
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 
 def test_graphite_skin_is_registered_end_to_end():

@@ -6,6 +6,7 @@ settings controls are present in the WebUI codebase.
 """
 import os
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), '..', 'static')
 
@@ -162,17 +163,17 @@ class TestTtsI18n:
     """TTS i18n keys exist in the English locale."""
 
     def test_tts_listen_key(self):
-        src = _read('i18n.js')
+        src = _i18n_catalog_source()
         assert "tts_listen:" in src, \
             "tts_listen key not found in i18n.js"
 
     def test_tts_not_supported_key(self):
-        src = _read('i18n.js')
+        src = _i18n_catalog_source()
         assert "tts_not_supported:" in src, \
             "tts_not_supported key not found in i18n.js"
 
     def test_tts_settings_keys(self):
-        src = _read('i18n.js')
+        src = _i18n_catalog_source()
         for key in ['settings_label_tts', 'settings_label_tts_auto_read',
                      'settings_label_tts_voice', 'settings_label_tts_rate',
                      'settings_label_tts_pitch']:

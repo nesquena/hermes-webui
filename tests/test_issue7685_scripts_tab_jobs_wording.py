@@ -28,11 +28,12 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 NODE = shutil.which("node")
 

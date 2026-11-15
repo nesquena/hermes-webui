@@ -10,11 +10,12 @@ from pathlib import Path
 import pytest
 
 from tests.test_selected_context_user_render_runtime import _run_user_renderer
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_JS = Path(os.environ.get("HERMES_ISSUE1255_MESSAGES_JS") or (ROOT / "static" / "messages.js"))
-I18N = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N = _i18n_catalog_source()
 NODE = shutil.which("node")
 
 

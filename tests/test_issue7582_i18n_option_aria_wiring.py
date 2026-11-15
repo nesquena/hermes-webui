@@ -13,11 +13,12 @@ switching keeps both the static and runtime call sites in sync.
 from __future__ import annotations
 
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = Path(__file__).resolve().parents[1]
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 
 # --- New keys land in the en locale block -----------------------------------

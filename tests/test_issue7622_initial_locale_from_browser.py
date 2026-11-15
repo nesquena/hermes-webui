@@ -22,9 +22,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import executable_source as _i18n_executable_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-I18N_JS_PATH = REPO_ROOT / "static" / "i18n.js"
+I18N_JS_PATH = _i18n_executable_source()
 
 NODE = shutil.which("node")
 
@@ -58,7 +59,7 @@ def _build_driver(stored_value, navigator_obj):
     the bottom of the file removed) inside a function scope so that
     each test gets a clean module instance.
     """
-    src = I18N_JS_PATH.read_text(encoding="utf-8")
+    src = I18N_JS_PATH
     # Strip the auto-loadLocale() call at the bottom so the test can
     # drive the function explicitly.  It's a single top-level call.
     src = re.sub(r"\nloadLocale\(\);\s*$", "", src, count=1)
@@ -145,7 +146,7 @@ process.stdout.write(JSON.stringify({{ lang: global._lastSetLang, ..._navInfo }}
 
 @pytest.fixture(scope="module")
 def i18n_src() -> str:
-    return I18N_JS_PATH.read_text(encoding="utf-8")
+    return I18N_JS_PATH
 
 
 def _run(driver_src: str) -> str:

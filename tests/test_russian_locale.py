@@ -2,6 +2,7 @@ from collections import Counter
 from pathlib import Path
 import re
 from tests.scripts_fallback_keys import scripts_fallback_keys
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -18,7 +19,7 @@ def read(path: Path) -> str:
 
 
 def test_russian_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     assert "\n  ru: {" in src
     assert "_label: 'Русский'" in src
     assert "_speech: 'ru-RU'" in src
@@ -85,7 +86,7 @@ def extract_locale_block(src: str, locale_key: str) -> str:
 
 
 def test_russian_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     expected = [
         "settings_title: '\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438'",
         "login_title: '\u0412\u0445\u043e\u0434'",
@@ -111,7 +112,7 @@ def test_russian_locale_includes_representative_translations():
 
 
 def test_public_share_locale_values_are_not_swapped():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     en_block = extract_locale_block(src, "en")
     ru_block = extract_locale_block(src, "ru")
 
@@ -127,7 +128,7 @@ def test_public_share_locale_values_are_not_swapped():
 
 
 def test_russian_locale_covers_english_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     key_pattern = re.compile(r"^\s+([a-zA-Z0-9_]+):", re.MULTILINE)
     en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
     ru_keys = set(key_pattern.findall(extract_locale_block(src, "ru")))
@@ -137,7 +138,7 @@ def test_russian_locale_covers_english_keys():
 
 
 def test_russian_locale_has_no_duplicate_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     key_pattern = re.compile(r"^\s+([a-zA-Z0-9_]+):", re.MULTILINE)
     keys = key_pattern.findall(extract_locale_block(src, "ru"))
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
@@ -145,6 +146,6 @@ def test_russian_locale_has_no_duplicate_keys():
 
 
 def test_russian_locale_has_no_cjk_fallback_text():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     ru_block = extract_locale_block(src, "ru")
     assert not re.search(r"[\u3400-\u9fff\u3040-\u30ff]", ru_block)

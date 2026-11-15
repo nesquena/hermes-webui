@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
 from tests.scripts_fallback_keys import scripts_fallback_keys
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -83,7 +84,7 @@ def locale_keys(src: str, locale_key: str) -> list[str]:
 
 
 def test_czech_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     cs_block = extract_locale_block(src, "cs")
     assert cs_block
     assert "_lang: 'cs'" in cs_block
@@ -92,7 +93,7 @@ def test_czech_locale_block_exists():
 
 
 def test_czech_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     cs_block = extract_locale_block(src, "cs")
     expected = [
         "settings_title: 'Nastavení'",
@@ -109,7 +110,7 @@ def test_czech_locale_includes_representative_translations():
 
 
 def test_czech_locale_matches_english_key_coverage():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     en_keys = set(locale_keys(src, "en"))
     cs_keys = set(locale_keys(src, "cs"))
     assert sorted((en_keys - cs_keys) - PROFILE_CONCEPT_FALLBACK_KEYS) == []
@@ -117,7 +118,7 @@ def test_czech_locale_matches_english_key_coverage():
 
 
 def test_czech_locale_has_no_duplicate_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     keys = locale_keys(src, "cs")
 
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
@@ -125,7 +126,7 @@ def test_czech_locale_has_no_duplicate_keys():
 
 
 def test_czech_locale_keys_use_standard_indentation():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     cs_block = extract_locale_block(src, "cs")
 
     # Enforce strict 4-space indentation for keys.
@@ -138,7 +139,7 @@ def test_czech_locale_keys_use_standard_indentation():
 
 
 def test_czech_locale_arrow_function_values_mirror_english():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     en_block = extract_locale_block(src, "en")
     cs_block = extract_locale_block(src, "cs")
 
@@ -160,7 +161,7 @@ def test_czech_locale_arrow_function_values_mirror_english():
 
 
 def test_czech_locale_preserves_placeholder_patterns():
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     en_block = extract_locale_block(src, "en")
     cs_block = extract_locale_block(src, "cs")
 
@@ -189,7 +190,7 @@ def test_czech_locale_preserves_placeholder_patterns():
 
 def test_czech_locale_has_no_double_escaped_unicode_sequences():
     """JSON-style double escapes (\\\\u2026) render literal backslash-u in the UI."""
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     cs_block = extract_locale_block(src, "cs")
     for bad in ("\\\\u2026", "\\\\u2192", "\\\\u2713"):
         assert bad not in cs_block, f"Czech locale must not contain {bad!r}"
@@ -198,7 +199,7 @@ def test_czech_locale_has_no_double_escaped_unicode_sequences():
 def test_czech_locale_uses_real_utf8_diacritics():
     """Czech uses á č ď é ě í ň ó ř š ť ú ů ý ž — confirm the block carries real
     UTF-8 diacritics, not ASCII-only text (which would mean nothing was translated)."""
-    src = read(REPO / "static" / "i18n.js")
+    src = _i18n_catalog_source()
     cs_block = extract_locale_block(src, "cs")
     diacritics = "áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"
     assert any(ch in cs_block for ch in diacritics), "Czech locale has no diacritics"

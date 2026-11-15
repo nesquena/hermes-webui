@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import os
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 def _scripts_module():
@@ -111,8 +112,8 @@ def test_the_panel_renders_the_refusal_instead_of_the_empty_state() -> None:
 
 def test_the_refusal_copy_lives_in_the_english_locale() -> None:
     """New copy goes in `en` and rides the fallback (GUIDELINES section 8)."""
-    i18n = Path(__file__).resolve().parent.parent / "static" / "i18n.js"
-    src = i18n.read_text(encoding="utf-8")
+    i18n = _i18n_catalog_source()
+    src = i18n
 
     en_start = src.index("\n  en: {")
     en_end = src.index("\n  it: {")

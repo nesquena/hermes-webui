@@ -1,5 +1,6 @@
 """Test: session batch select mode functions exist in sessions.js (#568)"""
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 def test_batch_select_state_variables():
@@ -169,8 +170,7 @@ def test_boot_does_not_drop_zero_message_inflight_session():
 
 def test_batch_select_i18n_keys():
     """Verify all batch select i18n keys exist in all locales."""
-    with open('static/i18n.js', encoding="utf-8") as f:
-        src = f.read()
+    src = _i18n_catalog_source()
     required_keys = [
         'session_select_mode',
         'session_select_mode_desc',
@@ -202,8 +202,7 @@ def test_batch_select_i18n_keys():
 
 def test_i18n_string_placeholder_interpolation_supported():
     """String-valued translations with {0} placeholders should interpolate args."""
-    with open('static/i18n.js', encoding="utf-8") as f:
-        src = f.read()
+    src = _i18n_catalog_source()
     assert "String(val).replace(/\\{(\\d+)\\}/g" in src, \
         "t() must interpolate {0}-style placeholders for string-valued translations"
     assert "Object.prototype.hasOwnProperty.call(args, idx)" in src, \

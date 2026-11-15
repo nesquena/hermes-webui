@@ -25,6 +25,7 @@ import types
 import functools
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -3819,7 +3820,7 @@ class TestCheckForUpdatesButton:
 
     def test_check_now_i18n_key_exists(self):
         """settings_check_now i18n key must exist in all locale blocks."""
-        src = read('static/i18n.js')
+        src = _i18n_catalog_source()
         count = src.count('settings_check_now')
         assert count >= 5, (
             f"settings_check_now found in only {count} locale blocks (expected ≥5: en, ru, es, zh, zh-Hant)"

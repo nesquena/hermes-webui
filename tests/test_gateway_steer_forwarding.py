@@ -13,6 +13,7 @@ import pytest
 
 from api import config, gateway_chat, streaming
 from tests.test_real_steer import _captured_response, _make_handler
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 class _GatewayStub(BaseHTTPRequestHandler):
@@ -213,7 +214,7 @@ def test_reattach_status_replays_unconsumed_gateway_steer(monkeypatch, state):
 def test_uncertain_steer_warning_is_translated_in_every_non_english_locale():
     import re
     from pathlib import Path
-    src = (Path(__file__).parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+    src = _i18n_catalog_source()
     english = "Steer may have reached the agent (no reply from Gateway); your text is kept in the composer"
     locales = {}
     current = None

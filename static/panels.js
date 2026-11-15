@@ -10378,10 +10378,13 @@ async function loadSettingsPanel(){
     const langSel=$('settingsLanguage');
     if(langSel){
       langSel.innerHTML='';
-      if(typeof LOCALES!=='undefined'){
-        for(const [code,bundle] of Object.entries(LOCALES)){
+      // Render from LOCALE_META: every shipped language is listed without
+      // downloading its bundle. Falls back to LOCALES for older callers.
+      const _langSource=(typeof LOCALE_META!=='undefined')?LOCALE_META:LOCALES;
+      if(typeof _langSource!=='undefined'){
+        for(const [code,meta] of Object.entries(_langSource)){
           const opt=document.createElement('option');
-          opt.value=code;opt.textContent=bundle._label||code;
+          opt.value=code;opt.textContent=(meta&&meta._label)||code;
           langSel.appendChild(opt);
         }
       }

@@ -4,10 +4,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import api.streaming as streaming
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,7 +66,7 @@ def test_no_auto_assign_entry_point_remains_in_the_backend():
 def test_the_toggle_its_confirm_and_their_ui_are_gone():
     sessions_js = _read("static/sessions.js")
     style_css = _read("static/style.css")
-    i18n = _read("static/i18n.js")
+    i18n = _i18n_catalog_source()
     for fragment, where in (
         ("pb_auto_assign", "static/i18n.js"),
         ("pb_auto_assign", "static/sessions.js"),

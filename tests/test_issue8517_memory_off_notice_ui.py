@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC = REPO_ROOT / "static"
@@ -26,7 +27,7 @@ MESSAGES_JS = (STATIC / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (STATIC / "sessions.js").read_text(encoding="utf-8")
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (STATIC / "style.css").read_text(encoding="utf-8")
-I18N_JS = (STATIC / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 NODE = shutil.which("node")
 

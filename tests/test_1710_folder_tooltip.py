@@ -8,6 +8,7 @@ Folder rename is still reachable via the right-click context menu.
 from pathlib import Path
 
 import pytest
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -74,7 +75,7 @@ class TestFolderTooltipGated:
 
     def test_i18n_key_still_defined_in_all_locales(self):
         """The i18n key must remain defined in every locale block in static/i18n.js."""
-        i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+        i18n = _i18n_catalog_source()
         # i18n.js has 9 locale blocks with the same key. Lock that the key still exists
         # at least 5 times (en, plus a quorum of locales) — exact count is i18n maintenance.
         count = i18n.count("double_click_rename:")

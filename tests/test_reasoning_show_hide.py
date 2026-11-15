@@ -12,6 +12,7 @@ Covers:
 
 import pathlib
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -242,7 +243,7 @@ class TestReasoningCommand:
         assert "arg==='off'" in fn, "off alias missing"
 
     def test_cmd_reasoning_i18n_key_exists(self):
-        i18n = read('static/i18n.js')
+        i18n = _i18n_catalog_source()
         assert 'cmd_reasoning' in i18n, (
             "i18n.js must define the cmd_reasoning key"
         )

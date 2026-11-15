@@ -8,9 +8,10 @@ owned by the open #7698 / #8001 lanes; these two surfaces were not.
 
 import re
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT = Path(__file__).resolve().parent.parent
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 

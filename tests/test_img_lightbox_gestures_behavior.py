@@ -11,12 +11,13 @@ as SUSPICIOUS.
 
 from pathlib import Path
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "static" / "ui.js"
 STYLE = ROOT / "static" / "style.css"
 BOOT = ROOT / "static" / "boot.js"
-I18N = ROOT / "static" / "i18n.js"
+I18N = _i18n_catalog_source()
 
 
 def _fit_rule() -> str:
@@ -164,7 +165,7 @@ class TestKeyboardAndButton:
         assert "fitBtn.setAttribute('title', fitTitle);" in src
 
     def test_fit_button_fallback_matches_the_english_locale(self):
-        i18n = I18N.read_text(encoding="utf-8")
+        i18n = I18N
         src = UI.read_text(encoding="utf-8")
         fallback = re.search(r":\s*'(Reset zoom to fit \(F\))'", src)
         assert fallback, "the fallback string is missing from ui.js"
@@ -173,7 +174,7 @@ class TestKeyboardAndButton:
         )
 
     def test_non_english_label_exists(self):
-        i18n = I18N.read_text(encoding="utf-8")
+        i18n = I18N
         assert "img_lightbox_fit_title" in i18n
         assert "img_lightbox_fit_title: '\u91cd\u7f6e\u7f29\u653e\u4ee5\u9002\u5e94 (F)'" in i18n
         assert "Reset zoom to fit (F)" in i18n

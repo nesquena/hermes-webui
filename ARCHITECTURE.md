@@ -82,7 +82,11 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       commands.js          Slash command registry, parser, autocomplete dropdown
       boot.js              Event wiring, mobile nav, voice input, theme/skin boot, bfcache handler
       onboarding.js        First-run wizard overlay, provider setup flow
-      i18n.js              Localization catalog (en, es, de, zh, zh-Hant, ru, …)
+      i18n.js              i18n core: eager English bundle (fallback for every key),
+                     LOCALE_META manifest, registerLocale()/ensureLocale(), t(),
+                     setLocale(), and DOM application
+locales/<code>.js    Per-language bundles, fetched on demand by ensureLocale()
+                     (en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, cs, tr, pl, vi)
       login.js             Login page + open-redirect guard
       icons.js             Lucide icon path registry
       sw.js                Service worker: offline shell cache, version-pinned assets

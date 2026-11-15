@@ -12,6 +12,7 @@ Issue: #720 (configurable busy-input behaviour)
 from pathlib import Path
 
 from tests.helpers import source_between as _source_between
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT = Path(__file__).parent.parent
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
@@ -21,7 +22,7 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 
 # ── Backend: setting registration + enum validation ─────────────────────

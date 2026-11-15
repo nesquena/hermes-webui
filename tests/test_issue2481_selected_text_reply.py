@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -96,7 +97,7 @@ def test_selected_text_reply_context_cards_are_built_with_text_nodes():
 
 def test_selected_text_reply_styles_and_i18n_exist_for_all_locales():
     css = read("static/style.css")
-    i18n = read("static/i18n.js")
+    i18n = _i18n_catalog_source()
 
     assert ".selected-text-action-group" in css
     assert ".selected-text-action-group.visible" in css

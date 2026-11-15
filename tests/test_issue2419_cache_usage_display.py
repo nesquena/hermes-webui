@@ -1,4 +1,5 @@
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,7 +62,7 @@ def test_context_indicator_surfaces_cache_hit_rate():
 
 
 def test_cache_usage_labels_are_localized():
-    src = (ROOT / "static" / "i18n.js").read_text()
+    src = _i18n_catalog_source()
 
     assert src.count("usage_cache_hit_detail:") == 15
     assert src.count("usage_cached_percent:") == 15

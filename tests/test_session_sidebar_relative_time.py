@@ -2,11 +2,12 @@ import json
 import pathlib
 import subprocess
 import textwrap
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 
 def _extract_function(source: str, name: str) -> str:

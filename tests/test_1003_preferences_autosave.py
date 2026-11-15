@@ -12,10 +12,11 @@ preferences-panel autosave pattern is wired correctly:
 """
 import re
 from pathlib import Path
+from tests._i18n_source import catalog_source as _i18n_catalog_source
 
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = _i18n_catalog_source()
 
 
 def _function_block(src: str, name: str) -> str:
