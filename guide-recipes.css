@@ -9,3 +9,8 @@ dt{font-weight:600}dd{margin:6px 0 18px}kbd{font:inherit;font-size:.85em;border:
 .guide-list>li:last-child:nth-child(odd){grid-column:1/-1}
 @media(max-width:600px){.recipe-summary{grid-template-columns:minmax(0,1fr);gap:4px;padding:18px}.recipe-summary dd{margin:0 0 12px}.recipe-summary dd:last-child{margin:0}.guide-list{grid-template-columns:minmax(0,1fr)}pre{padding:14px}}
 @media(max-width:600px){.table-scroll table{min-width:0}.table-scroll thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.table-scroll tr{display:block;padding:12px 0;border-top:1px solid var(--line)}.table-scroll th,.table-scroll td{display:block;padding:4px 14px}.table-scroll td:before{content:attr(data-label);display:block;font-weight:600;font-size:.85rem;color:var(--ink)}}
+
+/* Approved portrait diagram: preserve its full aspect ratio at reading width. */
+.credential-flow{max-width:480px;margin:32px auto}
+.credential-flow img{display:block;width:100%;height:auto;border:1px solid var(--line);box-sizing:border-box}
+.credential-flow figcaption{font-size:.9rem;line-height:1.65;color:var(--muted);margin:14px 0 0}
