@@ -14,6 +14,11 @@ import pytest
 
 import api.updates as updates
 
+# Git children here must never read the host's system/global git config: on a
+# Mac that runs osxkeychain against the test servers (#8931). See
+# tests/_git_host_config_isolation.py.
+pytestmark = pytest.mark.usefixtures("isolated_host_git_config")
+
 
 def _git(repo, *args):
     subprocess.run(

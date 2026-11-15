@@ -54,6 +54,7 @@ from api.config import (
     merge_custom_provider_runtime_bundle,
     CustomProviderRouteError,
     MODEL_ALIAS_ROUTE_UNRESOLVED,
+    PROVIDER_NAME_AMBIGUOUS,
     raise_for_unresolved_model_alias_route,
     CUSTOM_ROUTE_NO_CREDENTIAL,
     CUSTOM_ROUTE_NO_ENDPOINT,
@@ -94,6 +95,9 @@ from api.memory_profile_scope import (
     # #8613: release an unowned eviction's memory provider only when its agent is
     # the last holder of the instance.
     release_unowned_memory_provider,
+    # #8804: cancel the context engine's background summary pass (close-only; its
+    # session end stays behind the owner check), skipped along with a refused shutdown.
+    release_unowned_context_engine,
     # #8613: refuse the release instead of waiting on the acquisition fence,
     # for a caller that holds a lock and must not block.
     release_without_fence_wait,
@@ -463,7 +467,8 @@ def _strip_compact_echo_suffix(value: str, suffix: str) -> tuple[str, bool]:
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
     """Best-effort terminal SSE session payload for already-persisted state."""
     try:
-        return redact_session_data(
+        from api.helpers import public_session_projection
+        return public_session_projection(
             _session_payload_with_full_messages(session, tool_calls=tool_calls)
         )
     except Exception:
@@ -2205,6 +2210,8 @@ def _custom_provider_route_classification(error) -> dict:
         label = 'Provider credential unavailable'
     elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
         label = 'Provider endpoint unavailable'
+    elif reason == PROVIDER_NAME_AMBIGUOUS:
+        label = 'Provider name conflict'
     else:
         label = 'Provider not configured'
     return {
@@ -3509,16 +3516,35 @@ def _resolve_current_session_for_write(session):
     lock.
 
     Returns ``None`` (fail closed) when the current object cannot be
-    resolved — missing/deleted session, transient error, or no session id.
+    resolved — missing/deleted session, transient error, no session id, or
+    a session loaded from a file whose body names another session (#8852).
     Callers MUST no-op on ``None`` and must NEVER fall back to the
     worker-held snapshot: that object may be a detached LRU-evicted
     generation whose save would overwrite the current session state.
     """
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: the object's id is that other session's, so resolving it
+        # would hand that session to this write.
+        return None
     sid = getattr(session, "session_id", None)
     if not sid:
         return None
     try:
-        return get_session(sid)
+        current = get_session(sid)
+        # #9000: the file may have been replaced since the turn started with a
+        # copy of another session's file. The reload then carries that other
+        # session's id and path (the #8852 loader marks it), so a write through
+        # it (the cwd mirror, an ephemeral cancel's unlink) would land on the
+        # other conversation. Fail closed instead.
+        if getattr(current, "_sidecar_names_other_session", None):
+            logger.info(
+                "Not resolving session %s for a delayed write: its file now "
+                "holds session %r (#9000)",
+                sid,
+                getattr(current, "session_id", None),
+            )
+            return None
+        return current
     except Exception:
         logger.debug(
             "Failed to resolve current session %s for delayed-cancel write; "
@@ -4323,7 +4349,7 @@ def _drain_webui_process_notifications(
 
     notifications: list[str] = []
     skipped_events: list[dict] = []
-    async_retry_events: list[tuple[dict, bool]] = []
+    async_retry_events: list[tuple[dict, object]] = []
     completion_queue = getattr(process_registry, 'completion_queue', None)
     if completion_queue is None:
         return []
@@ -4439,9 +4465,7 @@ def _drain_webui_process_notifications(
                 if notification_added:
                     notifications.pop()
                 release_async_delegation_delivery(evt, claim)
-                async_retry_events.append(
-                    (evt, bool(getattr(claim, "durable", False)))
-                )
+                async_retry_events.append((evt, claim))
                 logger.warning(
                     "Failed to accept async delegation completion for session %s",
                     session_id,
@@ -4472,11 +4496,12 @@ def _drain_webui_process_notifications(
         # replayed forever on later turns.
         _mark_process_completion_consumed(process_registry, evt_sid)
 
-    for evt, durable in async_retry_events:
+    for evt, claim in async_retry_events:
         requeue_async_delegation_event(
             evt,
             completion_queue,
-            durable=durable,
+            durable=bool(getattr(claim, "durable", False)),
+            claim=claim,
         )
     for evt in skipped_events:
         try:
@@ -4503,6 +4528,7 @@ def _accept_pending_async_delegations(
                 evt,
                 completion_queue,
                 durable=bool(getattr(claim, "durable", False)),
+                claim=claim,
             )
             rejected_notifications.append(notification)
             logger.warning(
@@ -6744,6 +6770,46 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         return '', f'llm_empty{suffix}'
 
 
+def _title_provider_name_ambiguous(provider: str, base_url: str) -> bool:
+    """True when the title route's provider name has two claimants (#8690).
+
+    ``call_llm`` hands the name to the Agent, which answers it with the first
+    record that claims it, so the endpoint and key could come from different
+    records. ``auto`` / unset without a URL is the Agent's main provider. The
+    title then falls back to the local (non-LLM) one; the warning carries the
+    verdict message, which names records and never a URL or credential.
+
+    Both inputs are read the way ``call_llm`` will read them (Codex r4): the
+    config file the Agent's ``get_config_path()`` names, unexpanded (a title
+    worker binds the session profile's env for the Agent, not WebUI's profile
+    view), and the Agent's current ``_read_main_provider()`` (re-expanded from
+    the profile .env, unlike WebUI's cache). WebUI's own view is the fallback
+    only when the Agent's readers are unavailable.
+    """
+    from api.config import _load_yaml_config_file_raw, get_config, provider_name_ambiguity_verdict
+
+    try:
+        from hermes_cli.config import get_config_path as agent_config_path
+
+        source = _load_yaml_config_file_raw(Path(agent_config_path()))
+    except Exception:
+        source = None
+    name = provider
+    if not name and not base_url:
+        try:
+            from agent.auxiliary_client import _read_main_provider
+
+            name = str(_read_main_provider() or '')
+        except Exception:
+            main = get_config().get('model')
+            name = main.get('provider', '') if isinstance(main, dict) else ''
+    verdict = provider_name_ambiguity_verdict(name, config=source) if name else None
+    if verdict is None:
+        return False
+    logger.warning("skipping LLM title generation: %s", verdict['message'])
+    return True
+
+
 def generate_title_raw_via_aux(
     user_text: str,
     assistant_text: str,
@@ -6775,6 +6841,8 @@ def generate_title_raw_via_aux(
         provider = normalized_provider or ''
     except ValueError:
         pass
+    if _title_provider_name_ambiguous(provider, base_url):
+        return None, 'provider_name_ambiguous_aux'
     api_key = ''
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
@@ -7157,6 +7225,7 @@ _TITLE_FAILURE_HUMAN_REASONS = {
     'empty_user_message': 'this session has no user message to title yet',
     'empty_title': 'no title could be produced for this session',
     'title_generation_disabled': 'title generation is disabled for this profile',
+    'provider_name_ambiguous_aux': "two providers claim the title model's provider name",
 }
 
 
@@ -7470,6 +7539,10 @@ def _preserve_pre_compression_snapshot(
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
     """
+    if getattr(s, '_sidecar_names_other_session', None):
+        # #8852: old_sid is the object's id, which came from a file whose body
+        # names another session, so the stamp below would land in that session.
+        return False
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
         return False
@@ -13873,6 +13946,7 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     if not should_close_evicted_agent:
         return False
 
+    engine_release_due = False
     try:
         shutdown_memory_provider = getattr(agent, 'shutdown_memory_provider', None)
         if callable(shutdown_memory_provider):
@@ -13889,9 +13963,22 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
                 # its own bound profile, without a session end. A no-op unless this
                 # agent is the LAST holder of every instance it serves — a provider
                 # shared with a live agent of the same profile keeps running.
+                #
+                # #8804: the refusal also skipped the context engine's release, unless
+                # the Agent's own shutdown ran (a refusal at hook time). Decided BEFORE the
+                # release, which marks an old Agent's agent shut down.
+                engine_release_due = not getattr(agent, '_memory_provider_shutdown', False)
                 release_unowned_memory_provider(agent, session_id=session_id, owner_home=_owner_home)
     except Exception:
         logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
+
+    # #8804: cancel the context engine's background summary pass, in the agent's own
+    # profile home. Its session end is NOT run: it may write, and the owner is unknown.
+    if engine_release_due:
+        try:
+            release_unowned_context_engine(agent, session_id=session_id)
+        except Exception:
+            logger.debug("Failed to release the evicted agent's context engine for session %s", session_id, exc_info=True)
 
     # #8613: this agent is out of the cache for good, so it holds no provider
     # instance any more — whether or not one was released above.
@@ -16645,7 +16732,15 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 try:
                     import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    if getattr(s, '_sidecar_names_other_session', None):
+                        # #9000: loaded from a copy of another session's file, so
+                        # s.path is that other conversation. Never delete it.
+                        logger.info(
+                            "Not removing /btw file for %s: it holds session %r (#9000)",
+                            session_id, s.session_id,
+                        )
+                    else:
+                        pathlib.Path(s.path).unlink(missing_ok=True)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions
@@ -17787,16 +17882,25 @@ def _run_agent_streaming(
                     try:
                         from agent.model_metadata import get_model_context_length
                         from api.routes import _context_length_lookup_inputs_for_model
+                        from api.routes import _context_lookup_agent_fallback
                         _cfg_base_url = getattr(agent, 'base_url', '') or resolved_base_url or ''
+                        # #8822: the lookup picks the config key that owns the URL, as
+                        # on v0.52.544; the Agent's own credential (key, URL, provider
+                        # together) is only its fallback, under the same rule, and
+                        # nothing is added after the lookup, so a key never lands on a
+                        # host it doesn't own.
                         _ctx_lookup = _context_length_lookup_inputs_for_model(
                             getattr(agent, 'model', resolved_model or '') or '',
                             resolved_provider,
                             base_url=_cfg_base_url,
                             cfg=_cfg if isinstance(_cfg, dict) else {},
+                            **_context_lookup_agent_fallback(
+                                agent, resolved_api_key, resolved_base_url, resolved_provider
+                            ),
                         )
                         _cfg_ctx_len = _ctx_lookup.config_context_length
                         _cfg_custom_providers = _ctx_lookup.custom_providers
-                        _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
+                        _cfg_api_key = _ctx_lookup.api_key
                         _cfg_base_url = _ctx_lookup.base_url or _cfg_base_url
                         _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                         _resolved_cl = get_model_context_length(
@@ -18159,15 +18263,22 @@ def _run_agent_streaming(
                 try:
                     from agent.model_metadata import get_model_context_length as _get_cl
                     from api.routes import _context_length_lookup_inputs_for_model
+                    from api.routes import _context_lookup_agent_fallback
                     _ctx_lookup = _context_length_lookup_inputs_for_model(
                         getattr(agent, 'model', resolved_model or '') or '',
                         resolved_provider,
                         base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
                         cfg=_cfg if isinstance(_cfg, dict) else {},
+                        # #8822: the Agent's own credential (key, URL, provider together)
+                        # only as the lookup's fallback, under the same ownership rule;
+                        # nothing is added afterwards.
+                        **_context_lookup_agent_fallback(
+                            agent, resolved_api_key, resolved_base_url, resolved_provider
+                        ),
                     )
                     _cfg_ctx_len = _ctx_lookup.config_context_length
                     _cfg_custom_providers = _ctx_lookup.custom_providers
-                    _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
+                    _cfg_api_key = _ctx_lookup.api_key
                     _cfg_base_url = _ctx_lookup.base_url
                     _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                     try:

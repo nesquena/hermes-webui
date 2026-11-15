@@ -1704,7 +1704,7 @@ def test_session_writer_does_not_undo_effort_pick_saved_after_eviction(
     _stub_post_lock_side_effects(monkeypatch)
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda p, profile=None: p)
     monkeypatch.setattr(routes, "set_last_workspace", lambda *a, **kw: None)
-    monkeypatch.setattr(routes, "_resolve_context_length_for_session_model", lambda *a: 0)
+    monkeypatch.setattr(routes, "_resolve_context_length_for_session_model", lambda *a, **kw: 0)
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
     import api.config as config
     monkeypatch.setattr(config, "_evict_session_agent", lambda *a, **kw: None)

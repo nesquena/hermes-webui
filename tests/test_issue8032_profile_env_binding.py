@@ -385,6 +385,9 @@ _RAW_LOADERS = {
 _WRITER = "writer: read-modify-write that must save the RAW document"
 _LOADER = "loader internal"
 _ALLOWED = {
+    # #8977: replay eligibility parses the profile config only to prove it is readable YAML (an unreadable or
+    # malformed file makes the row undetermined); it reads no values, so the ${VAR} binding does not apply.
+    ("delegation_ledger_owner.py", "_require_backend_inputs_read"): "validation: parses to check the file is readable YAML; reads no values",
     ("commands.py", "_run_codex_runtime_command._persist_config"): _WRITER,
     ("config.py", "set_max_tokens"): _WRITER,
     ("config.py", "set_reasoning_display"): _WRITER,
@@ -417,6 +420,11 @@ _ALLOWED = {
     ("profiles.py", "_profile_visible_from_meta"): "profile.yaml, not config.yaml",
     ("gateway_chat.py", "_config_url_may_belong_to_a_profile"): "reads ${VAR} reference NAMES of an operator config file (#8435)",
     ("gateway_chat.py", "_gateway_endpoint_for_profile"): "value reader: expands under its own explicit profile env (#8435)",
+    # #8690: provider identities are read UNEXPANDED; each ${VAR} is then judged by the Agent's
+    # own expander only while an Agent profile secret scope is bound (current_secret_scope() is
+    # not None, whichever path bound it); with none bound it is a wildcard claim.
+    ("config.py", "_provider_identity_sources"): "reads provider record NAMES unexpanded; a ${VAR} is judged by the Agent's expander only under a bound profile secret scope (#8690)",
+    ("streaming.py", "_title_provider_name_ambiguous"): "reads the Agent profile's provider NAMES unexpanded for the title guard (#8690)",
 }
 
 

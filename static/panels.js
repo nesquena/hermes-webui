@@ -88,7 +88,7 @@ function syncAppTitlebar() {
       if (sourceLabel) {
         const badge = document.createElement('span');
         badge.className = 'topbar-source-badge';
-        badge.textContent = sourceLabel + (S.session && S.session.read_only ? ' · read-only' : '');
+        badge.textContent = sourceLabel + (S.session && (S.session.read_only || S.session.chat_read_only_reason) ? ' · read-only' : '');
         subEl.appendChild(document.createTextNode(' '));
         subEl.appendChild(badge);
       }
@@ -1936,7 +1936,6 @@ let _cronSelectedSkills=[];
 let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
 let _cronProfilesCache=null;
-let _cronDeliveryOptionsCache=null;
 
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
@@ -2071,7 +2070,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
           <select id="cronFormDeliver">
-            <option value="" disabled>loading...</option>
+            <option value="${esc(deliver || 'local')}" selected>loading...</option>
           </select>
         </div>
         <div class="detail-form-row">
@@ -2121,29 +2120,35 @@ async function _populateCronDeliverOptions(selectedValue, isEdit) {
   var sel = $('cronFormDeliver');
   if (!sel) return;
   sel.disabled = true;
+  // #9058: the list depends on the active profile's enabled platform plugins, so it is
+  // fetched for every form instead of cached for the page (a profile switch does not reload).
+  var requestedProfile = S.activeProfile || 'default';
   try {
-    if (!_cronDeliveryOptionsCache) {
-      var res = await api('/api/crons/delivery-options');
-      _cronDeliveryOptionsCache = res && res.platforms ? res.platforms : [];
+    var res = await api('/api/crons/delivery-options');
+    if ($('cronFormDeliver') !== sel) return;  // this form was replaced; its successor fills itself
+    if ((S.activeProfile || 'default') !== requestedProfile) {
+      // The profile changed while the request was in flight: refill for the current one.
+      return _populateCronDeliverOptions(selectedValue, isEdit);
     }
+    var options = res && res.platforms ? res.platforms : [];
     sel.innerHTML = '';
-    for (var i = 0; i < _cronDeliveryOptionsCache.length; i++) {
-      var p = _cronDeliveryOptionsCache[i];
+    for (var i = 0; i < options.length; i++) {
+      var p = options[i];
       var opt = document.createElement('option');
       opt.value = p.value;
       opt.textContent = p.label;
       if (p.value === selectedValue) opt.selected = true;
       sel.appendChild(opt);
     }
-    if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
-      var opt = document.createElement('option');
-      opt.value = selectedValue;
-      opt.textContent = selectedValue + ' *';
-      opt.selected = true;
-      sel.prepend(opt);
-    }
   } catch (e) {
     sel.innerHTML = '<option value="local">Local (save output only)</option>';
+  }
+  if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
+    var opt = document.createElement('option');
+    opt.value = selectedValue;
+    opt.textContent = selectedValue + ' *';
+    opt.selected = true;
+    sel.prepend(opt);
   }
   sel.disabled = false;
 }
@@ -13290,7 +13295,7 @@ async function checkUpdatesNow(channelOverride){
       const parts=[];
       const formatUpdatePart=(typeof _formatUpdateTargetStatus==='function')
         ? _formatUpdateTargetStatus
-        : ((label,info)=>info&&info.behind>0?label+': '+info.behind:null);
+        : ((label,info)=>info&&info.behind>0?label+': '+info.behind+' update'+(info.behind>1?'s':''):null);
       const webuiPart=formatUpdatePart('WebUI',data.webui);
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
@@ -13315,7 +13320,9 @@ async function checkUpdatesNow(channelOverride){
       // The target whose tag is shown. Its own release arrow may already name the tag (#6859 Fable r1).
       const tagOwner=(data.webui&&data.webui.latest_tag)?data.webui:data.agent;
       if(parts.length){
-        let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        // Each part already carries its own count and unit ("WebUI: 2 releases"), so the
+        // template only wraps the list and must not add another unit (#8283).
+        let txt=t('settings_updates_available_targets',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(tagInfo&&!_updateTargetArrowNamesTag(tagOwner,tagInfo)) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
