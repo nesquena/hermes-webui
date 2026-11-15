@@ -1796,6 +1796,162 @@ def test_auxiliary_extra_body_residue_equal_positive_score_tie_rejects_without_w
     assert cfg_path.read_bytes() == before_bytes
 
 
+def test_extra_body_single_reference_unowned_rejects_without_writing(
+    cfg_path, monkeypatch
+):
+    """Reference adoption at step 2.e rejects when correspondence is uncorroborated (#8740 CR r8)."""
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "owner-a-val")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "owner-b-val")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 1},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 3},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {"label": "renamed", "token": "owner-b-val", "depth": 2}
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced model options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
+    stored_rows = _raw(cfg_path)["model"]["extra_body"]["rows"]
+    assert stored_rows[0]["token"] == "${HERMES_TEST_OWNER_A}"
+    assert stored_rows[1]["token"] == "${HERMES_TEST_OWNER_B}"
+
+
+def test_auxiliary_extra_body_single_reference_unowned_rejects_without_writing(
+    cfg_path, monkeypatch
+):
+    """Auxiliary reference adoption at step 2.e rejects when correspondence is uncorroborated (#8740 CR r8)."""
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "owner-a-val")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "owner-b-val")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 1},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 3},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {"label": "renamed", "token": "owner-b-val", "depth": 2}
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 400, handler.json_body()
+    err = handler.json_body().get("error", "")
+    assert err.startswith("advanced auxiliary options: extra_body list rows")
+    assert cfg_path.read_bytes() == before_bytes
+    stored_rows = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert stored_rows[0]["token"] == "${HERMES_TEST_OWNER_A}"
+    assert stored_rows[1]["token"] == "${HERMES_TEST_OWNER_B}"
+
+
+def test_extra_body_single_reference_control_preserves_reference(
+    cfg_path, monkeypatch
+):
+    """Control for step 2.e: submitting beta row with label and depth matching expands and preserves reference (#8740 CR r8)."""
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "owner-a-val")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "owner-b-val")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 1},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 3},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    submitted = {
+        "rows": [
+            {"label": "beta", "token": "owner-b-val", "depth": 3}
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+    stored_rows = _raw(cfg_path)["model"]["extra_body"]["rows"]
+    assert stored_rows == [{"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 3}]
+    assert "owner-b-val" not in cfg_path.read_text(encoding="utf-8")
+
+
+def test_auxiliary_extra_body_single_reference_control_preserves_reference(
+    cfg_path, monkeypatch
+):
+    """Auxiliary control for step 2.e: submitting beta row matching expanded preserves reference (#8740 CR r8)."""
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "owner-a-val")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "owner-b-val")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 1},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 3},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    submitted = {
+        "rows": [
+            {"label": "beta", "token": "owner-b-val", "depth": 3}
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+    stored_rows = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert stored_rows == [{"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 3}]
+    assert "owner-b-val" not in cfg_path.read_text(encoding="utf-8")
+
+
 def test_extra_body_reordered_rows_follow_reference_valued_identity(
     cfg_path, monkeypatch
 ):

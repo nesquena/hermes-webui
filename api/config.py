@@ -7575,7 +7575,8 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
           keeps the siblings the edit did not touch.
        e. Preserved references: dict against dict where every ``${...}`` leaf the raw row
           holds expands to the submitted value at the same path, requiring at least one
-          preserved reference.
+          preserved reference, adopted only when correspondence is established beyond the
+          reference value itself (#8740 CR r8).
        f. Residue: dict against dict with identical key sets where at least one ``${...}``
           leaf the raw row holds expands to the submitted value at the same path (#8740 CR r4),
           adopted only when corroborated: either the raw candidate is the sole row in
@@ -7807,6 +7808,33 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 score += 1
         return score
 
+    def _decide_candidate_adoption(raw_idx: int, new_item) -> int | None:
+        """Decide whether to adopt *raw_idx*, write verbatim (None), or refuse (#8740 CR r6, r8).
+
+        Adoption requires corroboration beyond matching a single ${...} leaf:
+        either _corroborated_residue_match holds, both lists hold exactly one
+        row, or candidate's non-reference score is positive and strictly
+        greater than every other stored row's score. When another stored row
+        outscores the candidate, the submitted row is written verbatim (None).
+        When correspondence fails and no row outscores the candidate (e.g. tie
+        or zero score), ValueError is raised to refuse ambiguous adoption.
+        """
+        if _corroborated_residue_match(raw_list[raw_idx], new_item) or (
+            len(raw_list) == 1 and len(new_list) == 1
+        ):
+            return raw_idx
+        cand_score = _non_ref_score(raw_list[raw_idx], new_item)
+        other_scores = [
+            _non_ref_score(other_item, new_item)
+            for other_idx, other_item in enumerate(raw_list)
+            if other_idx != raw_idx
+        ]
+        if any(s > cand_score for s in other_scores):
+            return None
+        if cand_score > 0 and all(cand_score > s for s in other_scores):
+            return raw_idx
+        raise ValueError(ambiguous_err)
+
     matches: dict[int, int | None] = {}
     for new_idx, new_item in enumerate(new_list):
         # 2.b: Expanded value
@@ -7844,11 +7872,13 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
 
         # 2.e: Preserved references: every ${...} leaf the raw row holds
         # expands to the submitted value at the same path (#8740 CR r3).
+        # A single candidate is adopted only when correspondence is established
+        # beyond the reference value itself (#8740 CR r8).
         cands_2e = _ref_preserved_candidates(new_item)
         if len(cands_2e) > 1:
             raise ValueError(ambiguous_err)
         if len(cands_2e) == 1:
-            matches[new_idx] = cands_2e[0]
+            matches[new_idx] = _decide_candidate_adoption(cands_2e[0], new_item)
             continue
 
         # 2.f: Residue: dict against dict with identical key sets where at least
@@ -7864,23 +7894,8 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
         if len(cands_2f) > 1:
             raise ValueError(ambiguous_err)
         if len(cands_2f) == 1:
-            raw_idx = cands_2f[0]
-            if _corroborated_residue_match(raw_list[raw_idx], new_item):
-                matches[new_idx] = raw_idx
-                continue
-            cand_score = _non_ref_score(raw_list[raw_idx], new_item)
-            other_scores = [
-                _non_ref_score(other_item, new_item)
-                for other_idx, other_item in enumerate(raw_list)
-                if other_idx != raw_idx
-            ]
-            if any(s > cand_score for s in other_scores):
-                matches[new_idx] = None
-                continue
-            if cand_score > 0 and all(cand_score > s for s in other_scores):
-                matches[new_idx] = raw_idx
-                continue
-            raise ValueError(ambiguous_err)
+            matches[new_idx] = _decide_candidate_adoption(cands_2f[0], new_item)
+            continue
 
         matches[new_idx] = None
 
