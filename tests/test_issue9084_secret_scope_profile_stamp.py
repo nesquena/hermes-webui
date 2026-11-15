@@ -168,6 +168,29 @@ def test_uninspectable_set_secret_scope_falls_back_to_the_unstamped_install(
     assert resets == ["token"]
 
 
+def test_kwargs_wrapper_around_a_legacy_setter_still_installs_the_scope(
+    monkeypatch, tmp_path
+):
+    """A bare ``**kwargs`` wrapper is not proof the setter takes ``profile_home``:
+    stamping through it would raise TypeError in the legacy setter and leave the
+    turn with no scope. It must get today's unstamped install instead."""
+    _setup_profile(monkeypatch, tmp_path)
+    calls, resets = [], []
+
+    def legacy_set_secret_scope(secrets):
+        calls.append(dict(secrets))
+        return "legacy-token"
+
+    def wrapper(*args, **kwargs):  # no functools.wraps: the signature is (*args, **kwargs)
+        return legacy_set_secret_scope(*args, **kwargs)
+
+    _install_fake_secret_scope(monkeypatch, wrapper, resets)
+    with _enter("background_worker"):
+        pass
+    assert len(calls) == 1
+    assert resets == ["legacy-token"]
+
+
 # 3/4 ── the REAL installed Hermes Agent secret-scope module ──────────────────
 
 def _real_agent_modules():

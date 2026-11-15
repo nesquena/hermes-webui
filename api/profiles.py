@@ -1421,6 +1421,9 @@ def _resolve_secret_scope_module():
 # ``refresh_installed_secret_scope(get_hermes_home())`` skips a named profile's
 # turn. Older Agents lack the keyword: decide ONCE per module (and setter) from the
 # signature instead of retrying on TypeError, which would mask real setter errors.
+# Only a parameter actually named ``profile_home`` counts: a bare ``**kwargs``
+# wrapper may forward to a legacy setter, and a TypeError there would leave the
+# turn with no scope at all, where the unstamped install is today's behaviour.
 _secret_scope_stamp_support = None  # (module, setter, accepts_profile_home)
 
 
@@ -1434,16 +1437,10 @@ def _set_secret_scope_for_profile(mod, secrets, profile_home):
         accepts_profile_home = cached[2]
     else:
         try:
-            accepts_profile_home = any(
-                param.kind is inspect.Parameter.VAR_KEYWORD
-                or (
-                    param.name == "profile_home"
-                    and param.kind in (
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.KEYWORD_ONLY,
-                    )
-                )
-                for param in inspect.signature(setter).parameters.values()
+            param = inspect.signature(setter).parameters.get("profile_home")
+            accepts_profile_home = param is not None and param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
             )
         except Exception:
             accepts_profile_home = False
