@@ -1418,6 +1418,47 @@ class TestImageQuadraticGrowth:
         )
 
 
+class TestNestedImageOpeners:
+    """Regression: a nested ``![`` must not become a second image.
+
+    The single forward scan kept every opener it saw, so an opener that sat
+    inside a match it had already consumed stayed pending; the next ``](``
+    reused that position, emitted another ``<img>`` and copied text that was
+    already rendered into the new alt.  Repeated input grew the HTML
+    quadratically (16 KB in, megabytes out).  Openers left of a consumed match
+    are now dropped, so a bracket pair still yields exactly one image, which
+    is what the regex this pass replaced did.
+    """
+
+    def test_nested_image_renders_once(self, driver_path):
+        out = _render(driver_path, "![A![B](/one.png)](/two.png)")
+        assert out.count("<img") == 1, f"nested image must render once: {out!r}"
+        assert 'alt="A![B"' in out, f"alt must keep the nested opener text: {out!r}"
+        assert "](/two.png)" in out, f"the extra closer stays literal text: {out!r}"
+
+    def test_nested_image_between_text_renders_once(self, driver_path):
+        out = _render(driver_path, "see ![A![B](/one.png) now")
+        assert out.count("<img") == 1, f"nested image must render once: {out!r}"
+        assert "see " in out and " now" in out, f"surrounding text lost: {out!r}"
+
+    def test_repeated_nested_images_do_not_grow_the_output(self, driver_path):
+        unit = "![A![B](/one.png)](/two.png)"
+        small = _render(driver_path, unit * 200)
+        large = _render(driver_path, unit * 800)
+        assert small.count("<img") == 200, f"one image per unit: {small.count('<img')}"
+        assert large.count("<img") == 800, f"one image per unit: {large.count('<img')}"
+        assert len(large) < len(small) * 6, (
+            "4x the input must not rescale the output: "
+            f"{len(small)} -> {len(large)} bytes"
+        )
+        # Constant bytes per unit is the invariant that breaks when a stale
+        # opener drags previously rendered text into a new alt.
+        assert abs(len(large) / 800 - len(small) / 200) < 1, (
+            "output per unit drifted: "
+            f"{len(small) / 200:.1f} -> {len(large) / 800:.1f} bytes"
+        )
+
+
 class TestImageAltCodeSpans:
     """Gate G9072-IMAGEALT-STASH: code spans in an image alt must reach the
     attribute as plain text.

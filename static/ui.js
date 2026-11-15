@@ -11022,6 +11022,12 @@ function renderMd(raw){
         const url=str.slice(us,close);
         out+=str.slice(copy,open)+((typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
         copy=close+1;i=close+1;matched=true;
+        // Every opener still pending sits left of this `]`, so the match just
+        // swallowed it.  Keeping those positions lets a later `](` re-emit
+        // them (`![A![B](/one.png)`) and copy text that is already rendered
+        // into a second alt, which is how a nested input grew the output
+        // quadratically.  One bracket pair, one image - as before this pass.
+        pend.length=0;
         break;
       }
       if(matched)continue;
