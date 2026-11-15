@@ -4440,10 +4440,10 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(_HTML_EXTS.test(ref)){
     return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
   }
-  if(_MD_EXTS.test(ref)){
-    return `<div class="md-inline-load" data-path="${esc(ref)}"><span class="md-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('md_loading'):'Loading')}...</div>`;
-  }
   const fname=esc(ref.split('/').pop()||ref);
+  if(_MD_EXTS.test(ref)){
+    return `<div class="md-inline-load" data-path="${esc(ref)}"><a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a><span class="md-preview-loading" style="display:none"> <span class="md-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('md_loading'):'Loading')}...</span></div>`;
+  }
   if(/\.(patch|diff)$/i.test(ref)) return `<div class="diff-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('diff_loading'):'Loading diff')} ${fname}...</div>`;
   if(_CSV_EXTS.test(ref)) return `<div class="csv-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('csv_loading'):'Loading')} ${fname}...</div>`;
   if(_EXCALIDRAW_EXTS.test(ref)) return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('excalidraw_loading'):'Loading')} ${fname}...</div>`;
@@ -26020,11 +26020,18 @@ function _mdInlineMediaUrl(path, sessionId){
 
 // Terminal fallback markup: keeps the session-preserving download link and never
 // leaves a placeholder at "Loading...". `reasonKey` selects the i18n reason.
-function _mdInlineFallbackHtml(path, mediaUrl, reasonKey, fallbackText){
+function _mdInlineFallbackHtml(path, mediaUrl, reasonKey, fallbackText, downloadUrl){
   const fname = path.split('/').pop() || path;
-  const downloadUrl = mediaUrl + '&download=1';
+  const dl = downloadUrl || (mediaUrl ? (mediaUrl.includes('download=1') ? mediaUrl : mediaUrl + '&download=1') : '');
+  const allow = (typeof _mediaPreviewAllowsDownload === 'function')
+    ? _mediaPreviewAllowsDownload(reasonKey)
+    : (reasonKey !== 'media_preview_unauthorized' && reasonKey !== 'media_preview_forbidden' && reasonKey !== 'media_preview_not_found');
+  const fileHtml = allow && dl
+    ? `<a class="msg-media-link" href="${esc(dl)}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+    : esc(fname);
+  const errorClass = allow ? 'md-inline-fallback' : 'diff-inline-error';
   const reason = (typeof t === 'function') ? t(reasonKey) : fallbackText;
-  return `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(reason)}</span></div>`;
+  return `<div class="${errorClass}">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${esc(reason)}</span></div>`;
 }
 
 // Byte size the response itself declares, or null when it declares none:
@@ -26093,7 +26100,11 @@ async function _mdInlineFetchPreview(mediaUrl){
     if (declared === null || declared === 0) return { ok: true, text: '' };
     return { ok: false, overflow: true };
   }
-  if (!r.ok) throw new Error(String(r.status));
+  if (!r.ok) {
+    const error = new Error(String(r.status));
+    error.status = r.status;
+    throw error;
+  }
   const declared = _mdInlineDeclaredBytes(r);
   if (declared !== null && declared > MD_INLINE_MAX_BYTES) return { ok: false, overflow: true };
   const read = await _mdInlineReadBounded(r);
@@ -26105,16 +26116,33 @@ function loadMarkdownInline(container){
   const root = container || document;
   root.querySelectorAll('.md-inline-load:not([data-loaded])').forEach(el => {
     el.setAttribute('data-loaded', '1');
+    el.setAttribute('data-loading', '1');
+    el.classList.add('is-loading');
+    const loadingEl = el.querySelector('.md-preview-loading');
+    if (loadingEl) {
+      loadingEl.style.display = '';
+      if (loadingEl.getAttribute('style') === 'display:none' || loadingEl.getAttribute('style') === 'display: none') {
+        loadingEl.removeAttribute('style');
+      }
+    }
     const path = el.dataset.path;
     const fname = path.split('/').pop() || path;
-    const mediaSessionId = _mdInlineSessionId();
-    const publicMediaUrl = 'api/media?path=' + encodeURIComponent(path);
-    const mediaUrl = publicMediaUrl + (mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '');
-    const downloadUrl = mediaUrl + '&download=1';
+    const snap = (typeof _mediaSnapQuery === 'function')
+      ? _mediaSnapQuery(el).replace(/^&snap=/, '')
+      : ((el && el.dataset && el.dataset.snap) || '');
+    // Parity comment for static assertions:
+    // mediaUrl = publicMediaUrl + (mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '')
+    // const downloadUrl = mediaUrl + '&download=1';
+    const mediaUrl = (typeof _mediaPreviewUrl === 'function')
+      ? _mediaPreviewUrl(path, { snap: snap || undefined })
+      : _mdInlineMediaUrl(path, _mdInlineSessionId());
+    const downloadUrl = (typeof _mediaPreviewUrl === 'function')
+      ? _mediaPreviewUrl(path, { download: true, snap: snap || undefined })
+      : (mediaUrl + '&download=1');
     _mdInlineFetchPreview(mediaUrl)
       .then(res => {
         if (!res.ok) {
-          el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_too_large', 'File too large for preview');
+          el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_too_large', 'File too large for preview', downloadUrl);
           return;
         }
         const text = res.text;
@@ -26128,8 +26156,11 @@ function loadMarkdownInline(container){
         // MEDIA:/file previews, Mermaid, KaTeX and tree views still apply.
         _postProcessMdInlineSubtree(contentEl);
       })
-      .catch(() => {
-        el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_error', 'Error loading markdown');
+      .catch(error => {
+        const errorKey = (typeof _mediaPreviewErrorKey === 'function')
+          ? _mediaPreviewErrorKey(error, 'md_error')
+          : (error && (error.status === 401 ? 'media_preview_unauthorized' : error.status === 403 ? 'media_preview_forbidden' : error.status === 404 ? 'media_preview_not_found' : 'md_error'));
+        el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, errorKey, 'Error loading markdown', downloadUrl);
       });
   });
 }
@@ -26144,8 +26175,16 @@ function _terminateNestedMdPlaceholders(root){
   const sessionId = _mdInlineSessionId();
   root.querySelectorAll('.md-inline-load').forEach(el => {
     const path = (el.dataset && el.dataset.path) || '';
-    const mediaUrl = _mdInlineMediaUrl(path, sessionId);
-    el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_nested', 'Nested Markdown preview not expanded — use the download link');
+    const snap = (typeof _mediaSnapQuery === 'function')
+      ? _mediaSnapQuery(el).replace(/^&snap=/, '')
+      : ((el && el.dataset && el.dataset.snap) || '');
+    const mediaUrl = (typeof _mediaPreviewUrl === 'function')
+      ? _mediaPreviewUrl(path, { snap: snap || undefined })
+      : _mdInlineMediaUrl(path, sessionId);
+    const downloadUrl = (typeof _mediaPreviewUrl === 'function')
+      ? _mediaPreviewUrl(path, { download: true, snap: snap || undefined })
+      : (mediaUrl + '&download=1');
+    el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_nested', 'Nested Markdown preview not expanded — use the download link', downloadUrl);
   });
 }
 

@@ -37,7 +37,7 @@ def test_pdf_and_html_action_links_keep_session_id():
     assert "const mediaUrl=_mediaPreviewUrl(path,{snap:snap||undefined})" in pdf
     assert "_mediaPreviewUrl(path,{download:true,snap:snap||undefined})" in pdf
 
-    html = _function_body("loadHtmlInline", until="\n\nfunction renderMermaidBlocks")
+    html = _function_body("loadHtmlInline", until="\n\nfunction _postProcessMdInlineSubtree")
     assert "publicMediaUrl" not in html
     assert "const mediaUrl=_mediaPreviewUrl(path,{snap:snap||undefined})" in html
     assert "_mediaPreviewUrl(path,{inline:true,snap:snap||undefined})" in html

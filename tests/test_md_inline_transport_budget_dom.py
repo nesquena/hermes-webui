@@ -23,8 +23,6 @@ import json
 import pathlib
 import re
 
-import pytest
-
 _HERE = pathlib.Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location(
     "_md_inline_dom_base", _HERE / "test_md_inline_preview_dom.py"

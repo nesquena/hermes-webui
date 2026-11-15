@@ -1589,13 +1589,17 @@ class TestMarkdownInlineLoader(unittest.TestCase):
     def test_preview_and_download_urls_share_encoded_session_id(self):
         idx = UI_JS.find("function loadMarkdownInline")
         block = UI_JS[idx:idx + 2400]
-        # preview URL carries the session-scoped grant...
+        # The preview URL is built by the shared authority (_mediaPreviewUrl),
+        # which carries the session-scoped grant through _mediaSessionQuery()
+        # and the stamped snapshot through _mediaSnapQuery(el)...
+        self.assertIn("_mediaSnapQuery(el)", block)
+        self.assertIn("_mediaPreviewUrl(path, { snap: snap || undefined })", block)
+        # ...and the download URL is the same authority with download=1 and the
+        # same snapshot, so preview and download can never drift apart.
         self.assertIn(
-            "mediaUrl = publicMediaUrl + (mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '')",
+            "_mediaPreviewUrl(path, { download: true, snap: snap || undefined })",
             block,
         )
-        # ...and the download URL is derived from the same session-bearing URL
-        self.assertIn("const downloadUrl = mediaUrl + '&download=1';", block)
 
     def test_fetched_subtree_is_post_processed(self):
         idx = UI_JS.find("function loadMarkdownInline")
