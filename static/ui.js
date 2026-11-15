@@ -4554,13 +4554,14 @@ function _selectQuotaChipWindow(windows){
   const valid=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
   if(!valid.length) return null;
   const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
-  if(mode==='shortest'||mode==='longest'){
-    const timed=valid.filter(x=>_quotaWindowSeconds(x)!==null);
-    if(timed.length) return timed.reduce((best,x)=>{
+  // Pick by duration only when every measured window reports one. An untimed
+  // window can't be ordered, and skipping it could hide the depleted limit, so
+  // any gap falls back to the most constrained window.
+  if((mode==='shortest'||mode==='longest')&&valid.every(x=>_quotaWindowSeconds(x)!==null)){
+    return valid.reduce((best,x)=>{
       const a=_quotaWindowSeconds(x),b=_quotaWindowSeconds(best);
       return (mode==='shortest'?a<b:a>b)?x:best;
     });
-    // No eligible window reports a valid positive duration: fall back to the most constrained one.
   }
   return valid.reduce((min,x)=>Number(x.remaining_percent)<Number(min.remaining_percent)?x:min);
 }
