@@ -10978,23 +10978,79 @@ function renderMd(raw){
   // Placeholder tokens.  `\x00K0\x00` is also valid message text, and the
   // restore replace cannot tell the caller's characters from a placeholder it
   // wrote: a message containing one lost its text to the stash.  Each pass
-  // therefore picks, once per render, a lead character the text does not
-  // contain at all, so `<lead>K<digits>\x00` cannot appear in the caller's
-  // text.  The marker length is constant.  It used to be the shortest run of
-  // `K` / `H` after a NUL, which grew with the message: one NUL followed by a
-  // long letter run made a regex of that size, and every stashed code span
-  // copied the whole prefix into the temporary text, so the stash could grow
-  // quadratically in the message length (greptile P1 on #9072).
+  // therefore picks, once per render, a lead the text does not spell out as
+  // `<lead>K<digits>\x00`, so the marker cannot appear in the caller's own
+  // text.  The marker length is constant in every ordinary case.  It used to
+  // be the shortest run of `K` / `H` after a NUL, which grew with the message:
+  // one NUL followed by a long letter run made a regex of that size, and every
+  // stashed code span copied the whole prefix into the temporary text, so the
+  // stash could grow quadratically in the message length (greptile P1 on
+  // #9072).
   // Whitespace controls stay out of the candidate list: `\s`-shaped regexes
   // in the later passes must not treat a marker as layout.
   const _MARK_LEADS='\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f';
+  const _MARK_LEAD=new Array(32);
+  for(let i=0;i<_MARK_LEADS.length;i++)_MARK_LEAD[_MARK_LEADS.charCodeAt(i)]=true;
+  const _isMarkLead=c=>{const k=c.charCodeAt(0);return k<32&&_MARK_LEAD[k]===true;};
+  // The leads of length `len` that the text already spells out as a marker
+  // (`<lead><ch><digits>\x00`).  Only that shape collides with a placeholder:
+  // a lead character on its own is harmless, so presence alone is not enough
+  // to rule a lead out.
+  const _takenLeads=(text,ch,len)=>{
+    const taken=new Set();
+    for(let i=0;i+len<text.length;i++){
+      let lead='';
+      for(let k=0;k<len;k++){
+        const c=text.charAt(i+k);
+        if(!_isMarkLead(c)){lead='';break;}
+        lead+=c;
+      }
+      if(!lead||text.charAt(i+len)!==ch)continue;
+      let j=i+len+1;
+      while(j<text.length){
+        const d=text.charCodeAt(j);
+        if(d<48||d>57)break;
+        j++;
+      }
+      if(j>i+len+1&&text.charAt(j)==='\x00')taken.add(lead);
+    }
+    return taken;
+  };
+  const _firstFreeLead=(taken,len,pre)=>{
+    if(pre.length===len)return taken.has(pre)?'':pre;
+    for(let i=0;i<_MARK_LEADS.length;i++){
+      const got=_firstFreeLead(taken,len,pre+_MARK_LEADS.charAt(i));
+      if(got)return got;
+    }
+    return '';
+  };
   const _tokPrefix=(base,text)=>{
     const ch=base.slice(-1);
+    // Ordinary case: a candidate character the text does not contain at all
+    // cannot collide, and one indexOf answers it.
     for(let i=0;i<_MARK_LEADS.length;i++){
       const lead=_MARK_LEADS.charAt(i);
       if(text.indexOf(lead)<0)return lead+ch;
     }
-    return '\x00'+ch;
+    // The text carries every candidate character.  Lengthen the lead until its
+    // marker shape is free, so a message that spells out `\x00K0\x00` (a JSON
+    // or Python escape that arrived as real control characters) takes the next
+    // lead instead of having its own characters replaced by a stash entry.
+    for(let len=1;len<=3;len++){
+      const lead=_firstFreeLead(_takenLeads(text,ch,len),len,'');
+      if(lead)return lead+ch;
+    }
+    // Reachable only when the text spells out every lead of up to three
+    // characters.  One more `ch` than the longest run of it after a NUL is
+    // then absent by construction, at the cost of a longer marker.
+    let run=0;
+    for(let i=0;i<text.length;i++){
+      if(text.charCodeAt(i)!==0)continue;
+      let j=i+1;
+      while(j<text.length&&text.charAt(j)===ch)j++;
+      if(j-i-1>run)run=j-i-1;
+    }
+    return '\x00'+ch.repeat(run+1);
   };
   // Image pass: ![alt](url) for http(s), file, data:image/ and root-relative
   // sources.  Parsed with a forward scan rather than a regex: in the regex

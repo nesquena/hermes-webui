@@ -1528,6 +1528,10 @@ class TestPlaceholderTokens:
 
     TOKEN = "\x00K0\x00"
     LINE = "[x](https://localhost/" + TOKEN + ") `![doc](/a.png)`"
+    # Every control character the marker may use as a lead.
+    CONTROLS = "".join(
+        chr(c) for c in list(range(0x00, 0x09)) + list(range(0x0E, 0x20))
+    )
 
     def _assert_preserved(self, out, where):
         assert 'href="https://localhost/' + self.TOKEN + '"' in out, (
@@ -1561,6 +1565,35 @@ class TestPlaceholderTokens:
             f"alt must keep the message text and the code's text: {out!r}"
         )
         assert "<code" not in alt, f"code markup must not enter the tag: {out!r}"
+
+    def test_placeholder_survives_a_control_rich_message(self, driver_path):
+        # Greptile P2 on #9072.  The lead was picked by bare presence and the
+        # last-resort lead was not checked at all, so a message holding every
+        # candidate control character plus a literal ``\x00K0\x00`` had those
+        # own characters taken for a placeholder and replaced by a stash entry
+        # (``undefined`` with an empty stash).  The lead is now chosen against
+        # the marker shape and lengthened while that shape is already spelled
+        # out, so the message keeps its text.
+        line = self.CONTROLS + " " + self.LINE
+        cases = (
+            ("paragraph", line),
+            ("list", "- " + line),
+            ("heading", "# " + line),
+            ("table", "| h |\n|---|\n| " + line + " |"),
+        )
+        for where, message in cases:
+            self._assert_preserved(_render(driver_path, message), where)
+
+    def test_every_single_character_marker_spelled_out(self, driver_path):
+        # The text spells out `<lead>K0\x00` for every lead, so no single
+        # character is free and only a two-character lead can carry the stash.
+        spelled = "".join(c + "K0\x00" for c in self.CONTROLS)
+        out = _render(driver_path, spelled + " `![doc](/a.png)`")
+        assert "undefined" not in out, f"a stash index leaked: {out!r}"
+        assert "<code>![doc](/a.png)</code>" in out, (
+            f"the code span must round-trip unchanged: {out!r}"
+        )
+        assert "\x00K0\x00" in out, f"the message text must survive: {out!r}"
 
     def test_normal_image_and_code_still_render(self, driver_path):
         out = _render(driver_path, "![doc](/a.png) and `![doc](/a.png)`")
