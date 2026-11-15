@@ -4549,11 +4549,20 @@ function _normalizeQuotaChipWindow(value){
 function _quotaWindowSeconds(x){
   return x&&_isQuotaMeasurement(x.limit_window_seconds)&&Number(x.limit_window_seconds)>0?Number(x.limit_window_seconds):null;
 }
+function _isAccountQuotaWindow(x){
+  const scope=typeof x.scope==='string'?x.scope.trim().toLowerCase():'';
+  return !scope||scope==='account';
+}
 function _selectQuotaChipWindow(windows){
-  const valid=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
-  if(!valid.length) return null;
+  const measured=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
+  if(!measured.length) return null;
+  // A model-only window (e.g. one model family's weekly cap) doesn't limit the
+  // account, so choose among account windows whenever there is one. The hover
+  // text still lists every window.
+  const account=measured.filter(_isAccountQuotaWindow);
+  const valid=account.length?account:measured;
   const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
-  // Pick by duration only when every measured window reports one. An untimed
+  // Pick by duration only when every candidate window reports one. An untimed
   // window can't be ordered, and skipping it could hide the depleted limit, so
   // any gap falls back to the most constrained window.
   if((mode==='shortest'||mode==='longest')&&valid.every(x=>_quotaWindowSeconds(x)!==null)){
