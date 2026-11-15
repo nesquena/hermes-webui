@@ -117,10 +117,21 @@ def test_pool_shape_weekly_first_then_session():
     assert _chip_label(windows, "longest")["label"] == "80%"
 
 
-def test_fixed_modes_ignore_untimed_windows_when_any_is_timed():
+def test_fixed_modes_fall_back_when_any_measured_window_is_untimed():
+    # An untimed window can't be ordered by duration; skipping it would show a
+    # healthy share while that limit is depleted.
     windows = [_w("Untimed", 0), _w("Weekly", 80, WEEK)]
-    assert _chip_label(windows, "shortest")["label"] == "80%"
-    assert _chip_label(windows, "longest")["label"] == "80%"
+    assert _chip_label(windows, "shortest")["label"] == "0%"
+    assert _chip_label(windows, "longest")["label"] == "0%"
+
+
+def test_codex_shaped_partial_durations_fall_back_to_most_constrained():
+    # Codex pool after a failed duration probe: Weekly backfilled with its raw
+    # duration, Session measured but untimed (tests/test_provider_quota_status.py
+    # test_codex_singleton_raw_durations_survive_failed_probe).
+    windows = [_w("Weekly", 80, WEEK), _w("Session", 5)]
+    for mode in ("shortest", "longest", "most_constrained"):
+        assert _chip_label(windows, mode)["label"] == "5%"
 
 
 @pytest.mark.parametrize("bad", [None, 0, -5, "", "abc", "0", True])
