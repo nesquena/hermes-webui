@@ -28,6 +28,15 @@ except Exception:  # pragma: no cover - depends on installed hermes-agent
     GoalState = None  # type: ignore
     judge_goal = None  # type: ignore
 
+try:  # Older hermes-agent builds predate inline completion contracts.
+    from hermes_cli.goals import (  # type: ignore
+        CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE,
+        parse_contract,
+    )
+except Exception:  # pragma: no cover - depends on installed hermes-agent
+    CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = ""  # type: ignore
+    parse_contract = None  # type: ignore
+
 GoalManager = _NativeGoalManager  # type: ignore
 
 _DB_CACHE: dict[str, Any] = {}
@@ -166,6 +175,11 @@ class _ProfileGoalManager:
         self._scoped(save_goal, self.session_id, snapshot)
 
 
+def _state_has_contract(state: Any) -> bool:
+    contract = getattr(state, "contract", None)
+    return contract is not None and not contract.is_empty()
+
+
 class _LegacyProfileGoalManager:
     """Explicit-DB fallback for Hermes versions without profile context."""
 
@@ -227,7 +241,7 @@ class _LegacyProfileGoalManager:
             return f"✓ Goal done ({turns}): {s.goal}"
         return f"Goal ({s.status}, {turns}): {s.goal}"
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None):
+    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Any = None):
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
@@ -238,6 +252,7 @@ class _LegacyProfileGoalManager:
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
             created_at=time.time(),
             last_turn_at=0.0,
+            **({"contract": contract} if contract is not None else {}),
         )
         self._state = state
         self._save(state)
@@ -286,7 +301,9 @@ class _LegacyProfileGoalManager:
         if judge_goal is None:
             verdict, reason = "continue", "goal judge unavailable"
         else:
-            verdict, reason, *_ = judge_goal(state.goal, str(last_response or ""))
+            # Judge against the parsed contract too: state.goal holds only the headline.
+            contract_kwargs = {"contract": state.contract} if _state_has_contract(state) else {}
+            verdict, reason, *_ = judge_goal(state.goal, str(last_response or ""), **contract_kwargs)
         state.last_verdict = verdict
         state.last_reason = reason
 
@@ -331,6 +348,10 @@ class _LegacyProfileGoalManager:
     def next_continuation_prompt(self) -> Optional[str]:
         if not self._state or self._state.status != "active":
             return None
+        if _state_has_contract(self._state) and CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE:
+            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(
+                goal=self._state.goal, contract_block=self._state.contract.render_block()
+            )
         return CONTINUATION_PROMPT_TEMPLATE.format(goal=self._state.goal)
 
 
@@ -522,6 +543,31 @@ def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Pa
         logger.debug("Goal state restore failed for %s: %s", session_id, exc)
 
 
+def is_goal_gate_command(args: str) -> bool:
+    """Return True when /goal args are a ``gate`` subcommand rather than goal text."""
+    words = str(args or "").split(None, 1)
+    return bool(words) and words[0].lower() == "gate"
+
+
+def goal_gate_refusal_payload(state: Any = None) -> Dict[str, Any]:
+    """Refuse /goal gate without touching the goal.
+
+    Gates are shell commands rerun after every turn with no later approval, and
+    WebUI has no rule yet for who may add them.
+    """
+    return _payload(
+        ok=False,
+        action="gate",
+        error="unsupported_gate",
+        message=(
+            "/goal gate is not supported in WebUI: gates run shell commands after every "
+            "turn without another approval. The current goal is unchanged. "
+            "To set a goal that starts with the word gate, use /goal -- <text>."
+        ),
+        state=state,
+    )
+
+
 def goal_command_payload(
     session_id: str,
     args: str = "",
@@ -536,8 +582,12 @@ def goal_command_payload(
     - /goal pause pauses
     - /goal resume resumes without auto-starting a turn
     - /goal clear|stop|done clears
+    - /goal gate ... is refused without touching the goal: gates run shell
+      commands after every turn and WebUI has no rule yet for who may add them
+    - /goal -- <text> sets goal text that starts with a control word
     - /goal <text> sets a new active goal and returns kickoff_prompt so the
-      caller can start the first normal user-role turn immediately.
+      caller can start the first normal user-role turn immediately. Inline
+      ``outcome:``/``verification:``/... lines become the completion contract.
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -604,6 +654,9 @@ def goal_command_payload(
             state=getattr(mgr, "state", None),
         )
 
+    if is_goal_gate_command(text):
+        return goal_gate_refusal_payload(getattr(mgr, "state", None))
+
     if stream_running:
         return _payload(
             ok=False,
@@ -615,8 +668,18 @@ def goal_command_payload(
             ),
         )
 
+    if text.split(None, 1)[0] == "--":
+        # `/goal -- <text>` sets goal text that starts with a control word.
+        text = text[2:].strip()
+    # Split inline contract lines off the headline the way Hermes Agent's
+    # /goal handler does; text without contract lines is stored verbatim.
+    goal_text, set_kwargs = text, {}
+    if parse_contract is not None:
+        headline, contract = parse_contract(text)
+        if not contract.is_empty():
+            goal_text, set_kwargs = headline or text, {"contract": contract}
     try:
-        state = mgr.set(text)
+        state = mgr.set(goal_text, **set_kwargs)
     except ValueError as exc:
         return _payload(ok=False, action="set", error="invalid_goal", message=f"Invalid goal: {exc}")
 
@@ -630,7 +693,8 @@ def goal_command_payload(
         message_key="goal_set",
         message_args=[state.max_turns, state.goal],
         state=state,
-        kickoff_prompt=state.goal,
+        # The first turn gets the whole text so it starts under the contract too.
+        kickoff_prompt=text if set_kwargs else state.goal,
     )
 
 
