@@ -1624,3 +1624,18 @@ def test_kanban_editor_handles_scheduled_like_blocked():
     )
     # Blocked keeps behaving the same way — the precedent Scheduled follows.
     assert labels["kanban_status_blocked"] in out["blockedHint"]
+
+
+def test_kanban_status_actions_touch_target_meets_44px_minimum():
+    """UX44-F1: the Review detail button (rendered by _kanbanRenderTaskDetail
+    into .kanban-status-actions) measured 68.8x33.2 CSS px on phone/tablet —
+    below the project's 44px touch minimum. The shared
+    `.kanban-status-actions .btn` control must carry min-height:44px scoped
+    under the repo's existing coarse-pointer condition (cf. the
+    `@media (pointer:coarse)` touch precedents elsewhere in style.css), so
+    touch layouts pass without changing desktop (fine pointer) rendering.
+    """
+    assert "@media(pointer:coarse){.kanban-status-actions.btn{min-height:44px;" in COMPACT_STYLE, (
+        "touch layouts must scope min-height:44px to .kanban-status-actions .btn "
+        "under @media (pointer:coarse)"
+    )

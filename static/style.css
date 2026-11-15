@@ -7505,6 +7505,11 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-task-preview-body{font-size:12px;color:var(--muted);line-height:1.45;margin-bottom:6px;}
 .kanban-status-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px;}
 .kanban-status-actions .btn{font-size:11px;padding:4px 8px;}
+/* UX44-F1 touch target: the shared detail status buttons (incl. the Review
+   handoff button) measured 33px tall on phone/tablet, below the 44px touch
+   minimum. Scoped to pointer:coarse per the repo's existing touch precedents
+   so desktop (fine pointer) rendering is unchanged. */
+@media (pointer:coarse){.kanban-status-actions .btn{min-height:44px;}}
 /* Generic styled buttons used throughout the Kanban panel. The Kanban PR
    stack standardised on `.btn` / `.btn.secondary` class names but never
    shipped the matching CSS, so without these rules buttons fall back to
