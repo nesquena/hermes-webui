@@ -34655,6 +34655,32 @@ def _scope_offered_by_entry(entry: dict | None, choice: str) -> str:
     return choice
 
 
+@contextlib.contextmanager
+def _session_profile_grant_scope(sid: str):
+    """Yield True with the Agent's Hermes home bound to ``sid``'s own profile.
+
+    Yields False (save nothing) when that profile home or the context-local
+    override can't be established. Agent-less mode yields True unscoped.
+    """
+    if not APPROVAL_BRIDGE["agent"]:
+        yield True
+        return
+    from api.memory_profile_scope import session_owner_profile_home
+    from api.profiles import _resolve_hermes_home_override
+
+    home = session_owner_profile_home(sid)
+    home_mod = _resolve_hermes_home_override() if home else None
+    if home_mod is None:
+        logger.warning("approval grant for session %s not saved: its profile home is unknown", sid)
+        yield False
+        return
+    token = home_mod.set_hermes_home_override(home)
+    try:
+        yield True
+    finally:
+        home_mod.reset_hermes_home_override(token)
+
+
 def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
@@ -34759,16 +34785,13 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                     if matched_data is not None:
                         matched_data["approval_id"] = approval_id
                         local_gateway_approval_id = approval_id
-        # Is an Agent waiting on this answer? Yes for a relayed run approval, the
-        # exact local producer, the no-id head, and a gateway mirror that belongs
-        # to a run or (no id) to the live queue resolve_gateway_approval answers.
-        pending_mirror = bool(pending and pending.get(_GATEWAY_MIRROR_FLAG))
+        # Gateway-held: a relayed run approval, the exact local producer, the
+        # no-id head, or any gateway mirror (live, or orphaned: never used).
         agent_held = bool(
             run_id
             or local_gateway_approval_id
             or gateway_keys
-            or (pending_mirror and str(pending.get("run_id") or "").strip())
-            or (pending_mirror and not approval_id and _gateway_queues.get(sid))
+            or (pending and pending.get(_GATEWAY_MIRROR_FLAG))
         )
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
@@ -34784,19 +34807,21 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
 
     # The Agent saves a session/always answer once its wait returns, applying its
     # per-approval scope rule (a one-operation finding saves nothing) in the
-    # session's own profile. WebUI saves only entries no Agent waits on, and only
-    # within the scope that entry offered.
+    # session's own profile. WebUI saves only raw entries no Agent waits on, never
+    # a gateway mirror (a mirror whose producer is gone was never used), only
+    # within the scope that entry offered, and only in the session's own profile.
     scope = "once" if agent_held else _scope_offered_by_entry(pending, choice)
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
     all_keys = [k for k in keys_from_pending if k]
-    if scope == "session":
-        for k in all_keys:
-            approve_session(sid, k)
-    elif scope == "always":
-        for k in all_keys:
-            approve_session(sid, k)
-            approve_permanent(k)
-        save_permanent_allowlist(_permanent_approved)
+    if scope in ("session", "always") and all_keys:
+        with _session_profile_grant_scope(sid) as in_profile:
+            for k in all_keys if in_profile else ():
+                approve_session(sid, k)
+                if scope == "always":
+                    approve_permanent(k)
+            if in_profile and scope == "always":
+                # Only the keys granted now: never another profile's in-memory grants.
+                save_permanent_allowlist(set(all_keys))
     # choice == "once": no persistence — approval lasts this single call only.
     # resolve_gateway_approval() below unblocks the parked agent thread for
     # every choice, so "once" still lets the current tool run; we just must not

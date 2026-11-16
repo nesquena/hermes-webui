@@ -8,9 +8,12 @@ incomplete scan) and does not save a broader answer an older client returns.
 WebUI's own save also ran in the HTTP thread, outside the session's profile.
 
 ``_resolve_approval_legacy`` now leaves the grant to the Agent whenever an Agent
-is waiting on the answer, and for entries no Agent waits on it saves only within
-the scopes the entry offered (``allow_session``/``allow_permanent``/
-``smart_denied``; missing flags keep the answer as given).
+is waiting on the answer, saves nothing for any gateway mirror (an orphaned
+mirror's answer was never used), and for raw entries no Agent waits on it saves
+only within the scopes the entry offered (``allow_session``/``allow_permanent``/
+``smart_denied``; missing flags keep the answer as given), only in the session's
+own profile (tests/test_approval_profile_scoped_grants.py) and only the keys
+just granted.
 
 The unit tests record WebUI's grant calls. The end-to-end tests drive the real
 Agent gate in a subprocess, answer through WebUI's respond route, and check
@@ -25,9 +28,11 @@ import sys
 import threading
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from api import models
 from api import route_approvals
 from api import routes
 
@@ -45,8 +50,12 @@ def grants(monkeypatch):
 
 
 @pytest.fixture
-def sid():
+def sid(monkeypatch):
     session_id = f"approval-scope-{uuid.uuid4().hex[:8]}"
+    # A default-profile WebUI session, so WebUI-held grants have a profile home.
+    monkeypatch.setitem(
+        models.SESSIONS, session_id, SimpleNamespace(session_id=session_id, profile="default")
+    )
     yield session_id
     with routes._lock:
         routes._pending.pop(session_id, None)
@@ -111,7 +120,7 @@ def _expected_grants(sid, scope, key="recursive delete"):
         return [
             ("approve_session", (sid, key)),
             ("approve_permanent", (key,)),
-            ("save_permanent_allowlist", (routes._permanent_approved,)),
+            ("save_permanent_allowlist", ({key},)),
         ]
     return []
 
@@ -121,7 +130,8 @@ def _expected_grants(sid, scope, key="recursive delete"):
 @pytest.mark.parametrize("choice", ["once", "session", "always"])
 def test_webui_only_entry_is_saved_within_its_offered_scope(grants, sid, kind, case, choice):
     """No Agent waits on a raw entry (the loopback test-seeding route, an older Agent's
-    no-notifier ``_pending`` write) or on a mirror whose producer is gone."""
+    no-notifier ``_pending`` write) or on a mirror whose producer is gone. Only the raw
+    entry is saved: the orphan mirror's command was never run on this answer."""
     entry = {**_card(**FLAG_CASES[case]), "approval_id": f"aid-{sid}"}
     if kind == "orphan_mirror":
         entry[route_approvals._GATEWAY_MIRROR_FLAG] = True
@@ -130,9 +140,51 @@ def test_webui_only_entry_is_saved_within_its_offered_scope(grants, sid, kind, c
 
     assert routes._resolve_approval_legacy(sid, entry["approval_id"], choice) is True
 
-    assert grants == _expected_grants(sid, EXPECTED_SCOPE.get((case, choice), choice))
+    expected = EXPECTED_SCOPE.get((case, choice), choice) if kind == "raw_entry" else "once"
+    assert grants == _expected_grants(sid, expected)
     with routes._lock:
         assert not routes._pending.get(sid)
+
+
+def test_always_saves_only_the_keys_it_granted(grants, sid, monkeypatch):
+    """Grants already in memory (another session or profile) are not passed to the save."""
+    monkeypatch.setattr(routes, "_permanent_approved", {"earlier key from elsewhere"})
+    entry = {**_card("first key"), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
+    with routes._lock:
+        routes._pending[sid] = [entry]
+
+    assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
+
+    saves = [args for name, args in grants if name == "save_permanent_allowlist"]
+    assert saves == [({"first key", "second key"},)]
+
+
+def test_unknown_session_profile_saves_nothing(grants, monkeypatch):
+    """With an Agent bound, a session whose profile can't be resolved is treated as once."""
+    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
+    unknown = f"approval-scope-missing-{uuid.uuid4().hex[:8]}"
+    with routes._lock:
+        routes._pending[unknown] = [{**_card(), "approval_id": f"aid-{unknown}"}]
+    try:
+        assert routes._resolve_approval_legacy(unknown, f"aid-{unknown}", "always") is True
+    finally:
+        with routes._lock:
+            routes._pending.pop(unknown, None)
+    assert grants == []
+
+
+def test_agent_less_mode_still_saves_unscoped(grants, monkeypatch):
+    """No Agent: there is no profile-scoped grant store, so behaviour is unchanged."""
+    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", False)
+    unknown = f"approval-scope-agentless-{uuid.uuid4().hex[:8]}"
+    with routes._lock:
+        routes._pending[unknown] = [{**_card(), "approval_id": f"aid-{unknown}"}]
+    try:
+        assert routes._resolve_approval_legacy(unknown, f"aid-{unknown}", "always") is True
+    finally:
+        with routes._lock:
+            routes._pending.pop(unknown, None)
+    assert grants == _expected_grants(unknown, "always")
 
 
 # ── Approvals an Agent is waiting on: WebUI saves nothing ───────────────────
