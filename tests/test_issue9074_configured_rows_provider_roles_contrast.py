@@ -60,7 +60,8 @@ def _configured_row(rows, name):
 
 
 _PROVIDER_PILL_RE = re.compile(
-    r'<span class="model-opt-provider model-opt-provider--configured" title="([^"]*)">([^<]*)</span>'
+    r'<span class="model-opt-provider model-opt-provider--configured(?: model-opt-provider--fit)?" '
+    r'title="([^"]*)">([^<]*)</span>'
 )
 
 
@@ -93,6 +94,112 @@ def test_long_custom_provider_name_is_kept_whole_in_the_pill(tmp_path):
     assert pill and pill.group(2) == long_name and pill.group(1) == long_name
 
 
+# The pill must name the provider the row's click selects. A row's group label
+# can be the backend's injected "Default" group (a default missing from its
+# provider's catalog, or a label that carries a "(N of M)" count), or empty for
+# a configured id outside every group.
+# renderModelDropdown's default onSelect calls selectModelFromDropdown(value, provider).
+_SELECT_RECORDER = (
+    "function selectFromDropdown() {}\n"
+    "function selectModelFromDropdown(value, provider) { globalThis.__sel = { value, provider }; }"
+)
+assert _DRIVER_WITH_LOCALE.count("function selectFromDropdown() {}") == 1
+assert _DRIVER_WITH_LOCALE.count("  rows.push({\n") == 1
+_DRIVER_WITH_CLICKS = _DRIVER_WITH_LOCALE.replace(
+    "function selectFromDropdown() {}", _SELECT_RECORDER, 1
+).replace(
+    "  rows.push({\n",
+    "  globalThis.__sel = null;\n  node.onclick({ stopPropagation() {}, preventDefault() {} });\n"
+    "  rows.push({\n    selected: globalThis.__sel,\n",
+    1,
+)
+_CUSTOM_ID = "custom:magpie-research-inference-gateway-eu-west-staging"
+_CUSTOM_LABEL = "Magpie Research Inference Gateway (eu-west staging)"
+
+
+def _render_with_clicks(tmp_path, payload):
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    driver = tmp_path / "driver_clicks.js"
+    driver.write_text(_DRIVER_WITH_CLICKS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(UI_JS_PATH), json.dumps(payload)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)["rows"]
+
+
+@pytest.mark.parametrize(
+    "groups,badges,name,provider,pill_text",
+    [
+        pytest.param(
+            [
+                {"provider": "Nous Portal (15 of 40)", "provider_id": "nous", "models": [{"id": "hermes-4-70b"}]},
+                {"provider": "Default", "provider_id": "nous", "models": [{"id": "hermes-4-405b"}]},
+            ],
+            {"hermes-4-405b": {"provider": "nous", "role": "primary", "label": "Primary"}},
+            "hermes-4-405b", "nous", "Nous Portal",
+            id="count-label-default-group",
+        ),
+        pytest.param(
+            [
+                {"provider": _CUSTOM_LABEL, "provider_id": _CUSTOM_ID, "models": [{"id": "llama-4"}]},
+                {"provider": "Default", "provider_id": _CUSTOM_ID, "models": [{"id": "gpt-4o-custom"}]},
+            ],
+            {"gpt-4o-custom": {"provider": _CUSTOM_ID, "role": "primary", "label": "Primary"}},
+            "gpt-4o-custom", _CUSTOM_ID, _CUSTOM_LABEL,
+            id="custom-catalog-miss",
+        ),
+        pytest.param(
+            [
+                {"provider": "OpenAI", "provider_id": "openai", "models": [{"id": "gpt-4o"}]},
+                {"provider": "Default", "provider_id": "custom:solo-gw", "models": [{"id": "solo-1"}]},
+            ],
+            {"solo-1": {"provider": "custom:solo-gw", "role": "primary", "label": "Primary"}},
+            "solo-1", "custom:solo-gw", "solo-gw",
+            id="default-group-only-falls-back-to-the-id",
+        ),
+        pytest.param(
+            [{"provider": "OpenAI", "provider_id": "openai", "models": [{"id": "gpt-4o"}]}],
+            {"o9-preview": {"provider": "openai", "role": "fallback", "label": "Fallback 1"}},
+            "o9-preview", "openai", "OpenAI",
+            id="configured-id-outside-every-group",
+        ),
+    ],
+)
+def test_configured_provider_pill_names_the_provider_the_click_selects(
+    tmp_path, groups, badges, name, provider, pill_text
+):
+    payload = {"groups": groups, "configuredBadges": badges, "selectedValue": ""}
+    row = _configured_row(_render_with_clicks(tmp_path, payload), name)
+
+    assert row["selected"] and row["selected"]["provider"] == provider, row
+    pill = _PROVIDER_PILL_RE.search(row["html"])
+    assert pill, f"Configured row {name} shows no provider pill: {row['html']}"
+    assert pill.group(2) == pill_text and pill.group(1) == pill_text, (
+        f"the pill reads {pill.group(2)!r} but the click selects {provider!r}"
+    )
+
+
+def test_configured_row_name_is_escaped_exactly_once(tmp_path):
+    """Picker rows carry names already escaped where they are built, so the
+    Configured row renders ``m.name`` as is. Escaping it again would show
+    ``&amp;`` text; not escaping at build time would inject markup."""
+    label = '<img src=x onerror="alert(1)">R&D'
+    payload = {
+        "groups": [{"provider": "OpenAI", "provider_id": "openai", "models": [{"id": "rnd-1", "label": label}]}],
+        "configuredBadges": {"rnd-1": {"provider": "openai", "role": "primary", "label": "Primary"}},
+        "selectedValue": "",
+    }
+    rows = [row for row in _render_with_clicks(tmp_path, payload) if row["chipText"] is not None]
+    assert len(rows) == 1, rows
+    assert rows[0]["name"] == "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;R&amp;D"
+    assert "<img" not in rows[0]["html"]
+
+
 def test_configured_provider_pill_ellipsizes_instead_of_wrapping():
     rule = re.search(r"\.model-opt-provider--configured\{([^}]*)\}", STYLE_CSS)
     assert rule, "no .model-opt-provider--configured rule"
@@ -100,6 +207,41 @@ def test_configured_provider_pill_ellipsizes_instead_of_wrapping():
     # A zero flex-basis keeps the pill from forcing a wrap; it grows up to its own width.
     for decl in ("flex:1 1 0", "max-width:max-content", "overflow:hidden", "text-overflow:ellipsis"):
         assert decl in body, f"{decl} missing from {body}"
+
+
+@pytest.mark.parametrize(
+    "provider,fits",
+    [
+        ("OpenAI", True),
+        ("Anthropic", True),
+        ("OpenRouter", True),
+        ("Nous Portal", True),
+        ("Fourteen chars", True),
+        ("Fifteen chars!!", False),
+        ("Magpie Research Inference Gateway (eu-west staging)", False),
+    ],
+)
+def test_short_provider_names_keep_their_width_instead_of_a_stub(tmp_path, provider, fits):
+    """An ellipsis on a short name leaves a stub ("Ope…", "A…") that can't tell
+    OpenAI from OpenRouter or OpenCode, so a name of up to 14 characters keeps
+    its full width and wraps whole; longer names still shrink to an 8em floor."""
+    payload = json.loads(json.dumps(_PAYLOAD))
+    payload["groups"][0]["provider"] = provider
+    row = _configured_row(_render(tmp_path, payload), "gpt-4o")
+    pill = re.search(r'<span class="(model-opt-provider model-opt-provider--configured[^"]*)"', row["html"])
+    assert pill, row["html"]
+    assert ("model-opt-provider--fit" in pill.group(1).split()) is fits, pill.group(1)
+
+
+def test_fit_pill_never_shrinks_and_long_pills_keep_an_8em_floor():
+    fit = re.search(r"\.model-opt-provider--configured\.model-opt-provider--fit\{([^}]*)\}", STYLE_CSS)
+    assert fit, "no .model-opt-provider--configured.model-opt-provider--fit rule"
+    assert "flex:0 0 auto" in fit.group(1) and "min-width:0" in fit.group(1), fit.group(1)
+    base = re.search(r"\.model-opt-provider--configured\{([^}]*)\}", STYLE_CSS)
+    assert base and "min-width:8em" in base.group(1), base and base.group(1)
+    # The row wraps, so a pill that won't shrink moves to its own line whole.
+    top = re.search(r"\.model-opt-top\{([^}]*)\}", STYLE_CSS)
+    assert top and "flex-wrap:wrap" in top.group(1), top and top.group(1)
 
 
 # ── 2. translated roles ───────────────────────────────────────────────────

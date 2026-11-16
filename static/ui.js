@@ -7192,10 +7192,18 @@ function renderModelDropdown(){
         // #9074: a title is out of reach on touch and keyboard, so the provider
         // the chip used to name gets the muted pill the group rows use. It sits
         // beside the chip rather than inside it, and ellipsizes on narrow phones.
-        const providerName=(m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'')
-          || (m.badge&&m.badge.provider?String(m.badge.provider).replace(/^custom:/,'').split('/')[0]:'');
+        // It names the provider the click selects, from that provider's own group:
+        // m.group can be the backend's injected "Default" group, or empty.
+        const providerId=String((m.badge&&m.badge.provider)||m.providerId||'');
+        const providerMeta=_groupMeta.get(providerId);
+        const providerLabel=providerMeta?String(providerMeta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
+        const providerName=(providerLabel&&providerLabel!=='Default')?providerLabel
+          :providerId.replace(/^custom:/,'').split('/')[0];
+        // A short name keeps its full width and wraps whole: an ellipsis on it
+        // leaves a stub ("Ope…") that can't tell OpenAI from OpenRouter.
+        const providerFit=providerName.length<=14?' model-opt-provider--fit':'';
         const providerChip=providerName
-          ?`<span class="model-opt-provider model-opt-provider--configured" title="${esc(providerName)}">${esc(providerName)}</span>`
+          ?`<span class="model-opt-provider model-opt-provider--configured${providerFit}" title="${esc(providerName)}">${esc(providerName)}</span>`
           :'';
         // #8733: the chip no longer carries the routing key, so the matched key
         // rides on the chip's title. The subtitle stays the option id, which the

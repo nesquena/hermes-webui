@@ -3665,11 +3665,15 @@
    wrapping the row onto a second line on narrow phones. A zero basis keeps the
    pill from forcing a wrap; it grows into the line's free space up to its own
    width, and margin-left:auto still right-aligns it. */
-.model-opt-provider--configured{display:block;flex:1 1 0;min-width:3.5em;max-width:max-content;overflow:hidden;text-overflow:ellipsis;}
+.model-opt-provider--configured{display:block;flex:1 1 0;min-width:8em;max-width:max-content;overflow:hidden;text-overflow:ellipsis;}
 /* The pill is a Configured row's only visible provider, and plain --muted fell
    to 2.5:1 (Nous dark) and 3.5:1 (Catppuccin light). Mixed toward --text it stays
    >=4.5:1 on plain, hover, highlighted and active rows in every skin, light and dark. */
 .model-opt-provider--configured{color:color-mix(in srgb,var(--muted) 40%,var(--text));}
+/* A short provider name (<=14 characters, class set in ui.js) never shrinks to a
+   stub like "Ope…": it keeps its width and wraps whole. Longer names shrink to
+   the 8em floor above, then wrap. */
+.model-opt-provider--configured.model-opt-provider--fit{flex:0 0 auto;min-width:0;}
 /* #9074: the dark-theme chip colours measured ~1.1:1 on the light dropdown.
    Mixed from the theme tokens, they stay >=4.5:1 on plain, hover and active rows
    in every light skin (the tightest are Catppuccin's active row and neon-paint). */
