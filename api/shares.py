@@ -1110,6 +1110,23 @@ class ShareTokenOwnershipError(Exception):
         )
 
 
+class ShareTokenAncestryUncertainError(ShareTokenOwnershipError):
+    """A share token's ancestry could not be conclusively determined.
+
+    Domain error derived from :class:`ShareTokenOwnershipError`: when an ancestry
+    walk encounters an I/O failure or unexpected error during refresh, callers
+    must refuse rather than minting a replacement token or overwriting the
+    snapshot. The ``/api/share/*`` handlers map it to an explicit 409 (#8950).
+    """
+
+    def __init__(self, token: str, owner_session_id: str, acting_session_id: str):
+        super().__init__(token, owner_session_id, acting_session_id)
+        self.args = (
+            f"Share token '{self.token}' ancestry between '{self.owner_session_id}' "
+            f"and '{self.acting_session_id}' could not be verified",
+        )
+
+
 class ShareSnapshotUnreadable(Exception):
     """A share snapshot exists on disk but could not be read due to an I/O failure.
 
@@ -1301,7 +1318,7 @@ def _compression_continuation_state(child_sid: str, parent_sid: str) -> str:
             "Compression continuation state check failed between %s and %s",
             child_sid, parent_sid, exc_info=True,
         )
-        return "no"
+        return "unknown"
 
 
 def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
@@ -1403,7 +1420,7 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
                 path = None
                 existing = None
             elif isinstance(existing, dict):
-                # #8734: the token in this session's sidecar is a claim, not proof.
+                # #8734, #8950: the token in this session's sidecar is a claim, not proof.
                 # Never rewrite a snapshot another session owns — mint this session its
                 # own token instead, so the other session's public URL keeps serving
                 # its own conversation.
@@ -1412,17 +1429,22 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
                     existing_owner
                     and acting_sid
                     and existing_owner != acting_sid
-                    and not _is_compression_continuation(acting_sid, existing_owner)
                 ):
-                    reassigned_from = token
-                    token = ""
-                    path = None
-                    existing = None
-                    logger.warning(
-                        "Share token %s in session %s belongs to session %s; minted a "
-                        "new token instead of overwriting that snapshot (#8734)",
-                        reassigned_from, acting_sid, existing_owner,
-                    )
+                    continuation_state = _compression_continuation_state(acting_sid, existing_owner)
+                    if continuation_state == "yes":
+                        pass
+                    elif continuation_state == "no":
+                        reassigned_from = token
+                        token = ""
+                        path = None
+                        existing = None
+                        logger.warning(
+                            "Share token %s in session %s belongs to session %s; minted a "
+                            "new token instead of overwriting that snapshot (#8734)",
+                            reassigned_from, acting_sid, existing_owner,
+                        )
+                    else:
+                        raise ShareTokenAncestryUncertainError(token, existing_owner, acting_sid)
         if path is None:
             token = secrets.token_urlsafe(18)
             path = _share_path(token)
