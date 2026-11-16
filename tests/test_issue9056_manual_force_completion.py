@@ -392,40 +392,57 @@ def test_manual_force_registry_expiry(monkeypatch):
     assert key not in updates._manual_update_checks, "expired entry was not dropped from registry"
 
 
-# ── Test H (route-to-consumer) ────────────────────────────────────────────────
+# ── Test H (route-to-consumer, coupled payloads) ──────────────────────────────
 
 
-def test_manual_force_route_to_consumer():
-    """H: extract checkUpdatesNow from static/panels.js and verify consumer behavior in node:
+def _producer_payloads(monkeypatch) -> dict:
+    """Drive the real route handlers and return the payloads a forced manual check produces.
 
-    (i) with fixed contract (POST pending -> GET completed payload), final status text
-        is updates-available text and _showUpdateBanner fires;
-    (ii) with control payload {"disabled": true}, final text is disabled text.
+    The consumer test below must replay these exact server answers: payloads built by
+    hand in the test would pass even with the server short-circuit restored, which is
+    precisely the regression this file has to catch.
     """
+    _reset_cache(monkeypatch)
+    monkeypatch.setenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", "0")
+    monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": False})
+
+    gate = threading.Event()
+
+    def slow_check_repo(path, name, channel=updates.DEFAULT_UPDATE_CHANNEL):
+        gate.wait(timeout=5)
+        return {"name": name, "behind": 7 if name == "webui" else 0, "channel": channel}
+
+    monkeypatch.setattr(updates, "_check_repo", slow_check_repo)
+
+    post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+    in_flight_payload = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+    gate.set()
+    _drain_background()
+    completed_payload = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+    return {
+        "post": post_payload,
+        "in_flight": in_flight_payload,
+        "completed": completed_payload,
+    }
+
+
+def _build_consumer_harness(post_payload: dict, get_payloads: list[dict]) -> str:
+    """Render checkUpdatesNow() from static/panels.js with the server payloads replayed in order."""
     panels_js = PANELS_JS_PATH.read_text(encoding="utf-8")
     extracted_fn = extract_function(panels_js, "checkUpdatesNow", prefix="async function")
-
-    def build_harness(get_payload: dict) -> str:
-        return f"""
+    return f"""
 const requests = [];
-let getCount = 0;
-const getPayload = {json.dumps(get_payload)};
+const postPayload = {json.dumps(post_payload)};
+const getPayloads = {json.dumps(get_payloads)};
+let getIndex = 0;
 
 async function api(url, opts) {{
-  requests.push({{ url, method: opts ? opts.method : 'GET' }});
-  if (opts && opts.method === 'POST') {{
-    return {{
-      pending: true,
-      cached: true,
-      channel: 'stable',
-      include_agent: true,
-      webui: null,
-      agent: null,
-      stale_key: true,
-    }};
-  }}
-  getCount++;
-  return getPayload;
+  const method = (opts && opts.method) || 'GET';
+  requests.push({{ url, method }});
+  if (method === 'POST') return postPayload;
+  const payload = getPayloads[Math.min(getIndex, getPayloads.length - 1)];
+  getIndex++;
+  return payload;
 }}
 
 const elements = {{
@@ -455,6 +472,7 @@ setTimeout = (fn, ms) => setImmediate(fn);
   console.log(JSON.stringify({{
     requestCount: requests.length,
     requests,
+    getCount: getIndex,
     statusText: elements.checkUpdatesStatus.textContent,
     statusColor: elements.checkUpdatesStatus.style.color,
     spinnerDisplay: elements.checkUpdatesSpinner.style.display,
@@ -464,24 +482,95 @@ setTimeout = (fn, ms) => setImmediate(fn);
 }})();
 """
 
-    # (i) Fixed contract: completed payload with updates
-    fixed_completed_payload = {
-        "pending": False,
-        "cached": True,
-        "channel": "stable",
-        "include_agent": True,
-        "webui": {"name": "webui", "behind": 7},
-        "agent": {"name": "agent", "behind": 0},
-    }
-    result_fixed = _run_node(build_harness(fixed_completed_payload))
-    assert result_fixed["requestCount"] >= 2, f"expected poll requests, got {result_fixed['requestCount']}"
-    assert "Updates available" in result_fixed["statusText"], f"expected updates available, got: {result_fixed['statusText']}"
-    assert result_fixed["bannerCalls"] == 1, "banner must fire from completed payload"
-    assert result_fixed["requests"][1]["url"] == "/api/updates/check?channel=stable&include_agent=1"
 
-    # (ii) Control: disabled answer
-    disabled_payload = {"disabled": True}
-    result_disabled = _run_node(build_harness(disabled_payload))
-    assert result_disabled["requestCount"] >= 2
-    assert "Updates are disabled" in result_disabled["statusText"], f"expected disabled text, got: {result_disabled['statusText']}"
-    assert result_disabled["bannerCalls"] == 0, "banner must NOT fire when disabled"
+def test_manual_force_route_to_consumer(monkeypatch):
+    """H: the payloads the real handlers return must drive the real consumer to "available".
+
+    disabled-auto: the forced POST answers pending, the in-flight GET answers pending (never
+    disabled) and the completed GET carries webui.behind == 7. Replaying exactly those three
+    answers through the extracted checkUpdatesNow() must end on the updates-available text and
+    fire the banner once. With the pre-fix handlers the in-flight GET answers {{"disabled": true}},
+    the consumer stops polling and renders the disabled text, so this test fails.
+    """
+    payloads = _producer_payloads(monkeypatch)
+
+    result = _run_node(_build_consumer_harness(payloads["post"], [payloads["in_flight"], payloads["completed"]]))
+    assert result["requestCount"] >= 2, f"expected a poll round-trip, got {result['requestCount']} request(s)"
+    assert "Updates available" in result["statusText"], (
+        f"consumer rendered {result['statusText']!r} instead of the updates-available text"
+    )
+    assert "disabled" not in result["statusText"].lower(), (
+        f"consumer rendered the disabled text: {result['statusText']!r}"
+    )
+    assert result["bannerCalls"] == 1, "banner must fire exactly once from the completed payload"
+    assert result["requests"][1] == {
+        "url": "/api/updates/check?channel=stable&include_agent=1",
+        "method": "GET",
+    }, f"poll did not target the key-consistent GET: {result['requests']}"
+
+    # The producer-side contract behind the replayed answers, kept as diagnostics.
+    assert payloads["post"].get("pending") is True, f"POST did not answer pending: {payloads['post']}"
+    assert payloads["in_flight"].get("pending") is True, (
+        f"in-flight GET did not answer pending: {payloads['in_flight']}"
+    )
+    assert payloads["in_flight"] != {"disabled": True}, "in-flight GET answered disabled"
+    assert payloads["completed"].get("pending") is not True, (
+        f"completed GET still pending: {payloads['completed']}"
+    )
+    assert payloads["completed"].get("webui", {}).get("behind") == 7, (
+        f"completed payload lost webui.behind: {payloads['completed']}"
+    )
+
+
+def test_manual_force_route_to_consumer_control_enabled_auto(monkeypatch):
+    """H-control: with auto on the real POST already answers the completed payload.
+
+    The consumer must render updates-available from that single answer, without polling.
+    """
+    _reset_cache(monkeypatch)
+    monkeypatch.delenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", raising=False)
+    monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": True})
+    monkeypatch.setattr(
+        updates,
+        "_check_repo",
+        lambda path, name, channel=updates.DEFAULT_UPDATE_CHANNEL: {
+            "name": name,
+            "behind": 7 if name == "webui" else 0,
+            "channel": channel,
+        },
+    )
+
+    post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+    _drain_background()
+    assert post_payload.get("pending") is not True, f"enabled-auto POST answered pending: {post_payload}"
+    assert post_payload.get("webui", {}).get("behind") == 7
+
+    result = _run_node(_build_consumer_harness(post_payload, []))
+    assert result["requestCount"] == 1, f"enabled-auto POST must not poll: {result['requests']}"
+    assert "Updates available" in result["statusText"], (
+        f"consumer rendered {result['statusText']!r} instead of the updates-available text"
+    )
+    assert result["bannerCalls"] == 1, "banner must fire from the completed POST payload"
+
+
+def test_manual_force_route_to_consumer_control_disabled_non_forced(monkeypatch):
+    """H-control: a non-forced POST on disabled auto answers {"disabled": true} for real.
+
+    The consumer must render the disabled text and never fire the banner.
+    """
+    _reset_cache(monkeypatch)
+    monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": False})
+    scans = []
+    monkeypatch.setattr(updates, "_check_repo", lambda *a, **k: scans.append(a))
+
+    post_payload = _dispatch_post(monkeypatch, {"channel": "stable"})["ok"]
+    assert post_payload == {"disabled": True}, post_payload
+    assert len(scans) == 0, f"_check_repo was called {len(scans)} times"
+
+    result = _run_node(_build_consumer_harness(post_payload, []))
+    assert result["requestCount"] == 1, f"disabled POST must not poll: {result['requests']}"
+    assert "Updates are disabled" in result["statusText"], (
+        f"consumer rendered {result['statusText']!r} instead of the disabled text"
+    )
+    assert result["bannerCalls"] == 0, "banner must NOT fire when the server answers disabled"
+
