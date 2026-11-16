@@ -447,6 +447,38 @@ const scenarios = {
   // (f) the open session changes without loadSession() (a compression
   // continuation swap): a pill painted for A must not enable YOLO for the
   // new session N, and must not write to N at all.
+  // (g) an explicit /yolo enable for the open session A, made while a switch to
+  // B is still loading, must not be dropped: if B's load then fails, A stays
+  // open with YOLO on, so its "click to disable" pill must still show.
+  async g_enable_during_failed_switch_keeps_open_session_pill() {
+    const server = createServer({ A: { active_stream_id: 'stream-a' }, B: {} });
+    const handle = server.handle;
+    let rejectB = null;
+    server.handle = (method, p, body) => {
+      if (method === 'GET' && p.startsWith('/api/session?session_id=B&')) {
+        return new Promise((_, reject) => { rejectB = () => reject(Object.assign(new Error('metadata unavailable'), { status: 500 })); });
+      }
+      return handle(method, p, body);
+    };
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('A');
+    await tick();
+    const switching = tab.loadSession('B');
+    await tick();
+    check(typeof rejectB === 'function', 'precondition: B metadata request in flight', tab.calls);
+    await tab.cmdYolo();
+    await tick();
+    check(server.yolo.A === true, 'precondition: /yolo enabled A on the server', { server: { ...server.yolo } });
+    rejectB();
+    await switching;
+    await tick();
+    const st = tab.state();
+    const out = { after_failed_switch: st, server: { ...server.yolo }, toasts: tab.toasts };
+    check(st.sid === 'A' && st.pillVisible === true && st.yolo === true,
+      `A stays open with server yolo[A]=true but pill visible=${st.pillVisible}, mirror=${st.yolo}`, out);
+    return out;
+  },
+
   async f_pill_click_after_untracked_session_swap_enables_new_session() {
     const server = createServer({ A: {}, N: {} });
     const tab = createTab(server, 'tab1');

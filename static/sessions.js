@@ -3178,6 +3178,9 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  // Key the YOLO view to the installed session, dropping any pill an explicit
+  // write for the departing session restored while this load was in flight.
+  if(typeof _applyYoloState==='function') _applyYoloState(sid,false,{reset:true});
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override

@@ -8487,8 +8487,10 @@ function _applyYoloState(sid, enabled, meta) {
   if (!S.session || S.session.session_id !== sid) return false;
   const gen = typeof m.gen === 'number' ? m.gen : _loadSessionGeneration;
   if (gen !== _loadSessionGeneration) return false;
-  if (_loadingSessionId && _loadingSessionId !== sid) return false;
   const isRead = typeof m.readSeq === 'number';
+  // A read for the open session is stale once another session starts loading;
+  // an explicit write's answer is not: the open session really changed.
+  if (isRead && _loadingSessionId && _loadingSessionId !== sid) return false;
   if (isRead && m.readSeq !== _yoloView.seq) return false;
   _yoloView = {sid, enabled, gen, seq: _yoloView.seq + (isRead ? 0 : 1)};
   _yoloEnabled = enabled;

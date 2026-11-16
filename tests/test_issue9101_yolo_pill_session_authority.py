@@ -44,6 +44,7 @@ SCENARIOS = [
     "e_stale_on_pill_click_after_server_restart_enables",
     "e2_stale_on_pill_click_with_visible_card_approves",
     "f_pill_click_after_untracked_session_swap_enables_new_session",
+    "g_enable_during_failed_switch_keeps_open_session_pill",
 ]
 
 
