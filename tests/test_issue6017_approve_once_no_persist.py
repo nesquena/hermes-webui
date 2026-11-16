@@ -44,7 +44,7 @@ def _seed_gateway_entry(ta, sid, pattern_key):
         "description": "recursive delete",
     })
     with ta._lock:
-        ta._pending.pop(sid, None)
+        importlib.import_module("api.route_approvals")._pending.pop(sid, None)
         ta._gateway_queues.setdefault(sid, []).append(entry)
     return entry
 
@@ -53,7 +53,7 @@ def _cleanup(ta, sid):
     with ta._lock:
         ta._gateway_queues.pop(sid, None)
         ta._session_approved.pop(sid, None)
-        ta._pending.pop(sid, None)
+        importlib.import_module("api.route_approvals")._pending.pop(sid, None)
 
 
 def test_approve_once_releases_call_but_does_not_persist():

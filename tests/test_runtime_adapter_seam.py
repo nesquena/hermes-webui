@@ -370,7 +370,7 @@ def test_approval_respond_approves_from_gateway_queues_when_pending_empty() -> N
 
     # 1. Ensure _pending is empty for this sid
     with approval_mod._lock:
-        approval_mod._pending.pop(test_sid, None)
+        importlib.import_module("api.route_approvals")._pending.pop(test_sid, None)
 
     # 2. Populate _gateway_queues with a real entry
     entry = approval_mod._ApprovalEntry({
@@ -400,7 +400,7 @@ def test_approval_respond_approves_from_gateway_queues_when_pending_empty() -> N
         with approval_mod._lock:
             approval_mod._gateway_queues.pop(test_sid, None)
             approval_mod._session_approved.pop(test_sid, None)
-            approval_mod._pending.pop(test_sid, None)
+            importlib.import_module("api.route_approvals")._pending.pop(test_sid, None)
 
 
 def test_chat_start_route_selects_adapter_only_when_flag_enabled():
