@@ -12208,8 +12208,21 @@ function _ensureAppDialogBindings(){
   }, true);
 }
 
+// #6711: #appDialogOverlay is a <body> child, so while preview fullscreen is
+// active the browser paints only the fullscreen element and the prompt stays
+// invisible — even though its focus trap still swallows Tab/Enter. Leave
+// fullscreen before showing an app dialog; the panel keeps its state and can be
+// re-entered with one click.
+function _leavePreviewFullscreenForDialog(){
+  if(!document.fullscreenElement) return;
+  const panel=document.querySelector('.rightpanel.preview-fullscreen');
+  if(panel && typeof setPreviewFullscreen==='function'){ setPreviewFullscreen(false); return; }
+  try{ const r=document.exitFullscreen(); if(r&&typeof r.catch==='function') r.catch(()=>{}); }catch(_){}
+}
+
 function showConfirmDialog(opts={}){
   _ensureAppDialogBindings();
+  _leavePreviewFullscreenForDialog();
   if(APP_DIALOG.resolve) _finishAppDialog(false,false);
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');
@@ -12235,6 +12248,7 @@ function showConfirmDialog(opts={}){
 
 function showPromptDialog(opts={}){
   _ensureAppDialogBindings();
+  _leavePreviewFullscreenForDialog();
   if(APP_DIALOG.resolve) _finishAppDialog(null,false);
   const overlay=$('appDialogOverlay'),dialog=$('appDialog'),title=$('appDialogTitle'),
     desc=$('appDialogDesc'),input=$('appDialogInput'),cancelBtn=$('appDialogCancel'),confirmBtn=$('appDialogConfirm');

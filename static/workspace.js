@@ -1582,6 +1582,12 @@ document.addEventListener('fullscreenchange', ()=>{
 // key was cleared by hand.
 const _PREVIEW_FS_MIN = 8;
 const _PREVIEW_FS_MAX = 36;
+// The last explicit A−/A+ choice, kept in memory so a failed localStorage write
+// (private mode, quota, storage disabled) still resizes the preview for this
+// session. Losing persistence must not also lose the user's choice: the buttons
+// used to update the label while the inline size was dropped again on the next
+// read, so the preview never changed size.
+let _previewFontSizeSession = null;
 function _clampPreviewFontSize(value){
   const n = parseInt(value, 10);
   if (!Number.isFinite(n)) return null;
@@ -1600,6 +1606,7 @@ function _readPreviewFontSize(){
  * global small/large/xlarge mapping.
  */
 function _getPreviewFontSize(){
+  if (_previewFontSizeSession !== null) return _previewFontSizeSession;
   const stored = _readPreviewFontSize();
   if (stored !== null) return stored;
   try{
@@ -1623,7 +1630,11 @@ function _applyPreviewFontSize(px){
   // the stylesheet; otherwise drop the inline property and let the
   // data-font-size mapping keep driving the variable.
   const root = document.documentElement;
-  if (_readPreviewFontSize() !== null) root.style.setProperty('--preview-font-size', px + 'px');
+  // An explicit choice may live only in memory when the storage write failed;
+  // it still earns the inline override. Only an inherited value (no choice at
+  // all) must leave the stylesheet in charge.
+  const explicit = _previewFontSizeSession !== null || _readPreviewFontSize() !== null;
+  if (explicit) root.style.setProperty('--preview-font-size', px + 'px');
   else root.style.removeProperty('--preview-font-size');
   const label = document.getElementById('previewFontSizeLabel');
   if(label) label.textContent = String(px);
@@ -1631,6 +1642,7 @@ function _applyPreviewFontSize(px){
 function _setPreviewFontSize(px){
   const clamped = _clampPreviewFontSize(px);
   if (clamped === null) return;   // never persist or apply NaN
+  _previewFontSizeSession = clamped;
   try{ localStorage.setItem('hermes-preview-font-size', String(clamped)); }catch(_){}
   _applyPreviewFontSize(clamped);
 }

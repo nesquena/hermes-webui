@@ -55,19 +55,10 @@ def _function(name: str, prefix: str = "function") -> str:
     return extract_function(source, name, prefix=prefix)
 
 
-def _function_with_defaults(name: str, prefix: str = "function") -> str:
-    """Like ``_function()`` but safe for signatures with default parameters.
-
-    ``extract_function()`` brace-matches from the FIRST ``{``, which for
-    ``setPreviewFullscreen(active, opts={})`` is the default-value brace — it
-    returns the signature only, and every assertion against the body then fails
-    against a string that has no body at all. Match the parameter-closing ``){``
-    instead and brace-match from there.
-    """
-    source = _read(WORKSPACE_JS_PATH)
+def _extract_body(source: str, name: str, prefix: str = "function") -> str:
+    """Brace-match a function body, skipping default-value braces in the
+    signature (``opts={}``)."""
     marker = f"{prefix} {name}("
-    if marker not in source:
-        source = _read(BOOT_JS_PATH)
     start = source.index(marker)
     params_close = source.index("){", start)
     brace = params_close + 1
@@ -82,6 +73,21 @@ def _function_with_defaults(name: str, prefix: str = "function") -> str:
                 return source[start : i + 1]
         i += 1
     raise AssertionError(f"{name} body never closed")
+
+
+def _function_with_defaults(name: str, prefix: str = "function") -> str:
+    """Like ``_function()`` but safe for signatures with default parameters.
+
+    ``extract_function()`` brace-matches from the FIRST ``{``, which for
+    ``setPreviewFullscreen(active, opts={})`` is the default-value brace — it
+    returns the signature only, and every assertion against the body then fails
+    against a string that has no body at all. Match the parameter-closing ``){``
+    instead and brace-match from there.
+    """
+    source = _read(WORKSPACE_JS_PATH)
+    if f"{prefix} {name}(" not in source:
+        source = _read(BOOT_JS_PATH)
+    return _extract_body(source, name, prefix)
 
 
 # ── F1: CSS zoom coverage ────────────────────────────────────────────────────
@@ -148,6 +154,10 @@ def _preview_fs_constants() -> str:
         match = re.search(rf"const {name}\s*=\s*(\d+)\s*;", src)
         assert match, f"{name} not found in static/workspace.js"
         consts.append(f"var {name} = {match.group(1)};")
+    # The setter keeps its choice in module state so a failed storage write does
+    # not lose the zoom. The VM evaluates functions in isolation, so that state
+    # must be declared here too (default null = no explicit choice yet).
+    consts.append("var _previewFontSizeSession = params.session;")
     return "\n".join(consts)
 
 
@@ -207,7 +217,7 @@ console.log(JSON.stringify(out));
 """
 
 
-def _run_f2(*, stored=None, computed_var="13px") -> dict:
+def _run_f2(*, stored=None, computed_var="13px", session=None) -> dict:
     payload = {
         "consts": _preview_fs_constants(),
         "clamp": _function("_clampPreviewFontSize"),
@@ -215,6 +225,7 @@ def _run_f2(*, stored=None, computed_var="13px") -> dict:
         "get": _function("_getPreviewFontSize"),
         "stored": stored,
         "computedVar": computed_var,
+        "session": session,
     }
     js = _F2_HARNESS_HEAD.replace("__PARAMS__", json.dumps(payload))
     proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
@@ -299,6 +310,111 @@ def test_getter_prefers_a_stored_zoom_over_the_app_font_size():
         f"with no stored zoom the computed (data-font-size) value must be used, "
         f"got {mapping_wins['getFallsBack']}"
     )
+    session_wins = _run_f2(stored=None, computed_var="16px", session=22)
+    assert session_wins["getFallsBack"]["value"] == 22, (
+        f"a zoom chosen when storage was unwritable must still be used this "
+        f"session, got {session_wins['getFallsBack']}"
+    )
+
+
+_F2B_HARNESS_HEAD = r"""
+const params = __PARAMS__;
+const __store = {};
+var localStorage = {
+  getItem: (k) => (k in __store ? __store[k] : null),
+  // Reads succeed (empty), writes fail: the private-mode / quota case.
+  setItem: () => { throw new Error('storage unavailable'); },
+};
+const __props = {};
+var document = {
+  documentElement: {
+    style: {
+      setProperty: (k, v) => { __props[k] = String(v); },
+      removeProperty: (k) => { delete __props[k]; },
+    },
+  },
+  getElementById: () => null,
+};
+function getComputedStyle(){ return { getPropertyValue: () => params.computedVar }; }
+eval(params.consts);
+eval(params.clamp);
+eval(params.read);
+eval(params.get);
+eval(params.apply);
+eval(params.set);
+
+if (params.mode === 'apply') { _applyPreviewFontSize(params.request); }
+else { _setPreviewFontSize(params.request); }
+console.log(JSON.stringify({ props: __props, session: _previewFontSizeSession }));
+"""
+
+
+def _run_f2b(*, stored=None, request=22, session=None, computed_var="13px", mode="set") -> dict:
+    payload = {
+        "consts": _preview_fs_constants(),
+        "clamp": _function("_clampPreviewFontSize"),
+        "read": _function("_readPreviewFontSize"),
+        "get": _function("_getPreviewFontSize"),
+        "apply": _function("_applyPreviewFontSize"),
+        "set": _function("_setPreviewFontSize"),
+        "stored": stored,
+        "request": request,
+        "session": session,
+        "computedVar": computed_var,
+        "mode": mode,
+    }
+    js = _F2B_HARNESS_HEAD.replace("__PARAMS__", json.dumps(payload))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_zoom_still_resizes_when_storage_write_fails():
+    """Greptile P2 on #6711: a failed localStorage write must not swallow the
+    user's zoom. The size has to reach the inline variable from memory."""
+    result = _run_f2b(request=22)
+    assert result["session"] == 22, (
+        f"the chosen zoom must be remembered in memory, got {result['session']!r}"
+    )
+    assert result["props"].get("--preview-font-size") == "22px", (
+        f"zoom never reached the preview because storage was unwritable: {result['props']!r}"
+    )
+
+
+def test_zoom_without_explicit_choice_leaves_the_stylesheet_in_charge():
+    """The inherited (data-font-size) value must not be pinned inline."""
+    result = _run_f2b(request=13, session=None, mode="apply")
+    assert "--preview-font-size" not in result["props"], (
+        f"an inherited zoom was pinned inline, defeating data-font-size: {result['props']!r}"
+    )
+
+
+# ── Greptile re-gate: dialogs must not open behind the fullscreen element ────
+
+UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
+
+
+def test_app_dialogs_exit_preview_fullscreen_before_opening():
+    """`#appDialogOverlay` is a <body> child, so the browser paints only the
+    fullscreen element above it: "New file"/"New folder" opened an invisible
+    prompt whose focus trap still swallowed Tab/Enter. Both dialog entry points
+    must leave fullscreen first."""
+    ui = _read(UI_JS_PATH)
+    assert "function _leavePreviewFullscreenForDialog(" in ui, (
+        "the shared fullscreen-exit helper is missing from static/ui.js"
+    )
+    helper = _extract_body(ui, "_leavePreviewFullscreenForDialog")
+    assert "document.fullscreenElement" in helper, (
+        "the helper must only act while native fullscreen is active"
+    )
+    assert "setPreviewFullscreen(false)" in helper, (
+        "leaving fullscreen must go through the single preview entry point"
+    )
+    for dialog in ("showConfirmDialog", "showPromptDialog"):
+        body = _extract_body(ui, dialog)
+        assert "_leavePreviewFullscreenForDialog()" in body, (
+            f"{dialog} can still open an invisible prompt above the fullscreen element"
+        )
 
 
 # ── F3: Escape ownership ─────────────────────────────────────────────────────
