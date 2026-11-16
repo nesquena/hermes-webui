@@ -14816,11 +14816,11 @@ from api.oauth import (
 # Approval system -- state and helpers live in api.route_approvals; imported
 # here for backward compatibility so existing call sites continue to resolve.
 from api.route_approvals import (  # noqa: F401 — re-exports for backward compat
-    _submit_pending_raw,
+    APPROVAL_BRIDGE,
+    approval_bridge_failure,
     approve_session,
     approve_permanent,
     save_permanent_allowlist,
-    is_approved,
     _pending,
     _lock,
     _permanent_approved,
@@ -18618,6 +18618,7 @@ def handle_get(handler, parsed) -> bool:
         payload = build_agent_health_payload()
         payload["gateway_chat"] = gateway_chat_config_status()
         payload["gateway_lifecycle"] = gateway_lifecycle_capability()
+        payload["approval_bridge"] = dict(APPROVAL_BRIDGE)
         j(handler, payload)
         return True
 
@@ -18897,6 +18898,9 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
 
     if parsed.path == "/api/session/usage":
@@ -22164,6 +22168,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         sid = str(body["session_id"] or "").strip()
         enabled = bool(body.get("enabled", True))
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         if not enabled:
             with gateway_yolo_handoff(sid):
                 set_session_yolo_enabled(sid, False)
@@ -35285,6 +35292,9 @@ def _handle_approval_respond(handler, body):
     requested_mirror_token = str(body.get("mirror_token") or "").strip()
 
     if enable_yolo:
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         payload, status = _enable_session_yolo_and_release_pending(
             sid,
             choice=choice,
@@ -35513,6 +35523,13 @@ def _handle_approval_respond(handler, body):
                 return j(handler, relay_payload, status=relay_status)
     except Exception:
         pass  # fall through to local approval path
+
+    # The local path settles the Agent's in-process approval. When the Agent
+    # lacks the names it needs (#9119), refuse instead of reporting ok while the
+    # Agent thread stays parked until its timeout.
+    bridge_failure = approval_bridge_failure(choice=choice)
+    if bridge_failure is not None:
+        return j(handler, bridge_failure[0], status=bridge_failure[1])
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
