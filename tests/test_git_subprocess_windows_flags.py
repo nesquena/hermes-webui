@@ -33,6 +33,8 @@ def _is_subprocess_run(node: ast.Call) -> bool:
 
 def _git_argv_kind(node: ast.AST) -> str | None:
     """Recognize the production argv forms used by direct Git subprocess calls."""
+    if isinstance(node, ast.IfExp):
+        return _git_argv_kind(node.body) or _git_argv_kind(node.orelse)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _git_argv_kind(node.left)
     if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
@@ -44,7 +46,7 @@ def _git_argv_kind(node: ast.AST) -> str | None:
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "_hardened_git_argv"
+        and node.func.id in {"_hardened_git_argv", "noninteractive_git_argv"}
     ):
         return node.func.id
     return None
@@ -130,3 +132,69 @@ def test_windows_hide_flags_is_zero_on_posix(monkeypatch) -> None:
     )
 
     assert subprocess_utils.windows_hide_flags() == 0
+
+
+def test_noninteractive_git_env_detects_plink_command(monkeypatch, tmp_path) -> None:
+    """An auto-detected PuTTY command must receive its native batch option."""
+    from api import subprocess_utils
+
+    monkeypatch.setattr(
+        subprocess_utils,
+        "_scoped_git_config_values",
+        lambda _cwd, _env, key, **_kwargs: (
+            (("global", r'env SESSION=test "C:\Program Files\PuTTY\plink.exe" -P 22'),)
+            if key == "core.sshCommand"
+            else ()
+        ),
+    )
+
+    env = subprocess_utils.noninteractive_git_env(tmp_path, {})
+
+    assert env["GIT_SSH_COMMAND"] == (
+        r'env SESSION=test "C:\Program Files\PuTTY\plink.exe" -P 22 -batch'
+    )
+    assert env["GIT_SSH_VARIANT"] == "plink"
+
+
+def test_noninteractive_git_env_rejects_interactive_openssh_override(
+    monkeypatch, tmp_path,
+) -> None:
+    """Quoted BatchMode=no must fail closed instead of overriding the appended flag."""
+    from api import subprocess_utils
+
+    monkeypatch.setattr(
+        subprocess_utils,
+        "_scoped_git_config_values",
+        lambda _cwd, _env, key, **_kwargs: (
+            (("global", "ssh -o BatchMode='no'"),)
+            if key == "core.sshCommand"
+            else (("global", "ssh"),)
+        ),
+    )
+
+    env = subprocess_utils.noninteractive_git_env(tmp_path, {})
+
+    assert env["GIT_SSH_COMMAND"] == "git-ssh-command-disables-batch-mode"
+    assert env["GIT_SSH_VARIANT"] == "simple"
+
+
+def test_noninteractive_git_env_rejects_simple_and_unknown_variants(
+    monkeypatch, tmp_path,
+) -> None:
+    """A transport without a known batch option must not execute unattended."""
+    from api import subprocess_utils
+
+    monkeypatch.setattr(
+        subprocess_utils,
+        "_scoped_git_config_values",
+        lambda _cwd, _env, key, **_kwargs: (
+            (("global", "custom-transport"),)
+            if key == "core.sshCommand"
+            else ()
+        ),
+    )
+
+    env = subprocess_utils.noninteractive_git_env(tmp_path, {})
+
+    assert env["GIT_SSH_COMMAND"] == "git-ssh-variant-is-not-supported-by-hermes-webui"
+    assert env["GIT_SSH_VARIANT"] == "simple"

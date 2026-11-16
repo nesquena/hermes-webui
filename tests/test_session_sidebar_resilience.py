@@ -29,7 +29,7 @@ def test_session_list_refresh_has_visible_failure_state_instead_of_console_only(
 
     assert "console.warn('renderSessionList',e);" not in block
     assert "_showSessionListLoadError" in block
-    assert "renderSessionListFromCache" in block
+    assert "_repaintSidebarForBackgroundChurn" in block
     assert "session-list-error" in src
     assert "Retry" in src
 

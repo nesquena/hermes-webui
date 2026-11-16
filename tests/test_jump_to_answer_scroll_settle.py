@@ -108,6 +108,7 @@ eval(extractFunc('_scheduleMessageJumpScrollReconcile'));
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_messageJumpScrollBehavior'));
 eval(extractFunc('jumpToTurnQuestion'));
 
 (async () => {
@@ -217,6 +218,7 @@ eval(extractFunc('_scheduleMessageJumpScrollReconcile'));
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_messageJumpScrollBehavior'));
 eval(extractFunc('jumpToTurnQuestion'));
 eval(extractFunc('refreshActiveSessionIfExternallyUpdated'));
 
@@ -392,6 +394,7 @@ eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
 eval(extractFunc('_highlightQuestionRow'));
+eval(extractFunc('_messageJumpScrollBehavior'));
 eval(extractFunc('jumpToTurnQuestion'));
 eval(extractFunc('refreshActiveSessionIfExternallyUpdated'));
 eval(messageScrollListenerIife);
@@ -577,6 +580,8 @@ eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
 eval(extractFunc('_cancelBottomSettle'));
 eval(extractFunc('_freshProgrammaticScrollActive'));
+eval(extractFunc('_isTranscriptScrollTarget'));
+eval(extractFunc('_captureMessageScrollInputTail'));
 eval(extractFunc('_recordNonMessageScrollIntent'));
 
 _beginMessageJumpScroll(container);
@@ -706,6 +711,8 @@ function _freshProgrammaticScrollActive(){
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_isTranscriptScrollTarget'));
+eval(extractFunc('_captureMessageScrollInputTail'));
 eval(extractFunc('_recordNonMessageScrollIntent'));
 
 _beginMessageJumpScroll(container);
@@ -773,6 +780,8 @@ function _freshProgrammaticScrollActive(){
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_isTranscriptScrollTarget'));
+eval(extractFunc('_captureMessageScrollInputTail'));
 eval(extractFunc('_recordNonMessageScrollIntent'));
 
 _beginMessageJumpScroll(container);

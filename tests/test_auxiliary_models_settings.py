@@ -312,6 +312,280 @@ console.log(JSON.stringify({
             "Missing _buildAuxModelOptions() for model dropdown rebuild"
         )
 
+    @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+    def test_configured_aux_provider_absent_from_catalog_is_preserved(self):
+        """#7486: a configured provider missing from /api/models must survive Apply.
+
+        The aux provider <select> is populated with 'auto' plus the /api/models
+        catalog. When the configured provider is absent from that catalog (e.g.
+        its group is filtered out because it exposes no models), no option
+        matched, so the select fell back to its first entry ('auto') and the
+        next Apply persisted 'auto' — silently discarding the configured value.
+        """
+        script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+
+function extract(name){
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 0;
+  while(i < src.length){
+    const ch = src[i];
+    if(ch === '{') depth += 1;
+    else if(ch === '}') {
+      depth -= 1;
+      if(depth === 0){
+        break;
+      }
+    }
+    i += 1;
+  }
+  if(depth !== 0) throw new Error(name + ' parse failed');
+  return src.slice(start, i + 1);
+}
+
+global.t = (key) => key;
+
+// Minimal <select>/<option> model. The value getter mirrors real browser
+// behavior: with no option explicitly selected a single-select reads back its
+// first option, which is what made the downgrade silent.
+function makeSelect(){
+  const sel = { options: [] };
+  Object.defineProperty(sel, 'innerHTML', {
+    get(){ return ''; },
+    set(v){ if(v === '') sel.options = []; },
+  });
+  sel.appendChild = (node) => { sel.options.push(node); return node; };
+  sel.insertBefore = (node, ref) => {
+    const idx = sel.options.indexOf(ref);
+    if(idx < 0) sel.options.push(node); else sel.options.splice(idx, 0, node);
+    return node;
+  };
+  Object.defineProperty(sel, 'value', {
+    get(){
+      const picked = sel.options.find((opt) => opt.selected);
+      if(picked) return picked.value;
+      return sel.options.length ? sel.options[0].value : '';
+    },
+    set(v){ sel.options.forEach((opt) => { opt.selected = opt.value === v; }); },
+  });
+  return sel;
+}
+
+global.document = {
+  createElement(tag){
+    if(String(tag).toLowerCase() === 'option'){
+      return { tagName: 'OPTION', value: '', textContent: '', selected: false };
+    }
+    return { tagName: String(tag).toUpperCase(), value: '', textContent: '' };
+  },
+};
+
+eval(extract('_buildAuxProviderOptions'));
+
+const catalog = [
+  {slug: 'openai', name: 'OpenAI'},
+  {slug: 'anthropic', name: 'Anthropic'},
+];
+
+function build(providers, currentProvider){
+  const sel = makeSelect();
+  _buildAuxProviderOptions(sel, providers, currentProvider);
+  return {
+    values: sel.options.map((opt) => opt.value),
+    labels: sel.options.map((opt) => opt.textContent),
+    selected: sel.options.filter((opt) => opt.selected).map((opt) => opt.value),
+    value: sel.value,
+  };
+}
+
+console.log(JSON.stringify({
+  absent: build(catalog, 'custom-router'),
+  absentEmptyCatalog: build([], 'custom-router'),
+  present: build(catalog, 'anthropic'),
+  auto: build(catalog, 'auto'),
+  empty: build(catalog, ''),
+}));
+"""
+
+        proc = subprocess.run(
+            [NODE, "-e", script, str(PANELS_JS_PATH)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+
+        absent = result["absent"]
+        assert "custom-router" in absent["values"], (
+            "configured provider absent from the catalog must keep a selectable option"
+        )
+        assert absent["selected"] == ["custom-router"], (
+            f"configured option must be selected, got {absent['selected']}"
+        )
+        assert absent["value"] == "custom-router", (
+            "Apply must read back the configured provider, not the fallback first option"
+        )
+        assert "custom-router" in absent["labels"][-1]
+        assert result["absentEmptyCatalog"]["value"] == "custom-router"
+
+        assert result["present"]["value"] == "anthropic"
+        assert result["present"]["values"] == ["auto", "openai", "anthropic"]
+        assert result["present"]["selected"] == ["anthropic"]
+        assert result["auto"]["value"] == "auto"
+        assert result["empty"]["value"] == "auto"
+        assert result["empty"]["values"] == ["auto", "openai", "anthropic"]
+
+    def test_apply_does_not_downgrade_untouched_aux_row(self):
+        """#7486: applying one row must not re-save another row's provider as 'auto'.
+
+        End-to-end over the Apply path: two task rows are built with the real
+        option builder, the user edits only the second row's model, and the
+        first row keeps a provider that is missing from the catalog. The first
+        row must not produce any POST at all — the destructive symptom was it
+        being re-saved with provider 'auto'.
+        """
+        script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+
+function extract(name){
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 0;
+  while(i < src.length){
+    const ch = src[i];
+    if(ch === '{') depth += 1;
+    else if(ch === '}') {
+      depth -= 1;
+      if(depth === 0){
+        break;
+      }
+    }
+    i += 1;
+  }
+  if(depth !== 0) throw new Error(name + ' parse failed');
+  return src.slice(start, i + 1);
+}
+
+// Minimal <select>/<option> shim. The value getter mirrors the browser: a
+// single select with nothing explicitly selected reads back its first option,
+// which is why the downgrade was silent rather than an explicit error.
+function makeOption(value, label){
+  return {
+    tagName: 'OPTION',
+    value: String(value),
+    textContent: label === undefined ? String(value) : label,
+    selected: false,
+  };
+}
+function makeSelect(){
+  const sel = {options: []};
+  Object.defineProperty(sel, 'innerHTML', {
+    get(){ return ''; },
+    set(v){ if(v === '') sel.options = []; },
+  });
+  sel.appendChild = (node) => { sel.options.push(node); return node; };
+  sel.insertBefore = (node, ref) => {
+    const idx = sel.options.indexOf(ref);
+    if(idx < 0) sel.options.push(node); else sel.options.splice(idx, 0, node);
+    return node;
+  };
+  Object.defineProperty(sel, 'value', {
+    get(){
+      const picked = sel.options.find(o => o.selected);
+      if(picked) return picked.value;
+      return sel.options.length ? sel.options[0].value : '';
+    },
+    set(v){ sel.options.forEach(o => { o.selected = (o.value === String(v)); }); },
+  });
+  return sel;
+}
+function setSelect(sel, values, chosen){
+  sel.innerHTML = '';
+  for(const v of values) sel.appendChild(makeOption(v));
+  sel.value = chosen;
+  return sel;
+}
+global.document = {
+  createElement(tag){
+    return String(tag).toLowerCase() === 'option'
+      ? makeOption('', '')
+      : {tagName: String(tag).toUpperCase(), style: {}, appendChild(){}};
+  },
+};
+const els = {};
+global.$ = (id) => els[id] || null;
+global.t = (key) => key;
+global.showToast = () => {};
+global._loadAuxiliaryModels = () => {};
+
+eval(extract('_buildAuxProviderOptions'));
+
+const catalog = [{slug: 'openai', name: 'OpenAI'}];
+
+// Persisted config: 'simple' is configured with a provider that is no longer
+// present in /api/models; 'complex' uses a catalog provider.
+global._auxTasks = [{task: 'simple'}, {task: 'complex'}];
+global._auxOriginalConfig = {
+  simple: {provider: 'custom-router', model: 'gpt-x'},
+  complex: {provider: 'openai', model: 'gpt-5'},
+};
+
+els['aux-prov-simple'] = makeSelect();
+els['aux-model-simple'] = setSelect(makeSelect(), ['gpt-x', '__custom__'], 'gpt-x');
+els['aux-prov-complex'] = makeSelect();
+els['aux-model-complex'] = setSelect(makeSelect(), ['gpt-5', 'gpt-5-mini', '__custom__'], 'gpt-5');
+
+// The settings panel rebuilds every row's selects on load
+_buildAuxProviderOptions(els['aux-prov-simple'], catalog, 'custom-router');
+_buildAuxProviderOptions(els['aux-prov-complex'], catalog, 'openai');
+
+// The user edits only the 'complex' row, then clicks Apply
+els['aux-model-complex'].value = 'gpt-5-mini';
+
+const posted = [];
+global.api = async (path, opts) => { posted.push(JSON.parse(opts.body)); return {}; };
+
+// _applyAuxModels is async: extract() slices from the `function` keyword, so
+// re-add the modifier before evaluating the declaration.
+eval('async ' + extract('_applyAuxModels'));
+
+_applyAuxModels().then(() => {
+  console.log(JSON.stringify({posted, untouchedProvider: els['aux-prov-simple'].value}));
+});
+"""
+
+        proc = subprocess.run(
+            [NODE, "-e", script, str(PANELS_JS_PATH)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+
+        assert result["untouchedProvider"] == "custom-router", (
+            "the untouched row must still read back its configured provider"
+        )
+        assert result["posted"] == [
+            {
+                "scope": "auxiliary",
+                "task": "complex",
+                "provider": "openai",
+                "model": "gpt-5-mini",
+            }
+        ], f"only the edited row may be saved, got {result['posted']}"
+        assert not any(p.get("provider") == "auto" for p in result["posted"]), (
+            "an untouched row must never be persisted as 'auto' (data loss)"
+        )
+
     def test_custom_model_prompt(self):
         """Selecting 'Custom model…' must prompt for model ID."""
         assert "__custom__" in PANELS_JS, (
