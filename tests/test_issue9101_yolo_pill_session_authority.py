@@ -18,6 +18,14 @@ Mechanisms covered (letters follow the issue investigation):
         (e2: and never approve the visible approval card)
   f     a pill painted for A, clicked after the open session changed without
         loadSession(): it must not write to the new session at all
+  g/h   a failed switch leaves the previous session open with its pill
+  i/i2  overlapping /yolo commands post twice (both enable, or enable then
+        disable under an "on" pill)
+  j/j2  a non-boolean GET /api/session/yolo answer paints or hides the pill
+  k1-k4 a blank-page action (workspace prompt/switch, new file/folder) mints
+        a session without loadSession() and keeps the old session's pill
+  k5    an apperror after a compression rotation installs the continuation
+        without dropping the old pill or reading the new session's flag
 """
 
 import json
