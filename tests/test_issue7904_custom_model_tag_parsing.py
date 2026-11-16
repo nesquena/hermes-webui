@@ -194,19 +194,33 @@ def test_removed_named_provider_is_not_silently_rerouted():
 
 
 # ── CORE 3: the gateway parses with the SESSION's profile config ────────────
-def test_gateway_model_field_reads_session_profile_config(tmp_path):
-    """``_gateway_model_field`` resolves identities from the session profile."""
+def test_gateway_model_field_reads_session_profile_config(tmp_path, monkeypatch):
+    """``_gateway_model_field`` resolves identities from the session profile.
+
+    The homes are real and distinct: a mocked resolver that returned the same
+    directory for ``default`` and for a named profile would make the named home
+    the root home, and root legitimately owns an external ``HERMES_CONFIG_PATH``
+    there (#7905 review 2026-11-16T01:03:48Z). No override is set, so every
+    profile reads its own file.
+    """
     from api.gateway_chat import _gateway_model_field
 
-    profile_home = tmp_path / "omni-profile"
-    profile_home.mkdir()
-    (profile_home / "config.yaml").write_text(
+    root_home = tmp_path / "root"
+    profile_home = root_home / "profiles" / "omni"
+    profile_home.mkdir(parents=True)
+    identity = (
         "providers:\n"
         "  custom:omni:\n"
         "    base_url: https://omni.example/v1\n"
-        "    models: [latest]\n",
-        encoding="utf-8",
+        "    models: [latest]\n"
     )
+    (root_home / "config.yaml").write_text(identity, encoding="utf-8")
+    (profile_home / "config.yaml").write_text(identity, encoding="utf-8")
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+
+    def _home_for(name):
+        return profile_home if str(name or "").strip() == "omni" else root_home
+
     with patch.dict(config.cfg, GENERIC_CFG, clear=True):
         # No evidence at all -> master's parse (model stays `latest`).
         assert _gateway_model_field("@custom:omni:latest") == "latest"
@@ -218,7 +232,7 @@ def test_gateway_model_field_reads_session_profile_config(tmp_path):
         # The SESSION's profile does define `custom:omni` -> identity wins.
         with patch(
             "api.profiles.get_hermes_home_for_profile",
-            return_value=profile_home,
+            side_effect=_home_for,
         ):
             assert _gateway_model_field(
                 "@custom:omni:latest",

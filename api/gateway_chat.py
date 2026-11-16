@@ -320,15 +320,17 @@ def _gateway_profile_config(profile) -> dict | None:
 
     Mirrors ``_gateway_endpoint_for_profile``: the home is resolved from the
     profile name and read straight off disk, so a provider configured only in
-    that profile is visible here. Returns ``None`` (ambient config) only when
-    the profile itself cannot be resolved.
+    that profile is visible here. The home is the SESSION's profile, so an
+    override outside that profile's home must not win (mirroring the contract
+    in ``api.config``). Returns ``None`` (ambient config) only when the
+    profile itself cannot be resolved.
     """
     try:
         from api import profiles as _profiles
         from api.config import get_config_for_profile_home
 
         home = _profiles.get_hermes_home_for_profile(str(profile or "").strip())
-        cfg = get_config_for_profile_home(home)
+        cfg = get_config_for_profile_home(home, isolate_config_override=True)
         return cfg if isinstance(cfg, dict) else None
     except Exception:
         logger.debug("gateway model field profile config lookup failed", exc_info=True)
