@@ -1,0 +1,704 @@
+"""Sidebar resize lifecycle: pointer-capture fallback and teardown (#7954).
+
+Focuses on the regression path where ``setPointerCapture`` is unavailable or
+throws: the drag must keep working through the document-level fallback and
+must end cleanly on release outside the handle. The positive controls the fix
+must keep working (capture success, ``lostpointercapture``, window ``blur``,
+touch pointers, storage-denied date-group toggle) live here too.
+
+Runs the REAL resize and collapse-state code extracted from ``static/boot.js``
+and ``static/sessions.js`` in a browser harness, in the same style as
+``test_send_key_preference_live_update.py``.
+"""
+
+from pathlib import Path
+import json
+
+import pytest
+
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:  # pragma: no cover - dependency optional
+    sync_playwright = None
+
+
+REPO = Path(__file__).parent.parent
+BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+
+
+def _require_playwright():
+    if sync_playwright is None:
+        pytest.skip("playwright is unavailable; run `playwright install chromium`")
+    return sync_playwright
+
+
+def _extract_braced(src: str, start_marker: str) -> str:
+    """Return the full ``{...}`` block that follows ``start_marker``."""
+    start = src.index(start_marker)
+    brace_at = src.index("{", start)
+    depth = 0
+    for i in range(brace_at, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError(f"unterminated block after {start_marker!r}")
+
+
+def _extract_init_resize() -> str:
+    return _extract_braced(
+        BOOT_JS, "function initResize(handleId, targetEl, edge, minW, maxW, storageKey)"
+    )
+
+
+def _extract_collapse_state_block() -> str:
+    # The seeding block alone is not enough: _groupCollapsed/_saveCollapsed are
+    # declared right after it in sessions.js, and the toggle mirrors them.
+    marker = "if(!window.__hermesDateGroupCollapsed)"
+    start = SESSIONS_JS.index(marker)
+    tail = SESSIONS_JS[start:]
+    save_marker = "const _saveCollapsed=()=>"
+    save_at = tail.index(save_marker)
+    save_block = _extract_braced(tail, save_marker)
+    return tail[: save_at + len(save_block)] + ";"
+
+
+def _extract_group_loop() -> str:
+    """The real group-render loop from sessions.js, verbatim: builds the
+    session-date-group DOM including the real hdr.onclick handler. Sliced
+    from its start marker to the virtualization anchor restore that follows
+    it in production."""
+    start_marker = "let globalSessionRowIndex=0;"
+    end_marker = "if(virtualAnchorScrollTop!==null){"
+    start = SESSIONS_JS.index(start_marker)
+    end = SESSIONS_JS.index(end_marker, start)
+    return SESSIONS_JS[start:end]
+
+
+HARNESS_HTML = """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>resize lifecycle harness</title></head>
+<body>
+<div id="sidebar" style="width: 360px; height: 300px;"></div>
+<div id="sidebarResize" style="width: 5px; height: 300px;"></div>
+<div id="sessionList"></div>
+<script>
+window.$ = sel => document.querySelector(sel);
+window._syncWorkspacePanelInlineWidth = () => {};
+
+__INIT_RESIZE__
+
+__COLLAPSE_STATE__
+
+// Mirrors hdr.onclick (static/sessions.js): flip in-memory state, persist
+// best-effort, then re-render from the in-memory authority.
+window.__toggleGroup = (label) => {
+  const state = window.__hermesDateGroupCollapsed;
+  _pending.add(label);
+  state[label] = !state[label];
+  _saveCollapsed();
+  return state[label];
+};
+window.__reseedCollapseState = () => {
+  __COLLAPSE_STATE__
+};
+// Mirrors the render's visibility rule (static/sessions.js): a group body is
+// hidden exactly when its collapse flag is truthy. Builds rowsPerGroup rows
+// per group so visible session-row counts can be asserted.
+window.__renderGroups = (labels, rowsPerGroup) => {
+  const host = document.getElementById('sidebar');
+  host.innerHTML = '';
+  let visible = 0;
+  for (const label of labels) {
+    const body = document.createElement('div');
+    body.className = 'session-date-body';
+    for (let i = 0; i < rowsPerGroup; i++) {
+      const row = document.createElement('div');
+      row.className = 'session-row';
+      body.appendChild(row);
+    }
+    const collapsed = Boolean(window.__hermesDateGroupCollapsed[label]);
+    if (collapsed) body.style.display = 'none';
+    host.appendChild(body);
+    if (!collapsed) visible += rowsPerGroup;
+  }
+  return visible;
+};
+// Real render + click path: the collapse-state seed block and the group
+// loop below are VERBATIM slices of static/sessions.js — the seed block
+// re-runs on every render there, exactly as it does here, and hdr.onclick
+// is the real production handler (no copied logic). The loop's external
+// names (list, groups, virtualWindow, _renderOneSession,
+// _sessionVirtualSpacer) are bound here; renderSessionListFromCache is
+// wired to this same function so the handler's re-render call runs the
+// real loop again.
+window.__buildGroups = () => {
+  const list = document.getElementById('sessionList');
+  list.innerHTML = '';
+  const groups = window.__groups || [];
+  const virtualWindow = {virtualized:false, start:0, end:1000000, itemHeight:24};
+  const _renderOneSession = (s, isPinned) => {
+    const row = document.createElement('div');
+    row.className = 'session-row' + (isPinned ? ' pinned' : '');
+    row.textContent = s.title;
+    return row;
+  };
+  const _sessionVirtualSpacer = (h, pos) => {
+    const d = document.createElement('div');
+    d.className = 'session-virtual-spacer ' + pos;
+    d.style.height = h + 'px';
+    return d;
+  };
+__COLLAPSE_STATE__
+__GROUP_LOOP__
+};
+window.renderSessionListFromCache = window.__buildGroups;
+window.__seedGroupsFixture = () => {
+  window.__groups = [
+    {label:'Today', items:[{title:'s1'},{title:'s2'}]},
+    {label:'Yesterday', items:[{title:'s3'},{title:'s4'}]},
+    {label:'Older', items:[{title:'s5'},{title:'s6'}]},
+  ];
+};
+</script>
+</body></html>
+"""
+
+
+def _build_harness_html() -> str:
+    collapse = _extract_collapse_state_block()
+    return (
+        HARNESS_HTML.replace("__INIT_RESIZE__", _extract_init_resize())
+        .replace("__COLLAPSE_STATE__", collapse)
+        .replace("__GROUP_LOOP__", _extract_group_loop())
+    )
+
+
+STATE_JS = """() => ({
+    width: document.getElementById('sidebar').style.width,
+    dragging: document.getElementById('sidebarResize').classList.contains('dragging'),
+    resizing: document.body.classList.contains('resizing'),
+    stored: (() => { try { return localStorage.getItem('hermes-sidebar-w'); } catch (e) { return 'THROWS'; } })(),
+})"""
+
+
+def _boot_resize(page, *, capture="ok"):
+    """Wire initResize against the harness DOM.
+
+    capture='ok'    -> setPointerCapture succeeds (handle keeps receiving events)
+    capture='throw' -> setPointerCapture throws (fallback branch must engage)
+    """
+    page.evaluate(
+        """(capture) => {
+        if (capture === 'throw') {
+            Element.prototype.setPointerCapture = function() { throw new Error('capture unavailable'); };
+        } else {
+            Element.prototype.setPointerCapture = function(id) { this.__capturedId = id; };
+            Element.prototype.releasePointerCapture = function() {};
+        }
+        localStorage.removeItem('hermes-sidebar-w');
+        initResize('#sidebarResize', document.getElementById('sidebar'), 'right', 180, 420, 'hermes-sidebar-w');
+    }""",
+        capture,
+    )
+
+
+def _pointer(page, type_, *, target="#sidebarResize", x=100, pointer_id=1, pointer_type="mouse"):
+    page.evaluate(
+        """({type, target, x, pointerId, pointerType}) => {
+            const el = document.querySelector(target);
+            el.dispatchEvent(new PointerEvent(type, {
+                bubbles: true, cancelable: true,
+                clientX: x, clientY: 50,
+                pointerId: pointerId, pointerType: pointerType,
+            }));
+        }""",
+        {
+            "type": type_,
+            "target": target,
+            "x": x,
+            "pointerId": pointer_id,
+            "pointerType": pointer_type,
+        },
+    )
+
+
+def _boot_resize_native(page):
+    """Wire initResize with NO capture stubbing: setPointerCapture is the
+    real Chromium implementation, and the drag below is driven by real mouse
+    input through the browser's native pointer-event routing."""
+    page.evaluate(
+        """() => {
+        localStorage.removeItem('hermes-sidebar-w');
+        initResize('#sidebarResize', document.getElementById('sidebar'), 'right', 180, 420, 'hermes-sidebar-w');
+    }"""
+    )
+
+
+@pytest.fixture
+def page(tmp_path):
+    _require_playwright()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        context = browser.new_context()
+        pg = context.new_page()
+
+        tmp = tmp_path / "harness.html"
+        tmp.write_text(_build_harness_html(), encoding="utf-8")
+        pg.goto(tmp.as_uri())
+        pg.wait_for_load_state("domcontentloaded")
+        yield pg
+        browser.close()
+
+
+def test_capture_success_drag_resizes_and_persists(page):
+    """Positive control: working capture resizes, ends on release, persists."""
+    _boot_resize(page, capture="ok")
+    _pointer(page, "pointerdown", x=100)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+
+    _pointer(page, "pointermove", x=150)  # +50px
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "410px"
+
+    _pointer(page, "pointerup", x=150)
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "410"
+
+
+def test_native_capture_keeps_drag_alive_outside_handle(page):
+    """Greptile follow-up on merged #7968: the capture-success cases above
+    stub setPointerCapture and send events straight to the handle, so they
+    cannot see a routing failure after the pointer leaves the 5px handle.
+    This drives a REAL mouse drag with NATIVE capture: the move and release
+    happen far outside the handle and must still reach it through the
+    browser's capture routing."""
+    _boot_resize_native(page)
+    box = page.locator("#sidebarResize").bounding_box()
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] / 2
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+    assert page.evaluate(
+        "() => document.getElementById('sidebarResize').hasPointerCapture(1)"
+    ) is True, "the real setPointerCapture must actually capture the pointer"
+
+    # 60px to the right: far outside the 5px handle. Only capture routing
+    # can deliver these moves to the handle (no document fallback exists on
+    # the capture-success path).
+    page.mouse.move(cx + 60, cy, steps=5)
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "420px", (
+        "native capture must keep routing moves to the handle outside it"
+    )
+
+    # Release outside too; capture must route the up event as well.
+    page.mouse.up()
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "420"
+    assert page.evaluate(
+        "() => document.getElementById('sidebarResize').hasPointerCapture(1)"
+    ) is False, "the capture must be released when the drag ends"
+
+
+def test_second_pointer_cannot_take_over_drag(page):
+    """A second pointer pressing the handle mid-drag must not replace the
+    active pointer: the original drag keeps its start point, keeps resizing,
+    and the second pointer's move/release are ignored end to end."""
+    _boot_resize(page, capture="ok")
+    _pointer(page, "pointerdown", x=100)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+
+    # Second press on the same handle from a different pointer.
+    _pointer(page, "pointerdown", x=300, pointer_id=2)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+
+    # The second pointer's movement must be ignored entirely.
+    _pointer(page, "pointermove", x=350, pointer_id=2)
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "360px", (
+        "the drag must not follow the second pointer"
+    )
+
+    # The original pointer still resizes, measured from ITS OWN start point
+    # (100px), not from the second press (300px): +50px -> 410px. If the
+    # second press had overwritten startX/startW this would be a different
+    # width, which is exactly the takeover the guard prevents.
+    _pointer(page, "pointermove", x=150)
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "410px"
+
+    # The second pointer's release must not end the drag.
+    _pointer(page, "pointerup", x=350, pointer_id=2)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"], (
+        "the second pointer's release must not end the first pointer's drag"
+    )
+
+    # The original pointer's release ends it and persists.
+    _pointer(page, "pointerup", x=150)
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "410"
+
+    # After the drag ends, a fresh pointerdown works again (the guard only
+    # blocks mid-drag presses, not the next legitimate drag).
+    _pointer(page, "pointerdown", x=200)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+    _pointer(page, "pointerup", x=200)
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+
+
+def test_capture_failure_falls_back_and_still_ends(page):
+    """The #7954 regression: a thrown setPointerCapture must not stall the drag.
+
+    Move and release happen OUTSIDE the 5px handle, which only the
+    document-level fallback can see.
+    """
+    _boot_resize(page, capture="throw")
+    _pointer(page, "pointerdown", x=100)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+
+    _pointer(page, "pointermove", target="#sidebar", x=150)  # outside the handle
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "410px", "fallback must resize while the pointer is outside the handle"
+
+    _pointer(page, "pointerup", target="body", x=150)  # release outside too
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"], "handle.dragging must clear on an outside release"
+    assert not state["resizing"], "body.resizing must clear on an outside release"
+    assert state["stored"] == "410", "width must persist at the shared end path"
+
+    _pointer(page, "pointermove", target="#sidebar", x=300)  # drag is over
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "410px", "a later move must have no effect"
+    assert not state["dragging"] and not state["resizing"]
+
+
+def test_lostpointercapture_ends_drag(page):
+    """Positive control: capture revoked by the platform ends the drag."""
+    _boot_resize(page, capture="ok")
+    _pointer(page, "pointerdown", x=100)
+    _pointer(page, "pointermove", x=150)
+    page.evaluate(
+        "() => document.getElementById('sidebarResize')"
+        ".dispatchEvent(new PointerEvent('lostpointercapture', {bubbles: true, pointerId: 1}))"
+    )
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "410"
+
+
+def test_window_blur_ends_drag(page):
+    """Positive control: losing the window mid-drag ends the drag."""
+    _boot_resize(page, capture="ok")
+    _pointer(page, "pointerdown", x=100)
+    _pointer(page, "pointermove", x=150)
+    page.evaluate("() => window.dispatchEvent(new Event('blur'))")
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "410"
+
+
+def test_touch_pointer_does_not_start_resize(page):
+    """Positive control: touch pointers are not panel-resize drags."""
+    _boot_resize(page, capture="ok")
+    _pointer(page, "pointerdown", x=100, pointer_type="touch")
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    _pointer(page, "pointermove", x=150, pointer_type="touch")
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "360px"
+
+
+def test_date_group_toggle_survives_storage_denial(page):
+    """Positive control: a throwing localStorage write cannot undo the toggle (#7953)."""
+    page.evaluate(
+        """() => {
+        Storage.prototype.setItem = function() { throw new DOMException('denied', 'QuotaExceededError'); };
+        window.__hermesDateGroupCollapsed = undefined;
+        window.__reseedCollapseState();
+    }"""
+    )
+    on = page.evaluate("() => window.__toggleGroup('YESTERDAY')")
+    assert on is True
+    reseeded = page.evaluate(
+        "() => { window.__reseedCollapseState(); return window.__hermesDateGroupCollapsed['YESTERDAY']; }"
+    )
+    assert reseeded is True, "re-seeding must not clobber the in-memory state from storage"
+
+
+def test_other_pointer_cancel_does_not_end_drag(page):
+    """Regression (Oct 2 re-gate): a pointercancel from an unrelated pointer
+    must not end the active resize.
+
+    Reviewer's sequence: capture failing, pointer 1 drags to +20px, pointer 2
+    (a pen or touch contact elsewhere) is cancelled, then pointer 1 moves to
+    +50px and releases — the drag must survive the foreign cancel.
+    """
+    _boot_resize(page, capture="throw")
+    _pointer(page, "pointerdown", x=100, pointer_id=1)
+    _pointer(page, "pointermove", target="#sidebar", x=120, pointer_id=1)
+    state = page.evaluate(STATE_JS)
+    assert state["width"] == "380px"
+
+    _pointer(page, "pointercancel", target="#sidebar", x=120, pointer_id=2)
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"], "another pointer's cancel must not clear handle.dragging"
+    assert state["resizing"], "another pointer's cancel must not clear body.resizing"
+    assert state["width"] == "380px"
+
+    _pointer(page, "pointermove", target="#sidebar", x=150, pointer_id=1)
+    _pointer(page, "pointerup", target="body", x=150, pointer_id=1)
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["width"] == "410px", "the drag must resume and finish after the foreign cancel"
+    assert state["stored"] == "410"
+
+
+def test_other_pointer_cancel_ignored_with_capture(page):
+    """The pointer-id guard applies on the capture-success path too."""
+    _boot_resize(page, capture="ok")
+    _pointer(page, "pointerdown", x=100, pointer_id=1)
+    _pointer(page, "pointermove", x=150, pointer_id=1)
+    _pointer(page, "pointercancel", x=150, pointer_id=2)  # on the handle
+    state = page.evaluate(STATE_JS)
+    assert state["dragging"] and state["resizing"]
+    assert state["width"] == "410px"
+    _pointer(page, "pointerup", x=150, pointer_id=1)
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "410"
+
+
+def test_active_pointer_cancel_still_ends_drag(page):
+    """The active pointer's own cancel must still end the drag."""
+    _boot_resize(page, capture="throw")
+    _pointer(page, "pointerdown", x=100, pointer_id=1)
+    _pointer(page, "pointermove", target="#sidebar", x=150, pointer_id=1)
+    _pointer(page, "pointercancel", target="#sidebar", x=150, pointer_id=1)
+    state = page.evaluate(STATE_JS)
+    assert not state["dragging"] and not state["resizing"]
+    assert state["stored"] == "410"
+
+
+def test_successful_cross_tab_change_wins_over_released_local(page):
+    """Oct 3 re-gate: a local override is released once its snapshot is
+    successfully written, so another tab's newer successful choice wins.
+
+    A collapses YESTERDAY (write succeeds, override released). B reopens it
+    (write succeeds). A re-renders and must show YESTERDAY expanded with its
+    rows visible. A then toggles the unrelated OLDER group; the saved JSON
+    must preserve B's newer YESTERDAY:false.
+    """
+    # A collapses YESTERDAY; the write succeeds and releases the override.
+    assert page.evaluate("() => window.__toggleGroup('YESTERDAY')") is True
+    assert json.loads(page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")) == {"YESTERDAY": True}
+    assert page.evaluate("() => window.__hermesDateGroupPending.size") == 0, (
+        "a successful write must release the pending override"
+    )
+    assert page.evaluate("() => window.__renderGroups(['YESTERDAY'], 6)") == 0, (
+        "a collapsed group must hide its session rows"
+    )
+
+    # B reopens YESTERDAY (a successful write to shared storage).
+    page.evaluate("() => localStorage.setItem('hermes-date-groups-collapsed', JSON.stringify({YESTERDAY: false}))")
+
+    # A re-renders: the released key adopts B's newer choice.
+    page.evaluate("() => window.__reseedCollapseState()")
+    assert page.evaluate("() => window.__hermesDateGroupCollapsed['YESTERDAY']") is False, (
+        "after a successful write released the key, a newer stored choice must win"
+    )
+    assert page.evaluate("() => window.__renderGroups(['YESTERDAY'], 6)") == 6, (
+        "the adopted reopen must make the group's session rows visible again"
+    )
+
+    # A toggles the unrelated OLDER group; B's YESTERDAY:false is preserved.
+    page.evaluate("() => window.__toggleGroup('OLDER')")
+    stored = json.loads(page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')"))
+    assert stored == {"YESTERDAY": False, "OLDER": True}, (
+        "an unrelated local toggle must not overwrite another tab's newer successful choice"
+    )
+
+
+def test_cleared_storage_expands_adopted_non_pending_group(page):
+    """Oct 3 re-gate: a valid empty/cleared snapshot removes adopted
+    (non-pending) keys, so a group another tab expanded is no longer hidden.
+    """
+    page.evaluate("() => localStorage.setItem('hermes-date-groups-collapsed', JSON.stringify({TODAY: true}))")
+    page.evaluate("() => window.__reseedCollapseState()")
+    assert page.evaluate("() => window.__hermesDateGroupCollapsed['TODAY']") is True
+    assert page.evaluate("() => window.__renderGroups(['TODAY'], 4)") == 0
+
+    # Another tab clears storage entirely (a valid empty snapshot).
+    page.evaluate("() => localStorage.removeItem('hermes-date-groups-collapsed')")
+    page.evaluate("() => window.__reseedCollapseState()")
+    assert page.evaluate("() => window.__hermesDateGroupCollapsed['TODAY']") in (None, False), (
+        "a valid cleared snapshot must remove an adopted (non-pending) collapse key"
+    )
+    assert page.evaluate("() => window.__renderGroups(['TODAY'], 4)") == 4, (
+        "the cleared key must make the group's session rows visible again"
+    )
+
+
+def test_malformed_or_unavailable_storage_preserves_state(page):
+    """Oct 3 re-gate controls: a malformed or unavailable read must not
+    clobber the current in-memory state or drop adopted collapses.
+    """
+    page.evaluate("() => localStorage.setItem('hermes-date-groups-collapsed', JSON.stringify({TODAY: true}))")
+    page.evaluate("() => window.__reseedCollapseState()")
+    assert page.evaluate("() => window.__hermesDateGroupCollapsed['TODAY']") is True
+
+    # Malformed JSON: state preserved.
+    page.evaluate("() => localStorage.setItem('hermes-date-groups-collapsed', '{not-valid-json')")
+    page.evaluate("() => window.__reseedCollapseState()")
+    assert page.evaluate("() => window.__hermesDateGroupCollapsed['TODAY']") is True, (
+        "a malformed read must preserve the current state"
+    )
+
+    # Unavailable storage: state preserved.
+    page.evaluate(
+        "() => { Object.defineProperty(Storage.prototype, 'getItem',"
+        " {value: function(){ throw new Error('denied'); }, configurable: true}); }"
+    )
+    page.evaluate("() => window.__reseedCollapseState()")
+    assert page.evaluate("() => window.__hermesDateGroupCollapsed['TODAY']") is True, (
+        "an unavailable read must preserve the current state"
+    )
+
+
+REAL_PATH_COUNTS_JS = """() => ({
+    headers: document.querySelectorAll('.session-date-header').length,
+    rows: document.querySelectorAll('.session-row').length,
+    visibleBodies: [...document.querySelectorAll('.session-date-body')]
+        .filter(b => b.style.display !== 'none').length,
+})"""
+
+
+@pytest.mark.parametrize(
+    "raw_stored,kind",
+    [
+        ('"abc"', "string root"),
+        ("5", "number root"),
+        ("true", "boolean root"),
+        ('["x"]', "array root"),
+    ],
+)
+def test_non_object_stored_snapshot_renders_and_recovers(page, raw_stored, kind):
+    """Gate Oct 4: a stored collapse value that is valid JSON but not an
+    object must route through the malformed-read fallback. Drives the REAL
+    render loop and the REAL hdr.onclick handler from static/sessions.js:
+    every header and row must render, no page error may fire, and the first
+    real click must collapse its group and repair storage to a real object
+    snapshot.
+    """
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate(
+        "(raw) => localStorage.setItem('hermes-date-groups-collapsed', raw)",
+        raw_stored,
+    )
+    page.evaluate("() => window.__seedGroupsFixture()")
+    page.evaluate("() => window.__buildGroups()")
+    assert not errors, f"{kind}: the real render must not throw"
+    assert page.evaluate(REAL_PATH_COUNTS_JS) == {"headers": 3, "rows": 6, "visibleBodies": 3}, (
+        f"{kind}: a non-object snapshot must render every header and row expanded"
+    )
+
+    # The real production click handler: toggles, saves, re-renders.
+    page.click(".session-date-header")
+    assert not errors, f"{kind}: the real header click must not throw"
+    stored = page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")
+    assert json.loads(stored) == {"Today": True}, (
+        f"{kind}: the first successful save must repair storage to a real object"
+    )
+    after = page.evaluate(REAL_PATH_COUNTS_JS)
+    assert after["headers"] == 3 and after["rows"] == 4 and after["visibleBodies"] == 2, (
+        f"{kind}: after the click, Today must be collapsed and the rest intact"
+    )
+
+
+def test_stored_null_snapshot_renders_expanded(page):
+    """Gate Oct 4: stored `null` is a valid empty snapshot — everything
+    renders expanded (master crashed here; the pending-override head must
+    not), and the real click path still works."""
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate("() => localStorage.setItem('hermes-date-groups-collapsed', 'null')")
+    page.evaluate("() => window.__seedGroupsFixture()")
+    page.evaluate("() => window.__buildGroups()")
+    assert not errors, "stored null must not throw in the real render"
+    assert page.evaluate(REAL_PATH_COUNTS_JS) == {"headers": 3, "rows": 6, "visibleBodies": 3}
+
+    page.click(".session-date-header")
+    assert not errors, "stored null: the real header click must not throw"
+    stored = page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")
+    assert json.loads(stored) == {"Today": True}
+
+
+def test_stored_proto_payload_cannot_change_collapse_prototype(page):
+    """Gate Oct 4 follow-up (Opus nit): _mergeStoredCollapsed must copy only
+    boolean values. Without the type check, a same-origin write of
+    {"__proto__":{"Older":true}} replaces the collapse map's prototype via
+    _groupCollapsed[k]=fresh[k], hiding a group until reload. Drives the
+    real render loop and real click handler."""
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate(
+        "(raw) => localStorage.setItem('hermes-date-groups-collapsed', raw)",
+        '{"__proto__":{"Older":true}}',
+    )
+    page.evaluate("() => window.__seedGroupsFixture()")
+    page.evaluate("() => window.__buildGroups()")
+    assert not errors, "a stored __proto__ payload must not throw in the real render"
+    assert page.evaluate(
+        "() => Object.getPrototypeOf(window.__hermesDateGroupCollapsed) !== Object.prototype"
+    ) is False, "the merge must not replace the collapse map's prototype"
+    assert page.evaluate("() => window.__hermesDateGroupCollapsed['Older']") in (None, False), (
+        "no group may be collapsed through the prototype chain"
+    )
+    assert page.evaluate(REAL_PATH_COUNTS_JS) == {"headers": 3, "rows": 6, "visibleBodies": 3}, (
+        "every group must render expanded despite the stored __proto__ payload"
+    )
+
+    # The real click path still works and writes a clean object snapshot.
+    page.click(".session-date-header")
+    assert not errors, "the real header click must not throw after a __proto__ payload"
+    stored = page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")
+    assert json.loads(stored) == {"Today": True}
+
+
+def test_stored_non_boolean_value_expands_a_previously_collapsed_group(page):
+    """Release-stage maintainer fix for #8028 (Greptile P2, reproduced by the senior review):
+    the deletion pass must use the same boolean-only rule as the copy pass. If Today is
+    collapsed and storage later says {"Today": null}, the merge must drop the stale key
+    (Today expands, as on master) instead of keeping it collapsed and writing
+    `Today: true` back on the next unrelated toggle."""
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate("() => window.__seedGroupsFixture()")
+    page.evaluate("() => window.__buildGroups()")
+    page.click(".session-date-header")  # collapse Today through the real handler
+    assert json.loads(page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")) == {"Today": True}
+    page.evaluate("() => localStorage.setItem('hermes-date-groups-collapsed', '{\"Today\":null}')")
+    page.evaluate("() => window.__buildGroups()")
+    assert not errors, "a non-boolean stored value must not throw in the real render"
+    assert page.evaluate(REAL_PATH_COUNTS_JS) == {"headers": 3, "rows": 6, "visibleBodies": 3}, (
+        "Today must expand once storage no longer holds a boolean for it"
+    )
+    page.click(".session-date-header >> nth=1")  # an unrelated toggle saves the snapshot
+    stored = json.loads(page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')"))
+    assert stored.get("Today") is not True, "the stale collapse must not be written back"

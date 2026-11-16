@@ -79,20 +79,19 @@ RAISED_EXCEPTION_SELF_HEAL_MARKER = (
     "retrying stream after credential refresh')"
 )
 
-# Each region ends at the cache write that stores the signature it just
-# computed. Bounding the region at the write -- rather than at the next
-# lifecycle anchor or at EOF -- is what proves the signature is recomputed
-# *before* it is cached: a call moved below its own write lands outside the
-# region and fails, instead of passing while the write consumes a stale
-# `_agent_sig`.
+# Each region ends at the atomic registration/publication call that consumes
+# the signature it just computed. The shared helper now writes the cache under
+# the Stop lock; the call boundary must still follow fresh signature computation.
+# A signature call moved below its publication lands outside the region and
+# fails, rather than silently reusing a stale `_agent_sig` on a retry.
 INITIAL_SEND_CACHE_WRITE_MARKER = (
-    "SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)"
+    "if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):"
 )
 RETURNED_ERROR_SELF_HEAL_CACHE_WRITE_MARKER = (
-    "_SAC[session_id] = (agent, _agent_sig)"
+    "if not _register_agent_if_current(agent, _agent_sig):"
 )
 RAISED_EXCEPTION_SELF_HEAL_CACHE_WRITE_MARKER = (
-    "_SAC2[session_id] = (_heal_agent, _agent_sig)"
+    "if not _register_agent_if_current(_heal_agent, _agent_sig):"
 )
 
 

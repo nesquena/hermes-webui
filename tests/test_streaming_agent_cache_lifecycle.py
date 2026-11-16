@@ -23,6 +23,9 @@ def test_evicted_agent_lifecycle_commits_unregisters_and_shutdowns(monkeypatch):
 
     session_db = MagicMock()
     agent = MagicMock()
+    # No external memory manager: these tests cover the lifecycle sequence, not the
+    # #8517 owner scope (an unknown owner refuses a memory-bearing agent's shutdown).
+    agent._memory_manager = None
     agent._session_db = session_db
     agent._session_messages = [{"role": "user", "content": "hello"}]
 
@@ -43,6 +46,7 @@ def test_evicted_agent_lifecycle_shutdown_uses_empty_messages_when_missing(monke
     monkeypatch.setattr(streaming, "_lifecycle_unregister_agent", MagicMock())
 
     agent = MagicMock()
+    agent._memory_manager = None  # see above: no external memory, no owner scope
     agent._session_db = MagicMock()
 
     streaming._close_evicted_agent_at_session_boundary("old-session", agent)
