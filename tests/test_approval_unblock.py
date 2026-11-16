@@ -27,9 +27,15 @@ try:
         _gateway_queues,
         _gateway_notify_cbs,
         _lock,
-        _ApprovalEntry,
         submit_pending,
     )
+    # _ApprovalEntry moved out of tools.approval into tools.approval_gateway_wait
+    # (#9008). Import it from the new home and fall back to the old one so the
+    # module still imports against older agent checkouts.
+    try:
+        from tools.approval_gateway_wait import _ApprovalEntry
+    except ImportError:
+        from tools.approval import _ApprovalEntry
     # has_pending and pop_pending were removed from tools.approval when the
     # agent renamed has_pending -> has_blocking_approval (gateway queue check)
     # and removed the polling-mode pop_pending. Routes now check _pending
