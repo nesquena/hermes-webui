@@ -528,6 +528,88 @@ const scenarios = {
       `pill painted for A, clicked on N: posted ${JSON.stringify(after)}, server yolo[N]=${!!server.yolo.N}, pill visible=${st.pillVisible}`, out);
     return out;
   },
+
+  // (i) two overlapping /yolo commands (the second typed before the first's
+  // read answered) both read "off" and both POST enabled:true. The second must
+  // post nothing; a /yolo after the first settled must still toggle.
+  async i_overlapping_yolo_commands_both_enable() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('B');
+    await tick();
+    await Promise.all([tab.cmdYolo(), tab.cmdYolo()]);
+    await tick();
+    const overlap = posts(tab);
+    const out = { posts_from_overlap: overlap, server: { ...server.yolo }, state: tab.state(), toasts: tab.toasts };
+    check(overlap.length === 1 && overlap[0].enabled === true && server.yolo.B === true && out.state.pillVisible,
+      `two overlapping /yolo posted ${JSON.stringify(overlap)}`, out);
+    await tab.cmdYolo();
+    await tick();
+    out.later_posts = posts(tab).slice(overlap.length);
+    out.later_state = tab.state();
+    check(out.later_posts.length === 1 && out.later_posts[0].enabled === false && server.yolo.B === false && !out.later_state.pillVisible,
+      `a /yolo after the first settled posted ${JSON.stringify(out.later_posts)}`, out);
+    return out;
+  },
+
+  // (i2) a second /yolo while the first's enable POST is still in flight reads
+  // the half-applied "on" and posts a disable; the first's late answer then
+  // paints an "on" pill over a server that is off.
+  async i2_yolo_while_first_post_in_flight_desyncs_pill() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('B');
+    await tick();
+    server.shouldHold = (name, method, p) => method === 'POST' && p === '/api/session/yolo';
+    const first = tab.cmdYolo();
+    await tick();
+    check(tab.held.length === 1 && server.yolo.B === true, 'precondition: first enable POST in flight', tab.calls);
+    server.shouldHold = null;
+    await tab.cmdYolo();
+    await tick();
+    tab.held.shift().release();
+    await first;
+    await tick();
+    const st = tab.state();
+    const out = { posts: posts(tab), server: { ...server.yolo }, state: st };
+    check(out.posts.length === 1 && server.yolo.B === true && st.pillVisible === true,
+      `second /yolo during the first's POST: posted ${JSON.stringify(out.posts)}, server yolo[B]=${!!server.yolo.B}, pill visible=${st.pillVisible}`, out);
+    return out;
+  },
+
+  // Control: the /yolo in-flight guard is released on every exit: after a
+  // failed POST and after a read made stale by a session switch.
+  async control_yolo_guard_released_after_failure_and_stale_switch() {
+    const server = createServer({ A: {}, B: {} });
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('B');
+    await tick();
+    server.failPost = true;
+    await tab.cmdYolo();
+    await tick();
+    server.failPost = false;
+    await tab.cmdYolo();
+    await tick();
+    const afterFailure = posts(tab);
+    check(afterFailure.length === 2 && afterFailure[1].enabled === true && server.yolo.B === true,
+      `/yolo after a failed /yolo posted ${JSON.stringify(afterFailure)}`, { posts: afterFailure, toasts: tab.toasts });
+    server.shouldHold = yoloGet('B');
+    const stale = tab.cmdYolo();
+    await tick();
+    server.shouldHold = null;
+    await tab.loadSession('A');
+    await tick();
+    tab.held.shift().release();
+    await stale;
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    const last = posts(tab).slice(afterFailure.length);
+    const out = { posts_after_stale: last, server: { ...server.yolo }, state: tab.state() };
+    check(last.length === 1 && last[0].session_id === 'A' && last[0].enabled === true && server.yolo.A === true,
+      `/yolo on A after a stale /yolo on B posted ${JSON.stringify(last)}`, out);
+    return out;
+  },
 };
 
 (async () => {

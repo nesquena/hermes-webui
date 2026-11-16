@@ -2584,6 +2584,10 @@ function cmdVoice(){
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
+  // One /yolo at a time: an overlapping call would read the same pre-toggle
+  // state (or the first's half-applied one) and post a duplicate or reverse.
+  if(S._yoloCommandInFlight)return;
+  S._yoloCommandInFlight=true;
   const generation=_loadSessionGeneration;
   const viewIsCurrent=()=>!!(
     S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
@@ -2625,6 +2629,8 @@ async function cmdYolo(){
       _applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation});
     }
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }finally{
+    S._yoloCommandInFlight=false;
   }
 }
 

@@ -46,6 +46,8 @@ SCENARIOS = [
     "f_pill_click_after_untracked_session_swap_enables_new_session",
     "g_enable_during_failed_switch_keeps_open_session_pill",
     "h_failed_switch_reads_back_open_session_flag",
+    "i_overlapping_yolo_commands_both_enable",
+    "i2_yolo_while_first_post_in_flight_desyncs_pill",
 ]
 
 
@@ -72,6 +74,8 @@ def _run(name):
         "control_streaming_load_shows_own_state",
         # A disable the server rejects keeps the authoritative error payload.
         "control_failed_pill_disable_keeps_authoritative_state",
+        # The /yolo in-flight guard is released after a failure or a stale read.
+        "control_yolo_guard_released_after_failure_and_stale_switch",
     ],
 )
 def test_controls(name):
