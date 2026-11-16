@@ -2309,14 +2309,12 @@ def _shared_url_may_belong_to_process_profile(session_home) -> bool:
             return False
     except Exception:
         process_home = None
-    raw_env_url = str(_process_environ().get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    process_env = _process_environ()
+    raw_env_url = str(process_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
     try:
         if raw_env_url:
             return _env_value_is_profile_sourced(_profiles, _WEBUI_GATEWAY_BASE_URL_ENV, raw_env_url)
-        from api.config import get_config
-
-        cfg = get_config()
-        if not (isinstance(cfg, dict) and str(cfg.get("webui_gateway_base_url") or "").strip()):
+        if not _shared_gateway_url_config(process_env):
             return False
         if process_home is None:
             return True
@@ -2336,17 +2334,20 @@ def _shared_gateway_url_config(process_env: dict[str, str]) -> dict:
 
     get_config() expands from live os.environ at reload time, so a reload while another profile's background worker
     has mirrored its .env would cache that worker's host. Re-expand the raw file value against the clean view."""
-    from api.config import _get_config_path, _has_env_ref, get_config
+    from api.config import _config_path_for_env, _get_config_path, _has_env_ref, get_config
     from api.profiles import load_profile_config
 
-    cfg = get_config()
-    value = cfg.get("webui_gateway_base_url") if isinstance(cfg, dict) else None
-    if isinstance(value, str) and value:
-        path = Path(_get_config_path())  # the exact file get_config() read, even a custom HERMES_CONFIG_PATH name
-        clean = load_profile_config(path.parent, env=process_env, config_path=path).get("webui_gateway_base_url")
-        if isinstance(clean, str) and clean and not _has_env_ref(clean):
-            value = clean
-    return {"webui_gateway_base_url": value} if value else {}
+    # The process's own file (even a custom HERMES_CONFIG_PATH name), never one a worker mirrored into os.environ.
+    path = Path(_config_path_for_env(process_env))
+    clean = load_profile_config(path.parent, env=process_env, config_path=path).get("webui_gateway_base_url")
+    if isinstance(clean, str) and clean and not _has_env_ref(clean):
+        value = clean
+    elif path == Path(_get_config_path()):  # get_config() read this same file: keep its cached value
+        cfg = get_config()
+        value = cfg.get("webui_gateway_base_url") if isinstance(cfg, dict) else None
+    else:
+        value = None
+    return {"webui_gateway_base_url": value} if isinstance(value, str) and value else {}
 
 
 def _gateway_endpoint_for_profile(profile_name, *, profile_routing: bool = True) -> tuple[str, str]:
@@ -3498,7 +3499,7 @@ def _run_gateway_chat_streaming(
                 if run_id:  # the Gateway accepted the run: its delegation lease is delivered
                     _settle_delegation_reservation(session_id, stream_id, accepted=True)
             try:
-                if reattach_run and endpoint_moved:
+                if reattach_run and endpoint_moved and not _use_session_rpc:  # run_session() checks its own connection
                     raise RuntimeError(
                         "This profile's Gateway URL changed after the run started, so the WebUI cannot "
                         "authenticate to the Gateway that holds it; its result could not be recovered."

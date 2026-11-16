@@ -541,7 +541,12 @@ def _cfg_has_in_memory_overrides() -> bool:
 
 def _get_config_path() -> Path:
     """Return config.yaml path for the active profile."""
-    env_override = os.getenv("HERMES_CONFIG_PATH")
+    return _config_path_for_env(os.environ)
+
+
+def _config_path_for_env(env) -> Path:
+    """config.yaml path for the active profile, with HERMES_CONFIG_PATH read from *env*."""
+    env_override = env.get("HERMES_CONFIG_PATH")
     if env_override:
         return Path(env_override).expanduser()
     try:

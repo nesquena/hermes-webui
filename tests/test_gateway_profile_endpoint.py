@@ -397,3 +397,69 @@ def test_a_custom_named_hermes_config_path_supplies_the_shared_url_not_its_sibli
     finally:
         monkeypatch.undo()
         config.reload_config()
+
+
+def test_overlapping_workers_exiting_out_of_order_restore_the_process_value(work_profile):
+    """Greptile 4553365067: alpha enters, beta enters, alpha exits first; beta's exit restored alpha's URL and the
+    last baseline was dropped, so alpha's host became the process's shared URL. The last exit restores the baseline."""
+    for name in ("alpha", "beta"):
+        (work_profile.parent / name).mkdir()
+        (work_profile.parent / name / ".env").write_text(f"HERMES_WEBUI_GATEWAY_BASE_URL=http://{name}-gw:9000\n")
+    alpha = profiles.profile_env_for_background_worker("alpha")
+    beta = profiles.profile_env_for_background_worker("beta")
+    alpha.__enter__()
+    beta.__enter__()
+    alpha.__exit__(None, None, None)
+    beta.__exit__(None, None, None)
+
+    assert gateway_chat.os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"] == SHARED
+    assert profiles._WORKER_ENV_BASELINE == {}
+    assert gateway_chat._gateway_endpoint_for_profile("work") == (f"{SHARED}/p/work", WORK_KEY)
+
+
+def test_an_open_worker_mirror_of_hermes_config_path_does_not_choose_the_shared_config_file(
+        work_profile, tmp_path, monkeypatch):
+    """Greptile 4585218090: the shared config file is chosen from the clean process settings, not from a
+    HERMES_CONFIG_PATH another profile's worker mirrored into os.environ."""
+    from api import config
+
+    alpha = work_profile.parent / "alpha"
+    alpha.mkdir()
+    (alpha / "alpha.yaml").write_text("webui_gateway_base_url: http://alpha-gw:9000\n")
+    (alpha / ".env").write_text(f"HERMES_CONFIG_PATH={alpha / 'alpha.yaml'}\n")
+    (work_profile.parents[1] / "config.yaml").write_text(f"webui_gateway_base_url: {SHARED}\n")
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(work_profile.parents[1]))  # root process profile
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
+    try:
+        config.reload_config()
+        with profiles.profile_env_for_background_worker("alpha"):
+            assert gateway_chat.os.environ["HERMES_CONFIG_PATH"] == str(alpha / "alpha.yaml")  # the mirror is open
+            assert gateway_chat._gateway_endpoint_for_profile("work") == (f"{SHARED}/p/work", WORK_KEY)
+    finally:
+        monkeypatch.undo()
+        config.reload_config()
+
+
+def test_a_moved_rest_url_does_not_block_a_saved_session_transport_turn(work_profile, sessions, monkeypatch):
+    """Greptile 4585218101: a transport="session" turn is checked by run_session() against its own saved
+    connection; a changed REST Gateway URL must not reject it."""
+    from api import gateway_sessions
+
+    calls = []
+
+    def fake_run_session(s, stream_id, text, *, emit, cancel, record, saved=None):
+        calls.append(saved)
+        return "recovered over the session transport", {}, None
+
+    monkeypatch.setattr(gateway_sessions, "run_session", fake_run_session)
+    sid, polls, _ = _reattach(monkeypatch, {
+        "run_id": "run_sess", "stream_id": "stream-sess", "regeneration": False, "goal_related": False,
+        "endpoint_routing": "profile-v1", "base_url": "http://old-gw:7000", "transport": "session",
+        "session_request": {"session_id": "x", "input_id": "webui:stream-sess", "text": "long task"},
+    })
+
+    assert polls == [] and len(calls) == 1 and calls[0]["transport"] == "session"
+    saved = json.loads((models.SESSION_DIR / f"{sid}.json").read_text())
+    assert "Gateway URL changed" not in json.dumps(saved["messages"])
+    assert saved["messages"][-1]["content"] == "recovered over the session transport"

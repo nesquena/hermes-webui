@@ -1512,7 +1512,12 @@ def _worker_env_overlay_exit(keys) -> None:
                 continue
             entry[0] -= 1
             if entry[0] <= 0:
+                # Overlapping workers can exit out of order, so the last one out puts back the process value.
                 del _WORKER_ENV_BASELINE[key]
+                if entry[1] is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = entry[1]
 
 
 def process_environ_without_worker_overlays() -> dict[str, str]:
