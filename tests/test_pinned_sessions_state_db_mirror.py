@@ -246,9 +246,9 @@ def test_profile_a_sidebar_never_reads_or_writes_profile_b(tmp_path, monkeypatch
     opened, before_b = [], (db_b.read_bytes(), _db_snapshot(db_b))
     real_read = state_sync.read_state_db_flags
 
-    def spy(profile=None):
+    def spy(profile=None, session_ids=()):
         opened.append(str(state_sync._resolve_state_db_path(profile)))
-        return real_read(profile)
+        return real_read(profile, session_ids)
 
     monkeypatch.setattr(state_sync, "read_state_db_flags", spy)
 
@@ -401,6 +401,7 @@ def test_archive_mirrors_across_the_compression_lineage_and_title_mirrors_as_use
         conn.commit()
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
     tip = _PinSession("tip")
+    tip.archived, tip.title, tip.manual_title = True, "Manual name", True  # routes save the sidecar first
     monkeypatch.setattr(routes, "SESSIONS", {"tip": tip})
 
     routes._mirror_to_state_db(tip, "archived", True)

@@ -472,8 +472,11 @@ def sync_session_field(session_id: str, field: str, value, profile: Optional[str
         return False
 
 
-def read_state_db_flags(profile: Optional[str] = None) -> dict[str, dict]:
-    """``{id: {pinned, archived}}`` from *profile*'s own state.db; ``{}`` when unreadable.
+_FLAG_READ_BATCH = 500  # below SQLite's oldest bound-parameter limit (999)
+
+
+def read_state_db_flags(profile: Optional[str] = None, session_ids=()) -> dict[str, dict]:
+    """``{id: {pinned, archived}}`` for *session_ids* from *profile*'s own state.db; ``{}`` when unreadable.
 
     Read-only, and never another profile's database: a missing state.db contributes
     nothing instead of falling back to the active profile (#2762). Columns an older
@@ -488,11 +491,14 @@ def read_state_db_flags(profile: Optional[str] = None) -> dict[str, dict]:
             cols = [c for c in ("pinned", "archived") if c in have]
             if not cols:
                 return {}
-            return {
-                str(row[0]).strip(): {c: bool(row[i + 1]) for i, c in enumerate(cols)}
-                for row in conn.execute(f"SELECT id, {', '.join(cols)} FROM sessions")
-                if row[0]
-            }
+            ids = sorted({str(sid).strip() for sid in session_ids if str(sid or "").strip()})
+            flags: dict[str, dict] = {}
+            for start in range(0, len(ids), _FLAG_READ_BATCH):
+                batch = ids[start:start + _FLAG_READ_BATCH]
+                query = f"SELECT id, {', '.join(cols)} FROM sessions WHERE id IN ({', '.join('?' * len(batch))})"
+                for row in conn.execute(query, batch):
+                    flags[str(row[0]).strip()] = {c: bool(row[i + 1]) for i, c in enumerate(cols)}
+            return flags
     except Exception:
         logger.debug("Failed to read session flags from %s", profile, exc_info=True)
         return {}

@@ -463,7 +463,7 @@ def _mirror_to_state_db(session, field: str, value) -> None:
             held = _session_field(found, field)
             if field == "title" and not _session_field(found, "manual_title", False):
                 held = None  # an automatic title is mirrored as a reset
-            return held is not None and norm(held) != norm(value)
+            return norm(held) != norm(value)
 
         with _get_session_agent_lock(sid):
             current = resolve()
@@ -519,11 +519,18 @@ def _stamp_state_db_flags(rows: list[dict], profiles) -> None:
             owners[name] = _resolve_state_db_path(name)
         return owners[name]
 
+    ids_by_owner: dict[Path, set[str]] = {}
+    for row in rows:
+        sid = str(row.get("session_id") or "").strip() if isinstance(row, dict) else ""
+        owner = owner_of(row.get("profile")) if sid else None
+        if owner is not None:
+            ids_by_owner.setdefault(owner, set()).add(sid)
+
     flags_by_owner: dict[Path, dict[str, dict]] = {}
     for name in profiles:
         owner = owner_of(name)
-        if owner is not None and owner not in flags_by_owner:
-            flags_by_owner[owner] = read_state_db_flags(str(name or "").strip() or "default")
+        if owner is not None and owner not in flags_by_owner and ids_by_owner.get(owner):
+            flags_by_owner[owner] = read_state_db_flags(str(name or "").strip() or "default", ids_by_owner[owner])
 
     for row in rows:
         if not isinstance(row, dict):
