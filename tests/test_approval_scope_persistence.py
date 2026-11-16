@@ -12,9 +12,10 @@ is waiting on the answer, saves nothing for any gateway mirror (an orphaned
 mirror's answer was never used), and for raw entries no Agent waits on it saves
 only within the scopes the entry offered (``allow_session``/``allow_permanent``/
 ``smart_denied``; missing flags keep the answer as given) and only in the
-session's own profile (tests/test_approval_profile_scoped_grants.py): through the
-Agent's ``_persist_choice`` when it takes plain keys, else WebUI grants and saves
-only the keys just granted. Every allowlist save in the process is serialized.
+session's own profile (tests/test_approval_profile_scoped_grants.py). A session
+answer goes through the Agent's ``_persist_choice`` when it takes plain keys; an
+"always" answer grants and saves only the keys just granted. Every allowlist save
+in the process is serialized.
 
 The unit tests record WebUI's grant calls. The end-to-end tests drive the real
 Agent gate in a subprocess, answer through WebUI's respond route, and check
@@ -23,6 +24,7 @@ whether the next matching command is asked again and who saved what.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -34,6 +36,7 @@ from types import SimpleNamespace
 import pytest
 
 from api import models
+from api import profiles
 from api import route_approvals
 from api import routes
 
@@ -176,6 +179,58 @@ def test_unknown_session_profile_saves_nothing(grants, monkeypatch):
     assert grants == []
 
 
+def test_profile_home_that_cannot_be_bound_grants_nothing(grants, sid, monkeypatch, caplog):
+    """``set_hermes_home_override`` can raise (ScopeSwitchRefused while a hosted scope is
+    bound). The answer then counts as once: no exception, nothing granted or saved, no
+    reset of an override that was never set, and the Agent's gate is still answered."""
+    from api import memory_profile_scope
+
+    class ScopeSwitchRefused(RuntimeError):
+        pass
+
+    resets, gate_answers = [], []
+
+    def refuse(_home):
+        raise ScopeSwitchRefused("a hosted scope is bound")
+
+    home_mod = SimpleNamespace(set_hermes_home_override=refuse, reset_hermes_home_override=resets.append)
+    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
+    monkeypatch.setattr(memory_profile_scope, "session_owner_profile_home", lambda _sid: "/profile/home")
+    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: home_mod)
+    monkeypatch.setattr(
+        routes, "resolve_gateway_approval", lambda *a, **k: gate_answers.append((a, k)) or 1
+    )
+    with routes._lock:  # a raw entry, answered by a legacy id-less click with the Agent's head
+        routes._pending[sid] = [{**_card(), "approval_id": f"aid-{sid}"}]
+
+    with caplog.at_level(logging.WARNING, logger=routes.logger.name):
+        assert routes._resolve_approval_legacy(sid, "", "always") is True
+
+    assert grants == [] and resets == []
+    assert gate_answers == [((sid, "always"), {"resolve_all": False})]
+    assert [r for r in caplog.records if "could not be bound" in r.getMessage() and sid in r.getMessage()]
+    with routes._lock:
+        assert not routes._pending.get(sid)
+
+
+@pytest.mark.parametrize(
+    "keys, saved",
+    [(["tirith:some_rule", "recursive delete"], {"recursive delete"}), (["tirith:some_rule"], None)],
+    ids=["mixed", "tirith_only"],
+)
+def test_always_keeps_content_scanner_keys_session_only(grants, sid, keys, saved):
+    """As in the Agent's own ``_persist_choice``, ``tirith:`` findings are never made permanent."""
+    entry = {**_card(), "pattern_key": keys[0], "pattern_keys": keys, "approval_id": f"aid-{sid}"}
+    with routes._lock:
+        routes._pending[sid] = [entry]
+
+    assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
+
+    assert [args for name, args in grants if name == "approve_session"] == [(sid, k) for k in keys]
+    assert [args for name, args in grants if name == "approve_permanent"] == [(k,) for k in keys if k in (saved or ())]
+    assert [args for name, args in grants if name == "save_permanent_allowlist"] == ([(saved,)] if saved else [])
+
+
 def test_agent_less_mode_still_saves_unscoped(grants, monkeypatch):
     """No Agent: there is no profile-scoped grant store, so behaviour is unchanged."""
     monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", False)
@@ -190,17 +245,28 @@ def test_agent_less_mode_still_saves_unscoped(grants, monkeypatch):
     assert grants == _expected_grants(unknown, "always")
 
 
-def test_raw_always_is_granted_through_a_keys_persist_choice(grants, sid, monkeypatch):
+@pytest.mark.parametrize("choice", ["session", "always"])
+def test_raw_answer_uses_a_keys_persist_choice_only_for_session(grants, sid, monkeypatch, choice):
     persisted = []
     monkeypatch.setattr(routes, "persist_grant_choice", lambda *args: persisted.append(args))
     entry = {**_card(), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
     with routes._lock:
         routes._pending[sid] = [entry]
 
-    assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
+    assert routes._resolve_approval_legacy(sid, entry["approval_id"], choice) is True
 
-    assert persisted == [(sid, "always", ["first key", "second key"])]
-    assert grants == []  # not WebUI's own grant calls as well
+    if choice == "session":
+        assert persisted == [(sid, "session", ["first key", "second key"])]
+        assert grants == []  # not WebUI's own grant calls as well
+    else:  # only the keys granted now, never a copy of the in-memory set
+        assert persisted == []
+        assert grants == [
+            ("approve_session", (sid, "first key")),
+            ("approve_permanent", ("first key",)),
+            ("approve_session", (sid, "second key")),
+            ("approve_permanent", ("second key",)),
+            ("save_permanent_allowlist", ({"first key", "second key"},)),
+        ]
 
 
 def _tuple_shape(session_key, choice, warnings):  # Agent v2026.9.24

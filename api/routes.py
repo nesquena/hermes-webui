@@ -34675,7 +34675,19 @@ def _session_profile_grant_scope(sid: str):
         logger.warning("approval grant for session %s not saved: its profile home is unknown", sid)
         yield False
         return
-    token = home_mod.set_hermes_home_override(home)
+    try:
+        # Can raise, e.g. ScopeSwitchRefused while a hosted scope is bound.
+        token = home_mod.set_hermes_home_override(home)
+    except Exception as exc:
+        logger.warning(
+            "approval grant for session %s not saved: its profile home could not be bound (%s)", sid, exc
+        )
+        bound = False
+    else:
+        bound = True
+    if not bound:
+        yield False
+        return
     try:
         yield True
     finally:
@@ -34816,18 +34828,23 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     all_keys = [k for k in keys_from_pending if k]
     if scope in ("session", "always") and all_keys:
         with _session_profile_grant_scope(sid) as in_profile:
-            if in_profile and persist_grant_choice is not None:
-                # The Agent's own grant and save, as for its answers: it saves only
-                # what this process granted beyond its last read of the file.
+            if in_profile and persist_grant_choice is not None and scope == "session":
+                # A session answer uses the Agent's own grant. "always" saves only the
+                # keys granted now (below), so a concurrent answer can never write back
+                # an entry removed from command_allowlist by hand.
                 persist_grant_choice(sid, scope, all_keys)
             elif in_profile:
+                saved = set()
                 for k in all_keys:
                     approve_session(sid, k)
-                    if scope == "always":
+                    # Content-scanner (tirith) findings stay session-only, as in the
+                    # Agent's own _persist_choice; a raw entry carries no flag for them.
+                    if scope == "always" and not str(k).startswith("tirith:"):
                         approve_permanent(k)
-                if scope == "always":
+                        saved.add(k)
+                if saved:
                     # Only the keys granted now: never another profile's in-memory grants.
-                    save_permanent_allowlist(set(all_keys))
+                    save_permanent_allowlist(saved)
     # choice == "once": no persistence — approval lasts this single call only.
     # resolve_gateway_approval() below unblocks the parked agent thread for
     # every choice, so "once" still lets the current tool run; we just must not

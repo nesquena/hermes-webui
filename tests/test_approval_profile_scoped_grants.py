@@ -7,11 +7,11 @@ one profile was written into another profile's ``command_allowlist``.
 ``_resolve_approval_legacy`` now binds the Agent's context-local Hermes home to
 the session's own profile around those calls, saves nothing when that profile
 can't be established, and saves nothing for a gateway mirror whose producer is
-gone. With an Agent whose ``_persist_choice`` takes plain keys, the grant and
-save are the Agent's own (it saves what it granted beyond its last read of the
-file, so a grant whose save failed is not lost); otherwise WebUI saves the keys
-just granted. Every save in the process is serialized, so two "always" answers
-in one profile can't overwrite each other.
+gone. A "session" answer uses the Agent's own ``_persist_choice`` when it takes
+plain keys. An "always" answer grants and saves only the keys granted now, so a
+concurrent answer can't write back an entry removed by hand. Every save in the
+process is serialized, so two "always" answers in one profile can't overwrite
+each other.
 
 These tests use the real Agent ``tools.approval`` in process and read each
 profile's ``config.yaml``.
@@ -229,33 +229,57 @@ def test_webui_binds_the_agents_persist_choice_only_for_its_keys_shape():
     assert routes.persist_grant_choice is expected
 
 
-def test_session_and_always_answers_save_through_this_agents_path(homes, sessions, monkeypatch):
-    """Runs on every Agent: a keys-shaped ``_persist_choice`` saves for WebUI, otherwise
-    (v2026.9.24) WebUI's own calls save the granted keys."""
-    saved = []
-    webui_save = routes.save_permanent_allowlist
-    monkeypatch.setattr(routes, "save_permanent_allowlist", lambda keys: saved.append(set(keys)) or webui_save(keys))
+def _spy_grant_paths(monkeypatch):
+    """Record what reaches the Agent's ``_persist_choice`` and WebUI's save, calling through."""
+    persisted, saved = [], []
+    persist, save = routes.persist_grant_choice, routes.save_permanent_allowlist
+    if persist is not None:
+        monkeypatch.setattr(routes, "persist_grant_choice", lambda *a: persisted.append(a) or persist(*a))
+    monkeypatch.setattr(routes, "save_permanent_allowlist", lambda keys: saved.append(set(keys)) or save(keys))
+    return persisted, saved
+
+
+def test_session_answer_uses_the_agents_grant_and_always_saves_the_granted_keys(homes, sessions, monkeypatch):
+    """Runs on every Agent. "session" goes through a keys-shaped ``_persist_choice`` (WebUI's
+    own grant on v2026.9.24); "always" grants and saves only the keys granted now."""
+    persisted, saved = _spy_grant_paths(monkeypatch)
     by_session, by_always = sessions("alpha"), sessions("alpha")
 
     assert routes._resolve_approval_legacy(by_session, _queue(by_session), "session") is True
     assert _approved_in(homes["alpha"], by_session)
     assert not _approved_in(homes["alpha"], LATER)
     assert _allowlist(homes["alpha"]) == []
+    assert persisted == ([(by_session, "session", [KEY])] if _agent_takes_keys() else [])
 
     assert routes._resolve_approval_legacy(by_always, _queue(by_always, KEY_2), "always") is True
     assert _allowlist(homes["alpha"]) == [KEY_2]
     assert _approved_in(homes["alpha"], LATER, KEY_2)
-    assert saved == ([] if _agent_takes_keys() else [{KEY_2}])
+    assert len(persisted) == (1 if _agent_takes_keys() else 0)  # not used for "always"
+    assert saved == [{KEY_2}]
     assert _allowlist(homes["beta"]) == [] and _allowlist(homes["default"]) == []
 
 
-def test_always_after_a_failed_save_keeps_the_earlier_grant(homes, sessions, monkeypatch):
-    """A grant whose save failed stays granted in memory. The next "always" in the same
-    profile saves it as well (the Agent saves everything it granted beyond its last read
-    of the file), instead of saving only its own key and replacing the in-memory set with
-    that. Other profiles' unsaved grants stay where they are."""
-    if route_approvals.persist_grant_choice is None:
-        pytest.skip("this Agent's _persist_choice takes tuples; WebUI saves the granted keys only")
+def test_always_keeps_a_content_scanner_key_session_only(homes, sessions):
+    """A raw entry (v2026.9.24's no-notifier ``_pending``) carries no tirith flag. As in the
+    Agent's own ``_persist_choice``, an "always" grants a ``tirith:`` key for the session
+    only and saves just the other keys."""
+    tirith = "tirith:some_rule"
+    sid = sessions("alpha")
+    entry_id = _queue(sid, tirith, pattern_keys=[tirith, KEY])
+
+    assert routes._resolve_approval_legacy(sid, entry_id, "always") is True
+
+    assert _allowlist(homes["alpha"]) == [KEY]
+    assert _approved_in(homes["alpha"], sid, tirith)
+    assert not _approved_in(homes["alpha"], LATER, tirith)
+    assert _approved_in(homes["alpha"], LATER, KEY)
+    assert _allowlist(homes["beta"]) == [] and _allowlist(homes["default"]) == []
+
+
+def test_always_after_a_failed_save_saves_only_its_own_key(homes, sessions, monkeypatch):
+    """Fails closed: a grant whose save failed is not saved by the next "always" either.
+    That save writes only its own key and the Agent replaces the profile's in-memory set
+    with what it wrote, so the earlier command is asked again. Nothing else is granted."""
     beta_only, root_only = f"beta key {uuid.uuid4().hex[:6]}", f"root key {uuid.uuid4().hex[:6]}"
     with _in_home(homes["beta"]):
         agent_approval.approve_permanent(beta_only)
@@ -265,38 +289,25 @@ def test_always_after_a_failed_save_keeps_the_earlier_grant(homes, sessions, mon
 
     assert routes._resolve_approval_legacy(first, _queue(first), "always") is True
     assert _allowlist(homes["alpha"]) == []
-    assert _approved_in(homes["alpha"], LATER)
     assert routes._resolve_approval_legacy(second, _queue(second, KEY_2), "always") is True
 
     assert len(saves) == 2
-    assert _allowlist(homes["alpha"]) == sorted([KEY, KEY_2])
-    assert _approved_in(homes["alpha"], LATER, KEY)
+    assert _allowlist(homes["alpha"]) == [KEY_2]
+    assert not _approved_in(homes["alpha"], LATER, KEY)
     assert _approved_in(homes["alpha"], LATER, KEY_2)
+    assert not _approved_in(homes["alpha"], LATER, beta_only)
     assert _allowlist(homes["beta"]) == []
     assert _allowlist(homes["default"]) == []
     assert not _approved_in(homes["beta"], LATER, KEY)
-    assert _approved_in(homes["beta"], LATER, beta_only)
-
-
-def test_without_a_keys_persist_choice_always_saves_its_own_keys(homes, sessions, monkeypatch):
-    """The fallback (no ``_persist_choice``, or the tuple shape): the keys granted now."""
-    monkeypatch.setattr(routes, "persist_grant_choice", None)
-    _fail_first_save(monkeypatch)
-    first, second = sessions("alpha"), sessions("alpha")
-
-    assert routes._resolve_approval_legacy(first, _queue(first), "always") is True
-    assert routes._resolve_approval_legacy(second, _queue(second, KEY_2), "always") is True
-
-    assert _allowlist(homes["alpha"]) == [KEY_2]
-    assert _approved_in(homes["alpha"], LATER, KEY_2)
-    assert _allowlist(homes["beta"]) == []
-    assert _allowlist(homes["default"]) == []
 
 
 @pytest.mark.parametrize("path", ["persist_choice", "fallback"])
 def test_always_does_not_restore_an_entry_removed_by_hand(homes, sessions, monkeypatch, path):
+    """``persist_choice``: this Agent's binding as is; ``fallback``: no ``_persist_choice``.
+    Either way "always" saves the granted keys, not through ``_persist_choice``."""
     if path == "fallback":
         monkeypatch.setattr(routes, "persist_grant_choice", None)
+    persisted, saved = _spy_grant_paths(monkeypatch)
     first, second = sessions("alpha"), sessions("alpha")
     assert routes._resolve_approval_legacy(first, _queue(first), "always") is True
     assert _allowlist(homes["alpha"]) == [KEY]
@@ -310,6 +321,65 @@ def test_always_does_not_restore_an_entry_removed_by_hand(homes, sessions, monke
     assert _allowlist(homes["alpha"]) == [KEY_2]
     assert not _approved_in(homes["alpha"], LATER, KEY)
     assert _approved_in(homes["alpha"], LATER, KEY_2)
+    assert persisted == [] and saved == [{KEY}, {KEY_2}]
+
+
+def test_overlapping_always_answers_do_not_restore_an_entry_removed_by_hand(homes, sessions, monkeypatch):
+    """A and B answer "always" at once and both reach the save; A saves X, the operator then
+    removes X from config.yaml (the next check reads that), and B saves. B passes only its
+    own key, so X stays removed. Passing a copy of the in-memory set taken before A's save
+    wrote X back."""
+    serialized_save = agent_approval.save_permanent_allowlist
+    held = {"answer-A": (threading.Event(), threading.Event()), "answer-B": (threading.Event(), threading.Event())}
+    passed = {}
+
+    def held_save(patterns):
+        name = threading.current_thread().name
+        passed[name] = sorted(patterns)
+        if name in held:
+            reached, resume = held[name]
+            reached.set()
+            resume.wait(10)
+        return serialized_save(patterns)
+
+    monkeypatch.setattr(agent_approval, "save_permanent_allowlist", held_save)  # the Agent's own path
+    monkeypatch.setattr(routes, "save_permanent_allowlist", held_save)
+    sid_a, sid_b = sessions("alpha"), sessions("alpha")
+    errors = []
+
+    def answer(sid, key):
+        try:
+            assert routes._resolve_approval_legacy(sid, _queue(sid, key), "always") is True
+        except Exception as exc:  # surfaced below
+            errors.append(repr(exc))
+
+    a = threading.Thread(target=answer, args=(sid_a, KEY), name="answer-A", daemon=True)
+    b = threading.Thread(target=answer, args=(sid_b, KEY_2), name="answer-B", daemon=True)
+    try:
+        a.start()
+        assert held["answer-A"][0].wait(10)
+        b.start()
+        assert held["answer-B"][0].wait(10)
+        held["answer-A"][1].set()
+        a.join(10)
+        assert not a.is_alive() and _allowlist(homes["alpha"]) == [KEY]
+
+        (homes["alpha"] / "config.yaml").write_text(
+            "approvals:\n  mode: manual\ncommand_allowlist: []\n", encoding="utf-8"
+        )
+        if hasattr(agent_approval, "_sync_permanent_from_disk"):  # v2026.9.24 reads it at the save
+            assert not _approved_in(homes["alpha"], LATER, KEY)
+    finally:
+        for _reached, resume in held.values():
+            resume.set()
+    b.join(10)
+
+    assert not b.is_alive() and errors == []
+    assert passed["answer-B"] == [KEY_2]
+    assert _allowlist(homes["alpha"]) == [KEY_2]
+    assert not _approved_in(homes["alpha"], LATER, KEY)
+    assert _approved_in(homes["alpha"], LATER, KEY_2)
+    assert _allowlist(homes["beta"]) == [] and _allowlist(homes["default"]) == []
 
 
 # ── Two "always" saves in one profile at once ───────────────────────────────
