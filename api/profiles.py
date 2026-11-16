@@ -94,8 +94,11 @@ _tls = threading.local()
 # env var is not a stable identity; see _pin_process_profile_home().
 _PROCESS_PROFILE_HOME: Optional[str] = None
 
-_SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
+_SKILLS_TOOL_MODULE = "tools.skills_tool"
+_SKILL_HOME_MODULES = (_SKILLS_TOOL_MODULE, "tools.skill_manager_tool")
 _SKILL_HOME_MODULE_PATCH_LOCK = threading.RLock()
+# Module globals through which an Agent skill module keeps its own skills-dir state.
+_SKILL_HOME_OWN_STATE_ATTRS = ("HERMES_HOME", "SKILLS_DIR", "_SKILLS_DIR_AT_IMPORT")
 
 
 def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
@@ -116,9 +119,66 @@ def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
     return snapshot
 
 
+def _skill_module_shares_skills_tool_resolver(module, skills_tool) -> bool:
+    """True when *module* has no skills-dir state of its own and resolves through skills_tool.
+
+    Agents with upstream 17b953d8b7cd dropped ``HERMES_HOME``, ``SKILLS_DIR``,
+    ``_SKILLS_DIR_AT_IMPORT`` and ``_skills_dir()`` from tools.skill_manager_tool,
+    which now imports ``tools.skills_tool._skills_dir``. Such a module is exactly as
+    dynamic as skills_tool, whose own globals the caller still checks. Any other
+    shape (a stray global, or a ``_skills_dir`` that is a different function) is
+    not recognised, so callers keep the legacy whole-turn lock.
+    """
+    if skills_tool is None or module is skills_tool:
+        return False
+    if any(hasattr(module, attr) for attr in _SKILL_HOME_OWN_STATE_ATTRS):
+        return False
+    shared_resolver = getattr(skills_tool, '_skills_dir', None)
+    return callable(shared_resolver) and getattr(module, '_skills_dir', None) is shared_resolver
+
+
+def _skill_module_skills_dir_unpatched(module_name: str, module) -> bool:
+    """True when *module*'s ``SKILLS_DIR`` still equals its ``_SKILLS_DIR_AT_IMPORT``."""
+    if not hasattr(module, 'SKILLS_DIR'):
+        logger.debug("Skill capability check: %s missing SKILLS_DIR", module_name)
+        return False
+
+    if not hasattr(module, '_SKILLS_DIR_AT_IMPORT'):
+        logger.debug("Skill capability check: %s missing _SKILLS_DIR_AT_IMPORT", module_name)
+        return False
+
+    try:
+        current_skills_dir = Path(module.SKILLS_DIR).expanduser()
+        import_skills_dir = Path(module._SKILLS_DIR_AT_IMPORT).expanduser()
+    except Exception:
+        logger.debug(
+            "Skill capability check: %s has invalid SKILLS_DIR or _SKILLS_DIR_AT_IMPORT",
+            module_name,
+            exc_info=True,
+        )
+        return False
+
+    if current_skills_dir != import_skills_dir:
+        logger.debug(
+            "Skill capability check: %s.SKILLS_DIR %r does not match imported baseline %r",
+            module_name,
+            current_skills_dir,
+            import_skills_dir,
+        )
+        return False
+    return True
+
+
 def _skill_modules_support_profile_home(profile_home: Path) -> bool:
-    """Return ``True`` when both skill modules resolve to this profile home."""
+    """Return ``True`` when both skill modules resolve to this profile home.
+
+    A module qualifies when its ``SKILLS_DIR`` still equals its
+    ``_SKILLS_DIR_AT_IMPORT`` (so ``_skills_dir()`` follows the live home), or when
+    it shares skills_tool's resolver and carries none of those globals itself.
+    tools.skills_tool is always held to the first rule.
+    """
     expected_dir = (Path(profile_home) / 'skills').expanduser()
+    skills_tool = sys.modules.get(_SKILLS_TOOL_MODULE)
 
     for module_name in _SKILL_HOME_MODULES:
         module = sys.modules.get(module_name)
@@ -126,32 +186,11 @@ def _skill_modules_support_profile_home(profile_home: Path) -> bool:
             logger.debug("Skill capability check: %s not pre-imported in sys.modules", module_name)
             return False
 
-        if not hasattr(module, 'SKILLS_DIR'):
-            logger.debug("Skill capability check: %s missing SKILLS_DIR", module_name)
-            return False
-
-        if not hasattr(module, '_SKILLS_DIR_AT_IMPORT'):
-            logger.debug("Skill capability check: %s missing _SKILLS_DIR_AT_IMPORT", module_name)
-            return False
-
-        try:
-            current_skills_dir = Path(module.SKILLS_DIR).expanduser()
-            import_skills_dir = Path(module._SKILLS_DIR_AT_IMPORT).expanduser()
-        except Exception:
-            logger.debug(
-                "Skill capability check: %s has invalid SKILLS_DIR or _SKILLS_DIR_AT_IMPORT",
-                module_name,
-                exc_info=True,
-            )
-            return False
-
-        if current_skills_dir != import_skills_dir:
-            logger.debug(
-                "Skill capability check: %s.SKILLS_DIR %r does not match imported baseline %r",
-                module_name,
-                current_skills_dir,
-                import_skills_dir,
-            )
+        if _skill_module_shares_skills_tool_resolver(module, skills_tool):
+            # Dynamic exactly when skills_tool is, so skills_tool must pass the SKILLS_DIR rule.
+            if not _skill_module_skills_dir_unpatched(_SKILLS_TOOL_MODULE, skills_tool):
+                return False
+        elif not _skill_module_skills_dir_unpatched(module_name, module):
             return False
 
         skills_dir = getattr(module, '_skills_dir', None)
@@ -182,16 +221,23 @@ def _skill_modules_support_profile_home(profile_home: Path) -> bool:
 
 
 def patch_skill_home_modules(home: Path) -> None:
-    """Patch imported skill modules that cache HERMES_HOME at import time."""
+    """Patch imported skill modules that cache HERMES_HOME at import time.
+
+    Only globals a module already defines are rebound. A skill_manager_tool that
+    resolves through tools.skills_tool has none; creating them would give it
+    skills-dir state nothing reads and stop it matching that shape.
+    """
     for module_name in _SKILL_HOME_MODULES:
         module = sys.modules.get(module_name)
         if module is None:
             continue
-        try:
-            module.HERMES_HOME = home
-            module.SKILLS_DIR = home / "skills"
-        except AttributeError:
-            logger.debug("Failed to patch %s module", module_name)
+        for attr, value in (("HERMES_HOME", home), ("SKILLS_DIR", home / "skills")):
+            if not hasattr(module, attr):
+                continue
+            try:
+                setattr(module, attr, value)
+            except AttributeError:
+                logger.debug("Failed to patch %s.%s", module_name, attr)
 
 
 def restore_skill_home_modules(snapshot: dict[str, dict[str, object]]) -> None:
