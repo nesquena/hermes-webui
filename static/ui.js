@@ -11721,6 +11721,38 @@ function _backgroundRunLabel(){
   return typeof t==='function'?t('composer_run_background'):'Run in background';
 }
 
+function _toolSkipLabel(){
+  return typeof t==='function'?t('tool_skip'):'Skip this tool call';
+}
+
+async function skipRunningTool(btn){
+  if(btn) btn.disabled=true;
+  const sid=S.session&&S.session.session_id;
+  if(!sid){ if(btn) btn.disabled=false; return false; }
+  let body=null;
+  let ok=false;
+  try{
+    const r=await fetch(new URL('api/chat/skip-tool',document.baseURI||location.href).href,{
+      method:'POST',
+      credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid})
+    });
+    ok=!!(r&&r.ok);
+    try{body=await r.json();}catch(_){}
+  }catch(e){
+    if(typeof console!=='undefined'&&console.warn) console.warn('skipRunningTool: request failed',e);
+  }
+  if(ok&&body&&body.accepted){
+    showToast(t('tool_skip_started'),2500);
+    return true;
+  }
+  if(typeof console!=='undefined'&&console.info) console.info('[skip] refused',{reason:body&&body.reason,sessionId:sid});
+  showToast(t('tool_skip_failed'),4000,'error');
+  if(btn) btn.disabled=false;
+  return false;
+}
+
 async function _runToolInBackground(btn){
   if(btn) btn.disabled=true;
   const ok=typeof runSessionInBackground==='function'?await runSessionInBackground():false;
@@ -24737,6 +24769,11 @@ function buildToolCard(tc){
   const backgroundAction=(tc.done===false&&_toolCanYieldToBackground(tc))
     ? `<button class="tool-card-bg" type="button" title="${esc(_backgroundRunLabel())}" aria-label="${esc(_backgroundRunLabel())}" onclick="event.stopPropagation();_runToolInBackground(this)">${li('arrow-down-to-line',12)}</button>`
     : '';
+  // Every running call can be skipped: the executor answers the model with a skipped
+  // result and the turn continues, so a blocking wait stops holding the chat.
+  const skipAction=(tc.done===false)
+    ? `<button class="tool-card-skip" type="button" title="${esc(_toolSkipLabel())}" aria-label="${esc(_toolSkipLabel())}" onclick="event.stopPropagation();skipRunningTool(this)">${li('skip-forward',12)}</button>`
+    : '';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
   const openClass='';
@@ -24762,6 +24799,7 @@ function buildToolCard(tc){
         <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${backgroundAction}
+        ${skipAction}
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
       ${hasDetail?`<div class="tool-card-detail">

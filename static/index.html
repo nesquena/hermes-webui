@@ -1866,6 +1866,7 @@
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/outline.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/background_panel.js?v=__WEBUI_VERSION__" defer></script>
 
 <!-- Kanban: create/rename board modal — used for both flows. -->
 <div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">
@@ -1991,6 +1992,13 @@
       aria-label="Close outline">&#215;</button>
   </div>
   <div id="outlinePanel"></div>
+</div>
+<div id="bgTaskPanel" class="bg-task-panel" style="display:none" role="dialog" aria-label="Tâches de fond">
+  <div class="bg-task-panel-header">
+    <span>Tâches de fond</span>
+    <button class="bg-task-panel-close" type="button" onclick="toggleBgTaskPanel()" aria-label="Fermer">&#215;</button>
+  </div>
+  <div id="bgTaskPanelBody" class="bg-task-panel-body"></div>
 </div>
 <div class="profile-dropdown" id="profileDropdown"></div>
 </body>

@@ -19363,6 +19363,75 @@ def _handle_chat_background(handler, body: dict) -> bool:
     return j(handler, _background_bound_stream(sid, stream_id, cached_agent))
 
 
+def _request_skip(agent, sid: str, stream_id: Optional[str]) -> dict:
+    """Ask the live turn to skip the tool call it is waiting on.
+
+    Not a cancel: ``skip_current_tool()`` answers the model with a skipped result and the
+    turn keeps going, so a blocking wait or a long poll stops holding the chat without
+    losing the conversation.
+    """
+    if agent is None:
+        return {"accepted": False, "reason": "agent_unavailable", "stream_id": None}
+    skip = getattr(agent, "skip_current_tool", None)
+    if not callable(skip):
+        return {"accepted": False, "reason": "skip_unsupported", "stream_id": None}
+    try:
+        accepted = bool(skip())
+    except Exception:
+        logger.debug("Skip request failed for session %s", sid, exc_info=True)
+        return {"accepted": False, "reason": "skip_error", "stream_id": stream_id}
+    if not accepted:
+        return {"accepted": False, "reason": "no_tool_running", "stream_id": stream_id}
+    return {"accepted": True, "reason": None, "stream_id": stream_id}
+
+
+def _skip_bound_stream(sid: str, stream_id: str, cached_agent=None) -> dict:
+    """Skip the tool call *stream_id* is waiting on, behind the edge Stop uses.
+
+    Same ownership proof and the same single ``STREAMS_LOCK`` hold as the background
+    control, so a Stop cannot claim cancellation between the check and delivery.
+    """
+    from api import config as cfg
+
+    with cfg.STREAMS_LOCK:
+        if stream_id not in cfg.STREAMS:
+            return {"accepted": False, "reason": "stream_dead", "stream_id": None}
+        owner = cfg.stream_owner_session_id(stream_id)
+        with cfg.ACTIVE_RUNS_LOCK:
+            run = dict(cfg.ACTIVE_RUNS.get(stream_id) or {})
+        refusal = _run_ownership_refusal(sid, stream_id, run, owner)
+        if refusal is not None:
+            return refusal
+        return _request_skip(cfg.AGENT_INSTANCES.get(stream_id) or cached_agent, sid, stream_id)
+
+
+def _handle_chat_skip_tool(handler, body: dict) -> bool:
+    """Skip the tool call this session's turn is blocked on, without stopping the turn.
+
+    Accepts ``{"session_id": str}``. Returns 200 with ``{"accepted": bool,
+    "reason": str|None, "stream_id": str|None}``; a refusal leaves the run untouched.
+    """
+    from api import config as _cfg
+    from api.helpers import bad, j
+
+    sid = str((body or {}).get("session_id", "") or "").strip()
+    if not sid:
+        return bad(handler, "session_id required")
+
+    try:
+        session = get_session(sid)
+    except KeyError:
+        return j(handler, {"accepted": False, "reason": "session_not_found", "stream_id": None})
+    stream_id = getattr(session, "active_stream_id", None) or None
+    if not stream_id:
+        return j(handler, {"accepted": False, "reason": "not_running", "stream_id": None})
+
+    with _cfg.SESSION_AGENT_CACHE_LOCK:
+        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
+    cached_agent = cached[0] if cached and _cached_agent_matches_session(cached[0], sid) else None
+    return j(handler, _skip_bound_stream(sid, stream_id, cached_agent))
+
+
 def _deliver_gateway_steer(sid: str, result: dict, text: str) -> dict:
     """Forward a Gateway-owned steer to its run; keep the queue fallback on refusal.
 

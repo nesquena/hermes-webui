@@ -18761,6 +18761,10 @@ def handle_get(handler, parsed) -> bool:
         from api.background import get_results
         return j(handler, {"results": get_results(sid)})
 
+    if parsed.path == "/api/background/processes":
+        from api.background_panel import handle_background_processes
+        return handle_background_processes(handler, parse_qs(parsed.query))
+
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
         try:
@@ -22019,6 +22023,10 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/background":
         return _handle_background(handler, body)
 
+    if parsed.path == "/api/background/processes/kill":
+        from api.background_panel import handle_background_process_kill
+        return handle_background_process_kill(handler, body)
+
     if parsed.path == "/api/goal":
         return _handle_goal_command(handler, body)
 
@@ -22038,6 +22046,10 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/chat/background":
         from api.streaming import _handle_chat_background
         return _handle_chat_background(handler, body)
+
+    if parsed.path == "/api/chat/skip-tool":
+        from api.streaming import _handle_chat_skip_tool
+        return _handle_chat_skip_tool(handler, body)
 
     if parsed.path == "/api/terminal/start":
         return _handle_terminal_start(handler, body)
