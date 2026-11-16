@@ -11214,7 +11214,11 @@ function renderMd(raw){
   // Tests verify this list is complete; _tag() enforces it.
   const SAFE_TAGS=/^<\/?(?:strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span|img)([\s>]|$)/i;
   function _safeAttrValue(v){
-    return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
+    // Stash tokens (\x00Q0\x00, math, code ...) are restored after this sanitizer runs,
+    // so a token left inside an attribute value would be replaced by rendered HTML
+    // there. No attribute legitimately carries one: drop them, and any stray \x00.
+    return String(v||'').replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'')
+      .replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
   }
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
