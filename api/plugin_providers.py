@@ -115,21 +115,54 @@ def plugin_model_provider_api_key_env_var(provider_id: str) -> str | None:
 _OAUTH_PLUGIN_AUTH_TYPES = frozenset({"oauth_device_code", "oauth_external"})
 
 
-def plugin_model_provider_is_oauth(provider_id: str) -> bool:
-    """True when a plugin provider's profile uses an OAuth auth type.
+def _effective_registry_auth_type(provider_id: str) -> str | None:
+    """Return the auth type of the current home's effective registry row.
 
-    The type is read the way the Agent picks its status builder:
-    ``registry_auth_type`` if set, otherwise ``auth_type``; it must be exactly
-    ``oauth_device_code`` or ``oauth_external`` (no prefix matching). For these
-    providers the Agent's ``get_auth_status()`` reports ``configured=True`` as
-    soon as the profile is registered, regardless of sign-in, so callers must
-    look at ``logged_in`` instead (#9105).
+    This reads ``hermes_cli.auth.PROVIDER_REGISTRY.get()``, the same home-aware
+    view that the Agent's ``get_auth_status()`` dispatcher consults through
+    ``_registry_lookup`` before it picks a status builder. It is the most stable
+    public surface for that row (WebUI already imports the name elsewhere), and
+    it is read on every call, so a profile switch is never masked by a cached
+    decision. Returns ``None`` when the registry is unavailable or has no row.
     """
-    profile = plugin_model_provider_profiles().get((provider_id or "").strip().lower())
-    if profile is None:
-        return False
-    auth_type = getattr(profile, "registry_auth_type", None) or getattr(profile, "auth_type", "")
-    return str(auth_type or "").strip().lower() in _OAUTH_PLUGIN_AUTH_TYPES
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        row = PROVIDER_REGISTRY.get(provider_id)
+    except Exception:
+        logger.debug("Auth registry unavailable for %s", provider_id, exc_info=True)
+        return None
+    if row is None:
+        return None
+    return str(getattr(row, "auth_type", "") or "").strip().lower()
+
+
+def plugin_model_provider_is_oauth(provider_id: str) -> bool:
+    """True when the Agent would build this plugin provider's status as OAuth.
+
+    The Agent's ``get_auth_status()`` dispatches on the ``auth_type`` of the
+    effective auth registry row for the current home, not on the cached provider
+    profile. A home-level profile override keeps the existing row's auth type, so
+    the two can disagree; the row wins. The row is therefore consulted first and
+    must be exactly ``oauth_device_code`` or ``oauth_external`` (no prefix
+    matching). When the registry is unavailable or has no row for the provider,
+    the type is read from the cached profile (``registry_auth_type`` if set,
+    otherwise ``auth_type``), as before.
+
+    For OAuth providers the Agent's status reports ``configured=True`` as soon as
+    the profile is registered, regardless of sign-in, so callers must look at
+    ``logged_in`` instead (#9105).
+    """
+    pid = (provider_id or "").strip().lower()
+    auth_type = _effective_registry_auth_type(pid)
+    if auth_type is None:
+        profile = plugin_model_provider_profiles().get(pid)
+        if profile is None:
+            return False
+        auth_type = str(
+            getattr(profile, "registry_auth_type", None) or getattr(profile, "auth_type", "") or ""
+        ).strip().lower()
+    return auth_type in _OAUTH_PLUGIN_AUTH_TYPES
 
 
 def effective_provider_env_var(provider_id: str, static_map: dict[str, str]) -> str | None:

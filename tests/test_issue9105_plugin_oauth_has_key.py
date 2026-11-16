@@ -32,10 +32,35 @@ ISSUE_9105_LOGGED_OUT_STATUS = {
 }
 
 
+class _FakeRegistry:
+    """Stand-in for ``hermes_cli.auth.PROVIDER_REGISTRY`` (a home-aware ``.get``)."""
+
+    def __init__(self, rows):
+        self.rows = dict(rows)
+
+    def get(self, key, default=None):
+        row_auth_type = self.rows.get(key)
+        if row_auth_type is None:
+            return default
+        return SimpleNamespace(id=key, auth_type=row_auth_type)
+
+
 def _providers_for(
-    monkeypatch, tmp_path, *, auth_type, status, env_vars=(), registry_auth_type=None
+    monkeypatch,
+    tmp_path,
+    *,
+    auth_type,
+    status,
+    env_vars=(),
+    registry_auth_type=None,
+    registry_row_auth_type=None,
 ):
-    """Return the ``solstice`` card from ``get_providers()`` for one fake plugin."""
+    """Return the ``solstice`` card from ``get_providers()`` for one fake plugin.
+
+    ``registry_row_auth_type`` sets the effective auth registry row the Agent
+    would dispatch on; when ``None`` the fake ``hermes_cli.auth`` has no registry
+    at all (older Agent / unavailable), so classification falls back to the profile.
+    """
     profile = SimpleNamespace(
         name="solstice",
         display_name="Solstice",
@@ -57,6 +82,8 @@ def _providers_for(
     fake_models.provider_model_ids = lambda pid: []
     fake_auth = types.ModuleType("hermes_cli.auth")
     fake_auth.get_auth_status = lambda pid: dict(status) if pid == "solstice" else {}
+    if registry_row_auth_type is not None:
+        fake_auth.PROVIDER_REGISTRY = _FakeRegistry({"solstice": registry_row_auth_type})
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
@@ -154,6 +181,161 @@ def test_oauth_plugin_with_separately_configured_api_key_keeps_has_key(monkeypat
         monkeypatch,
         tmp_path,
         auth_type="oauth_external",
+        status=ISSUE_9105_LOGGED_OUT_STATUS,
+        env_vars=("SOLSTICE_API_KEY",),
+    )
+    assert card is not None
+    assert card["has_key"] is True
+
+
+def test_registry_row_oauth_beats_api_key_profile_with_empty_pool(monkeypatch, tmp_path):
+    """Row ``oauth_external`` + profile ``api_key`` + empty pool: the Agent builds an
+    OAuth status (``configured=True, logged_in=False``), so ``has_key`` is False."""
+    card = _providers_for(
+        monkeypatch,
+        tmp_path,
+        auth_type="api_key",
+        registry_row_auth_type="oauth_external",
+        status=ISSUE_9105_LOGGED_OUT_STATUS,
+    )
+    assert card is not None
+    assert card["has_key"] is False
+
+
+def test_registry_row_oauth_logged_in_with_api_key_profile_is_has_key(monkeypatch, tmp_path):
+    status = {**ISSUE_9105_LOGGED_OUT_STATUS, "logged_in": True, "accounts": 1, "hint": ""}
+    card = _providers_for(
+        monkeypatch,
+        tmp_path,
+        auth_type="api_key",
+        registry_row_auth_type="oauth_device_code",
+        status=status,
+    )
+    assert card is not None
+    assert card["has_key"] is True
+
+
+@pytest.mark.parametrize("profile_kwargs", [
+    {"auth_type": "oauth_external"},
+    {"auth_type": "api_key", "registry_auth_type": "oauth_device_code"},
+])
+def test_registry_row_api_key_beats_oauth_profile_keeps_configured(
+    monkeypatch, tmp_path, profile_kwargs
+):
+    """Row ``api_key`` + OAuth-looking profile: the Agent builds an API-key status,
+    where ``configured`` alone counts, so the configured path is preserved.
+
+    The status is synthetic (``logged_in: False``): the Agent's API-key builder sets
+    ``logged_in`` equal to ``configured``; this only pins the ``configured`` rule.
+    """
+    status = {"configured": True, "provider": "solstice", "logged_in": False, "key_source": "config_yaml"}
+    card = _providers_for(
+        monkeypatch,
+        tmp_path,
+        registry_row_auth_type="api_key",
+        status=status,
+        **profile_kwargs,
+    )
+    assert card is not None
+    assert card["has_key"] is True
+
+
+def test_registry_without_solstice_row_falls_back_to_profile(monkeypatch, tmp_path):
+    """A registry that has no row for the provider defers to the cached profile."""
+    from api.plugin_providers import plugin_model_provider_is_oauth
+
+    profile = SimpleNamespace(name="solstice", env_vars=(), auth_type="oauth_external", aliases=())
+    fake_providers = types.ModuleType("providers")
+    fake_providers.list_providers = lambda: [profile]
+    monkeypatch.setitem(sys.modules, "providers", fake_providers)
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.PROVIDER_REGISTRY = _FakeRegistry({})
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+    invalidate_plugin_model_provider_cache()
+    try:
+        assert plugin_model_provider_is_oauth("solstice") is True
+    finally:
+        invalidate_plugin_model_provider_cache()
+
+
+def test_registry_unavailable_falls_back_to_profile(monkeypatch, tmp_path):
+    """Registry import/attribute/lookup failures never raise; the profile decides."""
+    from api.plugin_providers import plugin_model_provider_is_oauth
+
+    class _BrokenRegistry:
+        def get(self, key, default=None):
+            raise RuntimeError("registry exploded")
+
+    profile = SimpleNamespace(name="solstice", env_vars=(), auth_type="oauth_external", aliases=())
+    fake_providers = types.ModuleType("providers")
+    fake_providers.list_providers = lambda: [profile]
+    monkeypatch.setitem(sys.modules, "providers", fake_providers)
+    invalidate_plugin_model_provider_cache()
+    try:
+        # (1) hermes_cli.auth cannot be imported at all
+        monkeypatch.setitem(sys.modules, "hermes_cli.auth", None)
+        assert plugin_model_provider_is_oauth("solstice") is True
+        # (2) the registry lookup itself raises
+        fake_auth = types.ModuleType("hermes_cli.auth")
+        fake_auth.PROVIDER_REGISTRY = _BrokenRegistry()
+        monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+        assert plugin_model_provider_is_oauth("solstice") is True
+    finally:
+        invalidate_plugin_model_provider_cache()
+
+
+def test_alternating_effective_rows_are_not_cached(monkeypatch):
+    """Switching the effective registry row (profile home change) flips the answer on
+    the very next call, even though the discovery profile stays cached and unchanged."""
+    from api.plugin_providers import plugin_model_provider_is_oauth
+
+    profile = SimpleNamespace(name="solstice", env_vars=(), auth_type="api_key", aliases=())
+    fake_providers = types.ModuleType("providers")
+    fake_providers.list_providers = lambda: [profile]
+    monkeypatch.setitem(sys.modules, "providers", fake_providers)
+    registry = _FakeRegistry({"solstice": "oauth_external"})
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.PROVIDER_REGISTRY = registry
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+    invalidate_plugin_model_provider_cache()
+    try:
+        answers = []
+        for row_auth_type in ("oauth_external", "api_key", "oauth_device_code", "api_key"):
+            registry.rows["solstice"] = row_auth_type
+            answers.append(plugin_model_provider_is_oauth("solstice"))
+        assert answers == [True, False, True, False]
+    finally:
+        invalidate_plugin_model_provider_cache()
+
+
+@pytest.mark.parametrize("row_type", ["external_process", "oauth_custom"])
+def test_registry_row_non_oauth_types_keep_configured(monkeypatch, tmp_path, row_type):
+    """Non-OAuth effective rows keep the ``configured`` rule, including a row type
+    that merely starts with ``oauth``.
+
+    The status is synthetic (``configured: True, logged_in: False``): the Agent's
+    external-process builder sets ``logged_in`` equal to ``configured``; this only
+    pins that WebUI does not require ``logged_in`` outside OAuth.
+    """
+    status = {"configured": True, "provider": "solstice", "logged_in": False}
+    card = _providers_for(
+        monkeypatch,
+        tmp_path,
+        auth_type="oauth_external",
+        registry_row_auth_type=row_type,
+        status=status,
+    )
+    assert card is not None
+    assert card["has_key"] is True
+
+
+def test_registry_oauth_row_with_separately_configured_api_key_keeps_has_key(monkeypatch, tmp_path):
+    (tmp_path / ".env").write_text("SOLSTICE_API_KEY=test-solstice-key-12345\n", encoding="utf-8")
+    card = _providers_for(
+        monkeypatch,
+        tmp_path,
+        auth_type="api_key",
+        registry_row_auth_type="oauth_external",
         status=ISSUE_9105_LOGGED_OUT_STATUS,
         env_vars=("SOLSTICE_API_KEY",),
     )
