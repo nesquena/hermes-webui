@@ -2579,7 +2579,8 @@ function cmdVoice(){
 
 // ── YOLO mode toggle ──
 // Session-scoped: skips all approval prompts for the current session.
-// Toggles on/off; state is not persisted across page reloads.
+// /yolo toggles on/off from a fresh server read; the server keeps the flag in
+// memory only. The composer pill does NOT toggle: see disableYoloFromPill().
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
@@ -2612,8 +2613,7 @@ async function cmdYolo(){
     });
     if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
     const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
-    _yoloEnabled=settled;
-    _updateYoloPill();
+    _applyYoloState(sid,settled,{gen:generation});
     showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
   }catch(e){
     if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
@@ -2622,10 +2622,43 @@ async function cmdYolo(){
       try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
     if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
-      _yoloEnabled=errorPayload.yolo_enabled;
-      _updateYoloPill();
+      _applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation});
     }
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }
+}
+
+// #9101: the composer pill is shown only while this tab's YOLO view says the
+// open session is ON, and it is labelled "click to disable". Its click carries
+// exactly that intent: disable YOLO for the session the pill was painted for
+// (data-yolo-session). Unlike /yolo it never re-reads the server to compute a
+// toggle, so a stale pill (another tab, a server restart, a late read) can
+// never turn YOLO on, and it never goes through the approval card, whose YOLO
+// action approves the displayed command.
+async function disableYoloFromPill(){
+  const pill=$('yoloPill');
+  const sid=pill&&pill.getAttribute('data-yolo-session');
+  if(!sid){_updateYoloPill();return;}
+  const generation=_loadSessionGeneration;
+  try{
+    const result=await api('/api/session/yolo',{
+      method:'POST',
+      body:JSON.stringify({session_id:sid,enabled:false}),
+    });
+    const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:false;
+    // Dropped when the pill's session is no longer the open one: re-render so
+    // a pill painted for it disappears.
+    if(!_applyYoloState(sid,settled,{gen:generation}))_updateYoloPill();
+    showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
+  }catch(e){
+    let errorPayload=null;
+    if(e&&typeof e.body==='string'){
+      try{errorPayload=JSON.parse(e.body);}catch(_){}
+    }
+    const applied=!!(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'
+      &&_applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation}));
+    if(!applied)_updateYoloPill();
+    showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||(e&&e.message)||''));
   }
 }
 
