@@ -4195,7 +4195,7 @@ function _isSafeDataImageUri(ref){
 
 function _dataImageHtml(ref, altText){
   if(!_isSafeDataImageUri(ref)) return null;
-  return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
+  return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image').replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}" loading="lazy">`;
 }
 
 // Remote image policy (#7941). The served CSP img-src is default-deny for
@@ -4274,7 +4274,7 @@ function _remoteImagePlaceholderHtml(raw, altText){
   const reason=_remoteImageReason(raw);
   const alt=String(altText||'').trim();
   const tip=alt&&alt!=='image'?`${reason} (${alt.slice(0,120)})`:reason;
-  return `<a class="msg-media-link" href="${esc(String(raw||''))}" target="_blank" rel="noopener" title="${esc(tip)}">🖼 ${esc(label)}${host?` · ${esc(host)}`:''}</a>`;
+  return `<a class="msg-media-link" href="${esc(String(raw||''))}" target="_blank" rel="noopener" title="${esc(tip).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}">🖼 ${esc(label)}${host?` · ${esc(host)}`:''}</a>`;
 }
 
 // Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
@@ -4282,6 +4282,12 @@ function _remoteImagePlaceholderHtml(raw, altText){
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
 // of the broken "!<a>" anchor it used to produce, and ![x](data:image/...) stops
 // dumping raw base64 text into the chat.
+// (gate G9072-IMAGE-REENTRY) every attribute this emits carries the alt with
+// [ and ] entity-encoded: esc() alone leaves `![` and `](scheme:` intact inside
+// the attribute value, and a later Markdown image pass scanning the finished
+// document pairs an emitted alt with the next `](/url)` in the text, rebuilds a
+// second image out of the tag, drops the literal tail and spills the tag's own
+// attributes into the new alt. Entities render identically.
 function _mdImageHtml(alt, url){
   if(/^data:/i.test(url)){
     const img=_dataImageHtml(url, alt);
@@ -4290,7 +4296,7 @@ function _mdImageHtml(alt, url){
   }
   if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
   if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(url)) return _remoteImagePlaceholderHtml(url, alt);
-  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}" class="msg-media-img" loading="lazy">`;
 }
 
 function _mediaTokenParts(source, matchOffset, rawRef){
@@ -11104,7 +11110,7 @@ function renderMd(raw){
         const alt=rawAlt.split('<code>').join('').split('</code>').join('')
           .replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&');
         const url=str.slice(us,close);
-        out+=str.slice(copy,open)+((typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+        out+=str.slice(copy,open)+((typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}" class="msg-media-img" loading="lazy">`);
         copy=close+1;i=close+1;matched=true;
         // Every opener still pending sits left of this `]`, so the match just
         // swallowed it.  Keeping those positions lets a later `](` re-emit
@@ -11174,7 +11180,21 @@ function renderMd(raw){
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.  Code content in the alt
     // comes back as plain text, never as markup inside the attribute.
-    t=_mdImagePass(t,alt=>String(alt).replace(_hTok,(_,i)=>_html_code_plain[+i]).replace(/\x00C(\d+)\x00/g,(_,i)=>_code_plain[+i]));
+    t=_mdImagePass(t,alt=>{
+      // Dependent alt tokens resolve to final plain text before the image
+      // is built: a backtick span can wrap an H placeholder (a rendered
+      // <code> element flanked by stray backticks), so a C plain text may
+      // carry a NEW H token that one H-then-C pass left raw inside the
+      // attribute (gate G9072-ALT-TOKEN-AMPLIFICATION). Iterate to a fixed
+      // point; every resolution produces plain text, never markup.
+      let a=String(alt);
+      for(let n=0;n<8;n++){
+        const b=a.replace(_hTok,(_,i)=>_html_code_plain[+i]).replace(/\x00C(\d+)\x00/g,(_,i)=>_code_plain[+i]);
+        if(b===a)break;
+        a=b;
+      }
+      return a;
+    });
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -11404,12 +11424,12 @@ function renderMd(raw){
   // lead, which caps each digit run at the raw gap since the previous
   // placeholder, so the walk work across a render stays linear in the
   // message length.
-  const _kTailAt=before=>{
-    const L=before.length,preLen=_kPre.length;
+  const _kTailAt=(L,at)=>{
+    const preLen=_kPre.length;
     if(L===0||preLen>L)return false;
     let d=0;
     while(d<L){
-      const c=before.charCodeAt(L-1-d);
+      const c=at(L-1-d);
       if(c<48||c>57)break;
       d++;
     }
@@ -11417,22 +11437,29 @@ function renderMd(raw){
     for(let t=Math.min(L-d-1+preLen,L-1);t>=Math.max(L-d,preLen);t--){
       let ok=true;
       for(let k=0;k<preLen;k++){
-        if(before.charCodeAt(t-preLen+k)!==_kPre.charCodeAt(k)){ok=false;break;}
+        if(at(t-preLen+k)!==_kPre.charCodeAt(k)){ok=false;break;}
       }
       if(ok)return true;
     }
     return false;
   };
+  // The probe never materialises the text it inspects: callers hand it a
+  // length plus a char accessor -- the original source bounded at the match
+  // offset, or the accumulated output joined with the pending gap. Building
+  // `str.slice(0,offset)` / `out+s.slice(i,open)` in front of every stashed
+  // span made repeated-example replies quadratic again after the boundary
+  // fix (greptile round 3 on #9072).
+  const _tailOf=(a,b)=>_kTailAt(a.length+b.length,p=>p<a.length?a.charCodeAt(p):b.charCodeAt(p-a.length));
   const _kGuardIdx=new Set();
-  const _stashOuterCode=(m,before)=>{
+  const _stashOuterCode=(m,tail)=>{
     _code_outer_stash.push(m);
-    if(_kTailAt(before)){
+    if(tail){
       _kGuardIdx.add(_code_outer_stash.length-1);
       return 'K'+_kPre+(_code_outer_stash.length-1)+'\x00';
     }
     return _kPre+(_code_outer_stash.length-1)+'\x00';
   };
-  s=s.replace(/`[^`\n]+`/g,(m,offset,str)=>m.includes('![')?_stashOuterCode(m,str.slice(0,offset)):m);
+  s=s.replace(/`[^`\n]+`/g,(m,offset,str)=>m.includes('![')?_stashOuterCode(m,_kTailAt(offset,p=>str.charCodeAt(p))):m);
   // Complete rendered <code> elements are collected by one forward scan.  A
   // tempered pattern that looks for `![` between two lazy "not </code>" runs
   // rescans the remaining suffix for every image opener when a message opens a
@@ -11455,7 +11482,8 @@ function renderMd(raw){
       if(close<0){out+=s.slice(i);break;}
       const end=close+7;
       const span=s.slice(open,end);
-      out+=s.slice(i,open)+(span.includes('![')?_stashOuterCode(span,out+s.slice(i,open)):span);
+      const gap=s.slice(i,open);
+      out+=gap+(span.includes('![')?_stashOuterCode(span,_tailOf(out,gap)):span);
       i=end;
     }
     s=out;
@@ -11651,9 +11679,9 @@ function renderMd(raw){
     }
     if(name==='img'){
       if(!_isSafeUrl(a.src,true)) return '';
-      if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(_safeAttrValue(a.src))) return _remoteImagePlaceholderHtml(_safeAttrValue(a.src), _safeAttrValue(a.alt||''));
+      if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(_safeAttrValue(a.src))) return _remoteImagePlaceholderHtml(_safeAttrValue(a.src), _safeAttrValue(a.alt||'').replace(/&#91;/g,'[').replace(/&#93;/g,']'));
       const cls=_cls(a.class,['msg-media-img']);
-      const alt=` alt="${esc(_safeAttrValue(a.alt||''))}"`;
+      const alt=` alt="${esc(_safeAttrValue(a.alt||'').replace(/&#91;/g,'[').replace(/&#93;/g,']')).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}"`;
       const loading=a.loading==='lazy'?' loading="lazy"':'';
       return `<img${cls} src="${esc(_safeAttrValue(a.src))}"${alt}${loading}>`;
     }

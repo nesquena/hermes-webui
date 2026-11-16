@@ -1440,7 +1440,9 @@ class TestNestedImageOpeners:
     def test_nested_image_renders_once(self, driver_path):
         out = _render(driver_path, "![A![B](/one.png)](/two.png)")
         assert out.count("<img") == 1, f"nested image must render once: {out!r}"
-        assert 'alt="A![B"' in out, f"alt must keep the nested opener text: {out!r}"
+        # The emitted alt entity-encodes brackets (gate G9072-IMAGE-REENTRY) so
+        # a later image pass cannot re-pair it; the attribute renders as `![B`.
+        assert 'alt="A!&#91;B"' in out, f"alt must keep the nested opener text: {out!r}"
         assert "](/two.png)" in out, f"the extra closer stays literal text: {out!r}"
 
     def test_nested_image_between_text_renders_once(self, driver_path):
@@ -1501,7 +1503,9 @@ class TestImageAltCodeSpans:
 
     def test_image_syntax_inside_code_alt_stays_plain(self, driver_path):
         out = _render(driver_path, "![`![`](/static/logo.png)")
-        assert 'alt="!["' in out, f"code content must stay plain text: {out!r}"
+        # The emitted alt entity-encodes [ and ] so a later image pass cannot
+        # re-pair it (gate G9072-IMAGE-REENTRY); the attribute renders as `![`.
+        assert 'alt="!&#91;"' in out, f"code content must stay plain text: {out!r}"
         assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
         assert "<code>" not in out, f"code markup must not enter the tag: {out!r}"
         assert 'class="msg-media-img"' in out, (
@@ -1681,4 +1685,89 @@ class TestPlaceholderTokens:
         )
         assert large_ms < 600, (
             f"letter run plus code spans renders too slowly: {large_ms:.1f} ms"
+        )
+
+class TestNestedImageReentry9072Round3:
+    """Greptile round 3 on #9072: the inlineMd() image output re-enters the
+    outer image pass, and alt tokens resolve in the wrong order.
+
+    Paragraph text was already safe; list / heading / table text runs
+    through inlineMd(), whose emitted <img> carries the alt verbatim: an
+    alt that still spells `![` paired with the literal `](/two.png)` tail
+    left after the match, so the outer pass rebuilt a second image out of
+    the finished tag, dropped the tail and spilled the tag attributes into
+    the new alt (item 2). And a backtick span wrapping an H placeholder
+    made the C plain text carry a NEW H token that the single H-then-C
+    pass left raw inside the attribute (item 3)."""
+
+    def _contexts(self, md):
+        nl = chr(10)
+        return {
+            'list': '- ' + md,
+            'heading': '# ' + md,
+            'table': '| h | f |' + nl + '| --- | --- |' + nl + '| ' + md + ' | z |',
+        }
+
+    def test_nested_image_keeps_tail_and_generated_text_out_of_alt(self, driver_path):
+        for name, src in self._contexts('![A![B](/one.png)](/two.png)').items():
+            out = _render(driver_path, src)
+            assert '/two.png' in out, (
+                name + ': literal image tail was consumed by re-entry: ' + repr(out))
+            assert 'class=&quot;' not in out, (
+                name + ': generated attribute text leaked into an alt: ' + repr(out))
+            assert out.count('<img') == 1, (
+                name + ': one source image must stay one image: ' + repr(out))
+
+    def test_nested_control_tokens_resolve_to_plain_alt(self, driver_path):
+        controls = ''.join(chr(c) for c in list(range(9)) + list(range(14, 32)))
+        md = controls + '![``![doc](/a.png)``](/one.png)'
+        for name, src in self._contexts(md).items():
+            out = _render(driver_path, src)
+            m = re.search(r'alt="([^"]*)"', out)
+            assert m, name + ': no rendered image alt: ' + repr(out)
+            alt = m.group(1)
+            assert chr(0) not in alt, (
+                name + ': internal NUL marker leaked into the alt: ' + repr(out.replace(chr(0), '<NUL>')))
+            assert 'H0' not in alt, (
+                name + ': internal marker text leaked into the alt: ' + repr(out.replace(chr(0), '<NUL>')))
+            assert 'doc' in alt, (
+                name + ': alt must keep the resolved plain text: ' + repr(out))
+
+    def test_paragraph_nested_image_control_still_keeps_tail(self, driver_path):
+        out = _render(driver_path, '![A![B](/one.png)](/two.png)')
+        assert '](/two.png)' in out, repr(out)
+        assert '/one.png' in out, repr(out)
+
+
+class TestRepeatedExampleMarkerTailGrowth:
+    """Gate G9072-MARKER-TAIL-QUADRATIC, review round 3: the boundary probe
+    removed the regex walk, but its callers still materialised the whole
+    prefix in front of every stashed span (`str.slice(0,offset)` and
+    `out+s.slice(i,open)`), so replies built from repeated examples went
+    quadratic again: 70 KB of `` `![x]` `` cost ~670 ms against ~60 ms on
+    the pre-PR renderer, and 280 KB hit ~18.5 s. The callers now hand the
+    probe a bounded reader (source bounded at the match offset, or the
+    accumulated output joined with the pending gap) instead of a
+    materialised string."""
+
+    def test_repeated_example_growth_is_linear(self, growth_driver_path):
+        def payload(n):
+            return '`![x]` ' * n
+
+        small_ms, mid_ms, large_ms = _render_timings_ms(
+            growth_driver_path,
+            [payload(8750), payload(17500), payload(35000)],
+        )
+        # 2x the bytes: linear work lands near 2x per step with loose headroom;
+        # the materialised-prefix arms ran ~4.7x and ~5.8x per step.
+        assert mid_ms < small_ms * 4, (
+            "repeated examples must not rescale per stashed span: "
+            f"70 KB={small_ms:.1f} ms, 140 KB={mid_ms:.1f} ms"
+        )
+        assert large_ms < mid_ms * 4, (
+            "repeated examples must not rescale per stashed span: "
+            f"140 KB={mid_ms:.1f} ms, 280 KB={large_ms:.1f} ms"
+        )
+        assert large_ms < 2000, (
+            f"280 KB of repeated examples renders far too slowly: {large_ms:.1f} ms"
         )
