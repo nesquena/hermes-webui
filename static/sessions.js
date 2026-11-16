@@ -2524,6 +2524,10 @@ async function newSession(flash, options={}){
     // restore and the busy-flag cleanup can no longer mutate the new pane.
     _loadingSessionId = null;
     _loadSessionGeneration++;
+    // #9101: New Chat installs a session without loadSession(); key the YOLO
+    // view to it so the previous session's pill does not stay on screen. A
+    // brand-new session has no server-side YOLO flag.
+    if(typeof _applyYoloState==='function') _applyYoloState(S.session.session_id,false,{reset:true});
     // #7855: a brand-new session starts with no restored-continuation draft.
     if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
     S._pendingSessionToolsets=null;
@@ -2858,7 +2862,10 @@ async function loadSession(sid){
   }
   stopApprovalPolling();hideApprovalCard(forceReload);
   if(typeof stopSessionStream==='function') stopSessionStream();
-  _yoloEnabled=false;_updateYoloPill();
+  // #9101: the YOLO view is keyed by session. A switch drops the previous
+  // session's view (pill hidden until this load's own read answers); a
+  // same-session refresh keeps it and re-reads after install.
+  if(typeof _applyYoloState==='function') _applyYoloState(sid,false,{reset:true});
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
   // #6572: clear stale compression state when switching sessions.
@@ -3446,7 +3453,7 @@ async function loadSession(sid){
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-    if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+    if(typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -3556,7 +3563,7 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+      if(typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
     }else{
       S.busy=false;
       S.activeStreamId=null;
@@ -3566,6 +3573,9 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       startApprovalPolling(sid);
+      // #9101: idle installs (switch, boot restore, reload, same-session
+      // refresh) read the YOLO flag too, not only streaming ones. Not awaited.
+      if(_isCurrentLoad()&&typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
