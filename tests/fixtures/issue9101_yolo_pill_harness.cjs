@@ -664,6 +664,37 @@ const scenarios = {
     return out;
   },
 
+  // (i3) the in-flight guard is per session: a /yolo for B issued while A's
+  // /yolo is still waiting must still toggle B (here: disable B's YOLO).
+  async i3_yolo_for_other_session_while_first_in_flight_is_dropped() {
+    const server = createServer({ A: {}, B: {} });
+    server.yolo.B = true;
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('A');
+    await tick();
+    server.shouldHold = yoloGet('A');
+    const first = tab.cmdYolo();
+    await tick();
+    check(tab.held.length === 1, 'precondition: A\'s /yolo read is in flight', tab.calls);
+    server.shouldHold = null;
+    await tab.loadSession('B');
+    await tick();
+    const before = posts(tab).length;
+    await tab.cmdYolo();
+    await tick();
+    const forB = posts(tab).slice(before);
+    const out = { posts_for_b: forB, server: { ...server.yolo }, state: tab.state() };
+    tab.held.shift().release();
+    await first;
+    await tick();
+    out.after_a_settles = { server: { ...server.yolo }, state: tab.state() };
+    check(forB.length === 1 && forB[0].session_id === 'B' && forB[0].enabled === false && server.yolo.B === false,
+      `/yolo on B while A's is in flight posted ${JSON.stringify(forB)}, server yolo[B]=${!!server.yolo.B}`, out);
+    check(!out.after_a_settles.state.pillVisible && out.after_a_settles.state.sid === 'B',
+      'B stays open with its pill hidden after A\'s stale /yolo settles', out);
+    return out;
+  },
+
   // (j) a malformed GET /api/session/yolo answer (a non-boolean flag) must
   // not paint a "click to disable" pill for a session whose YOLO is off.
   async j_malformed_read_paints_on_pill() {
