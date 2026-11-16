@@ -1142,9 +1142,17 @@ def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
 
     Reads from the cheap metadata prefix first; when the prefix is unavailable
     (None) or does not carry the lineage keys (e.g. pushed past the prefix budget
-    by an oversized field such as compression_anchor_summary), recovers authoritative
-    metadata through Session.load_metadata_only (#8950).
+    by an oversized field such as compression_anchor_summary), falls back to a
+    NONMUTATING read of the raw persisted document (#8950 LINEAGE-RAW-F1).
     Returns None if the session file is missing, unsafe, or unparseable.
+
+    The fallback deliberately does not go through ``Session.load_metadata_only``:
+    that constructor coerces ``pre_compression_snapshot`` with ``bool()`` and
+    repairs adjacent duplicate ``_partial`` replies by saving the sidecar back,
+    so deciding ownership through it rewrites the very ancestor evidence this
+    function is validating (a malformed string marker would persist as JSON
+    ``true`` and the duplicates would collapse before any marker re-read). One
+    observation of the raw file supplies marker and reciprocal IDs together.
     """
     if not sid:
         return None
@@ -1165,26 +1173,28 @@ def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
                 str(prefix.get("pre_compression_continuation_session_id") or "").strip(),
             )
 
-        # Incomplete observation: prefix is None or missing lineage keys.
-        # Recover authoritative metadata through Session.load_metadata_only (#8950).
-        session = models.Session.load_metadata_only(sid)
-        if session is None:
-            return None
-
-        # Re-validate the raw pre_compression_snapshot type before Session constructor
-        # coercion (#8950 round 3): only raw JSON boolean true qualifies.
-        raw_snapshot = None
+        # Incomplete observation: read the raw document ONCE, without constructing
+        # a Session and without any repair (#8950 LINEAGE-RAW-F1).
         try:
             raw_payload = json.loads(session_path.read_text(encoding="utf-8"))
-            if isinstance(raw_payload, dict):
-                raw_snapshot = raw_payload.get("pre_compression_snapshot")
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            raw_snapshot = None
+            return None
+        if not isinstance(raw_payload, dict):
+            return None
 
+        raw_parent = raw_payload.get("parent_session_id")
+        raw_continuation = raw_payload.get("pre_compression_continuation_session_id")
+        # Malformed lineage identity fails closed instead of being coerced.
+        if raw_parent is not None and not isinstance(raw_parent, str):
+            return None
+        if raw_continuation is not None and not isinstance(raw_continuation, str):
+            return None
+
+        # Strict raw boolean: only JSON ``true`` marks a pre-compression snapshot.
         return (
-            str(getattr(session, "parent_session_id", None) or "").strip(),
-            raw_snapshot is True,
-            str(getattr(session, "pre_compression_continuation_session_id", None) or "").strip(),
+            (raw_parent or "").strip(),
+            raw_payload.get("pre_compression_snapshot") is True,
+            (raw_continuation or "").strip(),
         )
     except Exception:
         logger.debug("Failed to read session lineage for %s", sid, exc_info=True)
