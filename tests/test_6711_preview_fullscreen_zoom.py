@@ -157,7 +157,7 @@ def _preview_fs_constants() -> str:
     # The setter keeps its choice in module state so a failed storage write does
     # not lose the zoom. The VM evaluates functions in isolation, so that state
     # must be declared here too (default null = no explicit choice yet).
-    consts.append("var _previewFontSizeSession = params.session;")
+    consts.append("var _previewFontSizeSession = null;")
     return "\n".join(consts)
 
 
@@ -177,6 +177,7 @@ var localStorage = {
 var document = { documentElement: { nodeType: 1, tagName: 'HTML' } };
 function getComputedStyle(){ return { getPropertyValue: () => params.computedVar }; }
 eval(params.consts);
+_previewFontSizeSession = params.session;
 eval(params.clamp);
 eval(params.read);
 eval(params.get);
@@ -337,6 +338,7 @@ var document = {
 };
 function getComputedStyle(){ return { getPropertyValue: () => params.computedVar }; }
 eval(params.consts);
+_previewFontSizeSession = params.session;
 eval(params.clamp);
 eval(params.read);
 eval(params.get);
