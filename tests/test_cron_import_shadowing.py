@@ -13,6 +13,22 @@ def _drop_cron_modules() -> None:
             sys.modules.pop(name, None)
 
 
+def _snapshot_cron_modules() -> dict:
+    return {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "cron" or name.startswith("cron.")
+    }
+
+
+def _restore_cron_modules(saved: dict) -> None:
+    # Put the pre-test module objects back. Dropping them for good would make
+    # the next ``import cron.jobs`` build a second module object, splitting it
+    # from every module/test that bound ``cron.jobs`` before this test ran.
+    _drop_cron_modules()
+    sys.modules.update(saved)
+
+
 def _reset_cron_import_path_ready(routes) -> None:
     routes._AGENT_CRON_IMPORT_PATH_READY = None
 
@@ -39,6 +55,7 @@ def test_agent_cron_import_path_prefers_agent_cron_over_plugin_shadow(monkeypatc
     monkeypatch.setattr(routes, "_AGENT_CRON_IMPORT_PATH_READY", None)
     monkeypatch.syspath_prepend(str(agent_dir))
     monkeypatch.syspath_prepend(str(site_packages))
+    saved_cron_modules = _snapshot_cron_modules()
     _drop_cron_modules()
     try:
         shadowed_cron = importlib.import_module("cron")
@@ -56,5 +73,5 @@ def test_agent_cron_import_path_prefers_agent_cron_over_plugin_shadow(monkeypatc
         routes._ensure_agent_cron_import_path()
         assert sys.path == sys_path_after_first_call
     finally:
-        _drop_cron_modules()
+        _restore_cron_modules(saved_cron_modules)
         _reset_cron_import_path_ready(routes)

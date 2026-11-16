@@ -38,6 +38,107 @@ In foreground mode, ``bootstrap.py`` does its setup work and then calls
 sees the long-lived server as the original child. ``KeepAlive=true`` /
 ``Restart=always`` work correctly.
 
+## Stopping: the bounded run drain
+
+A stop signal does not cut agent runs off mid-turn. The first ``SIGTERM`` (or
+``SIGINT``) the server receives starts **one bounded drain**:
+
+1. Run admission closes. A new chat turn gets HTTP ``503`` with
+   ``"code": "server_draining"`` and ``"retryable": true``, and the message
+   tells the user to send it again once the server is back. Runs that are
+   already going are not touched.
+2. Active WebUI agent runs may finish, for up to
+   ``HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS`` (default **90** seconds).
+3. Any run still active at the deadline is settled: it is stopped and its
+   session is saved with a durable "interrupted" marker (plus any partial
+   output), so the conversation shows what happened instead of a turn that
+   silently vanished. Settling has its own short bound (a few seconds).
+4. The HTTP server stops and the process exits.
+
+If nothing is running, the server exits right away. A **second** stop signal
+during the drain skips the rest of it: active runs are settled as interrupted
+immediately and the server stops. A repeated signal never starts a second
+drain. A Gateway run (a chat that executes inside the Hermes Gateway through
+its Runs API) is not waited on or interrupted once its run identity is saved:
+it keeps running in the Gateway and is picked up again after the restart. A
+Gateway chat on the older ``/v1/chat/completions`` relay cannot be picked up
+again, so it counts as an active WebUI run, like a Gateway run that is still
+starting.
+
+``HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS`` takes plain decimal seconds (``90``,
+``7.5``). ``0`` disables the wait (active runs are settled immediately),
+negative values count as ``0``, values above ``3600`` are capped at ``3600``,
+and anything else (``1e2``, ``inf``, text) is ignored with a warning in favour
+of the default. The server prints the effective value at startup
+(``Stop drain budget: 90s``). ``./ctl.sh stop`` waits that budget plus 5 seconds
+before it falls back to ``SIGKILL``.
+
+Updates started from the WebUI's update banner follow the same rule from the
+other side: while WebUI agent runs are active the update is refused with the
+run count, and the banner offers an explicit **Update anyway (interrupts N
+runs)**. That update settles those runs as interrupted before the server
+re-executes itself.
+
+### The supervisor's stop timeout must outlast the drain
+
+Every supervisor sends ``SIGKILL`` when the process has not exited within its
+stop timeout. ``SIGKILL`` ends the drain with nothing settled, which is exactly
+the lost-turn failure the drain exists to prevent. Set the stop timeout to
+**at least the drain budget + 30 seconds**: **120 seconds** for the default
+90-second budget.
+
+| Supervisor | Setting | Default | For the default 90 s budget |
+|---|---|---|---|
+| systemd | ``TimeoutStopSec=`` | 90 s (``DefaultTimeoutStopSec``) | ``TimeoutStopSec=120`` |
+| launchd | ``ExitTimeOut`` | system-defined (see ``launchd.plist(5)``) | ``<integer>120</integer>`` |
+| supervisord | ``stopwaitsecs`` | 10 s | ``stopwaitsecs=120`` |
+| Docker / Compose | ``docker stop -t`` / ``stop_grace_period`` | 10 s | see [Docker](#docker-the-drain-does-not-run-yet) below |
+
+Note that systemd's stock 90-second timeout equals the default budget, so
+without the override systemd kills the server just as the drain reaches its
+deadline, before the remaining runs are settled. If you change
+``HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS``, change the stop timeout with it.
+
+### Docker: the drain does not run yet
+
+The bundled image does **not** get the bounded drain on ``docker stop`` /
+``docker compose down`` today, whatever ``stop_grace_period`` you set. The
+stop signal never reaches the WebUI server process:
+
+- The image's ``CMD`` is ``/hermeswebui_init.bash`` and there is no init
+  process (no ``tini`` / ``--init``), so that script is PID 1. When the
+  container starts as root (the default) the script drops privileges with
+  ``exec su ... hermeswebui``, which makes ``su`` PID 1, and the re-run script
+  starts the server as a child with ``python server.py`` (no ``exec``).
+- ``docker stop`` signals PID 1 only. util-linux ``su`` answers ``SIGTERM`` by
+  sending ``SIGTERM`` to its child, which is the init script's shell, not the
+  server. The shell exits without passing it on, ``su`` waits two seconds and
+  exits, and the kernel then ``SIGKILL``s every process left in the container,
+  the server included. Running with ``--init`` / Compose ``init: true`` does
+  not help: ``tini`` forwards the signal only to its direct child, the same
+  ``su`` (or init script), with the same result.
+- When the container is started as a non-root user (``--user``), the script
+  itself stays PID 1. It installs no ``SIGTERM`` handler, so the kernel drops
+  the signal, and ``docker stop`` ends in ``SIGKILL`` after its timeout.
+
+Either way the server is ``SIGKILL``ed: active runs are neither drained nor
+settled (they end the way any unexpected kill ends them, and the existing
+startup recovery handles them), and the in-process memory-commit drain on
+shutdown does not run either. Making the init script hand the stop signal to
+the server (``exec`` the server, or forward ``SIGTERM`` to it) is a planned
+follow-up to #7293; until it lands, raising ``stop_grace_period`` does not
+help. The run admission fence, the refuse-or-force update check and
+the settle before a WebUI-initiated re-exec all run inside the server process,
+so they do not depend on the stop signal.
+
+**systemd ``KillMode``.** With the default ``KillMode=control-group``, systemd
+sends ``SIGTERM`` to every process in the unit at once, so the tool processes an
+agent run started (shell commands, builds, test runs) are terminated at the
+start of the drain and the run cannot finish them. Use ``KillMode=mixed``: the
+stop ``SIGTERM`` goes only to the WebUI server, which drains. Child tool
+processes keep running during the drain and are ``SIGKILL``ed by systemd once
+the server exits or ``TimeoutStopSec`` expires, whichever comes first.
+
 ## launchd (macOS)
 
 ``~/Library/LaunchAgents/com.example.hermes-webui.plist``:
@@ -65,6 +166,10 @@ sees the long-lived server as the original child. ``KeepAlive=true`` /
 
     <key>KeepAlive</key>
     <true/>
+
+    <!-- Stop timeout: drain budget (default 90s) + 30s. See "Stopping". -->
+    <key>ExitTimeOut</key>
+    <integer>120</integer>
 
     <key>StandardOutPath</key>
     <string>/Users/yourname/.hermes/webui/launchd-stdout.log</string>
@@ -116,6 +221,11 @@ WorkingDirectory=%h/hermes-webui
 ExecStart=/bin/bash %h/hermes-webui/start.sh --foreground
 Restart=on-failure
 RestartSec=5
+# Let active agent runs drain on stop: SIGTERM only the server (child tool
+# processes are SIGKILLed when it exits or the timeout expires), and wait the
+# drain budget (HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS, default 90) + 30s.
+KillMode=mixed
+TimeoutStopSec=120
 
 # Optional: route stdout/stderr to journald instead of files
 StandardOutput=journal
@@ -148,7 +258,8 @@ user=youruser
 autostart=true
 autorestart=true
 stopsignal=TERM
-stopwaitsecs=10
+; drain budget (HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS, default 90) + 30s
+stopwaitsecs=120
 stdout_logfile=/var/log/hermes-webui.out.log
 stderr_logfile=/var/log/hermes-webui.err.log
 environment=HOME="/home/youruser",PATH="/usr/local/bin:/usr/bin:/bin"

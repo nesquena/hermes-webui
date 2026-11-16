@@ -209,11 +209,21 @@ class FakeKanbanDB:
         self._event(task_id, "archived", {})
         return True
 
+    def schedule_task(self, conn, task_id, reason=None):
+        task = self.get_task(conn, task_id)
+        if not task or task.status not in ("todo", "ready", "running", "blocked"):
+            return False
+        task.status = "scheduled"
+        self._event(task_id, "scheduled", {"reason": reason})
+        return True
+
     def unblock_task(self, conn, task_id):
         task = self.get_task(conn, task_id)
         if not task:
             return False
-        task.status = "ready"
+        parents = self.parent_ids(conn, task_id)
+        unfinished_parents = [p for p in parents if (t := self.get_task(conn, p)) and t.status != "done"]
+        task.status = "todo" if unfinished_parents else "ready"
         self._event(task_id, "unblocked", {})
         return True
 
@@ -1332,3 +1342,104 @@ def test_board_payload_includes_unassigned_ready_tasks_without_assignee_filter(m
         "Unassigned task must have a falsy assignee in the payload so the "
         "frontend _kanbanLaneKey() maps it to KANBAN_UNASSIGNED_LANE."
     )
+
+
+def test_issue7900_scheduled_column_and_status(monkeypatch):
+    """Regression test for #7900: scheduled status must be in BOARD_COLUMNS and accepted by validation."""
+    bridge = _load_bridge(monkeypatch)
+    assert "scheduled" in bridge.BOARD_COLUMNS
+    assert bridge.BOARD_COLUMNS == [
+        "triage", "todo", "scheduled", "ready", "running", "blocked", "done"
+    ]
+    assert bridge._validate_status("scheduled") == "scheduled"
+
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    scheduled_task = FakeTask("t_sched", "Time-delay card", "scheduled", "alice")
+    fake_kanban.tasks.append(scheduled_task)
+
+    data = bridge._board_payload(_parsed())
+    sched_col = next((c for c in data["columns"] if c["name"] == "scheduled"), None)
+    assert sched_col is not None, "scheduled column missing from board payload"
+    sched_ids = {task["id"] for task in sched_col["tasks"]}
+    assert "t_sched" in sched_ids
+
+
+def test_issue7900_schedule_task_refused_for_done(monkeypatch):
+    """Moving a Done task to Scheduled must be refused with ValueError (HTTP 400)."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    done_task = FakeTask("t_done", "Completed card", "done", "bob")
+    fake_kanban.tasks.append(done_task)
+
+    import pytest
+    with pytest.raises(ValueError, match="cannot schedule task from status: done"):
+        with bridge._conn() as conn:
+            bridge._patch_task(conn, "t_done", {"status": "scheduled"})
+
+
+def test_issue7900_scheduled_to_ready_regates_parents(monkeypatch):
+    """Moving Scheduled -> Ready re-gates on parent completion (lands in Todo if parent open)."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+
+    parent = FakeTask("t_parent", "Parent task", "todo", "bob")
+    child = FakeTask("t_child", "Child task", "scheduled", "bob")
+    fake_kanban.tasks.extend([parent, child])
+    fake_kanban.links.append(("t_parent", "t_child"))
+
+    with bridge._conn() as conn:
+        bridge._patch_task(conn, "t_child", {"status": "ready"})
+
+    # Child has unfinished parent, so unblock_task lands it in 'todo'
+    assert child.status == "todo"
+
+    # Now complete the parent
+    parent.status = "done"
+    with bridge._conn() as conn:
+        child.status = "scheduled"
+        bridge._patch_task(conn, "t_child", {"status": "ready"})
+
+    # Child has all parents done, so unblock_task lands it in 'ready'
+    assert child.status == "ready"
+
+
+def test_issue7900_schedule_task_reason_not_synthesized_when_omitted(monkeypatch):
+    """Moving a task to Scheduled without explicit reason must pass reason=None to schedule_task."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_todo", "Ready task", "todo", "bob")
+    fake_kanban.tasks.append(task)
+
+    passed_reasons = []
+    orig_schedule_task = fake_kanban.schedule_task
+
+    def _tracking_schedule_task(conn, task_id, reason=None):
+        passed_reasons.append(reason)
+        return orig_schedule_task(conn, task_id, reason=reason)
+
+    monkeypatch.setattr(fake_kanban, "schedule_task", _tracking_schedule_task)
+
+    with bridge._conn() as conn:
+        bridge._patch_task(conn, "t_todo", {"status": "scheduled"})
+
+    assert task.status == "scheduled"
+    assert passed_reasons == [None]
+
+
+def test_issue7900_schedule_task_raises_when_agent_lacks_schedule_task(monkeypatch):
+    """When the installed Agent lacks schedule_task, moving to Scheduled raises RuntimeError."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_todo2", "Todo task", "todo", "bob")
+    fake_kanban.tasks.append(task)
+
+    monkeypatch.delattr(fake_kanban.__class__, "schedule_task", raising=False)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="scheduling requires a newer Hermes Agent"):
+        with bridge._conn() as conn:
+            bridge._patch_task(conn, "t_todo2", {"status": "scheduled"})
+
+
+
+

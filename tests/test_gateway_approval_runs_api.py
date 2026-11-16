@@ -331,6 +331,7 @@ def test_gateway_runs_api_submission():
 
     assert runs_called["called"], "The runs-API streaming path should have been invoked"
     assert captured["body_extras"]["reasoning_effort"] == "high"
+    assert captured["body_extras"]["model_options"] == {"reasoning": {"enabled": True, "effort": "high"}}
 
 
 @pytest.mark.parametrize(
@@ -3238,7 +3239,7 @@ def test_gateway_approval_response_relay():
 
     captured = {}
 
-    def fake_request_json(self, req):
+    def fake_request_json(self, req, **_kwargs):
         captured["url"] = req.full_url
         captured["body"] = json.loads(req.data)
         return {"ok": True}

@@ -60,7 +60,7 @@ class _FakeHandler:
 def helper_scope():
     """Build an exec scope with the helper's dependencies stubbed.
 
-    ``get_session`` is the only thing the helper actually calls into
+    ``get_session_profile_readonly`` is the only thing the helper actually calls into
     (besides the visibility predicate which is itself inlined). The
     visibility predicate is monkey-patched per-test so we can drive both
     the "match" and "mismatch" branches deterministically.
@@ -70,8 +70,8 @@ def helper_scope():
         # emit so the test can assert status + body.
         "j": lambda handler, payload, status=200, **_: handler.writes.append((status, payload)),
         "bad": lambda handler, msg, status=400: handler.writes.append((status, msg)),
-        # get_session is required so the helper can resolve the row.
-        "get_session": lambda sid, metadata_only=True: scope["_resolve"](sid),
+        # Read-only lookup is the helper's ownership dependency.
+        "get_session_profile_readonly": lambda sid: scope["_resolve"](sid).profile,
         # is_safe_session_id — accept anything that looks like a sid.
         "is_safe_session_id": lambda sid: bool(sid) and len(str(sid)) < 256,
     }

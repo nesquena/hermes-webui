@@ -32,6 +32,7 @@ function extractFunc(name) {
   return ui.slice(start, i);
 }
 eval(extractFunc('_normalizeConfiguredModelKey'));
+eval(extractFunc('_configuredModelIdentity'));
 eval(extractFunc('_isEquivalentConfiguredModelEntry'));
 const cases = JSON.parse(process.argv[3]);
 const result = cases.map(c => _isEquivalentConfiguredModelEntry(c.modelId, c.badge, c.entries));
@@ -291,6 +292,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
   };
   node.classList = makeClassList();
@@ -387,6 +389,7 @@ function _deduplicateModelPickerOptions() { return 0; }
 
 for (const name of [
   '_normalizeConfiguredModelKey',
+  '_configuredModelIdentity',
   '_getConfiguredModelBadge',
   '_providerFromModelValue',
   '_readModelOverflowData',
