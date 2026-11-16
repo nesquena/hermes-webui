@@ -15047,12 +15047,18 @@ function _renderActiveRunsForceOffer(target,res,resend){
     // resumable runs, so its confirmation names both kinds of run. A WebUI
     // update keeps the WebUI-only copy (#7293).
     // #8746: qualify the Agent confirmation by Gateway lifecycle ownership.
+    // #8746: an external-Gateway-only refusal interrupts nothing, so its
+    // confirmation names the Gateway runs that keep running, not an interruption.
+    const nothingInterrupted=interruptedCount===0;
     let confirmMessage;
-    if(agentTarget){
+    if(nothingInterrupted){
+      const confirmMessageFallback=g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Forcing the update will not stop '+(g===1?'it':'them')+'.';
+      confirmMessage=_activeRunsUpdateText('update_force_active_runs_no_runs_message',g,confirmMessageFallback);
+    }else if(agentTarget){
       if(g>0){
         if(agentExternal){
           const confirmMessageKey='update_force_active_runs_message_agent_external';
-          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working, and '+g+' Gateway run'+(g===1?' keeps':' keep')+' running because the WebUI cannot restart this profile\'s Gateway. Only the WebUI runs are saved as interrupted.';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working, and '+g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Only the WebUI runs are saved as interrupted.';
           confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
         }else{
           const confirmMessageKey='update_force_active_runs_message_agent';
@@ -15071,9 +15077,13 @@ function _renderActiveRunsForceOffer(target,res,resend){
       confirmMessage=_activeRunsUpdateText(confirmMessageKey,count,confirmMessageFallback);
     }
     const confirmed=await showConfirmDialog({
-      title:_activeRunsUpdateText('update_force_active_runs_title',interruptedCount,'Interrupt active runs?'),
+      title:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_title',undefined,'Update the Agent now?')
+        :_activeRunsUpdateText('update_force_active_runs_title',interruptedCount,'Interrupt active runs?'),
       message:confirmMessage,
-      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',interruptedCount,'Interrupt and update'),
+      confirmLabel:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_confirm',undefined,'Update anyway')
+        :_activeRunsUpdateText('update_force_active_runs_confirm',interruptedCount,'Interrupt and update'),
       danger:true,
       focusCancel:true,
     });
