@@ -81,7 +81,7 @@ def test_shared_gateway_endpoints_warn_including_other_profiles(monkeypatch):
         assert "in other profiles are outside that restart" not in message
         assert "outside that restart" not in message
         assert "outside the restart" not in message
-        assert "only the WebUI runs are settled as interrupted" in message
+        assert "only the WebUI runs are saved as interrupted" in message
     finally:
         with cfg.ACTIVE_RUNS_LOCK:
             cfg.ACTIVE_RUNS.clear()
@@ -122,7 +122,7 @@ def test_separate_gateway_endpoints_qualifies_gateway_this_profile_uses(monkeypa
     assert (
         "Updating the Agent also restarts the Gateway this profile uses and stops every "
         "run that Gateway is executing, including runs started from other profiles that "
-        "use the same Gateway endpoint; only the WebUI runs are settled as interrupted."
+        "use the same Gateway endpoint; only the WebUI runs are saved as interrupted."
     ) in message
     assert "in other profiles are outside that restart" not in message
     assert "outside that restart" not in message
@@ -161,7 +161,7 @@ def test_counts_by_type_in_snapshot_and_payload(monkeypatch):
         assert res["webui_owned_runs"] == 1
         assert res["gateway_runs"] == 2
         assert res["active_runs"] == 3
-        assert "3 agent runs are active (WebUI and Gateway)" in res["message"]
+        assert "3 agent runs are active (1 WebUI, 2 Gateway)" in res["message"]
     finally:
         with cfg.ACTIVE_RUNS_LOCK:
             cfg.ACTIVE_RUNS.clear()
@@ -233,7 +233,7 @@ def test_unmanaged_never_claims_same_run_is_both_interrupted_and_kept(monkeypatc
     res = upd._restart_blocked_response("agent", blocker)
     message = res["message"]
 
-    assert "Cannot update agent while 3 agent runs are active (WebUI and Gateway)." in message
+    assert "Cannot update agent while 3 agent runs are active (1 WebUI, 2 Gateway)." in message
     assert (
         "The Gateway this profile uses is managed outside the WebUI, "
         "so updating the Agent does not restart it and its Gateway runs keep running."

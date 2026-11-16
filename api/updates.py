@@ -25,10 +25,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import (
+    GATEWAY_EXTERNALLY_MANAGED_MESSAGE,
     gateway_lifecycle_capability,
     get_active_profile_gateway_running_pid,
 )
-from api.gateway_restart import restart_active_profile_gateway
+from api.gateway_restart import monitored_gateway_endpoint, restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT
 # Restart safety now reads run state through api.run_drain (#7293); these names
@@ -269,6 +270,17 @@ def _gateway_run_split(blocker_snapshot: dict | None, total: int) -> tuple[int, 
     return gateway, max(0, total - gateway)
 
 
+def _agent_run_counts(blocker_snapshot: dict) -> tuple[int, int, int]:
+    """``(active_runs, gateway_runs, webui_owned_runs)`` as the Agent refusal counts them."""
+    if 'webui_owned_runs' in blocker_snapshot or 'gateway_runs' in blocker_snapshot:
+        gateway_runs = int(blocker_snapshot.get('gateway_runs') or 0)
+        webui_owned_runs = int(blocker_snapshot.get('webui_owned_runs') or 0)
+        return webui_owned_runs + gateway_runs, gateway_runs, webui_owned_runs
+    n = int(blocker_snapshot.get('active_runs') or 0) or int(blocker_snapshot.get('active_streams') or 0)
+    gateway_runs, webui_owned_runs = _gateway_run_split(blocker_snapshot, n)
+    return n, gateway_runs, webui_owned_runs
+
+
 def _gateway_lifecycle_capability_info() -> tuple[bool, str]:
     """Return (managed, reason) for the active profile's Gateway safely.
 
@@ -289,17 +301,83 @@ def _gateway_lifecycle_capability_info() -> tuple[bool, str]:
         return False, 'local_gateway_unproven'
 
 
-def _is_gateway_lifecycle_managed() -> bool:
-    """Return whether the active profile's Gateway lifecycle is managed.
+# #8746: what a forced Agent update does to the Gateway is part of what the user
+# confirms. The refusal carries it, the client echoes it back with the forced
+# request, and the server refuses again if it changed in between.
+_GATEWAY_CONFIRMATION_FIELDS = ('gateway_restart_managed', 'gateway_profile', 'gateway_endpoint')
+_forced_update_state = threading.local()
+_GATEWAY_CONFIRMATION_STALE_MESSAGE = (
+    'The Gateway this profile uses changed since you confirmed. Try the update again.'
+)
+_GATEWAY_LEFT_RUNNING_MESSAGE = (
+    'The Agent checkout was updated, but the Gateway this profile uses changed after you '
+    'confirmed, so the WebUI left the Gateway and itself running. Restart the WebUI and the '
+    'Gateway when it suits you to finish the update.'
+)
+# A first restart already ran and failed before the change blocked the retry.
+_GATEWAY_RETRY_BLOCKED_MESSAGE = (
+    'The Agent checkout was updated and a Gateway restart was attempted, but it failed. The '
+    'Gateway this profile uses then changed after you confirmed, so the WebUI did not retry '
+    'the restart and left itself running. Restart the WebUI and the Gateway when it suits '
+    'you to finish the update.'
+)
 
-    Calls ``gateway_lifecycle_capability()`` safely without caching. Returns
-    False on any exception or malformed result so an unproven restart is never
-    promised.
+
+def _gateway_restart_profile() -> str:
+    """The profile ``hermes --profile <name> gateway restart`` targets."""
+    return str(get_active_profile_name() or 'default').strip() or 'default'
+
+
+def _gateway_restart_impact() -> dict:
+    """The Gateway restart impact of an Agent update, read once.
+
+    The refusal copy and every re-check of a forced request use this one read.
+    ``gateway_endpoint`` is the monitored URL normalised like the ownership
+    proof (no userinfo, query or fragment); ``''`` means no remote URL.
     """
-    return _gateway_lifecycle_capability_info()[0]
+    profile = _gateway_restart_profile()
+    managed, reason = _gateway_lifecycle_capability_info()
+    return {
+        'gateway_restart_managed': managed,
+        'gateway_profile': profile,
+        'gateway_endpoint': monitored_gateway_endpoint(),
+        '_reason': reason,
+    }
 
 
-def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
+def confirmed_gateway_impact(body) -> dict | None:
+    """What a forced request was confirmed for: the Gateway impact and, from
+    current clients, ``interrupted_runs``. None if it carries no confirmation;
+    ValueError for a confirmation field of the wrong type."""
+    if not isinstance(body, dict) or 'gateway_restart_managed' not in body:
+        return None
+    count = body.get('interrupted_runs')
+    if not isinstance(body['gateway_restart_managed'], bool) or (
+        'interrupted_runs' in body and (type(count) is not int or count < 0)
+    ):
+        raise ValueError('gateway_restart_managed must be a boolean, interrupted_runs a count')
+    return {**{field: body.get(field) for field in _GATEWAY_CONFIRMATION_FIELDS}, 'interrupted_runs': count}
+
+
+def _gateway_impact_changed(confirmed: dict | None, impact: dict) -> bool:
+    return confirmed is not None and any(
+        confirmed.get(field) != impact.get(field) for field in _GATEWAY_CONFIRMATION_FIELDS
+    )
+
+
+def _gateway_confirmation_stale(confirmed: dict, impact: dict, blocker_snapshot: dict) -> bool:
+    """The Gateway impact changed, or the update now interrupts more runs than confirmed."""
+    if _gateway_impact_changed(confirmed, impact):
+        return True
+    if confirmed.get('interrupted_runs') is None or not blocker_snapshot.get('restart_blocked'):
+        return False
+    n, _g, w = _agent_run_counts(blocker_snapshot)
+    return (n if impact['gateway_restart_managed'] else w) > confirmed['interrupted_runs']
+
+
+def _restart_blocked_response(
+    target: str, blocker_snapshot: dict | int, impact: dict | None = None
+) -> dict:
     if isinstance(blocker_snapshot, int):
         blocker_snapshot = {
             'active_streams': blocker_snapshot,
@@ -313,16 +391,11 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
 
     payload_extra: dict = {}
     if target == 'agent':
-        gateway_managed, gateway_reason = _gateway_lifecycle_capability_info()
-        payload_extra['gateway_restart_managed'] = gateway_managed
-
-        if 'webui_owned_runs' in blocker_snapshot or 'gateway_runs' in blocker_snapshot:
-            gateway_runs = int(blocker_snapshot.get('gateway_runs') or 0)
-            webui_owned_runs = int(blocker_snapshot.get('webui_owned_runs') or 0)
-            n = webui_owned_runs + gateway_runs
-        else:
-            n = raw_active_runs
-            gateway_runs, webui_owned_runs = _gateway_run_split(blocker_snapshot, n)
+        if impact is None:
+            impact = _gateway_restart_impact()
+        gateway_managed, gateway_reason = impact['gateway_restart_managed'], impact['_reason']
+        payload_extra.update({field: impact[field] for field in _GATEWAY_CONFIRMATION_FIELDS})
+        n, gateway_runs, webui_owned_runs = _agent_run_counts(blocker_snapshot)
 
         payload_extra['webui_owned_runs'] = webui_owned_runs
         payload_extra['gateway_runs'] = gateway_runs
@@ -333,13 +406,16 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
         g = gateway_runs
 
         if g > 0:
-            detail = f"{n} agent run{'s are' if plural_n else ' is'} active (WebUI and Gateway)"
+            if w > 0:
+                detail = f"{n} agent runs are active ({w} WebUI, {g} Gateway)"
+            else:
+                detail = f"{g} Gateway run{'s are' if g != 1 else ' is'} active"
             if gateway_managed:
                 gateway_note = (
                     ' Updating the Agent also restarts the Gateway this profile uses and '
                     'stops every run that Gateway is executing, including runs started '
-                    'from other profiles that use the same Gateway endpoint; only the '
-                    'WebUI runs are settled as interrupted.'
+                    'from other profiles that use the same Gateway endpoint'
+                    + ('; only the WebUI runs are saved as interrupted.' if w > 0 else '.')
                 )
             elif gateway_reason == 'external_gateway':
                 gateway_note = (
@@ -592,7 +668,9 @@ def _inventory_locks(path: Path) -> dict:
     return out
 
 
-def apply_clear_lock(target: str, *, force_active_runs: bool = False) -> dict:
+def apply_clear_lock(
+    target: str, *, force_active_runs: bool = False, confirmed_gateway: dict | None = None
+) -> dict:
     """Manual-instruction lock recovery for ``target``.
 
     v2.2: NEVER removes a lock file. Strategy:
@@ -612,7 +690,8 @@ def apply_clear_lock(target: str, *, force_active_runs: bool = False) -> dict:
         re-run the normal apply.
     """
     return _run_fenced_update(
-        target, force_active_runs, lambda: _apply_clear_lock_inner(target)
+        target, force_active_runs, lambda: _apply_clear_lock_inner(target),
+        confirmed_gateway=confirmed_gateway,
     )
 
 
@@ -669,7 +748,9 @@ def _apply_clear_lock_inner(target: str) -> dict:
     }
 
 
-def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
+def _run_fenced_update(
+    target: str, force_active_runs: bool, run, confirmed_gateway: dict | None = None
+) -> dict:
     """Refuse / fence / re-check wrapper shared by every update entry point (#7293).
 
     1. Refuse by default while WebUI-owned runs are active (``force_available``
@@ -681,12 +762,20 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
     4. Release the hold on the way out. A scheduled restart keeps admission
        closed on its own (``run_drain.mark_restart_pending``) until the process
        is replaced; a failed update reopens it.
+
+    A forced Agent update that carries ``confirmed_gateway`` (what the user
+    confirmed) refuses again, before any side effect, when the Gateway impact
+    changed or more runs would be interrupted than confirmed, even with no run
+    left in the census; the Gateway restart then follows the confirmation
+    (#8746, ``_ensure_gateway_restart_for_agent_update``).
     """
     from api import run_drain
 
     blocker_snapshot = _update_blocker_snapshot(target)
     if blocker_snapshot.get('restart_blocked') and not force_active_runs:
         return _restart_blocked_response(target, blocker_snapshot)
+    if not (force_active_runs and target == 'agent'):
+        confirmed_gateway = None
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
@@ -694,39 +783,62 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
         token = run_drain.hold_run_admission(f'update:{target}', force=bool(force_active_runs))
         try:
             blocker_snapshot = _update_blocker_snapshot(target)
-            if blocker_snapshot.get('restart_blocked'):
-                if not force_active_runs:
-                    return _restart_blocked_response(target, blocker_snapshot)
-                # #8667: name both cases — the WebUI settles its own runs, the
-                # Gateway runs end with the Gateway cycle and are settled
-                # afterwards by the worker teardown/watchdog.
-                # #8746: qualify the Agent forced log by Gateway lifecycle ownership.
+            blocked = bool(blocker_snapshot.get('restart_blocked'))
+            if blocked and not force_active_runs:
+                return _restart_blocked_response(target, blocker_snapshot)
+            confirmed = confirmed_gateway is not None
+            impact = _gateway_restart_impact() if target == 'agent' and (blocked or confirmed) else None
+            if confirmed and _gateway_confirmation_stale(confirmed_gateway, impact, blocker_snapshot):
+                if blocked:
+                    return _restart_blocked_response(target, blocker_snapshot, impact)
+                return {
+                    'ok': False,
+                    'message': _GATEWAY_CONFIRMATION_STALE_MESSAGE,
+                    'target': target,
+                    'update_confirmation_stale': True,
+                }
+            if blocked:
                 if target == 'agent':
-                    if _is_gateway_lifecycle_managed():
-                        logger.warning(
-                            "Forced %s update with %s active run(s) (WebUI and "
-                            "Gateway); the WebUI runs are settled as interrupted "
-                            "before the restart, and the Gateway runs this "
-                            "profile's Gateway is executing end when the Gateway "
-                            "cycles, including runs started from other profiles "
-                            "that use the same Gateway endpoint",
-                            target, blocker_snapshot.get('active_runs'),
+                    # #8667/#8746: name the real case. The WebUI saves its own
+                    # runs as interrupted; the Gateway runs end with a managed
+                    # Gateway restart (settled afterwards by the worker
+                    # teardown/watchdog) and keep running otherwise.
+                    n, g, w = _agent_run_counts(blocker_snapshot)
+                    if impact['gateway_restart_managed']:
+                        fate = (
+                            "the Gateway this profile uses is restarted, which stops "
+                            "every run it is executing, including runs started from "
+                            "other profiles that use the same Gateway endpoint"
+                        )
+                    elif impact['_reason'] == 'external_gateway':
+                        fate = (
+                            "the Gateway this profile uses is managed outside the WebUI "
+                            "and is not restarted, so its runs keep running"
                         )
                     else:
-                        logger.warning(
-                            "Forced %s update with %s active run(s) (WebUI and "
-                            "Gateway); the WebUI runs are settled as interrupted "
-                            "before the restart, and the Gateway runs keep running "
-                            "because the Gateway is managed outside the WebUI",
-                            target, blocker_snapshot.get('active_runs'),
+                        fate = (
+                            "the WebUI could not prove it owns the Gateway this profile "
+                            "uses (unproven, or the capability read failed) and does not "
+                            "restart it, so its runs keep running"
                         )
+                    logger.warning(
+                        "Forced %s update with %s active run(s) (%s WebUI, %s Gateway); %s%s",
+                        target, n, w, g,
+                        "the WebUI runs are saved as interrupted before the restart, and "
+                        if w > 0 else "",
+                        fate,
+                    )
                 else:
                     logger.warning(
                         "Forced %s update with %s active WebUI run(s); they will "
                         "be settled as interrupted before the restart",
                         target, blocker_snapshot.get('active_runs'),
                     )
-            return run()
+            _forced_update_state.confirmed_gateway = confirmed_gateway
+            try:
+                return run()
+            finally:
+                _forced_update_state.confirmed_gateway = None
         finally:
             run_drain.release_run_admission_hold(token)
     finally:
@@ -2628,9 +2740,26 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
         - ok is False when restart did not complete and callers must abort success.
         - restart_payload contains helper status fields for response shaping.
     """
-    target_profile = str(get_active_profile_name() or "default").strip() or "default"
+    target_profile = _gateway_restart_profile()
+    confirmed = getattr(_forced_update_state, 'confirmed_gateway', None)
+    if confirmed is not None and confirmed['gateway_restart_managed'] is False:
+        # #8746: the user confirmed a forced update that does not restart this
+        # Gateway, so it is never restarted, whatever ownership reads now. If
+        # the Gateway changed (e.g. became restartable), say it was left running.
+        impact = _gateway_restart_impact()
+        if _gateway_impact_changed(confirmed, impact):
+            return False, {
+                'status': 'restart_blocked',
+                'message': _GATEWAY_LEFT_RUNNING_MESSAGE,
+                **{field: impact[field] for field in _GATEWAY_CONFIRMATION_FIELDS},
+            }
+        logger.info("Agent updated; gateway restart skipped as confirmed (%s)", impact['_reason'])
+        return True, {'status': 'external', 'message': GATEWAY_EXTERNALLY_MANAGED_MESSAGE}
+    # #8746: a confirmed-managed force restarts only the confirmed Gateway; the
+    # helper compares it with its own read before every launch, retry included.
+    expected = {} if confirmed is None else {'expected_impact': confirmed}
     gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
-    restart_result = restart_active_profile_gateway(profile=target_profile)
+    restart_result = restart_active_profile_gateway(profile=target_profile, **expected)
     status = str(restart_result.get("status") or "")
     if status in {"completed", "in_progress"}:
         return True, restart_result
@@ -2653,7 +2782,7 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     # bounded delay so an already-applied Agent update is not reported as a
     # complete failure because of that transient process handoff.
     time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    retry_result = restart_active_profile_gateway(profile=target_profile)
+    retry_result = restart_active_profile_gateway(profile=target_profile, **expected)
     retry_status = str(retry_result.get("status") or "")
     if retry_status in {"completed", "in_progress"}:
         return True, {
@@ -2698,6 +2827,10 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
 
 
 def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
+    if restart_result.get("status") == "restart_blocked":  # #8746
+        if restart_result.get("retry_attempted"):
+            return _GATEWAY_RETRY_BLOCKED_MESSAGE
+        return _GATEWAY_LEFT_RUNNING_MESSAGE
     if restart_result.get("message"):
         return (
             f'{target} updated, but gateway restart did not complete: '
@@ -2734,7 +2867,10 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
-def apply_force_update(target: str, channel=None, *, force_active_runs: bool = False) -> dict:
+def apply_force_update(
+    target: str, channel=None, *, force_active_runs: bool = False,
+    confirmed_gateway: dict | None = None,
+) -> dict:
     """Discard local changes for the requested update target.
 
     Unlike apply_update() which requires a clean working tree and refuses
@@ -2756,7 +2892,8 @@ def apply_force_update(target: str, channel=None, *, force_active_runs: bool = F
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
     return _run_fenced_update(
-        target, force_active_runs, lambda: _apply_force_update_inner(target, channel)
+        target, force_active_runs, lambda: _apply_force_update_inner(target, channel),
+        confirmed_gateway=confirmed_gateway,
     )
 
 
@@ -2864,7 +3001,9 @@ def _apply_force_update_inner(target: str, channel) -> dict:
     return response
 
 
-def apply_update(target, channel=None, *, force_active_runs: bool = False):
+def apply_update(
+    target, channel=None, *, force_active_runs: bool = False, confirmed_gateway: dict | None = None
+):
     """Stash, pull --ff-only, pop for the given target repo.
 
     Refuses while WebUI-owned runs are active unless ``force_active_runs``
@@ -2874,7 +3013,8 @@ def apply_update(target, channel=None, *, force_active_runs: bool = False):
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
     return _run_fenced_update(
-        target, force_active_runs, lambda: _apply_update_inner(target, channel)
+        target, force_active_runs, lambda: _apply_update_inner(target, channel),
+        confirmed_gateway=confirmed_gateway,
     )
 
 

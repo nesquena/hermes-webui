@@ -23750,6 +23750,14 @@ def handle_post(handler, parsed) -> bool:
         return _handle_session_import(handler, body)
 
     # ── Self-update (POST) ──
+    if parsed.path in ("/api/updates/apply", "/api/updates/force", "/api/updates/clear_lock"):
+        from api.updates import confirmed_gateway_impact
+
+        try:  # #8746: a confirmation field of the wrong type is a bad request
+            confirmed_gateway_impact(body)
+        except ValueError as exc:
+            return bad(handler, str(exc))
+
     if parsed.path == "/api/updates/apply":
         target = body.get("target", "")
         if target not in ("webui", "agent"):
@@ -23761,12 +23769,15 @@ def handle_post(handler, parsed) -> bool:
         _apply_channel = body.get("channel") if isinstance(body, dict) else None
         if _apply_channel not in ("stable", "experimental"):
             _apply_channel = None
-        from api.updates import apply_update
+        from api.updates import apply_update, confirmed_gateway_impact
 
         # #7293: an update refuses while WebUI-owned runs are active unless the
         # client re-sends it with an explicit, user-confirmed force.
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True
-        return j(handler, apply_update(target, _apply_channel, force_active_runs=_force_active_runs))
+        return j(handler, apply_update(
+            target, _apply_channel, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/force":
         target = body.get("target", "")
@@ -23775,10 +23786,13 @@ def handle_post(handler, parsed) -> bool:
         _force_channel = body.get("channel") if isinstance(body, dict) else None
         if _force_channel not in ("stable", "experimental"):
             _force_channel = None
-        from api.updates import apply_force_update
+        from api.updates import apply_force_update, confirmed_gateway_impact
 
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True  # #7293
-        return j(handler, apply_force_update(target, _force_channel, force_active_runs=_force_active_runs))
+        return j(handler, apply_force_update(
+            target, _force_channel, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/clear_lock":
         # Manual-instruction recovery for the .git/index.lock case. The
@@ -23791,10 +23805,13 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target", "")
         if target not in ("webui", "agent"):
             return bad(handler, 'target must be "webui" or "agent"')
-        from api.updates import apply_clear_lock
+        from api.updates import apply_clear_lock, confirmed_gateway_impact
 
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True  # #7293
-        return j(handler, apply_clear_lock(target, force_active_runs=_force_active_runs))
+        return j(handler, apply_clear_lock(
+            target, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload

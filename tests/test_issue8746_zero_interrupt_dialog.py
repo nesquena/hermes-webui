@@ -37,6 +37,11 @@ MANAGED_TAIL = (
     "same Gateway endpoint. The WebUI runs are saved as interrupted. Wait for them to "
     "finish if you can."
 )
+GATEWAY_ONLY_TAIL = (
+    "Updating the Agent also restarts the Gateway this profile uses and stops every run "
+    "that Gateway is executing, including runs started from other profiles that use the "
+    "same Gateway endpoint."
+)
 
 # name, webui runs, gateway runs, gateway managed, target, gateway runs durable,
 # expected (offer label, title, message, confirm label)
@@ -57,6 +62,16 @@ CASES = [
     ("managed-mixed-control", 1, 1, True, "agent", True, (
         "Update anyway (interrupts 2 runs)", INTERRUPT_TITLE,
         "1 WebUI agent run is still working and 1 Gateway run is running. " + MANAGED_TAIL,
+        INTERRUPT_CONFIRM)),
+    # A managed Gateway with no WebUI run: only Gateway runs are interrupted, so
+    # the dialog names them alone (no "0 WebUI ..." and no "saved as interrupted").
+    ("managed-gateway-only-single", 0, 1, True, "agent", True, (
+        "Update anyway (interrupts 1 run)", INTERRUPT_TITLE,
+        "1 Gateway run is still working. " + GATEWAY_ONLY_TAIL + " Wait for it to finish if you can.",
+        INTERRUPT_CONFIRM)),
+    ("managed-gateway-only-plural", 0, 2, True, "agent", True, (
+        "Update anyway (interrupts 2 runs)", INTERRUPT_TITLE,
+        "2 Gateway runs are still working. " + GATEWAY_ONLY_TAIL + " Wait for them to finish if you can.",
         INTERRUPT_CONFIRM)),
     ("nondurable-gateway-control", 0, 1, False, "agent", False, (
         "Update anyway (interrupts 1 run)", INTERRUPT_TITLE,
@@ -134,12 +149,16 @@ def test_census_refusal_renders_a_coherent_complete_dialog(
     assert out["afterRefusal"]["offer"]["label"] == label
     assert out["confirmCalls"] == [
         {"title": title, "message": message, "confirmLabel": confirm,
-         "danger": True, "focusCancel": True}
+         # The neutral dialog is not a destructive action; cancel keeps the focus.
+         "danger": label != "Update anyway (interrupts nothing)", "focusCancel": True}
     ]
     # Cancelling never re-sends: the one call is the refused update.
     assert len(out["apiCalls"]) == 1
     assert "force_active_runs" not in out["apiCalls"][0]["body"]
     assert out["waitCalls"] == 0
+    if target == "agent" and w == 0 and durable:
+        rendered = out["confirmCalls"][0]["message"]
+        assert "0 WebUI" not in rendered and "saved as interrupted" not in rendered, rendered
     if label == "Update anyway (interrupts nothing)":
         dialog = out["confirmCalls"][0]
         for text in (dialog["title"], dialog["message"], dialog["confirmLabel"]):
@@ -156,8 +175,45 @@ def test_gateway_only_confirmation_still_resends_with_force(tmp_path):
     assert [c["title"] for c in out["confirmCalls"]] == [NEUTRAL_TITLE]
     assert out["apiCalls"] == [
         {"url": "/api/updates/apply", "body": {"target": "agent"}},
-        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True}},
+        {"url": "/api/updates/apply",
+         "body": {"target": "agent", "force_active_runs": True, "gateway_restart_managed": False,
+                  "interrupted_runs": 0}},
     ]
+
+
+_STYLED_HARNESS = harness._HARNESS.replace(
+    "label: offer ? offer.textContent : null,",
+    "label: offer ? offer.textContent : null, className: offer ? offer.className : null,"
+    " style: offer ? Object.assign({}, offer.style) : null,",
+)
+
+
+@pytest.mark.parametrize("w,g,managed,neutral", [(0, 1, False, True), (0, 2, False, True), (1, 1, False, False), (0, 1, True, False)])
+def test_neutral_offer_is_not_styled_as_destructive(w, g, managed, neutral, tmp_path):
+    """interruptedCount===0: the accent update button, no red inline styles, a non-danger dialog."""
+    assert _STYLED_HARNESS != harness._HARNESS
+    refusal = harness._refusal(
+        w + g, target="agent", gateway_restart_managed=managed, webui_owned_runs=w, gateway_runs=g
+    )
+    snippet = tmp_path / "ui_snippet.js"
+    snippet.write_text(harness._ui_snippet(), encoding="utf-8")
+    result = subprocess.run(
+        [harness.NODE, "-e", _STYLED_HARNESS, json.dumps(_scenario("agent", refusal, [False])),
+         str(harness.I18N_JS), str(snippet)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    offer = out["afterRefusal"]["offer"]
+    red = {"background": "var(--error,#e05)", "color": "#fff", "borderColor": "var(--error,#e05)"}
+    if neutral:
+        assert offer["className"] == "update-btn update-primary"
+        assert not set(red) & set(offer["style"]), offer["style"]
+    else:
+        assert offer["className"] == "update-btn"
+        assert {k: offer["style"].get(k) for k in red} == red
+    dialog = out["confirmCalls"][0]
+    assert (dialog["danger"], dialog["focusCancel"]) == (not neutral, True)
 
 
 def _run_without_locale(scenario, tmp_path):
@@ -174,7 +230,10 @@ def _run_without_locale(scenario, tmp_path):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.parametrize("w,g,managed", [(0, 1, False), (0, 2, False), (1, 1, False), (1, 2, False), (2, 1, True)])
+@pytest.mark.parametrize(
+    "w,g,managed",
+    [(0, 1, False), (0, 2, False), (1, 1, False), (1, 2, False), (2, 1, True), (0, 1, True), (0, 2, True)],
+)
 def test_inline_fallbacks_match_the_english_locale(w, g, managed, tmp_path):
     refusal = harness._refusal(
         w + g, target="agent", gateway_restart_managed=managed, webui_owned_runs=w, gateway_runs=g
@@ -213,6 +272,8 @@ for (const code of codes) {
     message_2: call(loc.update_force_active_runs_no_runs_message, 2),
     interrupt_title: call(loc.update_force_active_runs_title),
     interrupt_confirm: call(loc.update_force_active_runs_confirm),
+    gateway_only_1: call(loc.update_force_active_runs_message_agent_gateway_only, 1),
+    gateway_only_2: call(loc.update_force_active_runs_message_agent_gateway_only, 2),
   };
 }
 console.log(JSON.stringify({ codes, locales: out }));
@@ -237,9 +298,15 @@ def test_every_locale_has_the_gateway_only_dialog_keys():
             message = keys[f"message_{n}"]
             if str(n) not in message or "Gateway" not in message:
                 failures.append(f"{code}: message({n}) drops the count or the Gateway: {message!r}")
+        for n in (1, 2):
+            message = keys[f"gateway_only_{n}"]
+            if not message or str(n) not in message or "Gateway" not in message:
+                failures.append(f"{code}: gateway-only message({n}) missing or drops the count or the Gateway: {message!r}")
         if keys["title"] == keys["interrupt_title"] or keys["confirm"] == keys["interrupt_confirm"]:
             failures.append(f"{code}: the neutral dialog reuses the interruption title or label")
     assert failures == [], "\n".join(failures)
     en = data["locales"]["en"]
+    assert en["gateway_only_1"] == "1 Gateway run is still working. " + GATEWAY_ONLY_TAIL + " Wait for it to finish if you can."
+    assert en["gateway_only_2"] == "2 Gateway runs are still working. " + GATEWAY_ONLY_TAIL + " Wait for them to finish if you can."
     assert en["message_1"].startswith("1 Gateway run keeps running")
     assert en["message_2"].startswith("2 Gateway runs keep running")

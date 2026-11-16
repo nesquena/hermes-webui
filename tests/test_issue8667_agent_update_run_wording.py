@@ -54,8 +54,7 @@ def test_agent_refusal_names_webui_and_gateway_runs(monkeypatch):
     assert result["webui_owned_runs"] == 1
     assert result["gateway_runs"] == 1
     message = result["message"]
-    assert "2 agent runs are active" in message
-    assert "(WebUI and Gateway)" in message
+    assert "2 agent runs are active (1 WebUI, 1 Gateway)" in message
     for kind in BOTH_RUN_TYPES:
         assert kind in message
     # The user must learn WHY the Gateway runs are part of the count: the
@@ -63,7 +62,7 @@ def test_agent_refusal_names_webui_and_gateway_runs(monkeypatch):
     assert (
         "Updating the Agent also restarts the Gateway this profile uses and stops every "
         "run that Gateway is executing, including runs started from other profiles that "
-        "use the same Gateway endpoint; only the WebUI runs are settled as interrupted."
+        "use the same Gateway endpoint; only the WebUI runs are saved as interrupted."
     ) in message
     # The way out is unchanged.
     assert (
@@ -86,14 +85,13 @@ def test_agent_refusal_uses_the_singular_form(monkeypatch):
     assert result["gateway_runs"] == 1
     message = result["message"]
 
-    assert "1 agent run is active" in message
-    assert "(WebUI and Gateway)" in message
-    for kind in BOTH_RUN_TYPES:
-        assert kind in message
+    # #8746: with no WebUI run the copy names the Gateway run alone.
+    assert "Cannot update agent while 1 Gateway run is active." in message
+    assert "WebUI" not in message
     assert (
         "Updating the Agent also restarts the Gateway this profile uses and stops every "
         "run that Gateway is executing, including runs started from other profiles that "
-        "use the same Gateway endpoint; only the WebUI runs are settled as interrupted."
+        "use the same Gateway endpoint."
     ) in message
     assert (
         "force the update to restart the Gateway this profile uses and stop the Gateway runs it is executing."
@@ -116,7 +114,7 @@ def test_agent_refusal_when_gateway_unmanaged_does_not_promise_restart(monkeypat
     assert result_plural["webui_owned_runs"] == 1
     assert result_plural["gateway_runs"] == 1
     assert result_plural["message"] == (
-        "Cannot update agent while 2 agent runs are active (WebUI and Gateway). "
+        "Cannot update agent while 2 agent runs are active (1 WebUI, 1 Gateway). "
         "The Gateway this profile uses is managed outside the WebUI, so updating the Agent "
         "does not restart it and its Gateway runs keep running. "
         "Wait for the response to finish and retry, or force the update to interrupt the 1 WebUI run; "
@@ -134,7 +132,7 @@ def test_agent_refusal_when_gateway_unmanaged_does_not_promise_restart(monkeypat
     assert result_singular["webui_owned_runs"] == 0
     assert result_singular["gateway_runs"] == 1
     assert result_singular["message"] == (
-        "Cannot update agent while 1 agent run is active (WebUI and Gateway). "
+        "Cannot update agent while 1 Gateway run is active. "
         "The Gateway this profile uses is managed outside the WebUI, so updating the Agent "
         "does not restart it and its Gateway runs keep running. "
         "Wait for the Gateway runs to finish and retry; forcing the update will not stop them."
@@ -233,8 +231,9 @@ def test_agent_refusal_cross_profile_warning_scope(monkeypatch):
         assert result["webui_owned_runs"] == 0
         message = result["message"]
 
-        assert "including runs started from other profiles that use the same Gateway endpoint" in message
-        assert "only the WebUI runs are settled as interrupted" in message
+        assert "including runs started from other profiles that use the same Gateway endpoint." in message
+        # #8746: no WebUI run, so no WebUI clause.
+        assert "only the WebUI runs" not in message
         assert "Gateway runs in other profiles are outside that restart" not in message
         assert "outside that restart" not in message
         assert "outside the restart" not in message
@@ -379,13 +378,14 @@ def test_forced_agent_update_log_names_both_run_types(monkeypatch, caplog):
     assert "3" in text
     for kind in BOTH_RUN_TYPES:
         assert kind in text, text
-    # The WebUI settles its own runs; the Gateway runs end with the Gateway
-    # cycle and are settled afterwards by the worker teardown/watchdog.
-    assert "settled as interrupted" in text
-    assert "Gateway cycles" in text
+    # The WebUI saves its own runs as interrupted; the Gateway runs end with
+    # the Gateway restart and are settled afterwards by the worker teardown/watchdog.
+    assert "saved as interrupted" in text
     assert (
-        "the Gateway runs this profile's Gateway is executing end when the Gateway cycles, "
-        "including runs started from other profiles that use the same Gateway endpoint"
+        "Forced agent update with 3 active run(s) (1 WebUI, 2 Gateway); "
+        "the WebUI runs are saved as interrupted before the restart, "
+        "and the Gateway this profile uses is restarted, which stops every run it is "
+        "executing, including runs started from other profiles that use the same Gateway endpoint"
     ) in text
 
 
@@ -402,12 +402,14 @@ def test_forced_agent_update_log_when_gateway_unmanaged(monkeypatch, caplog):
     assert result == {"ok": True}
     text = " ".join(record.getMessage() for record in caplog.records)
     assert (
-        "Forced agent update with 3 active run(s) (WebUI and Gateway); "
-        "the WebUI runs are settled as interrupted before the restart, "
-        "and the Gateway runs keep running because the Gateway is managed "
-        "outside the WebUI"
+        "Forced agent update with 3 active run(s) (1 WebUI, 2 Gateway); "
+        "the WebUI runs are saved as interrupted before the restart, "
+        "and the WebUI could not prove it owns the Gateway this profile uses "
+        "(unproven, or the capability read failed) and does not restart it, "
+        "so its runs keep running"
     ) in text
-    assert "Gateway cycles" not in text
+    assert "is restarted" not in text
+    assert "managed outside the WebUI" not in text
 
 
 def test_forced_webui_update_log_does_not_claim_gateway_runs_stop(monkeypatch, caplog):

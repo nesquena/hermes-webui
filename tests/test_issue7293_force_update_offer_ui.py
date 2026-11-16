@@ -455,7 +455,10 @@ def test_agent_target_confirmation_names_the_gateway_runs_too(tmp_path):
     ]
     assert out["apiCalls"] == [
         {"url": "/api/updates/apply", "body": {"target": "agent"}},
-        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True}},
+        # #8746: the forced request carries the confirmed Gateway restart impact
+        # and interrupted-run count.
+        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True,
+                                               "gateway_restart_managed": True, "interrupted_runs": 2}},
     ]
 
 
@@ -498,7 +501,10 @@ def test_agent_target_confirmation_external_gateway_wording(tmp_path):
     ]
     assert out["apiCalls"] == [
         {"url": "/api/updates/apply", "body": {"target": "agent"}},
-        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True}},
+        # #8746: the forced request carries the confirmed Gateway restart impact
+        # and interrupted-run count.
+        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True,
+                                               "gateway_restart_managed": False, "interrupted_runs": 1}},
     ]
 
 
