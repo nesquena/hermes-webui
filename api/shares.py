@@ -18,6 +18,7 @@ import mimetypes
 import os
 import re
 import secrets
+import stat
 import tempfile
 import threading
 import time
@@ -1137,7 +1138,20 @@ _LINEAGE_KEYS = (
 )
 
 
-def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
+class _LineageInconclusiveSentinel:
+    """Sentinel returned when session lineage cannot be confirmed due to I/O error (#8950)."""
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "<LINEAGE_INCONCLUSIVE>"
+
+
+_LINEAGE_INCONCLUSIVE = _LineageInconclusiveSentinel()
+
+
+def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None | object:
     """Return (parent_session_id, is_pre_compression_snapshot, continuation_session_id).
 
     Reads from the cheap metadata prefix first; when the prefix is unavailable
@@ -1145,6 +1159,8 @@ def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
     by an oversized field such as compression_anchor_summary), falls back to a
     NONMUTATING read of the raw persisted document (#8950 LINEAGE-RAW-F1).
     Returns None if the session file is missing, unsafe, or unparseable.
+    Returns _LINEAGE_INCONCLUSIVE if reading the session file fails with an
+    I/O error (stat failure, permission denial, or transient failure) (#8950).
 
     The fallback deliberately does not go through ``Session.load_metadata_only``:
     that constructor coerces ``pre_compression_snapshot`` with ``bool()`` and
@@ -1162,22 +1178,44 @@ def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
         if not models.is_safe_session_id(sid):
             return None
         session_path = models.SESSION_DIR / f"{sid}.json"
-        if not session_path.is_file():
+        try:
+            st = session_path.stat()
+        except (FileNotFoundError, NotADirectoryError):
             return None
+        except OSError:
+            return _LINEAGE_INCONCLUSIVE
+
+        if not stat.S_ISREG(st.st_mode):
+            return _LINEAGE_INCONCLUSIVE
 
         prefix = models._persisted_session_meta_prefix(sid)
         if isinstance(prefix, dict) and all(k in prefix for k in _LINEAGE_KEYS):
+            raw_parent = prefix.get("parent_session_id")
+            raw_continuation = prefix.get("pre_compression_continuation_session_id")
+            if raw_parent is not None and not isinstance(raw_parent, str):
+                return None
+            if raw_continuation is not None and not isinstance(raw_continuation, str):
+                return None
             return (
-                str(prefix.get("parent_session_id") or "").strip(),
+                str(raw_parent or "").strip(),
                 prefix.get("pre_compression_snapshot") is True,
-                str(prefix.get("pre_compression_continuation_session_id") or "").strip(),
+                str(raw_continuation or "").strip(),
             )
 
         # Incomplete observation: read the raw document ONCE, without constructing
         # a Session and without any repair (#8950 LINEAGE-RAW-F1).
         try:
-            raw_payload = json.loads(session_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            raw_text = session_path.read_text(encoding="utf-8")
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError:
+            return _LINEAGE_INCONCLUSIVE
+        except (UnicodeDecodeError, ValueError):
+            return None
+
+        try:
+            raw_payload = json.loads(raw_text)
+        except (json.JSONDecodeError, ValueError):
             return None
         if not isinstance(raw_payload, dict):
             return None
@@ -1196,9 +1234,74 @@ def _read_session_lineage(sid: str) -> tuple[str, bool, str] | None:
             raw_payload.get("pre_compression_snapshot") is True,
             (raw_continuation or "").strip(),
         )
+    except OSError:
+        return _LINEAGE_INCONCLUSIVE
     except Exception:
         logger.debug("Failed to read session lineage for %s", sid, exc_info=True)
         return None
+
+
+def _compression_continuation_state(child_sid: str, parent_sid: str) -> str:
+    """Return 'yes', 'no', or 'unknown' for *child_sid* as a continuation of *parent_sid*.
+
+    Walks the durable reciprocal compression chain backward from *child_sid*
+    to *parent_sid* up to a fixed depth bound. Each hop is verified on both
+    sides: the child must name the parent as its ``parent_session_id``, and the
+    parent must be a ``pre_compression_snapshot`` naming that exact child as its
+    ``pre_compression_continuation_session_id``. Missing, malformed, unsafe, or
+    cyclic lineage anywhere in the chain fails closed ('no') (#8950). Inconclusive
+    reads anywhere in the chain return 'unknown'.
+    """
+    if not child_sid or not parent_sid or child_sid == parent_sid:
+        return "no"
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(child_sid) or not models.is_safe_session_id(parent_sid):
+            return "no"
+
+        visited: set[str] = {child_sid}
+        curr = child_sid
+
+        for _ in range(_MAX_COMPRESSION_CHAIN_HOPS):
+            curr_lineage = _read_session_lineage(curr)
+            if curr_lineage is _LINEAGE_INCONCLUSIVE:
+                return "unknown"
+            if curr_lineage is None:
+                return "no"
+            parent_id, _, _ = curr_lineage
+            if not parent_id or not models.is_safe_session_id(parent_id):
+                return "no"
+            if parent_id in visited:
+                # Cyclic lineage detected — fail closed.
+                return "no"
+
+            parent_lineage = _read_session_lineage(parent_id)
+            if parent_lineage is _LINEAGE_INCONCLUSIVE:
+                return "unknown"
+            if parent_lineage is None:
+                return "no"
+            _, is_snapshot, continuation_id = parent_lineage
+            if not is_snapshot or continuation_id != curr:
+                # Reciprocal link broken — fail closed.
+                return "no"
+
+            if parent_id == parent_sid:
+                return "yes"
+
+            visited.add(parent_id)
+            curr = parent_id
+
+        # Exceeded max chain depth bound.
+        return "no"
+    except OSError:
+        return "unknown"
+    except Exception:
+        logger.debug(
+            "Compression continuation state check failed between %s and %s",
+            child_sid, parent_sid, exc_info=True,
+        )
+        return "no"
 
 
 def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
@@ -1209,52 +1312,10 @@ def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
     sides: the child must name the parent as its ``parent_session_id``, and the
     parent must be a ``pre_compression_snapshot`` naming that exact child as its
     ``pre_compression_continuation_session_id``. Missing, malformed, unsafe, or
-    cyclic lineage anywhere in the chain fails closed (#8950).
+    cyclic lineage anywhere in the chain fails closed (#8950). Inconclusive reads
+    also fail closed (return False).
     """
-    if not child_sid or not parent_sid or child_sid == parent_sid:
-        return False
-    try:
-        from api import models
-
-        if not models.is_safe_session_id(child_sid) or not models.is_safe_session_id(parent_sid):
-            return False
-
-        visited: set[str] = {child_sid}
-        curr = child_sid
-
-        for _ in range(_MAX_COMPRESSION_CHAIN_HOPS):
-            curr_lineage = _read_session_lineage(curr)
-            if curr_lineage is None:
-                return False
-            parent_id, _, _ = curr_lineage
-            if not parent_id or not models.is_safe_session_id(parent_id):
-                return False
-            if parent_id in visited:
-                # Cyclic lineage detected — fail closed.
-                return False
-
-            parent_lineage = _read_session_lineage(parent_id)
-            if parent_lineage is None:
-                return False
-            _, is_snapshot, continuation_id = parent_lineage
-            if not is_snapshot or continuation_id != curr:
-                # Reciprocal link broken — fail closed.
-                return False
-
-            if parent_id == parent_sid:
-                return True
-
-            visited.add(parent_id)
-            curr = parent_id
-
-        # Exceeded max chain depth bound.
-        return False
-    except Exception:
-        logger.debug(
-            "Compression continuation check failed between %s and %s",
-            child_sid, parent_sid, exc_info=True,
-        )
-        return False
+    return _compression_continuation_state(child_sid, parent_sid) == "yes"
 
 
 def _read_share_snapshot(

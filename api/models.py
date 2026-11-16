@@ -6640,10 +6640,16 @@ def _share_snapshot_state_for_session(token: str, session_id: str) -> str:
         # continuation legitimately carries its parent's token, so answering
         # "absent" here let a metadata save adopt the empty durable pair and drop
         # a pending token -- "Stop sharing" then answered success while the
-        # public snapshot stayed readable. Fail closed: only a verified chain
-        # counts, and _is_compression_continuation already fails closed.
-        if owner and target and shares._is_compression_continuation(target, owner):
-            return "present"
+        # public snapshot stayed readable. Only a verified chain counts as
+        # ownership; an unprovable chain is 'absent', and a chain that could not
+        # be read at all is 'unknown' so a transient I/O failure never reads as
+        # proven absence (#8950 ANCESTOR-READ-F1).
+        if owner and target:
+            continuation_state = shares._compression_continuation_state(target, owner)
+            if continuation_state == "yes":
+                return "present"
+            if continuation_state == "unknown":
+                return "unknown"
         return "absent"
     except OSError:
         return "unknown"
