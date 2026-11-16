@@ -715,12 +715,40 @@ extension inherits the guard:
 This is the supported, forward-looking way for theme-pack and theme-creator
 extensions to integrate with the built-in appearance system.
 
+## Built-in TTS engines and the Edge default voice
+
+The built-ins are **Browser**, **Edge**, **ElevenLabs**, and **OpenAI**,
+selected in **Settings → TTS Engine**. Both playback paths — the per-message
+*Listen* button and the hands-free voice-mode auto-read — use the selected
+engine.
+
+When an Edge request carries no explicit `voice`, the endpoint picks one from
+the text's language, in this order:
+
+1. `tts.edge.voices.<lang>` from the active profile's `config.yaml` — an
+   explicit per-language choice always wins (`<lang>` is `it` or `en`).
+2. A built-in per-language default: `it` → `it-IT-ElsaNeural`,
+   `en` → `en-US-AvaNeural`.
+3. `tts.edge.voice` — the single configured voice. It applies to every
+   language, and it is where an inconclusive detection lands.
+4. `it-IT-ElsaNeural`.
+
+Language detection is a stopword **vote**: an `it`/`en` word list plus accented
+Italian letters, where a language needs at least two votes and a strict majority
+to win. Mixed text is therefore decided by that vote — the winner is used, a
+single language does not have to own the whole string. Only a tie, or a text too
+short to cast two votes, resolves to no language at all, and that is what falls
+through to steps 3–4. An explicit `voice` in the request overrides the whole
+chain, and the voice that comes out of it still has to pass the allowlist. A
+malformed `tts` block, or a `${VAR}` reference that did not resolve, is treated
+as absent and degrades to the built-in default rather than failing the request.
+
 ## Registering a custom TTS engine
 
 Extensions can contribute a **text-to-speech engine** that appears in the
 **Settings → TTS Engine** dropdown alongside the built-ins (Browser / Edge /
-ElevenLabs) and is used by **both** playback paths — the hands-free voice-mode
-auto-read and the per-message "Listen" button. Call
+ElevenLabs / OpenAI) and is used by **both** playback paths — the hands-free
+voice-mode auto-read and the per-message "Listen" button. Call
 `window.registerHermesTtsEngine(descriptor)`:
 
 ```javascript

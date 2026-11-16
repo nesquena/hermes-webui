@@ -7191,6 +7191,8 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
                 # WebUI-owned turns.
                 s.messages = list(latest_messages)
         return s
+    except SessionFileNamesOtherSession:
+        raise  # #9019: sid's file exists; never materialize over it
     except KeyError:
         pass
 
@@ -7463,6 +7465,8 @@ def _resolve_share_session_pair(sid: str, handler):
             cli_meta=cli_meta,
         )
         return snapshot_session, stored_session, cli_meta or {}
+    except SessionFileNamesOtherSession:
+        raise  # #9019: never synthesize over sid's file
     except KeyError:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
@@ -11734,13 +11738,23 @@ def _session_is_subagent_view_only(sid: str) -> bool:
     if _is_subagent_child_session_id(sid):
         return True
     try:
-        s = get_session(sid)
+        # #9019: this guard must read a swapped-in body to refuse it (master read the
+        # OTHER session's source tag here and refused a subagent body). Without the
+        # opt-in the boundary's KeyError fell to ``return False`` below, and routes that
+        # never call get_session themselves (delete, handoff-summary) mutated this id.
+        s = get_session(sid, allow_foreign_body=True)
     except Exception:
         return False
     src = (
         str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
             or getattr(s, "session_source", "") or "").strip().lower()
     )
+    if getattr(s, "_sidecar_names_other_session", None):
+        # The opt-in cached the foreign object under ``sid``; drop it again, as
+        # get_session does, so direct cache readers never act on it.
+        with LOCK:
+            if SESSIONS.get(sid) is s:
+                SESSIONS.pop(sid, None)
     return src == "subagent"
 
 
@@ -11808,6 +11822,23 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
                                     "external_agent", "gateway", "subagent", "unknown"}:
             return False, f"state_db_source={state_db_source_tag}"
     return True, ""
+
+
+def _cli_read_owner_profile(sid: str, read_profile=None):
+    """Return the profile owning the state.db a CLI import/claim reads ``sid`` from (#9093).
+
+    ``read_profile`` comes from the CLI listing row or an authorized all-profiles
+    request. Without one, ``get_cli_session_messages`` reads the ACTIVE profile's
+    state.db, so the session is the active profile's: the listing row (and its
+    tag) only exists for the newest-N window, and an untagged copy was backfilled
+    to ``default`` and left its own profile's sidebar. Claude Code transcripts are
+    global, not read from any profile's state.db, so they stay untagged.
+    """
+    if read_profile:
+        return read_profile
+    if str(sid or "").startswith(f"{CLAUDE_CODE_SOURCE}_"):
+        return None
+    return _get_active_profile_name()
 
 
 def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
@@ -11892,7 +11923,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             messages=msgs,
             created_at=(cli_meta or {}).get("created_at") or 0,
             updated_at=(cli_meta or {}).get("updated_at") or 0,
-            profile=(cli_meta or {}).get("profile"),
+            profile=_cli_read_owner_profile(sid, (cli_meta or {}).get("profile")),
             # ``is_cli_flag`` is True for genuine CLI/TUI/Desktop sessions so the
             # sidebar renders the source badge and the client's external-session
             # gating applies. It is False for delegated subagent children (#5307):
@@ -12070,6 +12101,9 @@ def _load_branch_source_or_refuse(handler, sid: str):
         return None
     try:
         source = get_session(sid)
+    except SessionFileNamesOtherSession:
+        bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
+        return None
     except KeyError:
         _foreign_session, _reason = _claim_or_synthesize_cli_session(sid)
         _source_kind = str((getattr(_foreign_session, "source_tag", None) or getattr(_foreign_session, "raw_source", None) or getattr(_foreign_session, "source", None) or "")).strip().lower() if _foreign_session is not None else ""
@@ -14344,6 +14378,7 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    SessionFileNamesOtherSession,
     get_cli_session_by_id,
     get_session,
     get_session_profile_readonly,
@@ -18039,6 +18074,12 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         if _diag: _diag.finish()
         return resp
+    except SessionFileNamesOtherSession:
+        # #9019: the file names another session, so this id is not found. Never
+        # fall through to the KeyError branch below, which claims or synthesizes
+        # a CLI session over the refused file.
+        if _diag: _diag.finish()
+        return bad(handler, "Session not found", 404)
     except KeyError:
         # perf(webui/session-load-latency) tier2c-followup: fire
         # _diag.finish() in the exception branch too. Greptile flagged
@@ -19065,6 +19106,8 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "session_id required")
         try:
             workspace = get_session(sid).workspace
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
         except KeyError:
             # state.db-only sessions (CLI, delegated subagents): same fallback as /api/list.
             cli_meta = _lookup_cli_session_metadata(sid)
@@ -20543,8 +20586,9 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Subagent sessions are view-only and cannot be duplicated from WebUI", 400)
 
             session = Session.load(sid)
-            if not session:
+            if not session or getattr(session, "_sidecar_names_other_session", None):
                 # 404, not 400 — missing resource, not a malformed request.
+                # #9019: a file that names another session is not this session.
                 return bad(handler, "Session not found", status=404)
 
             copy_messages = session.messages
@@ -20912,6 +20956,7 @@ def handle_post(handler, parsed) -> bool:
         # continues to work (routes.py imported it at module level).
         import api.routes as _routes
         _routes.get_session = _models.get_session
+        _routes.SessionFileNamesOtherSession = _models.SessionFileNamesOtherSession
         _routes.Session = _models.Session
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
@@ -22920,6 +22965,8 @@ def handle_post(handler, parsed) -> bool:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: never import over sid's file
         except KeyError:
             # #7776: reuse the CLI identity captured before the lock — the
             # lock-held reload can drop it. #7549/#7731: cross-profile archive
@@ -24410,6 +24457,8 @@ def _handle_list_dir(handler, parsed):
         s = get_session(sid)
         webui_session = s
         workspace = s.workspace
+    except SessionFileNamesOtherSession:
+        return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory. Resolved through
         # the same lookup as open/pin/rename, so a session outside the default
@@ -26340,6 +26389,81 @@ def _tts_open(req, *, timeout=30, opener_factory=None):
     return _urlopen(req, timeout=timeout)
 
 
+def _detect_text_lang(text: str) -> str:
+    """Best-effort it/en detection: a stopword vote, no extra dependency.
+
+    Returns "" when the vote is inconclusive (short texts), so callers fall back
+    to the configured single voice instead of guessing wrong.
+    """
+    words = re.findall(r"[a-zàèéìòù']+", (text or "").lower())
+    if len(words) < 3:
+        return ""
+    it_words = {
+        "il", "lo", "la", "gli", "le", "un", "una", "di", "che", "non", "per",
+        "con", "sono", "questo", "questa", "anche", "più", "già", "perché",
+        "cosa", "come", "quando", "adesso", "oggi", "molto", "così", "ma",
+    }
+    en_words = {
+        "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
+        "have", "what", "when", "there", "from", "would", "should", "about",
+        "can", "will", "your", "but", "just", "very",
+    }
+    it_votes = sum(1 for w in words if w in it_words)
+    en_votes = sum(1 for w in words if w in en_words)
+    accented_it = sum(1 for w in words if any(c in "àèéìòù" for c in w))
+    it_votes += accented_it
+    if it_votes >= 2 and it_votes > en_votes:
+        return "it"
+    if en_votes >= 2 and en_votes > it_votes:
+        return "en"
+    return ""
+
+
+def _default_edge_voice(text: str = "") -> str:
+    """Default Edge voice for /api/tts, picked by the text's language.
+
+    Precedence: ``tts.edge.voices.<lang>`` from the active profile's config.yaml,
+    then a built-in per-language default (it -> Elsa, en -> Ava), then
+    ``tts.edge.voice`` (the configured single voice, all languages), then Elsa.
+    Before this, the endpoint hardcoded zh-CN-XiaoxiaoNeural and spoke Chinese.
+    """
+    cfg: dict = {}
+    try:
+        from api.profiles import get_active_hermes_home, load_profile_config
+
+        cfg = load_profile_config(get_active_hermes_home()) or {}
+    except Exception:
+        logger.debug("Failed to read the agent config for TTS voices", exc_info=True)
+    # Shape-validate: a hand-edited config must never crash the request.
+    tts_cfg = cfg.get("tts")
+    edge_cfg = tts_cfg.get("edge") if isinstance(tts_cfg, dict) else None
+    if not isinstance(edge_cfg, dict):
+        edge_cfg = {}
+
+    def _usable(value) -> str:
+        # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
+        # would trip the voice allowlist, so treat it as absent.
+        if isinstance(value, str) and value.strip() and "${" not in value:
+            return value.strip()
+        return ""
+
+    lang = _detect_text_lang(text)
+    if lang:
+        voices = edge_cfg.get("voices")
+        if isinstance(voices, dict):
+            per_lang = _usable(voices.get(lang))
+            if per_lang:
+                return per_lang
+        builtin = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}.get(lang)
+        if builtin:
+            return builtin
+    configured = _usable(edge_cfg.get("voice"))
+    if configured:
+        return configured
+    return "it-IT-ElsaNeural"
+
+
+
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
 
@@ -26358,7 +26482,7 @@ def _handle_tts(handler, parsed):
     async API at that time.
     """
     text = ""
-    voice = "zh-CN-XiaoxiaoNeural"
+    voice = ""
     rate_str = ""
     pitch_str = ""
     engine = "edge"  # "edge" | "elevenlabs" | "openai" | "browser" (browser is client-side only)
@@ -26370,7 +26494,11 @@ def _handle_tts(handler, parsed):
     try:
         data = read_body(handler)
         text = (data.get("text") or "").strip()
-        voice = data.get("voice") or voice
+        voice = data.get("voice")
+        # Explicit override only: the configured default is resolved inside the
+        # Edge branch, after admission and rate limiting, so an engine that is
+        # not Edge never reads Edge (or any profile) config.
+        voice = voice.strip() if isinstance(voice, str) else ""
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
         request_engine = data.get("engine")
@@ -26643,12 +26771,21 @@ def _handle_tts(handler, parsed):
         return True
 
     # ── Edge TTS ────────────────────────────────────────────────────────
+    # Omitted voice: resolve the configured per-language default HERE, after
+    # validation, playback-profile admission and rate limiting. An unused Edge
+    # setting therefore cannot affect an OpenAI/ElevenLabs request, and a
+    # request rejected earlier never reads profile config.
+    if not voice:
+        voice = _default_edge_voice(text)
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural",
+        "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
+        "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
         "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
         "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
+        "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
+        "it-IT-GiuseppeMultilingualNeural",
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
@@ -29151,12 +29288,18 @@ def _handle_btw(handler, body):
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
-    # Duplicate-stream guard (same pattern as chat/start)
+    # Duplicate-stream guard (same pattern as chat/start): decide under the
+    # lock, respond outside it. ``j`` writes to the client socket, and a client
+    # that stopped reading would otherwise stall every stream start/Stop/steer
+    # waiting on STREAMS_LOCK for the duration of the write.
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
         with STREAMS_LOCK:
-            if current_stream_id in STREAMS:
-                return j(handler, {"error": "session already has an active stream"}, status=409)
+            busy = current_stream_id in STREAMS
+        if busy:
+            return j(handler, {"error": "session already has an active stream"}, status=409)
+        # Only clear the id when the stream is really gone; a live stream keeps
+        # its owner even though this request is refused above.
         s.active_stream_id = None
     # Create ephemeral hidden session inheriting context
     from api.models import new_session as _new_session
@@ -30981,6 +31124,8 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
         return action
     if action in ("clear", "stop", "done"):
         return "clear"
+    if action.split(None, 1)[0] == "gate":
+        return "gate"
     return "set"
 
 
@@ -31773,6 +31918,12 @@ def _handle_goal_command(handler, body):
     )
 
     goal_adapter_action = _runtime_adapter_goal_action(goal_args)
+    if goal_adapter_action == "gate":
+        # Refuse before any kickoff setup or adapter dispatch: the goal, its
+        # gates and the session's model state stay exactly as they were.
+        from api.goals import goal_gate_refusal_payload
+
+        return j(handler, goal_gate_refusal_payload(), status=400)
     runner_goal_owned = runtime_adapter_runner_enabled()
     if runner_goal_owned and goal_adapter_action == "set":
         # Separate set and kickoff calls cannot restore the runner's prior goal
@@ -32122,6 +32273,8 @@ def _handle_chat_start(handler, body, diag=None):
                 # write of the turn would land there. Refuse before anything
                 # is mutated, with the generic ownership guard's answer.
                 return bad(handler, "Session not found", 404)
+        except SessionFileNamesOtherSession:
+            return bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -32605,7 +32758,10 @@ def _handle_chat_sync(handler, body):
         return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
-    s = get_session(body["session_id"])
+    try:
+        s = get_session(body["session_id"])
+    except SessionFileNamesOtherSession:
+        return bad(handler, "Session not found", 404)  # #9019 (an unknown id still raises as before)
     if getattr(s, "_sidecar_names_other_session", None):
         # #9000: the file holds a copy of another session's file, so the loaded
         # object carries that session's id; the turn would run under it.
@@ -33209,12 +33365,52 @@ def _handle_cron_delivery_options(handler):
         if _known:
             _KNOWN_DELIVERY_PLATFORMS = frozenset(_known)
             break
+    # #9058: current Agents keep only the core-only rows (webhook,
+    # wecom_callback) in that constant; the messaging platforms (telegram,
+    # discord, slack, feishu, ...) live in the plugin platform registry. The
+    # Agent's validator ``_is_known_delivery_platform`` accepts the constant
+    # plus every registry entry with a ``cron_deliver_env_var``, so enumerate
+    # the registry with the same rule. Older Agents without the registry (or
+    # any failure while enumerating it) degrade to the constant alone.
+    #
+    # Only Agents that key plugin managers by profile home (from 2026-08-12,
+    # ``hermes_cli.plugins._plugin_managers_by_home``) with a profile-scoped
+    # platform registry (``current_scope_key``) are enumerated. Older
+    # Agents share one process-wide plugin manager, so the first profile to
+    # open the picker would leak its user plugin platforms into every other
+    # profile's picker; some of them also run discovery under the cron env
+    # lock. Those Agents keep today's constant-only list.
+    _registry_names = set()
+    _registry_labels = {}
+    try:
+        # import_module returns the exact registered module (tests replace it in sys.modules).
+        _agent_plugins = importlib.import_module("hermes_cli.plugins")
+        if hasattr(_agent_plugins, "_plugin_managers_by_home"):
+            from gateway.platform_registry import platform_registry
+            # The registry must be profile-scoped too (``current_scope_key``, the
+            # Agent commit right after the per-home managers); otherwise one
+            # profile's discovery can replace another's same-name adapter.
+            if callable(getattr(platform_registry, "current_scope_key", None)):
+                _agent_plugins.discover_plugins()  # idempotent, scoped to the active profile home
+                _names, _labels = set(), {}
+                for _entry in platform_registry.all_entries():
+                    _name = getattr(_entry, "name", None)
+                    if not isinstance(_name, str) or not _name:
+                        continue
+                    _label = getattr(_entry, "label", None)
+                    if isinstance(_label, str) and _label.strip():
+                        _labels[_name] = _label.strip()
+                    if getattr(_entry, "cron_deliver_env_var", None):
+                        _names.add(_name)
+                _registry_names, _registry_labels = _names, _labels
+    except Exception:
+        logger.debug("cron delivery options: platform registry unavailable", exc_info=True)
     platforms = [
         {"value": "local", "label": "Local (save output only)"},
         {"value": "origin", "label": "Origin (reply to creator)"}
     ]
-    for name in sorted(_KNOWN_DELIVERY_PLATFORMS):
-        platforms.append({"value": name, "label": name.capitalize()})
+    for name in sorted((set(_KNOWN_DELIVERY_PLATFORMS) | _registry_names) - {"local", "origin"}):
+        platforms.append({"value": name, "label": _registry_labels.get(name) or name.capitalize()})
     return j(handler, {"platforms": platforms})
 
 
@@ -36514,6 +36710,31 @@ def _handle_handoff_summary(handler, body):
             agent.reasoning_config = previous_reasoning
 
         # Call LLM for summary.
+    # Gateway mode owns model execution and the session's credentials: never
+    # build an in-process helper agent here (#8971). That path either fails on
+    # missing WebUI credentials or silently runs an LLM call outside the
+    # gateway. This handler exists specifically for gateway sessions, so use
+    # the deterministic local fallback — the same path taken when no provider
+    # key resolves — instead of refusing the feature with a 409.
+    if webui_gateway_chat_enabled(get_config_snapshot()):
+        summary_text = _fallback_handoff_summary(msgs)
+        try:
+            _persist_handoff_summary(
+                sid,
+                summary_text,
+                _resolve_handoff_channel_label(),
+                rounds,
+                fallback=True,
+            )
+        except Exception:
+            pass
+        return j(handler, {
+            "ok": True,
+            "summary": summary_text,
+            "message_count": len(msgs),
+            "rounds": rounds,
+            "fallback": True,
+        })
     try:
         ensure_agent_runtime_current()
         import api.config as _cfg
@@ -37231,7 +37452,10 @@ def _handle_session_import_cli(handler, body):
         requested_profile=requested_profile,
         allow_all_profiles=allow_all_profiles,
     )
-    profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
+    profile = _cli_read_owner_profile(
+        sid,
+        cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None),
+    )
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)

@@ -9,6 +9,7 @@ cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
 import copy
+import inspect
 import json
 import logging
 import os
@@ -1415,6 +1416,41 @@ def _resolve_secret_scope_module():
     return None
 
 
+# #9084: Hermes Agent's ``set_secret_scope`` takes a keyword-only ``profile_home``
+# that stamps the scope with the home its mapping was built for. An unstamped scope
+# counts as the process (launch) home's, so the Agent's post-plugin-discovery
+# ``refresh_installed_secret_scope(get_hermes_home())`` skips a named profile's
+# turn. Older Agents lack the keyword: decide ONCE per module (and setter) from the
+# signature instead of retrying on TypeError, which would mask real setter errors.
+# Only a parameter actually named ``profile_home`` counts: a bare ``**kwargs``
+# wrapper may forward to a legacy setter, and a TypeError there would leave the
+# turn with no scope at all, where the unstamped install is today's behaviour.
+_secret_scope_stamp_support = None  # (module, setter, accepts_profile_home)
+
+
+def _set_secret_scope_for_profile(mod, secrets, profile_home):
+    """Install *secrets* as *mod*'s secret scope, stamped with *profile_home* when the
+    installed Agent's ``set_secret_scope`` accepts it (unstamped otherwise)."""
+    global _secret_scope_stamp_support
+    setter = mod.set_secret_scope
+    cached = _secret_scope_stamp_support
+    if cached is not None and cached[0] is mod and cached[1] is setter:
+        accepts_profile_home = cached[2]
+    else:
+        try:
+            param = inspect.signature(setter).parameters.get("profile_home")
+            accepts_profile_home = param is not None and param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        except Exception:
+            accepts_profile_home = False
+        _secret_scope_stamp_support = (mod, setter, accepts_profile_home)
+    if accepts_profile_home:
+        return setter(secrets, profile_home=str(profile_home))
+    return setter(secrets)
+
+
 # #5567: hermes-agent v0.18.0+ exposes a CONTEXT-LOCAL Hermes-home override
 # (`hermes_constants.set_hermes_home_override`) that `get_hermes_home()` — and
 # therefore `hermes_cli.config.get_config_path()` / `load_config()` — consults
@@ -1572,7 +1608,9 @@ def profile_env_for_background_worker(
         _has_scope = False
         if _secret_scope_mod is not None:
             try:
-                _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
+                _scope_token = _set_secret_scope_for_profile(
+                    _secret_scope_mod, thread_env, profile_home_path
+                )
                 _has_scope = True
             except Exception:
                 pass
@@ -1842,7 +1880,9 @@ def profile_env_for_active_request_readonly(
         _has_scope = False
         if _secret_scope_mod is not None:
             try:
-                _scope_token = _secret_scope_mod.set_secret_scope(thread_env)
+                _scope_token = _set_secret_scope_for_profile(
+                    _secret_scope_mod, thread_env, profile_home_path
+                )
                 _has_scope = True
             except Exception:
                 pass
