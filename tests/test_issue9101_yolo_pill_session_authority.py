@@ -48,6 +48,8 @@ SCENARIOS = [
     "h_failed_switch_reads_back_open_session_flag",
     "i_overlapping_yolo_commands_both_enable",
     "i2_yolo_while_first_post_in_flight_desyncs_pill",
+    "j_malformed_read_paints_on_pill",
+    "j2_malformed_read_hides_on_pill",
 ]
 
 

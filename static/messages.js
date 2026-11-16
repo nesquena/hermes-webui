@@ -8514,7 +8514,8 @@ async function _fetchYoloState(sid, opts) {
       readSeq: _yoloView.seq,
     };
     const data = await api('/api/session/yolo?session_id=' + encodeURIComponent(sid));
-    _applyYoloState(sid, !!(data && data.yolo_enabled), meta);
+    // A malformed answer leaves the view unchanged (as the POST paths do).
+    if (data && typeof data.yolo_enabled === 'boolean') _applyYoloState(sid, data.yolo_enabled, meta);
   } catch (_) { /* ignore: fire-and-forget, must never reject */ }
 }
 

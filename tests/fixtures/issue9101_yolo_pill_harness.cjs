@@ -169,6 +169,7 @@ function createServer(sessions) {
         return { session: { session_id: sid, title: sid, message_count: 0, messages: [], active_stream_id: meta.active_stream_id || null } };
       }
       if (u.pathname === '/api/session/yolo' && method === 'GET') {
+        if (server.yoloGetBody) return server.yoloGetBody;
         return { yolo_enabled: !!server.yolo[u.searchParams.get('session_id')] };
       }
       if (u.pathname === '/api/session/yolo' && method === 'POST' && server.failPost) {
@@ -574,6 +575,45 @@ const scenarios = {
     const out = { posts: posts(tab), server: { ...server.yolo }, state: st };
     check(out.posts.length === 1 && server.yolo.B === true && st.pillVisible === true,
       `second /yolo during the first's POST: posted ${JSON.stringify(out.posts)}, server yolo[B]=${!!server.yolo.B}, pill visible=${st.pillVisible}`, out);
+    return out;
+  },
+
+  // (j) a malformed GET /api/session/yolo answer (a non-boolean flag) must
+  // not paint a "click to disable" pill for a session whose YOLO is off.
+  async j_malformed_read_paints_on_pill() {
+    const out = {};
+    for (const value of ['yes', 1, 'false']) {
+      const server = createServer({ B: {} });
+      server.yoloGetBody = { yolo_enabled: value };
+      const tab = createTab(server, 'tab-' + String(value));
+      await tab.loadSession('B');
+      await tick();
+      out[JSON.stringify(value)] = tab.state();
+    }
+    check(Object.values(out).every(st => !st.pillVisible && st.yolo === false),
+      `malformed yolo_enabled answers painted the pill: ${JSON.stringify(out)}`, out);
+    return out;
+  },
+
+  // (j2) the hiding direction: a malformed answer to a same-session re-read
+  // must leave an ON view alone instead of turning it off.
+  async j2_malformed_read_hides_on_pill() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('B');
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    check(tab.state().pillVisible && server.yolo.B === true, 'precondition: pill visible after /yolo enable', tab.state());
+    const out = {};
+    for (const value of [0, null, 'true']) {
+      server.yoloGetBody = { yolo_enabled: value };
+      await tab.loadSession('B', { force: true, externalRefreshReason: 'session-updated', keepStaleUntilLoaded: true });
+      await tick();
+      out[JSON.stringify(value)] = tab.state();
+    }
+    check(Object.values(out).every(st => st.pillVisible && st.yolo === true),
+      `malformed re-reads hid the pill while server yolo[B]=true: ${JSON.stringify(out)}`, out);
     return out;
   },
 
