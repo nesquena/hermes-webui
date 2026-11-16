@@ -3141,6 +3141,12 @@ async function loadSession(sid){
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
     }
+    // #9101: the load reset the YOLO view to the target; the previous session
+    // stays open, so read its flag back (guarded like every other read).
+    if (_loadingSessionId === null && S.session && S.session.session_id === currentSid
+        && typeof _fetchYoloState === 'function') {
+      _fetchYoloState(currentSid);
+    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
@@ -3178,14 +3184,14 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
-  // Key the YOLO view to the installed session, dropping any pill an explicit
-  // write for the departing session restored while this load was in flight.
-  if(typeof _applyYoloState==='function') _applyYoloState(sid,false,{reset:true});
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #9101: key the YOLO view to the installed session, dropping any pill an
+  // explicit write for the departing session restored while this load ran.
+  if(typeof _applyYoloState==='function') _applyYoloState(sid,false,{reset:true});
   // #7855: a session switch is a hard context boundary — drop any restored
   // goal-continuation draft left over from the previous session (restored but
   // never sent, or abandoned mid-settle) so it cannot attach to the next send.
@@ -3480,7 +3486,11 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
-      if (_isCurrentLoad()) _loadingSessionId = null;
+      if (_isCurrentLoad()) {
+        // #9101: this exit skips the idle read below; read the flag here.
+        if (typeof _fetchYoloState === 'function') _fetchYoloState(sid, {gen: _loadGeneration});
+        _loadingSessionId = null;
+      }
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).

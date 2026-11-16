@@ -7056,6 +7056,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
+          // #9101: a rotation installs another session id; hide a pill painted
+          // for the old one and read the new one's flag.
+          if(_preSettleSession&&_preSettleSession.session_id!==d.session.session_id){if(typeof _updateYoloPill==='function')_updateYoloPill();if(typeof _fetchYoloState==='function')_fetchYoloState(d.session.session_id);}
           if(
             window._compressionUi&&window._compressionUi.automatic&&
             window._compressionUi.sessionId===activeSid&&

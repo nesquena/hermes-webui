@@ -479,6 +479,36 @@ const scenarios = {
     return out;
   },
 
+  // (h) a switch whose metadata fetch fails leaves the previous session open:
+  // its YOLO flag (still on at the server) must be read back, not left hidden.
+  async h_failed_switch_reads_back_open_session_flag() {
+    const server = createServer({ A: { active_stream_id: 'stream-a' }, B: {} });
+    server.yolo.A = true;
+    const handle = server.handle;
+    let rejectB = null;
+    server.handle = (method, p, body) => {
+      if (method === 'GET' && p.startsWith('/api/session?session_id=B&')) {
+        return new Promise((_, reject) => { rejectB = () => reject(Object.assign(new Error('metadata unavailable'), { status: 500 })); });
+      }
+      return handle(method, p, body);
+    };
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('A');
+    await tick();
+    check(tab.state().pillVisible === true, 'precondition: A shows its YOLO pill', tab.state());
+    const switching = tab.loadSession('B');
+    await tick();
+    check(typeof rejectB === 'function', 'precondition: B metadata request in flight', tab.calls);
+    rejectB();
+    await switching;
+    await tick();
+    const st = tab.state();
+    const out = { after_failed_switch: st, server: { ...server.yolo } };
+    check(st.sid === 'A' && st.pillVisible === true && st.yolo === true,
+      `A stays open with server yolo[A]=true but pill visible=${st.pillVisible}, mirror=${st.yolo}`, out);
+    return out;
+  },
+
   async f_pill_click_after_untracked_session_swap_enables_new_session() {
     const server = createServer({ A: {}, N: {} });
     const tab = createTab(server, 'tab1');
