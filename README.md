@@ -374,6 +374,13 @@ never substitutes local goal execution. `/goal status`, `pause`, `resume`, and
 `clear` delegate to the runner when supported. Legacy-direct and legacy-journal
 goal kickoff behavior is unchanged for supported routes. Normal runner chat supports provider-only model aliases.
 
+`/goal <text>` reads Hermes Agent's inline completion-contract lines (`outcome:`,
+`verification:`, `constraints:`, `boundaries:`, `stop when:`) into the goal's contract
+and keeps the first plain line(s) as the goal. `/goal gate …` is refused with HTTP 400
+(`error: unsupported_gate`) on every backend, without changing the goal or starting a run:
+gates rerun shell commands after every turn and WebUI has no rule yet for who may add them.
+Use `/goal -- <text>` for a goal that starts with a control word such as `gate` or `pause`.
+
 Server-initiated turns retain the pre-session stale-Agent-runtime barrier. It
 runs before loading the session; named-profile alias and Gateway routing happen
 only after admission. A stale default local runtime can therefore reject a wakeup
