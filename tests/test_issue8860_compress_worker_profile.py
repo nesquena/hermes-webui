@@ -57,7 +57,7 @@ def profile_pair(tmp_path, monkeypatch, cleanup_test_sessions):
     monkeypatch.setattr(
         config,
         "resolve_model_provider",
-        lambda model: ("test-model", "openai", "https://example.invalid/v1"),
+        lambda model, **_kwargs: ("test-model", "openai", "https://example.invalid/v1"),
     )
     monkeypatch.setattr(
         oauth,
