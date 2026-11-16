@@ -32221,12 +32221,10 @@ def _handle_goal_command(handler, body):
     # WebUI-owned record is retried with its existing ID, never re-registered.
     # The resume kickoff runs as a registered goal_wakeup record, so admission
     # re-checks the goal under the session lock a racing pause/clear takes.
-    kickoff_source = "webui"
-    kickoff_continuation_id = ""
+    resume_kickoff = False
     if goal_adapter_action == "resume" and not stream_running and not payload.get("kickoff_prompt"):
         from api.goals import (
             peek_pending_goal_continuation_id,
-            register_pending_goal_continuation,
             resume_kickoff_prompt,
             retry_detached_goal_continuation,
         )
@@ -32234,12 +32232,8 @@ def _handle_goal_command(handler, body):
         if peek_pending_goal_continuation_id(s.session_id) is None:
             _resume_prompt = resume_kickoff_prompt(s.session_id, profile_home=profile_home)
             if _resume_prompt:
-                kickoff_continuation_id = (
-                    register_pending_goal_continuation(s.session_id, _resume_prompt) or ""
-                )
-            if kickoff_continuation_id:
                 payload["kickoff_prompt"] = _resume_prompt
-                kickoff_source = "goal_wakeup"
+                resume_kickoff = True
         else:
             retry_detached_goal_continuation(s.session_id, explicit_resume=True)
 
@@ -32276,6 +32270,16 @@ def _handle_goal_command(handler, body):
             except Exception:
                 pass
         gateway_owned = webui_gateway_chat_enabled(get_config())
+        # Registered only after launch settings validate, so no early exit strands it.
+        kickoff_source = "webui"
+        kickoff_continuation_id = ""
+        if resume_kickoff:
+            from api.goals import register_pending_goal_continuation
+
+            kickoff_continuation_id = (
+                register_pending_goal_continuation(s.session_id, kickoff_prompt) or ""
+            )
+            kickoff_source = "goal_wakeup"
         try:
             stream_response = _start_run(
                 s,

@@ -2018,3 +2018,26 @@ console.log(JSON.stringify({n:S.messages.length,hasMine:S.messages.includes(user
         assert out == {"n": 2, "hasMine": False, "hasEarlier": True, "renders": 1}
     else:
         assert out == {"n": 3, "hasMine": True, "hasEarlier": True, "renders": 0}
+
+
+def test_resume_kickoff_rejected_by_workspace_leaves_no_pending_record(monkeypatch, tmp_path):
+    """An invalid workspace refuses the resume kickoff without stranding a record."""
+    session, holder, kickoffs = _goal_command_env(monkeypatch, tmp_path, "sid-resume-bad-ws")
+    webui_goals.clear_pending_goal_continuation(session.session_id)
+    holder["state"].status = "paused"
+
+    def bad_workspace(_ws, **_kw):
+        raise ValueError("workspace missing")
+
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", bad_workspace)
+    monkeypatch.setattr(routes, "bad", lambda _h, msg, status=400: {"status": status, "payload": msg})
+    res = routes._handle_goal_command(object(), {"session_id": session.session_id, "args": "resume"})
+    assert res["status"] == 400
+    assert kickoffs == []
+    assert webui_goals.peek_pending_goal_continuation_id(session.session_id) is None
+
+    # Once the workspace is valid again, the next resume kicks off normally.
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda ws, **_kw: ws)
+    res = routes._handle_goal_command(object(), {"session_id": session.session_id, "args": "resume"})
+    assert res["status"] == 200
+    assert len(kickoffs) == 1 and kickoffs[0]["source"] == "goal_wakeup"
