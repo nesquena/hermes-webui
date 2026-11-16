@@ -62,10 +62,10 @@ services:
       # reaches this listener via HERMES_API_URL below. The agent only starts
       # the listener when API_SERVER_KEY is a usable value (>=16 chars); set
       # it in .env to enable the gateway API. Without a key the gateway daemon
-      # still runs (messaging + cron) but port 8642 stays unbound, so the
-      # healthcheck below keeps this service unhealthy with an explicit setup
-      # message — API_SERVER_HOST/API_SERVER_PORT alone never enable this
-      # terminal-capable API (#6986).
+      # still runs (messaging + cron) but port 8642 stays unbound; an unusable
+      # key short-circuits the healthcheck to healthy so the default deployment
+      # becomes ready, while a usable key probes /health — API_SERVER_HOST/
+      # API_SERVER_PORT alone never enable this terminal-capable API (#6986, #6987).
       - API_SERVER_ENABLED=true
       - API_SERVER_HOST=0.0.0.0
       - API_SERVER_PORT=8642
@@ -86,7 +86,7 @@ services:
       # listener never binds — short-circuit to healthy so the default
       # (no-key) deployment still becomes ready. When a key IS configured,
       # probe the real gateway health endpoint (#6986, #6987).
-      test: ["CMD-SHELL", "[ -z \"$$API_SERVER_KEY\" ] || python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=3)\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import os, urllib.request; k = os.environ.get('API_SERVER_KEY', '').strip(); low = k.lower(); (len(k) < 16 or low in {'*', '**', '***', 'changeme', 'your_api_key', 'your_api_key_here', 'your-api-key', 'placeholder', 'example', 'dummy', 'null', 'none'} or (low.startswith('your_') and low.endswith('_here')) or any(low.startswith(p) and set(low[len(p):]) == {'x'} for p in ('sk-', 'ghp_', 'hf_')) or set(low.replace(' ', '').replace('-', '').replace('_', '')) == {'x'}) or urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=3)\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12

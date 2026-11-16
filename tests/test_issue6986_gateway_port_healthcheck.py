@@ -22,8 +22,16 @@ forwarding, the healthcheck, and the `service_healthy` dependency.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
@@ -32,6 +40,32 @@ COMPOSE_FILES = (
     "docker-compose.two-container.yml",
     "docker-compose.three-container.yml",
 )
+
+UNUSABLE_KEY_SHAPES = (
+    "",
+    " " * 16,
+    "abcdefgh",
+    "changeme",
+    "your_api_key_here",
+    "xxxxxxxxxxxxxxxx",
+    "ghp_xxxxxxxx",
+)
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
 
 # The agent's API-server contract (gateway/config.py::load_gateway_config +
 # gateway/platforms/api_server.py::APIServerAdapter). The adapter requires a
@@ -42,8 +76,9 @@ AGENT_API_ENV = {
     "API_SERVER_HOST": "0.0.0.0",
     "API_SERVER_PORT": "8642",
     # Interpolated from the caller's environment / .env. Empty default on
-    # purpose: a missing/weak key must leave the service unhealthy, never
-    # silently "enabled" by host+port alone.
+    # purpose: an unusable key short-circuits the healthcheck to healthy so the
+    # default deployment becomes ready, while a usable key probes /health;
+    # host+port alone never enable the API.
     "API_SERVER_KEY": "${API_SERVER_KEY:-}",
 }
 
@@ -108,29 +143,103 @@ def test_webui_forwards_gateway_api_key():
 
 
 def test_missing_key_short_circuits_healthcheck_to_healthy():
-    """A missing or weak API_SERVER_KEY must short-circuit the healthcheck to
-    healthy (exit 0) so the default no-key deployment becomes ready. The real
-    8642 probe only runs when a usable key is configured. This prevents the
-    default deployment from bricking while keeping the probe for keyed setups
-    (#6986, #6987)."""
+    """An unusable API_SERVER_KEY (missing, whitespace, <16 chars, placeholder,
+    or placeholder shape) must short-circuit the healthcheck to healthy (exit 0)
+    so the default deployment becomes ready. The real 8642 probe only runs when a
+    usable key is configured. This prevents the default deployment from bricking
+    while keeping the probe for keyed setups (#6986, #6987)."""
+    posix_shell = shutil.which("sh") or shutil.which("bash")
+    if not posix_shell:
+        pytest.skip("No POSIX shell available to run healthcheck behavior matrix")
+
+    py_exec = sys.executable.replace("\\", "/")
+    if " " in py_exec and not py_exec.startswith('"'):
+        py_exec = f'"{py_exec}"'
+
     for fname in COMPOSE_FILES:
         data = _load(fname)
         agent = data["services"]["hermes-agent"]
         assert "healthcheck" in agent, (
             f"{fname}: hermes-agent must define a healthcheck"
         )
-        test_cmd = " ".join(agent["healthcheck"]["test"])
-        # The healthcheck must short-circuit when API_SERVER_KEY is empty.
-        # The double-$$ escape is deliberate: Compose must NOT interpolate the
-        # key at config time (that would bake the secret into `docker inspect`
-        # and read the host env instead of the container's runtime env) — the
-        # shell evaluates $API_SERVER_KEY inside the container on each run.
-        assert "[ -z \"$$API_SERVER_KEY\" ]" in test_cmd, (
-            f"{fname}: healthcheck must short-circuit when API_SERVER_KEY is empty "
-            "(escaped as $$ so the container runtime env is evaluated)"
+        raw_test = agent["healthcheck"]["test"]
+        test_cmd = " ".join(raw_test) if isinstance(raw_test, list) else raw_test
+        shell_cmd = (
+            raw_test[1]
+            if isinstance(raw_test, list) and len(raw_test) > 1 and raw_test[0] == "CMD-SHELL"
+            else test_cmd
         )
+        # Compose rewrites every `$$` to a literal `$` before handing the command
+        # to the shell, so a healthcheck that reads the container runtime env uses
+        # `$$VAR`. Run the extracted command the way Compose would: without this,
+        # `$$` is the shell's PID and the matrix would measure a different command
+        # than the one the container executes.
+        shell_cmd = shell_cmd.replace("$$", "$")
+
+        # Closed port fixture: allocate ephemeral port and immediately close socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            closed_port = s.getsockname()[1]
+        closed_url = f"http://127.0.0.1:{closed_port}/health"
+        closed_probe_cmd = shell_cmd.replace(
+            "http://127.0.0.1:8642/health", closed_url
+        ).replace("python3", py_exec)
+
+        # 1. Assert each unusable shape exits 0 against closed port (proves no probe happens)
+        for key in UNUSABLE_KEY_SHAPES:
+            env = {**os.environ, "API_SERVER_KEY": key}
+            res = subprocess.run(
+                [posix_shell, "-c", closed_probe_cmd],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            assert res.returncode == 0, (
+                f"{fname}: unusable key {key!r} must short-circuit to exit 0 "
+                f"without probing (got exit code {res.returncode})"
+            )
+
+        # 2. Live server fixture: real 32-hex key exits 0 against live endpoint
+        server = HTTPServer(("127.0.0.1", 0), _HealthHandler)
+        live_port = server.server_port
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            live_url = f"http://127.0.0.1:{live_port}/health"
+            live_probe_cmd = shell_cmd.replace(
+                "http://127.0.0.1:8642/health", live_url
+            ).replace("python3", py_exec)
+            real_key = "0123456789abcdef0123456789abcdef"
+            env = {**os.environ, "API_SERVER_KEY": real_key}
+
+            res_live = subprocess.run(
+                [posix_shell, "-c", live_probe_cmd],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            assert res_live.returncode == 0, (
+                f"{fname}: usable 32-hex key must probe live endpoint and exit 0 "
+                f"(got exit code {res_live.returncode})"
+            )
+
+            # 3. Same real key against closed port exits non-zero (proves probe is real and gated on usability)
+            res_closed = subprocess.run(
+                [posix_shell, "-c", closed_probe_cmd],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            assert res_closed.returncode != 0, (
+                f"{fname}: usable 32-hex key must exit non-zero against closed port "
+                f"(got exit code {res_closed.returncode})"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
         assert "${API_SERVER_KEY}" not in test_cmd, (
-            f"{fname}: healthcheck must not use an unescaped ${API_SERVER_KEY} — "
+            f"{fname}: healthcheck must not use an unescaped ${{API_SERVER_KEY}} — "
             "Compose would interpolate it at config time and bake the key into "
             "docker inspect"
         )

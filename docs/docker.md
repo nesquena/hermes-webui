@@ -288,9 +288,10 @@ characters, per the agent's `has_usable_secret` startup guard in
    no `HERMES_GATEWAY_*` environment variables — host and port alone
    never enable this terminal-capable API. **Without a key, the gateway daemon
    still runs (messaging + cron) but port 8642 stays unbound; the healthcheck
-   short-circuits to healthy so the default (no-key) deployment becomes ready.
-   When a key IS configured, the healthcheck probes the real /health endpoint
-   and the service is only healthy when the gateway is actually listening**
+   short-circuits to healthy for a missing, weak or placeholder-shaped key so
+   the default deployment becomes ready. When a usable key IS configured, the
+   healthcheck probes the real /health endpoint and the service is only healthy
+   when the gateway is actually listening**
    (#6986, #6987).
 2. The WebUI must not start before the gateway is actually accepting
    connections on 8642. A plain `depends_on: - hermes-agent` only waits for
@@ -298,8 +299,8 @@ characters, per the agent's `has_usable_secret` startup guard in
    health probe then races the agent boot and reports the gateway as down.
 
 **Fix**: Give the `hermes-agent` service a healthcheck that short-circuits to
-healthy when `API_SERVER_KEY` is empty, and probes
-`http://127.0.0.1:8642/health` when a key is configured. Start the WebUI (and
+healthy when `API_SERVER_KEY` is missing, weak or placeholder-shaped, and probes
+`http://127.0.0.1:8642/health` when a usable key is configured. Start the WebUI (and
 dashboard) with `depends_on: { hermes-agent: { condition: service_healthy } }`.
 The shipped `docker-compose.two-container.yml` and
 `docker-compose.three-container.yml` files already do this.
