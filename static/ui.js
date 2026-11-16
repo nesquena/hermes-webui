@@ -7153,16 +7153,30 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
         let badgeLabel = '';
+        let badgeTitle = '';
         if (m.badge) {
-          // 直接用badge的原始key（即config.yaml里的ID）
+          // #8733: the chip shows the readable role the group rows already use
+          // ("Primary", "Fallback 2") instead of the matched config key. That key
+          // can be an '@provider:model' routing spelling, which wraps the chip onto
+          // its own line on desktop and breaks mid-string on ~320px phones. The key
+          // stays reachable on the row subtitle, and the chip's title keeps master's
+          // full "key (provider)" text, so the provider the chip used to name isn't lost.
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
-          badgeLabel = rawId;
+          const roleLabel = String(m.badge.role||'').replace(/^./,c=>c.toUpperCase());
+          badgeLabel = (m.badge.label && !String(m.badge.label).includes('@'))
+            ? String(m.badge.label)
+            : (roleLabel || 'Configured');
+          badgeTitle = rawId;
           if(m.badge.provider){
-            const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
-            badgeLabel += ` (${providerName})`;
+            const providerName=String(m.badge.provider).replace(/^custom:/,'').split('/')[0];
+            badgeTitle += ` (${providerName})`;
           }
         }
-        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
+        const badgeAttrs = badgeTitle ? ` title="${esc(badgeTitle)}"` : '';
+        const badgeHtml=m.badge?`<span${badgeAttrs} class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
+        // #8733: the chip no longer carries the routing key, so the matched key
+        // rides on the chip's title. The subtitle stays the option id, which the
+        // Configured section has always shown.
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);

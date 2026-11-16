@@ -2719,6 +2719,24 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
+    // #9069: the server now serves the new profile, so drop the previous
+    // profile's Tasks detail/edit/duplicate state through the SAME synchronous
+    // reset the canonical switch runs (_profileSwitchPanelLoad). Without it,
+    // Duplicate + Save on the still-shown cron job created the previous
+    // profile's job in this one. Runs at accept, so a later list-render
+    // failure cannot skip it. Only a visible Tasks panel is reloaded here:
+    // loadCrons is latest-wins (#6767), and it is not awaited, so the session
+    // being loaded never waits on, or fails because of, it. Memory/Skills are
+    // not reloaded on this path (their loaders have no owner-profile/
+    // latest-response check yet). The Skills cache is dropped like
+    // switchToProfile does, so a later Skills open refetches, except while
+    // Skills is visible: its search/toggle re-render from that cache.
+    const skillsVisible=typeof _currentPanel!=='undefined'&&_currentPanel==='skills';
+    if(typeof _skillsData!=='undefined'&&!skillsVisible) _skillsData=null;
+    if(typeof _resetProfileScopedPanelState==='function') _resetProfileScopedPanelState();
+    if(typeof _currentPanel!=='undefined'&&_currentPanel==='tasks'&&typeof loadCrons==='function'){
+      Promise.resolve(loadCrons()).catch(()=>{});
+    }
     // #7509: mirror the canonical switch in panels.js — the slash-skill caches still
     // hold the previous profile's /api/skills payload, so drop them (and any reply
     // still in flight) once the switch has succeeded.
