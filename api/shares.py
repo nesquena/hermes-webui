@@ -1501,6 +1501,19 @@ def revoke_share(session) -> bool:
         return False
     session_id = str(getattr(session, "session_id", "") or "")
     with _SHARE_LOCK:
+        # #8950 DELETED-PARENT-N1: a snapshot that already carries revoked_at
+        # serves nothing, so clearing the stale token must succeed. When the
+        # compression parent is deleted, its delete revokes the link and removes
+        # the parent's file, so the continuation is left holding a token whose
+        # ownership can no longer be verified -- refusing here answered 409 on a
+        # link that was already dead while the base answered 200. Nothing is
+        # exposed by accepting: this only clears the caller's own pair.
+        try:
+            already_revoked = _read_share_snapshot(token)
+        except ShareSnapshotUnreadable:
+            return False
+        if isinstance(already_revoked, dict) and already_revoked.get("revoked_at"):
+            return True
         # #8734: revoke must prove the token is this session's. Otherwise the
         # request would take down another session's link while its owner still
         # shows it as shared. Raises ShareTokenOwnershipError (named refusal).

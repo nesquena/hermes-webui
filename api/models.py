@@ -6631,7 +6631,18 @@ def _share_snapshot_state_for_session(token: str, session_id: str) -> str:
         if not isinstance(data, dict):
             return "absent"
 
-        if str(data.get("source_session_id") or "").strip() == str(session_id).strip():
+        owner = str(data.get("source_session_id") or "").strip()
+        target = str(session_id).strip()
+        if owner == target:
+            return "present"
+        # #8950 SHARE-COMPRESSION-F1: ownership is the same durable reciprocal
+        # lineage that refresh and revoke already accept. A compression
+        # continuation legitimately carries its parent's token, so answering
+        # "absent" here let a metadata save adopt the empty durable pair and drop
+        # a pending token -- "Stop sharing" then answered success while the
+        # public snapshot stayed readable. Fail closed: only a verified chain
+        # counts, and _is_compression_continuation already fails closed.
+        if owner and target and shares._is_compression_continuation(target, owner):
             return "present"
         return "absent"
     except OSError:
