@@ -1197,7 +1197,7 @@ def dispatch_goal_continuation(
 
 
 def dispatch_browser_owned_goal_continuation(
-    session_id: str, continuation_id: str = ""
+    session_id: str, continuation_id: str = "", *, explicit_resume: bool = False
 ) -> bool:
     """Take over a browser-held continuation once its grace deadline passed.
 
@@ -1216,7 +1216,10 @@ def dispatch_browser_owned_goal_continuation(
     if not mark_detached_goal_continuation(session_id, record["continuation_id"]):
         return False
     start_detached_goal_continuation(
-        session_id, record["prompt"], record["continuation_id"]
+        session_id,
+        record["prompt"],
+        record["continuation_id"],
+        explicit_resume=explicit_resume,
     )
     return True
 
@@ -1253,10 +1256,13 @@ def pending_goal_continuation_matches(session_id: str, continuation_id: str) -> 
         return _locked_pending_record_matches(sid, cid)
 
 
-def detached_goal_continuation_skip_reason(session_id: str, continuation_id: str = "") -> str:
+def detached_goal_continuation_skip_reason(
+    session_id: str, continuation_id: str = "", *, explicit_resume: bool = False
+) -> str:
     """Why a detached continuation must NOT start, or '' when it may.
 
     Pre-flight only: admission re-validates record and goal under the lock.
+    ``explicit_resume`` (a user's ``/goal resume``) overrides an earlier Stop.
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -1295,7 +1301,7 @@ def detached_goal_continuation_skip_reason(session_id: str, continuation_id: str
     try:
         from api.streaming import _session_has_cancel_marker
 
-        if _session_has_cancel_marker(s):
+        if not explicit_resume and _session_has_cancel_marker(s):
             return "cancelled"
     except Exception:
         return "cancel_state_unknown"
@@ -1362,6 +1368,8 @@ def start_detached_goal_continuation(
     session_id: str,
     continuation_prompt: str,
     continuation_id: str,
+    *,
+    explicit_resume: bool = False,
 ) -> None:
     """Run a registered continuation server-side (0 SSE subscribers).
 
@@ -1377,7 +1385,9 @@ def start_detached_goal_continuation(
         try:
             from api.routes import start_session_turn
 
-            reason = detached_goal_continuation_skip_reason(sid, cid)
+            reason = detached_goal_continuation_skip_reason(
+                sid, cid, explicit_resume=explicit_resume
+            )
             if reason:
                 logger.debug(
                     "Detached goal continuation skipped for session %s: %s",
@@ -1440,17 +1450,23 @@ def pending_detached_goal_continuation(session_id: str) -> Optional[Dict[str, An
     return {"prompt": record["prompt"], "continuation_id": record["continuation_id"]}
 
 
-def retry_detached_goal_continuation(session_id: str) -> bool:
+def retry_detached_goal_continuation(session_id: str, *, explicit_resume: bool = False) -> bool:
     """Re-dispatch a WebUI-owned (detached) continuation with its EXISTING ID.
 
     Retrying is safe because admission consumes the record by ID under the
     session lock: concurrent attempts collapse to at most one admitted turn.
+    Only ``explicit_resume`` (``/goal resume``) may start after a Stop.
     """
     record = pending_detached_goal_continuation(session_id)
     if not record:
-        return dispatch_browser_owned_goal_continuation(session_id)
+        return dispatch_browser_owned_goal_continuation(
+            session_id, explicit_resume=explicit_resume
+        )
     start_detached_goal_continuation(
-        session_id, record["prompt"], record["continuation_id"]
+        session_id,
+        record["prompt"],
+        record["continuation_id"],
+        explicit_resume=explicit_resume,
     )
     return True
 
@@ -1812,6 +1828,19 @@ def _drop_pending_goal_continuation(session_id: str) -> None:
         timer = _BROWSER_GRACE_TIMERS.pop(str(session_id), None)
     if timer is not None:
         timer.cancel()
+
+
+def discard_pending_goal_continuation(session_id: str, continuation_id: str) -> bool:
+    """Drop the pending record only while it still carries *continuation_id*."""
+    sid = str(session_id or "").strip()
+    cid = str(continuation_id or "").strip()
+    if not sid or not cid:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        if not _locked_pending_record_matches(sid, cid):
+            return False
+        _drop_pending_goal_continuation(sid)
+        return True
 
 
 def clear_pending_goal_continuation(session_id: str) -> None:

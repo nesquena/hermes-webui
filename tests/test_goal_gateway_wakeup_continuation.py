@@ -171,7 +171,11 @@ def test_goal_resume_without_pending_record_kicks_off_goal_related_turn(monkeypa
     assert len(kickoffs) == 1
     assert kickoffs[0]["goal_related"] is True
     assert "replace helpers with native code" in kickoffs[0]["msg"]
-    assert session.session_id not in PENDING_GOAL_CONTINUATION
+    # The kickoff is a registered goal_wakeup record that admission consumes.
+    assert kickoffs[0]["source"] == "goal_wakeup"
+    assert kickoffs[0]["goal_continuation_id"] == webui_goals.peek_pending_goal_continuation_id(
+        session.session_id
+    )
 
 
 def test_evaluate_goal_after_turn_forwards_background_processes_and_active_delegations(
@@ -675,7 +679,7 @@ def test_start_detached_goal_continuation_does_not_start_when_skipped(monkeypatc
 
     started = []
     monkeypatch.setattr(routes, "start_session_turn", lambda *a, **k: started.append(a))
-    monkeypatch.setattr(webui_goals, "detached_goal_continuation_skip_reason", lambda _sid, _cid: "cancelled")
+    monkeypatch.setattr(webui_goals, "detached_goal_continuation_skip_reason", lambda _sid, _cid, **_kw: "cancelled")
     threads = []
     real_thread = threading.Thread
 
@@ -692,7 +696,7 @@ def test_start_detached_goal_continuation_does_not_start_when_skipped(monkeypatc
     assert started == []
 
     monkeypatch.setattr(routes, "start_session_turn", lambda *a, **k: started.append((a, k)))
-    monkeypatch.setattr(webui_goals, "detached_goal_continuation_skip_reason", lambda _sid, _cid: "")
+    monkeypatch.setattr(webui_goals, "detached_goal_continuation_skip_reason", lambda _sid, _cid, **_kw: "")
     webui_goals.start_detached_goal_continuation("sid-x", "continue", cid)
     for t in threads:
         t.join(5)
@@ -1024,7 +1028,7 @@ def test_gateway_teardown_retries_only_webui_owned_records(
     monkeypatch.setattr(
         webui_goals,
         "start_detached_goal_continuation",
-        lambda sid, prompt, cont_id: retried.append((sid, prompt, cont_id)),
+        lambda sid, prompt, cont_id, **_kw: retried.append((sid, prompt, cont_id)),
     )
     gateway_chat._run_gateway_chat_streaming(
         s.session_id,
@@ -1048,7 +1052,7 @@ def test_retry_detached_goal_continuation_binds_ownership_to_the_id(monkeypatch)
     monkeypatch.setattr(
         webui_goals,
         "start_detached_goal_continuation",
-        lambda s, prompt, cont_id: started.append((s, prompt, cont_id)),
+        lambda s, prompt, cont_id, **_kw: started.append((s, prompt, cont_id)),
     )
     cid = webui_goals.register_pending_goal_continuation(sid, "continue the goal")
     # Browser-owned: the browser holds that dispatch, so nothing is retried.
@@ -1232,7 +1236,7 @@ def test_browser_lease_expires_into_one_dispatch_bound_to_its_id(monkeypatch):
     monkeypatch.setattr(
         webui_goals,
         "start_detached_goal_continuation",
-        lambda s, prompt, cont_id: started.append((s, prompt, cont_id)),
+        lambda s, prompt, cont_id, **_kw: started.append((s, prompt, cont_id)),
     )
     cid = webui_goals.register_pending_goal_continuation(sid, "continue the goal")
     assert webui_goals.hand_goal_continuation_to_browser(
@@ -1546,7 +1550,7 @@ def test_restore_rearms_only_the_record_it_restores(monkeypatch):
     monkeypatch.setattr(
         webui_goals,
         "start_detached_goal_continuation",
-        lambda s, prompt, cont_id: started.append((s, prompt, cont_id)),
+        lambda s, prompt, cont_id, **_kw: started.append((s, prompt, cont_id)),
     )
     cid = webui_goals.register_pending_goal_continuation(sid, "continue the goal")
     assert webui_goals.hand_goal_continuation_to_browser(sid, cid, grace_seconds=30)
@@ -1580,7 +1584,7 @@ def _restore_env(monkeypatch):
     monkeypatch.setattr(
         webui_goals,
         "start_detached_goal_continuation",
-        lambda s, prompt, cont_id: started.append((s, prompt, cont_id)),
+        lambda s, prompt, cont_id, **_kw: started.append((s, prompt, cont_id)),
     )
     yield started
 
@@ -1634,7 +1638,7 @@ def test_refused_continuation_keeps_edited_text_and_files(label):
     body = src[start : src.index("      return;\n    }", start)] + "      return;\n    }"
     script = """
 const calls=[];const INFLIGHT={s1:1};const activeSid='s1';
-const e={status:409};const errMsg=%s;
+const S={session:null,messages:[]};const userMsg={};const e={status:409};const errMsg=%s;
 const _failedSendDraftText='continue\\nplus my edits';const _failedSendFilesSnapshot=[{name:'user-notes.txt'}];
 const _composerDraftClearPromise=Promise.resolve();
 function clearInflightState(){calls.push('clearInflight')}function removeThinking(){}function setBusy(){}
@@ -1853,3 +1857,164 @@ def test_sealed_parent_retirement_cannot_overwrite_concurrent_goal_clear(
     assert not retirement.is_alive() and not clearer.is_alive()
     assert clear_result["status"] == 200
     assert holder["state"] is None, "stale retirement pause resurrected a cleared goal"
+
+
+# ── Greptile 4585221105: resume kickoff uses goal-checked locked admission ──
+
+
+@pytest.mark.parametrize("change", ["pause", "clear"])
+def test_resume_kickoff_after_racing_pause_or_clear_starts_no_turn(
+    _admission_env, monkeypatch, tmp_path, change
+):
+    """A pause/clear that lands after the kickoff prompt is read rejects the kickoff."""
+    real_s, goal_active = _admission_env
+    session, holder, _kickoffs = _goal_command_env(monkeypatch, tmp_path, real_s.session_id)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: real_s)
+    holder["state"].status = "paused"
+    monkeypatch.setattr(
+        webui_goals,
+        "has_active_goal",
+        lambda *_a, **_kw: holder["state"] is not None and holder["state"].status == "active",
+    )
+    del goal_active
+    admitted = []
+
+    def racing_start_run(s, **kw):
+        # The racing command completes between the prompt read and admission.
+        if change == "pause":
+            holder["state"].status = "paused"
+        else:
+            holder["state"] = None
+        resp = routes._start_chat_stream_for_session(
+            s, msg=kw["msg"], attachments=[], workspace=str(tmp_path),
+            model=s.model, model_provider=s.model_provider, external_runtime_owned=False,
+            source=kw["source"], goal_related=kw["goal_related"],
+            goal_continuation_id=kw["goal_continuation_id"],
+        )
+        admitted.append(resp)
+        return resp
+
+    monkeypatch.setattr(routes, "_start_run", racing_start_run)
+    res = routes._handle_goal_command(object(), {"session_id": real_s.session_id, "args": "resume"})
+    assert res["status"] == 409, res
+    assert admitted[0]["reason"] == "goal_inactive"
+    assert not real_s.active_stream_id
+    assert webui_goals.peek_pending_goal_continuation_id(real_s.session_id) is None
+
+
+def test_resume_kickoff_admits_one_goal_related_turn_when_goal_stays_active(
+    _admission_env, monkeypatch, tmp_path
+):
+    """Without a racing command the resume kickoff starts exactly one goal-related turn."""
+    import api.config as config
+
+    real_s, _goal_active = _admission_env
+    session, holder, _kickoffs = _goal_command_env(monkeypatch, tmp_path, real_s.session_id)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: real_s)
+    holder["state"].status = "paused"
+    monkeypatch.setattr(
+        webui_goals, "has_active_goal", lambda *_a, **_kw: holder["state"].status == "active"
+    )
+
+    def start_run(s, **kw):
+        return routes._start_chat_stream_for_session(
+            s, msg=kw["msg"], attachments=[], workspace=str(tmp_path),
+            model=s.model, model_provider=s.model_provider, external_runtime_owned=False,
+            source=kw["source"], goal_related=kw["goal_related"],
+            goal_continuation_id=kw["goal_continuation_id"],
+        )
+
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    res = routes._handle_goal_command(object(), {"session_id": real_s.session_id, "args": "resume"})
+    assert res["status"] == 200, res
+    assert config.STREAM_GOAL_RELATED.get(res["payload"]["stream_id"]) is True
+    assert webui_goals.peek_pending_goal_continuation_id(real_s.session_id) is None
+
+
+# ── Greptile 4553428981: explicit resume restarts a continuation after Stop ──
+
+
+def _stopped_detached_env(monkeypatch, tmp_path, sid):
+    from api import background_process, profiles
+
+    session, holder, kickoffs = _goal_command_env(monkeypatch, tmp_path, sid)
+    session.messages = [
+        {"role": "user", "content": "genuine user turn"},
+        {"role": "assistant", "content": "*Task cancelled.*"},
+    ]
+    session.pending_user_message = None
+    webui_goals.clear_pending_goal_continuation(sid)
+    cid = webui_goals.register_pending_goal_continuation(sid, "continue the goal")
+    assert webui_goals.mark_detached_goal_continuation(sid, cid)
+    monkeypatch.setattr(models, "get_session", lambda _sid, *a, **k: session)
+    monkeypatch.setattr(background_process, "_session_has_active_turn", lambda _sid: False)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _name: str(tmp_path))
+    monkeypatch.setattr(
+        webui_goals, "has_active_goal", lambda _sid, **_kw: holder["state"].status == "active"
+    )
+    started = []
+    monkeypatch.setattr(
+        routes,
+        "start_session_turn",
+        lambda sid_, prompt, **kw: started.append((sid_, prompt, kw)) or {"_status": 200},
+    )
+    return session, holder, kickoffs, cid, started
+
+
+def test_goal_resume_restarts_server_owned_continuation_after_stop(monkeypatch, tmp_path):
+    """/goal resume starts the saved continuation even though the last turn was cancelled."""
+    sid = "sid-resume-after-stop"
+    _session, holder, kickoffs, cid, started = _stopped_detached_env(monkeypatch, tmp_path, sid)
+    join_all = _capture_goal_threads(monkeypatch)
+    holder["state"].status = "paused"
+    res = routes._handle_goal_command(object(), {"session_id": sid, "args": "resume"})
+    join_all()
+    assert res["status"] == 200
+    assert kickoffs == []
+    assert started == [
+        (sid, "continue the goal", {"source": "goal_wakeup", "goal_continuation_id": cid})
+    ]
+
+
+def test_automatic_retry_still_honours_stop(monkeypatch, tmp_path):
+    """Idle/teardown retries (not an explicit resume) never start after a Stop."""
+    sid = "sid-auto-retry-after-stop"
+    _session, _holder, _kickoffs, cid, started = _stopped_detached_env(monkeypatch, tmp_path, sid)
+    join_all = _capture_goal_threads(monkeypatch)
+    assert webui_goals.detached_goal_continuation_skip_reason(sid, cid) == "cancelled"
+    assert webui_goals.detached_goal_continuation_skip_reason(sid, cid, explicit_resume=True) == ""
+    assert webui_goals.retry_detached_goal_continuation(sid) is True
+    join_all()
+    assert started == []
+    assert webui_goals.peek_pending_goal_continuation_id(sid) == cid
+
+
+# ── Greptile 4553428996: a refused continuation drops its optimistic bubble ──
+
+
+@pytest.mark.parametrize("owns_pane", [True, False])
+def test_refused_continuation_removes_only_its_optimistic_bubble(owns_pane):
+    import json, shutil, subprocess
+    from pathlib import Path
+
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    src = Path(__file__).parents[1].joinpath("static", "messages.js").read_text(encoding="utf-8")
+    start = src.index("    // Refused continuation token:")
+    body = src[start : src.index("      return;\n    }", start)] + "      return;\n    }"
+    script = """
+const INFLIGHT={s1:1};const activeSid='s1';const e={status:409};const errMsg='goal_continuation_already_dispatched';
+const _failedSendDraftText='continue';const _failedSendFilesSnapshot=[];const _composerDraftClearPromise=Promise.resolve();
+const earlier={role:'user',content:'continue'};const userMsg={role:'user',content:'continue',_pending:true};
+const S={session:{session_id:%s},messages:[earlier,{role:'assistant',content:'ok'},userMsg]};let renders=0;
+function renderMessages(){renders++}function clearInflightState(){}function removeThinking(){}function setBusy(){}
+function setComposerStatus(){}function showToast(){}function renderSessionList(){}function _restoreComposerDraftAfterFailedSend(){}
+(function(){%s})();
+console.log(JSON.stringify({n:S.messages.length,hasMine:S.messages.includes(userMsg),hasEarlier:S.messages.includes(earlier),renders}));
+""" % (json.dumps("s1" if owns_pane else "s2"), body)
+    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert out["hasEarlier"] is True, "an identical earlier message must survive"
+    if owns_pane:
+        assert out == {"n": 2, "hasMine": False, "hasEarlier": True, "renders": 1}
+    else:
+        assert out == {"n": 3, "hasMine": True, "hasEarlier": True, "renders": 0}

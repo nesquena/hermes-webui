@@ -2273,6 +2273,11 @@ async function send(){
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
       removeThinking();setBusy(false,{drainQueue:false});setComposerStatus('');
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      // Drop only this send's optimistic bubble; its text returns to the composer.
+      if(S.session&&S.session.session_id===activeSid&&Array.isArray(S.messages)&&S.messages.includes(userMsg)){
+        S.messages=S.messages.filter(m=>m!==userMsg);
+        if(typeof renderMessages==='function') renderMessages();
+      }
       _restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,activeSid,_composerDraftClearPromise,'');
       showToast('That goal continuation was already sent. Your message is kept.',3200);
       if(typeof renderSessionList==='function') void renderSessionList();

@@ -32219,9 +32219,14 @@ def _handle_goal_command(handler, body):
     # Review 5593825504 Should fix 1: /goal resume re-arms the loop — it keeps
     # a pending record, else kicks off the next continuation prompt; a
     # WebUI-owned record is retried with its existing ID, never re-registered.
+    # The resume kickoff runs as a registered goal_wakeup record, so admission
+    # re-checks the goal under the session lock a racing pause/clear takes.
+    kickoff_source = "webui"
+    kickoff_continuation_id = ""
     if goal_adapter_action == "resume" and not stream_running and not payload.get("kickoff_prompt"):
         from api.goals import (
             peek_pending_goal_continuation_id,
+            register_pending_goal_continuation,
             resume_kickoff_prompt,
             retry_detached_goal_continuation,
         )
@@ -32229,9 +32234,14 @@ def _handle_goal_command(handler, body):
         if peek_pending_goal_continuation_id(s.session_id) is None:
             _resume_prompt = resume_kickoff_prompt(s.session_id, profile_home=profile_home)
             if _resume_prompt:
+                kickoff_continuation_id = (
+                    register_pending_goal_continuation(s.session_id, _resume_prompt) or ""
+                )
+            if kickoff_continuation_id:
                 payload["kickoff_prompt"] = _resume_prompt
+                kickoff_source = "goal_wakeup"
         else:
-            retry_detached_goal_continuation(s.session_id)
+            retry_detached_goal_continuation(s.session_id, explicit_resume=True)
 
     kickoff_prompt = str(payload.get("kickoff_prompt") or "").strip()
     if kickoff_prompt:
@@ -32275,22 +32285,33 @@ def _handle_goal_command(handler, body):
                 model=model,
                 model_provider=model_provider,
                 normalized_model=normalized_model,
-                source="webui",
+                source=kickoff_source,
                 route="/api/goal",
                 gateway_chat_enabled=gateway_owned,
                 goal_related=True,
+                goal_continuation_id=kickoff_continuation_id,
             )
         except Exception:
+            _discard_resume_kickoff_record(s.session_id, kickoff_continuation_id)
             _rollback_goal_after_failed_kickoff()
             raise
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)
         if status >= 400:
+            _discard_resume_kickoff_record(s.session_id, kickoff_continuation_id)
             _rollback_goal_after_failed_kickoff()
             payload["ok"] = False
             return j(handler, payload, status=status)
 
     return j(handler, payload)
+
+
+def _discard_resume_kickoff_record(session_id: str, continuation_id: str) -> None:
+    """Retire a refused resume kickoff record; the next resume re-reads the goal."""
+    if continuation_id:
+        from api.goals import discard_pending_goal_continuation
+
+        discard_pending_goal_continuation(session_id, continuation_id)
 
 
 def _is_silent_control_message(message) -> bool:
