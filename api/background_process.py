@@ -1671,7 +1671,6 @@ def _requeue_async_delegation_event(
         delay=delay,
         stop_event=_DRAIN_STOP,
         durable=(bool(getattr(claim, "durable", False)) if claim is not None else None),
-        claim=claim,
     )
 
 
@@ -1680,7 +1679,6 @@ def _retry_unclaimed_async_delegation_event(
     evt: dict,
     *,
     keep_legacy_retrying: bool = False,
-    claim=None,
 ) -> None:
     """Retry from durable state, or make a bounded legacy routing pass.
 
@@ -1694,7 +1692,6 @@ def _retry_unclaimed_async_delegation_event(
         evt,
         completion_queue,
         delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
-        claim=claim,
     ):
         return
     if not keep_legacy_retrying and evt.get("_webui_routing_retry_attempted"):
@@ -1705,7 +1702,6 @@ def _retry_unclaimed_async_delegation_event(
     _requeue_async_delegation_event(
         process_registry,
         retry_evt,
-        claim=claim,
         delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
     )
 
@@ -1798,7 +1794,7 @@ def _start_async_delegation_wakeup_turn(
             else:
                 release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
-                process_registry, evt, keep_legacy_retrying=True, claim=claim
+                process_registry, evt, keep_legacy_retrying=True
             )
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
@@ -1824,7 +1820,7 @@ def _start_async_delegation_wakeup_turn(
         except Exception:
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
-                process_registry, evt, keep_legacy_retrying=True, claim=claim
+                process_registry, evt, keep_legacy_retrying=True
             )
             logger.warning(
                 "async delegation wakeup turn failed for session %s; durable retry scheduled",
@@ -1945,7 +1941,7 @@ def _process_async_delegation_event(
             # event will never format correctly), so it must stay on the bounded
             # one-shot path — never keep_legacy_retrying, or it would loop forever.
             release_async_delegation_delivery(evt, claim)
-            _retry_unclaimed_async_delegation_event(process_registry, evt, claim=claim)
+            _retry_unclaimed_async_delegation_event(process_registry, evt)
             logger.warning(
                 "async delegation completion could not be formatted for session %s",
                 session_id,
@@ -1968,7 +1964,7 @@ def _process_async_delegation_event(
             # retrying rather than dropping it after one bounded attempt.
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
-                process_registry, evt, keep_legacy_retrying=True, claim=claim
+                process_registry, evt, keep_legacy_retrying=True
             )
             logger.warning(
                 "server-side async delegation dispatch failed for session %s",

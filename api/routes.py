@@ -2831,14 +2831,6 @@ _session_list_cache_clear = _route_session_list_cache._session_list_cache_clear
 _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cache_claim_rebuild
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
-_SESSION_LIST_CACHE_MISSING = _route_session_list_cache._SESSION_LIST_CACHE_MISSING
-_SESSION_LIST_CACHE_FRESH = _route_session_list_cache._SESSION_LIST_CACHE_FRESH
-_SESSION_LIST_CACHE_STALE_SOURCE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_SOURCE
-_SESSION_LIST_CACHE_STALE_AGE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_AGE
-_session_list_cache_probe = _route_session_list_cache._session_list_cache_probe
-_session_list_cache_resolved_source_stamp = (
-    _route_session_list_cache._session_list_cache_resolved_source_stamp
-)
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
 _route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
@@ -3845,55 +3837,6 @@ def _hidden_archived_sidebar_reference_sessions(
     return references
 
 
-def _session_list_cache_source_stamp_snapshot(key: tuple):
-    """Stamp read BEFORE a build, so the payload is certified by what it saw.
-
-    A cache entry is a (stamp, payload) pair, and the pair is only meaningful if
-    the stamp was taken no later than the rows the payload was built from. With
-    the stamp taken after the builder returns, a commit that lands mid-build is
-    folded into the stored stamp: the old payload is then certified against a
-    NEWER snapshot, served as FRESH for a full TTL, and stays wrong even once
-    the source moves again. Taking the snapshot first makes that commit visible
-    on the next request instead. ``None`` means the producer itself failed —
-    unknown evidence, so the payload is returned to this caller uncached rather
-    than certified with a later stamp. (#8694)
-    """
-    try:
-        return _session_list_cache_resolved_source_stamp(key)
-    except Exception:
-        logger.debug("session list source stamp snapshot failed", exc_info=True)
-        return None
-
-
-# Source-stamp slots the session-list BUILDER itself can move: the session index
-# (slot 3). all_sessions() re-adds on-disk sidecars missing from the index and the
-# Desktop/CLI orphan passes prune them again, so certifying that slot with its
-# pre-build value would leave every entry source-stale at birth and turn every
-# GET into a blocking rebuild. Master read the whole stamp after the build; the
-# state.db/WAL/fingerprint/all-profiles slots stay pre-build (#8694), the index
-# slot is read after the build, as on master. (#8986)
-_SESSION_LIST_STAMP_BUILDER_WRITTEN_SLOTS = frozenset({3})
-
-
-def _session_list_cache_certified_stamp(key: tuple, pre_build_stamp):
-    """The stamp to store with a payload built after ``pre_build_stamp`` was read."""
-    if pre_build_stamp is None:
-        return None
-    post = _session_list_cache_source_stamp_snapshot(key)
-    if (
-        post is None
-        or not isinstance(pre_build_stamp, tuple)
-        or not isinstance(post, tuple)
-        or len(pre_build_stamp) != 8
-        or len(post) != 8
-    ):
-        return pre_build_stamp
-    return tuple(
-        post[i] if i in _SESSION_LIST_STAMP_BUILDER_WRITTEN_SLOTS else pre_build_stamp[i]
-        for i in range(8)
-    )
-
-
 def _get_cached_session_list_payload(
     *,
     key: tuple,
@@ -3906,8 +3849,8 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
 
-    cached, cache_status = _session_list_cache_probe(key, allow_stale=True)
-    if cache_status == _SESSION_LIST_CACHE_FRESH:
+    cached, is_fresh = _session_list_cache_get(key, allow_stale=True)
+    if cached is not None and is_fresh:
         if diag is not None:
             try:
                 diag.stage("session_list_cache_hit")
@@ -3915,15 +3858,8 @@ def _get_cached_session_list_payload(
                 pass
         return cached
 
-    stale = cached  # a stale payload when one exists, else None
-    stale_reason = (
-        cache_status
-        if cache_status in (
-            _SESSION_LIST_CACHE_STALE_AGE,
-            _SESSION_LIST_CACHE_STALE_SOURCE,
-        )
-        else None
-    )
+    stale = cached  # now actually a stale payload when one exists, else None
+    stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
     if stale is not None and stale_reason != "source":
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
@@ -3938,17 +3874,8 @@ def _get_cached_session_list_payload(
                     rebuild_attempts = 0
                     while True:
                         invalidation_stamp = _session_list_cache_invalidation_stamp(key)
-                        source_stamp = _session_list_cache_source_stamp_snapshot(key)
-                        if source_stamp is None:
-                            # Unknown pre-build evidence: build and certify nothing.
-                            # The request that started this background rebuild was
-                            # already served the stale payload, and the next request
-                            # revalidates. Retrying cannot produce a snapshot the
-                            # producer just failed to read.
-                            return
                         try:
                             payload = builder()
-                            source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
                         except Exception:
                             logger.exception(
                                 "session list stale-cache background rebuild failed"
@@ -3960,7 +3887,6 @@ def _get_cached_session_list_payload(
                                 key,
                                 payload,
                                 expected_invalidation_stamp=invalidation_stamp,
-                                source_stamp=source_stamp,
                             )
                         ):
                             return
@@ -3997,21 +3923,13 @@ def _get_cached_session_list_payload(
             rebuild_attempts = 0
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
-                source_stamp = _session_list_cache_source_stamp_snapshot(key)
                 payload = builder()
-                source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
-                if source_stamp is None:
-                    # Unknown pre-build evidence: correct for this request, never
-                    # certified. Retrying cannot produce a snapshot the producer
-                    # just failed to read.
-                    return payload
                 if (
                     _session_list_cache_invalidation_stamp(key) == invalidation_stamp
                     and _session_list_cache_set(
                         key,
                         payload,
                         expected_invalidation_stamp=invalidation_stamp,
-                        source_stamp=source_stamp,
                     )
                 ):
                     if diag is not None:
@@ -4070,18 +3988,12 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
-    source_stamp = _session_list_cache_source_stamp_snapshot(key)
     payload = builder()
-    source_stamp = _session_list_cache_certified_stamp(key, source_stamp)
-    if (
-        source_stamp is not None
-        and _session_list_cache_invalidation_stamp(key) == invalidation_stamp
-    ):
+    if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
         _session_list_cache_set(
             key,
             payload,
             expected_invalidation_stamp=invalidation_stamp,
-            source_stamp=source_stamp,
         )
     return payload
 
@@ -4464,15 +4376,9 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
                              # patch the caller's in-memory copy after a
                              # successful clear, avoiding one ghost SSE
                              # reconnect on the very next /api/session GET.
-    reload_marker = None
     if getattr(session, "_loaded_metadata_only", False):
         try:
-            from api.models import _sidecar_change_marker
             from api.models import get_session as _get_session
-            # #9017: the reload stays outside the lock so its own self-heals
-            # (the state.db sync, the pending repair) can take it; the marker
-            # lets the locked section below see a writer that saved meanwhile.
-            reload_marker = _sidecar_change_marker(session.session_id)
             session = _get_session(session.session_id, metadata_only=False)
         except Exception:
             # If we cannot upgrade to a full load (file gone, decode error,
@@ -4512,22 +4418,9 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
-    persist_lock = _session_persist_lock(original_stub.session_id)
     if not session_lock.acquire(blocking=wait_for_writer):
         return False
-    # #9017: hold the persist lock from the changed-since check through the
-    # save. A save made without the session lock (journal recovery on another
-    # thread's cache hit) takes only the persist lock, so it can't land between
-    # the check and this save. Order: session -> persist, as save() nests it.
-    persist_lock.acquire()
     try:
-        if reload_marker is not None:
-            from api.models import _sidecar_unchanged_since
-            if not _sidecar_unchanged_since(original_stub.session_id, reload_marker):
-                # Another writer saved after the reload: its turn is newer than
-                # this copy, so clearing and saving it would drop that turn.
-                # Skip this time; the next read retries on the current file.
-                return False
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
         if getattr(session, "pending_user_message", None):
@@ -4586,7 +4479,6 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
                 getattr(session, "session_id", "?"),
             )
     finally:
-        persist_lock.release()
         session_lock.release()
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
@@ -7191,8 +7083,6 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False,
                 # WebUI-owned turns.
                 s.messages = list(latest_messages)
         return s
-    except SessionFileNamesOtherSession:
-        raise  # #9019: sid's file exists; never materialize over it
     except KeyError:
         pass
 
@@ -7465,8 +7355,6 @@ def _resolve_share_session_pair(sid: str, handler):
             cli_meta=cli_meta,
         )
         return snapshot_session, stored_session, cli_meta or {}
-    except SessionFileNamesOtherSession:
-        raise  # #9019: never synthesize over sid's file
     except KeyError:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
@@ -11738,23 +11626,13 @@ def _session_is_subagent_view_only(sid: str) -> bool:
     if _is_subagent_child_session_id(sid):
         return True
     try:
-        # #9019: this guard must read a swapped-in body to refuse it (master read the
-        # OTHER session's source tag here and refused a subagent body). Without the
-        # opt-in the boundary's KeyError fell to ``return False`` below, and routes that
-        # never call get_session themselves (delete, handoff-summary) mutated this id.
-        s = get_session(sid, allow_foreign_body=True)
+        s = get_session(sid)
     except Exception:
         return False
     src = (
         str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
             or getattr(s, "session_source", "") or "").strip().lower()
     )
-    if getattr(s, "_sidecar_names_other_session", None):
-        # The opt-in cached the foreign object under ``sid``; drop it again, as
-        # get_session does, so direct cache readers never act on it.
-        with LOCK:
-            if SESSIONS.get(sid) is s:
-                SESSIONS.pop(sid, None)
     return src == "subagent"
 
 
@@ -11822,23 +11700,6 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
                                     "external_agent", "gateway", "subagent", "unknown"}:
             return False, f"state_db_source={state_db_source_tag}"
     return True, ""
-
-
-def _cli_read_owner_profile(sid: str, read_profile=None):
-    """Return the profile owning the state.db a CLI import/claim reads ``sid`` from (#9093).
-
-    ``read_profile`` comes from the CLI listing row or an authorized all-profiles
-    request. Without one, ``get_cli_session_messages`` reads the ACTIVE profile's
-    state.db, so the session is the active profile's: the listing row (and its
-    tag) only exists for the newest-N window, and an untagged copy was backfilled
-    to ``default`` and left its own profile's sidebar. Claude Code transcripts are
-    global, not read from any profile's state.db, so they stay untagged.
-    """
-    if read_profile:
-        return read_profile
-    if str(sid or "").startswith(f"{CLAUDE_CODE_SOURCE}_"):
-        return None
-    return _get_active_profile_name()
 
 
 def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
@@ -11923,7 +11784,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             messages=msgs,
             created_at=(cli_meta or {}).get("created_at") or 0,
             updated_at=(cli_meta or {}).get("updated_at") or 0,
-            profile=_cli_read_owner_profile(sid, (cli_meta or {}).get("profile")),
+            profile=(cli_meta or {}).get("profile"),
             # ``is_cli_flag`` is True for genuine CLI/TUI/Desktop sessions so the
             # sidebar renders the source badge and the client's external-session
             # gating applies. It is False for delegated subagent children (#5307):
@@ -12101,9 +11962,6 @@ def _load_branch_source_or_refuse(handler, sid: str):
         return None
     try:
         source = get_session(sid)
-    except SessionFileNamesOtherSession:
-        bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
-        return None
     except KeyError:
         _foreign_session, _reason = _claim_or_synthesize_cli_session(sid)
         _source_kind = str((getattr(_foreign_session, "source_tag", None) or getattr(_foreign_session, "raw_source", None) or getattr(_foreign_session, "source", None) or "")).strip().lower() if _foreign_session is not None else ""
@@ -14378,7 +14236,6 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
-    SessionFileNamesOtherSession,
     get_cli_session_by_id,
     get_session,
     get_session_profile_readonly,
@@ -18074,12 +17931,6 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         if _diag: _diag.finish()
         return resp
-    except SessionFileNamesOtherSession:
-        # #9019: the file names another session, so this id is not found. Never
-        # fall through to the KeyError branch below, which claims or synthesizes
-        # a CLI session over the refused file.
-        if _diag: _diag.finish()
-        return bad(handler, "Session not found", 404)
     except KeyError:
         # perf(webui/session-load-latency) tier2c-followup: fire
         # _diag.finish() in the exception branch too. Greptile flagged
@@ -19106,8 +18957,6 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "session_id required")
         try:
             workspace = get_session(sid).workspace
-        except SessionFileNamesOtherSession:
-            return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
         except KeyError:
             # state.db-only sessions (CLI, delegated subagents): same fallback as /api/list.
             cli_meta = _lookup_cli_session_metadata(sid)
@@ -20586,9 +20435,8 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Subagent sessions are view-only and cannot be duplicated from WebUI", 400)
 
             session = Session.load(sid)
-            if not session or getattr(session, "_sidecar_names_other_session", None):
+            if not session:
                 # 404, not 400 — missing resource, not a malformed request.
-                # #9019: a file that names another session is not this session.
                 return bad(handler, "Session not found", status=404)
 
             copy_messages = session.messages
@@ -20956,7 +20804,6 @@ def handle_post(handler, parsed) -> bool:
         # continues to work (routes.py imported it at module level).
         import api.routes as _routes
         _routes.get_session = _models.get_session
-        _routes.SessionFileNamesOtherSession = _models.SessionFileNamesOtherSession
         _routes.Session = _models.Session
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
@@ -22965,8 +22812,6 @@ def handle_post(handler, parsed) -> bool:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
-        except SessionFileNamesOtherSession:
-            return bad(handler, "Session not found", 404)  # #9019: never import over sid's file
         except KeyError:
             # #7776: reuse the CLI identity captured before the lock — the
             # lock-held reload can drop it. #7549/#7731: cross-profile archive
@@ -24457,8 +24302,6 @@ def _handle_list_dir(handler, parsed):
         s = get_session(sid)
         webui_session = s
         workspace = s.workspace
-    except SessionFileNamesOtherSession:
-        return bad(handler, "Session not found", 404)  # #9019: no state.db fallback
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory. Resolved through
         # the same lookup as open/pin/rename, so a session outside the default
@@ -26389,81 +26232,6 @@ def _tts_open(req, *, timeout=30, opener_factory=None):
     return _urlopen(req, timeout=timeout)
 
 
-def _detect_text_lang(text: str) -> str:
-    """Best-effort it/en detection: a stopword vote, no extra dependency.
-
-    Returns "" when the vote is inconclusive (short texts), so callers fall back
-    to the configured single voice instead of guessing wrong.
-    """
-    words = re.findall(r"[a-zàèéìòù']+", (text or "").lower())
-    if len(words) < 3:
-        return ""
-    it_words = {
-        "il", "lo", "la", "gli", "le", "un", "una", "di", "che", "non", "per",
-        "con", "sono", "questo", "questa", "anche", "più", "già", "perché",
-        "cosa", "come", "quando", "adesso", "oggi", "molto", "così", "ma",
-    }
-    en_words = {
-        "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
-        "have", "what", "when", "there", "from", "would", "should", "about",
-        "can", "will", "your", "but", "just", "very",
-    }
-    it_votes = sum(1 for w in words if w in it_words)
-    en_votes = sum(1 for w in words if w in en_words)
-    accented_it = sum(1 for w in words if any(c in "àèéìòù" for c in w))
-    it_votes += accented_it
-    if it_votes >= 2 and it_votes > en_votes:
-        return "it"
-    if en_votes >= 2 and en_votes > it_votes:
-        return "en"
-    return ""
-
-
-def _default_edge_voice(text: str = "") -> str:
-    """Default Edge voice for /api/tts, picked by the text's language.
-
-    Precedence: ``tts.edge.voices.<lang>`` from the active profile's config.yaml,
-    then a built-in per-language default (it -> Elsa, en -> Ava), then
-    ``tts.edge.voice`` (the configured single voice, all languages), then Elsa.
-    Before this, the endpoint hardcoded zh-CN-XiaoxiaoNeural and spoke Chinese.
-    """
-    cfg: dict = {}
-    try:
-        from api.profiles import get_active_hermes_home, load_profile_config
-
-        cfg = load_profile_config(get_active_hermes_home()) or {}
-    except Exception:
-        logger.debug("Failed to read the agent config for TTS voices", exc_info=True)
-    # Shape-validate: a hand-edited config must never crash the request.
-    tts_cfg = cfg.get("tts")
-    edge_cfg = tts_cfg.get("edge") if isinstance(tts_cfg, dict) else None
-    if not isinstance(edge_cfg, dict):
-        edge_cfg = {}
-
-    def _usable(value) -> str:
-        # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
-        # would trip the voice allowlist, so treat it as absent.
-        if isinstance(value, str) and value.strip() and "${" not in value:
-            return value.strip()
-        return ""
-
-    lang = _detect_text_lang(text)
-    if lang:
-        voices = edge_cfg.get("voices")
-        if isinstance(voices, dict):
-            per_lang = _usable(voices.get(lang))
-            if per_lang:
-                return per_lang
-        builtin = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}.get(lang)
-        if builtin:
-            return builtin
-    configured = _usable(edge_cfg.get("voice"))
-    if configured:
-        return configured
-    return "it-IT-ElsaNeural"
-
-
-
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
 
@@ -26482,7 +26250,7 @@ def _handle_tts(handler, parsed):
     async API at that time.
     """
     text = ""
-    voice = ""
+    voice = "zh-CN-XiaoxiaoNeural"
     rate_str = ""
     pitch_str = ""
     engine = "edge"  # "edge" | "elevenlabs" | "openai" | "browser" (browser is client-side only)
@@ -26494,11 +26262,7 @@ def _handle_tts(handler, parsed):
     try:
         data = read_body(handler)
         text = (data.get("text") or "").strip()
-        voice = data.get("voice")
-        # Explicit override only: the configured default is resolved inside the
-        # Edge branch, after admission and rate limiting, so an engine that is
-        # not Edge never reads Edge (or any profile) config.
-        voice = voice.strip() if isinstance(voice, str) else ""
+        voice = data.get("voice") or voice
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
         request_engine = data.get("engine")
@@ -26771,21 +26535,12 @@ def _handle_tts(handler, parsed):
         return True
 
     # ── Edge TTS ────────────────────────────────────────────────────────
-    # Omitted voice: resolve the configured per-language default HERE, after
-    # validation, playback-profile admission and rate limiting. An unused Edge
-    # setting therefore cannot affect an OpenAI/ElevenLabs request, and a
-    # request rejected earlier never reads profile config.
-    if not voice:
-        voice = _default_edge_voice(text)
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
-        "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
+        "en-US-AriaNeural", "en-US-GuyNeural",
         "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
         "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
-        "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
-        "it-IT-GiuseppeMultilingualNeural",
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
@@ -29288,18 +29043,12 @@ def _handle_btw(handler, body):
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
-    # Duplicate-stream guard (same pattern as chat/start): decide under the
-    # lock, respond outside it. ``j`` writes to the client socket, and a client
-    # that stopped reading would otherwise stall every stream start/Stop/steer
-    # waiting on STREAMS_LOCK for the duration of the write.
+    # Duplicate-stream guard (same pattern as chat/start)
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
         with STREAMS_LOCK:
-            busy = current_stream_id in STREAMS
-        if busy:
-            return j(handler, {"error": "session already has an active stream"}, status=409)
-        # Only clear the id when the stream is really gone; a live stream keeps
-        # its owner even though this request is refused above.
+            if current_stream_id in STREAMS:
+                return j(handler, {"error": "session already has an active stream"}, status=409)
         s.active_stream_id = None
     # Create ephemeral hidden session inheriting context
     from api.models import new_session as _new_session
@@ -31124,8 +30873,6 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
         return action
     if action in ("clear", "stop", "done"):
         return "clear"
-    if action.split(None, 1)[0] == "gate":
-        return "gate"
     return "set"
 
 
@@ -31918,12 +31665,6 @@ def _handle_goal_command(handler, body):
     )
 
     goal_adapter_action = _runtime_adapter_goal_action(goal_args)
-    if goal_adapter_action == "gate":
-        # Refuse before any kickoff setup or adapter dispatch: the goal, its
-        # gates and the session's model state stay exactly as they were.
-        from api.goals import goal_gate_refusal_payload
-
-        return j(handler, goal_gate_refusal_payload(), status=400)
     runner_goal_owned = runtime_adapter_runner_enabled()
     if runner_goal_owned and goal_adapter_action == "set":
         # Separate set and kickoff calls cannot restore the runner's prior goal
@@ -32273,8 +32014,6 @@ def _handle_chat_start(handler, body, diag=None):
                 # write of the turn would land there. Refuse before anything
                 # is mutated, with the generic ownership guard's answer.
                 return bad(handler, "Session not found", 404)
-        except SessionFileNamesOtherSession:
-            return bad(handler, "Session not found", 404)  # #9019: never claim over sid's file
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -32758,10 +32497,7 @@ def _handle_chat_sync(handler, body):
         return j(handler, stale_response, status=409)
     if _session_is_subagent_view_only(str(body.get("session_id") or "")):
         return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
-    try:
-        s = get_session(body["session_id"])
-    except SessionFileNamesOtherSession:
-        return bad(handler, "Session not found", 404)  # #9019 (an unknown id still raises as before)
+    s = get_session(body["session_id"])
     if getattr(s, "_sidecar_names_other_session", None):
         # #9000: the file holds a copy of another session's file, so the loaded
         # object carries that session's id; the turn would run under it.
@@ -33365,52 +33101,12 @@ def _handle_cron_delivery_options(handler):
         if _known:
             _KNOWN_DELIVERY_PLATFORMS = frozenset(_known)
             break
-    # #9058: current Agents keep only the core-only rows (webhook,
-    # wecom_callback) in that constant; the messaging platforms (telegram,
-    # discord, slack, feishu, ...) live in the plugin platform registry. The
-    # Agent's validator ``_is_known_delivery_platform`` accepts the constant
-    # plus every registry entry with a ``cron_deliver_env_var``, so enumerate
-    # the registry with the same rule. Older Agents without the registry (or
-    # any failure while enumerating it) degrade to the constant alone.
-    #
-    # Only Agents that key plugin managers by profile home (from 2026-08-12,
-    # ``hermes_cli.plugins._plugin_managers_by_home``) with a profile-scoped
-    # platform registry (``current_scope_key``) are enumerated. Older
-    # Agents share one process-wide plugin manager, so the first profile to
-    # open the picker would leak its user plugin platforms into every other
-    # profile's picker; some of them also run discovery under the cron env
-    # lock. Those Agents keep today's constant-only list.
-    _registry_names = set()
-    _registry_labels = {}
-    try:
-        # import_module returns the exact registered module (tests replace it in sys.modules).
-        _agent_plugins = importlib.import_module("hermes_cli.plugins")
-        if hasattr(_agent_plugins, "_plugin_managers_by_home"):
-            from gateway.platform_registry import platform_registry
-            # The registry must be profile-scoped too (``current_scope_key``, the
-            # Agent commit right after the per-home managers); otherwise one
-            # profile's discovery can replace another's same-name adapter.
-            if callable(getattr(platform_registry, "current_scope_key", None)):
-                _agent_plugins.discover_plugins()  # idempotent, scoped to the active profile home
-                _names, _labels = set(), {}
-                for _entry in platform_registry.all_entries():
-                    _name = getattr(_entry, "name", None)
-                    if not isinstance(_name, str) or not _name:
-                        continue
-                    _label = getattr(_entry, "label", None)
-                    if isinstance(_label, str) and _label.strip():
-                        _labels[_name] = _label.strip()
-                    if getattr(_entry, "cron_deliver_env_var", None):
-                        _names.add(_name)
-                _registry_names, _registry_labels = _names, _labels
-    except Exception:
-        logger.debug("cron delivery options: platform registry unavailable", exc_info=True)
     platforms = [
         {"value": "local", "label": "Local (save output only)"},
         {"value": "origin", "label": "Origin (reply to creator)"}
     ]
-    for name in sorted((set(_KNOWN_DELIVERY_PLATFORMS) | _registry_names) - {"local", "origin"}):
-        platforms.append({"value": name, "label": _registry_labels.get(name) or name.capitalize()})
+    for name in sorted(_KNOWN_DELIVERY_PLATFORMS):
+        platforms.append({"value": name, "label": name.capitalize()})
     return j(handler, {"platforms": platforms})
 
 
@@ -36710,31 +36406,6 @@ def _handle_handoff_summary(handler, body):
             agent.reasoning_config = previous_reasoning
 
         # Call LLM for summary.
-    # Gateway mode owns model execution and the session's credentials: never
-    # build an in-process helper agent here (#8971). That path either fails on
-    # missing WebUI credentials or silently runs an LLM call outside the
-    # gateway. This handler exists specifically for gateway sessions, so use
-    # the deterministic local fallback — the same path taken when no provider
-    # key resolves — instead of refusing the feature with a 409.
-    if webui_gateway_chat_enabled(get_config_snapshot()):
-        summary_text = _fallback_handoff_summary(msgs)
-        try:
-            _persist_handoff_summary(
-                sid,
-                summary_text,
-                _resolve_handoff_channel_label(),
-                rounds,
-                fallback=True,
-            )
-        except Exception:
-            pass
-        return j(handler, {
-            "ok": True,
-            "summary": summary_text,
-            "message_count": len(msgs),
-            "rounds": rounds,
-            "fallback": True,
-        })
     try:
         ensure_agent_runtime_current()
         import api.config as _cfg
@@ -37452,10 +37123,7 @@ def _handle_session_import_cli(handler, body):
         requested_profile=requested_profile,
         allow_all_profiles=allow_all_profiles,
     )
-    profile = _cli_read_owner_profile(
-        sid,
-        cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None),
-    )
+    profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
