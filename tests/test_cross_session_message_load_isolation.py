@@ -137,6 +137,12 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+# #7824: the New Chat draft claim is tracked per session id. The declaration and
+# its two helpers travel with the sliced draft code instead of being mirrored here.
+NEW_CHAT_DRAFT_CLAIM_SRC = SESSIONS_SRC[
+    SESSIONS_SRC.index("const _newChatDraftSaveGenerationsBySid"):
+    SESSIONS_SRC.index("function _saveComposerDraft(")
+]
 COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
     _extract_function(SESSIONS_SRC, name)
     for name in (
@@ -439,7 +445,7 @@ const _composerDraftLocalFallbackBySid = new Map();
 const _composerDraftLatestIntentSequenceBySid = new Map();
 const _composerDraftPostPromisesBySid = new Map();
 let _composerDraftIntentSequence = 0;
-let _newChatDraftSaveGeneration = 0;
+__NEW_CHAT_DRAFT_CLAIM_SRC__
 __COMPOSER_DRAFT_HELPERS_SRC__
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
@@ -1062,6 +1068,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
+        .replace("__NEW_CHAT_DRAFT_CLAIM_SRC__", NEW_CHAT_DRAFT_CLAIM_SRC)
         .replace("__COMPOSER_DRAFT_HELPERS_SRC__", COMPOSER_DRAFT_HELPERS_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
@@ -1259,6 +1266,7 @@ def test_new_chat_pane_takeover_midflight_does_not_write_stale_rows(tmp_path):
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
+        .replace("__NEW_CHAT_DRAFT_CLAIM_SRC__", NEW_CHAT_DRAFT_CLAIM_SRC)
         .replace("__COMPOSER_DRAFT_HELPERS_SRC__", COMPOSER_DRAFT_HELPERS_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)

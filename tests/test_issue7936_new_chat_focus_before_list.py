@@ -21,7 +21,11 @@ def _block(marker: str, end: str) -> str:
 
 
 def test_the_new_chat_button_focuses_right_after_new_session():
-    handler = _block("$('btnNewChat').onclick=async()=>{", "\n};")
+    # #7824 needs the click event to tell a plain click from a native link
+    # gesture (middle/Ctrl/Meta/Shift), so the handler opens with `async(e)=>`.
+    # Pin the handler entry, not its parameter list; both behavioural pins below
+    # are unchanged.
+    handler = _block("$('btnNewChat').onclick=async", "\n};")
     assert FRESH_CHAT in handler
     assert "await newSession();await renderSessionList()" not in handler
 

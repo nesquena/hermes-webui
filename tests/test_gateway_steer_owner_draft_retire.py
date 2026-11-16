@@ -23,6 +23,7 @@ def _run(scenario):
     ses = (ROOT / 'static/sessions.js').read_text(encoding='utf-8')
     msg = (ROOT / 'static/messages.js').read_text(encoding='utf-8')
     parts = [
+        _slice(ses, 'const _newChatDraftSaveGenerationsBySid', 'function _saveComposerDraft('),
         _slice(ses, 'let _draftSaveTimer = null;', 'function _composerDraftFileSignature('),
         _slice(ses, 'function _composerDraftFileSignature(', 'function _profileMatchesActiveProfile('),
         _slice(ses, 'function _isRestorableNewChatDraftSession(', 'function _adoptRegenerationRevision('),
@@ -46,7 +47,6 @@ const inp={value:''},el={disabled:false,setAttribute(){},focus(){}};
 const document={getElementById:()=>null};
 const $=id=>id==='msg'?inp:el,t=x=>x,showToast=()=>{};
 const S={session:null,activeStreamId:null,pendingFiles:[],messages:[],activeProfile:'default'};
-let _newChatDraftSaveGeneration=0;
 const drafts={},queues={};let nextSid=0;
 const sessions={};
 async function api(path,opts){

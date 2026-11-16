@@ -255,12 +255,28 @@ async function _restoreRememberedNewChatDraftSession() {
   }
 }
 
-let _newChatDraftSaveGeneration = 0;
+// #7824 (review P1): a pending save keeps its New Chat claim until a newer save
+// or a clear of the SAME conversation lands. One global counter let a clear in
+// conversation A cancel an in-flight claim from conversation B: B's save
+// succeeded server-side, but New Chat in another tab then missed that draft and
+// opened A instead. Claims are therefore tracked per session id; the map only
+// holds small integers for the conversations this tab touched.
+const _newChatDraftSaveGenerationsBySid = new Map();
+
+function _claimNewChatDraftSave(sid) {
+  const next = (_newChatDraftSaveGenerationsBySid.get(sid) || 0) + 1;
+  _newChatDraftSaveGenerationsBySid.set(sid, next);
+  return next;
+}
+
+function _ownsNewChatDraftSaveClaim(sid, generation) {
+  return generation === (_newChatDraftSaveGenerationsBySid.get(sid) || 0);
+}
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
-  const claimGeneration = ++_newChatDraftSaveGeneration;
+  const claimGeneration = _claimNewChatDraftSave(sid);
   const draftSession = S.session && S.session.session_id === sid ? S.session : null;
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
@@ -298,7 +314,7 @@ function _saveComposerDraft(sid, text, files) {
       // Publish only server-confirmed drafts. A newer edit/clear invalidates an
       // older completion; switching sessions alone does not lose its owner.
       try {
-        if (claimGeneration === _newChatDraftSaveGeneration && draftSession
+        if (_ownsNewChatDraftSaveClaim(sid, claimGeneration) && draftSession
             && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
           _rememberNewChatDraftSession(draftSession);
         }
@@ -493,7 +509,7 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
-  const claimGeneration = ++_newChatDraftSaveGeneration;
+  const claimGeneration = _claimNewChatDraftSave(sid);
   const draftSession = S.session && S.session.session_id === sid ? S.session : null;
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
@@ -528,7 +544,7 @@ function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
   const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
   return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId).then(() => {
     try {
-      if (claimGeneration === _newChatDraftSaveGeneration && draftSession
+      if (_ownsNewChatDraftSaveClaim(sid, claimGeneration) && draftSession
           && _composerDraftHasPayload(normalizedText, normalizedFiles)) {
         _rememberNewChatDraftSession(draftSession);
       }
@@ -624,7 +640,9 @@ function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
   // The pending debounced save may belong to another session (e.g. after New Chat).
   if (_draftSaveTimerSid === sid) clearTimeout(_draftSaveTimer);
-  ++_newChatDraftSaveGeneration;
+  // Only this conversation's pending claim is retired: clearing A must not
+  // cancel an in-flight save claim that belongs to B (#7824 review P1).
+  _claimNewChatDraftSave(sid);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);

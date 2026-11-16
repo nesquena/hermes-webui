@@ -9,17 +9,16 @@ import pytest
 SRC = (Path(__file__).parents[1] / 'static/sessions.js').read_text()
 
 
-@pytest.mark.parametrize('scenario', ['pending', 'success', 'failure', 'erase', 'stale', 'switch', 'immediate', 'submit'])
+@pytest.mark.parametrize('scenario', ['pending', 'success', 'failure', 'erase', 'stale', 'switch', 'immediate', 'submit', 'cross-clear'])
 def test_draft_candidate_requires_successful_current_save(scenario):
     if not shutil.which('node'):
         pytest.skip('node unavailable')
-    saves = SRC[SRC.index('function _saveComposerDraft('):SRC.index('// Restore composer draft')]
+    saves = SRC[SRC.index('const _newChatDraftSaveGenerationsBySid'):SRC.index('// Restore composer draft')]
     start = SRC.index('function _clearComposerDraft(')
     end = SRC.index('\nfunction ', start + 1)
     clear = SRC[start:end]
     script = r'''
 let pointer='A', timer=null, _draftSaveTimer=null;
-let _newChatDraftSaveGeneration=0;
 const _DRAFT_SAVE_DELAY_MS=400;
 const S={session:{session_id:'B',message_count:0,title:'New Chat'}};
 const requests=[];
@@ -54,6 +53,9 @@ if(scenario==='erase')_saveComposerDraft('B','',[]);
 if(scenario==='stale')_saveComposerDraft('B','newer',[]);
 if(scenario==='switch')S.session={session_id:'C'};
 if(scenario==='submit')_clearComposerDraft('B','draft',[]);
+// #7824 review P1: a clear in ANOTHER conversation must not cancel this one's
+// in-flight save claim. RED with the old global counter (pointer stayed 'A').
+if(scenario==='cross-clear')_clearComposerDraft('A','other',[]);
 if(scenario==='failure')requests[0].reject(new Error('save failed'));
 else requests[0].resolve({});
 await new Promise(resolve=>setImmediate(resolve));
@@ -65,4 +67,4 @@ process.stdout.write(JSON.stringify({before,after:pointer}));
     assert result.returncode == 0, result.stderr
     actual = json.loads(result.stdout)
     assert actual['before'] == 'A', 'an unpersisted draft displaced the previous restorable draft'
-    assert actual['after'] == ('B' if scenario in {'success', 'switch', 'immediate'} else 'A')
+    assert actual['after'] == ('B' if scenario in {'success', 'switch', 'immediate', 'cross-clear'} else 'A')
