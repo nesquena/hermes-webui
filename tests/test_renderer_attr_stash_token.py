@@ -65,3 +65,64 @@ _UNCHANGED = {
 @pytest.mark.parametrize("markdown,expected", list(_UNCHANGED.values()), ids=list(_UNCHANGED))
 def test_ordinary_attributes_and_stashed_blocks_render_unchanged(driver_path, markdown, expected):  # noqa: F811
     assert _render(driver_path, markdown) == expected
+
+
+# ── Every attribute the sanitizer rebuilds stays a single, plain value ─────────
+# Raw NUL characters in the input would let text forge a stash token, and two
+# rebuilt attributes (a link's download name, a diagram id) skipped the value
+# cleanup. The autolink pass also rewrote a URL inside a diagram id.
+
+_ANCHOR = '<a href="https://example.com/x y z">t</a>'
+
+_ALLOWED_ATTRIBUTES = {
+    "src", "alt", "href", "title", "class", "loading", "target", "rel", "download",
+    "id", "value", "data-katex", "data-mermaid-id", "data-raw", "data-lang",
+}
+
+_FORGED_OR_UNCLEANED = {
+    "forged-token-in-autolink": "https://example.com/\x00Q0\x00\n> " + _ANCHOR,
+    "forged-token-in-download": '<a href="https://example.com" download="\x00Q0\x00">x</a>\n> ' + _ANCHOR,
+    "forged-token-in-diagram-id": '<div data-mermaid-id="\x00Q0\x00"></div>\n> ' + _ANCHOR,
+    "forged-token-in-json-fence": '```json\n{"x":"\x00Q0\x00"}\n```\n> ' + _ANCHOR,
+    "math-in-download": '<a href="https://example.com" download="$x$">x</a>',
+    "math-in-diagram-id": '<div data-mermaid-id="$x$"></div>',
+    "url-in-diagram-id": '<div data-mermaid-id="https://example.com/a/b=c"></div>',
+}
+
+
+class _AllAttrs(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.attrs = []
+
+    def handle_starttag(self, tag, attrs):
+        self.attrs.extend((tag, name, value or "") for name, value in attrs)
+
+
+@pytest.mark.parametrize("markdown", list(_FORGED_OR_UNCLEANED.values()), ids=list(_FORGED_OR_UNCLEANED))
+def test_rebuilt_attributes_hold_one_plain_value(driver_path, markdown):  # noqa: F811
+    html = _render(driver_path, markdown)
+    assert "\x00" not in html, html
+    parser = _AllAttrs()
+    parser.feed(html)
+    for tag, name, value in parser.attrs:
+        assert name in _ALLOWED_ATTRIBUTES, (tag, name, html)
+        assert "<" not in value, (tag, name, html)
+
+
+def test_generated_diagram_ids_are_kept(driver_path):  # noqa: F811
+    html = _render(driver_path, '<div class="mermaid-block" data-mermaid-id="mermaid-ab12cd34"></div>')
+    assert 'data-mermaid-id="mermaid-ab12cd34"' in html, html
+
+
+# ── Media references whose decoded path carries a NUL render nothing ──────────
+
+def test_media_reference_with_encoded_nul_renders_nothing(tmp_path_factory):
+    from tests.test_issue8033_file_uri_windows import UI_JS_PATH, _SETTLED_DRIVER, _run_node_driver
+
+    cases = ["file:///%00Q0%00.png", "file:///notes/a%00b.png", "/a\x00Q0\x00.png"]
+    results = _run_node_driver(_SETTLED_DRIVER, UI_JS_PATH, cases, tmp_path_factory)
+    for case in cases:
+        assert results[case]["html"] == "", (case, results[case])
+    ordinary = _run_node_driver(_SETTLED_DRIVER, UI_JS_PATH, ["file:///notes/a%20b.png"], tmp_path_factory)
+    assert ordinary["file:///notes/a%20b.png"]["pathParam"] == "/notes/a b.png", ordinary

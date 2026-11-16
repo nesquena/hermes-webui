@@ -4389,6 +4389,7 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
       catch(__){ref=ref.replace(/^file:\/\//i,'');}
     }
   }
+  if(/\x00/.test(String(ref))) return '';
   if(/^https?:\/\//i.test(ref)){
     let src=ref;
     if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
@@ -10637,7 +10638,7 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
 }
 
 function renderMd(raw){
-  let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  let s=(raw||'').replace(/\x00/g,'&#0;').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
@@ -11343,7 +11344,10 @@ function renderMd(raw){
     }
     if(name==='div'){
       const cls=_cls(a.class,['pre-header','mermaid-block','katex-block']);
-      const mermaid=a['data-mermaid-id']?` data-mermaid-id="${esc(a['data-mermaid-id'])}"`:'';
+      // Generated ids are word characters; anything else (a URL the autolink pass
+      // would rewrite, a stash token) must not reach this free-text attribute.
+      const mermaidId=_safeAttrValue(a['data-mermaid-id']);
+      const mermaid=/^[\w-]{1,64}$/.test(mermaidId)?` data-mermaid-id="${esc(mermaidId)}"`:'';
       const katex=a['data-katex']==='display'?' data-katex="display"':'';
       return `<div${cls}${mermaid}${katex}>`;
     }
@@ -11352,7 +11356,7 @@ function renderMd(raw){
       const target=a.target==='_blank'?' target="_blank"':'';
       const rel=a.rel==='noopener'?' rel="noopener"':'';
       const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back','session-link']);
-      const download=a.download?` download="${esc(a.download)}"`:'';
+      const download=a.download?` download="${esc(_safeAttrValue(a.download))}"`:'';
       // #7941: keep the blocked-remote-image tooltip only on a media chip whose
       // href really is a non-allowlisted remote image AND whose title begins with
       // the reason computed from that same href, so model-authored anchors cannot
