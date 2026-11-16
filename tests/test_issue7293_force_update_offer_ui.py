@@ -409,3 +409,113 @@ def test_force_update_refusal_offer_does_not_repeat_discard_confirmation(tmp_pat
     else:
         assert out["apiCalls"] == [first]
         assert out["waitCalls"] == 0
+
+
+_AGENT_BEHIND = {"agent": {"behind": 1}}
+
+
+def test_agent_target_confirmation_names_the_gateway_runs_too(tmp_path):
+    """#8667/#8746: an Agent update cycles the Gateway, so its copy says so."""
+
+    out = _run(
+        {
+            "entry": "apply",
+            "target": "agent",
+            "updateData": _AGENT_BEHIND,
+            "responses": [
+                _refusal(
+                    2,
+                    target="agent",
+                    gateway_restart_managed=True,
+                    webui_owned_runs=1,
+                    gateway_runs=1,
+                ),
+                {"ok": True, "target": "agent"},
+            ],
+            "clickOffer": True,
+            "confirmAnswers": [True],
+        },
+        tmp_path,
+    )
+    assert out["afterRefusal"]["offer"]["label"] == "Update anyway (interrupts 2 runs)"
+    assert out["confirmCalls"] == [
+        {
+            "title": "Interrupt active runs?",
+            "message": (
+                "1 WebUI agent run is still working and 1 Gateway run is running. "
+                "Updating the Agent also restarts the Gateway this profile uses and "
+                "stops every run that Gateway is executing, including runs started "
+                "from other profiles that use the same Gateway endpoint. The WebUI "
+                "runs are saved as interrupted. Wait for them to finish if you can."
+            ),
+            "confirmLabel": "Interrupt and update",
+            "danger": True,
+            "focusCancel": True,
+        }
+    ]
+    assert out["apiCalls"] == [
+        {"url": "/api/updates/apply", "body": {"target": "agent"}},
+        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True}},
+    ]
+
+
+def test_agent_target_confirmation_external_gateway_wording(tmp_path):
+    """#8746: when Gateway is unmanaged, confirmation dialog uses external copy."""
+
+    out = _run(
+        {
+            "entry": "apply",
+            "target": "agent",
+            "updateData": _AGENT_BEHIND,
+            "responses": [
+                _refusal(
+                    2,
+                    target="agent",
+                    gateway_restart_managed=False,
+                    webui_owned_runs=1,
+                    gateway_runs=1,
+                ),
+                {"ok": True, "target": "agent"},
+            ],
+            "clickOffer": True,
+            "confirmAnswers": [True],
+        },
+        tmp_path,
+    )
+    assert out["afterRefusal"]["offer"]["label"] == "Update anyway (interrupts 1 run)"
+    assert out["confirmCalls"] == [
+        {
+            "title": "Interrupt active runs?",
+            "message": (
+                "1 WebUI agent run is still working, and 1 Gateway run keeps running "
+                "because the WebUI cannot restart this profile's Gateway. Only the "
+                "WebUI runs are saved as interrupted."
+            ),
+            "confirmLabel": "Interrupt and update",
+            "danger": True,
+            "focusCancel": True,
+        }
+    ]
+    assert out["apiCalls"] == [
+        {"url": "/api/updates/apply", "body": {"target": "agent"}},
+        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True}},
+    ]
+
+
+def test_webui_target_confirmation_keeps_the_webui_only_copy(tmp_path):
+    """The #7293 copy is unchanged for a WebUI update (Gateway runs survive)."""
+
+    out = _run(
+        {
+            "entry": "apply",
+            "target": "webui",
+            "updateData": _WEBUI_BEHIND,
+            "responses": [_refusal(2), {"ok": True, "target": "webui"}],
+            "clickOffer": True,
+            "confirmAnswers": [True],
+        },
+        tmp_path,
+    )
+    message = out["confirmCalls"][0]["message"]
+    assert message.startswith("2 WebUI agent runs are still working.")
+    assert "Gateway" not in message
