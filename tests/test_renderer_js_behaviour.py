@@ -1595,6 +1595,44 @@ class TestPlaceholderTokens:
         )
         assert "\x00K0\x00" in out, f"the message text must survive: {out!r}"
 
+    def test_manufactured_token_in_a_code_alt_stays_text(self, driver_path):
+        # G9072-MANUFACTURED-TOKEN-AMPLIFICATION.  The outer K lead was chosen
+        # against the message as it stood, and the image pass flattens a
+        # code-formatted alt by stripping the <code> boundaries, so bytes that
+        # arrived separated by such a boundary could spell the chosen marker.
+        # The final global restore then substituted a stash entry into every
+        # copy inside that alt (``undefined`` with an empty stash).  The lead
+        # is now also chosen against the boundary-stripped text, a superset of
+        # every flattened alt, so no alt flattening can manufacture it.
+        out = _render(
+            driver_path, self.CONTROLS + "![a<code>\x00K</code>0\x00b](/one.png)"
+        )
+        assert "undefined" not in out, f"a manufactured token was restored: {out!r}"
+        alt = out.split('alt="', 1)[1].split('"', 1)[0]
+        assert alt.startswith("a") and alt.endswith("b"), (
+            f"the alt must keep the message text around the code span: {out!r}"
+        )
+        assert "<code" not in alt, f"code markup must not enter the tag: {out!r}"
+
+    def test_manufactured_token_copies_are_not_amplified(self, driver_path):
+        # Same hole at n copies: every flattened copy matched the chosen
+        # marker, and the final global restore expanded each into the one
+        # stashed code span, so a ~39 KB message rendered 4.3 MB of HTML
+        # holding 2,049 copies of a span that appears once in the input
+        # (gate table, n=2048 -> x2049).  One copy is expected at every size.
+        span = "`![doc](/a.png)`"
+        for n in (128, 512, 2048):
+            msg = (
+                span + " " + self.CONTROLS
+                + "![a" + "<code>\x00K</code>0\x00" * n + "b](/one.png)"
+            )
+            out = _render(driver_path, msg)
+            assert out.count("![doc](/a.png)") == 1, (
+                f"n={n}: the stashed span must be restored exactly once, "
+                f"got {out.count('![doc](/a.png)')} copies: {out[:300]!r}"
+            )
+            assert "undefined" not in out, f"n={n}: a manufactured token was restored"
+
     def test_normal_image_and_code_still_render(self, driver_path):
         out = _render(driver_path, "![doc](/a.png) and `![doc](/a.png)`")
         assert out.count('class="msg-media-img"') == 1, (

@@ -11024,33 +11024,40 @@ function renderMd(raw){
     }
     return '';
   };
-  const _tokPrefix=(base,text)=>{
+  const _tokPrefix=(base,text,flat)=>{
     const ch=base.slice(-1);
-    // Ordinary case: a candidate character the text does not contain at all
+    // Ordinary case: a candidate character neither form contains at all
     // cannot collide, and one indexOf answers it.
     for(let i=0;i<_MARK_LEADS.length;i++){
       const lead=_MARK_LEADS.charAt(i);
-      if(text.indexOf(lead)<0)return lead+ch;
+      if(text.indexOf(lead)<0&&(!flat||flat.indexOf(lead)<0))return lead+ch;
     }
     // The text carries every candidate character.  Lengthen the lead until its
     // marker shape is free, so a message that spells out `\x00K0\x00` (a JSON
     // or Python escape that arrived as real control characters) takes the next
     // lead instead of having its own characters replaced by a stash entry.
+    // The shape is checked against `flat` too: flattening an image alt strips
+    // <code>/backtick boundaries and can thereby JOIN bytes that arrived
+    // separated by such a boundary into the chosen marker shape, so a lead
+    // free in the boundary-stripped text is free in every flattened alt
+    // (gate G9072-MANUFACTURED-TOKEN-AMPLIFICATION).
     for(let len=1;len<=3;len++){
-      const lead=_firstFreeLead(_takenLeads(text,ch,len),len,'');
+      const taken=_takenLeads(text,ch,len);
+      if(flat)for(const l of _takenLeads(flat,ch,len))taken.add(l);
+      const lead=_firstFreeLead(taken,len,'');
       if(lead)return lead+ch;
     }
-    // Reachable only when the text spells out every lead of up to three
-    // characters.  One more `ch` than the longest run of it after a NUL is
-    // then absent by construction, at the cost of a longer marker.
-    let run=0;
-    for(let i=0;i<text.length;i++){
-      if(text.charCodeAt(i)!==0)continue;
-      let j=i+1;
-      while(j<text.length&&text.charAt(j)===ch)j++;
-      if(j-i-1>run)run=j-i-1;
+    // Reachable only when the message spells out every lead of up to three
+    // characters in both forms.  A random nonce then stands in: the message
+    // was fixed before the nonce existed, so it cannot target it, and unlike
+    // the previous `\x00+ch.repeat(run+1)` marker the marker length never
+    // grows with the input — a long letter run used to size every stash write
+    // and the temporary text could no longer stay bounded.
+    for(;;){
+      const lead='\x00'+ch+Math.random().toString(36).slice(2,10);
+      const re=new RegExp(lead+'(\\d+)\x00');
+      if(!re.test(text)&&(!flat||!re.test(flat)))return lead;
     }
-    return '\x00'+ch.repeat(run+1);
   };
   // Image pass: ![alt](url) for http(s), file, data:image/ and root-relative
   // sources.  Parsed with a forward scan rather than a regex: in the regex
@@ -11127,9 +11134,11 @@ function renderMd(raw){
     const _code_plain=[];
     const _html_code_stash=[];
     const _html_code_plain=[];
-    // A prefix this line does not contain, so the restore below only ever sees
-    // placeholders this pass wrote (see _tokPrefix).
-    const _hPre=_tokPrefix('\x00H',t);
+    // A prefix this line does not contain, so the restore below only ever see
+    // placeholders this pass wrote (see _tokPrefix).  The boundary-stripped
+    // form guards the same alt-flattening join as the outer K stash.
+    const _hFlat=t.split('<code>').join('').split('</code>').join('').split('`').join('');
+    const _hPre=_tokPrefix('\x00H',t,_hFlat);
     const _hTok=new RegExp(_hPre+'(\\d+)\x00','g');
     // One forward scan collects complete <code> elements.  A lazy
     // `[\s\S]*?</code>` rescans the rest of the line for every opener when a
@@ -11364,7 +11373,13 @@ function renderMd(raw){
   const _code_outer_stash=[];
   // Same rule as the block-local H stash: a prefix this message does not
   // contain, so a literal `\x00K0\x00` in the caller's text stays text.
-  const _kPre=_tokPrefix('\x00K',s);
+  // The image pass below flattens a code-formatted alt by stripping the
+  // <code>/backtick boundaries, which can join caller bytes into the chosen
+  // marker shape; the lead is therefore also chosen against the
+  // boundary-stripped text, a superset of every flattened alt
+  // (gate G9072-MANUFACTURED-TOKEN-AMPLIFICATION).
+  const _kFlat=s.split('<code>').join('').split('</code>').join('').split('`').join('');
+  const _kPre=_tokPrefix('\x00K',s,_kFlat);
   const _kTok=new RegExp(_kPre+'(\\d+)\x00','g');
   const _stashOuterCode=m=>{_code_outer_stash.push(m);return _kPre+(_code_outer_stash.length-1)+'\x00';};
   s=s.replace(/`[^`\n]+`/g,m=>m.includes('![')?_stashOuterCode(m):m);
