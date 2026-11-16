@@ -2398,3 +2398,533 @@ def test_auxiliary_extra_body_step_2d_tied_correspondence_refuses_without_writin
         resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
         assert resolved[0]["token"] == "synthetic-beta"
 
+
+# ── #8740 CR r9: ownership evidence on every adoption branch ──────────────────
+
+
+def test_extra_body_nested_literal_in_ref_bearing_child_does_not_adopt_wrong_owner(
+    cfg_path, monkeypatch
+):
+    """Nested literal inside reference-bearing child does not adopt wrong owner (Criterion 1, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "synthetic-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "synthetic-beta")
+
+    raw_eb = {
+        "rows": [
+            {"meta": {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}"}, "depth": 1},
+            {"meta": {"label": "beta", "token": "${HERMES_TEST_OWNER_B}"}, "depth": 3},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {"meta": {"label": "alpha", "token": "synthetic-beta"}, "depth": 3}
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status in (200, 400), handler.json_body()
+    if handler.status == 400:
+        err = handler.json_body().get("error", "")
+        assert err.startswith("advanced model options: extra_body list rows")
+        assert cfg_path.read_bytes() == before_bytes
+        stored_rows = _raw(cfg_path)["model"]["extra_body"]["rows"]
+        assert stored_rows[0]["meta"]["token"] == "${HERMES_TEST_OWNER_A}"
+        assert stored_rows[1]["meta"]["token"] == "${HERMES_TEST_OWNER_B}"
+    else:
+        text = cfg_path.read_text(encoding="utf-8")
+        assert "${HERMES_TEST_OWNER_B}" not in text
+        written = _raw(cfg_path)["model"]["extra_body"]["rows"]
+        assert written[0]["meta"]["token"] == "synthetic-beta"
+        monkeypatch.setenv("HERMES_TEST_OWNER_B", "rotated-beta")
+        _reload_config()
+        resolved = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]["rows"]
+        assert resolved[0]["meta"]["token"] == "synthetic-beta"
+
+
+def test_auxiliary_extra_body_nested_literal_in_ref_bearing_child_does_not_adopt_wrong_owner(
+    cfg_path, monkeypatch
+):
+    """Auxiliary nested literal inside reference-bearing child does not adopt wrong owner (Criterion 1, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "synthetic-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "synthetic-beta")
+
+    raw_eb = {
+        "rows": [
+            {"meta": {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}"}, "depth": 1},
+            {"meta": {"label": "beta", "token": "${HERMES_TEST_OWNER_B}"}, "depth": 3},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {"meta": {"label": "alpha", "token": "synthetic-beta"}, "depth": 3}
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status in (200, 400), handler.json_body()
+    if handler.status == 400:
+        err = handler.json_body().get("error", "")
+        assert err.startswith("advanced auxiliary options: extra_body list rows")
+        assert cfg_path.read_bytes() == before_bytes
+        stored_rows = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+        assert stored_rows[0]["meta"]["token"] == "${HERMES_TEST_OWNER_A}"
+        assert stored_rows[1]["meta"]["token"] == "${HERMES_TEST_OWNER_B}"
+    else:
+        text = cfg_path.read_text(encoding="utf-8")
+        assert "${HERMES_TEST_OWNER_B}" not in text
+        written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+        assert written[0]["meta"]["token"] == "synthetic-beta"
+        monkeypatch.setenv("HERMES_TEST_OWNER_B", "rotated-beta")
+        _reload_config()
+        resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+        assert resolved[0]["meta"]["token"] == "synthetic-beta"
+
+
+def test_extra_body_repeated_equal_references_do_not_corroborate_wrong_owner(
+    cfg_path, monkeypatch
+):
+    """Repeated leaves of the same variable do not corroborate ownership (Criterion 2, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "synthetic-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "synthetic-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "echo": "${HERMES_TEST_OWNER_A}", "depth": 1},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "echo": "${HERMES_TEST_OWNER_B}", "depth": 1},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha",
+                "token": "synthetic-beta",
+                "echo": "synthetic-beta",
+                "depth": 2,
+            }
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status in (200, 400), handler.json_body()
+    if handler.status == 400:
+        err = handler.json_body().get("error", "")
+        assert err.startswith("advanced model options: extra_body list rows")
+        assert cfg_path.read_bytes() == before_bytes
+    else:
+        text = cfg_path.read_text(encoding="utf-8")
+        assert "${HERMES_TEST_OWNER_B}" not in text
+        written = _raw(cfg_path)["model"]["extra_body"]["rows"]
+        assert written == [
+            {
+                "label": "alpha",
+                "token": "synthetic-beta",
+                "echo": "synthetic-beta",
+                "depth": 2,
+            }
+        ]
+        monkeypatch.setenv("HERMES_TEST_OWNER_B", "rotated-beta")
+        _reload_config()
+        resolved = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]["rows"]
+        assert resolved[0]["token"] == "synthetic-beta"
+        assert resolved[0]["echo"] == "synthetic-beta"
+
+
+def test_auxiliary_extra_body_repeated_equal_references_do_not_corroborate_wrong_owner(
+    cfg_path, monkeypatch
+):
+    """Auxiliary repeated leaves of the same variable do not corroborate ownership (Criterion 2, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "synthetic-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "synthetic-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "echo": "${HERMES_TEST_OWNER_A}", "depth": 1},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "echo": "${HERMES_TEST_OWNER_B}", "depth": 1},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {
+                "label": "alpha",
+                "token": "synthetic-beta",
+                "echo": "synthetic-beta",
+                "depth": 2,
+            }
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status in (200, 400), handler.json_body()
+    if handler.status == 400:
+        err = handler.json_body().get("error", "")
+        assert err.startswith("advanced auxiliary options: extra_body list rows")
+        assert cfg_path.read_bytes() == before_bytes
+    else:
+        text = cfg_path.read_text(encoding="utf-8")
+        assert "${HERMES_TEST_OWNER_B}" not in text
+        written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+        assert written == [
+            {
+                "label": "alpha",
+                "token": "synthetic-beta",
+                "echo": "synthetic-beta",
+                "depth": 2,
+            }
+        ]
+        monkeypatch.setenv("HERMES_TEST_OWNER_B", "rotated-beta")
+        _reload_config()
+        resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+        assert resolved[0]["token"] == "synthetic-beta"
+        assert resolved[0]["echo"] == "synthetic-beta"
+
+
+def test_extra_body_bool_number_leaves_do_not_leak_into_scoring(
+    cfg_path, monkeypatch
+):
+    """Booleans and numbers do not falsely score matching leaves via Python equality (Criterion 3, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "synthetic-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "synthetic-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 7, "flag": False},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 1, "flag": True},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {"label": "alpha", "token": "synthetic-beta", "depth": True, "flag": 1}
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status in (200, 400), handler.json_body()
+    if handler.status == 400:
+        err = handler.json_body().get("error", "")
+        assert err.startswith("advanced model options: extra_body list rows")
+        assert cfg_path.read_bytes() == before_bytes
+    else:
+        text = cfg_path.read_text(encoding="utf-8")
+        assert "${HERMES_TEST_OWNER_B}" not in text
+        written = _raw(cfg_path)["model"]["extra_body"]["rows"]
+        assert written[0]["token"] == "synthetic-beta"
+        monkeypatch.setenv("HERMES_TEST_OWNER_B", "rotated-beta")
+        _reload_config()
+        resolved = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]["rows"]
+        assert resolved[0]["token"] == "synthetic-beta"
+
+
+def test_auxiliary_extra_body_bool_number_leaves_do_not_leak_into_scoring(
+    cfg_path, monkeypatch
+):
+    """Auxiliary booleans and numbers do not falsely score matching leaves via Python equality (Criterion 3, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "synthetic-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "synthetic-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 7, "flag": False},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 1, "flag": True},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    before_bytes = cfg_path.read_bytes()
+
+    submitted = {
+        "rows": [
+            {"label": "alpha", "token": "synthetic-beta", "depth": True, "flag": 1}
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status in (200, 400), handler.json_body()
+    if handler.status == 400:
+        err = handler.json_body().get("error", "")
+        assert err.startswith("advanced auxiliary options: extra_body list rows")
+        assert cfg_path.read_bytes() == before_bytes
+    else:
+        text = cfg_path.read_text(encoding="utf-8")
+        assert "${HERMES_TEST_OWNER_B}" not in text
+        written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+        assert written[0]["token"] == "synthetic-beta"
+        monkeypatch.setenv("HERMES_TEST_OWNER_B", "rotated-beta")
+        _reload_config()
+        resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+        assert resolved[0]["token"] == "synthetic-beta"
+
+
+def test_extra_body_duplicate_plain_literal_rows_allow_unrelated_edit(
+    cfg_path, monkeypatch
+):
+    """Duplicate plain literals do not reject unrelated edits (Criterion 4, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_S", "stop-token-secret")
+
+    raw_eb = {
+        "temperature": 1,
+        "stop": ["${HERMES_TEST_S}", "END", "END"],
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    submitted = {
+        "temperature": 2,
+        "stop": ["stop-token-secret", "END", "END"],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]
+    assert written["temperature"] == 2
+    assert written["stop"] == ["${HERMES_TEST_S}", "END", "END"]
+
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "${HERMES_TEST_S}" in text
+    assert "stop-token-secret" not in text
+
+    monkeypatch.setenv("HERMES_TEST_S", "rotated-stop-secret")
+    _reload_config()
+    resolved = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]
+    assert resolved["stop"] == ["rotated-stop-secret", "END", "END"]
+
+
+def test_auxiliary_extra_body_duplicate_plain_literal_rows_allow_unrelated_edit(
+    cfg_path, monkeypatch
+):
+    """Auxiliary duplicate plain literals do not reject unrelated edits (Criterion 4, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_S", "stop-token-secret")
+
+    raw_eb = {
+        "temperature": 1,
+        "stop": ["${HERMES_TEST_S}", "END", "END"],
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    submitted = {
+        "temperature": 2,
+        "stop": ["stop-token-secret", "END", "END"],
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]
+    assert written["temperature"] == 2
+    assert written["stop"] == ["${HERMES_TEST_S}", "END", "END"]
+
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "${HERMES_TEST_S}" in text
+    assert "stop-token-secret" not in text
+
+    monkeypatch.setenv("HERMES_TEST_S", "rotated-stop-secret")
+    _reload_config()
+    resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]
+    assert resolved["stop"] == ["rotated-stop-secret", "END", "END"]
+
+
+def test_extra_body_two_row_genuine_edit_depth_keeps_references(
+    cfg_path, monkeypatch
+):
+    """Two-row genuine edit of depth keeps references on both rows (Criterion 5, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "synthetic-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "synthetic-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 1},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 1},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw["model"].__setitem__("extra_body", raw_eb))
+
+    submitted = {
+        "rows": [
+            {"label": "alpha", "token": "synthetic-alpha", "depth": 2},
+            {"label": "beta", "token": "synthetic-beta", "depth": 2},
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "main",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["model"]["extra_body"]["rows"]
+    assert written == [
+        {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 2},
+        {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 2},
+    ]
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "rotated-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "rotated-beta")
+    _reload_config()
+    resolved = config._load_yaml_config_file(cfg_path)["model"]["extra_body"]["rows"]
+    assert resolved == [
+        {"label": "alpha", "token": "rotated-alpha", "depth": 2},
+        {"label": "beta", "token": "rotated-beta", "depth": 2},
+    ]
+
+
+def test_auxiliary_extra_body_two_row_genuine_edit_depth_keeps_references(
+    cfg_path, monkeypatch
+):
+    """Auxiliary two-row genuine edit of depth keeps references on both rows (Criterion 5, #8740 CR r9)."""
+    from api import config
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "synthetic-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "synthetic-beta")
+
+    raw_eb = {
+        "rows": [
+            {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 1},
+            {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 1},
+        ]
+    }
+    _seed(cfg_path, lambda raw: raw.__setitem__("auxiliary", {
+        "vision": {"provider": "openai", "model": "gpt-4o", "extra_body": raw_eb}
+    }))
+
+    submitted = {
+        "rows": [
+            {"label": "alpha", "token": "synthetic-alpha", "depth": 2},
+            {"label": "beta", "token": "synthetic-beta", "depth": 2},
+        ]
+    }
+    handler = _post(
+        "/api/model/set",
+        {
+            "scope": "auxiliary",
+            "task": "vision",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "advanced": {"extra_body": submitted},
+        },
+    )
+    assert handler.status == 200, handler.json_body()
+
+    written = _raw(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert written == [
+        {"label": "alpha", "token": "${HERMES_TEST_OWNER_A}", "depth": 2},
+        {"label": "beta", "token": "${HERMES_TEST_OWNER_B}", "depth": 2},
+    ]
+
+    monkeypatch.setenv("HERMES_TEST_OWNER_A", "rotated-alpha")
+    monkeypatch.setenv("HERMES_TEST_OWNER_B", "rotated-beta")
+    _reload_config()
+    resolved = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["extra_body"]["rows"]
+    assert resolved == [
+        {"label": "alpha", "token": "rotated-alpha", "depth": 2},
+        {"label": "beta", "token": "rotated-beta", "depth": 2},
+    ]
+

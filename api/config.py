@@ -7567,9 +7567,12 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
        a. Identity: unique scalar key present across all rows on both sides, checked
           in fixed order ('id', 'name', 'key').
        b. Unique expanded value: submitted row is JSON-equal to the expansion of exactly
-          one raw row (_expand_env_vars + _same_json_value).
+          one raw row (_expand_env_vars + _same_json_value). Duplicate plain-literal
+          rows (holding no references across candidates) do not raise ambiguity; they
+          are written verbatim without inventing bindings (#8740 CR r9).
        c. Unique shape: dict against dict with identical key sets and all non-reference
-          leaves equal, matching exactly one raw row.
+          leaves equal across the entire structure (including nested dictionaries),
+          matching exactly one raw row, routed through the shared adoption decision (#8740 CR r9).
        d. Edited row: dict against dict with identical key sets differing at exactly one
           leaf, matching exactly one raw row, so a row made only of references still
           keeps the siblings the edit did not touch.
@@ -7580,16 +7583,17 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
        f. Residue: dict against dict with identical key sets where at least one ``${...}``
           leaf the raw row holds expands to the submitted value at the same path (#8740 CR r4),
           adopted only when corroborated: either the raw candidate is the sole row in
-          *raw_list* with that key set, or an additional reference corresponds
-          (#8740 CR r5, r6). Plain literals, booleans, and numbers do not corroborate
-          ownership. When corroboration fails, score non-reference leaves against other
-          stored rows: adopt only on a positive, strictly greater score, write verbatim
-          when outscored, and refuse on a tie or zero score (#8740 CR r6, r7).
-          Multiple candidates reject as ambiguous before writing.
+          *raw_list* with that key set, or at least two distinct reference variables
+          correspond (#8740 CR r5, r6, r9). Plain literals, booleans, numbers, and repeated
+          leaves referencing the same variable do not corroborate ownership. When corroboration
+          fails, score non-reference leaves against other stored rows: adopt only on a positive,
+          strictly greater score, write verbatim when outscored, and refuse on a tie or zero
+          score (#8740 CR r6, r7). Multiple candidates reject as ambiguous before writing.
     3. Unmatched submitted row is written as given (append). Unmatched raw row is removed.
-    4. Ambiguity (multiple raw candidates with differing raw text, or colliding submitted
-       rows disputing the same raw row, or non-unique match in a list with references) raises
-       ValueError before writing so the on-disk config remains intact.
+    4. Ambiguity (multiple raw candidates with differing raw text or reference-bearing
+       candidates, or colliding submitted rows disputing the same raw row, or non-unique
+       match in a list with references) raises ValueError before writing so the on-disk
+       config remains intact.
     5. Leaves within a matched row are resolved via _preserve_env_refs_in_object.
     """
     if not _object_has_env_ref(raw_list):
@@ -7647,37 +7651,15 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 result.append(new_item)
         return result
 
-    # Ladder step 2.b & 2.c: Row-level matching
-    def _matches_shape(raw_item, new_item) -> bool:
-        if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
-            return False
-        if set(raw_item.keys()) != set(new_item.keys()):
-            return False
-        has_non_ref_leaf = False
-        for k in raw_item:
-            if not _object_has_env_ref(raw_item[k]):
-                has_non_ref_leaf = True
-                if not _same_json_value(raw_item[k], new_item[k]):
-                    return False
-        return has_non_ref_leaf
-
-    def _edited_row_candidates(new_item) -> list[int]:
-        """Raw rows identical to *new_item* except at exactly one leaf (#8740 CR)."""
-        if not isinstance(new_item, dict):
-            return []
-        out = []
-        for raw_idx, raw_item in enumerate(raw_list):
-            if not isinstance(raw_item, dict) or set(raw_item.keys()) != set(new_item.keys()):
-                continue
-            differing = 0
-            for key in raw_item:
-                if not _same_json_value(new_item[key], _expand_env_vars(raw_item[key])):
-                    differing += 1
-                    if differing > 1:
-                        break
-            if differing == 1:
-                out.append(raw_idx)
-        return out
+    def _iter_all_leaves(obj, path=()):
+        if isinstance(obj, dict) and obj:
+            for k, v in obj.items():
+                yield from _iter_all_leaves(v, path + (k,))
+        elif isinstance(obj, list) and obj:
+            for idx, item in enumerate(obj):
+                yield from _iter_all_leaves(item, path + (idx,))
+        else:
+            yield path, obj
 
     def _iter_env_ref_leaves(obj, path=()):
         if isinstance(obj, dict):
@@ -7708,6 +7690,52 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 return False, None
         return True, curr
 
+    # Ladder step 2.b & 2.c: Row-level matching
+    def _matches_shape(raw_item, new_item) -> bool:
+        if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
+            return False
+        if set(raw_item.keys()) != set(new_item.keys()):
+            return False
+        has_non_ref_leaf = False
+        for path, raw_val in _iter_all_leaves(raw_item):
+            if not _has_env_ref(raw_val):
+                has_non_ref_leaf = True
+                exists, new_val = _get_at_path(new_item, path)
+                if not exists or not (
+                    _same_json_value(new_val, _expand_env_vars(raw_val))
+                    or _same_json_value(new_val, raw_val)
+                ):
+                    return False
+        for path, new_val in _iter_all_leaves(new_item):
+            exists, raw_val = _get_at_path(raw_item, path)
+            if not exists:
+                return False
+            if not _has_env_ref(raw_val):
+                if not (
+                    _same_json_value(new_val, _expand_env_vars(raw_val))
+                    or _same_json_value(new_val, raw_val)
+                ):
+                    return False
+        return has_non_ref_leaf
+
+    def _edited_row_candidates(new_item) -> list[int]:
+        """Raw rows identical to *new_item* except at exactly one leaf (#8740 CR)."""
+        if not isinstance(new_item, dict):
+            return []
+        out = []
+        for raw_idx, raw_item in enumerate(raw_list):
+            if not isinstance(raw_item, dict) or set(raw_item.keys()) != set(new_item.keys()):
+                continue
+            differing = 0
+            for key in raw_item:
+                if not _same_json_value(new_item[key], _expand_env_vars(raw_item[key])):
+                    differing += 1
+                    if differing > 1:
+                        break
+            if differing == 1:
+                out.append(raw_idx)
+        return out
+
     def _ref_preserved_candidates(new_item) -> list[int]:
         """Raw rows where every ${...} leaf expands to the submitted value at the same path."""
         if not isinstance(new_item, dict):
@@ -7723,7 +7751,8 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             for path, raw_val in ref_leaves:
                 exists, new_val = _get_at_path(new_item, path)
                 if not exists or not (
-                    _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+                    _same_json_value(new_val, _expand_env_vars(raw_val))
+                    or _same_json_value(new_val, raw_val)
                 ):
                     all_match = False
                     break
@@ -7746,7 +7775,8 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             for path, raw_val in ref_leaves:
                 exists, new_val = _get_at_path(new_item, path)
                 if exists and (
-                    _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+                    _same_json_value(new_val, _expand_env_vars(raw_val))
+                    or _same_json_value(new_val, raw_val)
                 ):
                     has_matching_ref = True
                     break
@@ -7754,27 +7784,17 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 out.append(raw_idx)
         return out
 
-    def _iter_all_leaves(obj, path=()):
-        if isinstance(obj, dict) and obj:
-            for k, v in obj.items():
-                yield from _iter_all_leaves(v, path + (k,))
-        elif isinstance(obj, list) and obj:
-            for idx, item in enumerate(obj):
-                yield from _iter_all_leaves(item, path + (idx,))
-        else:
-            yield path, obj
-
     def _corroborated_residue_match(raw_item, new_item) -> bool:
-        """True if *raw_item* has ownership evidence beyond a single ${...} leaf (#8740 CR r6, r8).
+        """True if *raw_item* has ownership evidence beyond a single ${...} leaf (#8740 CR r6, r8, r9).
 
         Adoption requires either that *raw_item* carries the submitted key set and is
         the sole row in *raw_list* with it (no other row could own or dispute the
-        bindings), or that at least one additional reference corresponds (>= 2
-        matching reference leaves of *raw_item* itself). A row whose key set differs
-        from the submission never corroborates through the single-row shortcut: the
-        key-set count only speaks about OTHER rows, so it cannot prove this one owns
-        the submitted row. Equal plain literals, booleans, and numbers must not
-        corroborate anything.
+        bindings), or that at least one distinct additional reference variable corresponds
+        (>= 2 distinct matching reference variables of *raw_item* itself). A row whose
+        key set differs from the submission never corroborates through the single-row
+        shortcut: the key-set count only speaks about OTHER rows, so it cannot prove
+        this one owns the submitted row. Equal plain literals, booleans, numbers, and
+        repeated leaves of the same variable must not corroborate anything.
         """
         if not (isinstance(raw_item, dict) and isinstance(new_item, dict)):
             return False
@@ -7786,14 +7806,20 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             )
             if same_keys_count == 1:
                 return True
-        matching_refs = 0
+        matching_ref_vars: set[str] = set()
         for path, raw_val in _iter_env_ref_leaves(raw_item):
             exists, new_val = _get_at_path(new_item, path)
             if exists and (
-                _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+                _same_json_value(new_val, _expand_env_vars(raw_val))
+                or _same_json_value(new_val, raw_val)
             ):
-                matching_refs += 1
-                if matching_refs >= 2:
+                vars_in_leaf = _AGENT_ENV_REF_RE.findall(raw_val)
+                if vars_in_leaf:
+                    for v in vars_in_leaf:
+                        matching_ref_vars.add(v[4:] if v.startswith("env:") else v)
+                else:
+                    matching_ref_vars.add(raw_val)
+                if len(matching_ref_vars) >= 2:
                     return True
         return False
 
@@ -7807,13 +7833,14 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
                 continue
             exists, new_val = _get_at_path(new_item, path)
             if exists and (
-                _same_json_value(new_val, _expand_env_vars(raw_val)) or new_val == raw_val
+                _same_json_value(new_val, _expand_env_vars(raw_val))
+                or _same_json_value(new_val, raw_val)
             ):
                 score += 1
         return score
 
     def _decide_candidate_adoption(raw_idx: int, new_item) -> int | None:
-        """Decide whether to adopt *raw_idx*, write verbatim (None), or refuse (#8740 CR r6, r8).
+        """Decide whether to adopt *raw_idx*, write verbatim (None), or refuse (#8740 CR r6, r8, r9).
 
         Adoption requires corroboration beyond matching a single ${...} leaf:
         either _corroborated_residue_match holds, both lists hold exactly one
@@ -7848,7 +7875,10 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
             if _same_json_value(new_item, _expand_env_vars(raw_item))
         ]
         if len(cands_2b) > 1:
-            raise ValueError(ambiguous_err)
+            if any(_object_has_env_ref(raw_list[r]) for r in cands_2b):
+                raise ValueError(ambiguous_err)
+            matches[new_idx] = None
+            continue
         if len(cands_2b) == 1:
             matches[new_idx] = cands_2b[0]
             continue
@@ -7862,7 +7892,7 @@ def _preserve_env_refs_in_list(raw_list: list, new_list: list) -> list:
         if len(cands_2c) > 1:
             raise ValueError(ambiguous_err)
         if len(cands_2c) == 1:
-            matches[new_idx] = cands_2c[0]
+            matches[new_idx] = _decide_candidate_adoption(cands_2c[0], new_item)
             continue
 
         # 2.d: a row edited at exactly one leaf, so a row made only of
