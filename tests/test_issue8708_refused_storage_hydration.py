@@ -24,6 +24,8 @@ undefined here so the test measures the panels.js hydration path only.
 import pathlib
 import subprocess
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
@@ -1027,3 +1029,180 @@ console.log('OK');
             "locale parity check failed\n--- stdout ---\n%s\n--- stderr ---\n%s"
             % (result.stdout, result.stderr)
         )
+
+
+# ── VOICE-SELECT-F1: native <select> option membership (#8749 fold) ─────────
+# FakeEl keeps whatever `.value` it is given.  A real <select> does not:
+# assigning a value no option carries leaves selectedIndex -1 and value '',
+# i.e. a blank control instead of its labelled default option.
+
+_NATIVE_SELECT_MODEL = r"""
+class NativeSelect extends FakeEl {
+  constructor(){ super('select'); }
+  get options(){
+    const out = [];
+    (this.children || []).forEach((c) => {
+      if(c && c.tagName === 'option') out.push(c);
+      else if(c && c.tagName === 'optgroup') {
+        (c.children || []).forEach((o) => { if(o && o.tagName === 'option') out.push(o); });
+      }
+    });
+    return out;
+  }
+  get selectedIndex(){ return this._selectedOpt ? this.options.indexOf(this._selectedOpt) : -1; }
+  set selectedIndex(i){ this._selectedOpt = this.options[i] || null; }
+  get value(){ return this._selectedOpt ? this._selectedOpt.value : ''; }
+  set value(v){ this._selectedOpt = this.options.find((o) => o.value === String(v)) || null; }
+  get innerHTML(){ return this._innerHTML || ''; }
+  set innerHTML(html){
+    this._innerHTML = html;
+    this.children = [];
+    this._selectedOpt = null;
+    const re = /<option value="([^"]*)"[^>]*>([^<]*)<\/option>/g;
+    let m;
+    while((m = re.exec(html))){
+      const opt = new FakeEl('option');
+      opt.value = m[1]; opt.textContent = m[2]; opt.parentElement = this;
+      this.children.push(opt);
+    }
+    this._selectedOpt = this.options[0] || null;  // display-size-1 select: first option
+  }
+  appendChild(node){
+    if(node) node.parentElement = this;
+    this.children.push(node);
+    // Selectedness algorithm: an inserted selected option wins; otherwise the
+    // first option is selected when nothing is.
+    const inserted = node && node.tagName === 'optgroup' ? (node.children || []) : [node];
+    const picked = inserted.filter((o) => o && o.tagName === 'option' && o._selected);
+    if(picked.length) this._selectedOpt = picked[picked.length - 1];
+    else if(!this._selectedOpt) this._selectedOpt = this.options[0] || null;
+    return node;
+  }
+}
+const voiceRow = new FakeEl('div');
+els.settingsTtsVoice = new NativeSelect();
+els.settingsTtsVoice.parentElement = voiceRow;
+const voiceSel = els.settingsTtsVoice;
+const selectedLabel = (sel) => (sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].textContent : null);
+const rowNote = () => voiceRow.children.find((c) => c && c.className === 'settings-unapplied-note') || null;
+window._voices = [
+  { name: 'Old Voice', lang: 'en-US' },
+  { name: 'New Voice', lang: 'en-US' },
+  { name: 'Third Voice', lang: 'en-US' },
+];
+function nativePayload(engine, voice){
+  return {
+    tts_enabled: true, tts_auto_read: false, tts_engine: engine, tts_voice: voice,
+    tts_rate: 1, tts_pitch: 1, voice_mode_button: false, voice_continuous: false,
+    voice_silence_ms: 1800, raw_audio_mode: false, notifications_enabled: false,
+    sidebar_density: 'compact', font_size: 'normal',
+    persisted_speech_keys: [
+      'tts_enabled', 'tts_auto_read', 'tts_engine', 'tts_voice', 'tts_rate',
+      'tts_pitch', 'voice_mode_button', 'voice_continuous', 'voice_silence_ms',
+      'raw_audio_mode',
+    ],
+  };
+}
+function hydrateNative(engine, voice){
+  store.set('hermes-tts-engine', engine);
+  store.set('hermes-tts-voice', voice);
+  const p = nativePayload(engine, voice);
+  __hydrateHead(p);
+  __hydrate(p);
+}
+"""
+
+
+def _run_native_select_scenario(body):
+    marker = "// 1. Conflicting obsolete cache in store"
+    harness_base = _REGRESSION_HARNESS[: _REGRESSION_HARNESS.index(marker)]
+    script = (
+        (harness_base + _NATIVE_SELECT_MODEL + "(async () => {\n" + body + "\n"
+         "  assert.deepStrictEqual(errors, []);\n"
+         "})().catch((e) => { process.stderr.write(String(e.stack || e)); process.exit(1); });\n")
+        .replace("/*__HELPERS__*/", _speech_helpers())
+        .replace("/*__PAYLOAD_HELPERS__*/", _payload_helpers())
+        .replace("/*__BOOT_RAW_AUDIO__*/", _boot_raw_audio_consumer())
+        .replace("/*__BOOT_SPEECH_MIRROR__*/", _boot_speech_mirror())
+        .replace("/*__BOOT_VOICE_MODE__*/", _boot_voice_mode_consumer())
+        .replace("/*__HYDRATION__*/", _speech_hydration())
+        .replace("/*__HEAD__*/", _font_size_hydration())
+    )
+    result = subprocess.run(["node", "-"], input=script, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise AssertionError(
+            "native select harness failed\n--- stdout ---\n%s\n--- stderr ---\n%s"
+            % (result.stdout, result.stderr)
+        )
+
+
+@pytest.mark.parametrize(
+    "engine,default_label",
+    [
+        ("openai", "OpenAI voice (server-configured)"),
+        ("elevenlabs", "Hermy — ElevenLabs (server-configured)"),
+        ("edge", "Default (Xiaoxiao)"),
+    ],
+)
+def test_engine_switch_from_browser_voice_keeps_labelled_default(engine, default_label):
+    """VOICE-SELECT-F1: writable storage, browser engine + 'Old Voice', switch the
+    engine: the rebuilt voice select has no 'Old Voice' option, so it must keep
+    its labelled default (index 0), not go blank (selectedIndex -1)."""
+    _run_native_select_scenario(r"""
+  REFUSE = false;
+  hydrateNative('browser', 'Old Voice');
+  assert.strictEqual(voiceSel.value, 'Old Voice');
+  assert.strictEqual(selectedLabel(voiceSel), 'Old Voice (en-US)');
+  els.settingsTtsEngine.value = '__ENGINE__';
+  els.settingsTtsEngine.onchange.call(els.settingsTtsEngine);
+  assert.strictEqual(store.get('hermes-tts-engine'), '__ENGINE__');
+  assert.strictEqual(voiceSel.selectedIndex, 0, 'voice select must keep its labelled default, not go blank');
+  assert.strictEqual(selectedLabel(voiceSel), '__LABEL__');
+  assert.strictEqual(voiceSel.value, '');
+  assert.strictEqual(rowNote(), null, 'writable storage must not show the unapplied note');
+  assert.strictEqual(pendingTimers.length, 1, 'engine change arms the autosave');
+  await pendingTimers.shift()();
+  const body = JSON.parse(posts[posts.length - 1].body);
+  assert.strictEqual(body.tts_engine, '__ENGINE__');
+  assert.strictEqual(body.tts_voice, '', 'the engine default voice is what gets saved');
+""".replace("__ENGINE__", engine).replace("__LABEL__", default_label))
+
+
+@pytest.mark.parametrize(
+    "engine,voice,label",
+    [
+        ("openai", "", "OpenAI voice (server-configured)"),
+        ("browser", "Third Voice", "Third Voice (en-US)"),
+        ("edge", "en-US-AriaNeural", "Aria (English, Female)"),
+    ],
+)
+def test_valid_saved_voice_is_selected_in_native_select(engine, voice, label):
+    """A saved voice the rebuilt list offers stays selected (edge options sit in optgroups)."""
+    _run_native_select_scenario(r"""
+  REFUSE = false;
+  hydrateNative('__ENGINE__', '__VOICE__');
+  assert.ok(voiceSel.selectedIndex >= 0, 'select must not be blank');
+  assert.strictEqual(voiceSel.value, '__VOICE__');
+  assert.strictEqual(selectedLabel(voiceSel), '__LABEL__');
+""".replace("__ENGINE__", engine).replace("__VOICE__", voice).replace("__LABEL__", label))
+
+
+def test_refused_voice_edit_keeps_note_and_selection_in_native_select():
+    """A refused mirror write keeps the row note and the desired voice across a
+    voiceschanged rebuild, and the desired voice is what gets saved."""
+    _run_native_select_scenario(r"""
+  REFUSE = false;
+  hydrateNative('browser', 'Old Voice');
+  assert.strictEqual(rowNote(), null);
+  REFUSE = true;
+  voiceSel.value = 'Third Voice';
+  voiceSel.onchange.call(voiceSel);
+  assert.strictEqual(store.get('hermes-tts-voice'), 'Old Voice', 'refused write leaves the cache');
+  assert.ok(rowNote() && rowNote().textContent.includes('settings_unapplied_note'), 'refused edit shows the row note');
+  voiceschangedListeners.forEach((fn) => fn());
+  assert.strictEqual(voiceSel.value, 'Third Voice', 'rebuild keeps the desired voice');
+  assert.strictEqual(selectedLabel(voiceSel), 'Third Voice (en-US)');
+  assert.ok(rowNote() && rowNote().style.display !== 'none', 'note stays visible after the rebuild');
+  await pendingTimers.shift()();
+  assert.strictEqual(JSON.parse(posts[posts.length - 1].body).tts_voice, 'Third Voice');
+""")

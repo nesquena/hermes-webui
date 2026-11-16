@@ -10950,7 +10950,9 @@ async function loadSettingsPanel(){
           ttsVoiceSel.appendChild(opt);
         });
       }
-      ttsVoiceSel.value=current;
+      // Sync only to an offered voice: a value with no option blanks the native
+      // select (selectedIndex -1) instead of keeping its labelled default.
+      if(Array.from(ttsVoiceSel.options||[]).some(o=>o.value===current)) ttsVoiceSel.value=current;
     };
     if(ttsVoiceSel&&'speechSynthesis' in window){
       window._populateTtsVoices();
