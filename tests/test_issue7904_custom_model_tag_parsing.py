@@ -26,7 +26,9 @@ from unittest.mock import patch
 
 import api.config as config
 from api.config import (
+    _configured_custom_provider_identity,
     _parse_provider_qualified_model_id,
+    canonical_model_provider_lane,
     model_with_provider_context,
     resolve_model_provider,
 )
@@ -171,6 +173,80 @@ def test_custom_providers_list_identity_still_wins():
             "my-model:latest",
             "custom:mybox",
         )
+
+
+def test_generic_custom_record_naming_the_slug_keeps_named_lane():
+    """Generic ``providers['custom']`` naming the slug outranks generic lane."""
+    cfg = {
+        "model": {"provider": "deepseek"},
+        "providers": {
+            "custom": {
+                "name": "omni",
+                "base_url": "https://omni.example/v1",
+                "models": ["latest"],
+            }
+        },
+    }
+    with patch.dict(config.cfg, cfg, clear=True):
+        assert _configured_custom_provider_identity("omni") is True
+        assert _parse_provider_qualified_model_id(
+            "@custom:omni:latest", generic_custom=True, config_obj=cfg
+        ) == ("latest", "custom:omni")
+        # Master parity: the named lane is what must be preserved; the endpoint
+        # stays None here exactly as on base (the connection bundle resolves it
+        # from the same selector authority downstream).
+        assert resolve_model_provider(
+            "@custom:omni:latest", session_provider="custom"
+        ) == ("latest", "custom:omni", None)
+        assert canonical_model_provider_lane(
+            "@custom:omni:latest", "custom"
+        ) == ("latest", "custom:omni")
+        # Negative control, same config: slug ghost
+        assert _configured_custom_provider_identity("ghost") is False
+        assert _parse_provider_qualified_model_id(
+            "@custom:ghost:latest", generic_custom=True, config_obj=cfg
+        ) == ("ghost:latest", "custom")
+
+
+def test_model_block_ownership_keeps_named_lane():
+    """``model:`` block naming the identity outranks generic lane."""
+    cfg = {
+        "model": {"provider": "custom:omni", "base_url": "https://omni.example/v1"},
+        "providers": {},
+    }
+    with patch.dict(config.cfg, cfg, clear=True):
+        assert _configured_custom_provider_identity("omni") is True
+        assert canonical_model_provider_lane(
+            "@custom:omni:latest", "custom"
+        ) == ("latest", "custom:omni")
+        assert resolve_model_provider(
+            "@custom:omni:latest", session_provider="custom"
+        ) == ("latest", "custom:omni", "https://omni.example/v1")
+        assert _parse_provider_qualified_model_id(
+            "@custom:omni:latest", generic_custom=True, config_obj=cfg
+        ) == ("latest", "custom:omni")
+        # Negative control: unconfigured slug ghost
+        assert _configured_custom_provider_identity("ghost") is False
+        assert _parse_provider_qualified_model_id(
+            "@custom:ghost:latest", generic_custom=True, config_obj=cfg
+        ) == ("ghost:latest", "custom")
+        assert canonical_model_provider_lane(
+            "@custom:ghost:latest", "custom"
+        ) == ("ghost:latest", "custom")
+
+    # Negative control: model.provider == "custom:ghost" with its own base_url
+    cfg_ghost = {
+        "model": {"provider": "custom:ghost", "base_url": "https://ghost.example/v1"},
+        "providers": {},
+    }
+    with patch.dict(config.cfg, cfg_ghost, clear=True):
+        assert _configured_custom_provider_identity("omni") is False
+        assert _parse_provider_qualified_model_id(
+            "@custom:omni:latest", generic_custom=True, config_obj=cfg_ghost
+        ) == ("omni:latest", "custom")
+        assert canonical_model_provider_lane(
+            "@custom:omni:latest", "custom"
+        ) == ("omni:latest", "custom")
 
 
 # ── CORE 2: a removed provider must fail visibly, never reroute silently ────

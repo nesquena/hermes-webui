@@ -3311,6 +3311,8 @@ def _configured_custom_provider_identity(
       * ``custom_providers: [{name: omni}]``   -> ``custom:omni``
       * ``providers: {custom:omni: {...}}``     -> the mapping key itself
       * ``providers: {omni: {...}}``            -> the bare mapping key
+      * ``providers: {custom: {name: omni, ...}}`` -> generic record naming the slug
+      * ``model: {provider: custom:omni, ...}`` -> model block naming the identity
       * endpoint-derived slugs already covered by ``custom:<host>:<port>``
 
     ``config_obj`` is the config the caller is resolving against (the session
@@ -3355,6 +3357,17 @@ def _configured_custom_provider_identity(
         except AmbiguousCustomProviderError:
             return True
         if _named_custom_provider_slug_for_provider(f"custom:{prefix}", source):
+            return True
+        pid = f"custom:{prefix}"
+        try:
+            rec, _, _, status = _select_custom_provider_record(
+                pid,
+                _custom_provider_slug_key(pid),
+                source,
+            )
+            if rec is not None and status not in CUSTOM_SELECTION_UNOWNED:
+                return True
+        except AmbiguousCustomProviderError:
             return True
     return False
 
