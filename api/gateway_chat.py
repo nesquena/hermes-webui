@@ -1026,9 +1026,11 @@ def _note_live_gateway_event(stream_id: str, event_name: str, event_payload: dic
             for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
                 if shared_tc.get("done"):
                     continue
-                if (
-                    event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
-                ) or shared_tc.get("name") == event_payload.get("name"):
+                tid = event_payload.get("tid")
+                # Ids decide when both sides carry one; the name only pairs id-less rows.
+                if (shared_tc.get("tid") == tid) if (tid and shared_tc.get("tid")) else (
+                    shared_tc.get("name") == event_payload.get("name")
+                ):
                     shared_tc["done"] = True
                     shared_tc["is_error"] = bool(event_payload.get("is_error"))
                     if event_payload.get("snippet"):

@@ -1949,6 +1949,30 @@ def test_gateway_tool_completion_keeps_output_in_snapshot_and_saved_record():
         STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
 
 
+def test_gateway_overlapping_same_tool_completions_pair_by_tool_call_id():
+    stream_id = "snap-overlap"
+    STREAM_LIVE_TOOL_CALLS[stream_id] = []
+    note = lambda ev: gateway_chat._note_live_gateway_event(stream_id, *_gateway_tool_progress_event(ev))
+    try:
+        for cid, cmd in (("c1", "ls"), ("c2", "pwd")):
+            note({"event": "tool.started", "tool": "terminal", "preview": cmd, "tool_call_id": cid})
+        note({"event": "tool.completed", "tool": "terminal", "preview": "a.txt", "tool_call_id": "c1"})
+        c1, c2 = STREAM_LIVE_TOOL_CALLS[stream_id]
+        assert c1["done"] and c1["snippet"] == "a.txt" and not c2["done"]
+        note({"event": "tool.completed", "tool": "terminal", "preview": "/root", "tool_call_id": "c2"})
+        assert c2["done"] and c2["snippet"] == "/root"
+        # An unknown id must not claim another call's row; id-less events still pair by name.
+        STREAM_LIVE_TOOL_CALLS[stream_id][:] = [{"name": "terminal", "args": {}, "done": False, "tid": "c3"}]
+        note({"event": "tool.completed", "tool": "terminal", "preview": "x", "tool_call_id": "zz"})
+        assert not STREAM_LIVE_TOOL_CALLS[stream_id][0]["done"]
+        STREAM_LIVE_TOOL_CALLS[stream_id][:] = [{"name": "terminal", "args": {}, "done": False}]
+        note({"event": "tool.completed", "tool": "terminal", "preview": "y", "tool_call_id": "c4"})
+        note({"event": "tool.completed", "tool": "terminal", "preview": "z"})
+        assert STREAM_LIVE_TOOL_CALLS[stream_id][0]["snippet"] == "y"
+    finally:
+        STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+
+
 def test_gateway_chat_401_hint_reports_the_session_profile_key_not_the_process_key(tmp_path, monkeypatch):
     """A 401 on a profile's request must be explained by the key that request carried.
 
