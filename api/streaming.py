@@ -19950,9 +19950,13 @@ def _cancel_stream_impl(
                                 _last_user = _m
                                 _last_user_idx = _idx
                                 break
-                        _already_persisted = _active_turn_has_checkpoint(
-                            _msgs_for_recovery, {'token': _cancel_turn_token})
-                        if _last_user is not None and not _already_persisted:
+                        # The token's own row owns the turn even when a later Steer row is the latest user row.
+                        _checkpoint_idx = next((i for i, m in enumerate(_msgs_for_recovery) if _active_turn_token_matches(
+                            m, {'token': _cancel_turn_token})), None)
+                        _already_persisted = _checkpoint_idx is not None
+                        if _already_persisted:
+                            _last_user_idx = _checkpoint_idx
+                        elif _last_user is not None:
                             _last_content = _last_user.get('content')
                             _last_ts = _last_user.get('timestamp') or 0
                             # Only treat as already-persisted if the latest user turn

@@ -1727,7 +1727,8 @@ async function send(){
         const _pcCmd=_pcMeta&&_pcMeta.command;
         if(_pc&&(_pcCmd&&_pcCmd.name||_pc.name)==='loop'&&typeof executeAgentCommand==='function'){
           // /loop status|pause|stop must reach the loop while its own wakeup turn runs.
-          $('msg').value='';autoResize();
+          // Clear only the captured command: a draft typed during the alias metadata wait stays.
+          if(String($('msg').value||'').trim()===text){$('msg').value='';autoResize();}
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           let _out;
           try{_out=await executeAgentCommand(text,_pcCmd||{name:'loop'});}catch(e){_out='Agent command error: '+(e&&e.message||e);}

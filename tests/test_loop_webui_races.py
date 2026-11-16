@@ -46,7 +46,8 @@ def test_pass_launches_nothing_after_a_concurrent_move_or_stop(tmp_path, monkeyp
 
     monkeypatch.setattr(agent, "goal_blocks_loop_tick", mid_pass)
     loops.run_due_loops()
-    assert started == [] and _loop(agent, loops).status == "cleared"  # the loop left in profile a is dropped
+    # nothing launches; an unlocked move only pauses (a real retag clears under the loop lock)
+    assert started == [] and _loop(agent, loops).status == ("paused" if mid_pass_writer == "retag" else "cleared")
 
 
 @requires_agent_modules
