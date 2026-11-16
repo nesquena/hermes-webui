@@ -15061,7 +15061,7 @@ function _renderActiveRunsForceOffer(target,res,resend){
         }
       }else{
         const confirmMessageKey='update_force_active_runs_message_agent_webui_only';
-        const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working. No Gateway run is active; the WebUI runs are saved as interrupted if you force the update.';
+        const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working. The WebUI runs are saved as interrupted if you force the update.';
         confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback);
       }
     }else{
