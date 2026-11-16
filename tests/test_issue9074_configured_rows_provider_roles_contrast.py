@@ -226,3 +226,38 @@ def test_light_theme_chip_text_meets_aa_contrast(role, skin):
     for state, row_bg in rows.items():
         ratio = _contrast(text, _over(tint, alpha, row_bg))
         assert ratio >= 4.5, f"{role} chip on a {state} row, {skin} light skin: {ratio:.2f}:1"
+
+
+def _dark_palettes():
+    """Each skin's dark palette. ``:root.dark`` ties ``:root[data-skin]`` on specificity and comes
+    first, so a skin's light block applies in dark mode too, under its own dark block."""
+    dark_root = re.search(r"^  :root\.dark \{(.*?)\}", STYLE_CSS, re.M | re.S).group(1)
+    dark = dict(LIGHT_PALETTES["default"], **_decls(dark_root))
+    overrides = {"default": {}}
+    for prefix in (r":root", r":root\.dark"):
+        pattern = prefix + r'\[data-skin="([a-z-]+)"\]\s*\{([^}]*)\}'
+        for match in re.finditer(pattern, STYLE_CSS):
+            overrides.setdefault(match.group(1), {}).update(_decls(match.group(2)))
+    return {name: dict(dark, **values) for name, values in overrides.items()}
+
+
+PALETTES = {("light", s): p for s, p in LIGHT_PALETTES.items()} | {("dark", s): p for s, p in _dark_palettes().items()}
+
+
+@pytest.mark.parametrize("mode,skin", sorted(PALETTES))
+def test_configured_provider_text_meets_aa_contrast(mode, skin):
+    assert len(PALETTES) >= 40 and ("dark", "nous") in PALETTES and ("dark", "zeus") in PALETTES
+    palette = PALETTES[mode, skin]
+    # The pill is the row's only visible provider; the last colour either of its classes declares wins.
+    value = re.findall(r"\.model-opt-provider(?:--configured)?\{(?:[^}]*;)?color:([^;}]+)", STYLE_CSS)[-1]
+    mix = re.fullmatch(r"color-mix\(in srgb,var\(--([a-z]+)\) (\d+)%,var\(--([a-z]+)\)\)", value)
+    a, pct, b = mix.groups() if mix else (re.fullmatch(r"var\(--([a-z]+)\)", value).group(1), "100", "text")
+    text = _over(_color(palette[a])[0], int(pct) / 100, _color(palette[b])[0])
+    pill, pill_alpha = _color(re.search(r"\.model-opt-provider\{[^}]*;background:(rgba\([^)]*\))", STYLE_CSS).group(1))
+    surface, _ = _color(palette["surface"])  # .model-dropdown background, composer and Settings alike
+    rows = {"plain": surface, "active": _over(*_color(palette["accent-bg"]), surface)}
+    for state in ("hover", "is-highlighted"):  # .model-opt:hover, keyboard .model-opt.is-highlighted
+        tint = re.search(rf"\.model-opt[.:]{state}\{{background:(rgba\([^)]*\))", STYLE_CSS).group(1)
+        rows[state] = _over(*_color(tint), surface)
+    ratios = {state: round(_contrast(text, _over(pill, pill_alpha, row_bg)), 3) for state, row_bg in rows.items()}
+    assert min(ratios.values()) >= 4.5, f"Configured provider text, {skin} {mode}: {ratios}"
