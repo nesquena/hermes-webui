@@ -11380,9 +11380,28 @@ function renderMd(raw){
   // (gate G9072-MANUFACTURED-TOKEN-AMPLIFICATION).
   const _kFlat=s.split('<code>').join('').split('</code>').join('').split('`').join('');
   const _kPre=_tokPrefix('\x00K',s,_kFlat);
-  const _kTok=new RegExp(_kPre+'(\\d+)\x00','g');
-  const _stashOuterCode=m=>{_code_outer_stash.push(m);return _kPre+(_code_outer_stash.length-1)+'\x00';};
-  s=s.replace(/`[^`\n]+`/g,m=>m.includes('![')?_stashOuterCode(m):m);
+  const _kTok=new RegExp('(K)?'+_kPre+'(\\d+)\x00','g');
+  // A caller text ending in a dangling `<lead>K<digits>` sits directly in
+  // front of where a placeholder is appended: the borrowed NUL lets the
+  // pair read as a marker for an index that was never stashed, and the
+  // restore then replaced the caller's tail plus the real marker's first
+  // byte with `undefined` (gate G9072-MARKER-INSERTION-BOUNDARY).  A
+  // placeholder written behind such a tail spells one extra K -- the lead
+  // it owns -- so the borrowed NUL no longer lands on a digit; the index
+  // is recorded so the restore can tell that guard K from a caller K, and
+  // a match whose index was never stashed is left untouched instead of
+  // being consumed.
+  const _kTailRe=new RegExp(_kPre+'\\d+$');
+  const _kGuardIdx=new Set();
+  const _stashOuterCode=(m,before)=>{
+    _code_outer_stash.push(m);
+    if(_kTailRe.test(before)){
+      _kGuardIdx.add(_code_outer_stash.length-1);
+      return 'K'+_kPre+(_code_outer_stash.length-1)+'\x00';
+    }
+    return _kPre+(_code_outer_stash.length-1)+'\x00';
+  };
+  s=s.replace(/`[^`\n]+`/g,(m,offset,str)=>m.includes('![')?_stashOuterCode(m,str.slice(0,offset)):m);
   // Complete rendered <code> elements are collected by one forward scan.  A
   // tempered pattern that looks for `![` between two lazy "not </code>" runs
   // rescans the remaining suffix for every image opener when a message opens a
@@ -11405,7 +11424,7 @@ function renderMd(raw){
       if(close<0){out+=s.slice(i);break;}
       const end=close+7;
       const span=s.slice(open,end);
-      out+=s.slice(i,open)+(span.includes('![')?_stashOuterCode(span):span);
+      out+=s.slice(i,open)+(span.includes('![')?_stashOuterCode(span,out+s.slice(i,open)):span);
       i=end;
     }
     s=out;
@@ -11416,10 +11435,11 @@ function renderMd(raw){
   // A stashed code span (only spans containing `![` reach the stash) or a raw
   // backtick span sitting in the alt is flattened to its text: alt is an
   // attribute value, so markup there would break the tag.
-  s=_mdImagePass(s,alt=>String(alt).replace(_kTok,(_,i)=>{
-    const span=String(_code_outer_stash[+i]);
-    if(/^<code\b/i.test(span))return span.replace(/^<code\b[^>]*>/i,'').replace(/<\/code>$/i,'');
-    return /^`/.test(span)?span.slice(1,-1):span;
+  s=_mdImagePass(s,alt=>String(alt).replace(_kTok,(m,k,i)=>{
+    const span=_code_outer_stash[+i];
+    if(span===undefined)return m;
+    const plain=/^<code\b/i.test(span)?span.replace(/^<code\b[^>]*>/i,'').replace(/<\/code>$/i,''):(/^`/.test(span)?span.slice(1,-1):span);
+    return k&&!_kGuardIdx.has(+i)?'K'+plain:plain;
   }).replace(/`([^`\n]+)`/g,(_,x)=>x));
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
@@ -11428,7 +11448,7 @@ function renderMd(raw){
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
   s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
-  s=s.replace(_kTok,(_,i)=>_code_outer_stash[+i]);
+  s=s.replace(_kTok,(m,k,i)=>{const span=_code_outer_stash[+i];return span===undefined?m:(k&&!_kGuardIdx.has(+i)?'K'+span:span);});
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
   s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);

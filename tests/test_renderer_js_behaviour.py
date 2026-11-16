@@ -1595,6 +1595,24 @@ class TestPlaceholderTokens:
         )
         assert "\x00K0\x00" in out, f"the message text must survive: {out!r}"
 
+    def test_marker_insertion_boundary_keeps_caller_prefix_and_code(self, driver_path):
+        # G9072-MARKER-INSERTION-BOUNDARY.  The caller text ends in a dangling
+        # NUL "K" digits tail sitting directly in front of a stashed code
+        # span: the appended placeholder lent its first NUL to that tail, the
+        # pair read as a marker for an index that was never stashed, and the
+        # restore replaced the caller's tail plus the real marker's first
+        # byte with "undefined".  A placeholder written behind such a tail
+        # now spells one extra K -- the lead it owns -- so the borrowed NUL
+        # no longer lands on a digit, and the restore only consumes indices
+        # it actually wrote; a match it does not own stays caller text.
+        message = self.CONTROLS + chr(0) + "K5" + "`![doc](/a.png)`"
+        out = _render(driver_path, message)
+        assert "undefined" not in out, f"an unstashed index was consumed: {out!r}"
+        assert "<code>![doc](/a.png)</code>" in out, (
+            f"the code span must still render: {out!r}"
+        )
+        assert chr(0) + "K5" in out, f"the caller prefix must survive: {out!r}"
+
     def test_manufactured_token_in_a_code_alt_stays_text(self, driver_path):
         # G9072-MANUFACTURED-TOKEN-AMPLIFICATION.  The outer K lead was chosen
         # against the message as it stood, and the image pass flattens a
