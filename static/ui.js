@@ -11022,7 +11022,15 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    // Autolink only the text between tags, as the block pass below does: set
+    // aside complete links, images and pre blocks and every other tag, then
+    // escape a raw tag left without its closing ">" on its line (the block
+    // pass escapes those too), so a URL in an attribute value stays as written.
+    const _tag_stash=[];
+    t=t.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<\/?[a-zA-Z][^>]*>)/g,m=>{_tag_stash.push(m);return `\x00T${_tag_stash.length-1}\x00`;});
+    t=t.replace(/<[a-zA-Z][\w:-]*[^>\n]*$/gm,tag=>esc(tag));
     t=_autolinkBareText(t);
+    t=t.replace(/\x00T(\d+)\x00/g,(_,i)=>_tag_stash[+i]);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -11423,12 +11431,16 @@ function renderMd(raw){
       run=>_autolinkBareRun(run),
     );
   }
-  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
+  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them, and
+  // every other tag (an opening <a> without its </a>, for one) so autolink
+  // never rewrites text inside a tag. Every tag here was rebuilt by _tag()
+  // above, with escaped, double-quoted attribute values, so it ends at its
+  // first ">"; raw tags without one were escaped to text just above.
   // Restoring scans every stash token (\x00, capital letters, digits, \x00) in
   // one left-to-right pass and puts back only these entries, so a run of text
   // between two tokens (math, code block, media) is never read as a token.
   const _alRestore=t=>t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='B'?_al_stash[+i]:m);
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(_alRestore(m));return `\x00B${_al_stash.length-1}\x00`;});
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<\/?[a-zA-Z][^>]*>)/g,m=>{_al_stash.push(_alRestore(m));return `\x00B${_al_stash.length-1}\x00`;});
   // Split high-confidence sentence boundaries while preserving valid CJK IRI
   // content, then rescan each plain-text trail so adjacent URLs all link.
   s=_autolinkBareText(s);
