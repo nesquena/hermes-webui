@@ -11146,6 +11146,17 @@ function renderMd(raw){
     const _hFlat=t.split('<code>').join('').split('</code>').join('').split('`').join('');
     const _hPre=_tokPrefix('\x00H',t,_hFlat);
     const _hTok=new RegExp(_hPre+'(\\d+)\x00','g');
+    // The C tokens get the same treatment.  A caller can type real NUL bytes,
+    // and a hardcoded `\x00C0\x00` shape would then match text the caller
+    // supplied rather than a span this pass stashed (gate
+    // G9072-CALLER-NUL-AMPLIFICATION): inside the image-alt resolver every
+    // forged token re-expanded into its own raw text, so 20 typed copies of
+    // `\x00C0\x00` doubled into 20^n tokens across the fixpoint rounds and
+    // froze the tab.  A prefix the line does not contain makes every
+    // resolution terminal — the only matchable tokens are the ones the
+    // backtick pass wrote below.
+    const _cPre=_tokPrefix('\x00C',t,_hFlat);
+    const _cTok=new RegExp(_cPre+'(\\d+)\x00','g');
     // One forward scan collects complete <code> elements.  A lazy
     // `[\s\S]*?</code>` rescans the rest of the line for every opener when a
     // message opens a code element and never closes it, which is quadratic
@@ -11169,7 +11180,7 @@ function renderMd(raw){
       }
       t=out;
     }
-    t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);_code_plain.push(x);return `\x00C${_code_stash.length-1}\x00`;});
+    t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);_code_plain.push(x);return _cPre+(_code_stash.length-1)+'\x00';});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
@@ -11189,7 +11200,7 @@ function renderMd(raw){
       // point; every resolution produces plain text, never markup.
       let a=String(alt);
       for(let n=0;n<8;n++){
-        const b=a.replace(_hTok,(_,i)=>_html_code_plain[+i]).replace(/\x00C(\d+)\x00/g,(_,i)=>_code_plain[+i]);
+        const b=a.replace(_hTok,(_,i)=>_html_code_plain[+i]).replace(_cTok,(_,i)=>_code_plain[+i]);
         if(b===a)break;
         a=b;
       }
@@ -11198,7 +11209,7 @@ function renderMd(raw){
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
-    t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
+    t=t.replace(_cTok,(_,i)=>_code_stash[+i]);
     t=t.replace(_hTok,(_,i)=>_html_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
@@ -11666,13 +11677,20 @@ function renderMd(raw){
       if(a.title&&cls.includes('msg-media-link')&&typeof _remoteImageAllowed==='function'
          &&typeof _remoteImageReason==='function'){
         const href=_safeAttrValue(a.href);
-        const tip=_safeAttrValue(a.title);
+        // _remoteImagePlaceholderHtml entity-encodes [ and ] in every tooltip
+        // it emits (image-reentry guard), so decode those two back before the
+        // shape check and the re-escape — the <img> branch right below does
+        // the same for alt.  Without the decode an alt like `a[b` surfaced as
+        // visible `a&#91;b` tooltip text, and the encoding blow-up (1 char →
+        // 5) pushed longer descriptions past the 120-char suffix check and
+        // silently dropped the tooltip altogether.
+        const tip=_safeAttrValue(a.title).replace(/&#91;/g,'[').replace(/&#93;/g,']');
         const reason=/^https?:\/\//i.test(href)&&!_remoteImageAllowed(href)?_remoteImageReason(href):'';
         // Exactly the shapes _remoteImagePlaceholderHtml emits: the reason, or the
         // reason followed by " (<alt>)".
         // The producer caps alt at 120 chars; re-admit no longer suffix than that.
         if(reason&&(tip===reason||(tip.startsWith(reason+' (')&&tip.endsWith(')')&&tip.length<=reason.length+123))){
-          tipAttr=` title="${esc(tip)}"`;
+          tipAttr=` title="${esc(tip).replace(/\[/g,'&#91;').replace(/\]/g,'&#93;')}"`;
         }
       }
       return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}${tipAttr}>`;

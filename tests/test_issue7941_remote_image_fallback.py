@@ -270,3 +270,26 @@ def test_sanitizer_rejects_overlong_alt_suffix_tooltip(driver):
     out = _run(driver, md={"ok": ok, "bad": bad})
     assert 'title="' in out["md:ok"]
     assert 'title="' not in out["md:bad"]
+
+
+def test_bracketed_alt_tooltip_survives_sanitizer_without_entity_leak(driver):
+    # The placeholder producer entity-encodes [ and ] in the tooltip; the
+    # anchor sanitizer used to re-escape that encoding into visible
+    # `a&#91;b` text instead of the intended `a[b`.
+    out = _run(driver, md={"md": f"![a[b]({EXFIL})"})
+    html = out["md:md"]
+    assert "&amp;#91;" not in html, html
+    assert 'title="Remote image not loaded automatically. Opens attacker.example in a new tab. (a&#91;b)"' in html
+
+
+def test_long_bracketed_alt_keeps_the_tooltip(driver):
+    # Encoding inflates brackets 1 char -> 5; the re-admission check compares
+    # the DECODED suffix against the producer's 120-char cap, so a 120-char
+    # bracket-heavy alt must still keep its tooltip.  (An alt may carry `[`
+    # but not `]` - an unpaired `]` kills the image opener before any of
+    # this runs - so the brackets here are openers only.)
+    alt = "x" * 110 + "[" * 10
+    out = _run(driver, md={"md": f"![{alt}]({EXFIL})"})
+    html = out["md:md"]
+    assert 'title="Remote image not loaded automatically. Opens attacker.example' in html, html[:400]
+    assert "&amp;#91;" not in html, html[:400]

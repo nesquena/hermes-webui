@@ -1771,3 +1771,48 @@ class TestRepeatedExampleMarkerTailGrowth:
         assert large_ms < 2000, (
             f"280 KB of repeated examples renders far too slowly: {large_ms:.1f} ms"
         )
+
+
+class TestCallerNulTokenAmplification9072Round4:
+    """Greptile round 4 on #9072: the image-alt resolver's fixpoint re-scanned
+    restored caller text, and the C token shape was hardcoded (`\x00C0\x00`),
+    so a message that TYPES real NUL bytes forged tokens the resolver kept
+    expanding: one backtick span holding 20 literal `\x00C0\x00` copies
+    resolved to 20 fresh matches per round, and eight rounds built 20^8
+    tokens out of a ~90-byte message, freezing or crashing the tab.  C tokens
+    now use the same caller-adaptive prefix the H tokens already carry
+    (checked against the text and its boundary-stripped form, mirroring the
+    K/H treatment), so the only matchable tokens are the ones this pass
+    wrote and every resolution is terminal."""
+
+    def test_typed_nul_c_tokens_resolve_once_and_stay_bounded(self, driver_path):
+        payload = '# ![``' + '\x00C0\x00' * 20 + '``](/one.png)'
+        out = _render(driver_path, payload)
+        # The caller's 20 literal copies survive verbatim; the resolver must
+        # not treat them as tokens of its own (each extra generation would
+        # multiply the count by 20 again).  On the pre-fix renderer this input
+        # blew up into 20^8 tokens and node died before returning.
+        assert out.count('\x00C0\x00') == 20, repr(out.replace('\x00', '<NUL>'))[:400]
+        assert '/one.png' in out, repr(out)[:400]
+
+    def test_typed_nul_c_tokens_stay_bounded_in_list_and_table(self, driver_path):
+        nl = chr(10)
+        payloads = [
+            '- ![``' + '\x00C0\x00' * 20 + '``](/one.png)',
+            '| h | f |' + nl + '| --- | --- |' + nl
+            + '| ![``' + '\x00C0\x00' * 20 + '``](/one.png) | z |',
+        ]
+        for md in payloads:
+            out = _render(driver_path, md)
+            assert out.count('\x00C0\x00') == 20, repr(out.replace('\x00', '<NUL>'))[:400]
+
+    def test_legit_nested_resolution_survives_the_adaptive_prefix(self, driver_path):
+        # The C prefix now shifts when the message carries the ordinary shape;
+        # a backtick span wrapping a rendered <code> element must still resolve
+        # the nested H token to plain text inside the image alt.
+        controls = ''.join(chr(c) for c in list(range(9)) + list(range(14, 32)))
+        out = _render(driver_path, controls + '![`![doc](/a.png)`](/one.png)')
+        m = re.search(r'alt="([^"]*)"', out)
+        assert m, repr(out)[:400]
+        assert chr(0) not in m.group(1), repr(out.replace(chr(0), '<NUL>'))[:400]
+        assert 'doc' in m.group(1), repr(out)[:400]
