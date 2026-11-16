@@ -1206,3 +1206,92 @@ def test_refused_voice_edit_keeps_note_and_selection_in_native_select():
   await pendingTimers.shift()();
   assert.strictEqual(JSON.parse(posts[posts.length - 1].body).tts_voice, 'Third Voice');
 """)
+
+
+# ── The unapplied note is its own line under the control's row ────────────
+# Appended to the control's flex parent, the note squeezed the phone slider
+# track (292 -> 129 px) and wrapped checkbox labels beside it. It now lives on
+# the row's `.settings-field`, as a block with no left margin.
+
+_NOTE_DOM = r"""
+const assert = require('assert');
+class El {
+  constructor(tag, cls){ this.tagName = tag; this.className = cls || ''; this.children = [];
+    this.parentElement = null; this.style = {}; this.dataset = {}; this.title = ''; this.textContent = ''; }
+  appendChild(node){ if(node.parentElement) node.remove(); node.parentElement = this; this.children.push(node); return node; }
+  remove(){ const p = this.parentElement; if(p){ p.children.splice(p.children.indexOf(this), 1); this.parentElement = null; } }
+  _has(sel){ return (' ' + this.className + ' ').includes(' ' + sel.replace(/^\./, '') + ' '); }
+  closest(sel){ let e = this; while(e){ if(e._has(sel)) return e; e = e.parentElement; } return null; }
+  querySelector(sel){
+    for(const k of this.children){ if(k._has(sel)) return k; const r = k.querySelector(sel); if(r) return r; }
+    return null;
+  }
+  querySelectorAll(sel){
+    const out = [];
+    for(const k of this.children){ if(k._has(sel)) out.push(k); out.push(...k.querySelectorAll(sel)); }
+    return out;
+  }
+}
+const document = { createElement(tag){ return new El(tag); } };
+const t = (key) => key;
+/*__NOTE_FUNCS__*/
+function checkboxRow(){
+  const field = new El('div', 'settings-field'), label = new El('label'), input = new El('input');
+  label.appendChild(input); label.appendChild(new El('span')); field.appendChild(label);
+  field.appendChild(new El('div'));  // description
+  return { field, control: input };
+}
+function selectRow(){
+  const field = new El('div', 'settings-field'), select = new El('select');
+  field.appendChild(new El('label')); field.appendChild(select); field.appendChild(new El('div'));
+  return { field, control: select };
+}
+function sliderRow(){
+  const field = new El('div', 'settings-field'), track = new El('div'), range = new El('input');
+  field.appendChild(new El('label')); track.appendChild(range); track.appendChild(new El('span'));
+  field.appendChild(track);
+  return { field, control: range };
+}
+const rows = { settingsTtsAutoRead: checkboxRow(), settingsVoiceModeEnabled: checkboxRow(),
+  settingsTtsVoice: selectRow(), settingsTtsRate: sliderRow(), settingsTtsPitch: sliderRow() };
+for(const [id, { field, control }] of Object.entries(rows).filter(([key]) => key === '__ONLY__')){
+  _setControlUnappliedNote(control, true);
+  _setControlUnappliedNote(control, true);
+  const notes = field.querySelectorAll('.settings-unapplied-note');
+  assert.strictEqual(notes.length, 1, id + ': exactly one note');
+  const note = notes[0];
+  assert.strictEqual(note.parentElement, field, id + ': the note must sit on the .settings-field row, not in '
+    + (note.parentElement && note.parentElement.tagName));
+  assert.strictEqual(field.children[field.children.length - 1], note, id + ': the note is the row\'s last line');
+  assert.strictEqual(note.style.display, 'block', id + ': the note is its own line');
+  assert.ok(!note.style.marginLeft, id + ': no left margin, flush with the description');
+  assert.strictEqual(note.style.marginTop, '4px', id);
+  assert.ok(note.textContent.includes('settings_unapplied_note') && control.title === 'settings_unapplied_note', id);
+  _setControlUnappliedNote(control, false);
+  assert.strictEqual(field.querySelectorAll('.settings-unapplied-note').length, 0, id + ': clearing removes the note');
+  assert.strictEqual(control.title, '', id + ': clearing removes the title');
+  assert.strictEqual(control.dataset.unapplied, undefined, id);
+  _setControlUnappliedNote(control, true);
+  assert.strictEqual(field.querySelectorAll('.settings-unapplied-note').length, 1, id + ': re-shown once');
+  process.stdout.write('CHECKED ' + id);
+}
+"""
+
+
+def _note_functions():
+    start_marker = (
+        "function _unappliedNoteHost" if "function _unappliedNoteHost" in PANELS_JS
+        else "function _findUnappliedSpeechNote"
+    )
+    return _slice(start_marker, "function _speechValuesEqual")
+
+
+@pytest.mark.parametrize(
+    "control",
+    ["settingsTtsAutoRead", "settingsVoiceModeEnabled", "settingsTtsVoice", "settingsTtsRate", "settingsTtsPitch"],
+)
+def test_unapplied_note_is_its_own_line_on_the_settings_field_row(control):
+    script = _NOTE_DOM.replace("/*__NOTE_FUNCS__*/", _note_functions()).replace("__ONLY__", control)
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "CHECKED " + control, result.stdout

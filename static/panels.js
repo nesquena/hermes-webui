@@ -9727,10 +9727,18 @@ function _syncSpeechPreferenceCache(settingKey,value){
   if(storageKey) return _writeSettingsStorageMirror(storageKey,value);
 }
 
+// The note is its own line under the control's whole .settings-field row:
+// inside the control's flex parent it squeezed a slider track or a checkbox label.
+function _unappliedNoteHost(controlEl){
+  const row=typeof controlEl.closest==='function'?controlEl.closest('.settings-field'):null;
+  return (row&&row!==controlEl&&typeof row.appendChild==='function')?row:controlEl.parentElement;
+}
+
 function _findUnappliedSpeechNote(controlEl){
   if(!controlEl) return null;
-  if(controlEl.parentElement && typeof controlEl.parentElement.querySelector==='function'){
-    const found=controlEl.parentElement.querySelector('.settings-unapplied-note');
+  const host=_unappliedNoteHost(controlEl);
+  if(host && typeof host.querySelector==='function'){
+    const found=host.querySelector('.settings-unapplied-note');
     if(found) return found;
   }
   // `children` is an HTMLCollection in the browser, so avoid Array#find.
@@ -9750,13 +9758,14 @@ function _setControlUnappliedNote(controlEl,isUnapplied){
     controlEl.title=noteText;
     if(controlEl.dataset) controlEl.dataset.unapplied='true';
     let note=_findUnappliedSpeechNote(controlEl);
-    if(!note && controlEl.parentElement && typeof controlEl.parentElement.appendChild==='function'){
+    const host=_unappliedNoteHost(controlEl);
+    if(!note && host && typeof host.appendChild==='function'){
       note=document.createElement('span');
       note.className='settings-unapplied-note';
       note.style.fontSize='11px';
       note.style.color='var(--muted)';
-      note.style.marginLeft='6px';
-      controlEl.parentElement.appendChild(note);
+      note.style.marginTop='4px';
+      host.appendChild(note);
     }
     if(!note && typeof controlEl.appendChild==='function'){
       // Inputs cannot take children; keep the title/dataset note if the row is
@@ -9770,7 +9779,7 @@ function _setControlUnappliedNote(controlEl,isUnapplied){
     if(note){
       note.textContent='('+noteText+')';
       if(note.dataset) note.dataset.unapplied='true';
-      if(note.style) note.style.display='';
+      if(note.style) note.style.display='block';
     }
     controlEl.unappliedNote=note;
   }else{
