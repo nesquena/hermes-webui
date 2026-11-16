@@ -10638,7 +10638,9 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
 }
 
 function renderMd(raw){
-  let s=(raw||'').replace(/\x00/g,'&#0;').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  // Raw NULs become U+FFFD (what a browser shows for a NUL in text) before any
+  // stash token is generated, so input text can never spell a token.
+  let s=(raw||'').replace(/\x00/g,'\uFFFD').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
@@ -10771,9 +10773,15 @@ function renderMd(raw){
       // For JSON/YAML blocks, add tree-view placeholder with raw data
       } else if(lang==='json'||lang==='yaml'){
         const rawCode=esc(code.replace(/\n$/,''));
+        // data-raw holds the fence's source text. MEDIA references were stashed
+        // before this pass, so put their source text back here (the stash is
+        // restored after this attribute is built) and drop any other stash token.
+        const rawSrc=code.replace(/\n$/,'')
+          .replace(/\x00D(\d+)\x00/g,(_,i)=>decode('MEDIA:'+media_stash[+i]))
+          .replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'');
         // Encode newlines as &#10; to prevent HTML attribute normalization
         // (browsers collapse \n to spaces inside attribute values).
-        const rawAttr=rawCode.replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
+        const rawAttr=esc(rawSrc).replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
         const blockId='tree-'+Math.random().toString(36).slice(2,10);
         _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawAttr}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
       // CSV blocks → render as styled table
@@ -11397,8 +11405,10 @@ function renderMd(raw){
     return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>`;
   }
   function _autolinkBareText(text){
+    // A stash token ends the URL: its content is restored after this pass and
+    // belongs after the link, not inside the rebuilt href.
     return String(text||'').replace(
-      /(https?:\/\/[^\s<>"')\]\uFF09]+)/g,
+      /(https?:\/\/[^\s<>"')\]\uFF09\x00]+)/g,
       run=>_autolinkBareRun(run),
     );
   }

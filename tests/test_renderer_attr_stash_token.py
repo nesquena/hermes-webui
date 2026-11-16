@@ -126,3 +126,112 @@ def test_media_reference_with_encoded_nul_renders_nothing(tmp_path_factory):
         assert results[case]["html"] == "", (case, results[case])
     ordinary = _run_node_driver(_SETTLED_DRIVER, UI_JS_PATH, ["file:///notes/a%20b.png"], tmp_path_factory)
     assert ordinary["file:///notes/a%20b.png"]["pathParam"] == "/notes/a b.png", ordinary
+
+
+# ── Autolink and code-tree attributes are built from source text only ────────
+# The autolink pass runs while math, media and link stashes are still tokens,
+# and a JSON/YAML code tree builds its raw-text attribute while MEDIA references
+# are still tokens. Each token is restored after the attribute is built, so the
+# rebuilt attribute must never hold one.
+
+
+class _StartTags(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, [(name, value or "") for name, value in attrs]))
+
+
+def _plain_attribute_tags(html):
+    """Every attribute value is plain text: no stash token, no restored markup."""
+    assert "\x00" not in html, html
+    parser = _StartTags()
+    parser.feed(html)
+    for tag, attrs in parser.tags:
+        for name, value in attrs:
+            assert name in _ALLOWED_ATTRIBUTES, (tag, name, html)
+            assert "<" not in value, (tag, name, html)
+    return parser.tags
+
+
+_ODATA_URL = "https://svc.example/People?$top=2&$skip=1"
+_ODATA_HTML = (
+    '<a href="https://svc.example/People" target="_blank" rel="noopener">https://svc.example/People</a>'
+    '?<span class="katex-inline" data-katex="inline">top=2&amp;</span>skip=1'
+)
+
+_AUTOLINK_BEFORE_TOKEN = {
+    "math-token-in-paragraph": (_ODATA_URL, "<p>" + _ODATA_HTML + "</p>"),
+    "math-token-in-list-item": ("- " + _ODATA_URL, "<ul><li>" + _ODATA_HTML + "</li></ul>"),
+    "link-right-after-url": (
+        "https://example.com[x](https://example.org/y)",
+        '<p><a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>'
+        '<a href="https://example.org/y" target="_blank" rel="noopener">x</a></p>',
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "markdown,expected", list(_AUTOLINK_BEFORE_TOKEN.values()), ids=list(_AUTOLINK_BEFORE_TOKEN)
+)
+def test_autolink_href_ends_before_a_stash_token(driver_path, markdown, expected):  # noqa: F811
+    html = _render(driver_path, markdown)
+    _plain_attribute_tags(html)
+    assert html == expected, html
+
+
+def test_bare_url_then_media_reference_keeps_the_media_after_the_link(driver_path):  # noqa: F811
+    link = '<a href="https://example.com/a" target="_blank" rel="noopener">https://example.com/a</a>'
+    image = '<img class="msg-media-img" src="api/media?path=%2Ftmp%2Fa.png" alt="image" loading="lazy">'
+    for separator in (" ", ""):
+        html = _render(driver_path, "https://example.com/a" + separator + "MEDIA:/tmp/a.png")
+        _plain_attribute_tags(html)
+        assert html == "<p>" + link + separator + image + "</p>", (separator, html)
+
+
+_CODE_TREE_SOURCES = {
+    "json": '{\n  "img": "MEDIA:/tmp/a.png",\n  "n": 1\n}',
+    "yaml": "img: MEDIA:/tmp/a.png\nn: 1",
+}
+
+
+@pytest.mark.parametrize("lang", list(_CODE_TREE_SOURCES))
+def test_code_tree_raw_attribute_holds_the_fence_source(driver_path, lang):  # noqa: F811
+    source = _CODE_TREE_SOURCES[lang]
+    html = _render(driver_path, "```" + lang + "\n" + source + "\n```")
+    tags = _plain_attribute_tags(html)
+    wraps = [attrs for tag, attrs in tags if tag == "div" and ("class", "code-tree-wrap") in attrs]
+    assert len(wraps) == 1, html
+    attrs = dict(wraps[0])
+    assert [name for name, _value in wraps[0]] == ["class", "data-raw", "data-lang", "id"], html
+    assert attrs["data-raw"] == source, html
+    assert attrs["data-lang"] == lang, html
+    assert '<pre class="tree-raw-view"><code class="language-' + lang + '">' in html, html
+
+
+# ── A raw NUL renders as U+FFFD, never as entity text ─────────────────────────
+
+_RAW_NUL = {
+    "plain-text": ("a\x00b", "<p>a\ufffdb</p>"),
+    "inline-code": ("`a\x00b`", "<p><code>a\ufffdb</code></p>"),
+    "fenced-code": ("```\na\x00b\n```", "<pre><code>a\ufffdb</code></pre>"),
+}
+
+
+@pytest.mark.parametrize("markdown,expected", list(_RAW_NUL.values()), ids=list(_RAW_NUL))
+def test_raw_nul_renders_as_replacement_character(driver_path, markdown, expected):  # noqa: F811
+    html = _render(driver_path, markdown)
+    assert html == expected, html
+    assert "#0;" not in html, html
+
+
+def test_raw_nul_in_code_tree_source_renders_as_replacement_character(driver_path):  # noqa: F811
+    html = _render(driver_path, '```json\n{"a":"x\x00y"}\n```')
+    assert "#0;" not in html, html
+    tags = _plain_attribute_tags(html)
+    wraps = [attrs for tag, attrs in tags if tag == "div" and ("class", "code-tree-wrap") in attrs]
+    assert len(wraps) == 1, html
+    assert dict(wraps[0])["data-raw"] == '{"a":"x\ufffdy"}', html
+    assert '<code class="language-json">{&quot;a&quot;:&quot;x\ufffdy&quot;}</code>' in html, html
