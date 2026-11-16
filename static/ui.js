@@ -11391,11 +11391,42 @@ function renderMd(raw){
   // is recorded so the restore can tell that guard K from a caller K, and
   // a match whose index was never stashed is left untouched instead of
   // being consumed.
-  const _kTailRe=new RegExp(_kPre+'\\d+$');
+  // Does `before` end with `_kPre` followed by at least one digit?  The
+  // regex probe that answered this before (`new RegExp(_kPre+'\\d+$')`)
+  // walked the whole growing prefix once per stashed span, so replies built
+  // from repeated examples went quadratic: 560 KB of `` `![x]` `` took ~46 s
+  // here against ~0.2 s without the probe, all on the browser main thread
+  // (gate G9072-MARKER-TAIL-QUADRATIC).  A match leaves only digits after
+  // the `_kPre` occurrence, and `_kPre` opens with a non-digit lead, so that
+  // occurrence must end within `_kPre.length-1` characters of the maximal
+  // trailing digit run: walk that run back once, then compare the `_kPre`
+  // characters at each candidate end.  Every placeholder ends in the NUL
+  // lead, which caps each digit run at the raw gap since the previous
+  // placeholder, so the walk work across a render stays linear in the
+  // message length.
+  const _kTailAt=before=>{
+    const L=before.length,preLen=_kPre.length;
+    if(L===0||preLen>L)return false;
+    let d=0;
+    while(d<L){
+      const c=before.charCodeAt(L-1-d);
+      if(c<48||c>57)break;
+      d++;
+    }
+    if(d===0)return false;
+    for(let t=Math.min(L-d-1+preLen,L-1);t>=Math.max(L-d,preLen);t--){
+      let ok=true;
+      for(let k=0;k<preLen;k++){
+        if(before.charCodeAt(t-preLen+k)!==_kPre.charCodeAt(k)){ok=false;break;}
+      }
+      if(ok)return true;
+    }
+    return false;
+  };
   const _kGuardIdx=new Set();
   const _stashOuterCode=(m,before)=>{
     _code_outer_stash.push(m);
-    if(_kTailRe.test(before)){
+    if(_kTailAt(before)){
       _kGuardIdx.add(_code_outer_stash.length-1);
       return 'K'+_kPre+(_code_outer_stash.length-1)+'\x00';
     }
