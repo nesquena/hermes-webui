@@ -85,7 +85,7 @@ function makeEl(id) {
   };
 }
 
-function createTab(server, name, overrides = null) {
+function createTab(server, name, overrides = null, extraSrc = []) {
   const sessionsJs = readStatic('sessions.js');
   const messagesJs = readStatic('messages.js');
   const commandsJs = readStatic('commands.js');
@@ -141,6 +141,7 @@ function createTab(server, name, overrides = null) {
     'function __state(){ const pill=$("yoloPill"); return {sid: S.session && S.session.session_id, yolo: _yoloEnabled,',
     '  pillVisible: pill.style.display !== "none", pillSession: pill.getAttribute("data-yolo-session"),',
     '  gen: _loadSessionGeneration, loading: _loadingSessionId}; }',
+    ...extraSrc,
   ].join('\n');
   vm.runInContext(src, ctx, { filename: name + '-harness.js' });
   return {
@@ -167,6 +168,9 @@ function createServer(sessions) {
         const sid = u.searchParams.get('session_id');
         const meta = server.sessions[sid] || {};
         return { session: { session_id: sid, title: sid, message_count: 0, messages: [], active_stream_id: meta.active_stream_id || null } };
+      }
+      if (u.pathname === '/api/session/new' && method === 'POST') {
+        return { session: { session_id: server.newSessionId || 'N', title: 'Untitled', workspace: body.workspace, messages: [] } };
       }
       if (u.pathname === '/api/session/yolo' && method === 'GET') {
         if (server.yoloGetBody) return server.yoloGetBody;
@@ -209,6 +213,88 @@ function visibleCardOverrides(server, sid) {
       return true;
     };
   };
+}
+
+// The four blank-page entry points that mint a session with POST
+// /api/session/new and install it into S.session without loadSession().
+const BLANK_PAGE_INSTALLERS = [
+  ['panels.js', 'promptWorkspacePath'], ['panels.js', 'switchToWorkspace'],
+  ['ui.js', 'promptNewFile'], ['ui.js', 'promptNewFolder'],
+];
+function blankPageInstallerSrc() {
+  return BLANK_PAGE_INSTALLERS.map(([file, fn]) => extractFunction(readStatic(file), fn));
+}
+const blankPageStubs = (base) => {
+  base.showPromptDialog = async () => null; // the user cancels the follow-up prompt
+  base.renderSessionList = async () => {};
+  base._workspaceCreateTargetLabel = () => '';
+};
+
+// A pill painted for A stays on screen when the open session is dropped
+// without a re-render (the delete paths set S.session=null); a blank-page
+// action then installs a brand-new session N (server YOLO off).
+async function blankPageInstallKeepsStalePill(fn) {
+  const server = createServer({ A: {} });
+  const tab = createTab(server, 'tab1', blankPageStubs, blankPageInstallerSrc());
+  await tab.loadSession('A');
+  await tick();
+  await tab.cmdYolo();
+  await tick();
+  check(tab.state().pillVisible && server.yolo.A === true, 'precondition: /yolo enabled A and shows its pill', tab.state());
+  tab.ctx.S.session = null;
+  tab.ctx.S._profileDefaultWorkspace = '/ws';
+  // switchToWorkspace continues into a workspace mutation after the install;
+  // a busy flag makes it stop right after the install with a toast.
+  if (fn === 'switchToWorkspace') tab.ctx.S.busy = true;
+  await vm.runInContext(fn, tab.ctx)();
+  await tick();
+  const st = tab.state();
+  const out = { entry: fn, state: st, server: { ...server.yolo }, calls: tab.calls.map(c => c.method + ' ' + c.path) };
+  check(st.sid === 'N', `precondition: ${fn} installed the new session`, out);
+  check(!st.pillVisible && st.yolo === false && !server.yolo.N,
+    `${fn} installed N (server yolo[N]=false) but pill visible=${st.pillVisible} (painted for ${st.pillSession}), mirror=${st.yolo}`, out);
+  return out;
+}
+
+// The stream's real `apperror` listener, attached to a fake EventSource for
+// stream `streamId` of session `activeSid`. Closure state is declared here;
+// rendering/anchor helpers are stubbed by apperrorStubs.
+function apperrorAttachSrc() {
+  const src = readStatic('messages.js');
+  const start = src.indexOf("source.addEventListener('apperror',e=>{");
+  if (start < 0) throw new Error('apperror listener not found');
+  let idx = start;
+  for (;;) {
+    idx = src.indexOf('});', idx + 1);
+    if (idx < 0) throw new Error('no parseable end for the apperror listener');
+    const slice = src.slice(start, idx + 3);
+    if (parses(slice)) {
+      return 'function __attachApperror(source, activeSid, streamId){\n' +
+        '  let assistantText=""; let _terminalStateReached=false; let _persistTimer=null;\n' +
+        '  let _streamFinalized=false; let _anchorRegistry=null;\n' + slice + '\n}';
+    }
+  }
+}
+const APPERROR_NOOPS = [
+  '_clearStreamEndRecovery', '_steerSettleTerminal', '_cancelThrottledSnapshotTimer', '_clearAnchorProseIncrementalNode',
+  '_cancelAnimationFramePendingStreamRender', '_streamFadeCleanupReduceMotionListener', '_smdEndParser',
+  'finalizeThinkingCard', '_clearOwnerInflightState', '_clearStreamHidden', '_clearStreamNotificationBackground',
+  '_clearApprovalForOwner', '_clearClarifyForOwner', '_flushReasoningToAnchor', '_applyToAnchor',
+  '_scheduleAnchorRegistryCleanup', 'removeThinking', 'clearCompressionUi', '_attachProjectedAnchorSceneToLastAssistant',
+  '_markSessionViewed', '_setActivePaneIdleIfOwner', 'renderSessionList', '_dispatchExtensionTurnLifecycle',
+  '_retrySettledAnchorScene', 'trackBackgroundError',
+];
+const apperrorStubs = (base) => {
+  for (const n of APPERROR_NOOPS) base[n] = function () { return undefined; };
+  base._bailOutOfTerminalEventsFromStaleStream = () => false;
+  base._streamRecoveryControlMessageText = () => false;
+  base._carryForwardEphemeralTurnFields = (prev, next) => next;
+  base._filterRecoveryControlMessages = m => m;
+  base._settledAnchorRetryOwnerKey = () => null;
+  base._restoreSettledSession = async () => false;
+};
+function fakeEventSource() {
+  return { readyState: 1, listeners: {}, close() { this.readyState = 2; }, addEventListener(ev, fn) { this.listeners[ev] = fn; } };
 }
 
 const scenarios = {
@@ -614,6 +700,72 @@ const scenarios = {
     }
     check(Object.values(out).every(st => st.pillVisible && st.yolo === true),
       `malformed re-reads hid the pill while server yolo[B]=true: ${JSON.stringify(out)}`, out);
+    return out;
+  },
+
+  // (k1-k4) a blank-page action mints a new session without loadSession():
+  // the previous session's ON pill must not stay on screen for it.
+  async k1_prompt_workspace_path_install_keeps_stale_pill() { return blankPageInstallKeepsStalePill('promptWorkspacePath'); },
+  async k2_switch_to_workspace_install_keeps_stale_pill() { return blankPageInstallKeepsStalePill('switchToWorkspace'); },
+  async k3_prompt_new_file_install_keeps_stale_pill() { return blankPageInstallKeepsStalePill('promptNewFile'); },
+  async k4_prompt_new_folder_install_keeps_stale_pill() { return blankPageInstallKeepsStalePill('promptNewFolder'); },
+
+  // (k5) an `apperror` after a compression rotation installs the continuation
+  // session N (an EXISTING session) from d.session. A's pill must go at once,
+  // and N's own server flag must be read back.
+  async k5_apperror_rotation_keeps_stale_pill_and_skips_read() {
+    const server = createServer({ A: { active_stream_id: 'stream-a' }, N: {} });
+    server.yolo.N = true;
+    const tab = createTab(server, 'tab1', apperrorStubs, [apperrorAttachSrc()]);
+    await tab.loadSession('A');
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    check(tab.state().pillVisible && server.yolo.A === true, 'precondition: /yolo enabled A and shows its pill', tab.state());
+    const source = fakeEventSource();
+    vm.runInContext('__attachApperror', tab.ctx)(source, 'A', 'stream-a');
+    server.shouldHold = yoloGet('N');
+    source.listeners.apperror({ data: JSON.stringify({
+      type: 'error', message: 'provider failed', session_id: 'N', old_session_id: 'A', new_session_id: 'N',
+      continuation_session_id: 'N', session: { session_id: 'N', title: 'N', messages: [] },
+    }) });
+    await tick();
+    const during = tab.state();
+    const out = { while_read_in_flight: during, reads_of_N: tab.held.length, server: { ...server.yolo } };
+    check(during.sid === 'N', 'precondition: apperror installed the continuation N', out);
+    check(!during.pillVisible || during.pillSession === 'N',
+      `after rotation to N the pill painted for ${during.pillSession} is still visible`, out);
+    check(tab.held.length === 1, `rotation to N did not read N's YOLO flag (server yolo[N]=true)`, out);
+    tab.held.shift().release();
+    await tick();
+    out.after_read = tab.state();
+    check(out.after_read.pillVisible && out.after_read.pillSession === 'N' && out.after_read.yolo === true,
+      `N's flag (server yolo[N]=true) not shown after the read: ${JSON.stringify(out.after_read)}`, out);
+    return out;
+  },
+
+  // Control: an `apperror` for the open session itself (no rotation) keeps
+  // its YOLO view and issues no extra YOLO read.
+  async control_apperror_same_session_keeps_view_without_read() {
+    const server = createServer({ A: { active_stream_id: 'stream-a' } });
+    const tab = createTab(server, 'tab1', apperrorStubs, [apperrorAttachSrc()]);
+    await tab.loadSession('A');
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    check(tab.state().pillVisible && server.yolo.A === true, 'precondition: /yolo enabled A and shows its pill', tab.state());
+    const source = fakeEventSource();
+    vm.runInContext('__attachApperror', tab.ctx)(source, 'A', 'stream-a');
+    const before = tab.calls.length;
+    source.listeners.apperror({ data: JSON.stringify({
+      type: 'error', message: 'provider failed', session_id: 'A', session: { session_id: 'A', title: 'A', messages: [] },
+    }) });
+    await tick();
+    const st = tab.state();
+    const reads = tab.calls.slice(before).filter(c => c.path.startsWith('/api/session/yolo'));
+    const out = { state: st, yolo_requests_after_error: reads };
+    check(st.sid === 'A' && st.pillVisible && st.pillSession === 'A' && reads.length === 0,
+      `same-session apperror: pill visible=${st.pillVisible}, yolo requests=${JSON.stringify(reads)}`, out);
     return out;
   },
 

@@ -7493,6 +7493,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
+            // #9101: a compression rotation installs the continuation (an
+            // existing session): drop the old id's YOLO view, read the new one.
+            if(d.session.session_id&&d.session.session_id!==currentSid&&typeof _applyYoloState==='function'){_applyYoloState(d.session.session_id,false,{reset:true});_fetchYoloState(d.session.session_id);}
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
             // Same persist-before-offset trap as settle/cancel: refresh paging

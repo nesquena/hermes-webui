@@ -50,6 +50,11 @@ SCENARIOS = [
     "i2_yolo_while_first_post_in_flight_desyncs_pill",
     "j_malformed_read_paints_on_pill",
     "j2_malformed_read_hides_on_pill",
+    "k1_prompt_workspace_path_install_keeps_stale_pill",
+    "k2_switch_to_workspace_install_keeps_stale_pill",
+    "k3_prompt_new_file_install_keeps_stale_pill",
+    "k4_prompt_new_folder_install_keeps_stale_pill",
+    "k5_apperror_rotation_keeps_stale_pill_and_skips_read",
 ]
 
 
@@ -78,6 +83,8 @@ def _run(name):
         "control_failed_pill_disable_keeps_authoritative_state",
         # The /yolo in-flight guard is released after a failure or a stale read.
         "control_yolo_guard_released_after_failure_and_stale_switch",
+        # A same-session apperror keeps the view and makes no extra YOLO read.
+        "control_apperror_same_session_keeps_view_without_read",
     ],
 )
 def test_controls(name):
