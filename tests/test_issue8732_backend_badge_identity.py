@@ -853,6 +853,60 @@ FORWARD_SERVED = ["anthropic/claude-sonnet-4", "openai/gpt-4o"]
 @pytest.mark.parametrize("live", [False, True], ids=["static", "live"])
 @pytest.mark.parametrize("active", [False, True], ids=["inactive-provider", "active-provider"])
 @pytest.mark.parametrize("provider", ["relay", "custom:relay"])
+@pytest.mark.parametrize("target,sibling", [
+    ("codex/gpt-6.1-sol", "any/gpt-6.1-sol"),
+    ("anthropic/claude-sonnet-4", "bedrock/claude-sonnet-4"),
+])
+@pytest.mark.parametrize("exact", [False, True], ids=["other-vendor", "exact-control"])
+def test_production_catalog_preserves_vendor_qualified_fallback(
+    monkeypatch, tmp_path, live, active, provider, target, sibling, exact,
+):
+    # The 16 November gate pins a missing vendor-qualified fallback beside a
+    # different vendor's spelling. Both real producers must keep that catalog
+    # row unbadged while the renderer synthesizes one provider-owned fallback.
+    import api.providers
+
+    monkeypatch.setattr(api.providers, "_provider_has_key", lambda *_args, **_kwargs: False)
+    catalog_id = target if exact else sibling
+    custom = {**RELAY, "models": [catalog_id, "fixture-unrelated"]}
+    primary = {"provider": provider, "default": "fixture-unrelated"} if active else {
+        "provider": "openai-codex", "default": "gpt-5.4",
+    }
+    fallback = [{"provider": provider, "model": target}]
+    if live:
+        result = _live_models(
+            monkeypatch, tmp_path, custom_providers=[custom],
+            fallback_providers=fallback,
+            served={"relay.example": custom["models"]}, model=primary,
+        )
+    else:
+        monkeypatch.setattr(config, "cfg", {
+            "model": primary, "custom_providers": [custom],
+            "fallback_providers": fallback, "providers": {},
+        })
+        monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+        result = config._static_models_catalog_without_live_probes()
+    ids = _option_ids(_group(result, "custom:relay"))
+    catalog_row = next(i for i in ids if i.removeprefix("@custom:relay:") == catalog_id)
+    badges = result["configured_model_badges"]
+    if not exact:
+        assert catalog_row not in badges
+        assert all(i.removeprefix("@custom:relay:") != target for i in ids)
+    else:
+        assert badges[catalog_row]["role"] == "fallback"
+    picker = _render_picker(tmp_path, result["groups"], badges)
+    choices = [c for c in _relay_choices(picker) if "fixture-unrelated" not in c[0]]
+    assert len(choices) == 1, picker
+    choice_id, clicks = choices[0]
+    assert choice_id.removeprefix("@custom:relay:") == target
+    assert clicks == [[choice_id, "custom:relay"]]
+    assert catalog_row in picker["allRows"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("live", [False, True], ids=["static", "live"])
+@pytest.mark.parametrize("active", [False, True], ids=["inactive-provider", "active-provider"])
+@pytest.mark.parametrize("provider", ["relay", "custom:relay"])
 @pytest.mark.parametrize("target", ["anthropic/claude-sonnet-4", "claude-sonnet-4"], ids=["reverse", "exact"])
 def test_production_catalog_preserves_configured_fallback_choice(
     monkeypatch, tmp_path, live, active, provider, target,

@@ -6094,11 +6094,11 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
       const entryIdentity=_modelPickerOptionIdentity(entry.value,provider);
       // Routing wrappers do not create another choice for the same model.
       if(configuredIdentity===entryIdentity) return true;
-      // A vendor-qualified config is not the bare catalog model. This matters
-      // when the active provider emits bare ids instead of @provider: ids:
-      // loose normalization must not hide the unbadged configured fallback.
+      // A vendor-qualified config is neither a bare catalog model nor a
+      // different vendor's model. Loose normalization strips that namespace
+      // and would hide the unbadged configured fallback in either case.
       // Keep the existing bare-config -> vendor-row policy separate.
-      if(configuredIdentity.includes('/')&&!entryIdentity.includes('/')) return false;
+      if(configuredIdentity.includes('/')) return false;
     }
     return _normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(candidate);
   };
