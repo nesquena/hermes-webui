@@ -1748,6 +1748,29 @@ def _custom_provider_slug_is_fallback(name: object) -> bool:
     return not _ascii_provider_slug(raw) and bool(_non_ascii_fallback_slug(raw))
 
 
+def _native_fallback_identities(providers_cfg: object) -> set[str]:
+    """``providers:`` identities that exist ONLY because of the non-ASCII fallback.
+
+    Master slugged such a key to the empty string, so the record was never a
+    route for a bare model name; the fallback (#8017) is what gives it one. That
+    makes the identity NEW: no configuration could select it before, so a row
+    carrying it must not answer for a model id resolved BY NAME, where master's
+    answer was the configured provider's endpoint. The picker asks for such a row
+    explicitly instead (``@custom:<name>:<model>``), which still routes to the
+    record's own endpoint and credential.
+    """
+    if not isinstance(providers_cfg, dict):
+        return set()
+    identities = set()
+    for key in providers_cfg:
+        if not _custom_provider_slug_is_fallback(key):
+            continue
+        identity = _custom_provider_slug_from_name(key)
+        if identity:
+            identities.add(identity)
+    return identities
+
+
 def _provider_record_may_own_slug(record_key: object, record: object, slug: str) -> bool:
     """True when selection could actually serve ``slug`` from this ``providers:`` record.
 
@@ -2418,7 +2441,18 @@ def _custom_provider_entries(
             # (#1970/#5301). Explicit custom: keys still declare native catalogs.
             continue
         entry = copy.deepcopy(record)
-        entry["name"] = identity if identity in native else key
+        # A native key master could not slug now mints the fallback identity
+        # (#8017). Tie that row to the identity it OWNS rather than leaving it on
+        # the bare Unicode key: the key reads as a fallback name, and
+        # :func:`_custom_provider_entry_identity` reserves a fallback name's slug
+        # for any pre-existing owner -- including this row's own ``providers:``
+        # record -- so the row minted nothing while the router still answered
+        # from its endpoint. An ASCII key keeps master's bare spelling.
+        entry["name"] = (
+            identity
+            if identity in native or _custom_provider_slug_is_fallback(key)
+            else key
+        )
         fallback_label = key if explicit_native else key.replace("-", " ").title()
         entry["display_name"] = str(record.get("name") or fallback_label).strip()
         # Native records are hand-edited config; only a string names a default
@@ -4414,6 +4448,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         )
     )
     custom_providers = _custom_provider_entries(cfg)
+    _native_fallback_ids = _native_fallback_identities(cfg.get('providers'))
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         # Disambiguation guard: when two custom_providers[] entries both list the
         # same bare model id (e.g. dogapi and packyapi both advertise
@@ -4485,6 +4520,16 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 provider_hint = _custom_provider_entry_identity(
                     entry, custom_providers, cfg.get('providers'), cfg.get('model')
                 )
+                if (provider_hint in _native_fallback_ids
+                        and _custom_provider_view_source(entry, cfg) == "providers"):
+                    # A ``providers:`` key whose identity exists only because of
+                    # the non-ASCII fallback. Master minted nothing for it, so it
+                    # never answered a model id resolved BY NAME; the configured
+                    # provider's endpoint did. Answering here would hand the
+                    # configured default's model to an endpoint the user did not
+                    # select. Explicit picks are qualified by the caller, so they
+                    # never reach this scan.
+                    continue
                 if not provider_hint:
                     # No identity at all for this entry: keep master's pair anyway, which
                     # is the EMPTY provider plus the entry's own URL. Do NOT skip here. A
