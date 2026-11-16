@@ -51,6 +51,7 @@ except ImportError:
 
 _update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}
 _update_cache_by_key: dict[tuple[str, bool], dict] = {}
+_manual_update_checks: dict[tuple[str, bool], float] = {}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
@@ -61,6 +62,7 @@ def _invalidate_update_cache():
     with _cache_lock:
         _update_cache['checked_at'] = 0
         _update_cache_by_key.clear()
+        _manual_update_checks.clear()
 _check_in_progress = False
 _running_key = None
 _refresh_queue: list[tuple[str, bool]] = []
@@ -1939,6 +1941,39 @@ def _is_dirty(path: Path, timeout: int = 1) -> bool:
 def _ignored_agent_update_info() -> dict:
     """Return a stable update-check payload for intentionally ignored Agent updates."""
     return {'name': 'agent', 'behind': 0, 'ignored': True}
+
+
+def mark_manual_update_check(channel=None, include_agent=True) -> tuple[str, bool]:
+    """Record an explicit manual update-check request for cache retrieval."""
+    include_agent = bool(include_agent)
+    if channel is None:
+        channel = _read_update_channel()
+    channel = _normalize_channel(channel)
+    key = (channel, include_agent)
+    with _cache_lock:
+        _manual_update_checks[key] = time.time()
+    return key
+
+
+def manual_update_check_poll_allowed(channel=None, include_agent=True) -> bool:
+    """Check if a cache-only poll for this key is authorized by a manual check."""
+    if channel is None:
+        return False
+    include_agent = bool(include_agent)
+    channel = _normalize_channel(channel)
+    key = (channel, include_agent)
+    now = time.time()
+    with _cache_lock:
+        expired = [
+            k for k, reg_time in _manual_update_checks.items()
+            if now - float(reg_time or 0) >= CACHE_TTL
+        ]
+        for k in expired:
+            del _manual_update_checks[k]
+        reg_time = _manual_update_checks.get(key)
+        if reg_time is not None and (now - float(reg_time or 0) < CACHE_TTL):
+            return True
+        return False
 
 
 def cached_update_status(*, include_agent=True, channel=None):
