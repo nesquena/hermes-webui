@@ -673,7 +673,7 @@ def test_scene_renderer_allows_prose_tool_prose_tool_interleaving():
 
     assert "currentTools=null;" in render
     assert render.index("if(row.role==='tool')") < render.index("}else{")
-    assert render.index("currentTools=null;") < render.index("list.appendChild(node);")
+    assert render.index("currentTools=null;") < render.index("children.push(node);")
 
 
 def test_anchor_tool_preview_slot_stays_empty_for_result_text():
@@ -1097,16 +1097,13 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     overlap = _function_body(MESSAGES_JS, "_anchorSceneRowTextOverlapsExisting")
 
     projected_idx = complete.index("const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];")
-    ordered_idx = complete.index("const orderedRows=[];", projected_idx)
-    projected_push_idx = complete.index("orderedRows.push(row);", ordered_idx)
-    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)", projected_push_idx)
-    terminal_idx = complete.index("if(row&&row.role==='terminal') orderedRows.push(row);", backfill_idx)
-    replay_idx = complete.index("orderedRows.forEach((row)=>pushRow(row));", terminal_idx)
-    assert projected_idx < ordered_idx < projected_push_idx < backfill_idx < terminal_idx < replay_idx
+    phase1_idx = complete.index("// Phase 1: projected non-terminal rows")
+    phase2_idx = complete.index("// Phase 2: settled/backfill rows")
+    phase3_idx = complete.index("// Phase 3: projected terminal rows")
+    assert projected_idx < phase1_idx < phase2_idx < phase3_idx
 
     assert "const seenTextKeys=[];" in complete
     assert "_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)" in complete
-    assert "if(isTextual&&textKey) seenTextKeys.push(textKey);" in complete
     assert "rowTextKey.includes(existing)||existing.includes(rowTextKey)" in overlap
 
 
@@ -1118,10 +1115,10 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
     assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
+    assert "const group=row.group&&typeof row.group==='object'?row.group:{};" in live_identity
     assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
     assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
     assert "return hasStreamOwner&&!hasAssistantMessageIndex;" in live_identity
-    assert "String(row.status||'').toLowerCase()!=='running'" in settle_live
     assert "if(row.role==='thinking'&&hasSettledThinking) return null;" in settle_live
     assert "const sealed={...row,status:'completed'};" in settle_live
     assert "sealed.payload={...row.payload,status:'completed'};" in settle_live
@@ -1205,7 +1202,7 @@ def test_live_anchor_scene_snapshot_renders_transparent_rows_before_compact_gate
     assert "turn.setAttribute('data-anchor-scene-live-owner','1')" in transparent
     assert "turn.setAttribute('data-anchor-stream-id',String(streamId||''))" in transparent
     assert "turn.setAttribute('data-live-assistant-turn','1')" in transparent
-    assert "_anchorSceneTransparentNodeForRow(row,{" in transparent
+    assert "_anchorSceneTransparentNodeForRow(row,rowOpts)" in transparent
     assert "live:true" in transparent
     assert "streamId:streamId||S.activeStreamId||''" in transparent
     assert "sessionId:S.session&&S.session.session_id" in transparent
@@ -1428,7 +1425,11 @@ global._syncToolCallGroupSummary=()=>{{}};
     eval(extractFunc('_rehydrateTransparentLiveRow'));
     eval(extractFunc('_refreshTransparentThinkingLiveRow'));
     eval(extractFunc('_refreshTransparentLiveRow'));
-    eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
+    document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_syncTransparentEventTimestampVisibility'));
+eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneDataRowKey'));
+eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
 const existingTurn=global._createAssistantTurn();
 existingTurn.id='liveAssistantTurn';

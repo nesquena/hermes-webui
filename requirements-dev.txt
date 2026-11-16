@@ -7,6 +7,8 @@ pytest
 pytest-timeout
 pytest-asyncio
 pytest-shard
+# Native Gateway transport integration tests use the Agent's WebSocket API.
+websockets>=15,<16
 ruff
 mcp>=1.28,<2
 # Optional Office parsers — runtime-optional (commented in requirements.txt), but

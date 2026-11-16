@@ -187,7 +187,11 @@ def test_review_surface_wiring():
     announce = commands_js[commands_js.index("_WEBUI_DISPATCHABLE_AGENT_COMMANDS") :]
     announce = announce[: announce.index("]);")]
     assert "'review'" in announce
-    assert "session_id:S.session&&S.session.session_id||''" in commands_js
+    # The transport carries BOTH the canonicalized token (master #8203) and the
+    # session this branch scopes /review to; the session read is guarded so a
+    # harness without a global S cannot crash the transport.
+    assert "command:transportCommand" in commands_js
+    assert "S.session&&S.session.session_id" in commands_js
 
     run_set = messages_js[messages_js.index("_AGENT_COMMANDS_RUN_ON_WEBUI") :]
     run_set = run_set[: run_set.index("]);")]

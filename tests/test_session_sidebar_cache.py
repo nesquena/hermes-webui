@@ -271,6 +271,226 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
     assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
 
 
+def test_session_list_cache_rebuilds_on_a_committed_message(monkeypatch):
+    """A settled row must reconcile on the next request.
+
+    The reconciliation contract (`test_webui_state_db_reconciliation.py`) says an
+    external writer — the official Desktop App continuing a WebUI-origin session,
+    a CLI turn — is visible immediately, so a fingerprint move rebuilds at once.
+    """
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    rows = {"fingerprint": "rows-2"}
+
+    def _stamp(_key):
+        return (
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            rows["fingerprint"],
+            None,
+            0,
+        )
+
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _stamp)
+    routes._session_list_cache_set(key, _session_cache_payload("two"))
+
+    # Two messages settle in state.db a millisecond later, well inside the TTL.
+    rows["fingerprint"] = "rows-4"
+    built = []
+
+    def builder():
+        built.append(1)
+        return _session_cache_payload("four")
+
+    diag = _StageRecorder()
+    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+    assert payload == _session_cache_payload("four")
+    assert built == [1], "committed rows must not wait for the TTL"
+    assert "session_list_cache_rebuild_owner" in diag.stages
+
+
+def test_content_fingerprint_marks_a_failed_read_as_unreadable(tmp_path):
+    """A locked state.db yields an UNREADABLE fingerprint, not a NULL one.
+
+    ``_sqlite_content_fingerprint`` degrades instead of blocking the hot path,
+    and it used to degrade to ``None`` per table. Two of those compare equal, so
+    a consumer could not tell "unchanged" from "could not read". The producer now
+    marks a failed read explicitly. (#8694)
+    """
+    import sqlite3
+
+    from api import models
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT INTO sessions (title) VALUES ('s1')")
+    conn.execute("INSERT INTO messages (body) VALUES ('m1')")
+    conn.commit()
+    conn.close()
+
+    readable = models._sqlite_content_fingerprint(db_path)
+    assert models._content_fingerprint_readable(readable) is True
+
+    writer = sqlite3.connect(db_path, isolation_level=None)
+    writer.execute("PRAGMA journal_mode=DELETE")
+    writer.execute("BEGIN EXCLUSIVE")
+    try:
+        locked = models._sqlite_content_fingerprint(db_path)
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+    assert locked is not None, "a per-table lock must not collapse into the total-failure None"
+    assert models._content_fingerprint_readable(locked) is False
+
+
+def _real_state_db_cache_env(tmp_path, monkeypatch):
+    """Real SQLite state.db, real stamp producer, real cache consumer.
+
+    Only the LOCATIONS are simulated: the fixture controls where state.db, the
+    session index, the settings file and the gateway metadata live so the stamp
+    can be produced for real. Nothing about the stamp, the fingerprint or the
+    cache is stubbed, so the assertions below are about the production
+    producer/consumer pair, not about a hand-built tuple.
+    """
+    import sqlite3
+
+    from api import models
+
+    db = tmp_path / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            "CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT);"
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT);"
+            "INSERT INTO sessions VALUES('old','Old title'),('new','New title');"
+            "INSERT INTO messages VALUES(1,'old'),(2,'new');"
+        )
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "_index.json").write_text("{}")
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}")
+    gateway = tmp_path / "gateway-sessions.json"
+    gateway.write_text("{}")
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: str(db))
+    monkeypatch.setattr(routes, "_gateway_session_metadata_path", lambda: gateway)
+    monkeypatch.setattr(routes, "SESSION_DIR", sessions)
+    monkeypatch.setattr(routes, "SETTINGS_FILE", settings)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        models, "_all_profiles_cli_contexts", lambda: ([(tmp_path, db, None)], ())
+    )
+
+    def make_key():
+        return routes._session_list_cache_key(
+            active_profile="default",
+            all_profiles=False,
+            show_cli_sessions=True,
+            show_previous_messaging_sessions=False,
+            show_cron_sessions=False,
+        )
+
+    def read():
+        with sqlite3.connect(db) as conn:
+            rows = conn.execute("SELECT id, title FROM sessions ORDER BY id").fetchall()
+        return {
+            "sessions": [{"session_id": sid, "title": title} for sid, title in rows],
+            "cli_count": len(rows),
+            "all_profiles": False,
+            "active_profile": "default",
+            "other_profile_count": 0,
+        }
+
+    return db, make_key, read
+
+
+@pytest.mark.parametrize("mutation", ["update", "non_max_delete"])
+def test_session_list_cache_serves_a_committed_rename_or_delete_on_the_next_read(
+    tmp_path, monkeypatch, mutation
+):
+    """A committed rename/delete is visible on the next request.
+
+    ``_sqlite_content_fingerprint`` is ``MAX(rowid)``: an append POSITION. It does
+    not move when an external writer renames a session (an UPDATE of a visible
+    column) or deletes a row that is not the current maximum; the state.db
+    file-stat movement is what makes the stamp move. The stamp producer and the
+    cache consumer are the real ones; only the file locations are simulated. (#8694)
+    """
+    import sqlite3
+
+    db, make_key, read = _real_state_db_cache_env(tmp_path, monkeypatch)
+    key = make_key()
+
+    initial = routes._get_cached_session_list_payload(key=key, builder=read)
+    before = routes._session_list_cache_source_stamp(key)
+
+    with sqlite3.connect(db) as conn:
+        if mutation == "update":
+            conn.execute("UPDATE sessions SET title='Renamed externally' WHERE id='old'")
+        else:
+            conn.execute("DELETE FROM messages WHERE session_id='old'")
+            conn.execute("DELETE FROM sessions WHERE id='old'")
+
+    after = routes._session_list_cache_source_stamp(key)
+    assert after != before, "the fixture must move the real source stamp"
+    assert after[5] == before[5], (
+        "the fixture must keep the MAX(rowid) fingerprint stable — that is the "
+        "degeneracy under test"
+    )
+    expected = read()
+    assert expected != initial, "the committed contents really did change"
+
+    served = routes._get_cached_session_list_payload(key=key, builder=read)
+    assert served == expected, (
+        f"{mutation}: the cache served stale committed contents"
+    )
+
+
+def test_session_list_cache_never_certifies_a_build_with_a_later_stamp(
+    tmp_path, monkeypatch
+):
+    """A payload may only be certified by a stamp read no later than its rows.
+
+    Storing the stamp read AFTER ``builder()`` returns folds a commit that lands
+    mid-build into the entry: the old payload is then certified against a newer
+    snapshot and served as FRESH for a whole TTL, instead of being revalidated on
+    the next request. The builder here really inserts a session and a message
+    after reading its rows. (#8694)
+    """
+    import sqlite3
+
+    db, make_key, read = _real_state_db_cache_env(tmp_path, monkeypatch)
+    key = make_key()
+
+    def interleaved_builder():
+        observed = read()
+        with sqlite3.connect(db) as conn:
+            conn.execute("INSERT INTO sessions VALUES('third','Committed during build')")
+            conn.execute("INSERT INTO messages VALUES(3,'third')")
+        return observed
+
+    stale = routes._get_cached_session_list_payload(key=key, builder=interleaved_builder)
+    expected = read()
+    assert len(stale["sessions"]) == 2, "the builder really read the pre-commit rows"
+    assert len(expected["sessions"]) == 3, "the commit really landed after that read"
+
+    served = routes._get_cached_session_list_payload(key=key, builder=read)
+    assert served == expected, (
+        "a commit during the build must be visible on the next request, not "
+        "certified away by a stamp read after it"
+    )
+
+
 def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):
     routes._session_list_cache_clear()
     monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
