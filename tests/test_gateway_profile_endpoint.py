@@ -405,12 +405,22 @@ def test_overlapping_workers_exiting_out_of_order_restore_the_process_value(work
     for name in ("alpha", "beta"):
         (work_profile.parent / name).mkdir()
         (work_profile.parent / name / ".env").write_text(f"HERMES_WEBUI_GATEWAY_BASE_URL=http://{name}-gw:9000\n")
-    alpha = profiles.profile_env_for_background_worker("alpha")
-    beta = profiles.profile_env_for_background_worker("beta")
-    alpha.__enter__()
-    beta.__enter__()
-    alpha.__exit__(None, None, None)
-    beta.__exit__(None, None, None)
+    entered = {name: threading.Event() for name in ("alpha", "beta")}
+    leave = {name: threading.Event() for name in ("alpha", "beta")}
+
+    def worker(name):  # each worker on its own thread, as in production
+        with profiles.profile_env_for_background_worker(name):
+            entered[name].set()
+            leave[name].wait(10)
+
+    threads = {name: threading.Thread(target=worker, args=(name,)) for name in ("alpha", "beta")}
+    threads["alpha"].start()
+    assert entered["alpha"].wait(10)
+    threads["beta"].start()
+    assert entered["beta"].wait(10)
+    for name in ("alpha", "beta"):  # alpha exits first
+        leave[name].set()
+        threads[name].join(10)
 
     assert gateway_chat.os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"] == SHARED
     assert profiles._WORKER_ENV_BASELINE == {}
