@@ -111,6 +111,27 @@ def plugin_model_provider_api_key_env_var(provider_id: str) -> str | None:
     return None
 
 
+# Exact OAuth auth types, matching the Agent (hermes_cli/auth_plugin_providers.py).
+_OAUTH_PLUGIN_AUTH_TYPES = frozenset({"oauth_device_code", "oauth_external"})
+
+
+def plugin_model_provider_is_oauth(provider_id: str) -> bool:
+    """True when a plugin provider's profile uses an OAuth auth type.
+
+    The type is read the way the Agent picks its status builder:
+    ``registry_auth_type`` if set, otherwise ``auth_type``; it must be exactly
+    ``oauth_device_code`` or ``oauth_external`` (no prefix matching). For these
+    providers the Agent's ``get_auth_status()`` reports ``configured=True`` as
+    soon as the profile is registered, regardless of sign-in, so callers must
+    look at ``logged_in`` instead (#9105).
+    """
+    profile = plugin_model_provider_profiles().get((provider_id or "").strip().lower())
+    if profile is None:
+        return False
+    auth_type = getattr(profile, "registry_auth_type", None) or getattr(profile, "auth_type", "")
+    return str(auth_type or "").strip().lower() in _OAUTH_PLUGIN_AUTH_TYPES
+
+
 def effective_provider_env_var(provider_id: str, static_map: dict[str, str]) -> str | None:
     pid = (provider_id or "").strip().lower()
     if not pid:
