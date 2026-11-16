@@ -1419,12 +1419,32 @@ function _flushPreviewFullscreenFocus(){
   if(target){ try{ target.focus(); }catch(_){} }
 }
 
+// A collapsed workspace panel keeps .rightpanel laid out at width:0/opacity:0
+// (the slide-out animation needs it in flow), so offsetParent is NOT null and
+// an inside-panel control still looks focusable. Focus must never land there:
+// the gate's clearPreview() repro ends on an invisible button inside the
+// collapsed panel. This predicate is the single source of truth for "panel is
+// closed right now"; the flush below rejects inside-panel targets while it is
+// true and falls through to a control that outlives the preview.
+function _previewPanelCollapsedForFocus(){
+  if(typeof _workspacePanelMode!=='undefined' && _workspacePanelMode==='closed') return true;
+  const root=document.documentElement;
+  if(root&&root.dataset&&root.dataset.workspacePanel==='closed') return true;
+  const layout=document.querySelector('.layout');
+  return !!(layout&&layout.classList&&layout.classList.contains('workspace-panel-collapsed'));
+}
+
 function _isFocusablePreviewTarget(el){
   if(!el || el === document.body) return false;
   // offsetParent is null for display:none subtrees (and for fixed-position
   // elements, which is why the fullscreen panel itself is checked separately).
   if(el.closest && el.closest('[hidden]')) return false;
   if(el.offsetParent === null && !el.closest('.preview-fullscreen')) return false;
+  // The collapsed panel exception above: visible per layout, invisible per CSS.
+  if(el.closest && el.closest('.rightpanel') && _previewPanelCollapsedForFocus()) return false;
+  // Rendered-truth check: a zero-width/zero-height control is not a focus
+  // destination even when offsetParent says otherwise.
+  if(typeof el.getClientRects==='function' && el.getClientRects().length===0) return false;
   return true;
 }
 

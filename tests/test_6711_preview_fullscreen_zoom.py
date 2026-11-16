@@ -1074,6 +1074,163 @@ def test_focus_flush_never_targets_a_hidden_control():
     )
 
 
+# ── Gate re-review (16 Nov): composed final-focus regression ─────────────────
+# The earlier checks were static: they proved the code *intended* to flush after
+# clearPreview() hid the controls, not that focus actually landed outside the
+# collapsed panel. This harness runs the real clearPreview() + fullscreen exit +
+# flush against a DOM double whose .rightpanel stays display:flex at width:0,
+# exactly like the shipped CSS. Without the panel-collapsed guard in
+# _isFocusablePreviewTarget(), focus lands on the invisible preview control.
+
+_FOCUS_CLOSE_HARNESS = r"""
+const params = __PARAMS__;
+
+let _workspacePanelMode = 'preview';
+let _previewCurrentPath = 'x';
+let _previewCurrentMode = 'code';
+let _previewDirty = false;
+let _previewSavedText = null;
+let _previewEditSessionId = '';
+let _previewEditWorkspace = '';
+let _previewOpenGen = 0;
+let _previewFsResizeHandler = null;
+let _previewFsNativeActive = false;
+let _previewFsPendingFocus = null;
+let _previewFsSavedChromeState = [];
+let _previewFsPrevFocus = null;
+
+function makeEl(id, inPanel) {
+  const classes = new Set();
+  const el = {
+    id, isConnected: true, offsetParent: {}, disabled: false, _inPanel: !!inPanel,
+    style: {}, dataset: {},
+    classList: {
+      contains: (c) => classes.has(c),
+      add: (c) => classes.add(c),
+      remove: (c) => classes.delete(c),
+      toggle: (c, on) => { if (on) classes.add(c); else classes.delete(c); },
+    },
+    getClientRects: () => [{}],
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    setAttribute() {}, removeAttribute() {}, hasAttribute() { return false; },
+    focus() { document.activeElement = el; },
+    closest(sel) {
+      if (sel === '.rightpanel') return el._inPanel ? panel : null;
+      if (sel === '.preview-fullscreen') return panel.classList.contains('preview-fullscreen') ? panel : null;
+      if (sel === '[hidden]') return null;
+      if (sel === '.workspace-panel-collapsed') return layout.classList.contains('workspace-panel-collapsed') ? layout : null;
+      return null;
+    },
+  };
+  return el;
+}
+
+const panel = makeEl('rightpanel', true);
+panel.classList.add('preview-fullscreen');
+panel.contains = (el) => !!el && el._inPanel === true;
+const layout = makeEl('layout', false);
+const fsBtn = makeEl('btnPreviewFullscreen', true);
+const clearBtn = makeEl('btnClearPreview', true);
+const outsideBtn = makeEl('btnWorkspacePanelToggle', false);
+const msg = makeEl('msg', false);
+const els = { btnPreviewFullscreen: fsBtn, btnClearPreview: clearBtn, btnWorkspacePanelToggle: outsideBtn, msg };
+_previewFsPrevFocus = fsBtn;
+
+const document = {
+  activeElement: null,
+  body: {},
+  documentElement: {
+    dataset: { workspacePanel: 'open' },
+    classList: {
+      _set: new Set(['preview-fullscreen-active']),
+      contains(c) { return this._set.has(c); },
+      add(c) { this._set.add(c); },
+      remove(c) { this._set.delete(c); },
+      toggle(c, on) { if (on) this._set.add(c); else this._set.delete(c); },
+    },
+  },
+  fullscreenElement: null,
+  contains() { return true; },
+  getElementById(id) { return els[id] || null; },
+  querySelector(sel) {
+    if (sel === '.rightpanel') return panel;
+    if (sel === '.rightpanel.preview-fullscreen') return panel.classList.contains('preview-fullscreen') ? panel : null;
+    if (sel === '.layout') return layout;
+    return null;
+  },
+};
+const window = { innerHeight: 800, addEventListener() {}, removeEventListener() {} };
+const localStorage = { getItem() { return null; }, setItem() {} };
+const $ = (id) => els[id] || null;
+
+function _setPreviewFullscreenButtonState() {}
+function _updatePreviewFsHeight() {}
+function _requestNativePreviewFullscreen() {}
+function _exitNativePreviewFullscreen() {}
+function _reconcileWorkspacePanelBreakpoint() {}
+function renderBreadcrumb() {}
+function _resetPreviewDirty() {}
+function _showPreviewZoomControls() { fsBtn.style.display = 'none'; }
+function syncWorkspacePanelUI() {}
+function openWorkspacePanel() {}
+function updateEditBtn() {}
+function closeWorkspacePanel() {
+  _workspacePanelMode = 'closed';
+  document.documentElement.dataset.workspacePanel = 'closed';
+  layout.classList.add('workspace-panel-collapsed');
+  panel.classList.remove('preview-fullscreen');
+}
+
+eval(params.helper);
+eval(params.focusable);
+eval(params.exit);
+eval(params.flush);
+eval(params.setter);
+eval(params.clear);
+
+clearPreview();
+console.log(JSON.stringify({
+  focused: document.activeElement ? document.activeElement.id : null,
+  mode: _workspacePanelMode,
+  collapsed: layout.classList.contains('workspace-panel-collapsed'),
+  insidePanel: document.activeElement ? !!document.activeElement._inPanel : false,
+}));
+"""
+
+
+def _run_clear_preview_focus() -> dict:
+    assert NODE is not None
+    payload = {
+        "helper": _function("_previewPanelCollapsedForFocus"),
+        "focusable": _function("_isFocusablePreviewTarget"),
+        "exit": _function("_previewFullscreenExit"),
+        "flush": _function("_flushPreviewFullscreenFocus"),
+        "setter": _function_with_defaults("setPreviewFullscreen"),
+        "clear": _function_with_defaults("clearPreview"),
+    }
+    js = _FOCUS_CLOSE_HARNESS.replace("__PARAMS__", json.dumps(payload))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_clear_preview_focuses_a_control_outside_the_collapsed_panel():
+    """Composed repro: fullscreen preview -> clearPreview() -> panel collapses.
+
+    Focus must land on an enabled, visible control outside .rightpanel, not on
+    the preview toolbar button the collapsed panel no longer shows.
+    """
+    result = _run_clear_preview_focus()
+    assert result["collapsed"] is True, "the harness did not collapse the panel"
+    assert result["insidePanel"] is False, (
+        f"focus landed inside the collapsed panel: {result['focused']!r}"
+    )
+    assert result["focused"] == "btnWorkspacePanelToggle", (
+        "closing a fullscreen preview must focus the workspace toggle outside "
+        f"the collapsed panel, got {result['focused']!r}"
+    )
+
+
 # ── Blocker 3: fullscreen must survive the 641–900px band ────────────────────
 
 
