@@ -14820,6 +14820,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     approval_bridge_failure,
     approve_session,
     approve_permanent,
+    persist_grant_choice,
     save_permanent_allowlist,
     _pending,
     _lock,
@@ -34815,13 +34816,18 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     all_keys = [k for k in keys_from_pending if k]
     if scope in ("session", "always") and all_keys:
         with _session_profile_grant_scope(sid) as in_profile:
-            for k in all_keys if in_profile else ():
-                approve_session(sid, k)
+            if in_profile and persist_grant_choice is not None:
+                # The Agent's own grant and save, as for its answers: it saves only
+                # what this process granted beyond its last read of the file.
+                persist_grant_choice(sid, scope, all_keys)
+            elif in_profile:
+                for k in all_keys:
+                    approve_session(sid, k)
+                    if scope == "always":
+                        approve_permanent(k)
                 if scope == "always":
-                    approve_permanent(k)
-            if in_profile and scope == "always":
-                # Only the keys granted now: never another profile's in-memory grants.
-                save_permanent_allowlist(set(all_keys))
+                    # Only the keys granted now: never another profile's in-memory grants.
+                    save_permanent_allowlist(set(all_keys))
     # choice == "once": no persistence — approval lasts this single call only.
     # resolve_gateway_approval() below unblocks the parked agent thread for
     # every choice, so "once" still lets the current tool run; we just must not

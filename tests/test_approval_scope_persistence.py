@@ -11,9 +11,10 @@ WebUI's own save also ran in the HTTP thread, outside the session's profile.
 is waiting on the answer, saves nothing for any gateway mirror (an orphaned
 mirror's answer was never used), and for raw entries no Agent waits on it saves
 only within the scopes the entry offered (``allow_session``/``allow_permanent``/
-``smart_denied``; missing flags keep the answer as given), only in the session's
-own profile (tests/test_approval_profile_scoped_grants.py) and only the keys
-just granted.
+``smart_denied``; missing flags keep the answer as given) and only in the
+session's own profile (tests/test_approval_profile_scoped_grants.py): through the
+Agent's ``_persist_choice`` when it takes plain keys, else WebUI grants and saves
+only the keys just granted. Every allowlist save in the process is serialized.
 
 The unit tests record WebUI's grant calls. The end-to-end tests drive the real
 Agent gate in a subprocess, answer through WebUI's respond route, and check
@@ -46,6 +47,8 @@ def grants(monkeypatch):
     calls = []
     for name in GRANT_NAMES:
         monkeypatch.setattr(routes, name, lambda *args, _name=name: calls.append((_name, args)))
+    # WebUI's own grant calls, not the Agent's _persist_choice (tested separately).
+    monkeypatch.setattr(routes, "persist_grant_choice", None)
     return calls
 
 
@@ -187,6 +190,82 @@ def test_agent_less_mode_still_saves_unscoped(grants, monkeypatch):
     assert grants == _expected_grants(unknown, "always")
 
 
+def test_raw_always_is_granted_through_a_keys_persist_choice(grants, sid, monkeypatch):
+    persisted = []
+    monkeypatch.setattr(routes, "persist_grant_choice", lambda *args: persisted.append(args))
+    entry = {**_card(), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
+    with routes._lock:
+        routes._pending[sid] = [entry]
+
+    assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
+
+    assert persisted == [(sid, "always", ["first key", "second key"])]
+    assert grants == []  # not WebUI's own grant calls as well
+
+
+def _tuple_shape(session_key, choice, warnings):  # Agent v2026.9.24
+    raise AssertionError("never called")
+
+
+def _keys_shape(session_key, choice, keys):
+    raise AssertionError("never called")
+
+
+class _NoSignature:
+    __signature__ = "not a signature"  # inspect.signature() raises TypeError
+
+    def __call__(self, *args):
+        raise AssertionError("never called")
+
+
+@pytest.mark.parametrize(
+    "module, uses_it",
+    [
+        (SimpleNamespace(_persist_choice=_keys_shape), True),
+        (SimpleNamespace(_persist_choice=_tuple_shape), False),
+        (SimpleNamespace(_persist_choice=lambda session_key, choice: None), False),
+        (SimpleNamespace(_persist_choice=_NoSignature()), False),
+        (SimpleNamespace(_persist_choice="not callable"), False),
+        (SimpleNamespace(), False),
+        (None, False),  # Agent-less
+    ],
+    ids=["keys", "tuples", "two_params", "no_signature", "not_callable", "missing", "agentless"],
+)
+def test_persist_choice_is_used_only_with_a_keys_parameter(module, uses_it):
+    found = route_approvals._keys_persist_choice(module)
+    assert found is (module._persist_choice if uses_it else None)
+
+
+def test_allowlist_save_is_wrapped_once_and_held_for_the_whole_call():
+    seen = []
+
+    def save(patterns):
+        seen.append((set(patterns), lock.locked()))
+        return "saved"
+
+    module = SimpleNamespace(save_permanent_allowlist=save)
+    lock = route_approvals._serialize_allowlist_saves(module)
+    wrapper = module.save_permanent_allowlist
+    assert lock is not None and wrapper is not save
+    assert wrapper._webui_serialized is True and wrapper._webui_original is save
+
+    # A reload or second import reuses the wrapper and its lock: no wrapper of a wrapper.
+    assert route_approvals._serialize_allowlist_saves(module) is lock
+    assert module.save_permanent_allowlist is wrapper
+
+    assert wrapper({"k"}) == "saved"
+    assert seen == [({"k"}, True)] and not lock.locked()
+
+
+@pytest.mark.parametrize(
+    "module", [SimpleNamespace(), SimpleNamespace(save_permanent_allowlist=None), None],
+    ids=["missing", "not_callable", "agentless"],
+)
+def test_allowlist_save_wrap_skips_a_missing_name(module):
+    assert route_approvals._serialize_allowlist_saves(module) is None
+    assert getattr(module, "save_permanent_allowlist", None) is None
+
+
 # ── Approvals an Agent is waiting on: WebUI saves nothing ───────────────────
 
 
@@ -263,6 +342,8 @@ import api.routes as ROUTES
 
 OSASCRIPT = "osascript -e 'tell application \"Keynote\" to quit'"
 RM = "rm -rf /tmp/approval-scope-target"
+CHMOD = "chmod 777 /tmp/approval-scope-target"
+CHMOD2 = "chmod -R 777 /tmp/approval-scope-target"
 SID, SID2 = "approval-scope-" + mode, "approval-scope-other-" + mode
 os.environ["HERMES_EXEC_ASK"] = "1"
 os.environ["HERMES_SESSION_PLATFORM"] = "webui"
@@ -307,7 +388,7 @@ for sid in cards:
 responses = []
 ROUTES.j = lambda _h, data, status=200, extra_headers=None: responses.append([status, data]) or data
 
-def step(sid, command, answer):
+def step(sid, command, answer, delay=0.0):
     seen = len(cards[sid])
     gate = {}
 
@@ -324,14 +405,20 @@ def step(sid, command, answer):
         time.sleep(0.02)
     prompted = len(cards[sid]) > seen and thread.is_alive()
     card = cards[sid][-1] if prompted else {}
+    responded = None
     if prompted:
-        ROUTES._handle_approval_respond(
+        time.sleep(delay)
+        responder = threading.Thread(target=ROUTES._handle_approval_respond, daemon=True, args=(
             object(), {"session_id": sid, "choice": answer, "approval_id": card.get("approval_id")}
-        )
+        ))
+        responder.start()
+        responder.join(timeout=15)
+        responded = not responder.is_alive()
     thread.join(timeout=15)
     result = gate.get("result") or {}
     return {
         "sid": sid, "answer": answer if prompted else None, "prompted": prompted,
+        "responded": responded, "gate_finished": not thread.is_alive(),
         "approved": result.get("approved"), "outcome": result.get("outcome"),
         "card": {k: card.get(k) for k in ("allow_session", "allow_permanent", "smart_denied", "pattern_keys")},
     }
@@ -341,6 +428,8 @@ PLANS = {
     "smart_deny_always": [(SID, RM, "always"), (SID, RM, "once"), (SID2, RM, "once")],
     "ordinary_session": [(SID, RM, "session"), (SID, RM, "once")],
     "ordinary_always": [(SID, RM, "always"), (SID2, RM, "once")],
+    # approvals.timeout is 1s here: answers land just before and just after it.
+    "timeout_race": [(SID, RM, "always", 0.95), (SID2, CHMOD, "always", 1.0), (SID, CHMOD2, "always", 1.05)],
 }
 out["steps"] = [step(*s) for s in PLANS[mode]]
 keys = out["steps"][0]["card"]["pattern_keys"] or []
@@ -363,8 +452,9 @@ def _run_scope_driver(tmp_path, mode):
     home = tmp_path / "home"
     (home / ".hermes").mkdir(parents=True)
     approval_mode = "smart" if mode == "smart_deny_always" else "manual"
+    timeout = 1 if mode == "timeout_race" else 6
     (home / ".hermes" / "config.yaml").write_text(
-        f"approvals:\n  mode: {approval_mode}\n  timeout: 6\n", encoding="utf-8"
+        f"approvals:\n  mode: {approval_mode}\n  timeout: {timeout}\n", encoding="utf-8"
     )
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -438,3 +528,15 @@ def test_real_agent_ordinary_always_answer_is_saved_once_by_the_agent(tmp_path):
     assert agent_calls.count("approve_session") == len(out["keys"]) > 0, detail
     assert agent_calls.count("approve_permanent") == len(out["keys"]), detail
     assert set(out["keys"]) <= set(out["allowlist_on_disk"]), detail
+
+
+def test_real_agent_always_answers_racing_the_approval_timeout_do_not_hang(tmp_path):
+    """Answers land around the Agent's 1s approval timeout, so a grant's save can run while
+    the waiter expires. Every gate and every respond call finishes (bounded joins)."""
+    out = _run_scope_driver(tmp_path, "timeout_race")
+    detail = json.dumps(out)
+    assert out["steps"] and all(s["gate_finished"] for s in out["steps"]), detail
+    assert all(s["responded"] in (True, None) for s in out["steps"]), detail
+    for s in out["steps"]:
+        if s["approved"] and s["answer"] == "always":
+            assert set(s["card"]["pattern_keys"] or []) <= set(out["allowlist_on_disk"]), detail

@@ -21,6 +21,8 @@ When a run becomes terminal, ``settle_gateway_pending_run`` fail-closes every
 producer owned by that run with ``deny`` before retiring its mirrors; producers
 owned by another run remain live.
 """
+import functools
+import inspect
 import logging
 import queue
 import threading
@@ -48,6 +50,60 @@ try:
     import tools.approval as _agent_approval
 except ImportError:
     _agent_approval = None
+
+
+# The Agent's ``save_permanent_allowlist`` reads config.yaml before it takes
+# ``_lock``, so two saves in one profile can overlap: the one that writes last
+# merges a read taken before the other's write, and both grants can be lost.
+# One lock held across each whole save closes that window. The module attribute
+# is replaced because the Agent's own ``_persist_choice`` looks the name up when
+# it runs, so its saves and WebUI's go through the same lock.
+#
+# Lock order: this lock first, then the Agent's ``_lock`` inside the save. Never
+# call the save while holding ``_lock`` (the Agent releases it before saving,
+# and every WebUI caller saves outside it).
+def _serialize_allowlist_saves(module):
+    """Wrap ``module.save_permanent_allowlist`` in one lock, once; return that lock."""
+    save = getattr(module, "save_permanent_allowlist", None)
+    if not callable(save):
+        return None
+    if getattr(save, "_webui_serialized", False):  # a reload or second import
+        return save._webui_save_lock
+    lock = threading.Lock()
+
+    @functools.wraps(save)
+    def serialized_save(*args, **kwargs):
+        with lock:
+            return save(*args, **kwargs)
+
+    serialized_save._webui_serialized = True
+    serialized_save._webui_original = save
+    serialized_save._webui_save_lock = lock
+    module.save_permanent_allowlist = serialized_save
+    return lock
+
+
+_allowlist_save_lock = _serialize_allowlist_saves(_agent_approval)
+
+
+def _keys_persist_choice(module):
+    """The Agent's ``_persist_choice(session_key, choice, keys)``, else None.
+
+    Agents before 2026-10-06 (v2026.9.24) take ``(key, description, is_tirith)``
+    tuples as the third argument; WebUI then grants and saves the keys itself.
+    """
+    persist = getattr(module, "_persist_choice", None)
+    if not callable(persist):
+        return None
+    try:
+        params = list(inspect.signature(persist).parameters)
+    except Exception:
+        return None
+    return persist if len(params) >= 3 and params[2] == "keys" else None
+
+
+# Read once. Not a bridge failure when None: WebUI uses its own grant calls.
+persist_grant_choice = _keys_persist_choice(_agent_approval)
 
 _MISSING = object()
 # Without these WebUI cannot see or settle the Agent's parked approvals.
