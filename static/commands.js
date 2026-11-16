@@ -727,7 +727,12 @@ async function resolveBundleCommand(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
   if(!S.session&&typeof newSession==='function'){
-    await newSession();
+    const created=await newSession();
+    // A sidebar choice can win while the first turn is still creating its
+    // session. That resolution is a supersession, not a success: stop before
+    // issuing the bundle resolve so an abandoned command never runs against
+    // the newer pane (Greptile P1, 2026-11-16).
+    if(created&&created.superseded) return {superseded:true};
     if(typeof renderSessionList==='function') await renderSessionList();
   }
   const sessionId=String(_meta&&(_meta.sessionId||_meta.session_id)||S&&S.session&&S.session.session_id||'').trim();

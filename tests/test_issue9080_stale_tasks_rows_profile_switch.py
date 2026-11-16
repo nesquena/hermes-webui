@@ -283,6 +283,13 @@ def _real_helpers() -> str:
     ]
     parts = [_extract_function(PANELS_JS, name) for name in panels]
     parts.append(_extract_function(SESSIONS_JS, "_switchProfileForSessionLoad"))
+    # master's profile refactor runs the switch inside the context-transition
+    # queue, so the harness needs that small chain beside the entry point.
+    parts.append("const _CONTEXT_TRANSITION_INTENT=Symbol('context-transition-intent');")
+    parts.append("let _contextTransitionTail=Promise.resolve();")
+    parts.append("let _contextTransitionGeneration=0;")
+    parts.append(_extract_function(SESSIONS_JS, "_claimContextTransition"))
+    parts.append(_extract_function(SESSIONS_JS, "_runContextTransition"))
     return "\n".join(parts)
 
 

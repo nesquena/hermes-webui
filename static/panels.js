@@ -8002,6 +8002,20 @@ async function switchToProfile(name) {
         _profileRollbackFailed=true;
         S.activeProfile=data.active||name;
         S.activeProfileIsDefault=!!data.is_default;
+        // The rollback failed, so the committed switch stands. Apply the
+        // committed profile's defaults BEFORE the queue is released: a waiting
+        // New Chat would otherwise create under the previous profile's model,
+        // provider or workspace (Greptile P1, 2026-11-16). Best-effort only —
+        // these must never mask the rollback failure itself.
+        try{
+          if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
+          if (data.default_model) window._defaultModel = data.default_model;
+          if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+          if (data.default_workspace) {
+            S._profileDefaultWorkspace = data.default_workspace;
+            S._profileSwitchWorkspace = data.default_workspace;
+          }
+        }catch(_){ /* defaults are best-effort */ }
         if(_switchGen===_profileSwitchGeneration){
           showToast(t('switch_failed')+(rollbackError.message||String(rollbackError)));
         }
@@ -8262,7 +8276,6 @@ async function switchToProfile(name) {
       showToast(t('profile_switched', name));
     }
 
-    await _profileSwitchPanelLoad();
     await _profileSwitchPanelLoad();
     if(!ownsPane()) return false;
     // Hand the stale-snapshot guard over to the /api/settings reconciliation

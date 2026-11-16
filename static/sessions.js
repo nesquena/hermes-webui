@@ -3189,9 +3189,13 @@ async function newSession(flash, options={}){
       // master keeps this: api() only toasts timeouts, so a 400 from
       // /api/session/new (an untrusted workspace is the common one) used to
       // look like a dead button. Surface the server's own explanation and
-      // keep propagating so callers that abort their flow still do.
+      // keep propagating so callers that abort their flow still do. The toast
+      // is best-effort: a throwing toast must never swallow the rejection.
       if(typeof showToast==='function'){
-        showToast(t('failed_colon')+((error&&error.message)?error.message:String(error)),5000,'error');
+        try{
+          const _prefix=(typeof t==='function')?t('failed_colon'):'Failed: ';
+          showToast(_prefix+((error&&error.message)?error.message:String(error)),5000,'error');
+        }catch(_){ /* ignore: the original error is what callers act on */ }
       }
       request.reject(error);
       throw error;

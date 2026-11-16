@@ -2040,6 +2040,9 @@ async function send(){
           const _bundleResolved=typeof resolveBundleCommand==='function'
             ? await resolveBundleCommand(text,_bundleCmd)
             : null;
+          // The bundle's first-turn session was superseded by a newer pane
+          // action; the command is abandoned, so stop before sending anything.
+          if(_bundleResolved&&_bundleResolved.superseded) return;
           const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
           if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
           _slashDisplayTextOverride=text;
