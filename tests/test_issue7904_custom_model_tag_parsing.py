@@ -116,6 +116,39 @@ def test_providers_dict_identity_wins_over_generic_evidence():
             "custom:omni",
         )
 
+    # Scenario 2: providers: {proxy: {name: omni, ...}} alias identity
+    alias_cfg = {
+        "model": {"provider": "deepseek"},
+        "providers": {
+            "proxy": {
+                "name": "omni",
+                "base_url": "https://omni.example/v1",
+                "models": ["latest"],
+            },
+            "custom": {"base_url": "https://generic.example/v1"},
+        },
+    }
+    with patch.dict(config.cfg, alias_cfg, clear=True):
+        # All three surfaces for name: alias identity
+        assert config._configured_custom_provider_identity("omni") is True
+        assert _parse_provider_qualified_model_id(
+            "@custom:omni:latest", generic_custom=True
+        ) == ("latest", "custom:omni")
+        assert resolve_model_provider(
+            "@custom:omni:latest", session_provider="custom"
+        ) == expected
+        # Plain string, round-trip, and parser parity
+        assert resolve_model_provider("@custom:omni:latest") == expected
+        routed = model_with_provider_context("latest", "custom:omni")
+        assert routed == "@custom:omni:latest"
+        assert resolve_model_provider(
+            routed, session_provider="custom:omni"
+        ) == expected
+        assert _parse_provider_qualified_model_id("@custom:omni:latest") == (
+            "latest",
+            "custom:omni",
+        )
+
 
 def test_custom_providers_list_identity_still_wins():
     """The ``custom_providers:`` list form keeps working (both config shapes)."""
@@ -192,6 +225,17 @@ def test_gateway_model_field_reads_session_profile_config(tmp_path):
                 session_provider="custom",
                 profile="omni",
             ) == "latest"
+            # Root profile declares custom:omni (via profile=None and profile=""):
+            assert _gateway_model_field(
+                "@custom:omni:latest",
+                session_provider="custom",
+                profile=None,
+            ) == "latest"
+            assert _gateway_model_field(
+                "@custom:omni:latest",
+                session_provider="custom",
+                profile="",
+            ) == "latest"
             # ...and an unconfigured slug under the same profile still peels.
             assert _gateway_model_field(
                 "@custom:qwen3-30b-a3b:latest",
@@ -248,6 +292,25 @@ def test_endpoint_like_slugs_retained():
     )
     assert _parse_provider_qualified_model_id("@custom:localhost:11434:Qwen3") == (
         "Qwen3",
+        "custom:localhost:11434",
+    )
+    # Also retained with positive generic evidence (and colon-tagged model)
+    assert _parse_provider_qualified_model_id(
+        "@custom:10.8.71.41:8080:Qwen3", generic_custom=True
+    ) == (
+        "Qwen3",
+        "custom:10.8.71.41:8080",
+    )
+    assert _parse_provider_qualified_model_id(
+        "@custom:localhost:11434:Qwen3", generic_custom=True
+    ) == (
+        "Qwen3",
+        "custom:localhost:11434",
+    )
+    assert _parse_provider_qualified_model_id(
+        "@custom:localhost:11434:qwen3:8b", generic_custom=True
+    ) == (
+        "qwen3:8b",
         "custom:localhost:11434",
     )
 

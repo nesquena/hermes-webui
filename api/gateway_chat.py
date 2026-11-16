@@ -306,9 +306,7 @@ def _gateway_model_field(
         return ""
     value = str(model).strip()
     generic_custom = str(session_provider or "").strip().lower() == "custom"
-    config_obj = None
-    if str(profile or "").strip():
-        config_obj = _gateway_profile_config(profile)
+    config_obj = _gateway_profile_config(profile)
     parsed = _parse_provider_qualified_model_id(
         value, generic_custom=generic_custom, config_obj=config_obj
     )

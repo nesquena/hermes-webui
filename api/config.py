@@ -3340,7 +3340,19 @@ def _configured_custom_provider_identity(
     parts = rest.split(":")
     for index in range(1, len(parts) + 1):
         prefix = ":".join(parts[:index])
-        if f"custom:{prefix}" in keys or prefix in keys:
+        if f"custom:{prefix}" in keys:
+            return True
+        try:
+            if (
+                _unique_raw_provider_record(
+                    providers_cfg,
+                    f"custom:{prefix}",
+                    _custom_provider_slug_key(f"custom:{prefix}"),
+                )
+                is not None
+            ):
+                return True
+        except AmbiguousCustomProviderError:
             return True
         if _named_custom_provider_slug_for_provider(f"custom:{prefix}", source):
             return True
@@ -3380,8 +3392,14 @@ def _parse_provider_qualified_model_id(
     provider_hint, bare_model = inner.rsplit(":", 1)
     if provider_hint.startswith("custom:"):
         _slug_rest = provider_hint[len("custom:"):]
-        if generic_custom and not _configured_custom_provider_identity(
-            _slug_rest, config_obj
+        if (
+            generic_custom
+            and not _custom_slug_rest_looks_like_host_port(
+                ":".join(_slug_rest.split(":")[:2])
+            )
+            and not _configured_custom_provider_identity(
+                _slug_rest, config_obj
+            )
         ):
             # Generic lane: every colon after ``custom:`` belongs to the model.
             bare_model = f"{_slug_rest}:{bare_model}"
@@ -3415,6 +3433,19 @@ def _get_provider_base_url(provider_id):
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
+    if str(provider_id).startswith("custom:"):
+        try:
+            raw = _unique_raw_provider_record(
+                _get_providers_cfg(),
+                str(provider_id),
+                _custom_provider_slug_key(provider_id),
+            )
+            if raw:
+                raw_url = (raw.get("base_url") or "").strip().rstrip("/")
+                if raw_url:
+                    return raw_url
+        except AmbiguousCustomProviderError:
+            pass
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
