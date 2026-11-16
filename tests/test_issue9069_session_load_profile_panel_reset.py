@@ -233,6 +233,13 @@ def _real_helpers(*, canonical: bool = False, real_skills: bool = False, real_cr
         _extract_function(PANELS_JS, "_profileSwitchPanelLoad"),
         _extract_function(PANELS_JS, "duplicateCurrentCron"),
         _extract_function(SESSIONS_JS, "_switchProfileForSessionLoad"),
+        # master routes the profile switch through the context-transition queue,
+        # so the harness carries that small chain alongside the entry point.
+        "const _CONTEXT_TRANSITION_INTENT=Symbol('context-transition-intent');",
+        "let _contextTransitionTail=Promise.resolve();",
+        "let _contextTransitionGeneration=0;",
+        _extract_function(SESSIONS_JS, "_claimContextTransition"),
+        _extract_function(SESSIONS_JS, "_runContextTransition"),
     ]
     if canonical:
         parts.append(_extract_function(PANELS_JS, "switchToProfile"))
