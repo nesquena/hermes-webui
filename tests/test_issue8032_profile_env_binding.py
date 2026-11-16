@@ -385,6 +385,9 @@ _RAW_LOADERS = {
 _WRITER = "writer: read-modify-write that must save the RAW document"
 _LOADER = "loader internal"
 _ALLOWED = {
+    # #8977: replay eligibility parses the profile config only to prove it is readable YAML (an unreadable or
+    # malformed file makes the row undetermined); it reads no values, so the ${VAR} binding does not apply.
+    ("delegation_ledger_owner.py", "_require_backend_inputs_read"): "validation: parses to check the file is readable YAML; reads no values",
     ("commands.py", "_run_codex_runtime_command._persist_config"): _WRITER,
     ("config.py", "set_max_tokens"): _WRITER,
     ("config.py", "set_reasoning_display"): _WRITER,

@@ -3157,12 +3157,6 @@ async function newSession(flash, options={}){
     // handlers used to guarantee this with their own awaited render (#7936);
     // now that newSession() owns the sole refresh it must force the paint,
     // matching the project "+" path (#5002: "newSession doesn't render; callers must").
-    // Refresh sidebar to include the newly created session (#3874).
-    // force:true -> deferWhileInteracting:false so the new row paints and the
-    // active highlight moves even while the pointer hovers #sessionList. The
-    // handlers used to guarantee this with their own awaited render (#7936);
-    // now that newSession() owns the sole refresh it must force the paint,
-    // matching the project "+" path (#5002: "newSession doesn't render; callers must").
     // User intent (Ctrl/Cmd+K, New-chat controls): retire an open project
     // picker that is older than this intent first, or this refresh is swallowed
     // by the picker's background-repaint deferral and the new chat stays
@@ -3192,6 +3186,13 @@ async function newSession(flash, options={}){
     request.resolve({status:'committed',session:request.createdSession});
     return;
     }catch(error){
+      // master keeps this: api() only toasts timeouts, so a 400 from
+      // /api/session/new (an untrusted workspace is the common one) used to
+      // look like a dead button. Surface the server's own explanation and
+      // keep propagating so callers that abort their flow still do.
+      if(typeof showToast==='function'){
+        showToast(t('failed_colon')+((error&&error.message)?error.message:String(error)),5000,'error');
+      }
       request.reject(error);
       throw error;
     }finally{
@@ -3275,6 +3276,24 @@ async function _switchProfileForSessionLoad(profile){
     S.activeProfileIsDefault=!!data.is_default;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
+    }
+    // #9069: the server now serves the new profile, so drop the previous
+    // profile's Tasks detail/edit/duplicate state through the SAME synchronous
+    // reset the canonical switch runs (_profileSwitchPanelLoad). Without it,
+    // Duplicate + Save on the still-shown cron job created the previous
+    // profile's job in this one. Runs at accept, so a later list-render
+    // failure cannot skip it. Only a visible Tasks panel is reloaded here:
+    // loadCrons is latest-wins (#6767), and it is not awaited, so the session
+    // being loaded never waits on, or fails because of, it. Memory/Skills are
+    // not reloaded on this path (their loaders have no owner-profile/
+    // latest-response check yet). The Skills cache is dropped like
+    // switchToProfile does, so a later Skills open refetches, except while
+    // Skills is visible: its search/toggle re-render from that cache.
+    const skillsVisible=typeof _currentPanel!=='undefined'&&_currentPanel==='skills';
+    if(typeof _skillsData!=='undefined'&&!skillsVisible) _skillsData=null;
+    if(typeof _resetProfileScopedPanelState==='function') _resetProfileScopedPanelState();
+    if(typeof _currentPanel!=='undefined'&&_currentPanel==='tasks'&&typeof loadCrons==='function'){
+      Promise.resolve(loadCrons()).catch(()=>{});
     }
     // #7509: mirror the canonical switch in panels.js — the slash-skill caches still
     // hold the previous profile's /api/skills payload, so drop them (and any reply
@@ -8728,6 +8747,19 @@ let _deferredActiveSessionExternalRefreshReason = '';
 let _pendingSessionUpdatedCounts = null;
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
+// Coalescing for SSE-driven sidebar refreshes. Every `sessions_changed` publish
+// clears the server's session-list cache, so an event-driven refresh always
+// rebuilds: this client-side cap is its only rate limit. It used to be a 300 ms
+// trailing debounce, so a streaming session's burst of events re-fetched
+// `/api/sessions` several times a second. Measured 2026-10-30: 65 `/api/sessions`
+// per minute from one client, gaps of 0-2 s, sidebar p99 1.8 s. The cap holds a
+// continuously-streaming session to 12 event-driven refreshes/min instead of 200;
+// an isolated event still paints after the 300 ms burst window (see
+// `_scheduleSessionEventsRefresh`). (#8694)
+const _SESSION_EVENTS_REFRESH_COALESCE_MS = 5000;
+const _SESSION_EVENTS_REFRESH_BURST_MS = 300;
+let _sessionEventsLastRefreshAt = 0;
+let _sessionEventsRefreshDueAt = 0;
 let _sessionEventsRefreshPendingRequest = null;
 let _sessionEventsReconnectTimer = 0;
 let _sessionEventsNeedsRefreshOnOpen = false;
@@ -9039,22 +9071,52 @@ async function refreshSessionList(reason='manual', opts={}){
     _sessionListRefreshInFlight = false;
     const pendingRequest = _sessionListRefreshPendingRequest;
     _sessionListRefreshPendingRequest = null;
-    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts);
+    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts, {prompt:true});
   }
 }
 
-function _scheduleSessionEventsRefresh(reason, opts={}){
+function _scheduleSessionEventsRefresh(reason, opts={}, schedule={}){
   _sessionEventsRefreshPendingRequest = {
     reason: reason || (_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.reason) || 'event',
     opts:_mergeSessionListRefreshOptions(_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.opts, opts),
   };
-  if(_sessionEventsRefreshTimer) return;
+  // Throttle, not a trailing-only debounce (#8694 senior review): an isolated
+  // event — a rename or delete from another tab, a cron finishing — paints after
+  // the short burst window, and only events arriving within
+  // `_SESSION_EVENTS_REFRESH_COALESCE_MS` of the last refresh this timer fired
+  // (an event-driven one or a parked re-send) wait for that cap. A PARKED request (`schedule.prompt`) arrived
+  // while another refresh was in flight: usually a new chat, a pull or a resume
+  // the user or the UI asked for, but this timer's own event refresh is parked
+  // the same way when it fires mid-flight. It re-sends after the burst window and
+  // is never held behind the cap (at most one extra refresh per in-flight one);
+  // it also pulls an already-pending capped timer forward.
+  // The cap is clamped to its own length: `Date.now()` follows the wall clock,
+  // and after a backward clock step `_sessionEventsLastRefreshAt` lies in the
+  // future, which would otherwise freeze every event refresh for the size of the
+  // step (#8694 senior review r2).
+  const now = Date.now();
+  const delay = (schedule && schedule.prompt)
+    ? _SESSION_EVENTS_REFRESH_BURST_MS
+    : Math.min(
+        _SESSION_EVENTS_REFRESH_COALESCE_MS,
+        Math.max(
+          _SESSION_EVENTS_REFRESH_BURST_MS,
+          _sessionEventsLastRefreshAt + _SESSION_EVENTS_REFRESH_COALESCE_MS - now,
+        ),
+      );
+  if(_sessionEventsRefreshTimer){
+    if(now + delay >= _sessionEventsRefreshDueAt) return;
+    clearTimeout(_sessionEventsRefreshTimer);
+  }
+  _sessionEventsRefreshDueAt = now + delay;
   _sessionEventsRefreshTimer = setTimeout(() => {
     _sessionEventsRefreshTimer = 0;
+    _sessionEventsRefreshDueAt = 0;
+    _sessionEventsLastRefreshAt = Date.now();
     const request = _sessionEventsRefreshPendingRequest || {reason:'event', opts:{}};
     _sessionEventsRefreshPendingRequest = null;
     void refreshSessionList(request.reason||'event', request.opts);
-  }, 300);
+  }, delay);
 }
 
 function _sessionEventTargetsActiveSession(payload){
