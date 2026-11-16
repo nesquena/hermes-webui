@@ -74,7 +74,11 @@ def _bind_agent_name(name: str, local_fallback):
     return value
 
 
-_lock = _bind_agent_name("_lock", threading.RLock())  # the Agent's lock is re-entrant
+# Current Agents use a re-entrant lock; older ones used a plain Lock, so WebUI
+# must never take ``_lock`` while already holding it (no WebUI path does). The
+# Agent-less stand-in is a plain Lock too, so a re-entry hangs in CI instead of
+# only against an older Agent.
+_lock = _bind_agent_name("_lock", threading.Lock())
 _gateway_queues = _bind_agent_name("_gateway_queues", {})
 resolve_gateway_approval = _bind_agent_name("resolve_gateway_approval", lambda *a, **k: 0)
 approve_session = _bind_agent_name("approve_session", lambda *a, **k: None)

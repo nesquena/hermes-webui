@@ -203,10 +203,10 @@ def test_agentless_mode_keeps_labelled_local_stand_ins(monkeypatch):
     probe = _load_route_approvals(monkeypatch, None)
 
     assert probe.APPROVAL_BRIDGE == {**FULL_BRIDGE, "agent": False}
-    # Re-entrant like the Agent's own lock.
+    # A plain lock, as in older Agents: WebUI never re-enters it, and a
+    # re-entry must show up here rather than only against an older Agent.
     with probe._lock:
-        assert probe._lock.acquire(blocking=False)
-        probe._lock.release()
+        assert probe._lock.acquire(blocking=False) is False
     assert probe.resolve_gateway_approval("sid", "once") == 0
     assert probe.is_session_yolo_enabled("sid") is False
     # No fail-open "everything is approved" stand-in.

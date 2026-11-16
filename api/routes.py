@@ -34641,6 +34641,20 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
+def _scope_offered_by_entry(entry: dict | None, choice: str) -> str:
+    """Narrow a session/always answer to the scopes this approval offered.
+
+    Missing flags keep the answer as given (entries from older producers).
+    """
+    if choice not in ("session", "always") or not isinstance(entry, dict):
+        return choice
+    if entry.get("allow_session") is False or entry.get("smart_denied"):
+        return "once"
+    if choice == "always" and entry.get("allow_permanent") is False:
+        return "session"
+    return choice
+
+
 def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
@@ -34711,11 +34725,9 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 # .data dict carries command, pattern_key, pattern_keys.
                 gw_data = getattr(gw_entry, 'data', None) or {}
                 gateway_keys = gw_data.get("pattern_keys") or [gw_data.get("pattern_key", "")]
-                # Peek is not strict — a concurrent resolver may pop a
-                # different gateway entry before we reach
-                # resolve_gateway_approval below, but approve_session is
-                # idempotent over the session key set so the outcome is
-                # the same regardless of which entry wins the race.
+                # resolve_gateway_approval() below hands the choice to the
+                # Agent waiting on the oldest entry; that Agent saves any
+                # session/always grant itself.
                 found_target = True
         elif approval_id:
             gw_queue = _gateway_queues.get(sid)
@@ -34747,6 +34759,17 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                     if matched_data is not None:
                         matched_data["approval_id"] = approval_id
                         local_gateway_approval_id = approval_id
+        # Is an Agent waiting on this answer? Yes for a relayed run approval, the
+        # exact local producer, the no-id head, and a gateway mirror that belongs
+        # to a run or (no id) to the live queue resolve_gateway_approval answers.
+        pending_mirror = bool(pending and pending.get(_GATEWAY_MIRROR_FLAG))
+        agent_held = bool(
+            run_id
+            or local_gateway_approval_id
+            or gateway_keys
+            or (pending_mirror and str(pending.get("run_id") or "").strip())
+            or (pending_mirror and not approval_id and _gateway_queues.get(sid))
+        )
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -34759,13 +34782,17 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
             else:
                 _approval_sse_notify_locked(sid, None, 0)
 
-    # Collect keys from both _pending and _gateway_queues
+    # The Agent saves a session/always answer once its wait returns, applying its
+    # per-approval scope rule (a one-operation finding saves nothing) in the
+    # session's own profile. WebUI saves only entries no Agent waits on, and only
+    # within the scope that entry offered.
+    scope = "once" if agent_held else _scope_offered_by_entry(pending, choice)
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
-    all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
-    if choice == "session":
+    all_keys = [k for k in keys_from_pending if k]
+    if scope == "session":
         for k in all_keys:
             approve_session(sid, k)
-    elif choice == "always":
+    elif scope == "always":
         for k in all_keys:
             approve_session(sid, k)
             approve_permanent(k)
