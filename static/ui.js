@@ -11150,10 +11150,27 @@ function renderMd(raw){
     // text into the C token shape AFTER _cPre was chosen while the shape was
     // still split by the tag (gate G9072-ATTRIBUTED-CODE-TOKEN-JOIN).  With
     // the attributed opening removed here, _cPre sees the joined bytes and
-    // takes a lead the restored alt cannot spell.  The `[^>]*` class keeps
-    // the strip linear; a lazy tag pattern would be another ReDoS candidate.
-    const _hFlat=t.split('<code>').join('').split('</code>').join('').split('`').join('')
-      .replace(/<code\b[^>]*>/g,'');
+    // takes a lead the restored alt cannot spell.  A forward scan does the
+    // strip: `<code\b[^>]*>` looks linear but backtracks to end-of-line once
+    // per unterminated opener (a forged `<code ` run that never closes), so
+    // 128 KB of openers froze the tab for ~630 ms (gate G9072-HFLAT-QUADRATIC).
+    // Stop at the first opener with no closing `>` -- like the selective
+    // stash below, an opener that never closes stays literal and ends the
+    // scan.  The `\b` guard (next char not [A-Za-z0-9_]) is preserved exactly.
+    const _hRaw=t.split('<code>').join('').split('</code>').join('').split('`').join('');
+    let _hFlat='';
+    {
+      let i=0;
+      while(i<_hRaw.length){
+        const open=_hRaw.indexOf('<code',i);
+        if(open<0){_hFlat+=_hRaw.slice(i);break;}
+        const after=_hRaw.charAt(open+5);
+        if(after&&/[A-Za-z0-9_]/.test(after)){_hFlat+=_hRaw.slice(i,open+5);i=open+5;continue;}
+        const gt=_hRaw.indexOf('>',open+5);
+        if(gt<0){_hFlat+=_hRaw.slice(i);break;}
+        _hFlat+=_hRaw.slice(i,open);i=gt+1;
+      }
+    }
     const _hPre=_tokPrefix('\x00H',t,_hFlat);
     const _hTok=new RegExp(_hPre+'(\\d+)\x00','g');
     // The C tokens get the same treatment.  A caller can type real NUL bytes,

@@ -1186,6 +1186,45 @@ class TestRootRelativeMarkdownImage:
         )
 
 
+class TestHFlatUnterminatedCodeGrowth:
+    """Gate G9072-HFLAT-QUADRATIC (greptile P1 on #9072, review 01:54Z).
+
+    ``_hFlat`` stripped attributed code openings with ``/<code\\b[^>]*>/g``.
+    The class looks linear but, once backtick removal joins a forged run of
+    ``<co`de ``` openers into repeated ``<code `` tags with no closing ``>``,
+    each opener makes the engine rescan the rest of the line: 128 KB reached
+    ~630 ms in the browser versus ~69 ms with the strip removed.  The strip
+    is now a forward scan that stops at the first opener without a closing
+    ``>``; this gate fails on the old regex (~14 ms -> ~540 ms for 18->144 KB).
+    """
+
+    def test_hflat_unterminated_openers_grow_linear(self, growth_driver_path):
+        def payload(openers):
+            # Backtick removal joins these into a run of unterminated
+            # `<code ` openers in _hFlat before the tag strip runs.
+            return "# " + "<co`de `" * openers
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(2000), payload(16000)]
+        )
+        # 8x the bytes: linear work lands near 8x, the backtracking regex ~36x.
+        assert large_ms < small_ms * 12, (
+            "unterminated <code openers must not rescale per opener in _hFlat: "
+            f"16 KB={small_ms:.1f} ms, 128 KB={large_ms:.1f} ms"
+        )
+
+    def test_hflat_still_strips_attributed_opening(self, driver_path):
+        # Correctness control: the forward scan must still remove a well-formed
+        # attributed opening so the adaptive C prefix sees the joined bytes.
+        out = _render(
+            driver_path,
+            "## " + "![a\x00<code class=\"language-text\">C0\x00</code>b](http://localhost/x.png)",
+        )
+        assert "undefined" not in out, out
+        m = re.search(r'alt="([^"]*)"', out)
+        assert m and m.group(1) == "a\x00C0\x00b", out
+
+
 class TestUnterminatedCodeStashGrowth:
     """Gate G9072-CODE-QUADRATIC: the selective ``<code>`` stash must stay
     linear when a message opens a code element and never closes it.
