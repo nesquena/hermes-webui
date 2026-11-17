@@ -11091,6 +11091,24 @@ function renderMd(raw){
       rpFrom=p;rp=str.indexOf(')',p);return rp;
     };
     while(i<str.length){
+      // Already-emitted HTML (from an earlier inlineMd/image pass) is opaque:
+      // its attributes can legitimately contain `![` (a URL with `![`, or an
+      // alt like `A![B`). Pairing that opener with a later `](/url)` rebuilds
+      // a second image out of the tag and spills attributes into its alt
+      // (gate G9072-IMAGE-REENTRY). Input here is escaped prose plus generated
+      // tags, so a `<` always opens a tag whose `>` is the tag end.
+      if(str.charAt(i)==='<'){
+        // Only media/img tags can carry a rendered URL or alt with `![` in an
+        // attribute. Skipping formatting tags (<code>, <strong>, ...) here
+        // would break opener pairing across them, e.g. ![`logo`](url).
+        if(/^<(?:img|span|svg|a|video|audio|source)\b/i.test(str.slice(i,i+10))){
+          const gt=str.indexOf('>',i+1);
+          if(gt>=0){
+            out+=str.slice(copy,gt+1);
+            copy=gt+1;i=gt+1;pend.length=0;continue;
+          }
+        }
+      }
       if(str.charAt(i)==='!'&&str.charAt(i+1)==='['){pend.push(i);i+=2;continue;}
       if(str.charAt(i)!==']'){i++;continue;}
       const us=i+2;

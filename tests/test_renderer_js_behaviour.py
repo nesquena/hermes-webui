@@ -1906,3 +1906,93 @@ class TestAttributedCodeTokenJoin9072Round5:
     def test_attributed_code_alt_in_a_table_cell(self, driver_path):
         table = "| h |\n| --- |\n| " + self.IMAGE + " |"
         self._assert_alt_keeps_caller_bytes(_render(driver_path, table), "table")
+
+
+class TestGeneratedImageHtmlOpaque9072:
+    """Round-7 residual (#9072): already-emitted image HTML must stay opaque
+    to later Markdown image parsing. A URL containing `![` (e.g. a destination
+    with a nested image) or a generated SVG alt containing `![` must not be
+    re-paired with a trailing `](/url)` by a second image pass — that rebuilt a
+    second <img>, dropped the literal tail and spilled attributes into the
+    alt. Paragraph output is the passing one-pass control.
+    """
+
+    URL_RECIPE = '![x](http://localhost/a![b.png)](/two.png)'
+    SVG_RECIPE = '![A![B](file:///one.svg)](/two.png)'
+
+    def _contexts(self, md):
+        nl = chr(10)
+        return {
+            'list': '- ' + md,
+            'heading': '# ' + md,
+            'table': '| h | f |' + nl + '| --- | |' + nl + '| ' + md + ' | z |',
+        }
+
+    def test_url_recipe_keeps_tail_and_generated_attributes_out_of_alt(self, driver_path):
+        for name, src in self._contexts(self.URL_RECIPE).items():
+            out = _render(driver_path, src)
+            assert out.count('<img') == 1, (
+                name + ': one source image must stay one image: ' + repr(out))
+            assert '/two.png' in out, (
+                name + ': literal image tail was consumed by re-entry: ' + repr(out))
+            assert 'alt="b.png' not in out, (
+                name + ': destination attributes leaked into an alt: ' + repr(out))
+            assert 'class=&quot;' not in out, (
+                name + ': generated attribute text leaked into an alt: ' + repr(out))
+
+    def test_url_recipe_paragraph_control(self, driver_path):
+        out = _render(driver_path, self.URL_RECIPE)
+        assert out.count('<img') == 1 and '/two.png' in out and 'alt="x"' in out, (
+            'paragraph control must render one clean image: ' + repr(out))
+
+    @staticmethod
+    def _md_image_pass_driver_path(tmp_path):
+        # Extract just _mdImagePass and feed it a _mdImageHtml that emits an
+        # SVG image whose alt keeps `![` verbatim (the real file:// SVG route
+        # before the fix). Verifies the scan treats emitted tags as opaque.
+        src = UI_JS_PATH.read_text(encoding='utf-8')
+        prelude = r"""
+const src = require('fs').readFileSync(process.argv[2], 'utf8');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start), depth = 1; i++;
+  while (depth > 0) { if (src[i] === '{') depth++; else if (src[i] === '}') depth--; i++; }
+  return src.slice(start, i);
+}
+eval(extractFunc('_mdImagePass'));
+// Emitted file:// SVG image: alt keeps the caller's `![` exactly like the
+// real _inlineMediaHtmlForRef SVG branch did before this fix.
+function _mdImageHtml(alt, url) {
+  return '<img class="msg-media-svg" src="' + esc(url) +
+    '" alt="' + esc(alt) + '" loading="lazy">';
+}
+process.stdout.write(_mdImagePass(
+  _mdImagePass(process.argv[3], null), null));  // second pass simulates the
+                                               // paragraph splitter re-entry
+"""
+        p = tmp_path / 'md_image_pass_driver.js'
+        p.write_text(prelude, encoding='utf-8')
+        return str(p)
+
+    def test_svg_recipe_generated_alt_stays_opaque(self, tmp_path):
+        driver = self._md_image_pass_driver_path(tmp_path)
+        for name, md in [('paragraph', self.SVG_RECIPE),
+                         ('list', '- ' + self.SVG_RECIPE),
+                         ('heading', '# ' + self.SVG_RECIPE)]:
+            out = subprocess.run(
+                [NODE, driver, str(UI_JS_PATH), md],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+            assert out.count('<img') == 1, (
+                name + ': one source image must stay one image: ' + repr(out))
+            assert '/two.png' in out, (
+                name + ': literal image tail was consumed by re-entry: ' + repr(out))
+            m = re.search(r'alt="([^"]*)"', out)
+            assert m and m.group(1) == 'A![B', (
+                name + ': emitted SVG alt must stay opaque and unmodified: ' + repr(out))
+            assert out.count('alt=') == 1, (
+                name + ': no second image was rebuilt out of the emitted tag: ' + repr(out))
