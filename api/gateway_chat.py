@@ -2783,6 +2783,77 @@ def _project_transcript_context_rows(messages) -> list:
     return rows
 
 
+# Rows adopted from the Agent's compacted transcript are model context only:
+# the visible transcript already holds the turns they stand for.
+_GATEWAY_COMPACTION_ADOPTED_KEY = "_gateway_compaction_adopted"
+
+
+def _gateway_compacted_context_prefix(session, msg_text, turn_started_at):
+    """Return the model context the Agent kept when it compacted this turn in place.
+
+    A caller-supplied ``conversation_history`` is used by the Gateway as-is, so
+    when the Agent compacts mid-turn the WebUI must adopt that result or it
+    re-sends the pre-compaction history on every later turn. The active
+    state.db rows are the Agent's own committed transcript.
+
+    Returns the rows before this turn's prompt, or None when state.db does not
+    prove a compaction written during this turn (no change to the context).
+    """
+    try:
+        started = float(turn_started_at)
+    except (TypeError, ValueError):
+        return None
+    if not started > 0:
+        return None
+    from api.models import get_state_db_session_messages
+    from api.session_ops import _MERGED_SUMMARY_DELIMITER
+    from api.streaming import _is_context_compression_marker, _message_text, _normalize_user_text
+
+    rows = get_state_db_session_messages(
+        getattr(session, "session_id", None), profile=getattr(session, "profile", None),
+    )
+    kept = []
+    summary_index = None
+    for row in rows or []:
+        projected = _project_transcript_context_rows([row])
+        if not projected:
+            continue
+        item = projected[0]
+        content = item.get("content")
+        text = _message_text(content)
+        if not text.strip() and not (isinstance(content, list) and content):
+            continue
+        if _is_context_compression_marker(item) or _MERGED_SUMMARY_DELIMITER in text:
+            written_at = row.get("timestamp")
+            if (
+                isinstance(written_at, (int, float))
+                and not isinstance(written_at, bool)
+                and written_at >= started
+            ):
+                summary_index = len(kept)
+        item[_GATEWAY_COMPACTION_ADOPTED_KEY] = True
+        kept.append(item)
+    if summary_index is None:
+        return None
+    raw_prompt = str(msg_text or "").strip()
+    prompt = _normalize_user_text(raw_prompt)
+    if not prompt:
+        return None
+    for index in range(len(kept) - 1, summary_index, -1):
+        row = kept[index]
+        if row.get("role") != "user":
+            continue
+        content = row.get("content")
+        if _normalize_user_text(_message_text(content)) == prompt:
+            return kept[:index]
+        # The Agent folds a prompt into the user row before it; keep that row's own text.
+        if isinstance(content, str) and content.rstrip().endswith(raw_prompt):
+            earlier = content.rstrip()[: -len(raw_prompt)].rstrip()
+            if earlier:
+                return kept[:index] + [{**row, "content": earlier}]
+    return None
+
+
 def _drop_active_turn_rows_for_writeback(rows, active_turn_identity) -> list:
     """Remove the active turn's retained rows from a model-context snapshot.
 
@@ -3711,6 +3782,10 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to filter gateway display context markers", exc_info=True)
                 display_context = previous_context
+            display_context = [
+                msg for msg in display_context
+                if not (isinstance(msg, dict) and msg.get(_GATEWAY_COMPACTION_ADOPTED_KEY))
+            ]
             display = merge_session_messages_append_only(
                 previous_messages,
                 display_context,
@@ -3747,6 +3822,16 @@ def _run_gateway_chat_streaming(
                 ]
                 if len(current_display_rows) == 1:
                     current_display_rows[0]["timestamp"] = user_msg["timestamp"]
+            if canonical_snapshot is None:
+                try:
+                    compacted_prefix = _gateway_compacted_context_prefix(
+                        s, msg_text, active_turn_identity.get("timestamp"),
+                    )
+                except Exception:
+                    logger.debug("Failed to read the gateway's compacted context", exc_info=True)
+                    compacted_prefix = None
+                if compacted_prefix is not None:
+                    s.context_messages = compacted_prefix + [user_msg, assistant_msg]
             if canonical_snapshot is not None:
                 # Gateway history remains authoritative across surfaces. In particular,
                 # a messaging sidecar may start empty; never replace its older turns
