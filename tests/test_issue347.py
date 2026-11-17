@@ -16,6 +16,8 @@ import re
 import subprocess
 import textwrap
 
+import pytest
+
 REPO = pathlib.Path(__file__).parent.parent
 UI_JS   = (REPO / 'static' / 'ui.js').read_text(encoding='utf-8')
 INDEX   = (REPO / 'static' / 'index.html').read_text(encoding='utf-8')
@@ -60,8 +62,11 @@ def _run_renderers(markdown: str) -> dict:
     js += textwrap.dedent(
         r'''
         const input=process.argv[1];
+        const start=performance.now();
+        const assistant=renderMd(input);
+        const elapsedMs=performance.now()-start;
         console.log(JSON.stringify({
-          assistant: renderMd(input),
+          assistant, elapsedMs,
           user: _renderUserFencedBlocks(input),
         }));
         '''
@@ -421,8 +426,8 @@ def test_safe_tags_span_is_narrowly_scoped():
 def test_inline_math_regex_requires_non_space_boundaries():
     """The $...$ inline regex must require non-space at both boundaries.
 
-    This prevents 'costs $5 and $10' from matching — the space after the opening
-    $ means it's a currency amount, not math.
+    This prevents the dollars in 'costs $5 and $10' from forming a math
+    candidate because the would-be body ends in whitespace.
     """
     # The inline math stash push is type:'inline' — find its containing replace() line
     inline_push_idx = UI_JS.find("type:'inline',src:m")
@@ -435,22 +440,116 @@ def test_inline_math_regex_requires_non_space_boundaries():
         f"Inline math regex must exclude spaces at boundaries to prevent false "
         f"positives on currency like $5. Found: {inline_line[:120]}"
     )
-def test_inline_math_regex_rejects_digit_after_opening_dollar():
-    """The $...$ inline regex must reject $ followed by a digit.
 
-    Currency like '$1,000 xuống ~$95' must NOT be parsed as math.
-    The opening $ followed by a digit (0-9) is a strong currency signal.
-    Aligns with smd's se() guard which also rejects $ + digit.
-    """
-    inline_push_idx = UI_JS.find("type:'inline',src:m")
-    assert inline_push_idx != -1
-    line_start = UI_JS.rfind('\n', 0, inline_push_idx) + 1
-    inline_line = UI_JS[line_start:inline_push_idx + 50]
-    # The regex character class for the first char must exclude \d
-    assert '\\d' in inline_line, (
-        f"Inline math regex must exclude digits at opening boundary to prevent "
-        f"false positives on currency like $1,000. Found: {inline_line[:120]}"
-    )
+
+@pytest.mark.parametrize("body", [
+    "0{,}8",
+    r"1 - 0{,}8 = \mathbf{0{,}2}",
+    "0.5",
+    r"1 - 0{,}1 = \mathbf{0{,}9}",
+    "0{,}0 - 0{,}1",
+    "2+3",
+    r"2\pi",
+    "0,5",
+])
+def test_numeric_inline_math_renders(body):
+    html = _run_renderers(f"${body}$")["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
+
+
+@pytest.mark.parametrize("sample,body", [
+    ("$.5x$", ".5x"),
+    ("$.5 + .2$", ".5 + .2"),
+])
+def test_leading_decimal_inline_math_renders(sample, body):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
+    assert "\x00" not in html
+
+
+@pytest.mark.parametrize("sample", ["$.99", "Costs $.99 per item", "$.99$"])
+def test_fractional_currency_stays_literal(sample):
+    html = _run_renderers(sample)["assistant"]
+    assert sample in html
+    assert "katex-inline" not in html
+    assert "\x00" not in html
+
+
+@pytest.mark.parametrize("sample", [
+    "$1,000",
+    "$1,000 xuống ~$95",
+    "costs $5 and $10",
+    "$5-$10",
+    "$5 - $10",
+    "$0.50–$.99",
+    "$0.50-$0.99",
+    r"\$5-\$10",
+    "$0.5 and $10",
+    "$5+$10",
+    "$5/$10",
+    "$5=$10",
+    "$5$",
+    "$0.5\n+1$",
+    "$ 0.5$",
+    "$0.5 $",
+])
+def test_currency_and_non_math_numeric_candidates_stay_literal(sample):
+    html = _run_renderers(sample)["assistant"]
+    assert 'katex-inline' not in html
+    assert sample.replace("\n", "<br>") in html
+
+
+@pytest.mark.parametrize("sample,expected_math,expected_text", [
+    ("Costs $5 ($x$ per unit)", "x", "Costs $5 ("),
+    (r"Costs \$5 ($x$ per unit).", "x", r"Costs \$5 ("),
+    ("$5 and $x$", "x", "$5 and "),
+    ("probability $p$ is $0.5$ and cost is $20", "0.5", "cost is $20"),
+])
+def test_mixed_currency_and_inline_math(sample, expected_math, expected_text):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{expected_math}</span>' in html
+    assert expected_text in html
+
+
+@pytest.mark.parametrize("sample,expected_math", [
+    ("Variable is $x$.", "x"),
+    ("Value is $0.5$.", "0.5"),
+    (r"Formula $1 - 0{,}8 = \mathbf{0{,}2}$.", r"1 - 0{,}8 = \mathbf{0{,}2}"),
+])
+def test_sentence_ending_inline_math(sample, expected_math):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{expected_math}</span>' in html
+    assert html.strip().endswith(".</p>")
+
+
+@pytest.mark.parametrize("sample", ["`$0.5$`", "```\n$0.5$\n```"])
+def test_numeric_inline_math_in_code_stays_literal(sample):
+    html = _run_renderers(sample)["assistant"]
+    assert 'katex-inline' not in html
+    assert '$0.5$' in html
+
+
+@pytest.mark.parametrize("sample,body", [
+    (r"\(\text{\$5}\)", r"\text{\$5}"),
+    (r"$x+\text{\$5}$", r"x+\text{\$5}"),
+])
+def test_escaped_dollars_inside_math_are_restored(sample, body):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
+    assert "\x00" not in html
+
+
+@pytest.mark.parametrize("sample,expected_math,expected_text", [
+    ("Repeat $x$ 2 times.", "x", "2 times."),
+    ("Repeat $x+y$ 2 times.", "x+y", "2 times."),
+    ("R$ 5 and $x$", "x", "R$ 5"),
+    ("US$ 50 for $n$ users", "n", "US$ 50"),
+])
+def test_inline_math_closers_before_numbers_preserve_currency(sample, expected_math, expected_text):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{expected_math}</span>' in html
+    assert expected_text in html
+    assert html.count('data-katex="inline"') == 1
 
 
 def test_display_math_stashed_before_inline():
@@ -493,3 +592,52 @@ def test_math_stash_token_uses_single_backslash_null_byte():
     assert good_returns, (
         "Math stash return must use single-backslash '\x00M' (null byte convention)"
     )
+
+
+@pytest.mark.parametrize("sample,bodies", [
+    ("Repeat $x + y$ 2 times.", ["x + y"]),
+    ("Repeat $x + y$ 2 ($z$)", ["x + y", "z"]),
+])
+def test_gate_r1_delimiter_ownership(sample, bodies):
+    html = _run_renderers(sample)["assistant"]
+    for body in bodies:
+        assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
+    assert html.count('data-katex="inline"') == len(bodies)
+    assert "2 times." in html if len(bodies) == 1 else "2 (" in html
+    assert "\x00" not in html
+
+
+def test_gate_r2_raw_pre_is_opaque():
+    html = _run_renderers("<pre>$0.5$</pre>")["assistant"]
+    assert "<pre>$0.5$</pre>" in html
+    assert "katex-inline" not in html
+
+
+def test_gate_r3_link_destination_is_opaque():
+    html = _run_renderers("[rate](https://example.test/path/$0.5$)")["assistant"]
+    assert 'href="https://example.test/path/$0.5$"' in html
+    assert "katex-inline" not in html
+    assert "\x00" not in html
+
+
+def test_gate_r4_currency_prefix_scan_is_bounded():
+    result = _run_renderers("R$ 5 " * 16384)
+    assert result["elapsedMs"] < 100
+    assert "katex-inline" not in result["assistant"]
+    assert "\x00" not in result["assistant"]
+
+
+def test_link_shaped_inline_math_preserves_formula_source():
+    html = _run_renderers("$[A](t)$")["assistant"]
+    assert '<span class="katex-inline" data-katex="inline">[A](t)</span>' in html
+    assert "\x00" not in html
+
+
+def test_adjacent_numeric_formulas_keep_comma_outside_math():
+    html = _run_renderers("$0.5$,$0.8$")["assistant"]
+    assert (
+        '<span class="katex-inline" data-katex="inline">0.5</span>,'
+        '<span class="katex-inline" data-katex="inline">0.8</span>'
+    ) in html
+    assert html.count('<span class="katex-inline"') == 2
+    assert "\x00" not in html
