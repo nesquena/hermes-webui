@@ -6112,7 +6112,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _liveToolTid(d, activityBurstId, activitySegmentSeq){
     const explicit=String(d&&(d.tid||d.id||d.tool_call_id||d.tool_use_id||d.call_id)||'').trim();
     if(explicit) return explicit;
-    return `live-${activeSid}-${_hashString(_toolCallSignature(d,activityBurstId,activitySegmentSeq))}`;
+    const sid=typeof activeSid!=='undefined'?activeSid:(typeof S!=='undefined'&&S&&S.session&&S.session.session_id||'');
+    if(!_liveToolTid._memo||_liveToolTid._sid!==sid){
+      _liveToolTid._sid=sid;
+      _liveToolTid._memo=new WeakMap();
+      _liveToolTid._counts=new Map();
+    }
+    const isObj=d&&typeof d==='object';
+    const sig=_toolCallSignature(d,activityBurstId,activitySegmentSeq);
+    let occurrence;
+    if(isObj&&_liveToolTid._memo.has(d)){
+      occurrence=_liveToolTid._memo.get(d);
+    }else{
+      occurrence=(_liveToolTid._counts.get(sig)||0)+1;
+      _liveToolTid._counts.set(sig,occurrence);
+      if(isObj){
+        _liveToolTid._memo.set(d,occurrence);
+      }
+    }
+    return `live-${sid}-${_hashString(sig)}-${occurrence}`;
   }
 
   function _coerceLiveToolCallSignature(tc, activityBurstId, activitySegmentSeq){
