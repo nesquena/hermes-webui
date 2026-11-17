@@ -13249,6 +13249,169 @@ def get_state_db_session_message_keys_before_timestamp(
         return None
 
 
+def get_state_db_session_message_tail_keys_since_timestamp(
+    sid,
+    since_timestamp,
+    *,
+    profile=None,
+) -> list[tuple] | None:
+    """Return visible-identity keys at/after ``since_timestamp`` in DB order.
+
+    The bounded-read sibling of
+    :func:`get_state_db_session_message_keys_before_timestamp`, read by the
+    display planner's restamped-tail proof (#8672 gate round 6).  Rows
+    WITHOUT a timestamp are intentionally excluded: the bounded reader keeps
+    them (``timestamp IS NULL OR timestamp >= ?``), but a clock-less row
+    establishes no clock and therefore proves nothing about a restamp.
+
+    Any read failure returns ``None`` so the caller takes the full read.
+    """
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+
+    if not sid:
+        return None
+    try:
+        since_ts = float(since_timestamp)
+    except (TypeError, ValueError):
+        return None
+
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return []
+
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
+                return None
+            api_content_select = ", api_content" if "api_content" in available else ""
+            # Inactive (compacted/archived) rows are excluded exactly like the
+            # canonical bounded reader excludes them, so the proof compares
+            # the same rows the bounded display merge will consume.
+            active_clause = ""
+            if 'active' in available:
+                active_clause = " AND (active IS NULL OR active != 0)"
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(role, '') AS role,
+                    COALESCE(content, '') AS content,
+                    timestamp,
+                    tool_calls{api_content_select}
+                FROM messages
+                WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp >= ?{active_clause}
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (str(sid), since_ts),
+            )
+            return [
+                _session_message_visible_key(
+                    {
+                        "role": row["role"],
+                        # Same guarded decode as the prefix proof and the
+                        # projected tail: all three must share one
+                        # representation or the restamp check compares
+                        # different identities per row.
+                        "content": _decode_state_db_content(row["content"]),
+                        # Occurrence discriminator (#7587): without the
+                        # timestamp the tail keys could not tell a restamped
+                        # row from a genuinely repeated one.
+                        "timestamp": row["timestamp"],
+                        "tool_calls": _json_loads_if_string(row["tool_calls"]),
+                        "api_content": row["api_content"] if "api_content" in available else None,
+                    },
+                    normalize_workspace_prefix=True,
+                )
+                for row in cur.fetchall()
+            ]
+    except Exception:
+        return None
+
+
+def state_db_tail_keys_disagree_with_sidecar(
+    sid,
+    sidecar_messages,
+    floor,
+    *,
+    profile=None,
+) -> bool:
+    """Return True when the bounded tail's clocks contradict the sidecar's.
+
+    Restamped-tail proof (#8672 gate round 6), read by the display planner
+    before it authorises a bounded state.db read.  The bounded display merge
+    consumes the same occurrence-sensitive visible keys the full read does,
+    but it starts at the floor instead of index 0, so the POSITIONAL,
+    clock-tolerant replay that collapses a restamped twin on the full read
+    cannot run: a tail row whose established clock disagrees with its
+    sidecar twin's is then appended as a duplicate and the bounded display
+    gains a row the full read suppresses.
+
+    The regeneration consumer already refuses this shape through the
+    restamped-twin proof in
+    :func:`api.session_ops._bounded_tail_snapshot_if_safe`; the display
+    planner must take the full read too whenever its bounded proof cannot
+    establish parity.  Two ESTABLISHED, different clocks for the same
+    clock-free row identity prove only that parity cannot be established --
+    the check cannot tell a restamp from a genuinely new repeated row -- so
+    the conservative answer is the full read (what master did for these
+    shapes).  A clock-less row on either side is a wildcard and proves
+    nothing; a private id is deliberately ignored (it may be one-sided and
+    cannot establish a clock disagreement).
+    """
+    sidecar_tail_clocks: dict[tuple, set[str]] = {}
+    for message in sidecar_messages or []:
+        if not isinstance(message, dict):
+            continue
+        ts = _message_timestamp_as_float(message)
+        if ts is None or ts < floor:
+            continue
+        key = _session_message_visible_key(
+            message, normalize_workspace_prefix=True
+        )
+        clock, _identity = _occurrence_parts(
+            _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        )
+        if not clock:
+            continue
+        sidecar_tail_clocks.setdefault(
+            _visible_key_without_occurrence(key), set()
+        ).add(clock)
+    if not sidecar_tail_clocks:
+        # Nothing in the sidecar tail establishes a clock, so no tail row can
+        # be shown to contradict it.
+        return False
+    state_tail_keys = get_state_db_session_message_tail_keys_since_timestamp(
+        sid,
+        floor,
+        profile=profile,
+    )
+    if state_tail_keys is None:
+        return True
+    for key in state_tail_keys:
+        clock, _identity = _occurrence_parts(
+            _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        )
+        if not clock:
+            continue
+        established = sidecar_tail_clocks.get(
+            _visible_key_without_occurrence(key)
+        )
+        if established and clock not in established:
+            return True
+    return False
+
+
 def get_state_db_regeneration_tail_snapshot(
     sid,
     floor,
@@ -15358,7 +15521,6 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
                     "anonymous": None,
                 },
                 "by_identity": {},
-                "by_namespace": {},
                 "identity_values": set(),
             },
         )
@@ -15399,13 +15561,6 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
         for identity in identities:
             group["by_identity"].setdefault(identity, key)
             group["identity_values"].add(identity)
-            # Index the identities PER NAMESPACE as well (#8672 review P2):
-            # a stable WebUI id and a SQLite row id describe different
-            # things, so only ids inside ONE namespace can contradict each
-            # other.
-            group["by_namespace"].setdefault(
-                _occurrence_identity_namespace(identity), {}
-            ).setdefault(identity, key)
         group["members"].append(key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
@@ -15944,7 +16099,13 @@ def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
     veto (#8672 gate C67-F2): the earlier saved occurrence of a repeated
     prompt owns durable row 7 while the later one is unbound, and an incoming
     durable row 8 conflicts with the first but not with the second, so the
-    unbound sibling still has to absorb its own replay.
+    unbound sibling still has to absorb its own replay.  That rule now covers
+    the NULL-clock branch as well (2026-11-13 RED certificate): the same
+    fixture with the incoming row's clock missing previously tripped a
+    group-level same-namespace veto that rejected the whole group before the
+    compatible unbound occurrence was offered, so the replay was appended as
+    a sixth row.  The per-candidate walk below answers both shapes, and it
+    still refuses when EVERY candidate conflicts.
 
     Every preferred step below is a dict lookup keyed by clock and canonical
     identity namespace -- never a scan over the group's members (#8672 review
@@ -16029,24 +16190,25 @@ def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
                 match, remaining
             ):
                 return match
-        # A row with no clock cannot prove it is a different occurrence, so a
-        # same-namespace conflict anywhere in the group stays a refusal HERE:
-        # the row has no clock to narrow the candidate set, and refusing keeps
-        # two provably different turns apart (fail closed, #7587).
-        by_namespace = group.get("by_namespace") or {}
-        for identity in identities:
-            namespace_values = by_namespace.get(
-                _occurrence_identity_namespace(identity)
-            )
-            if namespace_values and identity not in namespace_values:
-                return None
-        # The namespace check above proved no group identity contradicts
-        # ours, so the first identity-bearing row is a compatible
-        # representative -- resolved without scanning the bucket.  The walk
-        # runs from the group's merge-local cursor, so a candidate whose
-        # replay capacity is already consumed is skipped once for the whole
-        # merge rather than once per incoming NULL-clock replay (#8672 review
-        # P2, round 5: that restart was the N(N+1)/2 work bound).
+        # A row with no clock cannot prove it is a DIFFERENT occurrence, so a
+        # same-namespace conflict is resolved per CANDIDATE below instead of as
+        # a group-wide veto: one member's durable id must not reject a
+        # compatible sibling that establishes no such id -- the same rule the
+        # clocked branch already follows (#8672 gate C67-F2), extended to the
+        # NULL-clock replay by the 2026-11-13 RED certificate.  There the
+        # incoming durable row 8 conflicted with the saved row 7 but NOT with
+        # the unbound later occurrence, and the group veto rejected the whole
+        # group before that compatible occurrence was ever offered, appending
+        # the replay as a sixth row.  When EVERY candidate conflicts the walk
+        # below returns None and the refusal still keeps two provably
+        # different turns apart (fail closed, #7587).
+        #
+        # The first identity-bearing row is a compatible representative --
+        # resolved without scanning the bucket.  The walk runs from the
+        # group's merge-local cursor, so a candidate whose replay capacity is
+        # already consumed is skipped once for the whole merge rather than
+        # once per incoming NULL-clock replay (#8672 review P2, round 5: that
+        # restart was the N(N+1)/2 work bound).
         candidate = _available_candidate(
             _identity_candidates(group),
             group,
@@ -16104,7 +16266,18 @@ def _matching_visible_duplicate(
     (#8672 gate C67-F1).  ``None`` keeps the historical capacity-blind
     behaviour for every caller that does not track it.
     """
-    if visible_key in visible_keys:
+    # Exact membership is capacity-aware when the caller tracks it
+    # (#8672 gate round 6).  A legacy history can hold a clock-less saved
+    # occurrence whose visible identity is byte-identical to a clock-less
+    # replay's, so the membership answer below would hand the SAME exhausted
+    # representative to every replay: the caller then refuses the
+    # over-consumed skip and appends the replayed prompt as a new row.  When
+    # this representative has already absorbed its replay, falling through
+    # lets the probes select the still-available clocked occurrence instead.
+    # ``remaining is None`` keeps the historical return byte for byte.
+    if visible_key in visible_keys and _visible_key_capacity_remaining(
+        visible_key, remaining
+    ):
         return visible_key
     role = visible_key[0]
     content = visible_key[1] if len(visible_key) > 1 else ""

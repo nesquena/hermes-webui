@@ -12572,6 +12572,18 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages
     if null_timestamp_count or state_before_count != sidecar_before_count:
         return None, sidecar_messages
+    # Restamped-tail parity (2026-11-13 RED certificate): the bounded merge
+    # cannot positionally collapse a tail row whose clock was restamped
+    # relative to its sidecar twin, so the planner must take the full read
+    # whenever the tail clocks cannot prove parity.  Runs before BOTH
+    # bounded returns below so the empty-prefix shape is covered too.
+    if state_db_tail_keys_disagree_with_sidecar(
+        getattr(session, "session_id", None),
+        sidecar_messages,
+        floor,
+        profile=getattr(session, "profile", None) or None,
+    ):
+        return None, sidecar_messages
     if sidecar_before_count == 0:
         return floor, sidecar_messages
 
@@ -13685,6 +13697,7 @@ from api.models import (
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
+    state_db_tail_keys_disagree_with_sidecar,
     get_state_db_session_summary,
     merge_session_messages_append_only,
     reconciled_state_db_messages_for_session,

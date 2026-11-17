@@ -34,6 +34,9 @@ PROVIDER_BYTES = "provider-bytes"
 # The C67-F2 discriminator is a VALID scalar payload over the exact-only
 # cutoff, so the merge reaches the exact-index probe instead of the fuzzy loop.
 OVERSIZED_PROMPT = "x" * 200_001
+# The supported workspace wrapper the Agent stores in state.db for a user
+# turn while the WebUI sidecar owns the bare visible text.
+WORKSPACE_PREFIX = "[Workspace::v1: /workspace]\n"
 
 
 def _make_state_db(path, sid, rows):
@@ -472,3 +475,355 @@ def test_bounded_display_prefix_still_refuses_a_null_clock(monkeypatch, tmp_path
         10,
     )
     assert floor is None, "a null clock in the skipped prefix must refuse the bounded read"
+
+
+# ══ Round 6 (2026-11-13 RED): the three residual P2 regressions ═══════════
+#
+# The 2026-11-13 gate certificate extended the C67 examples instead of
+# re-claiming their original assertions.  Each discriminator below is built
+# the same PRODUCER-COMPOSED way as the controls above.
+
+
+def test_null_clock_durable_conflict_still_offers_the_compatible_sibling(
+    monkeypatch, tmp_path
+):
+    """C67-F2 extension: a NULL-clock replay keeps its compatible sibling.
+
+    Everything stays as in C67-F2 -- the earlier saved prompt owns durable
+    row 7, the later saved occurrence is unbound -- except that the
+    incoming durable row 8's timestamp is SQL NULL.  The real SQLite
+    reader still projects row identity 8 with the missing clock and a
+    nonempty provider payload.
+
+    A clock-less row cannot prove it is a DIFFERENT occurrence, so the
+    durable conflict with row 7 must stay a property of that candidate:
+    the unbound sibling has to absorb its own replay and the transcript
+    stays five rows with two copies of the prompt.  The pre-fix head let
+    the group-level namespace veto reject the whole group before the
+    compatible unbound occurrence was offered and appended the replay as a
+    sixth row.
+    """
+    import api.models as models
+
+    sidecar, _stamped = _settled_sidecar(
+        [
+            {"role": "assistant", "content": "PROLOGUE", "timestamp": 500.0},
+            {
+                "role": "user",
+                "content": OVERSIZED_PROMPT,
+                "timestamp": 1000.0,
+                "api_content": PROVIDER_BYTES,
+                "_state_db_row_id": 7,
+            },
+            {"role": "assistant", "content": "ALPHA", "timestamp": 1001.0},
+            {
+                "role": "user",
+                "content": OVERSIZED_PROMPT,
+                "_ts": 2000,
+                "api_content": PROVIDER_BYTES,
+            },
+            {"role": "assistant", "content": "OMEGA", "_ts": 2001},
+        ]
+    )
+    assert [row.get("id") for row in sidecar] == [1, 2, 3, 4, 5]
+    assert sidecar[1].get("_state_db_row_id") == 7
+    assert "_state_db_row_id" not in sidecar[3]
+
+    sid = "webui_8672_r6_null_clock_sibling"
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "id": 8,
+                "role": "user",
+                "content": OVERSIZED_PROMPT,
+                "timestamp": None,
+                "api_content": PROVIDER_BYTES,
+            }
+        ],
+    )
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar)
+
+    projected = models.get_state_db_session_messages(sid)
+    assert projected and projected[0].get("_state_db_row_id") == 8, (
+        "the real SQLite reader must project durable row id 8, got "
+        f"{[row.get('_state_db_row_id') for row in projected]}"
+    )
+    assert projected[0].get("timestamp") is None, (
+        "the replayed row must keep its missing clock, got "
+        f"{projected[0].get('timestamp')!r}"
+    )
+
+    display = models.reconciled_state_db_messages_for_session(session)
+    contents = [row.get("content") for row in display]
+    assert len(display) == 5, (
+        f"one durable conflict vetoed a compatible sibling: {len(display)} rows"
+    )
+    assert contents.count(OVERSIZED_PROMPT) == 2, (
+        f"the replayed occurrence was appended instead of merged: {len(contents)} rows"
+    )
+
+
+def test_exact_membership_respects_exhausted_replay_capacity(monkeypatch, tmp_path):
+    """C67-F1 extension: exact membership honours the remaining capacity.
+
+    A legacy sidecar -- saved and GENUINELY reloaded through the real
+    loader, with no stable ids -- holds ``PROLOGUE@500, Q@missing,
+    ALPHA@1001, Q@2000, OMEGA@2001``.  state.db replays TWO user rows with
+    SQL-NULL clocks, each carrying the supported workspace-prefixed prompt
+    text and no provider payload, so the real reader projects neither a
+    clock nor a durable row id for them.
+
+    The first replay collapses onto the clock-less saved occurrence and
+    consumes its capacity.  The second replay must then select the still
+    available clocked occurrence instead of consuming the exhausted
+    clock-less representative a second time: the pre-fix head returned the
+    exhausted representative from the exact-membership branch, the caller
+    refused the over-consumed skip, and the replayed workspace-prefixed
+    prompt landed as a sixth row.
+    """
+    import api.models as models
+
+    legacy_rows = [
+        {"role": "assistant", "content": "PROLOGUE", "_ts": 500},
+        {"role": "user", "content": REPEATED_PROMPT},
+        {"role": "assistant", "content": "ALPHA", "_ts": 1001},
+        {"role": "user", "content": REPEATED_PROMPT, "_ts": 2000},
+        {"role": "assistant", "content": "OMEGA", "_ts": 2001},
+    ]
+    sid = "webui_8672_r6_exact_capacity"
+    _install_test_session(monkeypatch, tmp_path, sid, [dict(row) for row in legacy_rows])
+    session = models.Session.load(sid)
+    assert session is not None, "the legacy sidecar must reload from disk"
+    # The reload really kept the legacy shape: `_ts` clocks, NO stable ids
+    # and NO synthesized `timestamp` for the clock-less prompt.
+    assert [row.get("content") for row in session.messages] == [
+        "PROLOGUE",
+        REPEATED_PROMPT,
+        "ALPHA",
+        REPEATED_PROMPT,
+        "OMEGA",
+    ]
+    assert all("id" not in row for row in session.messages), (
+        "the legacy sidecar must carry no stable ids"
+    )
+    assert all("timestamp" not in row for row in session.messages), (
+        "the legacy `_ts` clocks must survive the reload untouched"
+    )
+
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "user",
+                "content": WORKSPACE_PREFIX + REPEATED_PROMPT,
+                "timestamp": None,
+            },
+            {
+                "role": "user",
+                "content": WORKSPACE_PREFIX + REPEATED_PROMPT,
+                "timestamp": None,
+            },
+        ],
+    )
+    projected = models.get_state_db_session_messages(sid)
+    assert len(projected) == 2, f"both replays must be read: {len(projected)} rows"
+    assert all(row.get("timestamp") is None for row in projected), (
+        "both replays must keep their missing clock"
+    )
+    assert all("_state_db_row_id" not in row for row in projected), (
+        "a replay without provider payload must project no durable row id"
+    )
+
+    display = models.reconciled_state_db_messages_for_session(session)
+    contents = [row.get("content") for row in display]
+    assert contents == [
+        "PROLOGUE",
+        REPEATED_PROMPT,
+        "ALPHA",
+        REPEATED_PROMPT,
+        "OMEGA",
+    ], (
+        "the second clockless replay consumed the exhausted representative "
+        f"instead of the clocked occurrence: {contents}"
+    )
+    assert not any(
+        WORKSPACE_PREFIX in str(row.get("content") or "") for row in display
+    ), "the replayed workspace-prefixed prompt must not survive as its own row"
+
+
+def test_exact_membership_capacity_control_with_stable_ids(monkeypatch, tmp_path):
+    """C67-F1 control: stable ids make the exact branch unreachable.
+
+    The same legacy sidecar with stable ids minted by the real WebUI
+    producer gives the clock-less saved occurrence its own identity, so
+    the exact-membership branch never fires and both trees keep the
+    original five rows.
+    """
+    import api.models as models
+    from api.streaming import _assign_stable_message_ids
+
+    legacy_rows = [
+        {"role": "assistant", "content": "PROLOGUE", "_ts": 500},
+        {"role": "user", "content": REPEATED_PROMPT},
+        {"role": "assistant", "content": "ALPHA", "_ts": 1001},
+        {"role": "user", "content": REPEATED_PROMPT, "_ts": 2000},
+        {"role": "assistant", "content": "OMEGA", "_ts": 2001},
+    ]
+    legacy_rows = [dict(row) for row in legacy_rows]
+    _assign_stable_message_ids(legacy_rows)
+    assert [row.get("id") for row in legacy_rows] == [1, 2, 3, 4, 5]
+
+    sid = "webui_8672_r6_exact_capacity_control"
+    _install_test_session(monkeypatch, tmp_path, sid, [dict(row) for row in legacy_rows])
+    session = models.Session.load(sid)
+    assert session is not None
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "user",
+                "content": WORKSPACE_PREFIX + REPEATED_PROMPT,
+                "timestamp": None,
+            },
+            {
+                "role": "user",
+                "content": WORKSPACE_PREFIX + REPEATED_PROMPT,
+                "timestamp": None,
+            },
+        ],
+    )
+
+    display = models.reconciled_state_db_messages_for_session(session)
+    contents = [row.get("content") for row in display]
+    assert contents == [
+        "PROLOGUE",
+        REPEATED_PROMPT,
+        "ALPHA",
+        REPEATED_PROMPT,
+        "OMEGA",
+    ], f"stable ids must keep the five-row transcript: {contents}"
+
+
+def _limited_display_rows(session, sid, msg_limit=10):
+    """Mirror the ordinary session-detail handler's limited-display branch.
+
+    The handler asks the real planner for a floor, reads state.db bounded by
+    that floor (full read when the planner refuses), and hands both to the
+    real display consumer.  Returns ``(rows, floor, state_row_count)``.
+    """
+    import api.models as models
+    import api.routes as routes
+
+    floor, sidecar = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        msg_limit,
+    )
+    reader_kwargs = {} if floor is None else {"since_timestamp": floor}
+    state_rows = models.get_state_db_session_messages(sid, **reader_kwargs)
+    rows = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        sidecar,
+        state_rows,
+    )
+    return rows, floor, len(state_rows)
+
+
+def test_bounded_display_refuses_a_restamped_tail(monkeypatch, tmp_path):
+    """C67-F3 extension: a restamped tail must take the full read.
+
+    The 2026-11-13 RED certificate builds the C67-F3 350-row real-SQLite
+    fixture with matching sidecar timestamps 1000..1349 and stable ids
+    from the real producer, then restamps ONLY the final SQL row to 1350
+    without changing its content.  On the pre-fix head the planner still
+    accepted floor 1050 (the skipped prefix is identical) and the bounded
+    reader returned 300 SQL rows, but the bounded display merge could no
+    longer recognise the final row's replay: its established clock
+    disagrees with its sidecar twin's, the occurrence-sensitive visible
+    keys differ, and the final assistant row was duplicated (351 rows)
+    while the full read stayed at 350.
+
+    The regeneration consumer already refuses this shape through its
+    restamped-twin proof (``session_ops._bounded_tail_snapshot_if_safe``);
+    the display planner must take the full read too whenever its bounded
+    proof cannot establish parity.
+    """
+    import api.models as models
+
+    sid = "webui_8672_r6_restamped_tail"
+    rows = [
+        {
+            "role": "user" if idx % 2 == 0 else "assistant",
+            "content": f"row {idx:04d}",
+            "timestamp": 1000.0 + idx,
+        }
+        for idx in range(350)
+    ]
+    state_rows = [dict(row) for row in rows]
+    state_rows[-1]["timestamp"] = 1350.0
+    _make_state_db(tmp_path / "state.db", sid, state_rows)
+    sidecar, _stamped = _settled_sidecar(rows)
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar)
+
+    full_display = models.reconciled_state_db_messages_for_session(session)
+    assert len(full_display) == 350, (
+        f"the full read must stay at 350 rows: {len(full_display)}"
+    )
+
+    limited_rows, floor, state_row_count = _limited_display_rows(session, sid)
+    assert floor is None, (
+        "a restamped tail must refuse the bounded read, so the display path "
+        f"falls back to the full read (floor={floor!r})"
+    )
+    assert state_row_count == 350, (
+        f"the refused bounded read must fall back to the full 350 rows: "
+        f"{state_row_count}"
+    )
+    assert len(limited_rows) == len(full_display), (
+        "the limited display duplicated the restamped tail: "
+        f"{len(limited_rows)} rows vs {len(full_display)} on the full read"
+    )
+
+
+def test_bounded_display_matching_clock_tail_stays_bounded(monkeypatch, tmp_path):
+    """C67-F3 control: an unrestamped tail keeps the bounded read.
+
+    The same 350-row fixture WITHOUT the restamp must still take the
+    bounded read (floor 1050, 300 tail rows), and its display must match
+    the full read exactly.
+    """
+    import api.models as models
+
+    sid = "webui_8672_r6_matching_clock_tail"
+    rows = [
+        {
+            "role": "user" if idx % 2 == 0 else "assistant",
+            "content": f"row {idx:04d}",
+            "timestamp": 1000.0 + idx,
+        }
+        for idx in range(350)
+    ]
+    _make_state_db(tmp_path / "state.db", sid, [dict(row) for row in rows])
+    sidecar, _stamped = _settled_sidecar(rows)
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar)
+
+    full_display = models.reconciled_state_db_messages_for_session(session)
+    assert len(full_display) == 350, (
+        f"the full read must stay at 350 rows: {len(full_display)}"
+    )
+
+    limited_rows, floor, state_row_count = _limited_display_rows(session, sid)
+    assert floor == 1050.0, (
+        "the matching-clock control must keep the bounded read, got "
+        f"floor={floor!r}"
+    )
+    assert state_row_count == 300, (
+        f"the bounded reader must return the 300 tail rows: {state_row_count}"
+    )
+    assert len(limited_rows) == len(full_display), (
+        "the bounded display must match the full read for a matching-clock "
+        f"tail: {len(limited_rows)} rows vs {len(full_display)}"
+    )
