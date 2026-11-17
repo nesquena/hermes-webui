@@ -9828,6 +9828,8 @@ function _preferencesPayloadFromUi(){
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
   const showQuotaChipCb=$('settingsShowQuotaChip');
   if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
+  const quotaChipWindowSel=$('settingsQuotaChipWindow');
+  if(quotaChipWindowSel) payload.quota_chip_window=_normalizeQuotaChipWindow(quotaChipWindowSel.value);
   const showConversationOutlineCb=$('settingsShowConversationOutline');
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
@@ -10567,6 +10569,19 @@ async function loadSettingsPanel(){
             : ((typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null);
           void refreshProviderQuotaIndicator(provider);
         }
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const quotaChipWindowSel=$('settingsQuotaChipWindow');
+    if(quotaChipWindowSel){
+      quotaChipWindowSel.value=_normalizeQuotaChipWindow(settings.quota_chip_window);
+      window._quotaChipWindow=quotaChipWindowSel.value;
+      // Only meaningful while the chip is shown; the saved choice is kept either way.
+      quotaChipWindowSel.disabled=showQuotaChipCb?!showQuotaChipCb.checked:false;
+      if(showQuotaChipCb){showQuotaChipCb.addEventListener('change',function(){quotaChipWindowSel.disabled=!showQuotaChipCb.checked;},{once:false});}
+      quotaChipWindowSel.addEventListener('change',()=>{
+        window._quotaChipWindow=_normalizeQuotaChipWindow(quotaChipWindowSel.value);
+        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator(typeof _currentQuotaProvider==='function'?_currentQuotaProvider():undefined);
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -14203,6 +14218,7 @@ async function saveSettings(andClose){
     }
   }
   body.show_quota_chip=showQuotaChip===true;
+  body.quota_chip_window=_normalizeQuotaChipWindow(($('settingsQuotaChipWindow')||{}).value);
   body.show_conversation_outline=showConversationOutline===true;
   body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
