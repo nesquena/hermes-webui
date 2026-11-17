@@ -124,12 +124,16 @@ def test_read_predicate_fails_closed_when_liveness_cannot_be_confirmed(tmp_path,
 
 
 def test_read_predicate_denies_named_homes_when_helpers_are_missing(tmp_path, monkeypatch):
-    """Import failure denies NAMED homes; the default home keeps working.
+    """A missing liveness helper no longer denies live named homes.
 
     This is the CI shape: hermes-agent is not installed there, so
-    ``hermes_constants`` is simply absent. Denying every home would blank the
-    Tasks panel, so the pre-check is path shape (which needs no upstream
-    import) and only the named-home verdict falls back to deny.
+    ``hermes_constants`` is simply absent. Older Agent cores that DO load never
+    shipped ``named_profile_is_live`` either, and they still serve ``cron.jobs``
+    — denying every named home there blanked Tasks on those deployments. The
+    predicate now applies that Agent's own rule (directory + identity marker +
+    no tombstone), so the live home stays readable while tombstoned and
+    marker-less shells are still skipped. The default home never needed the
+    helper: its shape is provable without any upstream import.
     """
     from api import profiles as webui_profiles
     import sys
@@ -137,8 +141,34 @@ def test_read_predicate_denies_named_homes_when_helpers_are_missing(tmp_path, mo
     home, profiles, live, ghost, shell = _make_homes(tmp_path)
 
     monkeypatch.setitem(sys.modules, "hermes_constants", None)
-    assert webui_profiles.is_live_profile_home_for_reads(live) is False
-    assert webui_profiles.is_live_profile_home_for_reads(ghost) is False
+    assert webui_profiles.is_live_profile_home_for_reads(live) is True
+    assert webui_profiles.is_live_profile_home_for_reads(ghost) is False  # tombstoned
+    assert webui_profiles.is_live_profile_home_for_reads(shell) is False  # marker-less
+    assert webui_profiles.is_live_profile_home_for_reads(home) is True
+
+
+def test_read_predicate_applies_agent_rule_when_liveness_helper_is_missing(tmp_path, monkeypatch):
+    """The real older-Agent shape: ``hermes_constants`` loads, the helper does not.
+
+    Agent cores that predate ``named_profile_is_live`` still import the module
+    and still serve ``cron.jobs`` (verified against e5b4cf7bea2), so the missing
+    helper must not read as "not live". With only that one name removed, the
+    installed Agent's own identity/tombstone helpers decide — the marker set
+    stays authoritative instead of being mirrored.
+    """
+    from api import profiles as webui_profiles
+    import hermes_constants
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+
+    monkeypatch.delattr(hermes_constants, "named_profile_is_live", raising=False)
+    # The classifier still loads, so `live` is still classified as a named home...
+    assert hermes_constants.named_profile_home(live) == live
+    assert webui_profiles._named_profile_home_for_reads(live) == live
+    # ...and the Agent's own rule keeps it readable while ghosts stay skipped.
+    assert webui_profiles.is_live_profile_home_for_reads(live) is True
+    assert webui_profiles.is_live_profile_home_for_reads(ghost) is False  # tombstoned
+    assert webui_profiles.is_live_profile_home_for_reads(shell) is False  # marker-less
     assert webui_profiles.is_live_profile_home_for_reads(home) is True
 
 
@@ -441,3 +471,138 @@ def test_resolved_root_live_child_reads_through_live_named_ancestor(tmp_path, mo
     active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("actualprof")
     assert other_jobs == []
     assert [j["name"] for j in active_jobs] == ["actualprof-job"], [j["name"] for j in active_jobs]
+
+
+# ── Maintainer must-fix (2026-11-11): a symlinked profile dir is checked under
+# ── the wrong name ───────────────────────────────────────────────────────────
+
+def _make_symlinked_profile_dir(tmp_path: Path):
+    """The maintainer's layout: the profile DIR is a symlink into a sibling dir.
+
+        .hermes/profiles/worker -> .hermes/profiles/storage/worker-home
+        .hermes/profiles/storage/               # marker-less, not a profile
+
+    Both the Agent and WebUI list ``worker`` (``entry.is_dir()`` and
+    ``named_profile_has_identity`` both follow the symlink), but
+    ``get_hermes_home_for_profile()`` resolves it, and the resolved path's own
+    ``profiles`` ancestor is the marker-less ``storage`` profile.
+    """
+    base = tmp_path / ".hermes"
+    base.mkdir()
+    (base / "config.yaml").write_text("model: base\n", encoding="utf-8")
+    profiles = base / "profiles"
+    profiles.mkdir()
+    storage = profiles / "storage"
+    storage.mkdir()
+    worker_home = storage / "worker-home"
+    worker_home.mkdir()
+    (worker_home / "config.yaml").write_text("model: worker\n", encoding="utf-8")
+    (profiles / "worker").symlink_to(worker_home, target_is_directory=True)
+    return base, profiles, storage, worker_home
+
+
+def test_symlinked_profile_dir_is_checked_under_its_logical_name(tmp_path, monkeypatch):
+    """Must-fix 2: a live symlinked profile keeps its jobs in Tasks.
+
+    The guard derived ``storage`` (marker-less) from the RESOLVED path, so the
+    live ``worker`` profile's saved jobs disappeared. The route now passes the
+    logical ``owner_profile`` and the guard checks that home's identity and
+    tombstone; the resolved path is used only for containment and cron I/O.
+    """
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    base, profiles, storage, worker_home = _make_symlinked_profile_dir(tmp_path)
+    _write_saved_default_job(worker_home, "worker")
+
+    _point_runtime_at_base(monkeypatch, base, [{"name": "worker", "visible": True}])
+
+    # Precondition: both authorities list the symlinked profile, and the reader
+    # receives the RESOLVED path (the `profiles` component of `worker` is gone).
+    webui_profiles._invalidate_list_profiles_cache()
+    assert [row["name"] for row in webui_profiles._build_profile_rows_fast()] == ["default", "worker"]
+    resolved = webui_profiles.get_hermes_home_for_profile("worker")
+    assert resolved.resolve(strict=False) == worker_home.resolve(strict=False)
+    assert resolved.parent.name == "storage"
+
+    # Path-only classification answers with the marker-less ancestor...
+    assert webui_profiles._named_profile_home_for_reads(resolved) == storage
+    assert webui_profiles.is_live_profile_home_for_reads(resolved) is False
+    # ...while the logical owner_profile keeps the live home readable.
+    assert webui_profiles.is_live_profile_home_for_reads(resolved, owner_profile="worker") is True
+    assert webui_profiles.is_live_profile_home_for_reads(profiles / "worker", owner_profile="worker") is True
+    # A name that does not own this path is not trusted.
+    assert webui_profiles.is_live_profile_home_for_reads(resolved, owner_profile="storage") is False
+
+    # Real reader: the saved job survives, and nothing is created in the ancestor.
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("worker")
+    assert other_jobs == []
+    assert [j["name"] for j in active_jobs] == ["worker-job"], [j["name"] for j in active_jobs]
+    assert not (storage / "cron").exists()
+
+
+def test_symlinked_profile_dir_tombstone_uses_the_logical_name(tmp_path, monkeypatch):
+    """Control for must-fix 2: the tombstone beside the LOGICAL home still denies.
+
+    The symlink target is live, so a guard that followed the resolved path would
+    read (and recreate cron dirs inside) a home the operator deleted under its
+    logical name.
+    """
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    base, profiles, storage, worker_home = _make_symlinked_profile_dir(tmp_path)
+    _write_saved_default_job(worker_home, "worker")
+    (profiles / ".deleted").mkdir()
+    (profiles / ".deleted" / "worker").write_text("deleted\n", encoding="utf-8")
+
+    _point_runtime_at_base(monkeypatch, base, [{"name": "worker", "visible": True}])
+
+    resolved = webui_profiles.get_hermes_home_for_profile("worker")
+    assert webui_profiles.is_live_profile_home_for_reads(resolved, owner_profile="worker") is False
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("worker")
+    assert active_jobs == [] and other_jobs == []
+
+
+# ── Maintainer must-fix (2026-11-11): a custom default home under a `profiles/`
+# ── ancestor is treated as a dead named profile ──────────────────────────────
+
+def test_custom_default_home_under_profiles_ancestor_stays_readable(tmp_path, monkeypatch):
+    """Must-fix 3: the configured default home is admitted before classifying.
+
+    ``<root>/.hermes/profiles/storage/custom-root`` is a valid custom
+    ``HERMES_HOME``: both the Agent's ``get_default_hermes_root()`` and WebUI's
+    base-home resolver accept it as the default root. The ancestor classifier
+    still mapped it to the marker-less ``storage`` profile, so the default
+    profile's own saved jobs disappeared — contradicting this PR's "default and
+    custom homes are unaffected" claim. Isolated-profile handling is unchanged.
+    """
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+    import hermes_constants
+
+    root = tmp_path / "root"
+    storage = root / ".hermes" / "profiles" / "storage"
+    base = storage / "custom-root"
+    base.mkdir(parents=True)
+    (base / "config.yaml").write_text("model: custom\n", encoding="utf-8")
+    _write_saved_default_job(base, "custom")
+
+    # Precondition pins: both authorities accept the custom root as the default...
+    monkeypatch.setenv("HERMES_BASE_HOME", str(base))
+    monkeypatch.setenv("HERMES_HOME", str(base))
+    assert hermes_constants.get_default_hermes_root() == base
+    # ...while the classifier maps it to the marker-less `storage` ancestor: the trap.
+    assert hermes_constants.named_profile_home(base) == storage
+
+    _point_runtime_at_base(monkeypatch, base, [{"name": "default", "visible": True}])
+
+    assert webui_profiles.is_live_profile_home_for_reads(base) is True
+    # Admission is scoped to the configured default home: the marker-less
+    # ancestor it lives inside is still not a live named profile.
+    assert webui_profiles.is_live_profile_home_for_reads(storage) is False
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("default")
+    assert other_jobs == []
+    assert [j["name"] for j in active_jobs] == ["custom-job"], [j["name"] for j in active_jobs]

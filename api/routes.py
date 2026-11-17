@@ -2435,8 +2435,11 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
         # whose home was deleted. Reading its cron jobs would call ensure_dirs() and
         # mkdir `cron/` + `cron/output/` inside the ghost, making a tombstoned shell
         # look alive. Skip any named home that is not live; the default/custom homes
-        # (not under profiles/) are unaffected.
-        if not is_live_profile_home_for_reads(home):
+        # (not under profiles/) are unaffected. `owner_profile` is the LOGICAL name:
+        # a profile dir that is itself a symlink resolves into another profile's home,
+        # so the resolved path alone would validate the wrong home's identity and
+        # tombstone (the resolved path still drives containment and cron I/O).
+        if not is_live_profile_home_for_reads(home, owner_profile=owner_profile):
             continue
         home_key = _home_key(home)
         if home_key in seen_homes:
