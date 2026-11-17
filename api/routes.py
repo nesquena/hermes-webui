@@ -17512,8 +17512,8 @@ class _SavedPromptsPostCommitFailed(OSError):
     """The live store write raised after its replacement had already landed (#7647).
 
     Durability of the replacement could not be confirmed, but the new content is
-    on disk: the prompt *was* deleted and the recovery copy is published (or
-    retained in a pending copy on disk if publication failed), so the DELETE
+    on disk: the prompt *was* deleted. A recovery copy was published, retained
+    in a verified pending copy on disk, or recovery is unverified. The DELETE
     handler must never answer that nothing was deleted.
     """
 
@@ -17523,10 +17523,12 @@ class _SavedPromptsPostCommitFailed(OSError):
         *,
         recovery_published: bool = True,
         pending_path: "Path | None" = None,
+        attempted_path: "Path | None" = None,
     ) -> None:
         super().__init__(message)
         self.recovery_published = recovery_published
         self.pending_path = pending_path
+        self.attempted_path = attempted_path if attempted_path is not None else pending_path
 
 
 class _SavedPromptsBackupVerificationFailed(OSError):
@@ -17541,7 +17543,8 @@ class _SavedPromptsRestoreFailed(OSError):
     """The recovery backup could not be verified AND restoring the live store failed (#7647).
 
     Critical: the live store write already succeeded and could not be rolled back.
-    The DELETE handler must report that the prompt was deleted.
+    The prompt was deleted. A recovery copy was published, retained in a verified
+    pending copy on disk, or recovery is unverified.
     """
 
     def __init__(
@@ -17550,10 +17553,12 @@ class _SavedPromptsRestoreFailed(OSError):
         *,
         recovery_published: bool = False,
         pending_path: "Path | None" = None,
+        attempted_path: "Path | None" = None,
     ) -> None:
         super().__init__(message)
         self.recovery_published = recovery_published
         self.pending_path = pending_path
+        self.attempted_path = attempted_path if attempted_path is not None else pending_path
 
 
 def _is_saved_prompts_backup_verified(
@@ -17575,17 +17580,46 @@ def _is_saved_prompts_backup_verified(
 def _ensure_saved_prompts_preimage_retained(
     staged_path: "Path",
     content: str,
-) -> None:
+    live_path: "Path | None" = None,
+) -> "Path | None":
+    """Ensure the staged preimage survives at *staged_path*, verified as recovery material (#7647).
+
+    Returns the verified staging path when it exists, is a regular file, is not
+    a symlink, is not the same file as the live store, and its text reads back
+    byte-equal to *content*. Returns None when verification fails or recreation
+    cannot be established; never raises into the transaction.
+    """
+    if live_path is None:
+        try:
+            live_path = _saved_prompts_path()
+        except Exception:
+            live_path = None
+
+    def _verified() -> bool:
+        try:
+            return (
+                staged_path.exists()
+                and staged_path.is_file()
+                and not staged_path.is_symlink()
+                and (
+                    live_path is None
+                    or not live_path.exists()
+                    or not os.path.samefile(str(live_path), str(staged_path))
+                )
+                and staged_path.read_text(encoding="utf-8") == content
+            )
+        except (OSError, ValueError):
+            return False
+
     try:
-        if (
-            staged_path.is_file()
-            and not staged_path.is_symlink()
-            and staged_path.read_text(encoding="utf-8") == content
-        ):
-            return
+        if _verified():
+            return staged_path
         _write_text_atomic(staged_path, content, mode=0o600)
+        if _verified():
+            return staged_path
     except Exception:
         pass
+    return None
 
 
 def _write_text_atomic(path: "Path", text: str, *, mode: "int | None" = None) -> None:
@@ -17692,7 +17726,9 @@ def _save_saved_prompts(
                                 recovery_published=True,
                             ) from exc
 
-                        _ensure_saved_prompts_preimage_retained(staged_backup, backup_content)
+                        verified_staged = _ensure_saved_prompts_preimage_retained(
+                            staged_backup, backup_content, live_path=p
+                        )
                         err_msg = (
                             f"saved prompts store write could not be confirmed durable: {exc}; "
                             f"recovery publication {'failed: ' + str(publish_exc) if publish_exc else 'could not be verified'}"
@@ -17700,7 +17736,8 @@ def _save_saved_prompts(
                         raise _SavedPromptsPostCommitFailed(
                             err_msg,
                             recovery_published=False,
-                            pending_path=staged_backup,
+                            pending_path=verified_staged,
+                            attempted_path=staged_backup,
                         ) from (publish_exc or exc)
 
                     if backup_content is not None and current_store == backup_content:
@@ -17724,8 +17761,11 @@ def _save_saved_prompts(
                         publish_exc = p_exc
                         published = False
 
+                    verified_staged = None
                     if not published:
-                        _ensure_saved_prompts_preimage_retained(staged_backup, backup_content)
+                        verified_staged = _ensure_saved_prompts_preimage_retained(
+                            staged_backup, backup_content, live_path=p
+                        )
 
                     restored = False
                     restore_exc = None
@@ -17762,13 +17802,16 @@ def _save_saved_prompts(
                     raise _SavedPromptsRestoreFailed(
                         err_msg,
                         recovery_published=False,
-                        pending_path=staged_backup,
+                        pending_path=verified_staged,
+                        attempted_path=staged_backup,
                     ) from (restore_exc or publish_exc or exc)
 
                 try:
                     os.replace(staged_backup, backup)
                 except Exception as replace_exc:
-                    _ensure_saved_prompts_preimage_retained(staged_backup, backup_content)
+                    verified_staged = _ensure_saved_prompts_preimage_retained(
+                        staged_backup, backup_content, live_path=p
+                    )
                     restored = False
                     restore_exc = None
                     try:
@@ -17791,19 +17834,23 @@ def _save_saved_prompts(
                         raise _SavedPromptsRestoreFailed(
                             f"could not publish recovery backup ({replace_exc}) and live store restore failed: {restore_exc}",
                             recovery_published=False,
-                            pending_path=staged_backup,
+                            pending_path=verified_staged,
+                            attempted_path=staged_backup,
                         ) from restore_exc
 
                     raise _SavedPromptsRestoreFailed(
                         f"could not publish recovery backup ({replace_exc}) and live store restore could not be verified",
                         recovery_published=False,
-                        pending_path=staged_backup,
+                        pending_path=verified_staged,
+                        attempted_path=staged_backup,
                     ) from replace_exc
 
                 verified = _is_saved_prompts_backup_verified(backup, p, backup_content)
 
                 if not verified:
-                    _ensure_saved_prompts_preimage_retained(staged_backup, backup_content)
+                    verified_staged = _ensure_saved_prompts_preimage_retained(
+                        staged_backup, backup_content, live_path=p
+                    )
                     restored = False
                     restore_exc = None
                     try:
@@ -17826,13 +17873,15 @@ def _save_saved_prompts(
                         raise _SavedPromptsRestoreFailed(
                             f"recovery backup could not be verified and live store restore failed: {restore_exc}",
                             recovery_published=False,
-                            pending_path=staged_backup,
+                            pending_path=verified_staged,
+                            attempted_path=staged_backup,
                         ) from restore_exc
 
                     raise _SavedPromptsRestoreFailed(
                         "recovery backup could not be verified and live store restore could not be verified",
                         recovery_published=False,
-                        pending_path=staged_backup,
+                        pending_path=verified_staged,
+                        attempted_path=staged_backup,
                     )
 
                 return
@@ -24560,16 +24609,30 @@ def handle_delete(handler, parsed) -> bool:
                         "the prompt was deleted and the previous generation is in the recovery copy",
                         status=500,
                     )
+                pending_path = getattr(exc, "pending_path", None)
+                if pending_path is not None:
+                    logger.error(
+                        "saved prompt delete: store replacement landed but durability is unconfirmed "
+                        "(preimage retained at %s): %s",
+                        pending_path,
+                        exc,
+                    )
+                    return bad(
+                        handler,
+                        "saved prompts store write could not be confirmed durable; "
+                        "the prompt was deleted and the previous generation is retained in a pending recovery copy",
+                        status=500,
+                    )
                 logger.error(
                     "saved prompt delete: store replacement landed but durability is unconfirmed "
-                    "(preimage retained at %s): %s",
-                    getattr(exc, "pending_path", None),
+                    "(preimage retention could not be verified at %s): %s",
+                    getattr(exc, "attempted_path", None),
                     exc,
                 )
                 return bad(
                     handler,
                     "saved prompts store write could not be confirmed durable; "
-                    "the prompt was deleted and the previous generation is retained in a pending recovery copy",
+                    "the prompt was deleted and the previous generation could not be retained (recovery is unverified)",
                     status=500,
                 )
             except _SavedPromptsStoreWriteFailed as exc:
@@ -24616,16 +24679,30 @@ def handle_delete(handler, parsed) -> bool:
                         "the prompt may be gone and the previous generation is in the recovery copy",
                         status=500,
                     )
+                pending_path = getattr(exc, "pending_path", None)
+                if pending_path is not None:
+                    logger.error(
+                        "saved prompt delete critical: store restore could not be verified "
+                        "(preimage retained at %s): %s",
+                        pending_path,
+                        exc,
+                    )
+                    return bad(
+                        handler,
+                        "saved prompts store restore could not be verified; "
+                        "the prompt may be gone and the previous generation is retained in a pending recovery copy",
+                        status=500,
+                    )
                 logger.error(
                     "saved prompt delete critical: store restore could not be verified "
-                    "(preimage retained at %s): %s",
-                    getattr(exc, "pending_path", None),
+                    "(preimage retention could not be verified at %s): %s",
+                    getattr(exc, "attempted_path", None),
                     exc,
                 )
                 return bad(
                     handler,
                     "saved prompts store restore could not be verified; "
-                    "the prompt may be gone and the previous generation is retained in a pending recovery copy",
+                    "the prompt may be gone and the previous generation could not be retained (recovery is unverified)",
                     status=500,
                 )
             except OSError as exc:
