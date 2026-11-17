@@ -38,6 +38,7 @@ import json
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -315,7 +316,7 @@ def test_delete_aborts_when_the_backup_cannot_be_written(prompt_store, monkeypat
     real_write = routes._write_text_atomic
 
     def _fail_backup_write(path, text, mode=None):
-        if path.name.endswith(".bak"):
+        if ".bak" in path.name:
             raise OSError("simulated: no space left on device")
         real_write(path, text)
 
@@ -595,7 +596,7 @@ def test_delete_fails_closed_when_the_backup_file_cannot_be_created(prompt_store
     real_create = api_paths._create_atomic_temp_file
 
     def _deny_backup_temp(write_path, *, existing):
-        if Path(write_path).name.endswith(".bak"):
+        if ".bak" in Path(write_path).name:
             raise PermissionError("simulated: directory is not writable")
         return real_create(write_path, existing=existing)
 
@@ -613,4 +614,192 @@ def test_delete_fails_closed_when_the_backup_file_cannot_be_created(prompt_store
     ], "fail-closed means the live store is untouched"
     assert not prompt_store.with_name(BACKUP_NAME).exists()
     assert list(prompt_store.parent.glob("*.tmp")) == [], "the aborted write left a temp file behind"
+
+
+# ── #7647 CR round 4: permission authority, staged generation, aliases ────────
+
+
+def _record_atomic_writes(monkeypatch) -> list:
+    """Spy on routes._write_text_atomic; returns the ``[(path, mode), ...]`` it saw."""
+    real = routes._write_text_atomic
+    seen: list = []
+
+    def _spy(path, text, mode=None):
+        seen.append((Path(path), mode))
+        real(path, text, mode=mode)
+
+    monkeypatch.setattr(routes, "_write_text_atomic", _spy)
+    return seen
+
+
+def _synthetic_stat(mode: int) -> os.stat_result:
+    """A `stat_result` carrying *mode* as a regular file, for seam-level tests."""
+    return os.stat_result((mode | stat.S_IFREG, 1, 1, 1, 0, 0, 0, 0.0, 0.0, 0.0))
+
+
+def test_backup_mode_is_owner_only_when_the_store_stat_fails(prompt_store, monkeypatch):
+    """Permission authority must not evaporate when the store's mode cannot be read.
+
+    A failure while capturing the store's `st_mode` used to fall through as
+    `source_mode=None`; the backup was then created like any brand-new file,
+    i.e. through the process umask (0664 under umask 002) while the store it
+    copies stayed 0600. The backup holds the deleted prompt's private text, so
+    the fallback has to be owner-only (0600), never the umask.
+    """
+    os.chmod(prompt_store, 0o600)
+    real_stat = Path.stat
+
+    def _stat(self, *args, **kwargs):
+        if self == prompt_store and sys._getframe(1).f_code.co_name == "_save_saved_prompts":
+            raise OSError("simulated EIO while capturing the store mode")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat)
+
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+    seen = _record_atomic_writes(monkeypatch)
+
+    previous_umask = os.umask(0o002)
+    try:
+        assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    finally:
+        os.umask(previous_umask)
+
+    assert captured.get("payload") == {"ok": True}, captured.get("bad")
+    backup_writes = [mode for path, mode in seen if ".bak" in path.name]
+    assert backup_writes, "the delete must still commit a recovery backup"
+    assert backup_writes[0] == 0o600, (
+        "the store mode could not be read, so the recovery backup was created with "
+        f"{backup_writes[0]!r} (the process umask) instead of owner-only — the deleted "
+        "prompt's private text is readable beyond the store (#7647)"
+    )
+
+
+def test_backup_mode_uses_verified_metadata_not_a_stale_snapshot(prompt_store, monkeypatch):
+    """The mode authority is the probe-verified inode, not an earlier snapshot.
+
+    Schedule from the review: the store is tightened 0640 -> 0600 between the
+    initial `stat()` and the real `_require_writable_target()` probe. The probe
+    returns 0600 but the backup was published with the earlier 0640.
+    """
+    real_stat = Path.stat
+
+    def _stale_stat(self, *args, **kwargs):
+        if self == prompt_store:
+            return _synthetic_stat(0o640)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stale_stat)
+    monkeypatch.setattr(
+        routes, "_require_writable_target", lambda _p: _synthetic_stat(0o600), raising=False
+    )
+
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+    seen = _record_atomic_writes(monkeypatch)
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert captured.get("payload") == {"ok": True}, captured.get("bad")
+    backup_writes = [mode for path, mode in seen if ".bak" in path.name]
+    assert backup_writes, "the delete must still commit a recovery backup"
+    assert backup_writes[0] == 0o600, (
+        "the backup was published with the stale 0640 captured before the write probe; "
+        "the verified inode said 0600 (#7647)"
+    )
+
+
+def test_failed_second_delete_keeps_the_previous_recovery_generation(prompt_store, monkeypatch):
+    """A failed delete must not rotate away the generation the last delete committed.
+
+    Schedule from the review: (1) delete `gone` successfully, so `.bak` holds the
+    generation that still contains it; (2) attempt to delete `keepme`, letting the
+    backup rotate but injecting ENOSPC at the live `os.replace`. The second request
+    answers 500 and the live store is unchanged, yet `gone` was absent from both
+    files — the recovery path ate itself.
+    """
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert captured.get("payload") == {"ok": True}, captured.get("bad")
+    backup = prompt_store.with_name(BACKUP_NAME)
+    assert [p["id"] for p in json.loads(backup.read_text(encoding="utf-8"))] == [
+        "keepme",
+        "gone",
+    ], "the first delete must leave the full previous generation"
+
+    captured.clear()
+    _wire_delete(monkeypatch, captured, "keepme")
+    real_write = routes._write_text_atomic
+
+    def _fail_store_write(path, text, mode=None):
+        if Path(path) == prompt_store:
+            raise OSError("simulated: no space left on device")
+        real_write(path, text, mode=mode)
+
+    monkeypatch.setattr(routes, "_write_text_atomic", _fail_store_write)
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert "payload" not in captured, "a store write that never landed cannot report success"
+    assert captured.get("bad", (None, None))[1] == 500
+
+    rotated = [p["id"] for p in json.loads(backup.read_text(encoding="utf-8"))]
+    assert rotated == ["keepme", "gone"], (
+        "the failed delete rotated .bak onto the un-deleted store, so the prompt that the "
+        f"previous request deleted is now absent from both files (got {rotated}) — the "
+        "recovery copy destroyed itself on a failure (#7647)"
+    )
+    live_ids = [p["id"] for p in json.loads(prompt_store.read_text(encoding="utf-8"))]
+    assert live_ids == ["keepme"], (
+        "the failed delete mutated the live store; only the first delete may have "
+        f"removed `gone` (got {live_ids})"
+    )
+
+
+@pytest.mark.parametrize("shape", ["hardlink", "symlink"])
+def test_backup_alias_to_the_store_never_reports_a_recoverable_delete(
+    prompt_store, monkeypatch, shape
+):
+    """A `.bak` that aliases the store cannot hold a recovery copy.
+
+    With `.bak` as a hard link or a symlink to the store, writing "the backup"
+    lands in the store itself, so the delete answered 200 with no copy of the
+    deleted prompt anywhere. Either outcome is acceptable — a verified, distinct
+    backup artifact, or a fail-closed 500 with untouched live bytes — but a
+    success with no recoverable text is not.
+    """
+    backup = prompt_store.with_name(BACKUP_NAME)
+    try:
+        if shape == "hardlink":
+            os.link(prompt_store, backup)
+        else:
+            backup.symlink_to(prompt_store)
+    except (OSError, NotImplementedError, AttributeError) as exc:  # pragma: no cover
+        pytest.skip(f"{shape} backups are not supported on this platform: {exc}")
+
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    live_ids = [p["id"] for p in json.loads(prompt_store.read_text(encoding="utf-8"))]
+
+    if "payload" in captured:
+        assert live_ids == ["keepme"], "a successful delete must remove the prompt from the store"
+        assert not backup.is_symlink(), (
+            "the delete reported success while .bak is still a symlink to the live store"
+        )
+        assert not os.path.samefile(str(prompt_store), str(backup)), (
+            "the delete reported success while .bak is still the same inode as the live store"
+        )
+        recovered = [p["id"] for p in json.loads(backup.read_text(encoding="utf-8"))]
+        assert recovered == ["keepme", "gone"], (
+            "the delete reported success but the recovery copy does not contain the deleted "
+            f"prompt (got {recovered})"
+        )
+    else:
+        assert captured.get("bad", (None, None))[1] == 500, (
+            "an alias backup must either be replaced by a verified copy or fail closed"
+        )
+        assert live_ids == ["keepme", "gone"], "fail-closed must leave the live store untouched"
 
