@@ -118,6 +118,8 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Di la verdad con una sonrisa.", ""),
         ("Lo hago con una herramienta.", ""),
         ("Cosa hago con una herramienta?", ""),
+        ("Cuando la build termina?", ""),
+        ("Quando a build termina?", ""),
         ("Je ne sais pas, non, la build est verte.", ""),
         # ...while short Italian replies that lost la/un/con still vote Italian.
         *[(text, "it") for text in [
@@ -129,6 +131,9 @@ def _patch_profile_config(monkeypatch, cfg):
             "Le modifiche sono pronte.",
             "Va bene, procedo con le modifiche.",
             "Perfetto, la build è verde.",
+            "Lo faccio con una patch.",
+            "Cosa faccio con una patch?",
+            "Quando la build termina?",
         ]],
         ("", ""),
     ],
@@ -308,6 +313,9 @@ _SHORT_ITALIAN_REPLIES = [
     "Le modifiche sono pronte.",
     "Va bene, procedo con le modifiche.",
     "Perfetto, la build è verde.",
+    "Lo faccio con una patch.",
+    "Cosa faccio con una patch?",
+    "Quando la build termina?",
 ]
 
 
@@ -329,6 +337,18 @@ def test_english_reply_keeps_configured_voice_next_to_italian_entry(monkeypatch)
     captured = {}
     _stub_edge_tts(monkeypatch, captured)
     h = _post({"text": "The connection was restored and the server is up."}, client="10.42.1.5")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "en-US-GuyNeural"
+
+
+@pytest.mark.parametrize("text", ["Lo hago con una herramienta.", "Cosa hago con una herramienta?"])
+def test_spanish_reply_does_not_take_the_italian_entry(monkeypatch, text):
+    cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.6")
     routes._handle_tts(h, None)
     assert h.status == 200, h.payload()
     assert captured["voice"] == "en-US-GuyNeural"

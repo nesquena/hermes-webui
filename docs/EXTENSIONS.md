@@ -737,12 +737,17 @@ the text's language, in this order:
 
 Language detection is a stopword **vote**: an `it`/`en` word list plus the
 accented letters `à ì ò ù` and the Italian-only ending `-zione`/`-zioni`, where
-a language needs at least two votes and a strict majority to win. What Italian
-shares with French and Spanish (the words `la`, `le`, `un`, `una`, `con`, the
-French `à`/`là`/`déjà`/`voilà`, and `é`/`è` inside a word) casts no vote, so
-text in those languages usually resolves to no language. Words only Italian
-uses (`ho`, `stata`, `nella`, `fatto`, ...) keep short Italian replies voting
-Italian. Mixed text is
+a language needs at least two votes and a strict majority to win. The French
+`à`/`là`/`déjà`/`voilà`, and `é`/`è` inside a word, cast no vote. The words
+Italian shares with French and Spanish (`la`, `le`, `un`, `una`, `con`) vote
+only as backup: when the text already has an Italian word that French and
+Spanish don't use (`ho`, `stata`, `nella`, `fatto`, `faccio`, `quando`, ..., a
+word with `à ì ò ù`, or `-zione`) and no French, Spanish or Portuguese word
+(`est`, `les`, `es`, `el`, `muy`, `uma`, ...). `il`, `lo`, `di`, `non`, `ma`,
+`come` and `cosa` are French or Spanish words too, so they vote but can't be
+that Italian word. Text in those languages therefore usually resolves to no
+language, while short Italian replies such as "Le modifiche sono pronte." or
+"Quando la build termina?" still vote Italian. Mixed text is
 decided by the vote — the winner is used, a single language does not have to
 own the whole string. Only a tie, or a text too short to cast two votes,
 resolves to no language at all, and that skips steps 1 and 3. An explicit

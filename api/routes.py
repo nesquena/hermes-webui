@@ -26393,7 +26393,7 @@ def _detect_text_lang(text: str) -> str:
         "adesso", "oggi", "molto", "così", "ma",
         "ho", "hai", "abbiamo", "hanno", "stato", "stata", "stati", "fatto",
         "ecco", "ancora", "nel", "nella", "nelle", "negli", "della", "dello",
-        "delle", "degli", "sulla", "dalla", "bene", "perfetto",
+        "delle", "degli", "sulla", "dalla", "bene", "perfetto", "faccio",
     }
     # Words Italian shares with French/Spanish. They only back up a strong
     # Italian vote, and only when no French/Spanish/Portuguese word
@@ -26422,10 +26422,12 @@ def _detect_text_lang(text: str) -> str:
     it_votes += accented_it
     # -zione/-zioni is Italian only (French -tion, Spanish -ción).
     it_votes += sum(1 for w in words if w.endswith(("zione", "zioni")))
-    # These are also French, Spanish or Portuguese words, so they can't be
-    # the Italian vote that shared words back up ("Il a fini la ...",
-    # "Lo hago con una ...").
-    weak_it_words = {"il", "lo", "di", "non", "ma", "come", "cosa", "quando"}
+    # These are also French or Spanish words, so they can't be the Italian
+    # vote that shared words back up ("Il a fini la ...", "Lo hago con una
+    # ..."); "Lo faccio con una ..." needs an Italian-only word. Not quando:
+    # Portuguese writes it too, but uses none of the shared words, so
+    # "Quando la build termina?" is Italian.
+    weak_it_words = {"il", "lo", "di", "non", "ma", "come", "cosa"}
     strong_it_votes = it_votes - sum(1 for w in words if w in weak_it_words)
     if strong_it_votes and not any(w in other_romance_words for w in words):
         it_votes += sum(1 for w in words if w in shared_words)
