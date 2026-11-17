@@ -11032,11 +11032,16 @@ function renderMd(raw){
     //   it is linked as before. A name holding ":" is never an allowed tag.
     // - Only the "<" of an unclosed tag is escaped; the rest stays plain text,
     //   so a URL after it is linked with its "&" and quotes left as written.
+    //   The escaped "<" is set aside too, so it still ends a URL before it.
+    //   Each line is scanned once: a "<" before a letter is escaped when no
+    //   ">" follows it on its line.
+    // - Restoring scans every stash token in one left-to-right pass, so a run
+    //   of text between two tokens is never read as a token.
     const _tag_stash=[];
     t=t.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<(?![a-zA-Z][a-zA-Z0-9+.-]*:)\/?[a-zA-Z][^>]*>)/g,m=>{_tag_stash.push(m);return `\x00T${_tag_stash.length-1}\x00`;});
-    t=t.replace(/<(?=[a-zA-Z][\w:-]*[^>\n]*$)/gm,'&lt;');
+    t=t.split(/([\r\n\u2028\u2029])/).map(line=>{const at=line.lastIndexOf('>')+1;return line.slice(0,at)+line.slice(at).replace(/<(?=[a-zA-Z])/g,()=>{_tag_stash.push('&lt;');return `\x00T${_tag_stash.length-1}\x00`;});}).join('');
     t=_autolinkBareText(t);
-    t=t.replace(/\x00T(\d+)\x00/g,(_,i)=>_tag_stash[+i]);
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='T'?_tag_stash[+i]:m);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -11439,9 +11444,10 @@ function renderMd(raw){
   }
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them, and
   // every other tag (an opening <a> without its </a>, for one) so autolink
-  // never rewrites text inside a tag. Every tag here was rebuilt by _tag()
-  // above, with escaped, double-quoted attribute values, so it ends at its
-  // first ">"; raw tags without one were escaped to text just above.
+  // never rewrites text inside a tag. The sanitizer pass above set aside every
+  // "<" it did not hand to _tag() as "&lt;", so every tag here was written
+  // by _tag(), with escaped, double-quoted attribute values, and ends at its
+  // first ">".
   // Restoring scans every stash token (\x00, capital letters, digits, \x00) in
   // one left-to-right pass and puts back only these entries, so a run of text
   // between two tokens (math, code block, media) is never read as a token.
