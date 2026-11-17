@@ -5208,8 +5208,35 @@ def _strip_xml_tool_calls(text: str) -> str:
     return s.strip()
 
 
+_TITLE_THINKING_BLOCK_RE = re.compile(
+    r'^\s*<(think|thinking|thought|reasoning|analysis)>.*?</\1>\s*', flags=re.IGNORECASE | re.DOTALL
+)
+
+
+def _unwrap_title_json(text: str) -> str:
+    """Return the title from a reply that is exactly a ``{"title": ...}`` object.
+
+    A ```json fence around the object is allowed. Anything else is returned
+    unchanged, so JSON embedded in prose is never mined for a title.
+    """
+    s = str(text or '').strip()
+    fenced = re.fullmatch(r'```(?:json)?\s*(.*?)\s*```', s, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        s = fenced.group(1)
+    if not s.startswith('{'):
+        return text
+    try:
+        obj = json.loads(s)
+    except ValueError:
+        return text
+    if isinstance(obj, dict) and isinstance(obj.get('title'), str):
+        return obj['title']
+    return text
+
+
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
+    text = _unwrap_title_json(_TITLE_THINKING_BLOCK_RE.sub('', str(text or ''), count=1))
     # Preserve newline candidate boundaries before markup normalization.
     if _looks_like_title_option_menu(text):
         return ''
@@ -5226,7 +5253,7 @@ def _sanitize_generated_title(text: str) -> str:
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
-    if _is_bad_new_title(s):
+    if _is_bad_new_title(s) or _looks_like_leaked_reasoning(s):
         return ''
     return s[:80]
 
@@ -5356,6 +5383,34 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
         or _looks_like_title_option_menu(s)
+    )
+
+
+# Reasoning that open-weight models leak into the visible reply instead of a
+# title: hedged or opinion-led sentences, leftover thinking tags, and JSON
+# payload fragments. Applied to fresh candidates only, so saved titles are
+# never renamed by these rules.
+_TITLE_REASONING_LEAD_RE = re.compile(
+    r"^(?:(?:well|so|hmm+|ok|okay),?\s+)?"
+    r"(?:maybe|perhaps|possibly|probably"
+    r"|i\s+(?:think|guess|suppose|believe|would|recommend|suggest)"
+    r"|i['’]d\s|let['’]s\s+go\s+with|how\s+about|what\s+about|my\s+pick"
+    r"|something\s+like|a\s+good\s+title|the\s+(?:best|final)\s+title|title\s+should)\b",
+    flags=re.IGNORECASE,
+)
+_TITLE_LEAK_RE = re.compile(
+    r'</?(?:think|thinking|thought|reasoning|analysis)>|["\']title["\']\s*:|^\{',
+    flags=re.IGNORECASE,
+)
+_TITLE_MAX_WORDS = 12
+
+
+def _looks_like_leaked_reasoning(title: str) -> bool:
+    """True when a fresh title candidate is reasoning rather than a title."""
+    return bool(
+        _TITLE_REASONING_LEAD_RE.search(title)
+        or _TITLE_LEAK_RE.search(title)
+        or len(title.split()) > _TITLE_MAX_WORDS
     )
 
 
@@ -6770,6 +6825,45 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         return '', f'llm_empty{suffix}'
 
 
+_TITLE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "session_title",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    },
+}
+# Title routes that answered the schema request with HTTP 400/422.
+_TITLE_SCHEMA_REJECTED_ROUTES: set = set()
+
+
+def _send_title_request(send, route: tuple):
+    """Call ``send(response_format)`` asking for a strict ``{"title"}`` object.
+
+    Endpoints with constrained decoding (llama.cpp, vLLM, Ollama, LM Studio,
+    OpenAI-compatible hosts) then cannot put reasoning in the title. A route
+    that rejects the schema with HTTP 400/422 is resent once without it and,
+    if that succeeds, remembered so later titles skip the schema. Other errors
+    propagate. (Newer Agent ``call_llm`` versions also do this internally; the
+    two layers compose, since a handled rejection never reaches this one.)
+    """
+    if route not in _TITLE_SCHEMA_REJECTED_ROUTES:
+        try:
+            return send(_TITLE_RESPONSE_FORMAT)
+        except Exception as exc:
+            if getattr(exc, 'status_code', None) not in (400, 422):
+                raise
+            resp = send(None)
+            _TITLE_SCHEMA_REJECTED_ROUTES.add(route)
+            return resp
+    return send(None)
+
+
 def _title_provider_name_ambiguous(provider: str, base_url: str) -> bool:
     """True when the title route's provider name has two claimants (#8690).
 
@@ -6864,18 +6958,23 @@ def generate_title_raw_via_aux(
             budgets = [base_max_tokens]
             try:
                 for budget_idx, max_tokens in enumerate(budgets):
-                    resp = call_llm(
-                        task='title_generation',
-                        provider=provider or None,
-                        model=model or None,
-                        base_url=base_url or None,
-                        api_key=api_key or None,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.2,
-                        timeout=_timeout,
-                        extra_body=reasoning_extra or None,
-                    )
+                    def _send(response_format, max_tokens=max_tokens, messages=messages):
+                        extra = dict(reasoning_extra)
+                        if response_format:
+                            extra['response_format'] = response_format
+                        return call_llm(
+                            task='title_generation',
+                            provider=provider or None,
+                            model=model or None,
+                            base_url=base_url or None,
+                            api_key=api_key or None,
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=0.2,
+                            timeout=_timeout,
+                            extra_body=extra or None,
+                        )
+                    resp = _send_title_request(_send, ('aux', provider, model, base_url))
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
                         return raw, ('llm_aux' if idx == 0 and budget_idx == 0 else 'llm_aux_retry')
@@ -6982,9 +7081,19 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                             api_kwargs['max_completion_tokens'] = max_tokens
                         else:
                             api_kwargs['max_tokens'] = max_tokens
-                        resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
-                            **api_kwargs,
-                        )
+                        client = agent._ensure_primary_openai_client(reason='title_generation')
+
+                        def _send(response_format, api_kwargs=api_kwargs, client=client):
+                            kwargs = dict(api_kwargs)
+                            if response_format:
+                                kwargs['response_format'] = response_format
+                            return client.chat.completions.create(**kwargs)
+                        resp = _send_title_request(_send, (
+                            'agent',
+                            getattr(agent, 'provider', ''),
+                            getattr(agent, 'model', ''),
+                            getattr(agent, 'base_url', ''),
+                        ))
                         raw, empty_status = _extract_title_response(resp)
                     raw = str(raw or '').strip()
                     if raw:
