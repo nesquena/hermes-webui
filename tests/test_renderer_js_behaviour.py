@@ -1075,7 +1075,8 @@ class TestRendererGateRegressions7618:
         """
         out = _render(driver_path, "literal \x00BR\x00 text")
         assert "<br>" not in out
-        assert "\x00BR\x00" in out
+        # Raw NULs become U+FFFD on the way in, so typed text can never forge a token.
+        assert "\ufffdBR\ufffd" in out
 
     def test_literal_br_sentinel_inside_link_does_not_corrupt_anchor(self, driver_path):
         """The sentinel inside a URL must not break out of the href attribute."""
