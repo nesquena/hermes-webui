@@ -6484,18 +6484,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
   }
 
-  function _reassertProviderFallbackIndicator(sid, streamId){
+  function _reassertProviderFallbackIndicator(completedSid, streamId){
     // Called at `done` settlement AFTER the generic idle cleanup: if this
     // exact (session, stream) recorded a fallback transition, re-assert the
     // composer indicator (dedup by transition_id keeps it exactly-once per
     // transition; the stream fence drops stale same-session records).
-    const key=String(sid||'');
+    const key=String(activeSid||'');
     const rec=_providerFallbackReassertedMap[key];
     if(!rec) return;
     if(rec.streamId&&String(streamId||'')!==rec.streamId) return; // stale stream
     const rendered=_providerFallbackRenderedMap[rec.tid];
     if(!rendered) return;
-    if(typeof setComposerStatus==='function') setComposerStatus(rendered.text);
+    if(!S.session||S.session.session_id!==completedSid) return;
+    const _liveOwner=LIVE_STREAMS[completedSid];
+    if(_liveOwner&&String(_liveOwner.streamId||'')!==String(streamId||'')) return;
+    if(typeof setComposerStatus==='function') setComposerStatus(rendered.text,4000);
   }
 
   function _bindSidebarIdleRecovery(live){

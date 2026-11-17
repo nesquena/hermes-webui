@@ -90,6 +90,102 @@ def test_switch_notice_matcher_matches_only_the_one_shot_notice():
     assert not _is_fallback_switch_notice("lifecycle", "")
 
 
+def test_switch_notice_matcher_matches_current_agent_notice():
+    current_notice = (
+        "⚠️ Model fallback: gpt-4 via openai unavailable (rate limit exceeded); using opus via anthropic."
+    )
+    assert _is_fallback_switch_notice("lifecycle", current_notice)
+    # Case-insensitive
+    assert _is_fallback_switch_notice("lifecycle", current_notice.lower())
+    assert _is_fallback_switch_notice("lifecycle", current_notice.upper())
+    # Tolerant of leading emoji and whitespace variations
+    assert _is_fallback_switch_notice("lifecycle", "   " + current_notice)
+    assert _is_fallback_switch_notice(
+        "lifecycle",
+        "Model fallback: gpt-4 via openai unavailable (rate limit exceeded); using opus via anthropic.",
+    )
+    # Real cooldown suffix from chat_completion_helpers.py
+    assert _is_fallback_switch_notice(
+        "lifecycle",
+        current_notice + " Primary retry eligible in ~60 s; recovery is not guaranteed.",
+    )
+    # Anchored structure: unrelated status rows must NOT match
+    assert not _is_fallback_switch_notice("lifecycle", "Model fallback failed: gpt-4 via openai")
+    assert not _is_fallback_switch_notice(
+        "lifecycle",
+        "Prefix row Model fallback: gpt-4 via openai unavailable (x); using y",
+    )
+    assert not _is_fallback_switch_notice("lifecycle", "⚠️ Model fallback: gpt-4 via openai unavailable")
+    assert not _is_fallback_switch_notice("warn", current_notice)
+
+
+def test_agent_producer_emits_current_agent_notice_with_route_and_reason():
+    agent = _FakeAgent("anthropic", "opus")
+    agent._provider_fallback_route = ("opus", "anthropic")
+    state = _noticed_state()
+    current_notice = (
+        "⚠️ Model fallback: gpt-4 via openai unavailable (rate limit exceeded); using opus via anthropic."
+    )
+    payload = _maybe_emit_agent_fallback_event(
+        "lifecycle",
+        current_notice,
+        agent,
+        "sess-1",
+        state,
+        "stream-1",
+    )
+    assert payload is not None
+    assert payload["session_id"] == "sess-1"
+    assert payload["stream_id"] == "stream-1"
+    assert payload["source"] == "agent"
+    assert payload["from_provider"] == "openai"
+    assert payload["from_model"] == "gpt-4"
+    assert payload["to_provider"] == "anthropic"
+    assert payload["to_model"] == "opus"
+    assert payload["reason"] == "rate limit exceeded"
+    assert len(payload["transition_id"]) == 16
+
+
+def test_agent_producer_prefers_provider_fallback_route_over_agent_attrs():
+    # If agent._provider_fallback_route is set, it wins even if agent attrs are desynced
+    agent = _FakeAgent(provider="desynced-provider", model="desynced-model")
+    agent._provider_fallback_route = ("opus", "anthropic")
+    state = _noticed_state()
+    current_notice = (
+        "⚠️ Model fallback: gpt-4 via openai unavailable (provider failure); using opus via anthropic."
+    )
+    payload = _maybe_emit_agent_fallback_event(
+        "lifecycle",
+        current_notice,
+        agent,
+        "sess-1",
+        state,
+        "stream-1",
+    )
+    assert payload is not None
+    assert payload["to_provider"] == "anthropic"
+    assert payload["to_model"] == "opus"
+
+
+def test_agent_producer_cause_prefers_structured_cause_over_notice_reason():
+    agent = _FakeAgent(provider="anthropic", model="opus", fallback_cause="upstream 503")
+    agent._provider_fallback_route = ("opus", "anthropic")
+    state = _noticed_state()
+    current_notice = (
+        "⚠️ Model fallback: gpt-4 via openai unavailable (rate limit exceeded); using opus via anthropic."
+    )
+    payload = _maybe_emit_agent_fallback_event(
+        "lifecycle",
+        current_notice,
+        agent,
+        "sess-1",
+        state,
+        "stream-1",
+    )
+    assert payload is not None
+    assert payload["reason"] == "upstream 503"
+
+
 def test_agent_producer_emits_without_any_gateway_metadata():
     """The core review finding: a configured fallback with NO gateway metadata
     must still emit — the agent notice is the authoritative signal."""
@@ -248,24 +344,157 @@ def test_agent_producer_opt_out_env_var_suppresses_event(monkeypatch):
     assert payload is None
 
 
+def _run_worker_turn(notice_message, *, route_tuple=None, cause=None, notice_kind="lifecycle"):
+    import queue
+    import sys
+    import types
+    from unittest import mock
+    from api import streaming
+    from api.config import SESSION_AGENT_CACHE
+
+    SESSION_AGENT_CACHE.clear()
+
+    class Session:
+        session_id = "sess-1"
+        title = "Session"
+        workspace = "/tmp"
+        model = "gpt-4"
+        model_provider = "openai"
+        profile = None
+        personality = None
+        messages = [{"role": "user", "content": "hello"}]
+        context_messages = messages
+        input_tokens = output_tokens = cache_read_tokens = cache_write_tokens = 0
+        estimated_cost = 0.0
+        tool_calls = []
+        gateway_routing = None
+        gateway_routing_history = []
+        active_stream_id = "stream-1"
+        pending_user_message = None
+        pending_attachments = []
+        pending_started_at = None
+        context_length = threshold_tokens = last_prompt_tokens = 0
+        llm_title_generated = True
+
+        def save(self, *a, **k):
+            pass
+
+        def compact(self):
+            return {"session_id": self.session_id}
+
+    class TestAgent:
+        def __init__(self, model=None, provider=None, session_id=None,
+                     stream_delta_callback=None, reasoning_callback=None,
+                     status_callback=None, **kwargs):
+            self.model = model or "gpt-4"
+            self.provider = provider or "openai"
+            self.session_id = session_id
+            self.status_callback = status_callback
+            self._provider_fallback_active = False
+            self.context_compressor = None
+            self.session_prompt_tokens = self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = self.session_cache_write_tokens = 0
+            self.reasoning_config = self.ephemeral_system_prompt = self._last_error = None
+            if route_tuple is not None:
+                self._provider_fallback_route = route_tuple
+            if cause is not None:
+                self._fallback_cause = cause
+
+        def run_conversation(self, **kwargs):
+            if route_tuple is not None:
+                self.model = route_tuple[0]
+                self.provider = route_tuple[1]
+                self._provider_fallback_route = route_tuple
+            else:
+                self.model = "opus"
+                self.provider = "anthropic"
+            self._provider_fallback_active = True
+            if self.status_callback:
+                self.status_callback(notice_kind, notice_message)
+            return {
+                "messages": kwargs.get("conversation_history", []) + [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "hi")},
+                    {"role": "assistant", "content": "done"},
+                ]
+            }
+
+        def interrupt(self, message):
+            pass
+
+    runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    runtime_module.resolve_runtime_provider = mock.Mock(return_value={
+        "provider": "anthropic", "base_url": None, "api_key": "sk-test",
+        "api_mode": "chat_completions", "command": None, "args": [], "credential_pool": None,
+    })
+    cli_module = types.ModuleType("hermes_cli")
+    cli_module.runtime_provider = runtime_module
+    state_module = types.ModuleType("hermes_state")
+    state_module.SessionDB = mock.Mock(return_value=None)
+    injected = {
+        "hermes_cli": cli_module,
+        "hermes_cli.runtime_provider": runtime_module,
+        "hermes_state": state_module,
+    }
+    sentinel = object()
+    saved = {name: sys.modules.get(name, sentinel) for name in injected}
+    sys.modules.update(injected)
+
+    q = queue.Queue()
+    s = Session()
+    try:
+        with mock.patch.object(streaming, "get_session", return_value=s), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=TestAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4", "openai", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch("api.process_event_utils._restore_ledger", return_value=None):
+            streaming.STREAMS["stream-1"] = q
+            streaming._run_agent_streaming("sess-1", "hi", "gpt-4", "/tmp", "stream-1", ephemeral=True)
+    finally:
+        for name, orig in saved.items():
+            if orig is sentinel:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = orig
+        streaming.STREAMS.pop("stream-1", None)
+        SESSION_AGENT_CACHE.clear()
+
+    return list(q.queue)
+
+
 def test_agent_event_exactly_once_and_ordered_before_terminal_events():
-    """One notice → exactly one provider_fallback event, emitted before the
-    turn's terminal done event (the notice fires mid-turn, on recovery)."""
-    agent = _FakeAgent("anthropic", "opus", [("status", "primary failed: HTTP 429")])
-    state = _noticed_state()
-    stream = []
-    payload = _maybe_emit_agent_fallback_event(
-        "lifecycle",
-        "🔄 Switched to fallback model: gpt-4 via openai → opus via anthropic",
-        agent, "sess-1", state, "stream-1",
-    )
-    assert payload is not None
-    stream.append(("provider_fallback", payload))
-    stream.append(("done", {"session_id": "sess-1"}))
-    # Exactly one provider_fallback event and it precedes the terminal event.
-    names = [e[0] for e in stream]
-    assert names == ["provider_fallback", "done"]
-    assert names.count("provider_fallback") == 1
+    """Drive the real producer for both notices so ordering and exactly-once
+    are proven on emitted events before the turn's terminal done event."""
+    notices = [
+        (
+            "🔄 Switched to fallback model: gpt-4 via openai → opus via anthropic",
+            None,
+            "anthropic",
+            "opus",
+            "",
+        ),
+        (
+            "⚠️ Model fallback: gpt-4 via openai unavailable (rate limit exceeded); using opus via anthropic.",
+            ("opus", "anthropic"),
+            "anthropic",
+            "opus",
+            "rate limit exceeded",
+        ),
+    ]
+    for notice, route, expected_provider, expected_model, expected_reason in notices:
+        events = _run_worker_turn(notice, route_tuple=route)
+        names = [e[0] for e in events]
+        assert "provider_fallback" in names, f"provider_fallback not emitted for notice: {notice}"
+        assert "done" in names
+        assert names.count("provider_fallback") == 1
+        assert names.index("provider_fallback") < names.index("done")
+        payload = next(data for name, data in events if name == "provider_fallback")
+        assert payload["source"] == "agent"
+        assert payload["to_provider"] == expected_provider
+        assert payload["to_model"] == expected_model
+        if expected_reason:
+            assert payload["reason"] == expected_reason
 
 
 def test_agent_producer_marks_agent_fired_for_dual_producer_guard():
@@ -527,8 +756,12 @@ let _providerFallbackReassertedMap = {};
 let _providerFallbackRenderCount = 0;
 const S = { session: { session_id: 'sess-A' } };
 let _lastComposerStatus = '';
+let _lastComposerDuration = undefined;
 let _lastToast = null;
-function setComposerStatus(x) { _lastComposerStatus = x; }
+function setComposerStatus(x, duration) {
+  _lastComposerStatus = x;
+  _lastComposerDuration = duration;
+}
 function showToast(m, ms, type) { _lastToast = { m: m, ms: ms, type: type }; }
 function t(k, ...a) { return k === 'provider_fallback_status' ? ('⚠️ Fell back to ' + a[0]) : k; }
 
@@ -547,9 +780,15 @@ function makeEnv(activeSidVal, streamIdVal) {
   eval(_labelSrc);
   eval(_renderSrc);
   eval(_reassertSrc);
+  function idleCleanup() {
+    if (S.session && S.session.session_id === activeSid) {
+      setComposerStatus('');
+    }
+  }
   return {
     render: _renderProviderFallbackIndicator,
     reassert: _reassertProviderFallbackIndicator,
+    idleCleanup: idleCleanup,
   };
 }
 
@@ -561,7 +800,9 @@ function resetState() {
   _providerFallbackReassertedMap = {};
   _providerFallbackRenderCount = 0;
   _lastComposerStatus = '';
+  _lastComposerDuration = undefined;
   _lastToast = null;
+  S.session = { session_id: 'sess-A' };
   for (const k of Object.keys(LIVE_STREAMS)) delete LIVE_STREAMS[k];
 }
 function setLive(sid, streamId) { LIVE_STREAMS[sid] = { streamId: String(streamId) }; }
@@ -633,14 +874,37 @@ if (scenario === 'render') {
   const env = makeEnv('sess-A', 'stream-1');
   env.render({ session_id: 'sess-A', stream_id: 'stream-1', transition_id: 't1', to_provider: 'anthropic' });
   _lastComposerStatus = '';
+  _lastComposerDuration = undefined;
   env.reassert('sess-A', 'stream-1');
   assert(_lastComposerStatus === '⚠️ Fell back to anthropic', 'done reassert failed: ' + _lastComposerStatus);
+  assert(_lastComposerDuration === 4000, 'done reassert duration: ' + _lastComposerDuration);
   assert(Object.keys(_providerFallbackRenderedMap).length === 1, 'reassert grew map');
   _lastComposerStatus = '';
   env.reassert('sess-UNKNOWN', 'stream-1');
   assert(_lastComposerStatus === '', 'unknown session reasserted');
   env.reassert('sess-A', 'stream-OLD');
   assert(_lastComposerStatus === '', 'stale stream reasserted');
+  // Pane ownership fence: if another stream owns the pane, do not write
+  setLive('sess-A', 'stream-OTHER');
+  _lastComposerStatus = '';
+  env.reassert('sess-A', 'stream-1');
+  assert(_lastComposerStatus === '', 'reassert wrote when another stream owns pane');
+  setLive('sess-A', 'stream-1');
+  // Compression rotation: done delivers completedSid for the rotated session,
+  // while the record was saved under activeSid ('sess-A'). When viewed, the
+  // indicator must survive settlement; in background, it must write nothing.
+  _lastComposerStatus = '';
+  _lastComposerDuration = undefined;
+  S.session = { session_id: 'sess-A-rotated' };
+  env.reassert('sess-A-rotated', 'stream-1');
+  assert(_lastComposerStatus === '⚠️ Fell back to anthropic', 'compression rotation dropped indicator');
+  assert(_lastComposerDuration === 4000, 'compression rotation reassert missing 4000ms bound');
+  // Rotated session in background must write nothing:
+  _lastComposerStatus = '';
+  S.session = { session_id: 'sess-OTHER' };
+  env.reassert('sess-A-rotated', 'stream-1');
+  assert(_lastComposerStatus === '', 'background rotated settlement wrote into foreground');
+  S.session = { session_id: 'sess-A' };
   process.stdout.write('PASS done_reassert\n');
 } else if (scenario === 'stale_stream') {
   // Production-shaped regression: replacement stream for the SAME session.
@@ -670,14 +934,30 @@ if (scenario === 'render') {
   // → reassert AFTER the cleanup. The reassert must restore the indicator.
   resetState();
   setLive('sess-A', 'stream-1');
-  const env = makeEnv('sess-A', 'stream-1');
-  env.render({ session_id: 'sess-A', stream_id: 'stream-1', transition_id: 't1', to_provider: 'anthropic' });
-  setComposerStatus('');                                    // _setActivePaneIdleIfOwner()
+  setLive('sess-B', 'stream-2');
+  const envA = makeEnv('sess-A', 'stream-1');
+  const envB = makeEnv('sess-B', 'stream-2');
+  // Second pane (sess-B) recorded a fallback when viewed
+  S.session = { session_id: 'sess-B' };
+  envB.render({ session_id: 'sess-B', stream_id: 'stream-2', transition_id: 'tb', to_provider: 'anthropic' });
+  // User switches back to sess-A
+  S.session = { session_id: 'sess-A' };
+  envA.render({ session_id: 'sess-A', stream_id: 'stream-1', transition_id: 't1', to_provider: 'anthropic' });
+  assert(_lastComposerStatus === '⚠️ Fell back to anthropic', 'foreground render');
+  // Idle cleanup for sess-A clears the foreground composer
+  envA.idleCleanup();
   assert(_lastComposerStatus === '', 'precondition: idle cleanup cleared status');
-  env.reassert('sess-A', 'stream-1');                       // done settlement, post-cleanup
+  // Background session sess-B settles: its idle cleanup + reassert must NOT touch foreground composer
+  envB.idleCleanup();
+  envB.reassert('sess-B', 'stream-2');
+  assert(_lastComposerStatus === '', 'background settlement wrote into foreground composer');
+  // Foreground session sess-A settles: reassert restores indicator with 4000ms bound
+  envA.reassert('sess-A', 'stream-1');
   assert(_lastComposerStatus === '⚠️ Fell back to anthropic', 'indicator wiped by idle cleanup: ' + _lastComposerStatus);
-  env.reassert('sess-A', 'stream-1');
+  assert(_lastComposerDuration === 4000, 'reassert missing 4000ms bound: ' + _lastComposerDuration);
+  envA.reassert('sess-A', 'stream-1');
   assert(_lastComposerStatus === '⚠️ Fell back to anthropic', 'reassert changed text');
+  assert(_lastComposerDuration === 4000, 'reassert missing 4000ms bound');
   process.stdout.write('PASS done_cleanup_order\n');
 } else if (scenario === 'two_turns_same_route') {
   // Two turns, SAME session and SAME from→to route, DIFFERENT streams: the

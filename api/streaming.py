@@ -3864,19 +3864,37 @@ def _fallback_transition_id(session_id, stream_id, from_provider, from_model, to
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]
 
 
+_CURRENT_FALLBACK_NOTICE_RE = re.compile(
+    r'^[^\w]*model fallback:\s*.+?\bunavailable\s*\((.*?)\);\s*using\b',
+    re.IGNORECASE,
+)
+
+
 def _is_fallback_switch_notice(kind: str, message: str) -> bool:
     """True for the agent's one-shot successful fallback-switch notice.
 
-    ``try_activate_fallback`` records ``🔄 Switched to fallback model: …``
-    and the success path surfaces it exactly once per activation, so this is
-    the authoritative, request-scoped transition signal for the configured
-    ``fallback_providers`` chain.  Distinct from
-    ``_is_fallback_lifecycle_message``, which matches pre-switch chatter such
-    as "switching to fallback".
+    Accepts both legacy (``🔄 Switched to fallback model: …``) and current
+    (``⚠️ Model fallback: <old> via <old_provider> unavailable (<reason>); using <new> via <new_provider>.``)
+    notices.
     """
     k = str(kind or '').strip().lower()
-    m = str(message or '').strip().lower()
-    return k == 'lifecycle' and 'switched to fallback model' in m
+    if k != 'lifecycle':
+        return False
+    m = str(message or '').strip()
+    if 'switched to fallback model' in m.lower():
+        return True
+    if bool(_CURRENT_FALLBACK_NOTICE_RE.match(m)):
+        return True
+    return False
+
+
+def _extract_fallback_notice_reason(message: str) -> str:
+    """Extract the parenthetical reason from a current-format fallback notice."""
+    m = str(message or '').strip()
+    match = _CURRENT_FALLBACK_NOTICE_RE.match(m)
+    if match:
+        return match.group(1).strip()
+    return ''
 
 
 def _is_fallback_switch_chatter(message) -> bool:
@@ -3903,6 +3921,8 @@ def _is_fallback_switch_chatter(message) -> bool:
     if m.startswith('primary model failed'):
         return True
     if m.startswith('switched to fallback model'):
+        return True
+    if m.startswith('model fallback:'):
         return True
     return False
 
@@ -4002,14 +4022,34 @@ def _maybe_emit_agent_fallback_event(kind, message, agent, session_id, fallback_
     if not _is_fallback_switch_notice(kind, message):
         return None
     seq = int(fallback_state.get('seq') or 0) + 1
+
+    fb_route = getattr(agent, '_provider_fallback_route', None)
+    if (
+        isinstance(fb_route, tuple)
+        and len(fb_route) == 2
+        and isinstance(fb_route[0], str)
+        and isinstance(fb_route[1], str)
+    ):
+        to_model = fb_route[0]
+        to_provider = fb_route[1]
+    else:
+        to_provider = getattr(agent, 'provider', '') or ''
+        to_model = getattr(agent, 'model', '') or ''
+
+    cause = _agent_fallback_cause(agent)
+    if not cause:
+        notice_reason = _extract_fallback_notice_reason(message)
+        if notice_reason:
+            cause = _bounded_fallback_reason(notice_reason)
+
     payload = _build_agent_fallback_payload(
         session_id,
         stream_id,
         fallback_state.get('route_provider') or '',
         fallback_state.get('route_model') or '',
-        getattr(agent, 'provider', '') or '',
-        getattr(agent, 'model', '') or '',
-        _agent_fallback_cause(agent),
+        to_provider,
+        to_model,
+        cause,
         seq,
     )
     if payload is None:
