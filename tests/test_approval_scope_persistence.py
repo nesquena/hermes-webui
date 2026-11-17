@@ -13,9 +13,10 @@ mirror's answer was never used), and for raw entries no Agent waits on it saves
 only within the scopes the entry offered (``allow_session``/``allow_permanent``/
 ``smart_denied``; missing flags keep the answer as given) and only in the
 session's own profile (tests/test_approval_profile_scoped_grants.py). A session
-answer goes through the Agent's ``_persist_choice`` when it takes plain keys; an
-"always" answer grants and saves only the keys just granted. Every allowlist save
-in the process is serialized.
+answer goes through the Agent's ``_persist_choice`` when it takes plain keys. With
+an Agent bound, a WebUI-held "always" answer is granted for the session only (no
+permanent grant, no save); agent-less, it grants and saves only the keys just
+granted. Every allowlist save in the process is serialized.
 
 The unit tests record WebUI's grant calls. The end-to-end tests drive the real
 Agent gate in a subprocess, answer through WebUI's respond route, and check
@@ -53,8 +54,6 @@ def grants(monkeypatch):
         monkeypatch.setattr(routes, name, lambda *args, _name=name: calls.append((_name, args)))
     # WebUI's own grant calls, not the Agent's _persist_choice (tested separately).
     monkeypatch.setattr(routes, "persist_grant_choice", None)
-    # The Agent still holds every key granted here (the check itself is tested separately).
-    monkeypatch.setattr(routes, "unsaved_grants_still_held", lambda keys: set(keys))
     return calls
 
 
@@ -123,7 +122,8 @@ def test_scope_offered_by_entry(case, choice):
 
 
 def _expected_grants(sid, scope, key="recursive delete"):
-    if scope == "session":
+    """With an Agent bound, a WebUI-held "always" is granted for the session only."""
+    if scope == "session" or (scope == "always" and route_approvals.APPROVAL_BRIDGE["agent"]):
         return [("approve_session", (sid, key))]
     if scope == "always":
         return [
@@ -162,40 +162,27 @@ def _bound_profile(sid):
     yield True
 
 
-def test_always_saves_only_the_keys_it_granted(grants, sid, monkeypatch):
-    """Each key is granted for the session and permanently, the Agent is asked which of
-    exactly these keys it still holds as unsaved, and only those are saved."""
-    asked = []
+@pytest.mark.parametrize("choice", ["session", "always"])
+def test_always_with_an_agent_bound_grants_the_session_only(grants, sid, monkeypatch, choice):
+    """No approve_permanent and no save: the answer is asked again in a later session.
+    Also covers an Agent without a keys-shaped ``_persist_choice`` (the fixture's None)."""
     monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
     monkeypatch.setattr(routes, "_session_profile_grant_scope", _bound_profile)
-    monkeypatch.setattr(
-        routes, "unsaved_grants_still_held", lambda keys: asked.append(set(keys)) or {"second key"} & set(keys)
-    )
-    entry = {**_card("first key"), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
+    keys = ["first key", "tirith:some_rule", "second key"]
+    entry = {**_card("first key"), "pattern_keys": keys, "approval_id": f"aid-{sid}"}
     with routes._lock:
         routes._pending[sid] = [entry]
 
-    assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
+    assert routes._resolve_approval_legacy(sid, entry["approval_id"], choice) is True
 
-    assert asked == [set(), {"first key", "second key"}]  # availability, then the granted keys
-    assert grants == [
-        ("approve_session", (sid, "first key")),
-        ("approve_permanent", ("first key",)),
-        ("approve_session", (sid, "second key")),
-        ("approve_permanent", ("second key",)),
-        ("save_permanent_allowlist", ({"second key"},)),  # "first key" no longer held: not saved
-    ]
+    assert grants == [("approve_session", (sid, k)) for k in keys]
 
 
-@pytest.mark.parametrize("still_held", [set(), None], ids=["none-held", "check-failed"])
-def test_always_narrowed_to_nothing_still_runs_the_save(grants, sid, monkeypatch, still_held):
-    """When none of the granted keys is still held (or the check fails after the grant),
-    the save still runs with nothing to add, so the Agent drops entries removed from
-    command_allowlist from its in-memory set too."""
-    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
+def test_always_agent_less_saves_the_keys_it_granted(grants, sid, monkeypatch):
+    """Agent-less: each key is granted for the session and permanently, and only those are saved."""
+    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", False)
     monkeypatch.setattr(routes, "_session_profile_grant_scope", _bound_profile)
-    monkeypatch.setattr(routes, "unsaved_grants_still_held", lambda keys: set() if not keys else still_held)
-    entry = {**_card("first key"), "approval_id": f"aid-{sid}"}
+    entry = {**_card("first key"), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
     with routes._lock:
         routes._pending[sid] = [entry]
 
@@ -204,58 +191,10 @@ def test_always_narrowed_to_nothing_still_runs_the_save(grants, sid, monkeypatch
     assert grants == [
         ("approve_session", (sid, "first key")),
         ("approve_permanent", ("first key",)),
-        ("save_permanent_allowlist", (set(),)),
+        ("approve_session", (sid, "second key")),
+        ("approve_permanent", ("second key",)),
+        ("save_permanent_allowlist", ({"first key", "second key"},)),
     ]
-
-
-def test_always_without_the_agents_unsaved_grant_names_is_session_only(grants, sid, monkeypatch):
-    """Missing names (or a raise): no permanent grant and no save, so it is asked again."""
-    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
-    monkeypatch.setattr(routes, "_session_profile_grant_scope", _bound_profile)
-    monkeypatch.setattr(routes, "unsaved_grants_still_held", lambda keys: None)
-    entry = {**_card("first key"), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
-    with routes._lock:
-        routes._pending[sid] = [entry]
-
-    assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
-
-    assert grants == [("approve_session", (sid, "first key")), ("approve_session", (sid, "second key"))]
-
-
-def test_unsaved_grant_check_binds_the_agents_names_once(monkeypatch, caplog):
-    held = {"kept", "granted"}
-    lock = threading.Lock()
-    agent = SimpleNamespace(
-        _permanent_set=lambda: held,
-        _permanent_baseline_by_home={"profile": {"kept"}},
-        _baseline_key=lambda: "profile",
-        _lock=lock,
-    )
-    bound = route_approvals._bind_unsaved_grant_check(agent)
-    assert bound == (agent._permanent_set, agent._permanent_baseline_by_home, agent._baseline_key, lock)
-    monkeypatch.setattr(route_approvals, "_unsaved_grant_names", bound)
-    assert route_approvals.unsaved_grants_still_held(["granted", "kept", "other"]) == {"granted"}
-    assert route_approvals.unsaved_grants_still_held(()) == set()
-
-    def broken():
-        raise RuntimeError("not readable")
-
-    monkeypatch.setattr(route_approvals, "_unsaved_grant_names", (broken, {}, lambda: "", lock))
-    assert route_approvals.unsaved_grants_still_held(["granted"]) is None
-    assert not lock.locked()
-
-    with caplog.at_level(logging.WARNING, logger=route_approvals.logger.name):
-        missing = SimpleNamespace(_permanent_set=agent._permanent_set, _lock=lock)
-        assert route_approvals._bind_unsaved_grant_check(missing) is None
-    assert any("_permanent_baseline_by_home, _baseline_key" in r.getMessage() for r in caplog.records)
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger=route_approvals.logger.name):  # no _lock: a bridge failure
-        no_lock = SimpleNamespace(_permanent_set=agent._permanent_set, _permanent_baseline_by_home={}, _baseline_key=str)
-        assert route_approvals._bind_unsaved_grant_check(no_lock) is None
-    assert caplog.records == []
-    assert route_approvals._bind_unsaved_grant_check(None) is None  # Agent-less
-    monkeypatch.setattr(route_approvals, "_unsaved_grant_names", None)
-    assert route_approvals.unsaved_grants_still_held(["granted"]) is None
 
 
 def test_unknown_session_profile_saves_nothing(grants, monkeypatch):
@@ -312,7 +251,10 @@ def test_profile_home_that_cannot_be_bound_grants_nothing(grants, sid, monkeypat
     ids=["mixed", "tirith_only"],
 )
 def test_always_keeps_content_scanner_keys_session_only(grants, sid, keys, saved):
-    """As in the Agent's own ``_persist_choice``, ``tirith:`` findings are never made permanent."""
+    """As in the Agent's own ``_persist_choice``, ``tirith:`` findings are never made permanent
+    (with an Agent bound, nothing is: the answer is granted for the session only)."""
+    if route_approvals.APPROVAL_BRIDGE["agent"]:
+        saved = None
     entry = {**_card(), "pattern_key": keys[0], "pattern_keys": keys, "approval_id": f"aid-{sid}"}
     with routes._lock:
         routes._pending[sid] = [entry]
@@ -351,7 +293,10 @@ def test_raw_answer_uses_a_keys_persist_choice_only_for_session(grants, sid, mon
     if choice == "session":
         assert persisted == [(sid, "session", ["first key", "second key"])]
         assert grants == []  # not WebUI's own grant calls as well
-    else:  # only the keys granted now, never a copy of the in-memory set
+    elif route_approvals.APPROVAL_BRIDGE["agent"]:  # granted for the session only
+        assert persisted == []
+        assert grants == [("approve_session", (sid, "first key")), ("approve_session", (sid, "second key"))]
+    else:  # agent-less: only the keys granted now, never a copy of the in-memory set
         assert persisted == []
         assert grants == [
             ("approve_session", (sid, "first key")),

@@ -105,49 +105,6 @@ def _keys_persist_choice(module):
 # Read once. Not a bridge failure when None: WebUI uses its own grant calls.
 persist_grant_choice = _keys_persist_choice(_agent_approval)
 
-_UNSAVED_GRANT_NAMES = ("_permanent_set", "_permanent_baseline_by_home", "_baseline_key", "_lock")
-
-
-def _bind_unsaved_grant_check(module):
-    """The Agent's own names for "granted since the last read of command_allowlist", or None.
-
-    Bound once, with the Agent's real ``_lock``. When any is missing, a WebUI-held
-    "always" answer is granted for the session only (logged here, once).
-    """
-    if module is None:  # Agent-less: no Agent state to check
-        return None
-    values = tuple(getattr(module, name, None) for name in _UNSAVED_GRANT_NAMES)
-    permanent_set, baselines, baseline_key, lock = values
-    if callable(permanent_set) and isinstance(baselines, dict) and callable(baseline_key) and lock is not None:
-        return values
-    if lock is not None:  # a missing _lock is reported (and fails closed) as a bridge failure below
-        logger.warning(
-            "Hermes Agent tools.approval lacks %s; an 'always' approval answered in WebUI "
-            "is granted for the session only",
-            ", ".join(name for name, value in zip(_UNSAVED_GRANT_NAMES, values, strict=True) if value is None),
-        )
-    return None
-
-
-_unsaved_grant_names = _bind_unsaved_grant_check(_agent_approval)
-
-
-def unsaved_grants_still_held(keys) -> set | None:
-    """``keys`` the active profile still holds as granted beyond the Agent's last read
-    of ``command_allowlist``, as the Agent's own ``_persist_choice`` computes it (under
-    its ``_lock``), or None when those names are missing or raise. Call it outside
-    ``_lock`` and inside the session's profile scope."""
-    if _unsaved_grant_names is None:
-        return None
-    permanent_set, baselines, baseline_key, lock = _unsaved_grant_names
-    try:
-        with lock:
-            return set(keys) & (set(permanent_set()) - set(baselines.get(baseline_key(), set())))
-    except Exception:
-        logger.warning("could not read the Agent's unsaved permanent approvals", exc_info=True)
-        return None
-
-
 _MISSING = object()
 # Without these WebUI cannot see or settle the Agent's parked approvals.
 _BRIDGE_CRITICAL_NAMES = ("_lock", "_gateway_queues", "resolve_gateway_approval")

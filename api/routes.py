@@ -14822,7 +14822,6 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     approve_permanent,
     persist_grant_choice,
     save_permanent_allowlist,
-    unsaved_grants_still_held,
     _pending,
     _lock,
     _permanent_approved,
@@ -34830,34 +34829,26 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     if scope in ("session", "always") and all_keys:
         with _session_profile_grant_scope(sid) as in_profile:
             if in_profile and persist_grant_choice is not None and scope == "session":
-                # A session answer uses the Agent's own grant. "always" saves only the
-                # keys granted now (below), so a concurrent answer can never write back
-                # an entry removed from command_allowlist by hand.
+                # A session answer uses the Agent's own grant.
                 persist_grant_choice(sid, scope, all_keys)
+            elif in_profile and APPROVAL_BRIDGE["agent"]:
+                # With an Agent bound, a WebUI-held "always" is granted for this session
+                # only: a WebUI-side save can't be combined safely with the Agent's own
+                # save of command_allowlist. It is asked again in a later session.
+                for k in all_keys:
+                    approve_session(sid, k)
             elif in_profile:
-                # "always" saves only keys the Agent still holds as granted beyond its last
-                # read of command_allowlist (as its own _persist_choice computes), so an
-                # entry removed by hand after approve_permanent stays removed. Without the
-                # Agent's names for that, grant the session only: nothing permanent unsaved.
-                check = bool(APPROVAL_BRIDGE["agent"]) and scope == "always"
-                permanent = scope == "always" and (not check or unsaved_grants_still_held(()) is not None)
+                # Agent-less: no profile-scoped grant store, so the answer is saved as given.
                 saved = set()
                 for k in all_keys:
                     approve_session(sid, k)
                     # Content-scanner (tirith) findings stay session-only, as in the
                     # Agent's own _persist_choice; a raw entry carries no flag for them.
-                    if permanent and not str(k).startswith("tirith:"):
+                    if scope == "always" and not str(k).startswith("tirith:"):
                         approve_permanent(k)
                         saved.add(k)
-                attempted_permanent = bool(saved)
-                if saved and check:
-                    saved = unsaved_grants_still_held(saved) or set()
-                if attempted_permanent:
+                if saved:
                     # Only the keys granted now: never another profile's in-memory grants.
-                    # Saved even when narrowed to none: the save also drops entries removed
-                    # from command_allowlist from the Agent's in-memory set, which an Agent
-                    # that doesn't re-read the file on each check would otherwise still honour.
-                    # Called outside the Agent's _lock (the save lock is taken first).
                     save_permanent_allowlist(saved)
     # choice == "once": no persistence — approval lasts this single call only.
     # resolve_gateway_approval() below unblocks the parked agent thread for

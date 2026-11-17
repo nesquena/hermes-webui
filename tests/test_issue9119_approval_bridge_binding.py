@@ -92,9 +92,6 @@ def _fake_agent_module(missing=()):
                 return None
             value.__name__ = value.__qualname__ = f"agent_{name}"
         setattr(module, name, value)
-    # Read for a WebUI-held "always" save; not part of APPROVAL_BRIDGE.
-    for extra_name, extra_value in (("_permanent_set", set), ("_permanent_baseline_by_home", {}), ("_baseline_key", str)):
-        setattr(module, extra_name, extra_value)
     return module
 
 
