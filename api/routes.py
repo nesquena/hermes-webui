@@ -33218,7 +33218,7 @@ def _handle_chat_sync(handler, body):
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
             s.title = title_from(s.messages, s.title)
-        s.save()
+        s.save(append_intent=True)
     # Sync to state.db for /insights (opt-in setting)
     try:
         if load_settings().get("sync_to_insights"):

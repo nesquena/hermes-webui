@@ -3781,6 +3781,7 @@ def _run_gateway_chat_streaming(
                     s.process_wakeup_pause = dict(previous_process_wakeup_pause)
                 else:
                     clear_process_wakeup_pause(s, reason="run_completed")
+                # Cancellation revert republishes an earlier transcript snapshot, so append_intent must stay False.
                 s.save()
                 put_gateway_event("cancel", {"message": "Cancelled by user"})
 
@@ -3793,7 +3794,7 @@ def _run_gateway_chat_streaming(
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
-            s.save()
+            s.save(append_intent=True)
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return

@@ -16540,7 +16540,7 @@ def _run_agent_streaming(
             # Persist the user message BEFORE streaming starts so it's durable even if
             # the server crashes before the first checkpoint fires (every 15s).
             with _agent_lock:
-                s.save(touch_updated_at=True, skip_index=False)
+                s.save(touch_updated_at=True, skip_index=False, append_intent=True)
 
             _ckpt_thread = threading.Thread(
                 target=_periodic_checkpoint, daemon=True,
@@ -17486,7 +17486,7 @@ def _run_agent_streaming(
                             _error_message['provider_details_label'] = 'Terminal state details'
                         s.messages.append(_error_message)
                         try:
-                            s.save()
+                            s.save(append_intent=True)
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
@@ -17997,7 +17997,7 @@ def _run_agent_streaming(
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
-                    s.save()
+                    s.save(append_intent=True)
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:

@@ -3,6 +3,7 @@ import collections
 import contextvars
 import copy
 import datetime
+import errno
 import hashlib
 import inspect
 import json
@@ -333,10 +334,47 @@ def _sidecar_unchanged_since(session_id, marker) -> bool:
     return sig_before is not None and _sidecar_stat_signature(SESSION_DIR / f'{session_id}.json') == sig_before
 
 
+_DIR_FSYNC_UNSUPPORTED_ERRNOS = {
+    errno.EINVAL,
+    errno.EBADF,
+    errno.EACCES,
+}
+for _name in ("ENOTSUP", "EOPNOTSUPP"):
+    _val = getattr(errno, _name, None)
+    if _val is not None:
+        _DIR_FSYNC_UNSUPPORTED_ERRNOS.add(_val)
+
+
+def _fsync_parent_dir(path: Path | str) -> None:
+    """Fsync the parent directory of path to ensure publication is durable."""
+    p = Path(path)
+    parent = p if p.is_dir() else p.parent
+    fd = None
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        fd = os.open(parent, flags)
+        os.fsync(fd)
+    except PermissionError:
+        return
+    except OSError as exc:
+        if exc.errno in _DIR_FSYNC_UNSUPPORTED_ERRNOS:
+            return
+        raise
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
     _note_sidecar_write(session_id)
     try:
         _safe_replace(tmp, path)
+        _fsync_parent_dir(path)
     finally:
         _note_sidecar_write(session_id)
 
@@ -377,6 +415,46 @@ def _normalize_session_id_for_path(session_id) -> str | None:
     if not sid or not is_safe_session_id(sid):
         return None
     return sid
+
+
+@contextmanager
+def _session_sidecar_cross_process_lock(sid):
+    """Serialize sidecar save operations across WebUI worker processes for one session.
+
+    Keep the lock file in place permanently: unlinking it while another process
+    is waiting can split later callers across different inodes and defeat the
+    lock. POSIX uses ``flock``; native Windows locks the first byte with
+    ``msvcrt.locking``. If neither primitive exists, fail closed rather than
+    running without cross-process serialization.
+    """
+    normalized_sid = _normalize_session_id_for_path(sid)
+    if not normalized_sid:
+        raise ValueError(f"Unsafe session_id {sid!r}; refusing to lock sidecar")
+    lock_path = SESSION_DIR / f"{normalized_sid}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "r+b", buffering=0) as lock_file:
+        if _fcntl is not None:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            return
+
+        if _msvcrt is not None:
+            if os.fstat(lock_file.fileno()).st_size == 0:
+                lock_file.write(b"\0")
+            lock_file.seek(0)
+            _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+            return
+
+        raise RuntimeError("cross-process session sidecar locking is unavailable")
 
 
 def _session_draft_dir() -> Path:
@@ -1850,6 +1928,57 @@ def _normalize_skill_provenance(value) -> dict[str, int]:
     return normalized
 
 
+def _message_rows_match(row_a: object, row_b: object) -> bool:
+    if not isinstance(row_a, dict) or not isinstance(row_b, dict):
+        return row_a == row_b
+    role_content_match = (
+        row_a.get("role") == row_b.get("role")
+        and row_a.get("content") == row_b.get("content")
+    )
+    a_stable, a_valid = _stable_message_identity_details(row_a)
+    b_stable, b_valid = _stable_message_identity_details(row_b)
+    if a_valid and b_valid and a_stable is not None and b_stable is not None:
+        if a_stable == b_stable:
+            return role_content_match
+        return False
+
+    has_a_id = "id" in row_a and row_a.get("id") is not None
+    has_b_id = "id" in row_b and row_b.get("id") is not None
+    if has_a_id and has_b_id:
+        if row_a.get("id") == row_b.get("id"):
+            return role_content_match
+        return False
+
+    return role_content_match
+
+
+def _merge_concurrent_message_arrays(
+    disk_msgs: list | None,
+    our_msgs: list | None,
+    allow_zero_prefix_merge: bool = False,
+) -> list:
+    """Merge message arrays from concurrent writers sharing an ancestor prefix."""
+    if not isinstance(our_msgs, list):
+        return []
+    if not isinstance(disk_msgs, list):
+        return list(our_msgs)
+
+    prefix_len = 0
+    max_prefix = min(len(disk_msgs), len(our_msgs))
+    while prefix_len < max_prefix:
+        if not _message_rows_match(disk_msgs[prefix_len], our_msgs[prefix_len]):
+            break
+        prefix_len += 1
+
+    if prefix_len == 0 and not allow_zero_prefix_merge:
+        return list(our_msgs)
+
+    prefix = our_msgs[:prefix_len]
+    disk_tail = disk_msgs[prefix_len:]
+    our_tail = our_msgs[prefix_len:]
+    return prefix + disk_tail + our_tail
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -2118,16 +2247,39 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        append_intent: bool = False,
+    ) -> None:
         # #7881: every save of this session id, skip_index=True included,
         # holds one reentrant persistence lock across the persisted-effort
         # read, the payload construction and the atomic replacement, so a
         # save cannot freeze an effort that another save replaces before it
         # lands. Lock order: persist -> _INDEX_WRITE_LOCK -> LOCK.
         with _session_persist_lock(self.session_id):
-            return self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
+            if append_intent and (_fcntl is not None or _msvcrt is not None):
+                with _session_sidecar_cross_process_lock(self.session_id):
+                    return self._save_locked(
+                        touch_updated_at=touch_updated_at,
+                        skip_index=skip_index,
+                        append_intent=append_intent,
+                    )
+            return self._save_locked(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+                append_intent=append_intent,
+            )
 
-    def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def _save_locked(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        append_intent: bool = False,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -2219,6 +2371,35 @@ class Session:
         # actually still owed.
         _pending_hidden_wakeup_at = _validated_pending_hidden_wakeup_at(self)
         self._pending_hidden_wakeup_at = _pending_hidden_wakeup_at
+
+        if append_intent and (_fcntl is not None or _msvcrt is not None):
+            disk_sidecar = None
+            if self.path.exists():
+                try:
+                    disk_sidecar = json.loads(self.path.read_text(encoding="utf-8"))
+                except Exception:
+                    disk_sidecar = None
+            if isinstance(disk_sidecar, dict):
+                disk_messages = disk_sidecar.get("messages")
+                if isinstance(disk_messages, list):
+                    self.messages = _merge_concurrent_message_arrays(
+                        disk_messages, self.messages, allow_zero_prefix_merge=False
+                    )
+
+                disk_context = disk_sidecar.get("context_messages")
+                has_disk_context = isinstance(disk_context, list) and len(disk_context) > 0
+                has_our_context = isinstance(self.context_messages, list) and len(self.context_messages) > 0
+
+                if not has_our_context and has_disk_context:
+                    self.context_messages = list(disk_context)
+                elif has_our_context and not has_disk_context:
+                    self.context_messages = list(self.context_messages)
+                elif has_our_context and has_disk_context:
+                    self.context_messages = _merge_concurrent_message_arrays(
+                        disk_context, self.context_messages, allow_zero_prefix_merge=False
+                    )
+                else:
+                    self.context_messages = []
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
