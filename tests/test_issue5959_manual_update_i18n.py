@@ -13,10 +13,10 @@ def read(relative_path: str) -> str:
 
 def test_manual_update_instruction_exists_in_every_locale():
     source = read("static/i18n.js")
-    assert source.count("settings_update_manual_docker:") == 15
+    assert source.count("settings_update_manual_docker:") == 16
 
     values = re.findall(r"settings_update_manual_docker:\s*'([^']*)'", source)
-    assert len(values) == 15
+    assert len(values) == 16
     assert all("{0}" in value for value in values)
 
 
