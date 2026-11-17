@@ -39,6 +39,8 @@ import os
 import re
 import stat
 import sys
+import threading
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -844,5 +846,199 @@ def test_postcommit_failure_never_promises_untouched_live_bytes(prompt_store, mo
         "keepme",
         "gone",
     ], "the recovery copy must hold the generation that still contains the deleted prompt"
+
+
+def test_in_place_truncation_failure_restores_the_verified_preimage(prompt_store, monkeypatch):
+    """The in-place writer fails after truncation: restore verified preimage (#7647)."""
+    original_bytes = prompt_store.read_bytes()
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+
+    failed_once = False
+    real_write = routes._write_text_atomic
+
+    def _failing_write(path, text, mode=None):
+        nonlocal failed_once
+        p = Path(path)
+        if p == prompt_store and not failed_once:
+            failed_once = True
+            p.write_text("", encoding="utf-8")
+            raise OSError("simulated: in-place writer failed after truncation")
+        return real_write(path, text, mode=mode)
+
+    monkeypatch.setattr(routes, "_write_text_atomic", _failing_write)
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert "payload" not in captured
+
+    message, status = captured.get("bad", (None, None))
+    assert status == 500, message
+    assert "prompt was deleted" not in message
+    assert "the prompt was deleted" not in message
+    assert "nothing was deleted" in message
+
+    assert prompt_store.read_bytes() == original_bytes, (
+        "the live store still holds the two original prompts byte-for-byte after the handler"
+    )
+
+    backup = prompt_store.with_name(BACKUP_NAME)
+    assert backup.exists(), "the recovery copy exists"
+    assert [p["id"] for p in json.loads(backup.read_text(encoding="utf-8"))] == ["keepme", "gone"], (
+        "the recovery copy holds both prompts"
+    )
+
+
+def test_overlapping_deletes_never_resurrect_the_deleted_prompt(prompt_store, monkeypatch):
+    """Two concurrent DELETEs for same id must serialize so second hits repeat-delete (#7647)."""
+    req1_inside_write = threading.Event()
+    req1_can_proceed = threading.Event()
+
+    real_write = routes._write_text_atomic
+
+    def _blocking_write(path, text, mode=None):
+        if Path(path) == prompt_store and not req1_inside_write.is_set():
+            req1_inside_write.set()
+            assert req1_can_proceed.wait(timeout=5.0), "timed out waiting for req1 release"
+        return real_write(path, text, mode=mode)
+
+    monkeypatch.setattr(routes, "_write_text_atomic", _blocking_write)
+
+    results: dict = {}
+
+    def _custom_bad(handler, msg, status: int = 400, *_args, **_kwargs):
+        results[id(handler)] = {"bad": (msg, status)}
+        return True
+
+    def _custom_j(handler, obj, *_args, **_kwargs):
+        results[id(handler)] = {"payload": obj}
+        return True
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *a, **k: False)
+    monkeypatch.setattr(routes, "read_body", lambda _h: {"id": "gone"})
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *a, **k: True)
+    monkeypatch.setattr(routes, "bad", _custom_bad)
+    monkeypatch.setattr(routes, "j", _custom_j)
+
+    h1 = _FakeHandler()
+    h2 = _FakeHandler()
+
+    t1 = threading.Thread(target=lambda: routes.handle_delete(h1, urlparse("/api/prompts")))
+    t1.start()
+
+    assert req1_inside_write.wait(timeout=5.0), "timed out waiting for req1 store write"
+
+    t2 = threading.Thread(target=lambda: routes.handle_delete(h2, urlparse("/api/prompts")))
+    t2.start()
+
+    time.sleep(0.05)
+    req1_can_proceed.set()
+
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+
+    assert results.get(id(h1), {}).get("payload") == {"ok": True}
+    assert results.get(id(h2), {}).get("payload") == {"ok": True}
+
+    remaining = json.loads(prompt_store.read_text(encoding="utf-8"))
+    assert [p["id"] for p in remaining] == ["keepme"], "final store does not contain deleted prompt"
+
+    backup = prompt_store.with_name(BACKUP_NAME)
+    assert backup.exists(), "recovery copy exists"
+    assert [p["id"] for p in json.loads(backup.read_text(encoding="utf-8"))] == ["keepme", "gone"], (
+        "recovery copy still holds both prompts"
+    )
+
+
+def test_append_during_delete_keeps_both_writes(prompt_store, monkeypatch):
+    """A POST append issued while a DELETE is inside store write keeps both writes (#7647)."""
+    delete_inside_write = threading.Event()
+    delete_can_proceed = threading.Event()
+
+    real_write = routes._write_text_atomic
+
+    def _blocking_write(path, text, mode=None):
+        if Path(path) == prompt_store and not delete_inside_write.is_set():
+            delete_inside_write.set()
+            assert delete_can_proceed.wait(timeout=5.0), "timed out waiting for delete release"
+        return real_write(path, text, mode=mode)
+
+    monkeypatch.setattr(routes, "_write_text_atomic", _blocking_write)
+
+    results: dict = {}
+
+    def _custom_bad(handler, msg, status: int = 400, *_args, **_kwargs):
+        results[id(handler)] = {"bad": (msg, status)}
+        return True
+
+    def _custom_j(handler, obj, *_args, **_kwargs):
+        results[id(handler)] = {"payload": obj}
+        return True
+
+    h_del = _FakeHandler(command="DELETE")
+    h_post = _FakeHandler(command="POST")
+
+    bodies = {
+        id(h_del): {"id": "gone"},
+        id(h_post): {"text": "brand new prompt", "label": "brand new"},
+    }
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *a, **k: False)
+    monkeypatch.setattr(routes, "read_body", lambda h: bodies.get(id(h), {}))
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *a, **k: True)
+    monkeypatch.setattr(routes, "bad", _custom_bad)
+    monkeypatch.setattr(routes, "j", _custom_j)
+
+    t_del = threading.Thread(target=lambda: routes.handle_delete(h_del, urlparse("/api/prompts")))
+    t_del.start()
+
+    assert delete_inside_write.wait(timeout=5.0), "timed out waiting for delete to reach store write"
+
+    t_post = threading.Thread(target=lambda: routes.handle_post(h_post, urlparse("/api/prompts")))
+    t_post.start()
+
+    time.sleep(0.05)
+    delete_can_proceed.set()
+
+    t_del.join(timeout=5.0)
+    t_post.join(timeout=5.0)
+    assert not t_del.is_alive()
+    assert not t_post.is_alive()
+
+    assert results.get(id(h_del), {}).get("payload") == {"ok": True}
+    assert results.get(id(h_post), {}).get("payload", {}).get("ok") is True
+
+    remaining = json.loads(prompt_store.read_text(encoding="utf-8"))
+    remaining_texts = [p["text"] for p in remaining]
+    assert "the prompt the reporter lost" not in remaining_texts, "the deleted prompt is gone"
+    assert "brand new prompt" in remaining_texts, "the appended prompt is present"
+    assert "keep this one" in remaining_texts, "neither write reverted the other"
+
+
+def test_invalid_primary_is_recovered_from_the_valid_recovery_copy(prompt_store, monkeypatch):
+    """Invalid primary store recovers from valid recovery copy on read and delete (#7647)."""
+    backup = prompt_store.with_name(BACKUP_NAME)
+    backup_data = json.loads(prompt_store.read_text(encoding="utf-8"))
+    backup.write_text(json.dumps(backup_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    prompt_store.write_text("CORRUPTED INVALID NOT JSON {{{", encoding="utf-8")
+
+    loaded = routes._load_saved_prompts()
+    assert [p["id"] for p in loaded] == ["keepme", "gone"], (
+        "load must return the two prompts from recovery copy"
+    )
+
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert "bad" not in captured
+    assert captured.get("payload") == {"ok": True}
+
+    remaining = json.loads(prompt_store.read_text(encoding="utf-8"))
+    assert [p["id"] for p in remaining] == ["keepme"], "surviving prompt must be left in the store"
 
 

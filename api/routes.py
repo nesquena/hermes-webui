@@ -17417,13 +17417,49 @@ def _saved_prompts_path() -> "Path":
         return Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser() / "webui" / "saved_prompts.json"
 
 
+_SAVED_PROMPTS_LOCKS: dict[str, threading.RLock] = {}
+_SAVED_PROMPTS_LOCKS_GUARD = threading.Lock()
+
+
+def _saved_prompts_store_lock(p: "Path | None" = None) -> threading.RLock:
+    """Return the re-entrant lock for the given saved-prompts store path (#7647 follow-up)."""
+    target = p if p is not None else _saved_prompts_path()
+    try:
+        resolved_key = str(target.resolve())
+    except Exception:
+        resolved_key = str(target)
+    with _SAVED_PROMPTS_LOCKS_GUARD:
+        lock = _SAVED_PROMPTS_LOCKS.get(resolved_key)
+        if lock is None:
+            lock = threading.RLock()
+            _SAVED_PROMPTS_LOCKS[resolved_key] = lock
+        return lock
+
+
 def _load_saved_prompts() -> list:
     p = _saved_prompts_path()
-    if not p.exists():
-        return []
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    with _saved_prompts_store_lock(p):
+        if not p.exists():
+            return []
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+        backup = _saved_prompts_backup_path(p)
+        if backup.is_file():
+            try:
+                backup_data = json.loads(backup.read_text(encoding="utf-8"))
+                if isinstance(backup_data, list):
+                    logger.warning(
+                        "saved prompts store at %s is invalid; recovered from %s",
+                        p,
+                        backup.name,
+                    )
+                    return backup_data
+            except Exception:
+                pass
         return []
 
 
@@ -17460,6 +17496,15 @@ class _SavedPromptsStoreWriteFailed(OSError):
 
     The staged backup is discarded and the previous backup generation is left
     untouched, so the DELETE handler can report that nothing was deleted.
+    """
+
+
+class _SavedPromptsRolledBack(OSError):
+    """The live store write was left incomplete, but verified rollback from preimage succeeded (#7647 follow-up).
+
+    The staged recovery backup was published and the live store was restored
+    from the verified preimage, so the DELETE handler can report that nothing
+    was deleted.
     """
 
 
@@ -17510,10 +17555,10 @@ def _save_saved_prompts(
     * the write is atomic via _write_text_atomic / api.paths._atomic_write_text,
       preserving permissions, ownership, symlink targets, and directory constraints;
     * on a destructive write (``backup_required=True``, the DELETE path, #7647)
-      the previous generation is copied to `saved_prompts.json.bak` via a staged
-      sibling file (`saved_prompts.json.bak.pending`) with mode 0o600, published
-      only after the live store write succeeds, and verified against aliases and
-      corruption, so a DELETE can be undone.
+      the previous generation is copied to `saved_prompts.json.bak` via an
+      operation-owned staged sibling file (`saved_prompts.json.bak.pending.<uuid>`)
+      with mode 0o600, published only after the live store write succeeds, and
+      verified against aliases and corruption, so a DELETE can be undone.
 
     With ``backup_required=True`` (the DELETE path, #7647) a backup failure is
     raised instead of logged: the caller must abort the destructive operation
@@ -17528,120 +17573,156 @@ def _save_saved_prompts(
     until the next save (#7647 minor).
     """
     p = _saved_prompts_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    with _saved_prompts_store_lock(p):
+        p.parent.mkdir(parents=True, exist_ok=True)
 
-    if backup_required:
-        # #7647 (minor): never rotate .bak ahead of a store write that cannot
-        # succeed. A read-only store used to rotate the backup first and only
-        # then fail the store write — the older, useful recovery copy was
-        # destroyed for nothing, and the 500 blamed the backup step.
-        try:
-            _require_writable_target(p)
-        except PermissionError as exc:
-            raise _SavedPromptsStoreNotWritable(
-                f"saved prompts store is not writable: {p}"
-            ) from exc
-
-        if backup_content is None and p.is_file():
+        if backup_required:
+            # #7647 (minor): never rotate .bak ahead of a store write that cannot
+            # succeed. A read-only store used to rotate the backup first and only
+            # then fail the store write — the older, useful recovery copy was
+            # destroyed for nothing, and the 500 blamed the backup step.
             try:
-                backup_content = p.read_text(encoding="utf-8")
-            except Exception as exc:
-                raise OSError(f"could not read saved prompts for backup: {exc}") from exc
-
-        if backup_content is not None:
-            backup = _saved_prompts_backup_path(p)
-            staged_backup = backup.with_name(backup.name + ".pending")
-            try:
-                _write_text_atomic(staged_backup, backup_content, mode=0o600)
-            except Exception as exc:
-                try:
-                    staged_backup.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise _SavedPromptsBackupWriteFailed(
-                    f"could not write recovery backup: {exc}"
+                _require_writable_target(p)
+            except PermissionError as exc:
+                raise _SavedPromptsStoreNotWritable(
+                    f"saved prompts store is not writable: {p}"
                 ) from exc
 
-            store_payload = json.dumps(prompts, ensure_ascii=False, indent=2)
-            try:
-                _write_text_atomic(p, store_payload)
-            except Exception as exc:
-                # The atomic helper can fail *after* its rename landed (the
-                # directory fsync). Read the store back instead of assuming the
-                # pre-rename state: if it already carries this payload the
-                # delete happened and only durability is unconfirmed, so the
-                # recovery copy must still be published and the caller must not
-                # be told that nothing was deleted (#7647, commit boundary).
+            if backup_content is None and p.is_file():
                 try:
-                    landed = p.read_text(encoding="utf-8") == store_payload
-                except OSError:
-                    landed = False
-                if landed:
+                    backup_content = p.read_text(encoding="utf-8")
+                except Exception as exc:
+                    raise OSError(f"could not read saved prompts for backup: {exc}") from exc
+
+            if backup_content is not None:
+                backup = _saved_prompts_backup_path(p)
+                staged_backup = backup.with_name(f"{backup.name}.pending.{uuid.uuid4().hex}")
+                try:
+                    _write_text_atomic(staged_backup, backup_content, mode=0o600)
+                except Exception as exc:
                     try:
-                        os.replace(staged_backup, backup)
-                    except Exception:
+                        staged_backup.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise _SavedPromptsBackupWriteFailed(
+                        f"could not write recovery backup: {exc}"
+                    ) from exc
+
+                store_payload = json.dumps(prompts, ensure_ascii=False, indent=2)
+                try:
+                    _write_text_atomic(p, store_payload)
+                except Exception as exc:
+                    try:
+                        current_store = p.read_text(encoding="utf-8")
+                    except OSError:
+                        current_store = None
+
+                    if current_store == store_payload:
+                        try:
+                            os.replace(staged_backup, backup)
+                        except Exception:
+                            try:
+                                staged_backup.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                        raise _SavedPromptsPostCommitFailed(
+                            f"saved prompts store write could not be confirmed durable: {exc}"
+                        ) from exc
+
+                    if backup_content is not None and current_store == backup_content:
                         try:
                             staged_backup.unlink(missing_ok=True)
                         except OSError:
                             pass
-                    raise _SavedPromptsPostCommitFailed(
-                        f"saved prompts store write could not be confirmed durable: {exc}"
+                        raise _SavedPromptsStoreWriteFailed(
+                            f"could not write saved prompts store: {exc}"
+                        ) from exc
+
+                    # Anything else — empty, partial, unreadable, or a different generation
+                    # (the in-place fallback truncated and then failed) — is ambiguous.
+                    # Do not delete the staged copy. Publish it as the recovery copy:
+                    try:
+                        os.replace(staged_backup, backup)
+                    except Exception:
+                        pass
+
+                    restored = False
+                    if backup_content is not None:
+                        try:
+                            _write_text_atomic(p, backup_content)
+                            restored = p.read_text(encoding="utf-8") == backup_content
+                        except Exception:
+                            restored = False
+
+                    if restored:
+                        raise _SavedPromptsRolledBack(
+                            f"saved prompts store write failed ({exc}); store was left incomplete "
+                            "and has been restored from the verified preimage"
+                        ) from exc
+
+                    raise _SavedPromptsRestoreFailed(
+                        f"saved prompts store write failed ({exc}) and live store restore could not be verified"
                     ) from exc
-                try:
-                    staged_backup.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise _SavedPromptsStoreWriteFailed(
-                    f"could not write saved prompts store: {exc}"
-                ) from exc
 
-            try:
-                os.replace(staged_backup, backup)
-            except Exception as replace_exc:
                 try:
-                    staged_backup.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                try:
-                    _write_text_atomic(p, backup_content)
-                except Exception as restore_exc:
-                    raise _SavedPromptsRestoreFailed(
-                        f"could not publish recovery backup ({replace_exc}) and live store restore failed: {restore_exc}"
-                    ) from restore_exc
-                raise _SavedPromptsBackupVerificationFailed(
-                    f"could not publish recovery backup: {replace_exc}"
-                ) from replace_exc
+                    os.replace(staged_backup, backup)
+                except Exception as replace_exc:
+                    try:
+                        staged_backup.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    restored = False
+                    try:
+                        _write_text_atomic(p, backup_content)
+                        restored = p.read_text(encoding="utf-8") == backup_content
+                    except Exception as restore_exc:
+                        raise _SavedPromptsRestoreFailed(
+                            f"could not publish recovery backup ({replace_exc}) and live store restore failed: {restore_exc}"
+                        ) from restore_exc
+                    if not restored:
+                        raise _SavedPromptsRestoreFailed(
+                            f"could not publish recovery backup ({replace_exc}) and live store restore could not be verified"
+                        ) from replace_exc
+                    raise _SavedPromptsBackupVerificationFailed(
+                        f"could not publish recovery backup: {replace_exc}"
+                    ) from replace_exc
 
-            verified = False
-            try:
-                if (
-                    backup.exists()
-                    and not backup.is_symlink()
-                    and not os.path.samefile(str(p), str(backup))
-                    and backup.read_text(encoding="utf-8") == backup_content
-                ):
-                    verified = True
-            except OSError:
                 verified = False
-
-            if not verified:
                 try:
-                    staged_backup.unlink(missing_ok=True)
+                    if (
+                        backup.exists()
+                        and not backup.is_symlink()
+                        and not os.path.samefile(str(p), str(backup))
+                        and backup.read_text(encoding="utf-8") == backup_content
+                    ):
+                        verified = True
                 except OSError:
-                    pass
-                try:
-                    _write_text_atomic(p, backup_content)
-                except Exception as restore_exc:
-                    raise _SavedPromptsRestoreFailed(
-                        f"recovery backup could not be verified and live store restore failed: {restore_exc}"
-                    ) from restore_exc
-                raise _SavedPromptsBackupVerificationFailed(
-                    "recovery backup could not be verified; live store restored"
-                )
+                    verified = False
 
-            return
+                if not verified:
+                    try:
+                        staged_backup.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    restored = False
+                    try:
+                        _write_text_atomic(p, backup_content)
+                        restored = p.read_text(encoding="utf-8") == backup_content
+                    except Exception as restore_exc:
+                        raise _SavedPromptsRestoreFailed(
+                            f"recovery backup could not be verified and live store restore failed: {restore_exc}"
+                        ) from restore_exc
+                    if not restored:
+                        raise _SavedPromptsRestoreFailed(
+                            "recovery backup could not be verified and live store restore could not be verified"
+                        )
+                    raise _SavedPromptsBackupVerificationFailed(
+                        "recovery backup could not be verified; live store restored"
+                    )
 
-    _write_text_atomic(p, json.dumps(prompts, ensure_ascii=False, indent=2))
+                return
+
+        _write_text_atomic(p, json.dumps(prompts, ensure_ascii=False, indent=2))
 
 
 # In-process cache for the app-shell template. The `/`, `/index.html`, and
@@ -20387,13 +20468,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "text is required")
         if len(text) > 8000:
             return bad(handler, "text too long (max 8000 chars)")
-        prompts = _load_saved_prompts()
-        if len(prompts) >= 200:
-            return bad(handler, "saved prompts limit reached (max 200)")
-        new_prompt = {"id": uuid.uuid4().hex[:12], "label": label or text[:60], "text": text, "created_at": time.time()}
-        prompts.append(new_prompt)
-        _save_saved_prompts(prompts)
-        return j(handler, {"ok": True, "prompt": new_prompt})
+        p = _saved_prompts_path()
+        with _saved_prompts_store_lock(p):
+            prompts = _load_saved_prompts()
+            if len(prompts) >= 200:
+                return bad(handler, "saved prompts limit reached (max 200)")
+            new_prompt = {"id": uuid.uuid4().hex[:12], "label": label or text[:60], "text": text, "created_at": time.time()}
+            prompts.append(new_prompt)
+            _save_saved_prompts(prompts)
+            return j(handler, {"ok": True, "prompt": new_prompt})
 
     if parsed.path == "/api/share/create":
         sid = str(body.get("session_id") or "").strip()
@@ -24276,108 +24359,149 @@ def handle_delete(handler, parsed) -> bool:
         if not pid:
             return bad(handler, "id is required")
         p = _saved_prompts_path()
-        try:
-            source_raw = p.read_text(encoding="utf-8") if p.exists() else "[]"
-            before = json.loads(source_raw)
-            if not isinstance(before, list):
-                raise ValueError("saved prompts file does not contain a list")
-        except Exception as exc:
-            logger.error("saved prompt delete aborted: cannot read or verify prompts store: %s", exc)
-            return bad(handler, "could not verify saved prompts before deletion", status=500)
+        with _saved_prompts_store_lock(p):
+            source_raw = None
+            before = None
+            if p.exists():
+                try:
+                    raw = p.read_text(encoding="utf-8")
+                    data = json.loads(raw)
+                    if isinstance(data, list):
+                        source_raw = raw
+                        before = data
+                except Exception:
+                    pass
+            else:
+                source_raw = "[]"
+                before = []
 
-        prompts = [item for item in before if item.get("id") != pid]
-        if len(prompts) == len(before):
-            # #7647: repeat DELETE for an id that is already gone. Rewriting
-            # the store here would rotate .bak onto a generation that no
-            # longer contains the deleted prompt, destroying the only
-            # recovery copy (a stale retry or double-submit is enough).
-            # Return without saving: neither store nor backup is touched, so
-            # the first (oldest) backup for this key is preserved.
+            if before is None:
+                # Primary cannot be verified. Try the recovery copy (#7647 follow-up).
+                backup = _saved_prompts_backup_path(p)
+                if backup.is_file():
+                    try:
+                        raw = backup.read_text(encoding="utf-8")
+                        data = json.loads(raw)
+                        if isinstance(data, list):
+                            logger.warning(
+                                "saved prompts store at %s cannot be verified; proceeding with recovery copy %s",
+                                p,
+                                backup.name,
+                            )
+                            source_raw = raw
+                            before = data
+                    except Exception:
+                        pass
+
+            if before is None:
+                logger.error("saved prompt delete aborted: cannot read or verify prompts store: %s", p)
+                return bad(handler, "could not verify saved prompts before deletion", status=500)
+
+            prompts = [item for item in before if item.get("id") != pid]
+            if len(prompts) == len(before):
+                # #7647: repeat DELETE for an id that is already gone. Rewriting
+                # the store here would rotate .bak onto a generation that no
+                # longer contains the deleted prompt, destroying the only
+                # recovery copy (a stale retry or double-submit is enough).
+                # Return without saving: neither store nor backup is touched, so
+                # the first (oldest) backup for this key is preserved.
+                logger.info(
+                    "saved prompt delete repeated: id=%s already gone, backup preserved",
+                    pid,
+                )
+                return j(handler, {"ok": True})
+            try:
+                # The recovery backup is staged atomically BEFORE the store is rewritten;
+                # if the backup cannot be staged the delete aborts with the store untouched.
+                # If the store write fails, the staged backup is discarded and the previous
+                # backup is left untouched (#7647).
+                _save_saved_prompts(prompts, backup_required=True, backup_content=source_raw)
+            except _SavedPromptsStoreNotWritable as exc:
+                # The store itself refused the write probe, so the rotation never
+                # ran: name the real blocker and say the backup was left alone
+                # (#7647 minor — the old 500 blamed the backup step).
+                logger.error(
+                    "saved prompt delete aborted: live store not writable, backup left untouched: %s",
+                    exc,
+                )
+                return bad(
+                    handler,
+                    "saved prompts store is not writable; nothing was deleted "
+                    "and the existing backup was left untouched",
+                    status=500,
+                )
+            except _SavedPromptsPostCommitFailed as exc:
+                # The replacement landed but its durability could not be confirmed:
+                # the prompt is gone from the live store and the recovery copy has
+                # been published, so the answer must not promise untouched bytes.
+                logger.error(
+                    "saved prompt delete: store replacement landed but durability is unconfirmed: %s",
+                    exc,
+                )
+                return bad(
+                    handler,
+                    "saved prompts store write could not be confirmed durable; "
+                    "the prompt was deleted and the previous generation is in the recovery copy",
+                    status=500,
+                )
+            except _SavedPromptsStoreWriteFailed as exc:
+                logger.error(
+                    "saved prompt delete aborted: store write failed, backup left untouched: %s",
+                    exc,
+                )
+                return bad(
+                    handler,
+                    "saved prompts store write failed; nothing was deleted "
+                    "and the previous backup was left untouched",
+                    status=500,
+                )
+            except _SavedPromptsRolledBack as exc:
+                logger.error(
+                    "saved prompt delete rolled back: store left incomplete, restored from preimage: %s",
+                    exc,
+                )
+                return bad(
+                    handler,
+                    "saved prompts store write was left incomplete and has been restored "
+                    "from the verified preimage; nothing was deleted",
+                    status=500,
+                )
+            except _SavedPromptsBackupVerificationFailed as exc:
+                logger.error(
+                    "saved prompt delete aborted: recovery backup verification failed, store restored: %s",
+                    exc,
+                )
+                return bad(
+                    handler,
+                    "recovery copy could not be verified; nothing was deleted",
+                    status=500,
+                )
+            except _SavedPromptsRestoreFailed as exc:
+                logger.error(
+                    "saved prompt delete critical: store restore could not be verified: %s",
+                    exc,
+                )
+                return bad(
+                    handler,
+                    "saved prompts store restore could not be verified; "
+                    "the prompt may be gone and the previous generation is in the recovery copy",
+                    status=500,
+                )
+            except OSError as exc:
+                logger.error("saved prompt delete aborted: recovery backup failed: %s", exc)
+                return bad(
+                    handler,
+                    "could not write the recovery backup; nothing was deleted",
+                    status=500,
+                )
+            # #7644: deletions used to be total and silent. The store keeps the
+            # previous generation in .bak and the log records what went away.
             logger.info(
-                "saved prompt delete repeated: id=%s already gone, backup preserved",
+                "saved prompt deleted: id=%s (previous generation kept at %s)",
                 pid,
+                _saved_prompts_backup_path(p).name,
             )
             return j(handler, {"ok": True})
-        try:
-            # The recovery backup is staged atomically BEFORE the store is rewritten;
-            # if the backup cannot be staged the delete aborts with the store untouched.
-            # If the store write fails, the staged backup is discarded and the previous
-            # backup is left untouched (#7647).
-            _save_saved_prompts(prompts, backup_required=True, backup_content=source_raw)
-        except _SavedPromptsStoreNotWritable as exc:
-            # The store itself refused the write probe, so the rotation never
-            # ran: name the real blocker and say the backup was left alone
-            # (#7647 minor — the old 500 blamed the backup step).
-            logger.error(
-                "saved prompt delete aborted: live store not writable, backup left untouched: %s",
-                exc,
-            )
-            return bad(
-                handler,
-                "saved prompts store is not writable; nothing was deleted "
-                "and the existing backup was left untouched",
-                status=500,
-            )
-        except _SavedPromptsPostCommitFailed as exc:
-            # The replacement landed but its durability could not be confirmed:
-            # the prompt is gone from the live store and the recovery copy has
-            # been published, so the answer must not promise untouched bytes.
-            logger.error(
-                "saved prompt delete: store replacement landed but durability is unconfirmed: %s",
-                exc,
-            )
-            return bad(
-                handler,
-                "saved prompts store write could not be confirmed durable; "
-                "the prompt was deleted and the previous generation is in the recovery copy",
-                status=500,
-            )
-        except _SavedPromptsStoreWriteFailed as exc:
-            logger.error(
-                "saved prompt delete aborted: store write failed, backup left untouched: %s",
-                exc,
-            )
-            return bad(
-                handler,
-                "saved prompts store write failed; nothing was deleted "
-                "and the previous backup was left untouched",
-                status=500,
-            )
-        except _SavedPromptsBackupVerificationFailed as exc:
-            logger.error(
-                "saved prompt delete aborted: recovery backup verification failed, store restored: %s",
-                exc,
-            )
-            return bad(
-                handler,
-                "recovery copy could not be verified; nothing was deleted",
-                status=500,
-            )
-        except _SavedPromptsRestoreFailed as exc:
-            logger.error(
-                "saved prompt delete critical: recovery backup verification failed and restore failed: %s",
-                exc,
-            )
-            return bad(
-                handler,
-                "recovery copy could not be verified and store restore failed; prompt was deleted",
-                status=500,
-            )
-        except OSError as exc:
-            logger.error("saved prompt delete aborted: recovery backup failed: %s", exc)
-            return bad(
-                handler,
-                "could not write the recovery backup; nothing was deleted",
-                status=500,
-            )
-        # #7644: deletions used to be total and silent. The store keeps the
-        # previous generation in .bak and the log records what went away.
-        logger.info(
-            "saved prompt deleted: id=%s (previous generation kept at %s)",
-            pid,
-            _saved_prompts_backup_path().name,
-        )
-        return j(handler, {"ok": True})
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
