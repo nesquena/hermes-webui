@@ -279,8 +279,7 @@ function _deferLiveRenderForTyping(retry){
   const remaining=Math.min(_composerTypingUntil-now,
     _composerTypingDeferStarted+COMPOSER_TYPING_RENDER_MAX_DEFER_MS-now);
   if(remaining<=0){_composerTypingDeferStarted=null; return false;}
-  setTimeout(retry,remaining);
-  return true;
+  return setTimeout(retry,remaining);
 }
 _bindComposerTypingRenderDefer();
 
@@ -6371,7 +6370,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       _renderPending=true;
-      if(_deferLiveRenderForTyping(_doRender)) return;
+      const typingRetryHandle=_deferLiveRenderForTyping(_doRender);
+      if(typingRetryHandle!==false){
+        _pendingRafHandle=typingRetryHandle;
+        return;
+      }
       _renderPending=false;
       // Mobile scroll-jank guard: temporarily disable overflow-anchor before DOM
       // writes to suppress Chromium scroll re-anchoring during streaming growth.

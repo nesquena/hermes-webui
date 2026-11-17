@@ -20,7 +20,7 @@ const source = fs.readFileSync(process.argv[1], 'utf8');
 function extract(name){
   const start=source.indexOf('function '+name+'(');
   if(start<0) throw new Error(name+' not found');
-  const brace=source.indexOf('{',start);let depth=0;
+  const brace=source.indexOf('){',start)+1;let depth=0;
   for(let i=brace;i<source.length;i++){
     if(source[i]==='{')depth++;
     else if(source[i]==='}'&&--depth===0)return source.slice(start,i+1);
@@ -31,8 +31,12 @@ const listeners={};
 const composer={addEventListener(type,fn,opts){
   (listeners[type]||(listeners[type]=[])).push({fn,opts});
 }};
-let now=0,timers=[],nextTimer=1,renders=0,active=true;
+let now=0,timers=[],nextTimer=1,renders=0,segmentPaints=0,active=true,cancellations=[];
 function addTimer(fn,delay){const timer={id:nextTimer++,fn,at:now+delay};timers.push(timer);return timer.id;}
+function cancelTimer(id){
+  cancellations.push(id);
+  timers=timers.filter(timer=>timer.id!==id);
+}
 function flushDue(advance){
   const target=now+advance;let runs=0;
   for(;;){
@@ -45,9 +49,11 @@ function flushDue(advance){
   now=target;
 }
 const context={
-  console,performance:{now:()=>now},setTimeout:addTimer,requestAnimationFrame:fn=>addTimer(fn,0),
+  console,performance:{now:()=>now},
+  setTimeout:addTimer,clearTimeout:cancelTimer,
+  requestAnimationFrame:fn=>addTimer(fn,0),cancelAnimationFrame:cancelTimer,
   document:{getElementById:id=>id==='msg'?composer:null},window:{},S:{activeStreamId:'stream-1'},
-  listeners,flushDue,
+  listeners,flushDue,cancellations,
   // Tolerate sibling pacing changes to _scheduleRender (cost-based interval).
   LIVE_RENDER_BUSY_FACTOR:4,_lastRenderCostMs:0,
   get now(){return now;},set now(value){now=value;},
@@ -61,6 +67,8 @@ const start=source.indexOf(marker);
 if(start<0)throw new Error('composer typing helper not found');
 vm.runInContext(source.slice(start,source.indexOf('// TTS:',start)),context);
 vm.runInContext(extract('_scheduleRender'),context);
+vm.runInContext(extract('_cancelAnimationFramePendingStreamRender'),context);
+vm.runInContext(extract('_flushPendingSegmentRender'),context);
 vm.runInContext(`
 function typing(type='input'){
   for(const listener of listeners[type]||[])listener.fn({type});
@@ -80,15 +88,16 @@ function _smdNewParser(){throw new Error('unexpected incremental parser');}
 function _smdWrite(){}
 function _stripXmlToolCalls(text){return text;}
 function _syncLiveWorklogReasonsForAnchor(){}
-function _upsertAnchorProcessProse(){}
+function _upsertAnchorProcessProse(text,options){if(options&&options.sealed)segmentPaints++;}
 function renderMd(text){return text;}
 function esc(text){return text;}
 function scrollIfPinned(){}
 function _throttledSnapshotLiveTurn(){}
 `,context);
 const result=vm.runInContext(`(()=>{
-  now=0;timers=[];renders=0;active=true;
+  now=0;timers=[];renders=0;segmentPaints=0;active=true;cancellations.length=0;
   _renderPending=false;_streamFinalized=false;_lastRenderMs=-66;_composerTypingUntil=0;
+  _pendingRafHandle=null;
   _composerTypingDeferStarted=null;
   return ${JSON.stringify('CASE')} === 'listener' ? (()=>{
     _bindComposerTypingRenderDefer();
@@ -107,6 +116,27 @@ const result=vm.runInContext(`(()=>{
     for(let i=0;i<5;i++)_scheduleRender();
     const queued=timers.length;flushDue(250);flushDue(1000);
     return {renders,queued,pending:_renderPending,timers:timers.length};
+  })() : ['forced_flush','interim','tool'].includes(${JSON.stringify('CASE')}) ? (()=>{
+    typing();_scheduleRender();flushDue(0);
+    const retryHandle=_pendingRafHandle;
+    _flushPendingSegmentRender({force:true,skipAnchorProcessProse:${JSON.stringify('CASE')}!=='forced_flush'});
+    const afterFlush={renders,segmentPaints,body:assistantBody.innerHTML,
+      pending:_renderPending,timers:timers.length,handle:_pendingRafHandle,
+      cancellations:[...cancellations]};
+    flushDue(250);
+    const afterOldRetry={renders,segmentPaints,body:assistantBody.innerHTML,
+      pending:_renderPending,timers:timers.length};
+    now=250;_composerTypingUntil=0;assistantText+=' next';_scheduleRender();flushDue(0);
+    return {retryHandle,afterFlush,afterOldRetry,nextToken:{renders,segmentPaints,pending:_renderPending}};
+  })() : ${JSON.stringify('CASE')} === 'terminal' || ${JSON.stringify('CASE')} === 'dispose' ? (()=>{
+    typing();_scheduleRender();flushDue(0);
+    const retryHandle=_pendingRafHandle;
+    _streamFinalized=true;
+    _cancelAnimationFramePendingStreamRender();
+    const afterCancel={pending:_renderPending,handle:_pendingRafHandle,timers:timers.length,
+      cancellations:[...cancellations]};
+    flushDue(250);
+    return {retryHandle,afterCancel,renders,pending:_renderPending,timers:timers.length};
   })() : ${JSON.stringify('CASE')} === 'finalized' ? (()=>{
     typing();_scheduleRender();flushDue(0);_streamFinalized=true;flushDue(250);
     return {renders,pending:_renderPending};
@@ -158,6 +188,47 @@ def test_deferral_coalesces_into_one_render():
     assert run_case("duplicates") == {
         "renders": 1,
         "queued": 1,
+        "pending": False,
+        "timers": 0,
+    }
+
+
+@pytest.mark.parametrize("case", ["forced_flush", "interim", "tool"])
+def test_forced_flush_cancels_typing_retry_and_allows_next_token(case):
+    sealed_paints = int(case == "forced_flush")
+    assert run_case(case) == {
+        "retryHandle": 2,
+        "afterFlush": {
+            "renders": 0,
+            "segmentPaints": sealed_paints,
+            "body": "live",
+            "pending": False,
+            "timers": 0,
+            "handle": None,
+            "cancellations": [2, 2],
+        },
+        "afterOldRetry": {
+            "renders": 0,
+            "segmentPaints": sealed_paints,
+            "body": "live",
+            "pending": False,
+            "timers": 0,
+        },
+        "nextToken": {"renders": 1, "segmentPaints": sealed_paints, "pending": False},
+    }
+
+
+@pytest.mark.parametrize("case", ["terminal", "dispose"])
+def test_terminal_and_dispose_cancel_owned_typing_retry(case):
+    assert run_case(case) == {
+        "retryHandle": 2,
+        "afterCancel": {
+            "pending": False,
+            "handle": None,
+            "timers": 0,
+            "cancellations": [2, 2],
+        },
+        "renders": 0,
         "pending": False,
         "timers": 0,
     }
