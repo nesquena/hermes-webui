@@ -18175,12 +18175,19 @@ function _anchorSceneRenderKeyPart(value){
     return JSON.stringify(value);
   }catch(_){ return null; }
 }
+function _anchorSceneLiveProseFadePolicy(){
+  if(typeof window.__anchorProseIncrementalNode!=='function') return false;
+  const reduced=typeof window.matchMedia==='function'&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  return !reduced&&(window._fadeTextEffect===true||(typeof isTransparentStream==='function'&&isTransparentStream()));
+}
 function _anchorSceneRowRenderPrefs(opts){
   // Timestamp visibility is reconciled in place by the transparent renderer.
   // Excluding it keeps content identity stable across preference-only updates,
   // preserving expanded details, connected nodes, and reader text selection.
+  // The prose producer also keys its parser by effective fade policy. Keep the
+  // same resolved inputs in row identity so unchanged text reaches that producer.
   return {opts:opts||{},language:document.documentElement.lang,showThinking:window._showThinking,
-    simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),detailsExpanded:window._worklogDetailsExpandedByDefault===true,mode:typeof chatActivityMode==='function'?chatActivityMode():'',sessionId:S.session&&S.session.session_id,proseIncremental:typeof window.__anchorProseIncrementalNode==='function'};
+    simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),detailsExpanded:window._worklogDetailsExpandedByDefault===true,mode:typeof chatActivityMode==='function'?chatActivityMode():'',sessionId:S.session&&S.session.session_id,proseIncremental:typeof window.__anchorProseIncrementalNode==='function',proseFade:_anchorSceneLiveProseFadePolicy()};
 }
 function _anchorSceneRowRenderKey(row, prefs){
   if(!row) return null;

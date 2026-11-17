@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 UI_JS = (STATIC / "ui.js").read_text(encoding="utf-8")
+MESSAGES_JS = (STATIC / "messages.js").read_text(encoding="utf-8")
+SMD_JS = (STATIC / "vendor" / "smd.min.js").read_text(encoding="utf-8")
 SUPPORT_SCRIPTS = [
     (STATIC / name).read_text(encoding="utf-8")
     for name in ("i18n.js", "icons.js", "assistant_turn_anchors.js")
@@ -287,6 +289,132 @@ async (mode) => {
 """
 
 
+def _function_block(src: str, name: str) -> str:
+    """Extract a real classic-JS function for the composed browser harness."""
+    marker = re.search(rf"(^|\n)\s*function\s+{re.escape(name)}\(", src)
+    assert marker is not None, f"{name}() not found"
+    start = marker.start()
+    brace = src.find("{", marker.end())
+    assert brace != -1, f"{name}() opening brace not found"
+    depth = 0
+    quote = None
+    escaped = False
+    for index in range(brace, len(src)):
+        char = src[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "'\"`":
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : index + 1]
+    raise AssertionError(f"{name}() closing brace not found")
+
+
+_FADE_PRODUCER_SCRIPT = "\n".join(
+    [
+        "const _anchorProseSmdCache=new Map();",
+        "let _streamFadeReduceMotionMql=null;",
+        "let _streamFadeReduceMotion=false;",
+        "let _streamFadeReduceMotionOnChange=null;",
+        # Rendering/animation and parser-bookkeeping adapters deliberately stay
+        # plain. The policy, persistent prose producer and vendored parser below
+        # are the unmodified production implementations.
+        "function _streamFadeRenderer(el){return window.smd.default_renderer(el);}",
+        "function _safeSmdRenderer(el){return window.smd.default_renderer(el);}",
+        "function _smdRendererWithoutUnderscoreEmphasis(renderer){return renderer;}",
+        "function _smdMediaTailFlush(){}",
+        "function _smdMediaTailClear(){}",
+        "function _sanitizeSmdLinks(){}",
+        "function enhanceMarkdownTables(){}",
+        *(
+            _function_block(MESSAGES_JS, name)
+            for name in (
+                "_shouldUseStreamFade",
+                "_shouldUseTransparentStreamFade",
+                "_streamFadeReduceMotionEnabled",
+                "_shouldUseLiveProseFade",
+                "_smdBindParserIdentity",
+                "_smdClearParserIdentity",
+                "_finalizeAnchorProseIncrementalNode",
+                "_anchorProseIncrementalNode",
+            )
+        ),
+        "window.__anchorProseIncrementalNode=_anchorProseIncrementalNode;",
+    ]
+)
+_FADE_SCENARIO = r"""
+async ({mode,phase}) => {
+  if(phase==='start'){
+    const stream='oracle-fade-stream';
+    Date.now=()=>1700000001000;
+    window._chatActivityDisplayMode=mode;
+    window._showThinking=true;
+    window._simplifiedToolCalling=true;
+    window._fadeTextEffect=true;
+    S.session={session_id:'oracle-session',messages:[],pending_started_at:1700000000};
+    S.messages=[]; S.toolCalls=[]; S.activeStreamId=stream;
+    $('msgInner').innerHTML='';
+    const turn=_createAssistantTurn(); turn.id='liveAssistantTurn';
+    $('msgInner').appendChild(turn);
+    const row={row_id:'prose:fade',local_id:'live-prose:fade',event_id:'event-fade',
+      role:'prose',kind:'process_prose',source_event_type:'token',status:'running',
+      text:'Fade policy **prose** stays stable',created_at:1700000000,
+      payload:{text:'Fade policy **prose** stays stable'},identity:{event_id:'event-fade'}};
+    const scene=()=>({version:'activity_scene_v1',mode,
+      identity:{session_id:'oracle-session',stream_id:stream,run_id:stream},
+      activity_rows:[JSON.parse(JSON.stringify(row))]});
+    const select=()=>turn.querySelector('[data-anchor-row-id="prose:fade"]');
+    window.__fadeOracle={mode,row,scene,select,first:null,firstBody:null,selected:''};
+    const oracle=window.__fadeOracle;
+    renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+    oracle.first=select(); oracle.firstBody=oracle.first.querySelector('.msg-body');
+    const range=document.createRange(); range.selectNodeContents(oracle.firstBody);
+    const selection=getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    oracle.selected=selection.toString();
+    const initialPolicy=_shouldUseLiveProseFade();
+    const initialFade=oracle.firstBody.classList.contains('stream-fade-active');
+    const realParser=!!oracle.firstBody.querySelector('p strong')&&oracle.selected.includes('Fade policy');
+    renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+    return {initialPolicy,initialFade,realParser,status:row.status,
+      unchangedNode:select()===oracle.first,
+      unchangedBody:select().querySelector('.msg-body')===oracle.firstBody,
+      unchangedConnected:oracle.first.isConnected&&oracle.firstBody.isConnected,
+      selectionPreserved:!!oracle.selected&&selection.toString()===oracle.selected};
+  }
+  const oracle=window.__fadeOracle;
+  const stream=S.activeStreamId;
+  renderLiveAnchorActivityScene(stream,oracle.scene(),{sessionId:'oracle-session'});
+  const transitioned=oracle.select();
+  const transitionedBody=transitioned.querySelector('.msg-body');
+  const result={effectivePolicy:_shouldUseLiveProseFade(),status:oracle.row.status,
+    fadeCleared:!transitionedBody.classList.contains('stream-fade-active'),
+    producerRebuilt:transitionedBody!==oracle.firstBody,
+    connected:transitioned.isConnected&&transitionedBody.isConnected};
+  oracle.row.text+=' Neighbor text now changes.';
+  oracle.row.payload.text=oracle.row.text;
+  renderLiveAnchorActivityScene(stream,oracle.scene(),{sessionId:'oracle-session'});
+  const neighbor=oracle.select(); const neighborBody=neighbor.querySelector('.msg-body');
+  // A live parser legitimately holds the final punctuation as lookahead.
+  result.textNeighbor=neighbor.textContent.includes('Neighbor text now changes');
+  result.neighborConnected=neighbor.isConnected&&neighborBody.isConnected;
+  result.neighborFadeCleared=!neighborBody.classList.contains('stream-fade-active');
+  result.neighborStatus=oracle.row.status;
+  getSelection().removeAllRanges();
+  return result;
+}
+"""
+
+
 def _oracle_page(browser, incremental):
     page = browser.new_page()
     page.set_default_timeout(600_000)
@@ -305,6 +433,21 @@ def _oracle_page(browser, incremental):
         page.add_script_tag(content=script)
     page.add_script_tag(content=UI_JS)
     page.evaluate("enabled => { window._liveSceneIncremental=enabled; }", incremental)
+    return page, errors
+
+
+def _fade_oracle_page(browser):
+    page, errors = _oracle_page(browser, True)
+    page.route(
+        "**/static/vendor/smd.min.js",
+        lambda route: route.fulfill(
+            status=200, content_type="application/javascript", body=SMD_JS
+        ),
+    )
+    page.evaluate(
+        "async () => { window.smd = await import('/static/vendor/smd.min.js'); }"
+    )
+    page.add_script_tag(content=_FADE_PRODUCER_SCRIPT)
     return page, errors
 
 
@@ -366,3 +509,48 @@ def test_non_tool_status_only_change_renders(browser, mode):
         page.close()
     assert not errors, errors
     assert result == {"before": "running", "after": "completed", "builds": 1}, result
+
+
+@pytest.mark.parametrize(
+    "mode,transition",
+    [
+        ("compact_worklog", "fade_setting"),
+        ("compact_worklog", "reduced_motion"),
+        ("transparent_stream", "reduced_motion"),
+    ],
+)
+def test_unchanged_prose_observes_effective_fade_policy(browser, mode, transition):
+    """Composed renderer + real policy/producer/parser; no text/status mutation."""
+    page, errors = _fade_oracle_page(browser)
+    try:
+        initial = page.evaluate(_FADE_SCENARIO, {"mode": mode, "phase": "start"})
+        assert initial == {
+            "initialPolicy": True,
+            "initialFade": True,
+            "realParser": True,
+            "status": "running",
+            "unchangedNode": True,
+            "unchangedBody": True,
+            "unchangedConnected": True,
+            "selectionPreserved": True,
+        }, initial
+        if transition == "reduced_motion":
+            page.emulate_media(reduced_motion="reduce")
+        else:
+            page.evaluate("window._fadeTextEffect=false")
+        page.wait_for_function("() => _shouldUseLiveProseFade() === false")
+        result = page.evaluate(_FADE_SCENARIO, {"mode": mode, "phase": "after"})
+    finally:
+        page.close()
+    assert not errors, errors
+    assert result == {
+        "effectivePolicy": False,
+        "status": "running",
+        "fadeCleared": True,
+        "producerRebuilt": True,
+        "connected": True,
+        "textNeighbor": True,
+        "neighborConnected": True,
+        "neighborFadeCleared": True,
+        "neighborStatus": "running",
+    }, result
