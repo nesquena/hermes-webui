@@ -7364,26 +7364,70 @@ def _scoped_reasoning_override_keys_for_model(
     wanted |= {v.lower().replace(".", "-") for v in model_variants}
     wanted |= {v.lower().replace("-", ".") for v in model_variants}
 
-    matched: list[str] = []
-    for key in overrides:
+    # Ordered candidate spellings, most canonical first. This rank decides
+    # which of several matching keys wins: an exact spelling always beats a
+    # dot/dash-derived one, and inside each tier the earlier candidate wins.
+    # Without it a key that merely *derives* to the model id
+    # (``prov:gpt-5-4``) shadowed an exact key (``prov:gpt-5.4``) purely
+    # because it came first in the YAML file (greptile P1).
+    ordered: list[str] = []
+    for variant in model_variants:
+        for form in (
+            variant.lower(),
+            variant.lower().replace(".", "-"),
+            variant.lower().replace("-", "."),
+        ):
+            if form not in ordered:
+                ordered.append(form)
+
+    # Provider prefixes, longest first. A provider id may itself contain a
+    # colon (``custom:newapi``) and so may a model id (``qwen3:32b``), so no
+    # fixed colon position is right for both: splitting on the LAST colon turns
+    # ``ollama:qwen3:32b`` into provider ``ollama:qwen3`` + model ``32b`` and
+    # the tagged model never matches its scoped key (greptile P1). Matching a
+    # KNOWN provider prefix keeps the full tagged model name, and the
+    # longest-first order still resolves ``custom:newapi:ve-gpt``.
+    prefix_forms = sorted(
+        (form for form in provider_forms if form), key=len, reverse=True
+    )
+
+    scored: list[tuple[int, int, str]] = []
+    for index, key in enumerate(overrides):
         if not isinstance(key, str):
             continue
         k = key.strip()
         if not k or ":" not in k:
             continue
-        prefix, _, tail = k.rpartition(":")
-        if not prefix or not tail:
+        k_lower = k.lower()
+        tail = ""
+        for form in prefix_forms:
+            marker = form + ":"
+            if k_lower.startswith(marker):
+                candidate_tail = k[len(marker):].strip()
+                if candidate_tail:
+                    tail = candidate_tail
+                    break
+        if not tail:
             continue
-        if prefix.strip().lower() not in provider_forms:
+        tail_lower = tail.lower()
+        if tail_lower not in wanted:
             continue
-        tail_lower = tail.strip().lower()
-        if (
-            tail_lower in wanted
-            or tail_lower.replace(".", "-") in wanted
-            or tail_lower.replace("-", ".") in wanted
-        ):
-            matched.append(key)
-    return matched
+        rank: int | None = None
+        for position, form in enumerate(ordered):
+            if tail_lower == form:
+                rank = position * 2
+                break
+        if rank is None:
+            derived = {tail_lower.replace(".", "-"), tail_lower.replace("-", ".")}
+            for position, form in enumerate(ordered):
+                if form in derived:
+                    rank = position * 2 + 1
+                    break
+        if rank is None:
+            continue
+        scored.append((rank, index, key))
+    scored.sort()
+    return [key for _, _, key in scored]
 
 
 def _parse_reasoning_override_value(raw):

@@ -693,8 +693,10 @@ def test_scoped_key_honors_disable_and_dot_dash_tolerance():
 def test_scoped_key_custom_provider_slug():
     """A ``custom:<slug>:<model>`` provider id must scope its own keys.
 
-    The provider segment itself contains a colon, so the key has two — the
-    split must take the LAST colon as the model boundary.
+    The provider segment itself contains a colon, so the key has two. The
+    split matches the KNOWN provider prefix (longest first) rather than a fixed
+    colon position, which is what lets this form and the tagged-model form
+    ``ollama:qwen3:32b`` both resolve correctly.
     """
     data = _write_overrides(
         {"custom:newapi:ve-gpt": "medium"}, global_effort="low"
@@ -796,3 +798,76 @@ def test_scoped_key_beats_bare_for_at_qualified_model():
         )
         == "minimal"
     ), "the caller's own @ spelling stays most specific"
+
+
+def test_scoped_key_matches_a_tagged_model_name():
+    """A tagged model id keeps its colon; the provider prefix scopes it.
+
+    ``ollama:qwen3:32b`` must resolve ``(provider=ollama, model=qwen3:32b)``.
+    Splitting on the last colon read that key as provider ``ollama:qwen3`` +
+    model ``32b``, so the provider check rejected it and the request fell back
+    to the bare or global effort (greptile P1).
+    """
+    data = _write_overrides({"ollama:qwen3:32b": "high"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="qwen3:32b", provider_id="ollama"
+        )
+        == "high"
+    ), "a tagged model must honour its provider-scoped key"
+
+    # The bare spelling of the same tagged model is still not a scope.
+    bare = _write_overrides({"qwen3:32b": "medium"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            bare, model_id="qwen3:32b", provider_id="ollama"
+        )
+        == "medium"
+    ), "the bare tagged spelling still resolves through the unscoped path"
+
+    # …and it must not leak onto a different provider.
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="qwen3:32b", provider_id="other"
+        )
+        == "low"
+    ), "a scoped key for one provider must not apply to another"
+
+
+def test_scoped_key_exact_spelling_outranks_a_derived_one_regardless_of_yaml_order():
+    """Exact ``prov:gpt-5.4`` must win over derived ``prov:gpt-5-4``.
+
+    Both keys derive to the same model id, so the helper used to return them in
+    YAML order and the reader took the first one: with ``prov:gpt-5-4: low``
+    listed first, ``gpt-5.4`` resolved ``low`` even though an exact key existed
+    (greptile P1).
+    """
+    derived_first = _write_overrides(
+        {"prov:gpt-5-4": "low", "prov:gpt-5.4": "high"}, global_effort="medium"
+    )
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            derived_first, model_id="gpt-5.4", provider_id="prov"
+        )
+        == "high"
+    ), "the exact spelling must outrank a derived one"
+
+    # Control: the same pair in the other order keeps the same winner.
+    exact_first = _write_overrides(
+        {"prov:gpt-5.4": "high", "prov:gpt-5-4": "low"}, global_effort="medium"
+    )
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            exact_first, model_id="gpt-5.4", provider_id="prov"
+        )
+        == "high"
+    ), "the winner must not depend on YAML order"
+
+    # …and a lone derived key still applies when no exact sibling exists.
+    derived_only = _write_overrides({"prov:gpt-5-4": "medium"}, global_effort="low")
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            derived_only, model_id="gpt-5.4", provider_id="prov"
+        )
+        == "medium"
+    ), "a derived spelling still matches when it is the only key"
