@@ -333,8 +333,8 @@ def test_approval_respond_does_not_fallback_to_oldest_when_explicit_id_is_stale(
 
 def test_approval_respond_peeks_gateway_queues_when_pending_empty() -> None:
     """When _pending has no matching entry but _gateway_queues does, the
-    helper should extract pattern_keys from the gateway queue and call
-    approve_session even though pending is None.
+    helper still targets the gateway queue, and leaves session/always grants
+    for that queued approval to the Agent waiting on it.
     """
     routes = importlib.import_module("api.routes")
     src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
@@ -348,59 +348,44 @@ def test_approval_respond_peeks_gateway_queues_when_pending_empty() -> None:
     assert "gateway_keys" in helper_body, (
         "Must extract pattern_keys from _gateway_queues into a gateway_keys variable"
     )
-    assert "approve_session" in helper_body[helper_body.index("all_keys"):], (
-        "Must call approve_session for keys extracted from _gateway_queues"
+    persist = helper_body[helper_body.index("all_keys"):]
+    assert "gateway_keys" not in persist and "approve_session" in persist, (
+        "WebUI saves grants only for its own entries, never for keys of a queued Agent approval"
     )
+    assert 'scope = "once" if agent_held' in helper_body
 
 
 @requires_agent_modules
-def test_approval_respond_approves_from_gateway_queues_when_pending_empty() -> None:
-    """Verify _resolve_approval_legacy peeks into _gateway_queues for
-    pattern_keys when _pending has no matching entry, and calls
-    approve_session() even though pending is None (the real streaming case).
+def test_approval_respond_approves_from_gateway_queues_when_pending_empty(monkeypatch) -> None:
+    """Verify an id-less answer reaches the Agent approval parked in
+    _gateway_queues while _pending is empty (the real streaming case), and that
+    the session choice takes effect: the Agent waiting on it saves the grant.
     """
-    import threading
     from api.routes import _resolve_approval_legacy
+    from tests._real_agent_approval import parked_agent_approval
 
-    routes = importlib.import_module("api.routes")
     approval_mod = importlib.import_module("tools.approval")
-
+    route_approvals = importlib.import_module("api.route_approvals")
     test_sid = "__test_gateway_approval_sid__"
-    test_key = "__test_pattern_key__"
 
-    # 1. Ensure _pending is empty for this sid
-    with approval_mod._lock:
-        approval_mod._pending.pop(test_sid, None)
+    with parked_agent_approval(monkeypatch, test_sid) as parked:
+        # 1. _pending is empty for this sid; the approval lives in _gateway_queues
+        with approval_mod._lock:
+            route_approvals._pending.pop(test_sid, None)
+            assert approval_mod._gateway_queues.get(test_sid)
 
-    # 2. Populate _gateway_queues with a real entry
-    entry = approval_mod._ApprovalEntry({
-        "command": "test_cmd",
-        "pattern_key": test_key,
-        "pattern_keys": [test_key],
-        "description": "test dangerous cmd",
-    })
-    with approval_mod._lock:
-        approval_mod._gateway_queues.setdefault(test_sid, []).append(entry)
-
-    try:
-        # 3. Run the helper with empty _pending but populated _gateway_queues
+        # 2. Run the helper with empty _pending but populated _gateway_queues
         result = _resolve_approval_legacy(test_sid, "", "session")
-
-        # 4. Verify approve_session was called (is_approved must return True)
-        assert approval_mod.is_approved(test_sid, test_key), (
-            "approve_session should have been called for the pattern_key "
-            "extracted from _gateway_queues"
-        )
         assert result is True, (
             "_resolve_approval_legacy should return True when it finds "
             "and resolves the gateway entry"
         )
-    finally:
-        # 5. Cleanup
-        with approval_mod._lock:
-            approval_mod._gateway_queues.pop(test_sid, None)
-            approval_mod._session_approved.pop(test_sid, None)
-            approval_mod._pending.pop(test_sid, None)
+
+        # 3. The Agent ran the command and saved the session grant
+        assert parked.finish()["approved"] is True
+        assert parked.keys and all(approval_mod.is_approved(test_sid, k) for k in parked.keys), (
+            "the session choice for the pattern_key queued in _gateway_queues must take effect"
+        )
 
 
 def test_chat_start_route_selects_adapter_only_when_flag_enabled():
