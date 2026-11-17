@@ -67,4 +67,4 @@ def test_slow_session_new_logs_every_stage(monkeypatch):
 
 
 def test_fast_session_new_logs_nothing(monkeypatch):
-    assert _drive(monkeypatch, step=None) == []
+    assert _drive(monkeypatch, step=0.01) == []
