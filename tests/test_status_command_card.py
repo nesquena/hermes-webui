@@ -87,6 +87,13 @@ function makeSeg() {{
   }};
 }}
 
+// #2051: renderMessages() inserts a message block through this helper so a wrapped
+// DOM API cannot render it twice. Outside a browser the helper's own fallback is
+// insertAdjacentHTML, which is exactly what it does here.
+function _insertSegmentBlock(seg, html) {{
+  seg.insertAdjacentHTML('beforeend', html);
+}}
+
 const ordinaryBlock = extractBlock(
   "const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);",
   "_assistantTurnBlocks(currentAssistantTurn).appendChild(seg);"

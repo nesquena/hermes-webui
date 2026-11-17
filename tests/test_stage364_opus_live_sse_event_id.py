@@ -57,7 +57,7 @@ def test_stream_channel_queue_item_carries_per_event_id_with_legacy_fallback():
     """StreamChannel queue items need per-frame ids; legacy queues stay 2-tuples."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
         "StreamChannel events must carry their own event_id while legacy queue "
         "consumers retain the 2-tuple shape"
     )
@@ -69,7 +69,7 @@ def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
     put_def_idx = GATEWAY_CHAT_PY.find("def put_gateway_event(event, data):")
     assert put_def_idx != -1, "put_gateway_event(event, data) not found"
     put_body = GATEWAY_CHAT_PY[put_def_idx:put_def_idx + 1800]
-    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
         "Gateway live events must carry their own event_id for StreamChannel "
         "subscribers while preserving legacy queue compatibility"
     )
@@ -91,17 +91,60 @@ def test_sse_handler_reads_event_id_from_side_channel():
     )
 
 
-def test_cleanup_pops_stream_last_event_id():
-    """The streaming worker's finally block must pop STREAM_LAST_EVENT_ID
-    alongside the other STREAM_* dicts to prevent memory leak."""
-    # Find the cleanup block — multiple .pop(stream_id, None) lines
-    cleanup_idx = STREAMING_PY.find("STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)")
-    assert cleanup_idx != -1, "cleanup block not found"
-    cleanup_block = STREAMING_PY[cleanup_idx:cleanup_idx + 500]
-    assert "STREAM_LAST_EVENT_ID.pop(stream_id, None)" in cleanup_block, (
-        "STREAM_LAST_EVENT_ID must be popped on worker finally to prevent "
+def test_stream_last_event_id_released_on_stream_teardown(tmp_path, monkeypatch):
+    """STREAM_LAST_EVENT_ID must be released when the stream ends.
+
+    Behavior-level (#7302 re-gate): the worker teardown delegates to
+    ``release_stream_owned_registries``, so assert the registry row is gone
+    after the real worker exit (cancellation before admission -> ``q is None``)
+    instead of grepping ``api/streaming.py`` for the inline pop.
+    """
+    import threading
+
+    from api import config
+    import api.streaming as streaming
+
+    session_id = "sess_364_cursor_teardown"
+    stream_id = "stream-364-cursor"
+    config.register_stream_owner(stream_id, session_id)
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    config.STREAM_LAST_EVENT_ID[stream_id] = "ev-1"
+    config.STREAMS.pop(stream_id, None)
+
+    streaming._run_agent_streaming(session_id, "hello", "test-model", None, stream_id)
+
+    assert stream_id not in config.STREAM_LAST_EVENT_ID, (
+        "STREAM_LAST_EVENT_ID must be released on stream teardown to prevent "
         "unbounded memory growth across streams"
     )
+
+
+def test_stream_owned_registries_covers_every_stream_registry():
+    """The canonical release helper must own the complete registry set.
+
+    Contract check on the helper itself (not on source text): every per-stream
+    registry the lifecycle writes must be covered by
+    ``stream_owned_registries()``, otherwise a teardown path driven by that list
+    silently strands the missing one -- exactly the residual-owner bug class
+    this PR closes.
+    """
+    from api import config
+
+    covered = {id(registry) for registry in config.stream_owned_registries()}
+    for registry, name in [
+        (config.STREAMS, "STREAMS"),
+        (config.AGENT_INSTANCES, "AGENT_INSTANCES"),
+        (config.CANCEL_FLAGS, "CANCEL_FLAGS"),
+        (config.STREAM_GOAL_RELATED, "STREAM_GOAL_RELATED"),
+        (config.STREAM_PARTIAL_TEXT, "STREAM_PARTIAL_TEXT"),
+        (config.STREAM_REASONING_TEXT, "STREAM_REASONING_TEXT"),
+        (config.STREAM_LIVE_TOOL_CALLS, "STREAM_LIVE_TOOL_CALLS"),
+        (config.STREAM_LAST_EVENT_ID, "STREAM_LAST_EVENT_ID"),
+    ]:
+        assert id(registry) in covered, (
+            f"stream_owned_registries() must cover {name} so every teardown "
+            "path releases it"
+        )
 
 
 def test_imports_present():
