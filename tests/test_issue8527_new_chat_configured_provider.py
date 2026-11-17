@@ -3067,6 +3067,11 @@ _FOREIGN_QUALIFIED_REWRITE = {
     "model_provider": "openai",
 }
 _BARE_REWRITE = {"model": "gpt-5.4-mini", "model_provider": "other-tab-route"}
+# A rewrite naming a DIFFERENT model entirely — the maintainer's 2026-11-13
+# four-case probe. The shared store no longer names this tab's pick at all,
+# yet the session-scoped marker still owns it: admission must derive from the
+# marker, never require another tab's shared preference to keep naming it.
+_DIFFERENT_MODEL_REWRITE = {"model": "gpt-5.1", "model_provider": "openai"}
 
 
 def _resolve_new_session_model_state(body):
@@ -3092,7 +3097,7 @@ def _resolve_new_session_model_state(body):
 
 
 @pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
-@pytest.mark.parametrize("rewrite", ["foreign_qualified", "bare", "none"])
+@pytest.mark.parametrize("rewrite", ["foreign_qualified", "bare", "different_model", "none"])
 def test_qualified_pick_survives_a_shared_rewrite_at_the_backend_parser(flow, rewrite):
     """The marker's provider must survive another tab's rewrite of the shared
     persisted pair ALL THE WAY THROUGH the real backend parser.
@@ -3103,10 +3108,18 @@ def test_qualified_pick_survives_a_shared_rewrite_at_the_backend_parser(flow, re
     "custom:review-route"}`` and the parser resolved provider ``openai``.
     The bare rewrite and the no-rewrite control kept the marker's provider
     before the fix and must keep doing so.
+
+    RED on the reviewed head for the different-model rewrite (the
+    maintainer's 2026-11-13 four-case probe): admission still required the
+    SHARED store to name the same model, so once another tab rewrote it to
+    ``gpt-5.1`` the POST went out with NEITHER model NOR provider although
+    this tab's marker still owned the explicit pick. The bare and
+    no-rewrite arms are the same-model controls for that probe.
     """
     rewrites = {
         "foreign_qualified": _FOREIGN_QUALIFIED_REWRITE,
         "bare": _BARE_REWRITE,
+        "different_model": _DIFFERENT_MODEL_REWRITE,
     }
     extra = {}
     if rewrite != "none":

@@ -2461,39 +2461,14 @@ async function newSession(flash, options={}){
     // provider, so a value match there is a pair match by construction.)
     const freshExplicitPickOwns=(value)=>!!(freshExplicitPickValue
       &&freshExplicitPickValue===String(value||'').trim());
-    // The persisted arm needs a different comparison, because the marker and
-    // the persisted pair record the SAME pick in two shapes: the marker holds
-    // the picker's RAW selection, while the persisted pair holds the
-    // NORMALISED model id — a named custom route's option is the qualified
-    // @<provider>:<model> form and the picker's model-state resolver strips
-    // that duplicated custom prefix before persisting it (#6884). Comparing
-    // the two verbatim therefore rejected EVERY qualified custom pick as soon
-    // as a later empty catalogue refresh cleared the <select> and the persisted
-    // arm became the only source left: the New Chat then posted with NEITHER
-    // model NOR provider. Compare model IDENTITIES instead — and keep the
-    // provider out of it, since the persisted store is SHARED and another tab
-    // may have rewritten it (provider authority stays on the marker, #8576
-    // greptile P1 2026-11-08). The picker arm above is unaffected: the option
-    // the user picked is still selected, so its raw value still matches the
-    // marker.
-    const _freshPickModelIdentity=(value)=>{
-      const raw=String(value||'').trim();
-      if(!raw||raw.charAt(0)!=='@') return raw;
-      const provider=(typeof _providerFromModelValue==='function')
-        ?String(_providerFromModelValue(raw)||'').trim():'';
-      if(!provider) return raw;
-      const prefix='@'+provider+':';
-      return raw.toLowerCase().startsWith(prefix.toLowerCase())?raw.slice(prefix.length):raw;
-    };
-    const freshExplicitPickIdentity=freshExplicitPickValue
-      ?_freshPickModelIdentity(freshExplicitPickValue):'';
-    const freshExplicitPickIdentityOwns=(value)=>{
-      if(!freshExplicitPickValue||!freshExplicitPickIdentity) return false;
-      const candidate=String(value||'').trim();
-      if(!candidate) return false;
-      return freshExplicitPickValue===candidate
-        ||freshExplicitPickIdentity===_freshPickModelIdentity(candidate);
-    };
+    // The persisted arm needs no value comparison of its own any more: while
+    // the reset gate is armed the session-scoped marker above is the ONLY
+    // authoritative record of what this tab's user picked (the picker is
+    // per-tab DOM that an empty catalogue refresh can clear, and the
+    // persisted pair is SHARED localStorage another tab can rewrite), so the
+    // marker alone authorizes the pick — see the persisted arm below. The
+    // picker arm above is likewise unaffected: the option the user picked is
+    // still selected, so its raw value still matches the marker.
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
@@ -2524,38 +2499,41 @@ async function newSession(flash, options={}){
         // No pending profile switch: the persisted pair is this profile's own
         // preference and may pass as-is.
         newModelState=_persistedModelState;
-      }else if(freshExplicitPickIdentityOwns(_persistedModelState&&_persistedModelState.model)){
+      }else if(freshExplicitPickValue){
         // Under the armed gate the persisted pair is SHARED localStorage:
         // another tab can rewrite it between this tab's pick and this New
-        // Chat. Matching the model alone admitted that tab's
-        // same-model/different-provider pair and supplied the wrong
-        // model_provider (#8576, greptile P1 2026-11-08). The comparison is
-        // by model IDENTITY (see freshExplicitPickIdentityOwns): the marker
-        // holds the picker's raw qualified value while this pair holds the
-        // normalised id.
+        // Chat. It is therefore evidence about ANOTHER tab's preference,
+        // never authority over this one — so admission derives from THIS
+        // tab's marker alone, and both outgoing fields are built from the
+        // marker's own selection. Requiring the shared pair to still name
+        // the same model let another tab's DIFFERENT-model rewrite
+        // (gpt-5.1 against a marker that owns
+        // @custom:review-route:gpt-5.4-mini) drop BOTH outgoing fields even
+        // though the marker still owned the pick (#8576 maintainer re-gate
+        // 2026-11-13); matching the model alone had earlier admitted that
+        // tab's same-model/different-provider pair and supplied the wrong
+        // model_provider (#8576, greptile P1 2026-11-08).
         //
-        // #8576 maintainer follow-up (2026-11-10): identity-only admission
-        // must NOT forward the shared model string it admitted. Another
-        // tab's pair can carry a FOREIGN @<provider>: qualifier around the
-        // very same model id — @openai:gpt-5.4-mini against a marker that
-        // owns @custom:review-route:gpt-5.4-mini — and the backend gives an
-        // embedded qualifier precedence over model_provider, so the posted
-        // pair {model:"@openai:gpt-5.4-mini", model_provider:
-        // "custom:review-route"} resolved to provider openai. Build BOTH
-        // outgoing fields from THIS tab's marker-owned selection through the
-        // picker's own normalisation contract instead — the same
-        // _modelStateForSelect resolver the picker arm above uses, which
-        // strips a custom provider's duplicated @<provider>: prefix — so the
-        // model sent is the pick's own normalised id and never a differently
-        // qualified shared string. The provider stays on the marker (the
-        // contract resolves the same one from the qualified value). The
-        // backend's deliberate qualifier precedence is NOT touched: the
-        // client simply stops sending a payload that needs it.
+        // Build BOTH outgoing fields from THIS tab's marker-owned selection
+        // through the picker's own normalisation contract
+        // (_modelStateForSelect) — the same resolver the picker arm above
+        // uses, which strips a custom provider's duplicated @<provider>:
+        // prefix — so the model sent is the pick's own normalised id and
+        // never a differently qualified shared string. The provider stays
+        // on the marker (the contract resolves the same one from the
+        // qualified value). The backend's deliberate qualifier precedence is
+        // NOT touched: the client simply stops sending a payload that would
+        // need it.
+        //
+        // Stale-profile quarantine is unchanged: with no marker for the
+        // loaded session nothing is admitted here at all, so the previous
+        // profile's picker/persisted state still cannot reach the new
+        // profile's New Chat.
         const _markerSelection=(typeof _modelStateForSelect==='function'&&freshExplicitPickValue)
           ? _modelStateForSelect(modelSelForNew,freshExplicitPickValue)
           : null;
         newModelState={
-          model:(_markerSelection&&_markerSelection.model)||_persistedModelState.model,
+          model:(_markerSelection&&_markerSelection.model)||freshExplicitPickValue,
           model_provider:(freshExplicitPick&&freshExplicitPick.model_provider)
             ||(_markerSelection&&_markerSelection.model_provider)||null,
         };
