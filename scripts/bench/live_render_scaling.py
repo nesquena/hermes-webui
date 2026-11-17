@@ -15,6 +15,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import platform as platform_module
+import shutil
 import socket
 import statistics
 import subprocess
@@ -24,7 +26,61 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
-CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+MACOS_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+CHROME_COMMANDS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+
+
+def _chrome_candidates(platform: str, release: str) -> list[str]:
+    if platform == "darwin":
+        return [MACOS_CHROME]
+    candidates = []
+    if "microsoft" in release.lower() or "wsl" in release.lower():
+        candidates.extend([
+            "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+            "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+        ])
+    candidates.extend([
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/opt/google/chrome/chrome",
+    ])
+    return candidates
+
+
+def _is_executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def resolve_chrome_path(
+    explicit: str | Path | None = None,
+    *,
+    platform: str | None = None,
+    release: str | None = None,
+) -> str:
+    """Resolve an installed Chrome/Chromium before starting any benchmark process."""
+    if explicit is not None:
+        candidate = Path(explicit).expanduser()
+        if not _is_executable(candidate):
+            raise ValueError(f"--chrome-path is not an executable file: {candidate}")
+        return str(candidate)
+
+    platform = platform or sys.platform
+    release = release if release is not None else platform_module.release()
+    for value in _chrome_candidates(platform, release):
+        candidate = Path(value)
+        if _is_executable(candidate):
+            return str(candidate)
+    for command in CHROME_COMMANDS:
+        value = shutil.which(command)
+        if value is not None and _is_executable(Path(value)):
+            return value
+    raise ValueError(
+        "could not find a Chrome/Chromium executable; supply one with --chrome-path"
+    )
+
+
 INIT = r"""
 if ('serviceWorker' in navigator) navigator.serviceWorker.register =
   () => Promise.reject(new Error('disabled by render benchmark'));
@@ -83,15 +139,16 @@ RUN = r"""async ({events, checkpoints}) => {
     const sorted=[...values].sort((a,b)=>a-b), middle=sorted.length>>1;
     return sorted.length%2 ? sorted[middle] : (sorted[middle-1]+sorted[middle])/2;
   };
-  const summarize=sample => {
+  const summarize=intervalSamples => {
     const byType={};
     for (const type of ['reasoning','tool','tool_complete','token']) {
-      const times=samples.filter(s=>s.type===type).flatMap(s=>s.work);
+      const times=intervalSamples.filter(s=>s.type===type).flatMap(s=>s.work);
       if (times.length) byType[type]=median(times);
     }
-    return {events_so_far:sample.events,
-      median_per_render_ms:median(sample.renders),
-      render_count:sample.renders.length, median_by_event_type_ms:byType};
+    const renders=intervalSamples.flatMap(s=>s.renders);
+    return {events_so_far:intervalSamples.at(-1).events,
+      median_per_render_ms:median(renders),
+      render_count:renders.length, median_by_event_type_ms:byType};
   };
   // Every cycle emits exactly four SSE events. Tool results are 2048 chars.
   const result='r'.repeat(2048);
@@ -139,9 +196,8 @@ RUN = r"""async ({events, checkpoints}) => {
         cumulative_by_event_type_ms:Object.fromEntries(
           ['reasoning','tool','tool_complete','token'].map(type=>[type,
             median(samples.filter(s=>s.type===type).flatMap(s=>s.work))])),
-        latest_interval:summarize({events:i,
-          renders:samples.slice(Math.max(0,(checkpoints[checkpoints.indexOf(i)-1]||0)))
-            .flatMap(s=>s.renders)}),
+        latest_interval:summarize(samples.slice(
+          Math.max(0,(checkpoints[checkpoints.indexOf(i)-1]||0)))),
         mode:chatActivityMode()});
     }
   }
@@ -209,12 +265,21 @@ def main() -> int:
     parser.add_argument("--events", type=int, default=1000)
     parser.add_argument("--checkpoints", default="50,100,200,400,700,1000")
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--chrome-path",
+        type=Path,
+        help="Chrome/Chromium executable (otherwise discover a platform default)",
+    )
     args = parser.parse_args()
     if args.runs < 1 or args.events < 1:
         parser.error("--runs and --events must be positive")
     checkpoints = [int(value) for value in args.checkpoints.split(",")]
     if checkpoints[-1] != args.events or checkpoints != sorted(set(checkpoints)):
         parser.error("checkpoints must be unique, ascending, and end at --events")
+    try:
+        chrome_path = resolve_chrome_path(args.chrome_path)
+    except ValueError as error:
+        parser.error(str(error))
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -240,7 +305,7 @@ def main() -> int:
         try:
             wait_url(base + "/health", server)
             debug_port = free_port()
-            chrome = subprocess.Popen([CHROME, "--headless=new",
+            chrome = subprocess.Popen([chrome_path, "--headless=new",
                 f"--remote-debugging-port={debug_port}", f"--user-data-dir={root / 'chrome'}",
                 "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage",
                 "--disable-background-networking", "--window-size=1440,900", "about:blank"],
