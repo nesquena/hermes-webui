@@ -341,3 +341,57 @@ def test_registry_oauth_row_with_separately_configured_api_key_keeps_has_key(mon
     )
     assert card is not None
     assert card["has_key"] is True
+
+
+# The Agent reports ``needs_refresh=True`` when every pooled token has expired but
+# refresh material and the plugin's refresh hook exist: the account is still usable
+# (the Agent refreshes it on first use). The WebUI's own pool view can be empty at
+# that moment, for example while its pool cache still holds the state from before
+# a CLI sign-in, so the Agent's status is the only signal that an account exists.
+EXPIRED_BUT_REFRESHABLE_STATUS = {
+    **ISSUE_9105_LOGGED_OUT_STATUS,
+    "needs_refresh": True,
+    "accounts": 1,
+    "hint": "Run `hermes auth add solstice` to sign in.",
+}
+
+
+@pytest.mark.parametrize("auth_type", ["oauth_external", "oauth_device_code"])
+def test_oauth_plugin_expired_but_refreshable_is_has_key(monkeypatch, tmp_path, auth_type):
+    card = _providers_for(
+        monkeypatch, tmp_path, auth_type=auth_type, status=EXPIRED_BUT_REFRESHABLE_STATUS
+    )
+    assert card is not None
+    assert card["has_key"] is True
+
+
+def test_registry_row_oauth_expired_but_refreshable_is_has_key(monkeypatch, tmp_path):
+    """Same through the effective registry row (row OAuth, cached profile api_key)."""
+    card = _providers_for(
+        monkeypatch,
+        tmp_path,
+        auth_type="api_key",
+        registry_row_auth_type="oauth_external",
+        status=EXPIRED_BUT_REFRESHABLE_STATUS,
+    )
+    assert card is not None
+    assert card["has_key"] is True
+
+
+@pytest.mark.parametrize("status_extra", [
+    {"needs_refresh": False, "accounts": 1},   # expired, nothing to refresh with
+    {"needs_refresh": None},                    # odd value from a producer
+])
+def test_oauth_plugin_without_a_refreshable_account_stays_not_has_key(monkeypatch, tmp_path, status_extra):
+    status = {**ISSUE_9105_LOGGED_OUT_STATUS, **status_extra}
+    card = _providers_for(monkeypatch, tmp_path, auth_type="oauth_external", status=status)
+    assert card is not None
+    assert card["has_key"] is False
+
+
+def test_oauth_plugin_status_without_needs_refresh_key_stays_not_has_key(monkeypatch, tmp_path):
+    """A producer that omits ``needs_refresh`` keeps the signed-out answer."""
+    status = {k: v for k, v in ISSUE_9105_LOGGED_OUT_STATUS.items() if k != "needs_refresh"}
+    card = _providers_for(monkeypatch, tmp_path, auth_type="oauth_device_code", status=status)
+    assert card is not None
+    assert card["has_key"] is False
