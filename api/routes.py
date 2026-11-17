@@ -14816,11 +14816,12 @@ from api.oauth import (
 # Approval system -- state and helpers live in api.route_approvals; imported
 # here for backward compatibility so existing call sites continue to resolve.
 from api.route_approvals import (  # noqa: F401 — re-exports for backward compat
-    _submit_pending_raw,
+    APPROVAL_BRIDGE,
+    approval_bridge_failure,
     approve_session,
     approve_permanent,
+    persist_grant_choice,
     save_permanent_allowlist,
-    is_approved,
     _pending,
     _lock,
     _permanent_approved,
@@ -18618,6 +18619,7 @@ def handle_get(handler, parsed) -> bool:
         payload = build_agent_health_payload()
         payload["gateway_chat"] = gateway_chat_config_status()
         payload["gateway_lifecycle"] = gateway_lifecycle_capability()
+        payload["approval_bridge"] = dict(APPROVAL_BRIDGE)
         j(handler, payload)
         return True
 
@@ -18897,6 +18899,9 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
 
     if parsed.path == "/api/session/usage":
@@ -22164,6 +22169,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         sid = str(body["session_id"] or "").strip()
         enabled = bool(body.get("enabled", True))
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         if not enabled:
             with gateway_yolo_handoff(sid):
                 set_session_yolo_enabled(sid, False)
@@ -34651,6 +34659,58 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
+def _scope_offered_by_entry(entry: dict | None, choice: str) -> str:
+    """Narrow a session/always answer to the scopes this approval offered.
+
+    Missing flags keep the answer as given (entries from older producers).
+    """
+    if choice not in ("session", "always") or not isinstance(entry, dict):
+        return choice
+    if entry.get("allow_session") is False or entry.get("smart_denied"):
+        return "once"
+    if choice == "always" and entry.get("allow_permanent") is False:
+        return "session"
+    return choice
+
+
+@contextlib.contextmanager
+def _session_profile_grant_scope(sid: str):
+    """Yield True with the Agent's Hermes home bound to ``sid``'s own profile.
+
+    Yields False (save nothing) when that profile home or the context-local
+    override can't be established. Agent-less mode yields True unscoped.
+    """
+    if not APPROVAL_BRIDGE["agent"]:
+        yield True
+        return
+    from api.memory_profile_scope import session_owner_profile_home
+    from api.profiles import _resolve_hermes_home_override
+
+    home = session_owner_profile_home(sid)
+    home_mod = _resolve_hermes_home_override() if home else None
+    if home_mod is None:
+        logger.warning("approval grant for session %s not saved: its profile home is unknown", sid)
+        yield False
+        return
+    try:
+        # Can raise, e.g. ScopeSwitchRefused while a hosted scope is bound.
+        token = home_mod.set_hermes_home_override(home)
+    except Exception as exc:
+        logger.warning(
+            "approval grant for session %s not saved: its profile home could not be bound (%s)", sid, exc
+        )
+        bound = False
+    else:
+        bound = True
+    if not bound:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        home_mod.reset_hermes_home_override(token)
+
+
 def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
@@ -34721,11 +34781,9 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 # .data dict carries command, pattern_key, pattern_keys.
                 gw_data = getattr(gw_entry, 'data', None) or {}
                 gateway_keys = gw_data.get("pattern_keys") or [gw_data.get("pattern_key", "")]
-                # Peek is not strict — a concurrent resolver may pop a
-                # different gateway entry before we reach
-                # resolve_gateway_approval below, but approve_session is
-                # idempotent over the session key set so the outcome is
-                # the same regardless of which entry wins the race.
+                # resolve_gateway_approval() below hands the choice to the
+                # Agent waiting on the oldest entry; that Agent saves any
+                # session/always grant itself.
                 found_target = True
         elif approval_id:
             gw_queue = _gateway_queues.get(sid)
@@ -34757,6 +34815,14 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                     if matched_data is not None:
                         matched_data["approval_id"] = approval_id
                         local_gateway_approval_id = approval_id
+        # Gateway-held: a relayed run approval, the exact local producer, the
+        # no-id head, or any gateway mirror (live, or orphaned: never used).
+        agent_held = bool(
+            run_id
+            or local_gateway_approval_id
+            or gateway_keys
+            or (pending and pending.get(_GATEWAY_MIRROR_FLAG))
+        )
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -34769,17 +34835,38 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
             else:
                 _approval_sse_notify_locked(sid, None, 0)
 
-    # Collect keys from both _pending and _gateway_queues
+    # The Agent saves a session/always answer once its wait returns, applying its
+    # per-approval scope rule (a one-operation finding saves nothing) in the
+    # session's own profile. WebUI saves only raw entries no Agent waits on, never
+    # a gateway mirror (a mirror whose producer is gone was never used), only
+    # within the scope that entry offered, and only in the session's own profile.
+    scope = "once" if agent_held else _scope_offered_by_entry(pending, choice)
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
-    all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
-    if choice == "session":
-        for k in all_keys:
-            approve_session(sid, k)
-    elif choice == "always":
-        for k in all_keys:
-            approve_session(sid, k)
-            approve_permanent(k)
-        save_permanent_allowlist(_permanent_approved)
+    all_keys = [k for k in keys_from_pending if k]
+    if scope in ("session", "always") and all_keys:
+        with _session_profile_grant_scope(sid) as in_profile:
+            if in_profile and persist_grant_choice is not None and scope == "session":
+                # A session answer uses the Agent's own grant.
+                persist_grant_choice(sid, scope, all_keys)
+            elif in_profile and APPROVAL_BRIDGE["agent"]:
+                # With an Agent bound, a WebUI-held "always" is granted for this session
+                # only: a WebUI-side save can't be combined safely with the Agent's own
+                # save of command_allowlist. It is asked again in a later session.
+                for k in all_keys:
+                    approve_session(sid, k)
+            elif in_profile:
+                # Agent-less: no profile-scoped grant store, so the answer is saved as given.
+                saved = set()
+                for k in all_keys:
+                    approve_session(sid, k)
+                    # Content-scanner (tirith) findings stay session-only, as in the
+                    # Agent's own _persist_choice; a raw entry carries no flag for them.
+                    if scope == "always" and not str(k).startswith("tirith:"):
+                        approve_permanent(k)
+                        saved.add(k)
+                if saved:
+                    # Only the keys granted now: never another profile's in-memory grants.
+                    save_permanent_allowlist(saved)
     # choice == "once": no persistence — approval lasts this single call only.
     # resolve_gateway_approval() below unblocks the parked agent thread for
     # every choice, so "once" still lets the current tool run; we just must not
@@ -35302,6 +35389,9 @@ def _handle_approval_respond(handler, body):
     requested_mirror_token = str(body.get("mirror_token") or "").strip()
 
     if enable_yolo:
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         payload, status = _enable_session_yolo_and_release_pending(
             sid,
             choice=choice,
@@ -35530,6 +35620,13 @@ def _handle_approval_respond(handler, body):
                 return j(handler, relay_payload, status=relay_status)
     except Exception:
         pass  # fall through to local approval path
+
+    # The local path settles the Agent's in-process approval. When the Agent
+    # lacks the names it needs (#9119), refuse instead of reporting ok while the
+    # Agent thread stays parked until its timeout.
+    bridge_failure = approval_bridge_failure(choice=choice)
+    if bridge_failure is not None:
+        return j(handler, bridge_failure[0], status=bridge_failure[1])
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 

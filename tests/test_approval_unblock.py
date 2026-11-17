@@ -27,7 +27,6 @@ try:
         _gateway_queues,
         _gateway_notify_cbs,
         _lock,
-        submit_pending,
     )
     # _ApprovalEntry moved out of tools.approval into tools.approval_gateway_wait
     # (#9008). Import it from the new home and fall back to the old one so the
