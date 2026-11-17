@@ -265,14 +265,16 @@ def test_chat_start_refreshes_cli_messages_before_first_webui_turn(monkeypatch, 
 
     seen: dict[str, bool] = {}
 
-    def _fake_get_or_materialize_session(sid, *, refresh_cli_messages=False):
+    def _fake_get_or_materialize_session(sid, *, refresh_cli_messages=False, for_chat=False):
         seen["refresh_cli_messages"] = refresh_cli_messages
+        seen["for_chat"] = for_chat
         assert sid == session.session_id
         return session
 
     def _fake_start_run(s, **kwargs):
         assert s is session
         assert seen["refresh_cli_messages"] is True
+        assert seen["for_chat"] is True
         return {"ok": True}
 
     monkeypatch.setattr(routes, "_get_or_materialize_session", _fake_get_or_materialize_session)

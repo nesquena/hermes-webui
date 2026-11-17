@@ -9,6 +9,11 @@ from api import subprocess_utils as utils, updates
 from api.workspace_git import GitWorkspaceError, git_fetch
 from tests.test_update_git_security import _git, _make_bare_origin
 
+# Git children here must never read the host's system/global git config: on a
+# Mac that runs osxkeychain against the test servers (#8931). See
+# tests/_git_host_config_isolation.py.
+pytestmark = pytest.mark.usefixtures("isolated_host_git_config")
+
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
 def test_old_git_still_blocks_repository_proxy(tmp_path, isolated_home, monkeypatch, caller):
