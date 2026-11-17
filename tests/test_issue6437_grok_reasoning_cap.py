@@ -28,10 +28,11 @@ UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 NODE = shutil.which("node")
 
 CAPPED = ["low", "medium", "high"]
+FAMILY_46 = ["low", "medium", "high", "xhigh"]
 FULL = ["minimal", "low", "medium", "high", "xhigh", "max"]
 
-# Models whose ladder must stop at 'high' (Grok 4.0-4.5, incl. the unversioned
-# ids) vs models that keep xhigh/max (Grok 4.6+).
+# Models whose ladder must stop at 'high' (Grok legacy prefixes) vs
+# models that get the 4.6 family ladder low..xhigh (#6497).
 CAPPED_MODELS = [
     "grok-4.5",
     "grok-4.5-latest",
@@ -40,14 +41,25 @@ CAPPED_MODELS = [
     "Grok-4.5",
     "grok-4.5-mini",
     "grok-4-5",
+    "grok-3-mini",
+    "grok-4.20-multi-agent",
+    "grok-4.3",
+    "grok-4.5x",
+]
+UNCAPPED_MODELS = ["grok-4.6", "grok-4.6-fast", "grok-4.6-0712"]
+NON_REASONING_GROK = [
     "grok-4",
     "grok4",
     "grok-4-fast",
-    "grok-4-0709",  # release stamp, not minor=709
+    "grok-4-0709",
+    "grok-4.7",
+    "grok-5",
+    "grok-3",
+    "grok-beta",
+    "grok-2",
+    "grok-1",
 ]
-UNCAPPED_MODELS = ["grok-4.6", "grok-4.7", "grok-4.6-fast", "grok-4.6-0712"]
-NON_REASONING_GROK = ["grok-3", "grok-3-mini", "grok-beta", "grok-2", "grok-1"]
-LOOKALIKES = ["grok-45", "grok45", "grok-4.5x", "grok4x", "notgrok-4.5"]
+LOOKALIKES = ["grok-45", "grok45", "grok4x", "notgrok-4.5"]
 
 
 # ── one parse, one profile: no drifting regexes ─────────────────────────────
@@ -78,33 +90,35 @@ def test_resolved_ladder_matches_profile_ceiling_on_both_lanes():
             assert efforts == CAPPED, f"{model}@{provider} must cap at high: {efforts}"
         for model in UNCAPPED_MODELS:
             efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=provider)
-            assert "xhigh" in efforts and "max" in efforts, f"{model}@{provider}: {efforts}"
+            assert efforts == FAMILY_46, f"{model}@{provider}: {efforts}"
 
 
 def test_unversioned_grok4_ids_are_capped():
-    """`grok-4` / `grok4` / `grok-4-fast` used to fall through the 4.5 regex."""
+    """`grok-4` / `grok4` / `grok-4-fast` get no dial from the Agent (#6497)."""
     for model in ("grok-4", "grok4", "grok-4-fast"):
-        assert cfg._grok_reasoning_profile(model)["max_effort"] == "high", model
-        assert "xhigh" not in cfg.resolve_model_reasoning_efforts(
+        assert cfg._grok_reasoning_profile(model) is None, model
+        assert cfg.resolve_model_reasoning_efforts(
             model, provider_id="xai"
-        ), model
+        ) == [], model
 
 
 def test_release_stamp_is_not_read_as_minor_version():
-    """`grok-4-0709` is a snapshot of grok-4, not grok-4.709 (which would be 4.6+)."""
-    assert cfg._grok_reasoning_profile("grok-4-0709")["max_effort"] == "high"
-    assert cfg._grok_reasoning_profile("grok-4.6-0712")["max_effort"] == "max"
+    """`grok-4-0709` is a snapshot of grok-4 (no dial); `grok-4.6-0712` is 4.6 family."""
+    assert cfg._grok_reasoning_profile("grok-4-0709") is None
+    assert cfg._grok_reasoning_profile("grok-4.6-0712")["max_effort"] == "xhigh"
+    assert cfg.resolve_model_reasoning_efforts("grok-4.6-0712", provider_id="xai") == FAMILY_46
 
 
 def test_grok_46_and_later_keep_full_ladder():
-    assert cfg._grok_reasoning_profile("grok-4.6")["max_effort"] == "max"
-    assert cfg.resolve_model_reasoning_efforts("grok-4.6", provider_id="xai") == FULL
-    # a future minor keeps the wider ladder rather than being silently capped
-    assert cfg._grok_reasoning_profile("grok-5")["max_effort"] == "max"
+    assert cfg._grok_reasoning_profile("grok-4.6")["max_effort"] == "xhigh"
+    assert cfg.resolve_model_reasoning_efforts("grok-4.6", provider_id="xai") == FAMILY_46
+    # grok-5 is not in the Agent allowlist and gets no dial (#6497)
+    assert cfg._grok_reasoning_profile("grok-5") is None
+    assert cfg.resolve_model_reasoning_efforts("grok-5", provider_id="xai") == []
 
 
 def test_lookalike_ids_never_get_the_grok_45_ceiling():
-    """`grok-45` is not 4.5 (multi-digit major) and `grok-4.5x` is not 4.5.
+    """`grok-45` is not 4.5 (multi-digit major) and `grok4x` is a different id.
 
     The strict parse rejects the attached alphanumerics instead of falling back
     to the bare major, so neither id is capped *as if* it were grok-4.5 — and a
@@ -173,9 +187,9 @@ def test_status_coerces_stale_max_down_to_high_for_grok_45(monkeypatch):
     for provider in ("xai", "xai-oauth"):
         status = cfg.get_reasoning_status(model_id="grok-4.5", provider_id=provider)
         assert status["reasoning_effort"] == "high", provider
-    # grok-4.6 legitimately keeps 'max'
+    # grok-4.6 clamps 'max' down to 'xhigh' (#6497)
     status = cfg.get_reasoning_status(model_id="grok-4.6", provider_id="xai")
-    assert status["reasoning_effort"] == "max"
+    assert status["reasoning_effort"] == "xhigh"
 
 
 # ── composer: the "None" option is hidden when there is no off switch ───────

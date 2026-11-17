@@ -6100,112 +6100,75 @@ def _reasoning_name_candidates(model_id: str) -> list[str]:
     return candidates
 
 
-# xAI / Grok reasoning ladder. Verified against xAI's model-capabilities doc
-# (docs.x.ai/developers/model-capabilities/text/reasoning): Grok 4.x accepts
-# reasoning_effort low|medium|high (default high); xhigh/max exist only from
-# Grok 4.6 on. Reasoning cannot be turned OFF on the 4.x reasoning models — the
-# transport just omits the field — so the composer must not offer "None".
-_GROK_REASONING_MIN_MAJOR = 4
-_GROK_FULL_LADDER_MIN_MINOR = 6
-_GROK_CAPPED_EFFORTS = frozenset({"low", "medium", "high"})
-# Both credential lanes hit the same xAI backend and share one model ladder: the
-# API-key lane is `xai`, the OAuth lane canonicalizes to `xai-oauth`. `x-ai`
-# ("x-ai/grok-4.5" ids) and `grok` normally resolve to `xai` via the alias table
-# and are listed here so a future alias-table change cannot silently reopen the
-# bypass.
-_XAI_REASONING_PROVIDERS = frozenset({"xai", "xai-oauth", "x-ai", "x.ai", "grok"})
+# xAI / Grok reasoning ladder: parity with the installed Agent
+# (_GROK_EFFORT_CAPABLE_PREFIXES from agent/model_metadata.py:369 and
+# XAI_GROK46_EFFORTS / XAI_LEGACY_EFFORTS from agent/reasoning_effort.py:48).
+# Grok 4.5/4.6 reject "none", unlike grok-4.3 (agent/model_metadata.py:377).
+_GROK_EFFORT_CAPABLE_PREFIXES = (
+    "grok-3-mini",
+    "grok-4.20-multi-agent",
+    "grok-4.3",
+    "grok-4.5",
+    "grok-4.6",
+)
+_XAI_GROK46_EFFORTS = ["low", "medium", "high", "xhigh"]
+_XAI_LEGACY_EFFORTS = ["low", "medium", "high"]
 
 
-def _grok_version(model_id: str | None) -> tuple[int, int | None] | None:
-    """Return ``(major, minor|None)`` for the first clean ``grok`` version token.
-
-    Deliberately boundary-aware, because the previous ``grok[._-]?4[._-]?5``
-    regex both under- and over-matched: it missed the unversioned ``grok-4`` /
-    ``grok4`` ids AND treated lookalikes (``grok-45``, ``grok-4.5x``) as grok-4.5.
-
-      - the major version may be glued to the family name (``grok4``) but a
-        separator IS required between major and minor (``grok-4.5`` ok,
-        ``grok-45`` is rejected: a multi-digit major is a different/
-        hypothetical id, not a Grok family release);
-      - a letter strapped straight onto the major or the minor (``grok4x``,
-        ``grok-4.5x``) is a DIFFERENT id, not grok-4/4.5 — the parse is
-        rejected outright rather than falling back to the bare major (which
-        would wrongly cap it);
-      - delimiter-separated suffixes are fine (``grok-4.5-mini``);
-      - date-stamped snapshots (``grok-4-0709``) carry the BASE version, so a
-        leading-zero group is a release stamp, not ``minor=709``.
-
-    ``None`` means "no clean grok version in this id".
-    """
+def _normalize_grok_model_id(model_id: str | None) -> str:
+    """Strip hint, vendor prefix, and normalize delimiters for Grok matching."""
     text = str(model_id or "").strip().lower()
     pos = 0
+    grok_start = -1
     while True:
         idx = text.find("grok", pos)
         if idx < 0:
-            return None
+            break
+        if idx == 0 or not text[idx - 1].isalnum():
+            grok_start = idx
+            break
         pos = idx + len("grok")
-        if idx > 0 and text[idx - 1].isalnum():
-            # Embedded in a larger token ("notgrok-4") — not the family name.
-            continue
-        cursor = pos + 1 if pos < len(text) and text[pos] in "._-" else pos
-        end = cursor
-        while end < len(text) and text[end].isdigit():
-            end += 1
-        if end == cursor:
-            # "grok-beta", "grokking-4": no version digits after the family name.
-            continue
-        if end - cursor > 1 or (end < len(text) and text[end].isalpha()):
-            # "grok45"/"grok-45": a multi-digit major is not a Grok release.
-            # "grok4x": a letter glued onto the major is a different id.
-            return None
-        major = int(text[cursor:end])
-        minor: int | None = None
-        if end < len(text) and text[end] in "._-":
-            digits_start = end + 1
-            digits_end = digits_start
-            while digits_end < len(text) and text[digits_end].isdigit():
-                digits_end += 1
-            if digits_end > digits_start:
-                digits = text[digits_start:digits_end]
-                if digits_end < len(text) and text[digits_end].isalpha():
-                    return None
-                if len(digits) == 1 or not digits.startswith("0"):
-                    minor = int(digits)
-        return (major, minor)
+    if grok_start < 0:
+        return ""
+    tail = text[grok_start:].replace("_", "-")
+    tail = re.sub(r"^grok-(\d+)-(\d+)", r"grok-\1.\2", tail)
+    return tail
 
 
 def _grok_reasoning_profile(model_id: str | None) -> dict | None:
-    """Single source of truth for the Grok/xAI reasoning surface.
+    """Single source of truth for the Grok reasoning surface.
 
-    Returns ``None`` when the id is not a reasoning-capable Grok model (Grok
-    1-3, ``grok-beta``, non-Grok ids, unparseable lookalikes). Otherwise:
-
-      ``supports``    — whether the reasoning chip exists for this id at all
-      ``max_effort``  — highest ladder level the backend accepts: "high" for
-                        Grok 4.0-4.5 (including the unversioned ``grok-4`` /
-                        ``grok-4-fast`` ids), "max" for Grok 4.6+
-      ``can_disable`` — whether the on/off ("None") control exists at all
-
-    ``_candidate_supports_reasoning``, ``_filter_reasoning_efforts_for_provider``
-    and the stored-``none`` gate all consult this, so the ceiling and the
-    toggle decision cannot drift apart (review: one strict version parse).
+    Consults the installed Agent (agent.model_metadata.grok_supports_reasoning_effort
+    and is_grok_46_family) when available, falling back to the mirrored allowlist
+    and effort ladder. Returns None when the id gets no reasoning dial.
     """
-    version = _grok_version(model_id)
-    if version is None:
+    norm = _normalize_grok_model_id(model_id)
+    if not norm:
         return None
-    major, minor = version
-    if major < _GROK_REASONING_MIN_MAJOR:
+
+    supports = False
+    is_46 = False
+    try:
+        from agent.model_metadata import grok_supports_reasoning_effort, is_grok_46_family
+
+        supports = grok_supports_reasoning_effort(norm)
+        if supports:
+            is_46 = is_grok_46_family(norm)
+    except (ImportError, AttributeError):
+        supports = any(norm.startswith(p) for p in _GROK_EFFORT_CAPABLE_PREFIXES)
+        if supports:
+            is_46 = norm == "grok-4.6" or norm.startswith("grok-4.6-")
+
+    if not supports:
         return None
-    capped = major == _GROK_REASONING_MIN_MAJOR and (
-        minor is None or minor < _GROK_FULL_LADDER_MIN_MINOR
-    )
+
+    efforts = list(_XAI_GROK46_EFFORTS) if is_46 else list(_XAI_LEGACY_EFFORTS)
+    can_disable = not (norm.startswith("grok-4.5") or is_46)
     return {
         "supports": True,
-        "max_effort": "high" if capped else "max",
-        # xAI exposes no "reasoning off" switch on the 4.x reasoning models: the
-        # transport omits the field and the model runs at its default effort, so
-        # offering "None" would be a dead control.
-        "can_disable": False,
+        "max_effort": "xhigh" if is_46 else "high",
+        "supported_efforts": efforts,
+        "can_disable": can_disable,
     }
 
 
@@ -6283,9 +6246,11 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         if idx + 1 < len(tokens) and tokens[idx + 1].startswith(("v", "r")):
             return True
     if "grok" in token_set or normalized.startswith("grok"):
-        # Restrict to Grok 4+ (exclude Grok-1, Grok-2, Grok-3 — no reasoning)
-        # via the single strict version parse in _grok_reasoning_profile.
-        return _grok_reasoning_profile(normalized) is not None
+        # Restrict to capable Grok models via _grok_reasoning_profile.
+        return (
+            _grok_reasoning_profile(candidate) is not None
+            or _grok_reasoning_profile(normalized) is not None
+        )
     return False
 
 
@@ -6496,15 +6461,14 @@ def _filter_reasoning_efforts_for_provider(
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
         return [eff for eff in normalized if eff != "max"]
-    # xAI / Grok 4.x tops out at 'high' ("xhigh" is Grok 4.6+; the unversioned
-    # 'grok-4' / 'grok-4-fast' ids cap too). The ceiling follows the MODEL and
-    # must hold on BOTH credential lanes — `xai` (API key) and `xai-oauth`
-    # (OAuth) route to the same xAI backend — so the decision lives in
-    # _grok_reasoning_profile alongside the chip/None-gate logic.
-    if provider in _XAI_REASONING_PROVIDERS:
+    # Grok reasoning capability and effort ceiling follow the model id alone
+    # across every lane (xai, xai-oauth, custom:proxy). Unknown Grok models
+    # get no dial ([]), 4.6 gets low..xhigh, and legacy gets low..high.
+    if _normalize_grok_model_id(bare):
         grok_profile = _grok_reasoning_profile(bare)
-        if grok_profile and grok_profile["max_effort"] == "high":
-            return [eff for eff in normalized if eff in _GROK_CAPPED_EFFORTS]
+        if grok_profile is None:
+            return []
+        return [eff for eff in normalized if eff in grok_profile["supported_efforts"]]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
     # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
     # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
@@ -6861,6 +6825,9 @@ def resolve_model_reasoning_efforts(
         [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
     )
     if had_none:
+        grok_prof = _grok_reasoning_profile(model_id)
+        if grok_prof is not None and not grok_prof.get("can_disable", True):
+            return filtered
         # Keep 'none' in its original leading position if it was there.
         return ["none", *filtered] if raw and raw[0] == "none" else [*filtered, "none"]
     return filtered
@@ -7024,14 +6991,31 @@ def coerce_reasoning_effort_for_model(
     # early-return below so the forced-tier contract wins. (#6219 round-3)
     if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
         return ""
-    # Grok 4.x reasoning cannot be switched off either: xAI has no disable
-    # signal, the transport just omits the field and the model runs at its
-    # default effort. A stored 'none' must therefore coerce to '' (provider
-    # default) instead of a dead disable — same contract as the forced-thinking
-    # gate above, read from the same profile the chip and the ceiling use.
-    # (#6437 review)
-    if raw == "none" and (_grok_reasoning_profile(model_id) or {}).get("can_disable") is False:
-        return ""
+    # Grok reasoning coercion mirrors the Agent clamp_effort contract:
+    # no-dial Grok ids coerce to "" (nothing sent on wire);
+    # grok-4.5* and 4.6 family reject "none" and coerce to "";
+    # grok-4.3 accepts "none"; other levels clamp to nearest weaker supported level,
+    # or weakest supported level when below the floor.
+    if _normalize_grok_model_id(model_id):
+        grok_profile = _grok_reasoning_profile(model_id)
+        if grok_profile is None:
+            return ""
+        if raw == "none":
+            return "" if grok_profile.get("can_disable") is False else "none"
+        if raw not in VALID_REASONING_EFFORTS:
+            return ""
+        supported = grok_profile["supported_efforts"]
+        if raw in supported:
+            return raw
+        ladder = list(VALID_REASONING_EFFORTS)
+        try:
+            raw_idx = ladder.index(raw)
+        except ValueError:
+            return ""
+        weaker = [lvl for lvl in supported if lvl in ladder and ladder.index(lvl) < raw_idx]
+        if weaker:
+            return max(weaker, key=ladder.index)
+        return min(supported, key=ladder.index)
     if raw == "none":
         return "none"
     if raw not in VALID_REASONING_EFFORTS:

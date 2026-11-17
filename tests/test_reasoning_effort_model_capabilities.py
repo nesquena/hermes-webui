@@ -605,11 +605,10 @@ def test_qwen_prefixed_alias_reasoning_detection():
 
 
 def test_grok_4_without_minor_caps_at_high():
-    # Unversioned `grok-4` / `grok4` / `grok-4-fast` slipped through the old
-    # `grok[._-]?4[._-]?5` regex and exposed xhigh/max.
+    # Unversioned `grok-4` / `grok4` / `grok-4-fast` get no dial from the Agent (#6497).
     for model in ("grok-4", "grok4", "grok-4-fast"):
         efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="xai")
-        assert efforts == ["low", "medium", "high"], f"{model}: {efforts}"
+        assert efforts == [], f"{model}: {efforts}"
 
 
 def test_grok_45_caps_at_high_on_both_xai_lanes():
@@ -625,25 +624,30 @@ def test_grok_45_caps_at_high_on_both_xai_lanes():
 
 def test_grok_46_keeps_xhigh():
     efforts = cfg.resolve_model_reasoning_efforts("grok-4.6", provider_id="xai")
-    assert "xhigh" in efforts and "max" in efforts, efforts
+    assert efforts == ["low", "medium", "high", "xhigh"], efforts
 
 
 def test_grok_3_has_no_reasoning():
-    for model in ("grok-3", "grok-3-mini"):
-        assert cfg._candidate_supports_reasoning(model) is False, model
-        assert cfg.resolve_model_reasoning_efforts(
-            model, provider_id="xai"
-        ) == [], model
+    assert cfg._candidate_supports_reasoning("grok-3") is False
+    assert cfg.resolve_model_reasoning_efforts("grok-3", provider_id="xai") == []
+    # grok-3-mini is effort-capable in the Agent (#6497)
+    assert cfg._candidate_supports_reasoning("grok-3-mini") is True
+    assert cfg.resolve_model_reasoning_efforts(
+        "grok-3-mini", provider_id="xai"
+    ) == ["low", "medium", "high"]
 
 
 def test_grok_lookalikes_are_not_read_as_grok_45():
-    # `grok-45` is a multi-digit major, not 4.5; `grok-4.5x` is a different id.
-    # Both are rejected outright instead of being capped *as* grok-4.5.
-    for model in ("grok-45", "grok45", "grok-4.5x"):
+    # `grok-45` is a multi-digit major (rejected); `grok-4.5x` shares the 4.5 prefix.
+    for model in ("grok-45", "grok45"):
         assert cfg._grok_reasoning_profile(model) is None, model
         assert cfg.resolve_model_reasoning_efforts(
             model, provider_id="xai"
         ) == [], model
+    assert cfg._grok_reasoning_profile("grok-4.5x") is not None
+    assert cfg.resolve_model_reasoning_efforts(
+        "grok-4.5x", provider_id="xai"
+    ) == ["low", "medium", "high"]
 
 
 def test_grok_45_offers_no_none_option():

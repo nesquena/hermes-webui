@@ -24,12 +24,13 @@ def test_models_dev_true_returns_full_efforts(monkeypatch):
 
     import api.config as cfg
 
-    # Grok 4.6+ keeps the full ladder (xhigh is 4.6+ only per the xAI docs);
-    # pre-4.6 Grok ids are covered by
-    # test_models_dev_metadata_respects_grok_ceiling below (#6437).
-    assert cfg._models_dev_reasoning_efforts("grok-4.6", "xai-oauth") == list(
-        cfg.VALID_REASONING_EFFORTS
-    )
+    # Grok 4.6 gets low..xhigh (Agent contract); pre-4.6 Grok ids cap at high.
+    assert cfg._models_dev_reasoning_efforts("grok-4.6", "xai-oauth") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
 
 
 def test_models_dev_false_returns_authoritative_empty(monkeypatch):
@@ -48,8 +49,13 @@ def test_models_dev_unknown_allows_compatibility_fallback(monkeypatch):
 
     import api.config as cfg
 
+    # Grok 4 gets no dial on any lane (#6497)
     assert cfg.resolve_model_reasoning_efforts(
         "x-ai/grok-4", provider_id="openrouter"
+    ) == []
+    # Non-Grok prefix fallback still preserves full efforts
+    assert cfg.resolve_model_reasoning_efforts(
+        "deepseek/deepseek-v4", provider_id="openrouter"
     ) == list(cfg.VALID_REASONING_EFFORTS)
 
 
@@ -87,9 +93,12 @@ def test_models_dev_metadata_respects_grok_ceiling(monkeypatch):
         "medium",
         "high",
     ]
-    assert cfg._models_dev_reasoning_efforts("grok-4.6", "xai-oauth") == list(
-        cfg.VALID_REASONING_EFFORTS
-    )
+    assert cfg._models_dev_reasoning_efforts("grok-4.6", "xai-oauth") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
 
 
 def test_models_dev_false_suppresses_prefix_heuristic(monkeypatch):
