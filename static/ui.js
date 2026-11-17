@@ -11090,6 +11090,22 @@ function renderMd(raw){
       }
       rpFrom=p;rp=str.indexOf(')',p);return rp;
     };
+    // Forward-only next-tag-end cache. Unmarked `<span` openers can repeat
+    // thousands of times before a `>` (greptile round 10: repeated
+    // `indexOf('>', i+1)` grew ~50ms -> ~953ms for 16k -> 128k openers).
+    let gtCache=-2,gtFrom=-1,gtGenerated=false;
+    const nextTagEnd=p=>{
+      if(gtCache!==-2){
+        if(gtCache===-1){if(p>=gtFrom)return -1;}
+        else if(gtCache>=p)return gtCache;
+      }
+      gtFrom=p;gtCache=str.indexOf('>',p);
+      // Compute the marker flag ONCE per distinct tag end, not per pending
+      // opener: a run of `<span ` before one `>` would otherwise rescan the
+      // whole tag for each opener (greptile round 10 growth).
+      gtGenerated=gtCache>=0&&/\b(?:class="msg-|loading="lazy")/.test(str.slice(p,gtCache));
+      return gtCache;
+    };
     while(i<str.length){
       // Already-emitted HTML (from an earlier inlineMd/image pass) is opaque:
       // its attributes can legitimately contain `![` (a URL with `![`, or an
@@ -11112,16 +11128,24 @@ function renderMd(raw){
         //     drop any opener still pending before it. Genuine user HTML in an
         //     alt (`<span>logo</span>`) has none of these markers and stays
         //     eligible for pairing.
-        const tag=str.slice(i,i+220);
-        if(/^<(?:img|span|svg|a|video|audio|source)\b/i.test(tag)){
-          const gt=str.indexOf('>',i+1);
-          if(gt>=0){
-            const generated=/\b(?:class="msg-|loading="lazy")/.test(tag.slice(0,gt-i));
-            if(pend.length===0||generated){
-              if(generated)pend.length=0;
-              out+=str.slice(copy,gt+1);
-              copy=gt+1;i=gt+1;continue;
-            }
+        // Inspect the COMPLETE start tag, not a fixed 220-char prefix: a
+        // generated image emits `src` before the `class`/`loading` markers,
+        // so a long destination pushed them past the old window and an
+        // unfinished opener rebuilt a second image from the tag's attributes
+        // (greptile round 10). The forward-only cache keeps the tag-end search
+        // linear even with thousands of pending unmarked openers.
+        const gt=nextTagEnd(i+1);
+        if(gt<0){i++;continue;}
+        // Check the tag name on a bounded prefix; `gtGenerated` was computed
+        // once for this tag end by nextTagEnd (see above). A generated image
+        // may put a long `src` before `class`/`loading`, so the marker test
+        // covers the whole tag, not a fixed 220-char window (round 10).
+        const tagHead=str.slice(i,Math.min(i+16,gt+1));
+        if(/^<(?:img|span|svg|a|video|audio|source)\b/i.test(tagHead)){
+          if(pend.length===0||gtGenerated){
+            if(gtGenerated)pend.length=0;
+            out+=str.slice(copy,gt+1);
+            copy=gt+1;i=gt+1;continue;
           }
         }
       }

@@ -2072,3 +2072,60 @@ class TestUnfinishedOpenerDoesNotEatGeneratedImage9072:
         # renderer marker and must still produce the image (round-8 fix).
         out = _render(driver_path, '![A<span>logo</span>](/a.png)')
         assert out.count('<img') == 1 and 'src="/a.png"' in out, repr(out)
+
+
+class TestLongGeneratedImageTagOpaque9072Round10:
+    """Greptile round 10 on #9072: generated-image opacity used a 220-char
+    prefix probe (`str.slice(i, i+220)`). A generated image places its `src`
+    before the `class`/`loading` markers, so a 240-char URL pushed those
+    markers past the probe window and an unfinished opener rebuilt a second
+    image out of the generated tag's escaped attributes. Inspect the full
+    start tag (up to its closing `>`) instead, while keeping genuine user
+    HTML inside an image description pairable."""
+
+    def _recipe(self, marker):
+        url = 'http://localhost/' + 'a' * 240 + '.png'
+        return marker + ' ![unfinished\n' + marker + ' ![x](' + url + ') tail ](/two.png)'
+
+    def test_long_heading_generated_image_stays_rendered(self, driver_path):
+        out = _render(driver_path, self._recipe('#'))
+        assert out.count('<img') == 1, repr(out)
+        assert 'class=&quot;msg-media' not in out, (
+            'generated tag attributes leaked into a rebuilt alt: ' + repr(out))
+        assert 'tail ](/two.png)' in out, (
+            'unfinished opener consumed the literal tail: ' + repr(out))
+
+    def test_long_list_generated_image_stays_rendered(self, driver_path):
+        out = _render(driver_path, self._recipe('-'))
+        assert out.count('<img') == 1, repr(out)
+        assert 'class=&quot;msg-media' not in out, (
+            'generated tag attributes leaked into a rebuilt alt: ' + repr(out))
+        assert 'tail ](/two.png)' in out, repr(out)
+
+    def test_user_html_in_alt_still_pairs_round10(self, driver_path):
+        # Over-correction guard: full-tag inspection must not make genuine
+        # <span> markup in an image alt opaque (round-8 control retained).
+        out = _render(driver_path, '![A<span>logo</span>](/a.png)')
+        assert out.count('<img') == 1 and 'src="/a.png"' in out, repr(out)
+
+
+class TestPendingUnmarkedTagGrowth9072Round10:
+    """Greptile round 10 on #9072: each pending unmarked `<span` recomputed
+    `str.indexOf('>', i+1)` without caching. For `'![' + '<span '.repeat(n)
+    + '>'` that rescanned the whole suffix per opener (16k->128k reps went
+    ~50ms->~953ms). Cache the monotonically advancing next-tag-end search,
+    including a missing result."""
+
+    def test_repeated_pending_spans_grow_near_linear(self, growth_driver_path):
+        def payload(n):
+            return '![' + '<span ' * n + '>'
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(2000), payload(16000)]
+        )
+        # 8x the bytes: linear work lands near 8x (loose headroom); the
+        # rescan-every-opener form grows ~19x over the same range.
+        assert large_ms < small_ms * 12, (
+            'pending <span openers must not rescan the suffix per opener: '
+            f'16k={small_ms:.1f} ms, 128k={large_ms:.1f} ms'
+        )
