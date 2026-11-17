@@ -1,13 +1,15 @@
 from collections import Counter
 from pathlib import Path
 import re
-from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.scripts_fallback_keys import scripts_fallback_keys
 
 
 REPO = Path(__file__).resolve().parent.parent
+# en-only keys by design (#6067): absent from every non-English locale.
+# profile_concept_* keys were filled in for #7579 and are no longer exempted.
 PROFILE_CONCEPT_FALLBACK_KEYS = {
-    *PROFILE_CONCEPT_KEYS,
     "workspace_artifact_source_session",
+    *scripts_fallback_keys('ru'),
 }
 
 

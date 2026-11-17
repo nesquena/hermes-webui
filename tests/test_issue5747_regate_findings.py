@@ -75,7 +75,6 @@ WORKSPACE_PRELUDE = "\n".join(
         _fn(WORKSPACE_JS, "_currentMutationOwner"),
         _fn(WORKSPACE_JS, "_mutationKey"),
         _fn(WORKSPACE_JS, "_toolMutationIdentity"),
-        _fn(WORKSPACE_JS, "_openFileReadStale"),
     ]
 )
 
@@ -197,31 +196,45 @@ def test_pending_mutation_key_survives_transient_stream_id():
     assert out["otherWs"] is False, "different workspaces must not collide (#5747 F2)"
 
 
-def test_stale_read_predicate_flags_superseded_reads():
-    """F4: the guards added to the rejection paths key off this predicate."""
+def test_stale_read_predicate_follows_preview_ownership():
+    """F4: staleness is the base's ownership token, NOT the stream id.
+
+    Re-gate 2026-10-29: keying read staleness on `S.activeStreamId` discarded the
+    refresh for the last tool call of every turn (the run ends, the stream id
+    clears, and the in-flight read was treated as stale). Ownership is a
+    monotonic open generation + session + workspace-tree generation.
+    """
     driver = (
         WORKSPACE_STATE
         + "\n"
         + WORKSPACE_PRELUDE
         + "\n"
-        + "function stale(args){ return _openFileReadStale(args.gen, args.sid, args.pid, args.ws, args.stream); }\n"
+        + "let _previewOpenGen = 0;\n"
+        + "let _wsTreeGen = 0;\n"
+        + _fn(WORKSPACE_JS, "_previewOpenOwned")
+        + "\n"
+        + "function owned(args){ return _previewOpenOwned(args.gen, args.sid, args.wsGen); }\n"
         + "const c = __PAYLOAD__;\n"
         + "process.stdout.write(JSON.stringify({\n"
-        + "  current: stale({gen:4, sid:'s1', pid:'default', ws:'/w', stream:'stream-1'}),\n"
-        + "  newerOpen: stale({gen:3, sid:'s1', pid:'default', ws:'/w', stream:'stream-1'}),\n"
-        + "  otherWs: stale({gen:4, sid:'s1', pid:'default', ws:'/w2', stream:'stream-1'}),\n"
-        + "  settledStream: stale({gen:4, sid:'s1', pid:'default', ws:'/w', stream:''}),\n"
+        + "  current: owned({gen:_previewOpenGen, sid:'s1', wsGen:_wsTreeGen}),\n"
+        + "  settledStream: (()=>{ S.activeStreamId=''; return owned({gen:_previewOpenGen, sid:'s1', wsGen:_wsTreeGen}); })(),\n"
+        + "  newerOpen: owned({gen:_previewOpenGen - 1, sid:'s1', wsGen:_wsTreeGen}),\n"
+        + "  otherSession: owned({gen:_previewOpenGen, sid:'s2', wsGen:_wsTreeGen}),\n"
+        + "  otherWorkspace: owned({gen:_previewOpenGen, sid:'s1', wsGen:_wsTreeGen + 1}),\n"
+        + "  afterClose: (()=>{ _previewOpenGen++; return owned({gen:_previewOpenGen - 1, sid:'s1', wsGen:_wsTreeGen}); })(),\n"
         + "}));\n"
     )
     out = json.loads(_run(driver, {}))
     assert out == {
-        "current": False,
-        "newerOpen": True,
-        "otherWs": True,
+        "current": True,
         "settledStream": True,
+        "newerOpen": False,
+        "otherSession": False,
+        "otherWorkspace": False,
+        "afterClose": False,
     }, (
-        "a read superseded by a newer openFile(), a workspace switch, or a "
-        f"settled stream must all read as stale (#5747 F4); got {out}"
+        "a settled stream must NOT make the read stale, while a newer open, a "
+        f"session switch, a workspace switch or a closed pane must (#5747 F4); got {out}"
     )
 
 
