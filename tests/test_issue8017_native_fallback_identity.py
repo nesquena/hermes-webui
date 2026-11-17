@@ -128,7 +128,7 @@ def test_the_configured_default_keeps_its_route(monkeypatch):
     provider (or the reverse) would satisfy a URL-only check.
     """
     _bind(monkeypatch, _oracle_config())
-    assert config.resolve_model_provider(MODEL) == (MODEL, "custom", DEFAULT_URL)
+    _assert_default_keeps_its_own_connection(_oracle_config())
 
 
 def test_the_row_stays_visible_on_every_read_surface(monkeypatch):
@@ -178,3 +178,76 @@ def test_a_legacy_empty_hint_entry_keeps_its_own_endpoint(monkeypatch):
     }
     _bind(monkeypatch, data)
     assert config.resolve_model_provider(MODEL) == (MODEL, "", "http://dash.example/v2")
+
+
+def _same_url_config() -> dict:
+    """The round-14 reproduction: the native row shares the default's endpoint."""
+    data = _oracle_config()
+    data["model"]["api_key"] = "model-key"
+    data["providers"][NATIVE_KEY]["base_url"] = DEFAULT_URL
+    return data
+
+
+def _assert_default_keeps_its_own_connection(data) -> None:
+    """The resolver AND the constructor bundle stay on the configured default.
+
+    Both halves matter: a route can keep the provider and still hand the send a
+    different record's key, which is the account substitution the review named.
+    """
+    _model, provider, base_url = config.resolve_model_provider(MODEL)
+    assert (provider, base_url) == ("custom", DEFAULT_URL)
+    bundle = config.merge_custom_provider_runtime_bundle(
+        provider, "model-key", base_url, None
+    )
+    assert (bundle["provider"], bundle["base_url"], bundle["api_key"]) == (
+        "custom", DEFAULT_URL, "model-key",
+    )
+
+
+def test_a_same_url_native_row_does_not_take_the_configured_default(monkeypatch):
+    """An equal endpoint is not evidence that two records are one account.
+
+    Red on the previous head: the bare ``custom`` route was promoted by
+    ``_named_custom_provider_slug_for_base_url`` to ``custom:晨光`` and the
+    runtime bundle replaced ``model-key`` with the row's own key.
+    """
+    _bind(monkeypatch, _same_url_config())
+    _assert_default_keeps_its_own_connection(_same_url_config())
+
+
+def test_an_explicit_pick_of_the_same_url_row_still_carries_its_own_key(monkeypatch):
+    """Control: the picker's qualified form reaches the row even at a shared URL."""
+    _bind(monkeypatch, _same_url_config())
+    assert config.resolve_model_provider(
+        f"@{PID}:{MODEL}", explicitly_picked=True
+    ) == (MODEL, PID, DEFAULT_URL)
+    bundle = config.merge_custom_provider_runtime_bundle(
+        PID, "model-key", DEFAULT_URL, None
+    )
+    assert bundle["api_key"] == "synthetic-native"
+
+
+def test_a_configured_native_identity_still_routes_to_its_own_record(monkeypatch):
+    """Control: naming the native record in ``model.provider`` is an explicit claim."""
+    data = _oracle_config()
+    data["model"]["provider"] = NATIVE_KEY
+    _bind(monkeypatch, data)
+    assert config.resolve_model_provider(MODEL) == (MODEL, PID, NATIVE_URL)
+
+
+def test_a_url_match_on_an_ascii_entry_still_promotes(monkeypatch):
+    """Control: only fallback-derived native identities are excluded.
+
+    The historical ASCII ``custom_providers[]`` inference by ``model.base_url``
+    is what a gateway config relies on, and it is unchanged.
+    """
+    data = {
+        "model": {"provider": "custom", "default": MODEL, "base_url": DEFAULT_URL},
+        "custom_providers": [
+            {"name": "Gateway", "base_url": DEFAULT_URL, "api_key": "entry-key",
+             "model": MODEL},
+        ],
+    }
+    _bind(monkeypatch, data)
+    assert config.resolve_model_provider(MODEL) == (MODEL, "custom:gateway", DEFAULT_URL)
+
