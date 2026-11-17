@@ -14822,6 +14822,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     approve_permanent,
     persist_grant_choice,
     save_permanent_allowlist,
+    unsaved_grants_still_held,
     _pending,
     _lock,
     _permanent_approved,
@@ -34834,16 +34835,25 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 # an entry removed from command_allowlist by hand.
                 persist_grant_choice(sid, scope, all_keys)
             elif in_profile:
+                # "always" saves only keys the Agent still holds as granted beyond its last
+                # read of command_allowlist (as its own _persist_choice computes), so an
+                # entry removed by hand after approve_permanent stays removed. Without the
+                # Agent's names for that, grant the session only: nothing permanent unsaved.
+                check = bool(APPROVAL_BRIDGE["agent"]) and scope == "always"
+                permanent = scope == "always" and (not check or unsaved_grants_still_held(()) is not None)
                 saved = set()
                 for k in all_keys:
                     approve_session(sid, k)
                     # Content-scanner (tirith) findings stay session-only, as in the
                     # Agent's own _persist_choice; a raw entry carries no flag for them.
-                    if scope == "always" and not str(k).startswith("tirith:"):
+                    if permanent and not str(k).startswith("tirith:"):
                         approve_permanent(k)
                         saved.add(k)
+                if saved and check:
+                    saved = unsaved_grants_still_held(saved) or set()
                 if saved:
                     # Only the keys granted now: never another profile's in-memory grants.
+                    # Called outside the Agent's _lock (the save lock is taken first).
                     save_permanent_allowlist(saved)
     # choice == "once": no persistence — approval lasts this single call only.
     # resolve_gateway_approval() below unblocks the parked agent thread for

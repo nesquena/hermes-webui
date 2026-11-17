@@ -8,8 +8,9 @@ one profile was written into another profile's ``command_allowlist``.
 the session's own profile around those calls, saves nothing when that profile
 can't be established, and saves nothing for a gateway mirror whose producer is
 gone. A "session" answer uses the Agent's own ``_persist_choice`` when it takes
-plain keys. An "always" answer grants and saves only the keys granted now, so a
-concurrent answer can't write back an entry removed by hand. Every save in the
+plain keys. An "always" answer grants and saves only the keys granted now that the
+Agent still holds as unsaved (session only when it can't tell), so a concurrent
+answer can't write back an entry removed by hand. Every save in the
 process is serialized, so two "always" answers in one profile can't overwrite
 each other.
 
@@ -379,6 +380,53 @@ def test_overlapping_always_answers_do_not_restore_an_entry_removed_by_hand(home
     assert _allowlist(homes["alpha"]) == [KEY_2]
     assert not _approved_in(homes["alpha"], LATER, KEY)
     assert _approved_in(homes["alpha"], LATER, KEY_2)
+    assert _allowlist(homes["beta"]) == [] and _allowlist(homes["default"]) == []
+
+
+def test_always_for_a_key_removed_by_hand_while_it_is_granted_stays_removed(homes, sessions, monkeypatch):
+    """Two queued approvals for one key. The first "always" saves it. The second is held
+    right after its approve_permanent while the operator removes the key from
+    command_allowlist and a check reads that; its save must not write the key back."""
+    first, second = sessions("alpha"), sessions("alpha")
+    first_id, second_id = _queue(first), _queue(second)
+    assert routes._resolve_approval_legacy(first, first_id, "always") is True
+    assert _allowlist(homes["alpha"]) == [KEY]
+
+    granted, resume = threading.Event(), threading.Event()
+    real_approve_permanent = routes.approve_permanent
+
+    def held_approve_permanent(key):
+        real_approve_permanent(key)
+        granted.set()
+        resume.wait(10)
+
+    monkeypatch.setattr(routes, "approve_permanent", held_approve_permanent)
+    errors = []
+
+    def answer():
+        try:
+            assert routes._resolve_approval_legacy(second, second_id, "always") is True
+        except Exception as exc:  # surfaced below
+            errors.append(repr(exc))
+
+    thread = threading.Thread(target=answer, daemon=True)
+    try:
+        thread.start()
+        assert granted.wait(10)
+        (homes["alpha"] / "config.yaml").write_text(
+            "approvals:\n  mode: manual\ncommand_allowlist: []\n", encoding="utf-8"
+        )
+        with _in_home(homes["alpha"]):
+            if not hasattr(agent_approval, "_sync_permanent_from_disk"):  # v2026.9.24 reads it on load
+                agent_approval.load_permanent_allowlist()
+            assert not agent_approval.is_approved(LATER, KEY)  # the revocation is in effect
+    finally:
+        resume.set()
+    thread.join(10)
+
+    assert not thread.is_alive() and errors == []
+    assert _allowlist(homes["alpha"]) == []
+    assert not _approved_in(homes["alpha"], LATER, KEY)
     assert _allowlist(homes["beta"]) == [] and _allowlist(homes["default"]) == []
 
 

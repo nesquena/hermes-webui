@@ -52,6 +52,8 @@ def grants(monkeypatch):
         monkeypatch.setattr(routes, name, lambda *args, _name=name: calls.append((_name, args)))
     # WebUI's own grant calls, not the Agent's _persist_choice (tested separately).
     monkeypatch.setattr(routes, "persist_grant_choice", None)
+    # The Agent still holds every key granted here (the check itself is tested separately).
+    monkeypatch.setattr(routes, "unsaved_grants_still_held", lambda keys: set(keys))
     return calls
 
 
@@ -153,16 +155,76 @@ def test_webui_only_entry_is_saved_within_its_offered_scope(grants, sid, kind, c
 
 
 def test_always_saves_only_the_keys_it_granted(grants, sid, monkeypatch):
-    """Grants already in memory (another session or profile) are not passed to the save."""
-    monkeypatch.setattr(routes, "_permanent_approved", {"earlier key from elsewhere"})
+    """Each key is granted for the session and permanently, the Agent is asked which of
+    exactly these keys it still holds as unsaved, and only those are saved."""
+    asked = []
+    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
+    monkeypatch.setattr(
+        routes, "unsaved_grants_still_held", lambda keys: asked.append(set(keys)) or {"second key"} & set(keys)
+    )
     entry = {**_card("first key"), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
     with routes._lock:
         routes._pending[sid] = [entry]
 
     assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
 
-    saves = [args for name, args in grants if name == "save_permanent_allowlist"]
-    assert saves == [({"first key", "second key"},)]
+    assert asked == [set(), {"first key", "second key"}]  # availability, then the granted keys
+    assert grants == [
+        ("approve_session", (sid, "first key")),
+        ("approve_permanent", ("first key",)),
+        ("approve_session", (sid, "second key")),
+        ("approve_permanent", ("second key",)),
+        ("save_permanent_allowlist", ({"second key"},)),  # "first key" no longer held: not saved
+    ]
+
+
+def test_always_without_the_agents_unsaved_grant_names_is_session_only(grants, sid, monkeypatch):
+    """Missing names (or a raise): no permanent grant and no save, so it is asked again."""
+    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
+    monkeypatch.setattr(routes, "unsaved_grants_still_held", lambda keys: None)
+    entry = {**_card("first key"), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
+    with routes._lock:
+        routes._pending[sid] = [entry]
+
+    assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
+
+    assert grants == [("approve_session", (sid, "first key")), ("approve_session", (sid, "second key"))]
+
+
+def test_unsaved_grant_check_binds_the_agents_names_once(monkeypatch, caplog):
+    held = {"kept", "granted"}
+    lock = threading.Lock()
+    agent = SimpleNamespace(
+        _permanent_set=lambda: held,
+        _permanent_baseline_by_home={"profile": {"kept"}},
+        _baseline_key=lambda: "profile",
+        _lock=lock,
+    )
+    bound = route_approvals._bind_unsaved_grant_check(agent)
+    assert bound == (agent._permanent_set, agent._permanent_baseline_by_home, agent._baseline_key, lock)
+    monkeypatch.setattr(route_approvals, "_unsaved_grant_names", bound)
+    assert route_approvals.unsaved_grants_still_held(["granted", "kept", "other"]) == {"granted"}
+    assert route_approvals.unsaved_grants_still_held(()) == set()
+
+    def broken():
+        raise RuntimeError("not readable")
+
+    monkeypatch.setattr(route_approvals, "_unsaved_grant_names", (broken, {}, lambda: "", lock))
+    assert route_approvals.unsaved_grants_still_held(["granted"]) is None
+    assert not lock.locked()
+
+    with caplog.at_level(logging.WARNING, logger=route_approvals.logger.name):
+        missing = SimpleNamespace(_permanent_set=agent._permanent_set, _lock=lock)
+        assert route_approvals._bind_unsaved_grant_check(missing) is None
+    assert any("_permanent_baseline_by_home, _baseline_key" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=route_approvals.logger.name):  # no _lock: a bridge failure
+        no_lock = SimpleNamespace(_permanent_set=agent._permanent_set, _permanent_baseline_by_home={}, _baseline_key=str)
+        assert route_approvals._bind_unsaved_grant_check(no_lock) is None
+    assert caplog.records == []
+    assert route_approvals._bind_unsaved_grant_check(None) is None  # Agent-less
+    monkeypatch.setattr(route_approvals, "_unsaved_grant_names", None)
+    assert route_approvals.unsaved_grants_still_held(["granted"]) is None
 
 
 def test_unknown_session_profile_saves_nothing(grants, monkeypatch):
