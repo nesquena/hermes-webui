@@ -23,6 +23,7 @@ whether the next matching command is asked again and who saved what.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -154,11 +155,19 @@ def test_webui_only_entry_is_saved_within_its_offered_scope(grants, sid, kind, c
         assert not routes._pending.get(sid)
 
 
+@contextlib.contextmanager
+def _bound_profile(sid):
+    """Stand-in for the session's profile scope (tested separately) so these tests also
+    run without an installed Agent."""
+    yield True
+
+
 def test_always_saves_only_the_keys_it_granted(grants, sid, monkeypatch):
     """Each key is granted for the session and permanently, the Agent is asked which of
     exactly these keys it still holds as unsaved, and only those are saved."""
     asked = []
     monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
+    monkeypatch.setattr(routes, "_session_profile_grant_scope", _bound_profile)
     monkeypatch.setattr(
         routes, "unsaved_grants_still_held", lambda keys: asked.append(set(keys)) or {"second key"} & set(keys)
     )
@@ -181,6 +190,7 @@ def test_always_saves_only_the_keys_it_granted(grants, sid, monkeypatch):
 def test_always_without_the_agents_unsaved_grant_names_is_session_only(grants, sid, monkeypatch):
     """Missing names (or a raise): no permanent grant and no save, so it is asked again."""
     monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
+    monkeypatch.setattr(routes, "_session_profile_grant_scope", _bound_profile)
     monkeypatch.setattr(routes, "unsaved_grants_still_held", lambda keys: None)
     entry = {**_card("first key"), "pattern_keys": ["first key", "second key"], "approval_id": f"aid-{sid}"}
     with routes._lock:

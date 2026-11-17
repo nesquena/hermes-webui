@@ -124,7 +124,7 @@ def _bind_unsaved_grant_check(module):
         logger.warning(
             "Hermes Agent tools.approval lacks %s; an 'always' approval answered in WebUI "
             "is granted for the session only",
-            ", ".join(name for name, value in zip(_UNSAVED_GRANT_NAMES, values) if value is None),
+            ", ".join(name for name, value in zip(_UNSAVED_GRANT_NAMES, values, strict=True) if value is None),
         )
     return None
 
