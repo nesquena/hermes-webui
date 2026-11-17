@@ -66,7 +66,8 @@ decides whether it reaches the endpoint. When an endpoint's HTTP 400/422 error s
 field (`response_format`) is unsupported, the request is resent once without
 it; other errors are not resent and follow the normal error path. The Agent's
 auxiliary client may remember such a rejection and leave the schema off later
-auxiliary requests. A reply that is exactly a `{"title"}` object is unwrapped. A fresh
+auxiliary requests. A short reply (up to 2 KB) that is exactly a `{"title"}`
+object, optionally inside a JSON code fence, is unwrapped. A fresh
 candidate is discarded when it opens with a hedge or opinion (`Maybe`,
 `Perhaps`, `I think`, `I'd go with`, `How about`, `Something like`, `The best
 title is`, ...), still contains a thinking tag or a JSON `"title":` fragment,

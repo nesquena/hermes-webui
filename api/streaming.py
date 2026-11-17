@@ -5213,21 +5213,33 @@ _TITLE_THINKING_BLOCK_RE = re.compile(
 )
 
 
+# A real ``{"title"}`` reply is a few dozen characters. Longer replies are not
+# unwrapped, which also bounds the JSON parser's nesting depth.
+_TITLE_JSON_UNWRAP_MAX_CHARS = 2048
+
+
 def _unwrap_title_json(text: str) -> str:
     """Return the title from a reply that is exactly a ``{"title": ...}`` object.
 
     A ```json fence around the object is allowed. Anything else is returned
-    unchanged, so JSON embedded in prose is never mined for a title.
+    unchanged, so JSON embedded in prose is never mined for a title. Replies
+    over ``_TITLE_JSON_UNWRAP_MAX_CHARS`` are returned unchanged. The fence is
+    removed by slicing, not a regex, so a reply cut off inside an unclosed
+    fence costs linear time.
     """
     s = str(text or '').strip()
-    fenced = re.fullmatch(r'```(?:json)?\s*(.*?)\s*```', s, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        s = fenced.group(1)
+    if len(s) > _TITLE_JSON_UNWRAP_MAX_CHARS:
+        return text
+    if len(s) >= 6 and s.startswith('```') and s.endswith('```'):
+        s = s[3:-3]
+        if s[:4].lower() == 'json':
+            s = s[4:]
+        s = s.strip()
     if not s.startswith('{'):
         return text
     try:
         obj = json.loads(s)
-    except ValueError:
+    except (ValueError, RecursionError):
         return text
     if isinstance(obj, dict) and isinstance(obj.get('title'), str):
         return obj['title']
@@ -5418,7 +5430,13 @@ def _is_bad_new_title(text: str) -> bool:
     if _looks_invalid_generated_title(text):
         return True
     s = str(text or '').strip()
-    _token = re.sub(r'[\s.!?]+$', '', s, flags=re.IGNORECASE)
+    # Trim trailing whitespace and . ! ? by scanning back from the end. The
+    # regex this replaces retried from every start position, which is
+    # quadratic on a long punctuation run that is not at the end.
+    end = len(s)
+    while end and (s[end - 1].isspace() or s[end - 1] in '.!?'):
+        end -= 1
+    _token = s[:end]
     if re.fullmatch(
         r'(?:pong|ping|yes|no|yep|nope|hi|hello|hey|thanks|thank you|sure|k|kk|cool|nice|lol|ok|okay|done)',
         _token,
@@ -6884,10 +6902,12 @@ def _send_title_request(send):
     unsupported is resent once without the schema. Every other error
     propagates unchanged to the caller's existing retry and error path. This
     layer caches nothing, but the Agent's auxiliary client may remember a
-    rejection and drop the schema itself on later auxiliary requests.
+    rejection and drop the schema itself on later auxiliary requests. Each
+    send gets its own copy of the schema, so an adapter that edits the
+    request cannot change the module constant.
     """
     try:
-        return send(_TITLE_RESPONSE_FORMAT)
+        return send(copy.deepcopy(_TITLE_RESPONSE_FORMAT))
     except Exception as exc:
         if not _title_structured_output_rejected(exc):
             raise

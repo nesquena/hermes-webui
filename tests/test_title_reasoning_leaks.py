@@ -5,6 +5,8 @@ bare JSON title reply, and the fresh-candidate rules that reject reasoning
 sentences, leftover thinking tags, payload fragments and overlong replies.
 Saved titles are not affected by these rules.
 """
+import copy
+import time
 import types
 from unittest.mock import MagicMock, patch
 
@@ -15,6 +17,7 @@ from api.streaming import (
     _looks_invalid_generated_title,
     _title_structured_output_rejected,
     _sanitize_generated_title,
+    _send_title_request,
     generate_title_raw_via_agent,
     generate_title_raw_via_aux,
 )
@@ -300,3 +303,60 @@ def test_agent_route_over_the_openai_sdk_resends_only_schema_refusals(
         assert raw is None
         # Every request kept the schema: no compatibility resend for these errors.
         assert seen and all(seen)
+
+
+@pytest.mark.parametrize("raw", [
+    "```" + " " * 2000 + "x",                    # unclosed fence, under the unwrap limit
+    "```json\n" + " " * 3000 + "{",              # unclosed fence, over the unwrap limit
+    "```json " + " " * 2000 + "{\"title\": \"x\"}",  # closing fence missing
+], ids=["unclosed-under-limit", "unclosed-over-limit", "no-closing-fence"])
+def test_unclosed_fence_with_long_whitespace_is_handled_in_linear_time(raw):
+    # A reply cut off at max_tokens can open a fence and never close it.
+    started = time.perf_counter()
+    _sanitize_generated_title(raw)
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize("raw", [
+    '{"title": ' + "[" * 2030,                    # deep nesting under the unwrap limit
+    '{"a":' * 1000 + "1" + "}" * 1000,             # deep nesting over the unwrap limit
+], ids=["array-under-limit", "object-over-limit"])
+def test_deeply_nested_json_reply_is_discarded_without_raising(raw):
+    assert _sanitize_generated_title(raw) == ""
+
+
+def test_title_schema_is_copied_for_each_send():
+    pristine = copy.deepcopy(_TITLE_RESPONSE_FORMAT)
+    seen = []
+
+    def send(response_format):
+        seen.append(copy.deepcopy(response_format))
+        # An adapter that edits the request it is given.
+        response_format["json_schema"]["strict"] = False
+        response_format["json_schema"]["schema"]["properties"].clear()
+        response_format.pop("type")
+        return "sent"
+
+    try:
+        assert _send_title_request(send) == "sent"
+        assert _send_title_request(send) == "sent"
+        assert seen == [pristine, pristine]
+        assert _TITLE_RESPONSE_FORMAT == pristine
+    finally:
+        _TITLE_RESPONSE_FORMAT.clear()
+        _TITLE_RESPONSE_FORMAT.update(copy.deepcopy(pristine))
+
+
+@pytest.mark.parametrize("raw", [
+    "!" * 20000 + "x",
+    '{"title": "Docker", "reason": "' + "!" * 20000 + 'x"}',
+], ids=["plain", "json-over-unwrap-limit"])
+def test_long_punctuation_run_is_handled_in_linear_time(raw):
+    started = time.perf_counter()
+    _sanitize_generated_title(raw)
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize("raw", ["pong", "Thanks!", "ok...", "Done?! ", "yes \n"])
+def test_single_word_echo_replies_are_still_discarded(raw):
+    assert _sanitize_generated_title(raw) == ""
