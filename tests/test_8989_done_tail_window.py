@@ -359,6 +359,208 @@ def test_rotated_generation_still_settles_into_a_bounded_window() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# #8994 — the resident array is already filtered, so it is NOT a raw transcript
+# span. Two consecutive settlements must not evict ordinary resident rows.
+# --------------------------------------------------------------------------- #
+_LEGACY_RECOVERY_TEXT = (
+    "[System: Your previous response was cut off by a network error. "
+    "Continue exactly where you left off.]"
+)
+
+
+def _chain_turn(ts_base: int) -> list[dict]:
+    """A four-row settled turn (user -> tool call -> tool result -> answer)."""
+    return [
+        {"role": "user", "content": f"chain question {ts_base}", "_ts": str(ts_base)},
+        {
+            "role": "assistant",
+            "content": "",
+            "_ts": str(ts_base + 1),
+            "tool_calls": [{"id": f"call-{ts_base}", "function": {"name": "grep"}}],
+        },
+        {
+            "role": "tool",
+            "content": "grep output",
+            "_ts": str(ts_base + 2),
+            "tool_call_id": f"call-{ts_base}",
+        },
+        {"role": "assistant", "content": STREAMED_ANSWER, "_ts": str(ts_base + 3)},
+    ]
+
+
+def _settle_chain(
+    *,
+    recovery_raw_indices: tuple[int, ...] = (),
+    second_generation: int | None = 5,
+    full_total: int = 200,
+    resident_oldest_idx: int = 147,
+) -> dict:
+    """Two consecutive `done` settlements over one bounded resident window.
+
+    The maintainer's replay for the #8994 resident-history regression: a
+    bounded tail at a raw origin with the supported legacy recovery rows
+    inside it, then two four-row turns settled back-to-back with
+    `transcript_generation` held and authoritative counts 204 then 208, the
+    next pending user row appended between the settlements. The second
+    settlement runs the REAL done-listener statements again over the state the
+    first one left behind, so the resident array it measures is the filtered
+    one the production filter produces.
+    """
+    full = _transcript(full_total)
+    for idx in recovery_raw_indices:
+        row = dict(full[idx])
+        row["content"] = _LEGACY_RECOVERY_TEXT
+        full[idx] = row
+    turn_one = _chain_turn(9001)
+    turn_two = _chain_turn(9101)
+    pending_one = {"role": "user", "content": "pending question one", "_ts": "8999"}
+    pending_two = {"role": "user", "content": "pending question two", "_ts": "9099"}
+    resident = full[resident_oldest_idx:]
+    done_one = full + turn_one
+    done_two = full + turn_one + turn_two
+
+    def _settle_block(session_var: str, label: str) -> str:
+        return (
+            f"const d={{session:{session_var},stream_id:'stream-one'}};\n"
+            + _done_listener_statements()
+            + f"\nafter{label}={{"
+            + "count:S.messages.length,"
+            + "oldestIdx:_oldestIdx,"
+            + "messagesTruncated:_messagesTruncated,"
+            + "ts:S.messages.map(m=>m._ts),"
+            + "answerInTranscript:S.messages.some(m=>m.role==='assistant'&&m.content==="
+            + json.dumps(STREAMED_ANSWER)
+            + ")};\n"
+        )
+
+    case = "\n".join(
+        [
+            *_RUNTIME_STUBS,
+            "const olderResponse=null;",
+            "const doneOneSession=" + json.dumps({
+                "session_id": "A",
+                "title": "long session",
+                "messages": done_one,
+                "message_count": len(done_one),
+                "transcript_generation": 5,
+                "tool_calls": [],
+            }) + ";",
+            "const doneTwoSession=" + json.dumps({
+                "session_id": "A",
+                "title": "long session",
+                "messages": done_two,
+                "message_count": len(done_two),
+                "transcript_generation": second_generation,
+                "tool_calls": [],
+            }) + ";",
+            # A cold-loaded bounded session: the authoritative count, the
+            # absolute origin mirrored in _messages_offset, and the truncation
+            # flag — exactly what loadSession leaves behind.
+            "const residentSession=" + json.dumps({
+                "session_id": "A",
+                "title": "long session",
+                "message_count": full_total,
+                "transcript_generation": 5,
+                "_messages_offset": resident_oldest_idx,
+                "_messages_truncated": True,
+                "tool_calls": [],
+            }) + ";",
+            "const residentMessages=" + json.dumps(resident) + ";",
+            "const pendingOne=" + json.dumps(pending_one) + ";",
+            "const pendingTwo=" + json.dumps(pending_two) + ";",
+            "const S={session:residentSession,messages:residentMessages.concat([pendingOne]),activeStreamId:'stream-one'};",
+            "const activeSid='A',completedSid='A';",
+            "const _settledStreamId='stream-one';",
+            "const _pendingTitleUpdates=new Map();",
+            "const _pendingTitleExpectedCurrent=new Map();",
+            "function applySessionTitleUpdate(){}",
+            "let _oldestIdx=" + json.dumps(resident_oldest_idx) + ";",
+            "let _messagesTruncated=true;",
+            "const _streamDisplay=()=>" + json.dumps(STREAMED_ANSWER) + ";",
+            "let afterFirst=null,afterSecond=null;",
+            "{",
+            _settle_block("doneOneSession", "First"),
+            "}",
+            # Between settlements the next pending user row is appended, as the
+            # existing harness does for the row the reader just sent.
+            "S.messages=S.messages.concat([pendingTwo]);",
+            "{",
+            _settle_block("doneTwoSession", "Second"),
+            "}",
+            "console.log(JSON.stringify({afterFirst:afterFirst,afterSecond:afterSecond,"
+            + "firstSettledCount:" + json.dumps(len(done_one))
+            + ",secondSettledCount:" + json.dumps(len(done_two))
+            + "}));",
+        ]
+    )
+    return _run_node(case)
+
+
+def test_consecutive_settlements_keep_resident_rows_past_the_recovery_filter() -> None:
+    """#8994 — filtered legacy recovery rows must not shift the raw window.
+
+    `_filterRecoveryControlMessages()` runs at the end of every settle, so the
+    resident array the NEXT settle measures is shorter than the raw span its
+    absolute origin points into. Measuring the next window from that filtered
+    cardinality advances the origin by the filtered count and evicts ordinary
+    rows that are still resident: on the maintainer's 200-row replay (legacy
+    recovery text at raw 180-182, two consecutive settlements, counts 204 then
+    208) the origin marched 146 -> 148 and ordinary rows 146/147 disappeared.
+    """
+    result = _settle_chain(recovery_raw_indices=(180, 181, 182))
+    first, second = result["afterFirst"], result["afterSecond"]
+    recovery_ts = {str(181), str(182), str(183)}  # _transcript: raw row i -> _ts str(1 + i)
+    ordinary_first = [ts for ts in first["ts"] if ts not in recovery_ts]
+    assert first["count"] == 55 and first["oldestIdx"] == 146, first
+    assert second["oldestIdx"] == first["oldestIdx"], (first, second)
+    assert set(ordinary_first) <= set(second["ts"]), (
+        "every ordinary resident timestamp must survive the second settlement",
+        sorted(set(ordinary_first) - set(second["ts"])),
+    )
+    assert second["count"] < result["secondSettledCount"], second
+    assert second["messagesTruncated"] is True, second
+    assert second["answerInTranscript"] is True, second
+    # Trusted raw span (204 - 146) plus the four appended rows, minus the
+    # recovery rows the settle filter removes again.
+    assert second["count"] == 204 - first["oldestIdx"] + 4 - len(recovery_ts), second
+
+
+def test_consecutive_settlements_without_recovery_rows_keep_the_window_stable() -> None:
+    """No-marker control: the same chain without any recovery rows.
+
+    Without filtered rows the resident cardinality already equals the raw span
+    plus the pending row, so the trusted-span term never binds and the window
+    behaves exactly as before — this control passes on both trees.
+    """
+    result = _settle_chain()
+    first, second = result["afterFirst"], result["afterSecond"]
+    assert first["count"] == 58 and first["oldestIdx"] == 146, first
+    assert second["count"] == 63 and second["oldestIdx"] == 145, second
+    assert set(first["ts"]) <= set(second["ts"]), second
+    assert second["count"] < result["secondSettledCount"], second
+    assert second["messagesTruncated"] is True, second
+    assert second["answerInTranscript"] is True, second
+
+
+def test_generation_change_between_settlements_keeps_the_guard() -> None:
+    """Generation-change control: rotation renumbers the raw coordinate space.
+
+    Across a transcript_generation change the previous absolute origin must NOT
+    be carried into the next window — the resident-cardinality width (the
+    behaviour this PR shipped with) stays in force, so the window is still
+    bounded, still truncated and the answer still survives.
+    """
+    result = _settle_chain(recovery_raw_indices=(180, 181, 182), second_generation=9)
+    first, second = result["afterFirst"], result["afterSecond"]
+    assert first["count"] == 55 and first["oldestIdx"] == 146, first
+    assert second["count"] == 60 - 3, second
+    assert second["oldestIdx"] == result["secondSettledCount"] - 60, second
+    assert second["count"] < result["secondSettledCount"], second
+    assert second["messagesTruncated"] is True, second
+    assert second["answerInTranscript"] is True, second
+
+
+# --------------------------------------------------------------------------- #
 # Adjacent faces: the existing settle behaviours must be untouched.
 # --------------------------------------------------------------------------- #
 def _bare_listener(resident: list[dict], done_session: dict, *, oldest_idx: int, truncated: bool, answer: str) -> dict:

@@ -8070,11 +8070,44 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const previousMessageCount=Math.max(0,Number(preSettleSession&&preSettleSession.message_count)||0);
     const currentMessageCount=Math.max(0,Number(dSession.message_count)||0);
     const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);
+    // #8994 — `pre` is NOT a raw transcript span. The settle that produced it
+    // already ran _filterRecoveryControlMessages() (the `done` listener's final
+    // filter), so supported legacy recovery rows the reader never saw are
+    // missing from `pre.length` while residentOrigin still points at the raw
+    // origin. A width measured from loadedMessageCount then starts the next
+    // window that many rows late and evicts ordinary rows that are still
+    // resident: on the maintainer's 200-row replay (recovery text at raw
+    // 180-182, two consecutive settlements, counts 204 then 208) the origin
+    // marched 146 -> 148 and ordinary rows 146/147 disappeared. When the
+    // coordinates are authoritative, the trusted raw span is
+    // previousMessageCount - residentOrigin — the same quantity #7925's
+    // widening re-fetch uses (`message_count - _oldestIdx`) — and the width
+    // keeps all of it. Authority means: an integer origin strictly inside
+    // (0, previousMessageCount), safe counts that did not shrink, the same
+    // transcript_generation on both sides (rotation/compaction renumbers the
+    // raw space, so an old origin must not be carried across it), and a
+    // pre-settle _messages_offset that agrees with the origin when present.
+    // Anything less trustworthy keeps the resident cardinality, which is all
+    // an unverifiable coordinate may claim.
+    let trustedRawSpan=0;
+    const preGeneration=preSettleSession?preSettleSession.transcript_generation:null;
+    const preSettleOffsetRaw=preSettleSession?preSettleSession._messages_offset:null;
+    if(
+      typeof preSettleOldestIdx==='number'&&Number.isSafeInteger(preSettleOldestIdx)&&
+      preSettleOldestIdx>0&&preSettleOldestIdx<previousMessageCount&&
+      Number.isSafeInteger(previousMessageCount)&&Number.isSafeInteger(currentMessageCount)&&
+      currentMessageCount>=previousMessageCount&&
+      Number.isSafeInteger(preGeneration)&&Number.isSafeInteger(dSession.transcript_generation)&&
+      preGeneration===dSession.transcript_generation&&
+      (preSettleOffsetRaw==null||(Number.isFinite(Number(preSettleOffsetRaw))&&Number(preSettleOffsetRaw)===preSettleOldestIdx))
+    ){
+      trustedRawSpan=previousMessageCount-preSettleOldestIdx;
+    }
     // Floor constant is owned by static/sessions.js and reached through the
     // shared classic-script scope; the static fallback mirrors _MSG_LIMIT_MAX's
     // documented convention for harnesses that load messages.js alone.
     const initialLimit=(typeof _INITIAL_MSG_LIMIT==='number'&&_INITIAL_MSG_LIMIT>0)?_INITIAL_MSG_LIMIT:30;
-    const width=Math.max(initialLimit,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
+    const width=Math.max(initialLimit,loadedRenderableCount,loadedMessageCount+appendedMessageCount,trustedRawSpan+appendedMessageCount);
     if(settled.length<=width) return null;
     const messages=settled.slice(settled.length-width);
     const offset=settled.length-messages.length;
