@@ -21,7 +21,7 @@ VENV_PY="$(resolve_venv_python || true)"
 is_supported_python() {
   "$1" - <<'PY' >/dev/null 2>&1
 import sys
-raise SystemExit(0 if (3, 11) <= sys.version_info[:2] <= (3, 13) else 1)
+raise SystemExit(0 if (3, 11) <= sys.version_info[:2] <= (3, 14) else 1)
 PY
 }
 
@@ -50,7 +50,7 @@ resolve_executable() {
 
 find_supported_base_python() {
   local candidate path
-  for candidate in python3.13 python3.12 python3.11 python3; do
+  for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
     path="$(resolve_executable "$candidate")"
     if [[ -n "$path" ]] && is_supported_python "$path"; then
       printf '%s\n' "$path"
@@ -101,7 +101,7 @@ venv_guidance() {
     echo "Could not create a working .venv for Hermes WebUI tests." >&2
   fi
   echo "Install the matching Python venv/ensurepip package (for example python3.x-venv on Debian/Ubuntu)" >&2
-  echo "or set HERMES_WEBUI_TEST_PYTHON to a supported Python 3.11, 3.12, or 3.13 interpreter." >&2
+  echo "or set HERMES_WEBUI_TEST_PYTHON to a supported Python 3.11, 3.12, 3.13, or 3.14 interpreter." >&2
 }
 
 create_or_rebuild_venv() {
@@ -115,7 +115,7 @@ create_or_rebuild_venv() {
   # before this function is reached, so refusing here only blocks the destructive path.
   if [[ -L "$VENV_DIR" ]]; then
     echo "$VENV_DIR is a symlink; refusing to create or clear a virtualenv through it." >&2
-    echo "Remove the .venv symlink (or set HERMES_WEBUI_TEST_PYTHON to a supported Python 3.11-3.13) and rerun." >&2
+    echo "Remove the .venv symlink (or set HERMES_WEBUI_TEST_PYTHON to a supported Python 3.11-3.14) and rerun." >&2
     return 2
   fi
   if [[ "$mode" == "rebuild" ]]; then
@@ -156,7 +156,7 @@ select_python() {
     fi
     if ! is_supported_python "$requested_path"; then
       echo "Unsupported Python for Hermes WebUI tests: $requested_path ($(python_version "$requested_path"))" >&2
-      echo "Use Python 3.11, 3.12, or 3.13." >&2
+      echo "Use Python 3.11, 3.12, 3.13, or 3.14." >&2
       return 2
     fi
     base_py="$requested_path"
@@ -165,7 +165,7 @@ select_python() {
     base_py="$(find_supported_base_python || true)"
     if [[ -z "$base_py" ]]; then
       echo "No supported Python found for Hermes WebUI tests." >&2
-      echo "Install Python 3.11, 3.12, or 3.13, then rerun ./scripts/test.sh." >&2
+      echo "Install Python 3.11, 3.12, 3.13, or 3.14, then rerun ./scripts/test.sh." >&2
       return 2
     fi
     desired_major_minor=""

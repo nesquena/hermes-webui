@@ -269,17 +269,20 @@ def test_llm_wiki_status_last_updated_rechecks_status_file_identity(monkeypatch,
 
     monkeypatch.setenv("WIKI_PATH", str(wiki))
 
-    original_stat = Path.stat
+    # Hook Path.lstat, the call the status-file check makes. Up to Python 3.13
+    # Path.lstat() went through Path.stat(follow_symlinks=False); 3.14 calls
+    # os.lstat directly, so a Path.stat hook never fires there.
+    original_lstat = Path.lstat
     swapped = {"done": False}
 
-    def fake_stat(self, *args, **kwargs):
+    def fake_lstat(self, *args, **kwargs):
         if not swapped["done"] and self == log_path:
             swapped["done"] = True
             log_path.unlink()
             log_path.symlink_to(hidden.name)
-        return original_stat(self, *args, **kwargs)
+        return original_lstat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", fake_stat)
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
 
     status = routes._build_llm_wiki_status()
 

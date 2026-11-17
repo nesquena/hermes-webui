@@ -47,7 +47,7 @@ Follow that checklist's safety rules:
   subsystem before editing.
 - For local pytest runs, use `./scripts/test.sh` instead of bare `python3`,
   `python -m pytest`, or `pytest`. The script creates/uses the repo `.venv`,
-  pins execution to Python 3.11-3.13, and installs missing dev test dependencies.
+  pins execution to Python 3.11-3.14, and installs missing dev test dependencies.
   `HERMES_WEBUI_TEST_PYTHON` selects the supported base interpreter used to
   create or rebuild `.venv`; it must not install test dependencies into a
   system/Homebrew interpreter directly.

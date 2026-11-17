@@ -22,6 +22,7 @@ os.environ["HERMES_WEBUI_STATE_DIR"] = str(_TEST_STATE)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import api.auth as auth
+from tests._deep_json import recursion_overflowing_json
 
 
 class TestSessionPersistence(unittest.TestCase):
@@ -169,8 +170,11 @@ class TestSessionPersistence(unittest.TestCase):
     def test_session_recursion_failure_warns_with_state_dir_and_starts_fresh(self) -> None:
         """Deeply nested JSON must warn and fall back to an empty session table."""
         sessions_file = _TEST_STATE / '.sessions.json'
-        depth = 50000
-        sessions_file.write_text('{"token":' * depth + '0' + '}' * depth)
+        # The depth that overflows the decoder depends on the interpreter
+        # (see tests/_deep_json.py).
+        sessions_file.write_text(
+            recursion_overflowing_json(lambda depth: '{"token":' * depth + '0' + '}' * depth, start=50_000)
+        )
         with self.assertLogs('api.auth', level='WARNING') as captured:
             self._simulate_restart()
         self.assertEqual(auth._sessions, {})

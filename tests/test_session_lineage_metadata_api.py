@@ -9,6 +9,7 @@ import pytest
 import api.models as models
 import api.routes as routes
 from api.models import SESSIONS, STREAMS, Session, all_sessions
+from tests._deep_json import recursion_overflowing_json
 
 
 @pytest.fixture(autouse=True)
@@ -1238,8 +1239,8 @@ def test_branch_markers_report_fail_closed_unknown_state():
 
     # A valid but pathologically deep payload overflows the decoder with
     # RecursionError (not ValueError); it must degrade to 'unknown', not crash.
-    depth = 12_000
-    deep_payload = '[' * depth + ']' * depth
+    # The depth that overflows depends on the interpreter (see tests/_deep_json.py).
+    deep_payload = recursion_overflowing_json(lambda depth: '[' * depth + ']' * depth)
     with pytest.raises(RecursionError):
         json.loads(deep_payload)
     assert _branch_markers({'model_config': deep_payload}) == ('unknown', {})
@@ -1270,7 +1271,7 @@ def test_untrusted_model_config_markers_fail_closed_inside_tolerance():
         json.dumps({'_branched_from': ''}),
         json.dumps({'_reset_from': ['fc_parent']}),
         json.dumps({'_delegate_from': 'somewhere_else', '_branched_from': 123}),
-        '[' * 12_000 + ']' * 12_000,
+        recursion_overflowing_json(lambda depth: '[' * depth + ']' * depth),
     ):
         assert not _is_continuation_session(parent, {**child, 'model_config': raw}), raw[:40]
 
