@@ -17462,6 +17462,15 @@ class _SavedPromptsStoreWriteFailed(OSError):
     """
 
 
+class _SavedPromptsPostCommitFailed(OSError):
+    """The live store write raised after its replacement had already landed (#7647).
+
+    Durability of the replacement could not be confirmed, but the new content is
+    on disk: the prompt *was* deleted and the recovery copy is published, so the
+    DELETE handler must never answer that nothing was deleted.
+    """
+
+
 class _SavedPromptsBackupVerificationFailed(OSError):
     """Publishing or verifying the recovery backup failed, but the live store was restored (#7647).
 
@@ -17552,9 +17561,31 @@ def _save_saved_prompts(
                     f"could not write recovery backup: {exc}"
                 ) from exc
 
+            store_payload = json.dumps(prompts, ensure_ascii=False, indent=2)
             try:
-                _write_text_atomic(p, json.dumps(prompts, ensure_ascii=False, indent=2))
+                _write_text_atomic(p, store_payload)
             except Exception as exc:
+                # The atomic helper can fail *after* its rename landed (the
+                # directory fsync). Read the store back instead of assuming the
+                # pre-rename state: if it already carries this payload the
+                # delete happened and only durability is unconfirmed, so the
+                # recovery copy must still be published and the caller must not
+                # be told that nothing was deleted (#7647, commit boundary).
+                try:
+                    landed = p.read_text(encoding="utf-8") == store_payload
+                except OSError:
+                    landed = False
+                if landed:
+                    try:
+                        os.replace(staged_backup, backup)
+                    except Exception:
+                        try:
+                            staged_backup.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    raise _SavedPromptsPostCommitFailed(
+                        f"saved prompts store write could not be confirmed durable: {exc}"
+                    ) from exc
                 try:
                     staged_backup.unlink(missing_ok=True)
                 except OSError:
@@ -24277,6 +24308,20 @@ def handle_delete(handler, parsed) -> bool:
                 handler,
                 "saved prompts store is not writable; nothing was deleted "
                 "and the existing backup was left untouched",
+                status=500,
+            )
+        except _SavedPromptsPostCommitFailed as exc:
+            # The replacement landed but its durability could not be confirmed:
+            # the prompt is gone from the live store and the recovery copy has
+            # been published, so the answer must not promise untouched bytes.
+            logger.error(
+                "saved prompt delete: store replacement landed but durability is unconfirmed: %s",
+                exc,
+            )
+            return bad(
+                handler,
+                "saved prompts store write could not be confirmed durable; "
+                "the prompt was deleted and the previous generation is in the recovery copy",
                 status=500,
             )
         except _SavedPromptsStoreWriteFailed as exc:

@@ -803,3 +803,46 @@ def test_backup_alias_to_the_store_never_reports_a_recoverable_delete(
         )
         assert live_ids == ["keepme", "gone"], "fail-closed must leave the live store untouched"
 
+
+def test_postcommit_failure_never_promises_untouched_live_bytes(prompt_store, monkeypatch):
+    """A failure after the store replace landed must not claim "nothing was deleted".
+
+    The atomic helper can fail *after* its rename (the directory fsync), and the
+    response used to be the pre-commit copy — "nothing was deleted and the
+    previous backup was left untouched" — while the prompt was already gone from
+    the store and no recovery copy had been published. The copy has to follow
+    what the disk actually holds (#7647).
+    """
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+    real_write = routes._write_text_atomic
+
+    def _replace_then_fail(path, text, mode=None):
+        if Path(path) == prompt_store:
+            # the rename landed; only durability after it failed
+            real_write(path, text, mode=mode)
+            raise OSError("simulated: directory fsync after replace")
+        real_write(path, text, mode=mode)
+
+    monkeypatch.setattr(routes, "_write_text_atomic", _replace_then_fail)
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert "payload" not in captured, "a write that could not be confirmed durable is not a success"
+
+    message, status = captured.get("bad", (None, None))
+    assert status == 500, message
+    assert "nothing was deleted" not in message, (
+        "the store already lost the prompt, so this copy is false: " f"{message!r}"
+    )
+
+    live_ids = [p["id"] for p in json.loads(prompt_store.read_text(encoding="utf-8"))]
+    assert live_ids == ["keepme"], f"the replaced store keeps the surviving prompt (got {live_ids})"
+
+    backup = prompt_store.with_name(BACKUP_NAME)
+    assert backup.exists(), "the deleted prompt must stay recoverable even when durability is unconfirmed"
+    assert [p["id"] for p in json.loads(backup.read_text(encoding="utf-8"))] == [
+        "keepme",
+        "gone",
+    ], "the recovery copy must hold the generation that still contains the deleted prompt"
+
+
