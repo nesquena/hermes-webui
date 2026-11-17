@@ -18,10 +18,6 @@ const performance={now:()=>now};
 function setTimeout(fn,delay){timers.push({fn,delay});return timers.length;}
 function requestAnimationFrame(fn){rafs.push(fn);return rafs.length;}
 let _renderPending=false, _streamFinalized=false, _pendingRafHandle=null;
-let _lastRenderMs=0, _lastRenderCostMs=0;
-const LIVE_RENDER_BUSY_FACTOR=4;
-// Tolerate a sibling typing-deferral hook inside _doRender.
-function _deferLiveRenderForTyping(){return false;}
 let assistantText='', liveReasoningText='', segmentStart=0;
 let _cachedParsed=null, _cachedParsedText='', _cachedParsedReasoning='';
 const S={activeStreamId:'stream'}, streamId='stream', assistantBody=null, assistantRow=null;
@@ -68,12 +64,55 @@ console.log(JSON.stringify(result));
 """
 
 
+def _extract_declaration(src: str, name: str, *, required: bool = True) -> str:
+    match = re.search(
+        rf"^[ \t]*(?:const|let|var)\s+{re.escape(name)}\s*=\s*[^;\n]+;",
+        src,
+        re.MULTILINE,
+    )
+    if required:
+        assert match, f"production declaration {name} not found"
+    return match.group(0).strip() if match else ""
+
+
+def _extract_function(src: str, name: str, *, required: bool = True) -> str:
+    match = re.search(rf"function {re.escape(name)}\([^)]*\)\{{", src)
+    if not match:
+        if required:
+            raise AssertionError(f"production function {name} not found")
+        return ""
+    depth = 0
+    for index in range(match.end() - 1, len(src)):
+        if src[index] == "{":
+            depth += 1
+        elif src[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[match.start() : index + 1]
+    raise AssertionError(f"unbalanced braces in production function {name}")
+
+
 def _render_probe(costs: list[float], finalized: bool = False) -> dict:
     src = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
-    match = re.search(r"function _scheduleRender\([^)]*\)\{.*?\n  \}", src, re.DOTALL)
-    assert match, "_scheduleRender not found"
+    production = [
+        _extract_declaration(src, name)
+        for name in ("_lastRenderMs", "_lastRenderCostMs", "LIVE_RENDER_BUSY_FACTOR")
+    ]
+    # If the sibling typing-deferral feature is composed into this checkout,
+    # execute its real helper and state; otherwise inject no substitute helper.
+    production.extend(
+        _extract_declaration(src, name, required=False)
+        for name in (
+            "COMPOSER_TYPING_RENDER_DEFER_MS",
+            "COMPOSER_TYPING_RENDER_MAX_DEFER_MS",
+            "_composerTypingUntil",
+            "_composerTypingDeferStarted",
+        )
+    )
+    production.append(_extract_function(src, "_deferLiveRenderForTyping", required=False))
+    production.append(_extract_function(src, "_scheduleRender"))
     result = subprocess.run(
-        [NODE or "node", "-e", HARNESS, PRELUDE + match.group(0), json.dumps(costs),
+        [NODE or "node", "-e", HARNESS, PRELUDE + "\n".join(production), json.dumps(costs),
          "finalized" if finalized else "live"],
         cwd=ROOT, capture_output=True, text=True, check=False,
     )
