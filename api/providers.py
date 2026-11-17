@@ -3497,9 +3497,9 @@ def _lift_suppressed_pool_source(
     # row before calling load_pool(), and never copy rows borrowed from root (#7418).
     try:
         from hermes_cli.auth import (
-            write_credential_pool,
             _global_auth_file_path,
             _same_path,
+            write_credential_pool,
         )
 
         is_named_profile = False
@@ -3510,27 +3510,92 @@ def _lift_suppressed_pool_source(
         except Exception:
             pass
 
-        if not is_named_profile:
-            try:
+        try:
+            global_auth = _global_auth_file_path()
+            if global_auth is None:
+                is_named_profile = False
+            else:
                 local_auth = _get_hermes_home() / "auth.json"
-                global_auth = _global_auth_file_path()
-                is_named_profile = not _same_path(local_auth, global_auth)
-            except Exception:
-                pass
+                if _same_path(local_auth, global_auth):
+                    is_named_profile = False
+                elif not is_named_profile:
+                    is_named_profile = True
+        except Exception:
+            pass
 
         if is_named_profile:
             token = api_key or _thread_local_env_value(env_var)
+            target_source = f"env:{env_var}"
             for pid in matching_providers:
+                # Read only this profile's own store — never borrow root rows (#7418).
+                existing_entries = []
+                try:
+                    from hermes_cli.auth import _load_auth_store
+
+                    auth_store = _load_auth_store()
+                    pool = (
+                        auth_store.get("credential_pool")
+                        if isinstance(auth_store, dict)
+                        else {}
+                    )
+                    if isinstance(pool, dict) and isinstance(pool.get(pid), list):
+                        existing_entries = [e for e in pool[pid] if isinstance(e, dict)]
+                except Exception:
+                    try:
+                        local_auth = _get_hermes_home() / "auth.json"
+                        if local_auth.exists():
+                            auth_store = json.loads(
+                                local_auth.read_text(encoding="utf-8")
+                            )
+                            pool = (
+                                auth_store.get("credential_pool")
+                                if isinstance(auth_store, dict)
+                                else {}
+                            )
+                            if isinstance(pool, dict) and isinstance(pool.get(pid), list):
+                                existing_entries = [
+                                    e for e in pool[pid] if isinstance(e, dict)
+                                ]
+                    except Exception:
+                        existing_entries = []
+
+                if any(e.get("source") == target_source for e in existing_entries):
+                    continue
+
+                try:
+                    from agent.credential_pool import PooledCredential, _next_priority
+
+                    pooled_entries = [
+                        e
+                        if hasattr(e, "priority")
+                        else PooledCredential.from_dict(pid, e)
+                        for e in existing_entries
+                    ]
+                    priority = _next_priority(pooled_entries)
+                except Exception:
+                    priority = max(
+                        (
+                            int(
+                                e.priority
+                                if hasattr(e, "priority")
+                                else e.get("priority", 0)
+                            )
+                            for e in existing_entries
+                        ),
+                        default=-1,
+                    ) + 1
+
                 entry = {
-                    "id": f"env:{env_var}",
-                    "source": f"env:{env_var}",
+                    "id": target_source,
+                    "source": target_source,
                     "auth_type": "api_key",
                     "label": env_var,
+                    "priority": priority,
                 }
                 if token:
                     entry["runtime_api_key"] = token
                     entry["access_token"] = token
-                write_credential_pool(pid, [entry])
+                write_credential_pool(pid, [*existing_entries, entry])
     except Exception:
         logger.debug(
             "Failed to pre-seed named profile credential pool for provider %s",
