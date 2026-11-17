@@ -34849,10 +34849,14 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                     if permanent and not str(k).startswith("tirith:"):
                         approve_permanent(k)
                         saved.add(k)
+                attempted_permanent = bool(saved)
                 if saved and check:
                     saved = unsaved_grants_still_held(saved) or set()
-                if saved:
+                if attempted_permanent:
                     # Only the keys granted now: never another profile's in-memory grants.
+                    # Saved even when narrowed to none: the save also drops entries removed
+                    # from command_allowlist from the Agent's in-memory set, which an Agent
+                    # that doesn't re-read the file on each check would otherwise still honour.
                     # Called outside the Agent's _lock (the save lock is taken first).
                     save_permanent_allowlist(saved)
     # choice == "once": no persistence — approval lasts this single call only.

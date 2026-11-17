@@ -187,6 +187,27 @@ def test_always_saves_only_the_keys_it_granted(grants, sid, monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("still_held", [set(), None], ids=["none-held", "check-failed"])
+def test_always_narrowed_to_nothing_still_runs_the_save(grants, sid, monkeypatch, still_held):
+    """When none of the granted keys is still held (or the check fails after the grant),
+    the save still runs with nothing to add, so the Agent drops entries removed from
+    command_allowlist from its in-memory set too."""
+    monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)
+    monkeypatch.setattr(routes, "_session_profile_grant_scope", _bound_profile)
+    monkeypatch.setattr(routes, "unsaved_grants_still_held", lambda keys: set() if not keys else still_held)
+    entry = {**_card("first key"), "approval_id": f"aid-{sid}"}
+    with routes._lock:
+        routes._pending[sid] = [entry]
+
+    assert routes._resolve_approval_legacy(sid, entry["approval_id"], "always") is True
+
+    assert grants == [
+        ("approve_session", (sid, "first key")),
+        ("approve_permanent", ("first key",)),
+        ("save_permanent_allowlist", (set(),)),
+    ]
+
+
 def test_always_without_the_agents_unsaved_grant_names_is_session_only(grants, sid, monkeypatch):
     """Missing names (or a raise): no permanent grant and no save, so it is asked again."""
     monkeypatch.setitem(route_approvals.APPROVAL_BRIDGE, "agent", True)

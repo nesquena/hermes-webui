@@ -430,6 +430,51 @@ def test_always_for_a_key_removed_by_hand_while_it_is_granted_stays_removed(home
     assert _allowlist(homes["beta"]) == [] and _allowlist(homes["default"]) == []
 
 
+def test_a_key_removed_by_hand_while_it_is_granted_is_dropped_from_memory_too(homes, sessions, monkeypatch):
+    """As above, but nothing re-reads command_allowlist before the second save. An Agent
+    that only reconciles its in-memory set at a save (v2026.9.24) must still stop
+    honouring the key once the second answer is done, though there is nothing to add."""
+    first, second = sessions("alpha"), sessions("alpha")
+    first_id, second_id = _queue(first), _queue(second)
+    assert routes._resolve_approval_legacy(first, first_id, "always") is True
+    assert _allowlist(homes["alpha"]) == [KEY]
+
+    granted, resume = threading.Event(), threading.Event()
+    real_approve_permanent = routes.approve_permanent
+
+    def held_approve_permanent(key):
+        real_approve_permanent(key)
+        granted.set()
+        resume.wait(10)
+
+    monkeypatch.setattr(routes, "approve_permanent", held_approve_permanent)
+    errors = []
+
+    def answer():
+        try:
+            assert routes._resolve_approval_legacy(second, second_id, "always") is True
+        except Exception as exc:  # surfaced below
+            errors.append(repr(exc))
+
+    thread = threading.Thread(target=answer, daemon=True)
+    try:
+        thread.start()
+        assert granted.wait(10)
+        (homes["alpha"] / "config.yaml").write_text(
+            "approvals:\n  mode: manual\ncommand_allowlist: []\n", encoding="utf-8"
+        )
+    finally:
+        resume.set()
+    thread.join(10)
+
+    assert not thread.is_alive() and errors == []
+    assert _allowlist(homes["alpha"]) == []
+    data = yaml.safe_load((homes["alpha"] / "config.yaml").read_text(encoding="utf-8"))
+    assert data["approvals"] == {"mode": "manual"}  # the rest of the file is kept
+    assert not _approved_in(homes["alpha"], LATER, KEY)
+    assert _allowlist(homes["beta"]) == [] and _allowlist(homes["default"]) == []
+
+
 # ── Two "always" saves in one profile at once ───────────────────────────────
 
 
