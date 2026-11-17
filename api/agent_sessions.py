@@ -1171,9 +1171,23 @@ def read_importable_agent_session_rows(
                 # aggregate terms"). No ``LIMIT -1`` guard is needed for that
                 # any more — and adding one would put a second LIMIT in the
                 # statement, which the sidebar-cap test forbids.
+                #
+                # greptile P1 (#7681 re-gate, "Sidebar reads all message
+                # history"): the grouped decode is restricted to the candidate
+                # sessions BEFORE grouping. Unrestricted, SQLite materialized
+                # the grouped table from a full SCAN of ``messages``
+                # (``MATERIALIZE m`` + ``SCAN mq`` in the checked plan), so
+                # even a single-session lookup decoded and copied every stored
+                # message. The restriction references the ``candidates`` CTE
+                # the bounded listing already builds (and the unbounded
+                # listing below now builds too), so the planner seeks
+                # ``messages`` through ``idx_messages_session`` instead.
                 join_clause = (
                     "LEFT JOIN ("
-                    + _plaintext_content_join_sql("mq.content")
+                    + _plaintext_content_join_sql(
+                        "mq.content",
+                        "mq.session_id IN (SELECT cx.id FROM candidates cx)",
+                    )
                     + ") m"
                     " ON m.session_id = s.id"
                 )
@@ -1498,12 +1512,41 @@ def read_importable_agent_session_rows(
                 row['parent_source'] = None
             return _result(selected, window_exhausted)
 
+        # greptile P1 (#7681 re-gate, "Sidebar reads all message history"): the
+        # unbounded listing projects its session set through the SAME
+        # ``candidates`` CTE the bounded listing uses — without a LIMIT, since
+        # every session is requested here — instead of an outer WHERE. The
+        # restricted grouped decode (see join_clause) references that CTE, so
+        # the messages subquery seeks by session id instead of materializing
+        # the whole table before the join. The where clauses move verbatim
+        # into the CTE, so the bound parameters still appear exactly once and
+        # in the same order (the pushdown test pins the first two).
+        if use_messages_join and 'content' in message_cols:
+            unbounded_cte = (
+                "WITH candidates AS (\n"
+                "                    SELECT s.id\n"
+                "                    FROM sessions s\n"
+                "                    WHERE " + " AND ".join(where_clauses) + "\n"
+                "                )"
+            )
+            unbounded_from = (
+                "FROM sessions s\n"
+                "                JOIN candidates c ON c.id = s.id"
+            )
+            unbounded_where = ""
+        else:
+            # Plain (or no) messages join: nothing references the CTE, so the
+            # listing keeps its original outer-WHERE shape.
+            unbounded_cte = ""
+            unbounded_from = "FROM sessions s"
+            unbounded_where = "WHERE " + " AND ".join(where_clauses)
         cur.execute(
             f"""
+            {unbounded_cte}
             {select_sql}
-            FROM sessions s
+            {unbounded_from}
             {join_clause}
-            WHERE {' AND '.join(where_clauses)}
+            {unbounded_where}
             {group_by_clause}
             {order_by_clause}
             """,

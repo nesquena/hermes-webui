@@ -7480,7 +7480,28 @@ function _dropStaleOptimisticSessionRow(sid){
   if(typeof _forgetObservedStreamingSession==='function') _forgetObservedStreamingSession(sid);
 }
 
+// #7681 greptile P2 (re-gate): the server reports an UNKNOWN user-turn count
+// as null (api/agent_sessions.py emits NULL plus the unknown marker for
+// schemas it cannot classify), never as 0. Number(null) is 0, so laundering
+// the raw value through Number first turns that unknown into a confident
+// zero — and the merge below would then persist "0 user turns" for a legacy
+// single-segment session whose count is simply not knowable. Resolve the raw
+// value to a finite count >= 0 (numbers, or their numeric-string form) or to
+// null (unknown) BEFORE any arithmetic.
+
 function _mergeOptimisticFirstTurnSessions(fetchedSessions){
+  // The resolver lives INSIDE the merge on purpose: review harnesses extract
+  // this function's body verbatim and run it standalone
+  // (tests/test_issue2454_active_session_spinner.py), so it has to travel
+  // with its only caller instead of relying on a module-level binding.
+  function _knownUserMessageCount(value){
+    if(typeof value==='number')return Number.isFinite(value)&&value>=0?value:null;
+    if(typeof value==='string'&&value.trim()!==''){
+      const n=Number(value);
+      return Number.isFinite(n)&&n>=0?n:null;
+    }
+    return null;
+  }
   const merged=Array.isArray(fetchedSessions)?[...fetchedSessions]:[];
   const bySid=new Map();
   merged.forEach((s,idx)=>{if(s&&s.session_id) bySid.set(s.session_id,idx);});
@@ -7505,16 +7526,18 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
         // #7681: same rule for the user-turn count. While the local optimistic
         // row is authoritative the server row may still report a stale (or
         // absent) count for the in-flight turn, so keep the larger value.
+        // #7681 greptile P2 (re-gate): resolve the RAW values through
+        // _knownUserMessageCount first — Number(null) === 0 would launder the
+        // server's unknown count into a confident zero and persist it once the
+        // row goes idle.
         user_message_count:(()=>{
-          const localTurns=Number(local.user_message_count);
-          const fetchedTurns=Number(fetched.user_message_count);
-          const localKnown=Number.isFinite(localTurns)&&localTurns>=0;
-          const fetchedKnown=Number.isFinite(fetchedTurns)&&fetchedTurns>=0;
+          const localTurns=_knownUserMessageCount(local.user_message_count);
+          const fetchedTurns=_knownUserMessageCount(fetched.user_message_count);
           if(keepLocalOptimistic){
-            if(localKnown&&fetchedKnown) return Math.max(localTurns,fetchedTurns);
-            return localKnown?localTurns:(fetchedKnown?fetchedTurns:undefined);
+            if(localTurns!==null&&fetchedTurns!==null)return Math.max(localTurns,fetchedTurns);
+            return localTurns!==null?localTurns:(fetchedTurns!==null?fetchedTurns:undefined);
           }
-          return fetchedKnown?fetchedTurns:undefined;
+          return fetchedTurns!==null?fetchedTurns:undefined;
         })(),
         last_message_at:keepLocalOptimistic?Math.max(localTs,fetchedTs):fetchedTs,
         updated_at:keepLocalOptimistic?Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs):Number(fetched.updated_at||fetchedTs||0),

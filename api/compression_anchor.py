@@ -718,6 +718,27 @@ def _with_plaintext_content(message):
     return {**message, "content": decoded}
 
 
+# greptile P1 (#7681 re-gate, "String parts break session listing"): the
+# per-part decode must branch on ``je.type`` BEFORE anything parses
+# ``je.value`` as JSON. ``JSON_EACH`` returns a string part's value as
+# UNQUOTED text (``hello``, not ``"hello"``), so the old unconditional
+# ``JSON_EXTRACT(je.value, '$.text')`` raised ``malformed JSON`` — and one
+# such row anywhere in ``messages`` (even outside the requested window) took
+# the whole external-session listing down with it. String parts therefore use
+# ``je.value`` directly; only ``'object'`` parts, whose value IS the JSON text
+# of an object, are parsed. Shared by both SQL variants below so the two
+# decodes cannot drift apart.
+_DECODED_PART_TEXT_SQL = (
+    "CASE je.type"
+    " WHEN 'text' THEN COALESCE(NULLIF(TRIM(je.value), ''), '')"
+    " WHEN 'object' THEN COALESCE("
+    "NULLIF(TRIM(JSON_EXTRACT(je.value, '$.text')), ''),"
+    " CASE WHEN COALESCE(JSON_EXTRACT(je.value, '$.type'), 'text')"
+    " NOT IN ('text', 'input_text', 'output_text') THEN '▇' END, '')"
+    " ELSE '' END"
+)
+
+
 def _plaintext_content_sql(raw_expr: str) -> str:
     """SQL expression: the plaintext view of a message's content for the guards.
 
@@ -735,11 +756,8 @@ def _plaintext_content_sql(raw_expr: str) -> str:
     payload = f"CAST(SUBSTR(CAST({trimmed} AS BLOB), 7) AS TEXT)"
     decoded = (
         "COALESCE((SELECT GROUP_CONCAT("
-        "COALESCE(NULLIF(TRIM(JSON_EXTRACT(je.value, '$.text')), ''),"
-        " CASE WHEN JSON_TYPE(je.value) = 'text' THEN NULLIF(TRIM(je.value), '')"
-        " WHEN JSON_TYPE(je.value) = 'object'"
-        " AND COALESCE(JSON_EXTRACT(je.value, '$.type'), 'text')"
-        " NOT IN ('text', 'input_text', 'output_text') THEN '▇' END), '')"
+        + _DECODED_PART_TEXT_SQL
+        + ", '')"
         f" FROM JSON_EACH({payload}) AS je), '')"
     )
     return (
@@ -749,7 +767,7 @@ def _plaintext_content_sql(raw_expr: str) -> str:
     )
 
 
-def _plaintext_content_join_sql(raw_expr: str) -> str:
+def _plaintext_content_join_sql(raw_expr: str, session_restriction: str | None = None) -> str:
     """FROM-level variant of :func:`_plaintext_content_sql`.
 
     Same decoded plaintext view, but the JSON expansion runs as a table
@@ -765,6 +783,17 @@ def _plaintext_content_join_sql(raw_expr: str) -> str:
     preaggregated_ordering``). At the FROM level the JSON_EACH argument
     references the same FROM row, so the plan stays free of correlated
     subqueries while the decoded value is still computed once per message.
+
+    ``session_restriction`` is embedded as this subquery's WHERE clause, so
+    the grouped decode runs over the SELECTED sessions only (greptile P1 on
+    #7681's re-gate, "Sidebar reads all message history"). Without it SQLite
+    materialized the grouped table from a full ``SCAN`` of ``messages``
+    before the join (``MATERIALIZE m`` + ``SCAN mq``), so even a
+    single-session lookup decoded and copied the entire transcript store.
+    With it, the planner seeks ``messages`` by session id through
+    ``idx_messages_session``. Callers pass a restriction that references the
+    candidate CTE by name, e.g. ``"mq.session_id IN (SELECT c.id FROM
+    candidates c)"``.
     """
     trimmed = f"LTRIM(COALESCE({raw_expr}, ''))"
     payload = f"CAST(SUBSTR(CAST({trimmed} AS BLOB), 7) AS TEXT)"
@@ -772,21 +801,16 @@ def _plaintext_content_join_sql(raw_expr: str) -> str:
         "SUBSTR(CAST(" + trimmed + " AS BLOB), 1, 6) = CAST(CHAR(0) || 'json:' AS BLOB)"
         " AND JSON_VALID(" + payload + ")"
     )
-    part = (
-        "COALESCE(NULLIF(TRIM(JSON_EXTRACT(je.value, '$.text')), ''),"
-        " CASE WHEN JSON_TYPE(je.value) = 'text' THEN NULLIF(TRIM(je.value), '')"
-        " WHEN JSON_TYPE(je.value) = 'object'"
-        " AND COALESCE(JSON_EXTRACT(je.value, '$.type'), 'text')"
-        " NOT IN ('text', 'input_text', 'output_text') THEN '▇' END, '')"
-    )
+    restriction = f" WHERE {session_restriction}" if session_restriction else ""
     return (
         "SELECT mq.*,"
         " LOWER(LTRIM(CASE WHEN " + is_json
-        + " THEN COALESCE(GROUP_CONCAT(" + part + ", ''), '')"
+        + " THEN COALESCE(GROUP_CONCAT(" + _DECODED_PART_TEXT_SQL + ", ''), '')"
         + " ELSE " + trimmed + " END)) AS _plaintext_content"
         " FROM messages mq"
         " LEFT JOIN JSON_EACH(CASE WHEN " + is_json + " THEN " + payload + " ELSE '[]' END) AS je"
-        " GROUP BY mq.rowid"
+        + restriction
+        + " GROUP BY mq.rowid"
     )
 
 
