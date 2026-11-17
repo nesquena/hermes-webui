@@ -3069,6 +3069,17 @@ def _named_custom_provider_slug_for_base_url(
     opaque 401 for models owned by later entries. When ``model_id`` is given,
     the entry that declares the model outranks declaration order; otherwise
     (or when no entry declares it) the historical first-match stands.
+
+    Only an entry that selection could already serve is promotable. A
+    ``providers:`` key whose identity exists only because of the non-ASCII
+    fallback (#8017) is NEW: master slugged such a key to the empty string, so
+    no configuration could reach it before, and a shared ``base_url`` is not
+    evidence that two credentialed records are the same account. Promoting the
+    bare ``custom`` route to it here changed the endpoint's credential on an
+    unchanged default (#8164 r14) — an equal URL is exactly the case that
+    looked safe, because the round-13 by-name exclusion ran on a path this one
+    does not. Such a row stays reachable through the picker's qualified
+    ``@custom:<name>:<model>`` form, which never consults this fallback.
     """
     target = _normalize_base_url_for_match(base_url)
     if not target:
@@ -3077,11 +3088,15 @@ def _named_custom_provider_slug_for_base_url(
     entries = _custom_provider_entries(config_obj)
     providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
     model_cfg = config_obj.get("model") if isinstance(config_obj, dict) else None
+    native_fallback_ids = _native_fallback_identities(providers_cfg)
     for entry in entries:
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
         slug = _custom_provider_entry_identity(entry, entries, providers_cfg, model_cfg) or "custom"
+        if (slug in native_fallback_ids
+                and _custom_provider_view_source(entry, config_obj) == "providers"):
+            continue
         if not fallback:
             fallback = slug
         if model_id and _custom_provider_entry_owns_model(entry, model_id):
