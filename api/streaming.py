@@ -15074,12 +15074,14 @@ def _run_agent_streaming(
         try:
             try:
                 from api.route_approvals import (
+                    require_approval_bridge as _require_approval_bridge,
                     settle_gateway_pending_local_notification as _settle_pending_for_polling,
                     retire_gateway_pending_mirror as _retire_gateway_pending_mirror,
                 )
                 def _cleanup_gateway_pending_mirror():
                     _retire_gateway_pending_mirror(session_id)
             except ImportError:
+                _require_approval_bridge = None
                 _settle_pending_for_polling = None
                 _cleanup_gateway_pending_mirror = None
             from tools.approval import (
@@ -15087,6 +15089,10 @@ def _run_agent_streaming(
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
+                if _require_approval_bridge is not None:
+                    # Raises when WebUI could show this card but never settle
+                    # it (#9119): the Agent then denies it as notify_failed.
+                    _require_approval_bridge()
                 if _settle_pending_for_polling is not None:
                     try:
                         auto_resolved, head, total = _settle_pending_for_polling(
