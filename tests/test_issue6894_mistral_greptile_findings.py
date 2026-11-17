@@ -121,6 +121,27 @@ def _swap_in_test_config(extra_cfg: dict):
     return _restore
 
 
+def _stub_provider_name_ambiguity_guard(monkeypatch) -> None:
+    """Neutralise #8690's provider-name ambiguity guard for a repair test.
+
+    #8690 landed on master after this branch forked: when two ``providers:``
+    records claim one built-in name it refuses the route fail-closed BEFORE
+    any record is chosen, which pre-empts the whole-record repair for the
+    legacy spelling (the merge commit runs master's guard, the branch alone
+    does not carry it). The repair stays live for the canonical spelling, for
+    non-built-in slugs and for single-record shapes; the guard's own verdict
+    is pinned unstubbed in
+    ``test_issue6894_mistral_provider_identity.TestAmbiguousNameRefusalCoexistsWithTheRepair``.
+    On a tree without the guard this patch is a no-op (``raising=False``).
+    """
+    monkeypatch.setattr(
+        config,
+        "provider_name_ambiguity_verdict",
+        lambda provider, _cfg=None: None,
+        raising=False,
+    )
+
+
 @pytest.fixture
 def native(monkeypatch):
     """Point the REAL installed resolver at the swapped WebUI config and a
@@ -291,6 +312,14 @@ class TestMatchingConnectionIsNotRebuilt:
 class TestOwnerEffectiveModeIsCompared:
     """The owner may declare no ``api_mode``; its effective mode is then its
     OWN default, never the sibling's declared protocol."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ambiguity_guard(self, monkeypatch):
+        # #8690's guard refuses the legacy spelling outright once both
+        # records are enabled; this class exercises the whole-record repair,
+        # so the guard is stubbed here and pinned unstubbed in
+        # test_issue6894_mistral_provider_identity.TestAmbiguousNameRefusalCoexistsWithTheRepair.
+        _stub_provider_name_ambiguity_guard(monkeypatch)
 
     def test_owner_without_api_mode_does_not_keep_sibling_protocol(self, native):
         providers_cfg = {

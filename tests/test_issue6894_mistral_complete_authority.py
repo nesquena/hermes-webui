@@ -111,6 +111,27 @@ def _swap_in_test_config(extra_cfg: dict):
     return _restore
 
 
+def _stub_provider_name_ambiguity_guard(monkeypatch) -> None:
+    """Neutralise #8690's provider-name ambiguity guard for a repair test.
+
+    #8690 landed on master after this branch forked: when two ``providers:``
+    records claim one built-in name it refuses the route fail-closed BEFORE
+    any record is chosen, which pre-empts the whole-record repair for the
+    legacy spelling (the merge commit runs master's guard, the branch alone
+    does not carry it). The repair stays live for the canonical spelling, for
+    non-built-in slugs and for single-record shapes; the guard's own verdict
+    is pinned unstubbed in
+    ``test_issue6894_mistral_provider_identity.TestAmbiguousNameRefusalCoexistsWithTheRepair``.
+    On a tree without the guard this patch is a no-op (``raising=False``).
+    """
+    monkeypatch.setattr(
+        config,
+        "provider_name_ambiguity_verdict",
+        lambda provider, _cfg=None: None,
+        raising=False,
+    )
+
+
 def _synthetic_pool(provider: str, key: str):
     """Real CredentialPool with one synthetic api_key entry."""
     from agent.credential_pool import CredentialPool, PooledCredential
@@ -178,6 +199,14 @@ _OWNER_SIDE_FIELDS = ("base_url", "api_key", "api_mode", "credential_pool")
 class TestCompleteAuthorityMatrix:
     """Each requested spelling, in each config order, must hand the client a
     bundle equal to the owning record's COMPLETE native authority."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ambiguity_guard(self, monkeypatch):
+        # #8690's guard refuses the legacy spelling outright once both
+        # records are enabled; this class exercises the whole-record repair,
+        # so the guard is stubbed here and pinned unstubbed in
+        # test_issue6894_mistral_provider_identity.TestAmbiguousNameRefusalCoexistsWithTheRepair.
+        _stub_provider_name_ambiguity_guard(monkeypatch)
 
     # (a) protocol-only split: key and URL identical, protocols differ.
     _PROTOCOL_ONLY = {
@@ -478,6 +507,14 @@ class TestCredentialOwnershipIsProvenanceNotEndpoint:
     authority for the OWNING record, ``native(owner_key)``.
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_ambiguity_guard(self, monkeypatch):
+        # #8690's guard refuses the legacy spelling outright once both
+        # records are enabled; this class exercises the whole-record repair,
+        # so the guard is stubbed here and pinned unstubbed in
+        # test_issue6894_mistral_provider_identity.TestAmbiguousNameRefusalCoexistsWithTheRepair.
+        _stub_provider_name_ambiguity_guard(monkeypatch)
+
     _URL = "https://relay.example/v1"
 
     # (1) owner declares key_env; sibling carries a different inline key.
@@ -775,7 +812,7 @@ class TestCredentialOwnershipIsProvenanceNotEndpoint:
             )
             owner_cfg = (config._get_providers_cfg() or {}).get("mistralai") or {}
             owner_authority = config._raw_provider_record_runtime_authority(
-                owner_cfg, "mistralai", native_rt.get("base_url")
+                owner_cfg, "mistralai"
             )
             bundle = config.merge_custom_provider_runtime_bundle(
                 "mistral",

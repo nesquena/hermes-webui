@@ -4387,7 +4387,6 @@ def _custom_record_effective_api_mode(record: dict, base_url: str | None) -> str
 def _raw_provider_record_runtime_authority(
     record: dict,
     provider_key: str,
-    fallback_url: str | None = None,
 ) -> dict:
     """Resolve ONE raw ``providers:`` record as its COMPLETE runtime authority.
 
@@ -4401,14 +4400,23 @@ def _raw_provider_record_runtime_authority(
     the value another alias record resolved to (#8664 review P2-1): an
     omitted api_mode falls back to the endpoint default, an omitted
     credential keeps the record keyless (_CUSTOM_NO_AUTH_PLACEHOLDER), an
-    omitted pool is no pool.
+    omitted pool is no pool — and an omitted ``base_url`` leaves this
+    authority endpointLESS.
+
+    That last rung is load-bearing (#8664 review P1 "Key reaches another
+    endpoint", Greptile 2026-11-13): the collision repair used to pass the
+    caller's ``resolved_base_url`` in as a fallback, so an owning record that
+    declares a credential but no endpoint was paired with the URL the native
+    resolver had returned — which under a collision is the SIBLING's relay.
+    The record's own secret then went to an endpoint that record never named.
+    A caller that legitimately resolved THIS record's endpoint (the
+    no-sibling repair path, where the resolver answered for the same record)
+    may still supply it; nothing else may.
 
     Returns a dict with base_url, api_key, api_mode, credential_pool,
     acp_command, acp_args.
     """
     base_url = _custom_record_base_url(record)
-    if not base_url:
-        base_url = str(fallback_url or "").strip() or None
 
     pool_runtime = _custom_record_pool_runtime(base_url, record) if base_url else None
     api_key = None
@@ -5166,10 +5174,13 @@ def _custom_provider_runtime_bundle_with_provenance(
                 if sibling_exists:
                     split = url_split or key_split or mode_split
                     if not split and not owner_key_declared:
+                        # Resolved from the record's OWN declarations only:
+                        # under a collision the incoming endpoint may be the
+                        # sibling's, and credential provenance must not be
+                        # decided against an endpoint this record never named.
                         authority = _raw_provider_record_runtime_authority(
                             owner_cfg,
                             owner_key,
-                            resolved_base_url,
                         )
                         key_split = not _resolved_credential_is_owner_own(
                             authority.get("api_key"), resolved_api_key
@@ -5220,8 +5231,26 @@ def _custom_provider_runtime_bundle_with_provenance(
                     authority = _raw_provider_record_runtime_authority(
                         owner_cfg,
                         owner_key,
-                        resolved_base_url,
                     )
+                    if not sibling_exists and not authority.get("base_url"):
+                        # No sibling exists, so the incoming endpoint is the
+                        # resolver's answer for THIS record and may stand in
+                        # for one the record does not declare. Under a
+                        # collision it is the sibling's endpoint — pairing it
+                        # with this record's credential is the #8664 P1 — so
+                        # that path never reaches this substitution.
+                        authority["base_url"] = (
+                            str(resolved_base_url or "").strip() or None
+                        )
+                if sibling_exists and not authority.get("base_url"):
+                    # The owning record names no endpoint of its own, so the
+                    # repair cannot establish one — and borrowing the incoming
+                    # URL would send this record's credential to an endpoint
+                    # it never named (#8664 review P1, Greptile 2026-11-13).
+                    # Stop instead: the bundle keeps the resolver's own
+                    # single-record authority, which is coherent, rather than
+                    # a mix of two records' endpoint and credential.
+                    return bundle, None
                 for field in (
                     "base_url",
                     "api_key",

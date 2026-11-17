@@ -127,6 +127,26 @@ def _mistral_groups(catalog: dict) -> list[dict]:
     ]
 
 
+def _stub_provider_name_ambiguity_guard(monkeypatch) -> None:
+    """Neutralise #8690's provider-name ambiguity guard for a repair test.
+
+    #8690 landed on master after this branch forked: when two ``providers:``
+    records claim one built-in name it refuses the route fail-closed BEFORE
+    any record is chosen, which pre-empts the whole-record repair for the
+    legacy spelling (the merge commit runs master's guard, the branch alone
+    does not carry it). The repair stays live for the canonical spelling, for
+    non-built-in slugs and for single-record shapes, and its own verdict is
+    pinned unstubbed in :class:`TestAmbiguousNameRefusalCoexistsWithTheRepair`.
+    On a tree without the guard this patch is a no-op (``raising=False``).
+    """
+    monkeypatch.setattr(
+        config,
+        "provider_name_ambiguity_verdict",
+        lambda provider, _cfg=None: None,
+        raising=False,
+    )
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Section 1 — one canonical identity in every WebUI table
 # ────────────────────────────────────────────────────────────────────────
@@ -933,6 +953,14 @@ def _final_bundle_for(cfg_extra: dict, option: str):
 class TestFinalBundleRecordOwnership:
     """P2-1: endpoint and credential must come from the SAME record."""
 
+    @pytest.fixture(autouse=True)
+    def _no_ambiguity_guard(self, monkeypatch):
+        # #8690's guard refuses the legacy spelling outright once both
+        # records are enabled; this class exercises the whole-record repair,
+        # so the guard is stubbed here and pinned in
+        # TestAmbiguousNameRefusalCoexistsWithTheRepair.
+        _stub_provider_name_ambiguity_guard(monkeypatch)
+
     def test_bundle_never_mixes_two_records(self):
         for label, cfg_extra in (
             ("legacy-first", _COLLISION_LEGACY_FIRST_PAIR),
@@ -1036,6 +1064,143 @@ class TestFinalBundleRecordOwnership:
         )
 
 
+class TestOwnerWithoutEndpointNeverBorrowsTheSiblingURL:
+    """#8664 review P1 "Key reaches another endpoint" (Greptile, 2026-11-13).
+
+    The FIRST matching provider record declares an ``api_key`` but no
+    ``base_url``; the sibling record points at a relay. The collision repair
+    used to pass the caller's ``resolved_base_url`` into
+    ``_raw_provider_record_runtime_authority`` as a fallback, so the owner's
+    key was paired with the sibling's relay URL — the record's own secret
+    sent to an endpoint that record never named.
+
+    The authority is now resolved from the owning record's OWN declarations
+    alone. When that record names no endpoint the repair cannot establish
+    one, so it STOPS: the bundle keeps the resolver's own single-record
+    authority (endpoint and credential from ONE record) rather than a mix of
+    two. The canonical spelling is driven here because it is the one the
+    native resolver answers with the sibling's complete authority (exact
+    spelling pickup) — the very input the finding describes.
+    """
+
+    def test_keyed_owner_without_endpoint_keeps_one_coherent_authority(self):
+        cfg_extra = {
+            "model": {"provider": "anthropic", "default": "unrelated-model"},
+            "providers": {
+                # The OWNER (first matching raw key): a credential, no endpoint.
+                "mistralai": {"api_key": "owner-key-canary"},
+                # The SIBLING: a different credential and its own relay.
+                "mistral": {
+                    "api_key": "sibling-key-canary",
+                    "base_url": "https://sibling-relay.example/v1",
+                },
+            },
+        }
+        restore = _swap_in_test_config(cfg_extra)
+        try:
+            bundle = config.merge_custom_provider_runtime_bundle(
+                "mistral",
+                "sibling-key-canary",
+                "https://sibling-relay.example/v1",
+                {
+                    "provider": "mistral",
+                    "api_key": "sibling-key-canary",
+                    "base_url": "https://sibling-relay.example/v1",
+                },
+            )
+        finally:
+            restore()
+        assert bundle["api_key"] != "owner-key-canary", (
+            "the owning record's key must never be paired with the sibling's "
+            f"relay URL; the bundle carried {bundle['api_key']!r}"
+        )
+        assert bundle["base_url"] == "https://sibling-relay.example/v1", (
+            "the repair must stop when the owner names no endpoint, leaving "
+            f"the resolver's own endpoint; got {bundle['base_url']!r}"
+        )
+        assert bundle["api_key"] == "sibling-key-canary", (
+            "what goes out must be ONE record's authority — the endpoint and "
+            "the credential that belong together — never the owner's key on "
+            f"the sibling's relay; got {bundle['api_key']!r}"
+        )
+
+
+class TestAmbiguousNameRefusalCoexistsWithTheRepair:
+    """#8690's fail-closed name-ambiguity guard vs #8664's whole-record repair.
+
+    #8690 landed on master after this branch forked. When two ``providers:``
+    records claim one built-in name — exactly the #6894 collision shape — it
+    refuses the route BEFORE any record is chosen: the bundle is terminal
+    with the ambiguity verdict and carries no endpoint, no credential and no
+    side fields. This PR's repair targets the same collision for the spelling
+    the guard does not refuse, so the two must coexist. Whatever tree is
+    installed, the bundle must EITHER be the owning record's complete
+    authority OR a terminal refusal that sends nothing — never a mix of the
+    two records. That invariant is asserted here UNSTUBBED, on both config
+    orders.
+    """
+
+    def test_legacy_spelling_never_mixes_two_records(self):
+        for label, cfg_extra in (
+            ("legacy-first", _COLLISION_LEGACY_FIRST_PAIR),
+            ("canonical-first", _COLLISION_CANONICAL_FIRST_PAIR),
+        ):
+            restore = _swap_in_test_config(cfg_extra)
+            try:
+                bundle = config.merge_custom_provider_runtime_bundle(
+                    *_final_bundle_inputs("@mistralai:mistral-small-latest")
+                )
+                # The owner is resolved from the SAME config the bundle read,
+                # so the two cannot disagree about ordering.
+                owner = config._raw_provider_key_for_provider_id(
+                    bundle["provider"]
+                )
+                owner_record = cfg_extra["providers"].get(owner) or {}
+            finally:
+                restore()
+            verdict = bundle.get(config.CUSTOM_ROUTE_ERROR_FIELD)
+            if verdict is not None:
+                # #8690's guard: fail closed. Nothing to send, so nothing
+                # can be mixed — and a consumer that reads the fields
+                # without checking the verdict still has nothing to send.
+                assert bundle["base_url"] is None, (
+                    f"{label}: a refused route must not keep an endpoint; got "
+                    f"{bundle['base_url']!r}"
+                )
+                assert bundle["api_key"] is None, (
+                    f"{label}: a refused route must not keep a credential; got "
+                    f"{bundle['api_key']!r}"
+                )
+                for field in config.CUSTOM_CONNECTION_SIDE_FIELDS:
+                    assert bundle[field] is None, (
+                        f"{label}: a refused route must not keep {field}; got "
+                        f"{bundle[field]!r}"
+                    )
+                expected_reason = getattr(
+                    config, "PROVIDER_NAME_AMBIGUOUS", None
+                )
+                if expected_reason is not None:
+                    assert verdict.get("reason") == expected_reason, (
+                        f"{label}: the refusal must be the name-ambiguity "
+                        f"verdict; got {verdict.get('reason')!r}"
+                    )
+            else:
+                # A tree without #8690's guard: the whole-record repair owns
+                # this shape and must attach the OWNER's complete authority.
+                assert bundle["api_key"] == owner_record.get("api_key"), (
+                    f"{label}: the bundle's credential came from a different "
+                    f"record than the endpoint owner {owner!r} (bundle key "
+                    f"{bundle['api_key']!r}, owner key "
+                    f"{owner_record.get('api_key')!r})"
+                )
+                assert bundle["base_url"] == owner_record.get("base_url"), (
+                    f"{label}: the bundle's endpoint came from a different "
+                    f"record than its owner {owner!r} (bundle url "
+                    f"{bundle['base_url']!r}, owner url "
+                    f"{owner_record.get('base_url')!r})"
+                )
+
+
 class TestLegacyOnboardingReusesStoredKey:
     """P2-2: an existing configured key must satisfy onboarding."""
 
@@ -1083,6 +1248,14 @@ class TestWholeRuntimeBundleOwnership:
     owner's endpoint with the sibling's wire protocol. Both config orders and
     both requested spellings are covered.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_ambiguity_guard(self, monkeypatch):
+        # #8690's guard refuses the legacy spelling outright once both
+        # records are enabled; this class exercises the whole-record repair,
+        # so the guard is stubbed here and pinned in
+        # TestAmbiguousNameRefusalCoexistsWithTheRepair.
+        _stub_provider_name_ambiguity_guard(monkeypatch)
 
     _LEGACY = {
         "base_url": "https://legacy-relay.example/v1",
