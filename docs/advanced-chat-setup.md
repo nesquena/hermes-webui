@@ -55,6 +55,19 @@ Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
 (and periodically refresh it for long sessions).
 
+Title requests ask for a strict `{"title": "..."}` JSON schema, so endpoints
+with constrained decoding (llama.cpp, vLLM, Ollama, LM Studio and most
+OpenAI-compatible hosts) cannot put reasoning in the title. An endpoint that
+rejects the schema (HTTP 400/422) is resent once without it. A reply that is exactly a `{"title"}` object is unwrapped. A fresh
+candidate is discarded, and the alternate title route or local summary used
+instead, when it opens with a hedge or opinion (`Maybe`, `Perhaps`, `I think`,
+`I'd go with`, `How about`, `Something like`, `The best title is`, ...),
+still contains a thinking tag or a JSON `"title":` fragment, or starts with `{`.
+The existing 80-character cap still applies; there is no word-count rule, since
+some languages put spaces inside words. These checks are best effort: they apply only to newly
+generated titles, never rename a saved title, and can turn down a real title
+that happens to start with one of those phrases.
+
 For structured messages containing text and native images, title generation
 uses the user text without flattening or modifying the stored message. Title
 comparison and title-model inputs remove the internal `[Workspace::v1: ...]`
