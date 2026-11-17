@@ -154,7 +154,7 @@ def test_cache_hit_copies_only_the_window(monkeypatch):
         out = real_cached(*a, **k)
         if out is not None:
             entry = routes._display_merge_cache[SID]
-            copied.append(sum(1 for x, y in zip(out, entry["messages"]) if x is not y))
+            copied.append(sum(1 for x, y in zip(out, entry["messages"], strict=True) if x is not y))
         return out
 
     monkeypatch.setattr(routes, "_display_merge_cached_messages", spy)
