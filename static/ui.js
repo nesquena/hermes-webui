@@ -11024,11 +11024,17 @@ function renderMd(raw){
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
     // Autolink only the text between tags, as the block pass below does: set
     // aside complete links, images and pre blocks and every other tag, then
-    // escape a raw tag left without its closing ">" on its line (the block
-    // pass escapes those too), so a URL in an attribute value stays as written.
+    // turn a raw tag left without its closing ">" on its line into text by
+    // escaping its "<" (the block pass escapes those too), so a URL in an
+    // attribute value stays as written.
+    // - A bracketed address such as <https://example.com> or <mailto:a@b.c>
+    //   (any scheme, any case) is not a tag: it stays in place, so the URL in
+    //   it is linked as before. A name holding ":" is never an allowed tag.
+    // - Only the "<" of an unclosed tag is escaped; the rest stays plain text,
+    //   so a URL after it is linked with its "&" and quotes left as written.
     const _tag_stash=[];
-    t=t.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<\/?[a-zA-Z][^>]*>)/g,m=>{_tag_stash.push(m);return `\x00T${_tag_stash.length-1}\x00`;});
-    t=t.replace(/<[a-zA-Z][\w:-]*[^>\n]*$/gm,tag=>esc(tag));
+    t=t.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<(?![a-zA-Z][a-zA-Z0-9+.-]*:)\/?[a-zA-Z][^>]*>)/g,m=>{_tag_stash.push(m);return `\x00T${_tag_stash.length-1}\x00`;});
+    t=t.replace(/<(?=[a-zA-Z][\w:-]*[^>\n]*$)/gm,'&lt;');
     t=_autolinkBareText(t);
     t=t.replace(/\x00T(\d+)\x00/g,(_,i)=>_tag_stash[+i]);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);

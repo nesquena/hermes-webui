@@ -34,12 +34,25 @@ class _Tags(HTMLParser):
         super().__init__()
         self.tags = []
         self.values = []
+        self.links = []  # (href value, link text) per <a>, decoded as a browser would
+        self._open_link = None
 
     def handle_starttag(self, tag, attrs):
         self.tags.append((tag, [name for name, _value in attrs]))
         self.values.extend(value or "" for _name, value in attrs)
+        if tag == "a":
+            self._open_link = [dict(attrs).get("href"), ""]
+            self.links.append(self._open_link)
 
     handle_startendtag = handle_starttag
+
+    def handle_endtag(self, tag):
+        if tag == "a":
+            self._open_link = None
+
+    def handle_data(self, data):
+        if self._open_link is not None:
+            self._open_link[1] += data
 
 
 def _parse(html):
@@ -52,6 +65,10 @@ def _parse(html):
 def _assert_no_markup_in_attribute_values(html):
     for value in _parse(html).values:
         assert "<" not in value, (value, html)
+
+
+def _links(html):
+    return [tuple(link) for link in _parse(html).links]
 
 
 # ── A URL in an attribute value of an unclosed tag stays where it was written ──
@@ -196,11 +213,14 @@ _OPEN_TAG = {
 @pytest.mark.parametrize("markdown", list(_OPEN_TAG.values()), ids=list(_OPEN_TAG))
 def test_raw_tag_without_closing_bracket_stays_text_in_inline_blocks(driver_path, markdown):  # noqa: F811
     html = _render(driver_path, markdown)
-    assert "&lt;a href=&quot;api/x&quot; download=&quot;" in html, html
+    # Only the "<" is escaped; the tag text after it is kept as written, so
+    # its quote and "&" never run into the link built from the URL in it.
+    assert '&lt;a href="api/x" download="<a href=' in html, html
     tags = _parse(html).tags
     assert tags[-1] == ("a", ["href", "target", "rel"]), html
     assert all(names == [] for _tag, names in tags[:-1]), html
     _assert_no_markup_in_attribute_values(html)
+    assert _links(html) == [(U, U)], html
 
 
 # ── Attribute URLs the sanitizer or an earlier stash already protected ────────
@@ -208,20 +228,29 @@ def test_raw_tag_without_closing_bracket_stays_text_in_inline_blocks(driver_path
 # fixed classes; images were already set aside; a paragraph escapes a tag
 # without its closing ">")
 
+# The paragraph pass escapes the whole text of a tag without its closing ">"
+# before linking, so the escaped closing quote still runs into the link built
+# from the URL in it ("&quot" in the href, "&quot" in the text, ";" after).
+# That is how master renders it; this change leaves the paragraph pass alone.
+_P_NO_CLOSE_LINK = (U + '"', U + '&quot')
+
 _ALREADY_KEPT = {
-    'paragraph-title': (f'<a href="api/x" title="{U}">t', [('p', []), ('a', ['href'])]),
-    'paragraph-span-title': (f'<span title="{U}">t', [('p', []), ('span', [])]),
-    'paragraph-img-alt': (f'<img src="api/x" alt="{U}">', [('p', []), ('img', ['src', 'alt'])]),
-    'list-item-img-alt': (f'- <img src="api/x" alt="{U}">', [('ul', []), ('li', []), ('img', ['src', 'alt'])]),
-    'paragraph-no-close': (f'<a href="api/x" download="{U}"', [('p', []), ('a', ['href', 'target', 'rel'])]),
+    'paragraph-title': (f'<a href="api/x" title="{U}">t', [('p', []), ('a', ['href'])], [('api/x', 't')]),
+    'paragraph-span-title': (f'<span title="{U}">t', [('p', []), ('span', [])], []),
+    'paragraph-img-alt': (f'<img src="api/x" alt="{U}">', [('p', []), ('img', ['src', 'alt'])], []),
+    'list-item-img-alt': (f'- <img src="api/x" alt="{U}">', [('ul', []), ('li', []), ('img', ['src', 'alt'])], []),
+    'paragraph-no-close': (f'<a href="api/x" download="{U}"', [('p', []), ('a', ['href', 'target', 'rel'])], [_P_NO_CLOSE_LINK]),
 }
 
 
-@pytest.mark.parametrize("markdown,expected_tags", list(_ALREADY_KEPT.values()), ids=list(_ALREADY_KEPT))
-def test_attribute_urls_already_kept_stay_kept(driver_path, markdown, expected_tags):  # noqa: F811
+@pytest.mark.parametrize(
+    "markdown,expected_tags,expected_links", list(_ALREADY_KEPT.values()), ids=list(_ALREADY_KEPT)
+)
+def test_attribute_urls_already_kept_stay_kept(driver_path, markdown, expected_tags, expected_links):  # noqa: F811
     html = _render(driver_path, markdown)
     assert _parse(html).tags == expected_tags, html
     _assert_no_markup_in_attribute_values(html)
+    assert _links(html) == expected_links, html
 
 
 # ── Text with a stray "<" in a list item, table cell or heading is kept ───────
@@ -238,6 +267,130 @@ _ANGLE_TEXT = {
 @pytest.mark.parametrize("markdown,expected", list(_ANGLE_TEXT.values()), ids=list(_ANGLE_TEXT))
 def test_stray_angle_bracket_text_is_kept_in_inline_blocks(driver_path, markdown, expected):  # noqa: F811
     assert _render(driver_path, markdown) == expected
+
+
+# ── A bracketed address in a list item, heading or table cell ────────────────
+# <https://...> is not a tag: the URL in it is linked exactly as on master, with
+# the brackets left as text around the link and never inside its href.
+# (markdown, exact rendered HTML captured from master with this harness,
+#  [(exact href value, exact link text)])
+
+_BRACKETED = {
+    'list-item': (
+        '- see <https://example.com>',
+        '<ul><li>see <<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>></li></ul>',
+        [('https://example.com', 'https://example.com')],
+    ),
+    'ordered-item': (
+        '1. see <https://example.com>',
+        '<ol><li value="1">see <<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>></li></ol>',
+        [('https://example.com', 'https://example.com')],
+    ),
+    'heading': (
+        '## See <https://docs.python.org/3/>',
+        '<h2>See <<a href="https://docs.python.org/3/" target="_blank" rel="noopener">https://docs.python.org/3/</a>></h2>',
+        [('https://docs.python.org/3/', 'https://docs.python.org/3/')],
+    ),
+    'table-cell': (
+        '| a | b |\n|---|---|\n| x | <https://example.com> |',
+        '\n<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>x</td><td><<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>></td></tr></tbody></table>\n',
+        [('https://example.com', 'https://example.com')],
+    ),
+    'http-scheme': (
+        '- <http://example.com/x>',
+        '<ul><li><<a href="http://example.com/x" target="_blank" rel="noopener">http://example.com/x</a>></li></ul>',
+        [('http://example.com/x', 'http://example.com/x')],
+    ),
+    'query-string': (
+        '- <https://example.com/a?b=1&c=2>',
+        '<ul><li><<a href="https://example.com/a?b=1&amp;c=2" target="_blank" rel="noopener">https://example.com/a?b=1&amp;c=2</a>></li></ul>',
+        [('https://example.com/a?b=1&c=2', 'https://example.com/a?b=1&c=2')],
+    ),
+    'entity-encoded-brackets': (
+        '- see &lt;https://example.com&gt; ok',
+        '<ul><li>see <<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>> ok</li></ul>',
+        [('https://example.com', 'https://example.com')],
+    ),
+    'blockquote-list-item': (
+        '> - <https://example.com>',
+        '<blockquote><ul><li><<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>></li></ul></blockquote>',
+        [('https://example.com', 'https://example.com')],
+    ),
+    'nested-blockquote-heading': (
+        '> > ## <https://docs.python.org/3/>',
+        '<blockquote><blockquote><h2><<a href="https://docs.python.org/3/" target="_blank" rel="noopener">https://docs.python.org/3/</a>></h2></blockquote></blockquote>',
+        [('https://docs.python.org/3/', 'https://docs.python.org/3/')],
+    ),
+    'nested-blockquote-list-item': (
+        '> > - see <https://example.com/a?b=1&c=2> ok',
+        '<blockquote><blockquote><ul><li>see <<a href="https://example.com/a?b=1&amp;c=2" target="_blank" rel="noopener">https://example.com/a?b=1&amp;c=2</a>> ok</li></ul></blockquote></blockquote>',
+        [('https://example.com/a?b=1&c=2', 'https://example.com/a?b=1&c=2')],
+    ),
+    'blockquote-table-cell': (
+        '> | a |\n> |---|\n> | <https://example.com> |',
+        '<blockquote>\n<table><thead><tr><th>a</th></tr></thead><tbody><tr><td><<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>></td></tr></tbody></table>\n</blockquote>',
+        [('https://example.com', 'https://example.com')],
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "markdown,expected_html,expected_links", list(_BRACKETED.values()), ids=list(_BRACKETED)
+)
+def test_bracketed_url_links_as_on_master_in_inline_blocks(
+    driver_path, markdown, expected_html, expected_links  # noqa: F811
+):
+    html = _render(driver_path, markdown)
+    assert _links(html) == expected_links, html
+    _assert_no_markup_in_attribute_values(html)
+    assert html == expected_html
+
+
+# Other schemes and letter cases are not linked by the bare-URL pass, on master
+# or here: the bracketed text stays escaped text, with no link and no href.
+_BRACKETED_UNLINKED = {
+    'uppercase-scheme-list-item': ('- <HTTPS://example.com>', '<ul><li>&lt;HTTPS://example.com&gt;</li></ul>'),
+    'mixed-case-scheme-heading': ('## <Http://example.com/x>', '<h2>&lt;Http://example.com/x&gt;</h2>'),
+    'uppercase-scheme-table-cell': (
+        '| a |\n|---|\n| <HTTPS://example.com> |',
+        '\n<table><thead><tr><th>a</th></tr></thead><tbody><tr><td>&lt;HTTPS://example.com&gt;</td></tr></tbody></table>\n',
+    ),
+    'mailto-list-item': ('- <mailto:a@b.c>', '<ul><li>&lt;mailto:a@b.c&gt;</li></ul>'),
+    'mailto-table-cell': (
+        '| a |\n|---|\n| <mailto:a@b.c> |',
+        '\n<table><thead><tr><th>a</th></tr></thead><tbody><tr><td>&lt;mailto:a@b.c&gt;</td></tr></tbody></table>\n',
+    ),
+    'tel-heading': ('## <tel:+123>', '<h2>&lt;tel:+123&gt;</h2>'),
+    'mailto-nested-blockquote': ('> > - <mailto:a@b.c>', '<blockquote><blockquote><ul><li>&lt;mailto:a@b.c&gt;</li></ul></blockquote></blockquote>'),
+}
+
+
+@pytest.mark.parametrize(
+    "markdown,expected_html", list(_BRACKETED_UNLINKED.values()), ids=list(_BRACKETED_UNLINKED)
+)
+def test_bracketed_address_of_other_schemes_stays_text_as_on_master(driver_path, markdown, expected_html):  # noqa: F811
+    html = _render(driver_path, markdown)
+    assert _links(html) == [], html
+    assert html == expected_html
+
+
+# A URL after a raw "<" in a list item or heading is linked with its "&" and
+# quotes as written: exact href value and exact link text.
+_AFTER_OPEN_ANGLE = {
+    'list-item-query': ('- x<y https://e.com/?a=1&b=2', [('https://e.com/?a=1&b=2', 'https://e.com/?a=1&b=2')]),
+    'heading-download': (f'### <a href="api/x" download="{U}"', [(U, U)]),
+    'list-item-single-quoted': (f"- <a href='{U}'", [(U, U)]),
+    'table-cell-query': ('| a |\n|---|\n| x<y https://e.com/?a=1&b=2 |', [('https://e.com/?a=1&b=2', 'https://e.com/?a=1&b=2')]),
+}
+
+
+@pytest.mark.parametrize(
+    "markdown,expected_links", list(_AFTER_OPEN_ANGLE.values()), ids=list(_AFTER_OPEN_ANGLE)
+)
+def test_url_after_a_raw_angle_bracket_links_cleanly(driver_path, markdown, expected_links):  # noqa: F811
+    html = _render(driver_path, markdown)
+    assert _links(html) == expected_links, html
+    _assert_no_markup_in_attribute_values(html)
 
 
 # ── Ordinary bare URLs autolink exactly as before ─────────────────────────────
