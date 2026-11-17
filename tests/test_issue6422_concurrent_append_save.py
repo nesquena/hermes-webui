@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import sqlite3
+import stat
 from collections import OrderedDict
 from pathlib import Path
 
@@ -274,7 +275,7 @@ def test_durability_eio_propagates_and_leaves_baselines_intact(temp_session_dir,
 
 
 def test_durability_unsupported_errors_degrade_to_success(temp_session_dir, monkeypatch):
-    """Unsupported directory fsync errors (EINVAL, EBADF, PermissionError) degrade to success."""
+    """Unsupported directory fsync errors (EINVAL, EBADF, EACCES) degrade to success."""
     sid = "sess_dur_unsupported"
     s = Session(session_id=sid)
     s.messages = [{"role": "user", "content": "hello", "id": 1}]
@@ -283,42 +284,31 @@ def test_durability_unsupported_errors_degrade_to_success(temp_session_dir, monk
     s.share_created_at = 20000.0
     s._reasoning_effort_saved = "low"
 
-    real_open = os.open
     real_fsync = os.fsync
-    dir_fds = set()
 
-    def tracked_open(path, flags, *args, **kwargs):
-        fd = real_open(path, flags, *args, **kwargs)
-        try:
-            if Path(path).is_dir():
-                dir_fds.add(fd)
-        except Exception:
-            pass
-        return fd
-
-    monkeypatch.setattr("os.open", tracked_open)
-
-    # Test that _fsync_parent_dir absorbs unsupported errors from the underlying OS
     for err in (errno.EINVAL, errno.EBADF, errno.EACCES):
-        def fake_fsync(fd, e=err):
-            if fd in dir_fds:
-                raise OSError(e, "unsupported directory fsync")
+        def fake_fsync(fd, _err=err):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(_err, "unsupported directory fsync")
             return real_fsync(fd)
 
         monkeypatch.setattr("os.fsync", fake_fsync)
+        # The helper classifies the errno itself: no raise for these three.
         _fsync_parent_dir(s.path)
         s.save()
         assert s._reasoning_effort_saved == "medium"
 
-    # Also test PermissionError directly on directory open
+    # A directory handle that cannot even be opened for fsync (the Windows
+    # shape) is the same unsupported case.
+    real_open = os.open
+
     def perm_open(path, flags, *args, **kwargs):
         try:
-            if Path(path).is_dir():
-                raise PermissionError(13, "Permission denied")
-        except PermissionError:
-            raise
-        except Exception:
-            pass
+            is_dir = Path(path).is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            raise PermissionError(errno.EACCES, "Permission denied")
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr("os.open", perm_open)
