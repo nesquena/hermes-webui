@@ -496,8 +496,9 @@ deadline, although a manual fetch eventually succeeds.
 Git maintenance. In a partial clone, maintenance can itself download missing
 historical objects. The updater gives each fetch/pull 60 seconds and disables
 automatic maintenance for that command only; repository configuration is not
-changed. Ref-collision recovery retains its one bounded retry. Check and apply
-requests allow five minutes for the sequential operations and cleanup.
+changed. Ref-collision recovery retains its one bounded retry. Check, apply,
+force-update, and lock-recovery retry requests allow five minutes for the
+sequential operations and cleanup.
 
 **Recovery.** On timeout the updater kills the command's process group on POSIX.
 On Windows it runs the command inside a per-call Job Object and terminates the
