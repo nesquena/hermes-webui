@@ -346,6 +346,8 @@
 
 ### Internal
 
+- **Tests no longer leave chat streams registered for later tests (#9112, refs #8904).** Tests in eight files started a chat, background or btw run through a route and then replaced the worker with a fake, so the real teardown never ran and the stream stayed in `STREAMS` and the related registries. A later test in the same process then saw a live run that wasn't its own, which is why some ordered runs failed while each file passed alone. Each of these tests now removes the stream ids it added when it finishes. Test-only.
+
 - **The test suite can no longer create or change profiles in the real `~/.hermes` (#9079, closes #9078).** When `TMPDIR` was inside the real Hermes home, a test could resolve the platform default home and create a real profile there. `tests/conftest.py` now points `HOME` (and the Windows home and app-data variables) at a per-session sandbox before any Agent or WebUI import, so every resolver and child process lands in the sandbox. Tool caches such as the Agent checkouts and the Playwright browsers are linked into it. A best-effort in-process write tripwire (`tests/_real_hermes_root_guard.py`) refuses and records writes into a real root, and a session-end check fails the run if any real root's `profiles/` listing changed. Test-only.
 
 - **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
