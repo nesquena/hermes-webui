@@ -103,7 +103,9 @@ def test_same_frame_snapshot_preserves_bottom_distance_and_unpinned_state():
     assert "bottom" in capture
     assert "readerAwayFromBottom?false:_shouldFollowMessagesOnDomReplace()" in _compact(capture)
     assert "readerAwayFromBottom?true:_messageUserUnpinned" in _compact(capture)
-    assert "maxTop-Math.max(0,bottom)" in restore
+    # Bounce fix (Sep 6 2026): pinned branch targets the POST-rebuild tail
+    # (maxTop) exactly — the pre-rebuild bottom gap is stale after growth.
+    assert "?maxTop" in _compact(restore)
     assert "_messageUserUnpinned=true" in restore
     assert "_scrollPinned=false" in restore
     assert "renderMessages({...(options||{}),preserveScroll:true});" in wrapper

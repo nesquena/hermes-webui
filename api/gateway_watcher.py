@@ -9,6 +9,7 @@ This enables real-time session list updates in the sidebar without
 requiring any changes to hermes-agent.
 """
 import hashlib
+import json
 import logging
 import os
 import queue
@@ -27,12 +28,27 @@ logger = logging.getLogger(__name__)
 # ── State hash tracking ─────────────────────────────────────────────────────
 
 def _snapshot_hash(sessions: list) -> str:
-    """Create a lightweight hash of session IDs and timestamps for change detection."""
-    key = '|'.join(
-        f"{s['session_id']}:{s.get('updated_at', 0)}:{s.get('message_count', 0)}"
-        for s in sorted(sessions, key=lambda x: x['session_id'])
-    )
-    return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
+    """Hash the complete published session payload for change detection.
+
+    Every emitted field participates, not only the id / activity timestamp /
+    message count triple. Projection authority (compression collapse,
+    ``model_config`` lineage markers, title promotion) can change a row's
+    ``title``, ``created_at`` or source metadata while that triple stays fixed;
+    hashing only the triple let the projection rerun, keep ``_last_sessions``
+    stale and emit no ``sessions_changed`` event. Entries are canonicalised
+    (sorted keys, stable separators) and ordered by ``session_id`` so the hash
+    is deterministic and independent of sidebar ordering; cost is bounded by
+    the projection's own row limit.
+    """
+    digest = hashlib.md5(usedforsecurity=False)
+    for session in sorted(sessions, key=lambda x: str(x.get('session_id') or '')):
+        digest.update(
+            json.dumps(
+                session, sort_keys=True, separators=(',', ':'), default=str
+            ).encode('utf-8', 'replace')
+        )
+        digest.update(b'\x1e')
+    return digest.hexdigest()
 
 
 # Sources excluded from the WebUI sidebar projection. Must match the default
@@ -70,10 +86,10 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
     # are always present (``source`` is required for the projection to run at
     # all); the rest are optional on older agent schemas and filtered below.
     _PROJECTION_SESSION_COLS = (
-        'id', 'source', 'session_source', 'title', 'model', 'message_count',
-        'started_at', 'ended_at', 'end_reason', 'parent_session_id', 'archived',
-        'user_id', 'chat_id', 'chat_type', 'thread_id', 'session_key',
-        'origin_chat_id', 'origin_user_id', 'platform',
+        'id', 'source', 'session_source', 'model_config', 'title', 'model',
+        'message_count', 'started_at', 'ended_at', 'end_reason',
+        'parent_session_id', 'archived', 'user_id', 'chat_id', 'chat_type',
+        'thread_id', 'session_key', 'origin_chat_id', 'origin_user_id', 'platform',
     )
     try:
         with closing(open_state_db_readonly(db_path)) as conn:

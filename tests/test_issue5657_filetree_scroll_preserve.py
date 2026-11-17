@@ -21,7 +21,7 @@ UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _render_file_tree_body() -> str:
-    start = UI_JS.index("function renderFileTree()")
+    start = UI_JS.index("function renderFileTree(")
     end = UI_JS.index("\nfunction ", start + 1)
     return UI_JS[start:end]
 
