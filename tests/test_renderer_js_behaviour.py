@@ -2110,22 +2110,29 @@ class TestLongGeneratedImageTagOpaque9072Round10:
 
 
 class TestPendingUnmarkedTagGrowth9072Round10:
-    """Greptile round 10 on #9072: each pending unmarked `<span` recomputed
+    """Round 10 on #9072: each pending unmarked `<span` recomputed
     `str.indexOf('>', i+1)` without caching. For `'![' + '<span '.repeat(n)
-    + '>'` that rescanned the whole suffix per opener (16k->128k reps went
-    ~50ms->~953ms). Cache the monotonically advancing next-tag-end search,
-    including a missing result."""
+    + '>'` that rescanned the whole suffix per opener. Cache the
+    monotonically advancing next-tag-end search, including a missing result.
+
+    The payload sizes are the actual court-sized inputs: 16k/32k/64k/128k
+    repetitions. With the cached fix, 16k->128k grows ~7x (27->191 ms);
+    restoring only the preceding ui.js (87653503) grows ~26x (32->830 ms).
+    The 12x ceiling below separates those two arms with headroom.
+    """
 
     def test_repeated_pending_spans_grow_near_linear(self, growth_driver_path):
         def payload(n):
             return '![' + '<span ' * n + '>'
 
-        small_ms, large_ms = _render_timings_ms(
-            growth_driver_path, [payload(2000), payload(16000)]
+        ms_16k, ms_32k, ms_64k, ms_128k = _render_timings_ms(
+            growth_driver_path,
+            [payload(16000), payload(32000), payload(64000), payload(128000)],
         )
-        # 8x the bytes: linear work lands near 8x (loose headroom); the
-        # rescan-every-opener form grows ~19x over the same range.
-        assert large_ms < small_ms * 12, (
+        # 8x the bytes (16k->128k): near-linear work lands near 8x (loose
+        # headroom); the rescan-every-opener form grows ~26x over this range.
+        assert ms_128k < ms_16k * 12, (
             'pending <span openers must not rescan the suffix per opener: '
-            f'16k={small_ms:.1f} ms, 128k={large_ms:.1f} ms'
+            f'16k={ms_16k:.1f} ms, 32k={ms_32k:.1f} ms, '
+            f'64k={ms_64k:.1f} ms, 128k={ms_128k:.1f} ms'
         )
