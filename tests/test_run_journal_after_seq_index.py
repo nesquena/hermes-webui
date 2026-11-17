@@ -1,5 +1,6 @@
 """Equivalence tests for the read_run_events(after_seq=...) offset index."""
 
+import builtins
 import gzip
 import json
 import os
@@ -26,7 +27,10 @@ def _oracle(path, after_seq):
 
 
 def _row(seq, **extra):
-    return json.dumps({"seq": seq, "event": "token", "payload": {"t": "x" * 20, **extra}}) + "\n"
+    return json.dumps(
+        {"seq": seq, "event": "token", "payload": {"t": "x" * 20, **extra}},
+        ensure_ascii=False,
+    ) + "\n"
 
 
 def _write(path, text, mode="w"):
@@ -94,7 +98,11 @@ def test_truncation_and_inode_swap(tmp_path):
 def test_non_monotonic_and_crlf_and_utf8(tmp_path):
     path = rj._run_path(SID, RID, session_dir=tmp_path)
     seqs = list(range(1, 700)) + [5, 3] + list(range(700, 1300))
-    _write(path, "".join(_row(s, u="é\u2028") for s in seqs) + "\xff\n")
+    raw = "".join(_row(s, u="é\u2028") for s in seqs).encode("utf-8") + b"\xff\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    assert b"\xe2\x80\xa8" in raw and raw.endswith(b"\xff\n")
+    _check(tmp_path, [0, 4, 5, 6, 600, 1299, 2000])
     _check(tmp_path, [0, 4, 5, 6, 600, 1299, 2000])
     _write(path, "\r\n".join(_row(s).strip() for s in range(1, 600)) + "\r\n")
     _check(tmp_path, [0, 10, 598, 700])
@@ -113,6 +121,73 @@ def test_missing_bad_seq_and_gz(tmp_path):
         gz.write("".join(_row(i) for i in range(1, 200)))
     assert rj._read_jsonl_after_seq_indexed(path, 0) is None
     _check(tmp_path, [0, 150, 399])
+
+
+def test_warm_tail_does_not_require_pread(tmp_path, monkeypatch):
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    _write(path, "".join(_row(i) for i in range(1, 521)))
+    _check(tmp_path, [0])
+    monkeypatch.delattr(os, "pread")
+    got = rj.read_run_events(SID, RID, after_seq=510, session_dir=tmp_path)
+    assert [event["seq"] for event in got["events"]] == list(range(511, 521))
+    assert got == _oracle(path, 510)
+
+
+def test_oversized_malformed_rows_are_not_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr(rj, "_AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES", 64, raising=False)
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    damaged = "x" * 100 + "é"
+    _write(path, "".join(_row(i) for i in range(1, 301)) + damaged + "\n" + _row(301))
+    first = rj.read_run_events(SID, RID, after_seq=250, session_dir=tmp_path)
+    assert first == _oracle(path, 250)
+    assert first["malformed"] == [{"line": 301, "raw": damaged}]
+    assert str(path) not in rj._after_seq_index
+    second = rj.read_run_events(SID, RID, after_seq=250, session_dir=tmp_path)
+    assert second == first == _oracle(path, 250)
+    assert str(path) not in rj._after_seq_index
+
+
+def _append_completed_run(tmp_path, run_id):
+    for seq, event in enumerate(("token", "done", "stream_end"), start=1):
+        rj.append_run_event(SID, run_id, event, {"seq": seq}, session_dir=tmp_path)
+    path = rj._run_path(SID, run_id, session_dir=tmp_path)
+    aged = time.time() - 7200
+    os.utime(path, (aged, aged))
+    return path
+
+
+def test_live_open_retention_race_falls_back_to_archive(tmp_path, monkeypatch):
+    path = _append_completed_run(tmp_path, RID)
+    real_open = builtins.open
+    swept = []
+
+    def open_with_sweep(file, *args, **kwargs):
+        if os.fspath(file) == os.fspath(path) and args and args[0] == "rb" and not swept:
+            counters = rj.sweep_run_journal(
+                session_dir=tmp_path, ttl_days=0.001,
+                max_runs_per_session=0, max_bytes_per_session=0,
+            )
+            assert counters["archived_files"] == 1
+            assert counters["errors"] == 0
+            swept.append(counters)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", open_with_sweep)
+    got = rj.read_run_events(SID, RID, after_seq=1, session_dir=tmp_path)
+    assert swept and not path.exists()
+    assert [event["seq"] for event in got["events"]] == [2, 3]
+
+
+def test_already_archived_after_seq_control(tmp_path):
+    path = _append_completed_run(tmp_path, RID)
+    counters = rj.sweep_run_journal(
+        session_dir=tmp_path, ttl_days=0.001,
+        max_runs_per_session=0, max_bytes_per_session=0,
+    )
+    assert counters["archived_files"] == 1 and counters["errors"] == 0
+    assert not path.exists()
+    got = rj.read_run_events(SID, RID, after_seq=1, session_dir=tmp_path)
+    assert [event["seq"] for event in got["events"]] == [2, 3]
 
 
 def test_microbenchmark_tail_read(tmp_path):

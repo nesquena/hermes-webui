@@ -815,6 +815,10 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
 
 _AFTER_SEQ_INDEX_MAX_PATHS = 64
 _AFTER_SEQ_INDEX_STRIDE = 256
+# The path LRU alone does not bound memory: one malformed row can be arbitrarily
+# large. Keep at most 1 MiB of malformed UTF-8 bytes per indexed path. Beyond
+# this budget the current response remains complete, but that path is not cached.
+_AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES = 1024 * 1024
 _after_seq_index: "OrderedDict[str, dict]" = OrderedDict()
 _after_seq_index_lock = threading.Lock()
 
@@ -844,15 +848,21 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
                 idx = None
             if idx is None:
                 idx = {"id": (st.st_dev, st.st_ino), "size": 0, "maxes": [float("-inf")], "offs": [0],
-                       "lines": [0], "malformed": [], "rows": 0}
+                       "lines": [0], "malformed": [], "malformed_bytes": 0, "rows": 0}
             pos = bisect.bisect_right(idx["maxes"], threshold) - 1
             start, line_no = idx["offs"][pos], idx["lines"][pos]
             fh.seek(start)
-            if start and os.pread(fh.fileno(), 1, start - 1) != b"\n":
-                return None
+            if start:
+                checkpoint = fh.tell()
+                try:
+                    fh.seek(start - 1)
+                    if fh.read(1) != b"\n":
+                        return None
+                finally:
+                    fh.seek(checkpoint)
             data = fh.read()
     except FileNotFoundError:
-        return [], []
+        return None
     except (OSError, TypeError, ValueError):
         return None
     if b"\r" in data:
@@ -890,15 +900,19 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
                 malformed.append({"line": line_no, "raw": raw})
                 if extend:
                     idx["malformed"].append(malformed[-1])
+                    idx["malformed_bytes"] += len(raw_b)
         if extend:
             idx["size"] = line_end
         off = line_end
     if archived is not None and os.path.lexists(archived):
         return None
     with _after_seq_index_lock:
-        _after_seq_index[key] = idx
-        while len(_after_seq_index) > _AFTER_SEQ_INDEX_MAX_PATHS:
-            _after_seq_index.popitem(last=False)
+        if idx["malformed_bytes"] > _AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES:
+            _after_seq_index.pop(key, None)
+        else:
+            _after_seq_index[key] = idx
+            while len(_after_seq_index) > _AFTER_SEQ_INDEX_MAX_PATHS:
+                _after_seq_index.popitem(last=False)
     return events, malformed
 
 
