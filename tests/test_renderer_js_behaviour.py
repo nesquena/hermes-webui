@@ -2035,3 +2035,40 @@ class TestImageAltHtmlTags9072:
     def test_multiple_html_tags_in_alt(self, driver_path):
         out = _render(driver_path, '![A<span>x</span><svg></svg>](/b.png)')
         assert out.count('<img') == 1 and 'src="/b.png"' in out, repr(out)
+
+
+class TestUnfinishedOpenerDoesNotEatGeneratedImage9072:
+    """Greptile P2 round 9 (#9072): the round-8 `pend.length===0` guard let an
+    unfinished `![` opener consume an image already rendered by an earlier
+    heading/list pass. A generated tag carries the renderer's own markers
+    (class="msg-…" / loading="lazy"); it must stay opaque even while an opener
+    is pending. Genuine user HTML inside an image description has none of those
+    markers and must remain eligible for pairing (round-8 control).
+    """
+
+    RECIPE = '![unfinished\n# ![x](/a.png) tail ](/two.png)'
+    LIST_RECIPE = '![unfinished\n- ![x](/a.png) tail ](/two.png)'
+
+    def test_heading_generated_image_stays_rendered(self, driver_path):
+        out = _render(driver_path, self.RECIPE)
+        # The inner image renders once as a real <img> and the trailing prose
+        # is left intact; the unfinished opener must not rebuild a second
+        # image out of the generated tag's attributes.
+        assert out.count('<img') == 1, repr(out)
+        assert 'class=&quot;msg-media' not in out, (
+            'generated tag attributes leaked into a rebuilt alt: ' + repr(out))
+        assert 'tail ](/two.png)' in out, (
+            'unfinished opener consumed the literal tail: ' + repr(out))
+
+    def test_list_generated_image_stays_rendered(self, driver_path):
+        out = _render(driver_path, self.LIST_RECIPE)
+        assert out.count('<img') == 1, repr(out)
+        assert 'class=&quot;msg-media' not in out, (
+            'generated tag attributes leaked into a rebuilt alt: ' + repr(out))
+        assert 'tail ](/two.png)' in out, repr(out)
+
+    def test_user_html_in_alt_still_pairs(self, driver_path):
+        # Guard against over-correcting: a genuine <span> in an alt has no
+        # renderer marker and must still produce the image (round-8 fix).
+        out = _render(driver_path, '![A<span>logo</span>](/a.png)')
+        assert out.count('<img') == 1 and 'src="/a.png"' in out, repr(out)

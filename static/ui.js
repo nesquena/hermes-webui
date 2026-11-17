@@ -11101,11 +11101,27 @@ function renderMd(raw){
         // Only media/img tags can carry a rendered URL or alt with `![` in an
         // attribute. Skipping formatting tags (<code>, <strong>, ...) here
         // would break opener pairing across them, e.g. ![`logo`](url).
-        if(pend.length===0&&/^<(?:img|span|svg|a|video|audio|source)\b/i.test(str.slice(i,i+10))){
+        // Two cases must be opaque:
+        //   * no opener pending — the tag cannot be part of an image alt, so
+        //     skip it wholesale (round-7 re-entry guard);
+        //   * a tag emitted by an earlier image pass — it carries the
+        //     renderer's own markers (class="msg-…" or loading="lazy"). An
+        //     unfinished `![` opener must not reach across such a tag and
+        //     consume the image it already rendered (greptile P2: unfinished
+        //     examples ate a later heading/list image), so skip the tag and
+        //     drop any opener still pending before it. Genuine user HTML in an
+        //     alt (`<span>logo</span>`) has none of these markers and stays
+        //     eligible for pairing.
+        const tag=str.slice(i,i+220);
+        if(/^<(?:img|span|svg|a|video|audio|source)\b/i.test(tag)){
           const gt=str.indexOf('>',i+1);
           if(gt>=0){
-            out+=str.slice(copy,gt+1);
-            copy=gt+1;i=gt+1;continue;
+            const generated=/\b(?:class="msg-|loading="lazy")/.test(tag.slice(0,gt-i));
+            if(pend.length===0||generated){
+              if(generated)pend.length=0;
+              out+=str.slice(copy,gt+1);
+              copy=gt+1;i=gt+1;continue;
+            }
           }
         }
       }
