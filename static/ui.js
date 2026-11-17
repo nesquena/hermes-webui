@@ -11101,11 +11101,11 @@ function renderMd(raw){
         // Only media/img tags can carry a rendered URL or alt with `![` in an
         // attribute. Skipping formatting tags (<code>, <strong>, ...) here
         // would break opener pairing across them, e.g. ![`logo`](url).
-        if(/^<(?:img|span|svg|a|video|audio|source)\b/i.test(str.slice(i,i+10))){
+        if(pend.length===0&&/^<(?:img|span|svg|a|video|audio|source)\b/i.test(str.slice(i,i+10))){
           const gt=str.indexOf('>',i+1);
           if(gt>=0){
             out+=str.slice(copy,gt+1);
-            copy=gt+1;i=gt+1;pend.length=0;continue;
+            copy=gt+1;i=gt+1;continue;
           }
         }
       }

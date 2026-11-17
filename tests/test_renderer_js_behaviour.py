@@ -1996,3 +1996,42 @@ process.stdout.write(_mdImagePass(
                 name + ': emitted SVG alt must stay opaque and unmodified: ' + repr(out))
             assert out.count('alt=') == 1, (
                 name + ': no second image was rebuilt out of the emitted tag: ' + repr(out))
+
+
+class TestImageAltHtmlTags9072:
+    """Round-8 residual (#9072, greptile P2): user HTML tags inside an image
+    description must stay eligible for image pairing. The round-7 opaque-tag
+    skip made any <span>/<svg>/<a>/... tag hide a pending `![` opener, so
+    ![A<span>logo</span>](/a.png) stayed literal Markdown (and became a bare
+    link with a stray '!' for an HTTPS destination). Generated tags emitted by
+    an earlier image pass still carry `![` in their own attributes and must
+    remain opaque; the discriminator is whether an opener is already pending
+    at the tag, not the tag name.
+    """
+
+    RECIPE = '![A<span>logo</span>](/a.png)'
+    HTTPS_RECIPE = '![A<span>logo</span>](https://example.com/a.png)'
+
+    def test_html_tag_in_alt_still_renders_image(self, driver_path):
+        out = _render(driver_path, self.RECIPE)
+        assert out.count('<img') == 1, (
+            'image description with <span> must still produce one image: ' + repr(out))
+        assert 'src="/a.png"' in out, (
+            'image destination must be preserved: ' + repr(out))
+        assert 'logo' in out, (
+            'description text must survive into the alt: ' + repr(out))
+        assert '![A<span>' not in out, (
+            'image must not be left as literal Markdown: ' + repr(out))
+
+    def test_html_tag_in_alt_https_destination(self, driver_path):
+        out = _render(driver_path, self.HTTPS_RECIPE)
+        assert out.count('<img') == 1, (
+            'HTTPS image with <span> in alt must render one image, not a bare '
+            'link with a stray "!": ' + repr(out))
+        assert '<a href=' not in out, (
+            'must not degrade to a plain markdown link: ' + repr(out))
+        assert 'src="https://example.com/a.png"' in out, repr(out)
+
+    def test_multiple_html_tags_in_alt(self, driver_path):
+        out = _render(driver_path, '![A<span>x</span><svg></svg>](/b.png)')
+        assert out.count('<img') == 1 and 'src="/b.png"' in out, repr(out)
