@@ -10817,7 +10817,15 @@ def _reconcile_prefix_occurrence_ownership(
 
     Narrow by construction:
       * a row that already carries a valid ownership id is never re-identified;
-      * a row the CURRENT turn owns (``_active_turn_token``) is never touched;
+      * a row the CURRENT turn owns is never touched - proven by THIS settle's
+        ``_active_turn_token`` or by position (the row the Agent produced for
+        this turn, or the tail checkpoint when the return carries no such
+        row). #8574 review P1 (greptile-apps[bot] 2026-11-13): the submitted
+        prompt's TEXT only narrows the candidates, it never proves ownership
+        by itself - a repeated prompt has genuine HISTORICAL occurrences, and
+        excluding every row that repeats the prompt skipped their ownership
+        repair, so the identity dedup deleted one of them while the display
+        transcript kept it;
       * a content group whose rows share ONE exact key is a replay, and the
         whole group is left untouched so the legacy collapse still collapses it;
       * only a content group with TWO OR MORE distinct exact keys is split, and
@@ -10856,6 +10864,48 @@ def _reconcile_prefix_occurrence_ownership(
                 return text
         return None
 
+    def _agent_current_turn_user_row(prompt):
+        """The user row the AGENT produced for THIS turn, or ``None``.
+
+        The current turn is appended at the tail of the Agent's return, so its
+        own user row is the LAST user row there whose text matches the
+        submitted prompt - the same last-match rule ``_proven_turn_split``
+        applies. Historical rows that repeat the prompt verbatim precede it.
+        """
+        found = None
+        for row in result_messages or []:
+            if (
+                isinstance(row, dict)
+                and row.get("role") == "user"
+                and _active_turn_user_text_matches(row, prompt)
+            ):
+                found = row
+        return found
+
+    def _proves_current_turn_row(row, index, agent_row):
+        """True only when ``row`` is PROVEN to be THIS turn's own row.
+
+        #8574 review P1 (greptile-apps[bot] 2026-11-13): text equality alone
+        is not proof. A historical turn can repeat the submitted prompt
+        verbatim at a different timestamp; treating that row as the current
+        turn's own excluded it from ownership repair, so the final identity
+        dedup deleted a genuine turn the display transcript still showed. The
+        prompt therefore only ever NARROWS the candidates - two positional
+        proofs decide which one is this turn's:
+
+        * the row IS the row the Agent produced for this turn. The settle
+          persists that very row object, so object identity names it exactly;
+          a historical row with identical text is a different object and never
+          qualifies;
+        * when the Agent's return carries no matching user row at all, the
+          only row this settle can own inside the reconciled list is the
+          checkpoint this process persisted for the turn before the Agent ran,
+          which the settle keeps at the tail of the list.
+        """
+        if agent_row is not None:
+            return row is agent_row
+        return index == len(previous_context) - 1
+
     def _current_turn_row_ids():
         """The current-turn proof for each row, plus whether a proof exists.
 
@@ -10866,15 +10916,18 @@ def _reconcile_prefix_occurrence_ownership(
         * the row's ``_active_turn_token`` equals the token THIS settle minted
           (the token-authoritative path - the sync route mints one for an
           image turn);
-        * the row's text IS this turn's submitted prompt (the tokenless path -
-          a text turn carries no token at all, so token presence cannot
-          identify it).
+        * the row IS the turn's own row, proven by position - the row the
+          Agent produced for this turn (the tokenless path, where a text turn
+          carries no token at all, so token presence cannot identify it).
 
         The SECOND proof is what a historical token-bearing row must not be
         able to claim: it repeats an OLD prompt, and this turn's prompt is a
-        different string, so it never matches. The proof is the row's own
-        CONTENT, so it holds whether or not this turn's row is already part
-        of the list being reconciled.
+        different string, so it never matches. #8574 review P1
+        (greptile-apps[bot] 2026-11-13): the proof must exclude ONLY this
+        turn's own row, never every row whose text repeats the submitted
+        prompt - a repeated prompt has genuine historical occurrences that
+        each need their own ownership, or the identity dedup collapses one of
+        them out of the model context while the display keeps it.
 
         The returned flag says whether this settle has ANY current-turn
         authority at all. With authority in hand only a PROVEN row is
@@ -10891,10 +10944,13 @@ def _reconcile_prefix_occurrence_ownership(
         prompt = _current_turn_prompt()
         if prompt is not None:
             has_authority = True
+            agent_row = _agent_current_turn_user_row(prompt)
             for idx, row in enumerate(previous_context):
                 if not isinstance(row, dict) or row.get("role") != "user":
                     continue
-                if _active_turn_user_text_matches(row, prompt):
+                if _active_turn_user_text_matches(
+                    row, prompt
+                ) and _proves_current_turn_row(row, idx, agent_row):
                     proofs.add(("row", idx))
         return proofs, has_authority
 

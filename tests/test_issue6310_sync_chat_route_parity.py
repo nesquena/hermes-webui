@@ -124,19 +124,32 @@ def _contents(rows):
     return [r.get("content") for r in rows if isinstance(r, dict)]
 
 
-def _sync_http_send(tmp_path, monkeypatch, sid, history, prompt, answer, reseed=True):
+def _sync_http_send(
+    tmp_path,
+    monkeypatch,
+    sid,
+    history,
+    prompt,
+    answer,
+    reseed=True,
+    agent_factory=None,
+):
     """One real synchronous ``POST /api/chat``; returns the cold-reloaded session.
 
     ``reseed=False`` keeps whatever the previous request persisted for ``sid``
     on disk and sends a follow-up into it — the cold-load shape, where the
-    previous turn's persisted result is this turn's input.
+    previous turn's persisted result is this turn's input. ``agent_factory``
+    substitutes a different inference seam (same signature as
+    ``_agent_class``); the default echoes the sent history verbatim.
     """
     import server as server_mod
     from api import models
 
     _state_patches(tmp_path, monkeypatch)
     monkeypatch.setitem(
-        sys.modules, "run_agent", SimpleNamespace(AIAgent=_agent_class(sid, answer))
+        sys.modules,
+        "run_agent",
+        SimpleNamespace(AIAgent=(agent_factory or _agent_class)(sid, answer)),
     )
     if reseed:
         _new_session(tmp_path, sid, history)
@@ -1993,4 +2006,220 @@ def test_sync_chat_cold_follow_up_retains_the_replacement(tmp_path, monkeypatch)
     assert "higher" in _contents(follow_up.context_messages), (
         "the retained history must still reach the model context; got "
         f"{_contents(follow_up.context_messages)}"
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# #8574 review P1 (greptile-apps[bot] 2026-11-13, head dec6a01ba): "Earlier
+# repeated prompts disappear".
+#
+# The history carries two genuine legacy ``higher`` turns with no WebUI ids,
+# this turn's submitted prompt is also ``higher``, and the Agent returns a
+# projection that does NOT match the sent history. ``_current_turn_row_ids()``
+# treated EVERY historical user row matching the submitted prompt as the
+# current turn's own row, so both historical turns skipped ownership repair
+# and the final identity dedup deleted the second ``higher`` from the
+# model-facing context while the display transcript kept it.
+# ────────────────────────────────────────────────────────────────────────
+
+_P1_REPEATED_PROMPT_HISTORY = [
+    {"role": "user", "content": "higher", "timestamp": 100.0},
+    {"role": "assistant", "content": "guess 50", "timestamp": 101.0},
+    {"role": "user", "content": "higher", "timestamp": 102.0},
+    {"role": "assistant", "content": "guess 75", "timestamp": 103.0},
+]
+
+
+def _changed_history_agent_class(sid, answer):
+    """Fake Agent that rewrites a HISTORICAL answer inside its return.
+
+    The only substitution is inference: the Agent returns the sent history
+    with one historical assistant answer replaced, then appends the freshly
+    submitted prompt plus its reply. That is the reviewer's shape — a
+    projection that does not match the sent history, so the settle's replay
+    check keeps the raw pre-turn context without protected rows.
+    """
+
+    class ChangedHistoryAgent:
+        def __init__(self, **_kwargs):
+            self.session_id = sid
+            self.platform = "webui"
+            self.model = "test-model"
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+
+        def run_conversation(
+            self,
+            user_message=None,
+            conversation_history=None,
+            persist_user_message=None,
+            **_kwargs,
+        ):
+            prompt = (
+                persist_user_message if persist_user_message is not None else user_message
+            )
+            msgs = [dict(r) for r in (conversation_history or []) if isinstance(r, dict)]
+            for row in msgs:
+                if row.get("role") == "assistant" and row.get("content") == "guess 75":
+                    row["content"] = "totally unrelated"
+                    break
+            msgs.append({"role": "user", "content": prompt})
+            msgs.append({"role": "assistant", "content": answer})
+            return {
+                "messages": msgs,
+                "final_response": answer,
+                "completed": True,
+                "current_turn_user_idx": len(msgs) - 2,
+                "turn_id": "i8574-p1-turn",
+            }
+
+    return ChangedHistoryAgent
+
+
+def test_sync_chat_keeps_every_historical_occurrence_of_a_repeated_prompt(
+    tmp_path, monkeypatch
+):
+    """A repeated submitted prompt must not erase earlier genuine turns.
+
+    Two id-less legacy ``higher`` turns sit in the history at DIFFERENT
+    timestamps and this turn submits ``higher`` again while the Agent changes
+    a historical answer. The current-turn proof used to match every row whose
+    text equalled the submitted prompt, so both historical turns were treated
+    as the current turn's own rows: they skipped ownership repair, and the
+    final identity dedup collapsed the second ``higher`` out of the persisted
+    model context while the display transcript kept it.
+    """
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p1-repeated-prompt",
+        _P1_REPEATED_PROMPT_HISTORY,
+        "higher",
+        "guess 90",
+        agent_factory=_changed_history_agent_class,
+    )
+    assert reloaded is not None
+    context = reloaded.context_messages
+    display = reloaded.messages
+
+    context_higher = _contents(context).count("higher")
+    display_higher = _contents(display).count("higher")
+    assert context_higher == 2, (
+        "the model context must keep BOTH genuine historical `higher` turns "
+        "when the submitted prompt repeats them; got "
+        f"{context_higher} in {_contents(context)}"
+    )
+    assert display_higher == 3, (
+        "the display transcript keeps the two historical turns plus this "
+        f"turn's own prompt; got {display_higher} in {_contents(display)}"
+    )
+    # The retained history must keep its ordered shape in the model context.
+    assert _contents(context) == ["higher", "guess 50", "higher", "guess 75"], (
+        "the persisted context must carry the complete retained history in "
+        f"order; got {_contents(context)}"
+    )
+    # Each retained occurrence is INDEPENDENTLY OWNED, which is what keeps the
+    # identity dedup from collapsing a genuine turn the display still shows.
+    kept = [
+        r for r in context if isinstance(r, dict) and r.get("content") == "higher"
+    ]
+    kept_ids = [r.get("id") for r in kept]
+    assert len(kept_ids) == 2 and all(kept_ids) and kept_ids[0] != kept_ids[1], (
+        "both retained historical occurrences must carry distinct ownership "
+        f"ids; got ids={kept_ids} rows={kept}"
+    )
+    # The historical user rows the display keeps are the ones the model
+    # context must keep: the two surfaces agree on the retained history.
+    display_higher_rows = [
+        r for r in display if isinstance(r, dict) and r.get("content") == "higher"
+    ]
+    assert len(display_higher_rows) == 3, (
+        "the display transcript must keep the two historical turns and this "
+        f"turn's prompt; got {_contents(display)}"
+    )
+
+
+def test_reconcile_does_not_treat_a_repeated_historical_prompt_as_current():
+    """Only the Agent's OWN row is the current turn, never a repeated prompt.
+
+    #8574 review P1 (greptile-apps[bot] 2026-11-13): two genuine historical
+    ``higher`` turns sit at different timestamps and the submitted prompt is
+    ``higher`` again. The prompt-text proof used to mark BOTH historical rows
+    as the current turn's own rows, so they skipped ownership repair. Here the
+    settle appended the Agent's row for this turn (shared object, id 9): the
+    historical occurrences must still be counted and minted their own ids.
+    """
+    from api.streaming import _deduplicate_context_messages
+    from api.streaming import _reconcile_prefix_occurrence_ownership
+
+    history = [
+        {"role": "user", "content": "higher", "timestamp": 100.0},
+        {"role": "assistant", "content": "guess 50", "timestamp": 101.0},
+        {"role": "user", "content": "higher", "timestamp": 102.0},
+        {"role": "assistant", "content": "guess 75", "timestamp": 103.0},
+    ]
+    agent_current = {"role": "user", "content": "higher", "timestamp": 104.0, "id": 9}
+    agent_answer = {"role": "assistant", "content": "guess 90", "timestamp": 105.0, "id": 10}
+    # The settle persists the Agent's very row objects, so the current turn's
+    # row is shared between the reconciled list and the Agent's return.
+    result_messages = copy.deepcopy(history) + [agent_current, agent_answer]
+    settled = copy.deepcopy(history) + [agent_current, agent_answer]
+
+    out = _reconcile_prefix_occurrence_ownership(
+        settled, result_messages, {"token": None, "text": "higher"}
+    )
+    assert _user_ids(out) == [11, 12, 9], (
+        "both historical occurrences must be minted distinct ownership ids "
+        "above every real id in play while the Agent's own row keeps id 9; "
+        f"got ids={_user_ids(out)}"
+    )
+    assert out[4] is agent_current and out[4].get("id") == 9, (
+        "the current turn's own row must never be re-identified; got "
+        f"{out[4]}"
+    )
+    deduped = _deduplicate_context_messages(copy.deepcopy(out))
+    assert _contents(deduped).count("higher") == 3, (
+        "with distinct ownership every genuine occurrence must survive the "
+        f"identity dedup; got {_contents(deduped)}"
+    )
+
+
+def test_reconcile_stamps_history_when_the_current_row_is_not_in_the_list():
+    """Control: the raw-context fail-closed shape still gets its ownership.
+
+    When the Agent changes a historical answer the settle keeps the raw
+    pre-turn context verbatim, so the current turn's row is NOT part of the
+    reconciled list. The prompt proof must then protect nothing: every
+    historical occurrence of the repeated prompt is repaired.
+    """
+    from api.streaming import _deduplicate_context_messages
+    from api.streaming import _reconcile_prefix_occurrence_ownership
+
+    history = [
+        {"role": "user", "content": "higher", "timestamp": 100.0},
+        {"role": "assistant", "content": "guess 50", "timestamp": 101.0},
+        {"role": "user", "content": "higher", "timestamp": 102.0},
+        {"role": "assistant", "content": "guess 75", "timestamp": 103.0},
+    ]
+    # The Agent's return carries this turn's own row (id 9) plus a REWRITTEN
+    # historical answer, so no returned row is a member of the settled list.
+    result_messages = copy.deepcopy(history)
+    result_messages[3]["content"] = "totally unrelated"
+    result_messages.append({"role": "user", "content": "higher", "timestamp": 104.0, "id": 9})
+    result_messages.append(
+        {"role": "assistant", "content": "guess 90", "timestamp": 105.0, "id": 10}
+    )
+
+    out = _reconcile_prefix_occurrence_ownership(
+        copy.deepcopy(history), result_messages, {"token": None, "text": "higher"}
+    )
+    ids = _user_ids(out)
+    assert len(ids) == 2 and all(ids) and ids[0] != ids[1], (
+        "both historical occurrences must be minted distinct ownership ids "
+        f"when the current turn's row is absent; got ids={ids}"
+    )
+    deduped = _deduplicate_context_messages(copy.deepcopy(out))
+    assert _contents(deduped) == ["higher", "guess 50", "higher", "guess 75"], (
+        "the complete retained history must survive the identity dedup; got "
+        f"{_contents(deduped)}"
     )
