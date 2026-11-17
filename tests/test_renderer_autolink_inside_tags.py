@@ -473,3 +473,25 @@ def test_colon_names_render_quickly(driver_path, markdown):  # noqa: F811
     elapsed = time.monotonic() - start
     assert html and "\x00" not in html
     assert elapsed < 2.0, elapsed
+
+
+# Long lines of "<" followed by a name, with no closing ">", render in linear
+# time in list items, headings and table cells.
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "- " + "<x" * 50000 + " https://example.com",
+        "## " + "<x" * 50000 + " https://example.com",
+        "| h |\n|---|\n| " + "<x" * 50000 + " https://example.com |",
+        "- " + '<a href="https://e.com/u ' * 10000,
+    ],
+    ids=["list-unclosed", "heading-unclosed", "table-cell-unclosed", "list-open-links"],
+)
+def test_tag_names_without_a_close_render_quickly(driver_path, markdown):  # noqa: F811
+    start = time.monotonic()
+    html = _render(driver_path, markdown)
+    elapsed = time.monotonic() - start
+    assert html and "\x00" not in html
+    assert elapsed < 2.0, elapsed
+    if markdown.endswith(("https://example.com", "https://example.com |")):
+        assert [href for href, _text in _links(html)] == ["https://example.com"], html[-300:]

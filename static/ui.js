@@ -11037,8 +11037,38 @@ function renderMd(raw){
     //   ">" follows it on its line.
     // - Restoring scans every stash token in one left-to-right pass, so a run
     //   of text between two tokens is never read as a token.
+    // - Setting tags aside is one forward scan that remembers where the next
+    //   ">", "</a>" and "</pre>" are (or that there is none), so a long line
+    //   of "<" without a close is read once, not once per "<".
     const _tag_stash=[];
-    t=t.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<(?![a-zA-Z][a-zA-Z0-9+.-]*:)\/?[a-zA-Z][^>]*>)/g,m=>{_tag_stash.push(m);return `\x00T${_tag_stash.length-1}\x00`;});
+    t=(()=>{
+      const out=[];
+      const head=/<(?![a-zA-Z][a-zA-Z0-9+.-]*:)\/?[a-zA-Z]/y;
+      let at=0,emitted=0,gt=-1,aClose=-2,preClose=-2;
+      while((at=t.indexOf('<',at))!==-1){
+        if(gt<at) gt=t.indexOf('>',at+1);
+        if(gt<0) break;
+        let end=-1;
+        if(t.startsWith('<a',at)&&!/\w/.test(t[at+2]||'')){
+          if(aClose===-2||(aClose>=0&&aClose<=gt)) aClose=t.indexOf('</a>',gt+1);
+          if(aClose>=0) end=aClose+4;
+        }
+        if(end<0&&t.startsWith('<img',at)&&!/\w/.test(t[at+4]||'')) end=gt+1;
+        if(end<0&&t.startsWith('<pre',at)&&!/\w/.test(t[at+4]||'')){
+          if(preClose===-2||(preClose>=0&&preClose<=gt)) preClose=t.indexOf('</pre>',gt+1);
+          if(preClose>=0) end=preClose+6;
+        }
+        if(end<0){head.lastIndex=at;if(head.test(t)) end=gt+1;}
+        if(end<0){at++;continue;}
+        out.push(t.slice(emitted,at));
+        _tag_stash.push(t.slice(at,end));
+        out.push(`\x00T${_tag_stash.length-1}\x00`);
+        emitted=end;
+        at=end;
+      }
+      out.push(t.slice(emitted));
+      return out.join('');
+    })();
     t=t.split(/([\r\n\u2028\u2029])/).map(line=>{const at=line.lastIndexOf('>')+1;return line.slice(0,at)+line.slice(at).replace(/<(?=[a-zA-Z])/g,()=>{_tag_stash.push('&lt;');return `\x00T${_tag_stash.length-1}\x00`;});}).join('');
     t=_autolinkBareText(t);
     t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='T'?_tag_stash[+i]:m);
