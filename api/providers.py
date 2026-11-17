@@ -62,6 +62,7 @@ from api.plugin_providers import (
     effective_provider_env_var,
     is_plugin_model_provider,
     plugin_model_provider_ids,
+    plugin_model_provider_is_oauth,
 )
 
 logger = logging.getLogger(__name__)
@@ -2977,8 +2978,18 @@ def get_providers() -> dict[str, Any]:
             try:
                 from hermes_cli.auth import get_auth_status as _gas_plugin
                 _plugin_status = _gas_plugin(pid)
+                # OAuth-shaped plugins report configured=True once the profile is
+                # registered, even when nobody is signed in (#9105): only
+                # logged_in counts there, or needs_refresh (every token expired
+                # but the Agent can refresh one, so the account is usable).
+                # Other auth types keep configured.
                 if isinstance(_plugin_status, dict) and (
-                    _plugin_status.get("logged_in") or _plugin_status.get("configured")
+                    _plugin_status.get("logged_in")
+                    or _plugin_status.get("needs_refresh")
+                    or (
+                        _plugin_status.get("configured")
+                        and not plugin_model_provider_is_oauth(pid)
+                    )
                 ):
                     has_key = True
                     plugin_auth_status = _plugin_status
