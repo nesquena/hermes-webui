@@ -11394,7 +11394,18 @@ function renderMd(raw){
     }
     return '';
   }
-  s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>_tag(tag));
+  // One pass over every "<": a tag goes through _tag(), and any other "<"
+  // becomes "&lt;". _tag() returns "" for a tag it removes, and a replace never
+  // scans its own output again, so a "<" left as is just before a removed tag
+  // would join the text after it into a new tag that was never checked.
+  // Consuming every "<" here means each "<" left in the result came from
+  // _tag() or starts an HTML comment written as "<!--" in the message (kept
+  // as before; a removal cannot form one, as its "<" would be escaped), so a
+  // removal can never join the text around it into a tag.
+  // That "&lt;" is held in the autolink stash below until autolinking is done,
+  // so it still ends a URL written just before it, as the raw "<" did.
+  const _al_stash=[];
+  s=s.replace(/<\/?[a-z][^>]*>|<(?!!--)/gi,m=>m==='<'?(_al_stash.push('&lt;'),`\x00B${_al_stash.length-1}\x00`):_tag(m));
   // Incomplete raw tags must not survive until paragraph wrapping, where the
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
@@ -11413,12 +11424,15 @@ function renderMd(raw){
     );
   }
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
-  const _al_stash=[];
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
+  // Restoring scans every stash token (\x00, capital letters, digits, \x00) in
+  // one left-to-right pass and puts back only these entries, so a run of text
+  // between two tokens (math, code block, media) is never read as a token.
+  const _alRestore=t=>t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='B'?_al_stash[+i]:m);
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(_alRestore(m));return `\x00B${_al_stash.length-1}\x00`;});
   // Split high-confidence sentence boundaries while preserving valid CJK IRI
   // content, then rescan each plain-text trail so adjacent URLs all link.
   s=_autolinkBareText(s);
-  s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
+  s=_alRestore(s);
   // Restore math stash → katex placeholder spans/divs
   // These will be rendered by renderKatexBlocks() after DOM insertion
   s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{
