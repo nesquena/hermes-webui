@@ -9225,7 +9225,13 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     return provider or None
 
 
-def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
+def _split_provider_qualified_model(
+    model: str,
+    *,
+    session_provider: str | None = None,
+    generic_custom: bool = False,
+    config_obj: dict | None = None,
+) -> tuple[str, str | None]:
     """Split an ``@provider:model`` hint into ``(bare_model, provider)``.
 
     Delegates the grammar to ``config._parse_provider_qualified_model_id()``,
@@ -9236,7 +9242,10 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     the gateway request path resolve the same provider/model pair (#6722).
     """
     model = str(model or "").strip()
-    parsed = _parse_provider_qualified_model_id(model)
+    is_generic = generic_custom or (str(session_provider or "").strip().lower() == "custom")
+    parsed = _parse_provider_qualified_model_id(
+        model, generic_custom=is_generic, config_obj=config_obj
+    )
     if parsed:
         bare_model, provider_hint = parsed
         provider = _clean_session_model_provider(provider_hint)
@@ -11323,14 +11332,14 @@ def _session_model_identity_matches(
     if not stored or not resolved:
         return False
 
-    def _split_model_identity(value: str) -> tuple[str, str | None]:
+    def _split_model_identity(value: str, provider_context: str | None = None) -> tuple[str, str | None]:
         # Handle BOTH provider-qualified shapes so a slash-prefixed session model
         # (e.g. ``deepseek/deepseek-v4-1m``, OpenRouter-style) compares equal to its
         # resolved bare id. ``_split_provider_qualified_model`` only handles the
         # ``@provider:model`` form; without the slash case a reload of a
         # slash-stored model is wrongly treated as a model change, bypassing the
         # #4248 256k-clobber guard (Codex regression gate, v0.51.x).
-        bare, prov = _split_provider_qualified_model(value)
+        bare, prov = _split_provider_qualified_model(value, session_provider=provider_context)
         if prov is None and "/" in value:
             prefix, rest = value.split("/", 1)
             prefix = prefix.strip()
@@ -11339,8 +11348,8 @@ def _session_model_identity_matches(
                 return rest, prefix
         return bare, prov
 
-    stored_bare, stored_explicit_provider = _split_model_identity(stored)
-    resolved_bare, resolved_explicit_provider = _split_model_identity(resolved)
+    stored_bare, stored_explicit_provider = _split_model_identity(stored, stored_provider)
+    resolved_bare, resolved_explicit_provider = _split_model_identity(resolved, resolved_provider)
     stored_provider_norm = _canonical_context_provider(stored_explicit_provider or stored_provider)
     resolved_provider_norm = _canonical_context_provider(resolved_explicit_provider or resolved_provider)
     if stored == resolved and stored_provider_norm == resolved_provider_norm:

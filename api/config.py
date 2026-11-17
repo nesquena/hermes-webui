@@ -3332,37 +3332,25 @@ def _configured_custom_provider_identity(
     if not isinstance(source, dict):
         return False
     providers_cfg = source.get("providers")
-    keys: set[str] = set()
-    if isinstance(providers_cfg, dict):
-        keys = {
-            str(key).strip().lower()
-            for key in providers_cfg.keys()
-            if isinstance(key, str)
-        }
     parts = rest.split(":")
     for index in range(1, len(parts) + 1):
         prefix = ":".join(parts[:index])
-        if f"custom:{prefix}" in keys:
-            return True
-        try:
-            if (
-                _unique_raw_provider_record(
-                    providers_cfg,
-                    f"custom:{prefix}",
-                    _custom_provider_slug_key(f"custom:{prefix}"),
-                )
-                is not None
-            ):
-                return True
-        except AmbiguousCustomProviderError:
-            return True
-        if _named_custom_provider_slug_for_provider(f"custom:{prefix}", source):
-            return True
         pid = f"custom:{prefix}"
+        slug = _custom_provider_slug_key(pid)
+        if isinstance(providers_cfg, dict):
+            for ep_name, record in providers_cfg.items():
+                key = str(ep_name or "").strip()
+                if not key:
+                    continue
+                display_name = record.get("name") if isinstance(record, dict) else None
+                if _custom_record_names_identity(display_name or key, key, pid, slug):
+                    return True
+        if _named_custom_provider_slug_for_provider(pid, source):
+            return True
         try:
             rec, _, _, status = _select_custom_provider_record(
                 pid,
-                _custom_provider_slug_key(pid),
+                slug,
                 source,
             )
             if rec is not None and status not in CUSTOM_SELECTION_UNOWNED:
