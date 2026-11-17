@@ -226,6 +226,71 @@ def test_update_flows_keep_explicit_longer_timeouts():
     assert "api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000})" in src
 
 
+def test_lock_recovery_waits_for_update_and_keeps_timeout_cleanup():
+    """A slow lock-recovery update must reload on success and stay bounded."""
+    api_fn = _extract_js_function(_source(WORKSPACE_JS), "api")
+    clear_lock_fn = _extract_js_function(_source(UI_JS), "applyClearUpdateLock")
+    script = textwrap.dedent(
+        f"""
+        const assert=require('node:assert/strict');
+        const realSetTimeout=setTimeout;
+        // Scale seconds to milliseconds without changing timer ordering.
+        global.setTimeout=(fn,ms)=>realSetTimeout(fn,ms/1000);
+        global.document={{baseURI:'http://example.test/hermes/'}};
+        global.location={{href:document.baseURI,pathname:'/hermes/',search:''}};
+        global.window={{location}};
+        {api_fn}
+        {clear_lock_fn}
+        (async()=>{{
+          for(const [target,forceActiveRuns,delayMs,success] of [
+            ['webui',false,70000,true],
+            ['agent',true,299000,true],
+            ['webui',false,301000,false],
+          ]){{
+            const events=[],requests=[];
+            const error={{style:{{}},textContent:''}};
+            const btn={{dataset:{{target}},disabled:false,textContent:'Retry update'}};
+            global.$=()=>error;
+            global.showToast=msg=>events.push(String(msg));
+            global.sessionStorage={{removeItem:key=>events.push(key)}};
+            global._waitForServerThenReload=()=>events.push('reload');
+            global.fetch=(url,opts)=>{{
+              requests.push({{url,body:JSON.parse(opts.body)}});
+              return new Promise((resolve,reject)=>{{
+                const timer=setTimeout(()=>resolve({{
+                  ok:true,headers:{{get:()=> 'application/json'}},
+                  json:async()=>({{ok:true}}),
+                }}),delayMs);
+                opts.signal.addEventListener('abort',()=>{{
+                  clearTimeout(timer);
+                  reject(new Error('aborted'));
+                }},{{once:true}});
+              }});
+            }};
+            await applyClearUpdateLock(btn,{{forceActiveRuns}});
+            assert.equal(requests.length,1);
+            assert.equal(requests[0].url,'http://example.test/hermes/api/updates/clear_lock');
+            assert.deepEqual(requests[0].body,forceActiveRuns?{{target,force_active_runs:true}}:{{target}});
+            assert.equal(events.includes('reload'),success,
+              `lock recovery at ${{delayMs}}ms: ${{error.textContent}}`);
+            if(success){{
+              assert.equal(error.textContent,'');
+              assert(events.includes('hermes-update-checked'));
+              assert(events.includes('hermes-update-dismissed'));
+            }}else{{
+              assert.match(error.textContent,/Lock-check request failed:.*timed out/i);
+            }}
+            assert.equal(window._clearLockInFlight,false);
+            assert.equal(btn.disabled,false);
+            assert.equal(btn.textContent,'Retry update');
+          }}
+        }})().catch(err=>{{console.error(err);process.exitCode=1;}});
+        """
+    )
+    result = _node_eval(script)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_session_message_loads_keep_explicit_longer_timeouts():
     """Large state.db installs can take longer than the generic 30s API timeout."""
     src = _source(SESSIONS_JS)
