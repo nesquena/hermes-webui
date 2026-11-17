@@ -1351,24 +1351,104 @@ def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
     return _compression_continuation_state(child_sid, parent_sid) == "yes"
 
 
+_MAX_SHARE_REVOCATION_CHAIN_HOPS = 256
+
+
+def _share_succession_state(owner_sid: str, acting_sid: str) -> str:
+    """'yes' | 'no' | 'unknown' — does the owner's durable record hand its share to acting_sid?
+
+    Follows the durable reciprocal compression chain forward from *owner_sid*
+    to *acting_sid* up to a work limit (_MAX_SHARE_REVOCATION_CHAIN_HOPS).
+    Each hop requires the ancestor to be a ``pre_compression_snapshot`` naming
+    the next session as its ``pre_compression_continuation_session_id``, and the
+    declared child to name that exact previous session as its ``parent_session_id``.
+    When the walk reaches *acting_sid*, an absent or unreadable acting-session
+    sidecar is accepted because the owner durably declared the succession; a
+    readable sidecar that names a different parent contradicts it and answers 'no'.
+
+    Returns 'yes' when the owner's durable record hands its share to *acting_sid*.
+    Returns 'no' when the chain ends elsewhere, points at a deleted or unparseable
+    session, contradicts itself, or cycles.
+    Returns 'unknown' when an ancestor read is inconclusive (I/O failure) or the
+    work bound is reached without finding *acting_sid*.
+    """
+    if not owner_sid or not acting_sid or owner_sid == acting_sid:
+        return "no"
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(owner_sid) or not models.is_safe_session_id(acting_sid):
+            return "no"
+
+        visited: set[str] = {owner_sid}
+        curr = owner_sid
+        hops = 0
+
+        while True:
+            curr_lineage = _read_session_lineage(curr)
+            if curr_lineage is _LINEAGE_INCONCLUSIVE:
+                return "unknown"
+            if curr_lineage is None:
+                return "no"
+
+            _, is_snapshot, continuation_id = curr_lineage
+            if not is_snapshot or not continuation_id:
+                return "no"
+            if not models.is_safe_session_id(continuation_id):
+                return "no"
+            if continuation_id in visited:
+                return "no"
+
+            hops += 1
+            if hops > _MAX_SHARE_REVOCATION_CHAIN_HOPS:
+                return "unknown"
+
+            if continuation_id == acting_sid:
+                acting_lineage = _read_session_lineage(acting_sid)
+                if isinstance(acting_lineage, tuple):
+                    parent_id, _, _ = acting_lineage
+                    if parent_id != curr:
+                        return "no"
+                return "yes"
+
+            next_lineage = _read_session_lineage(continuation_id)
+            if next_lineage is _LINEAGE_INCONCLUSIVE:
+                return "unknown"
+            if next_lineage is None:
+                return "no"
+            parent_id, _, _ = next_lineage
+            if parent_id != curr:
+                return "no"
+
+            visited.add(continuation_id)
+            curr = continuation_id
+    except OSError:
+        return "unknown"
+    except Exception:
+        logger.debug(
+            "Share succession state check failed between %s and %s",
+            owner_sid, acting_sid, exc_info=True,
+        )
+        return "unknown"
+
+
 def _read_share_snapshot(
     token: str,
     *,
     expected_session_id: str | None = None,
     allow_continuation: bool = False,
-    allow_inconclusive_continuation: bool = False,
 ) -> dict | None:
-    """Read a snapshot from disk, enforcing ownership when *expected_session_id* is given.
+    """Read a snapshot from disk, enforcing positive ownership when *expected_session_id* is given.
 
     Returns the raw snapshot payload dict, or ``None`` when the file is missing
     or unparseable. Raises :class:`ShareSnapshotUnreadable` when the file exists
     but cannot be read due to an I/O failure. Raises :class:`ShareTokenOwnershipError`
     when the snapshot exists, carries a non-empty ``source_session_id``, and does not
-    match *expected_session_id* (unless *allow_continuation* is true and the expected
-    session is a verified compression continuation of the owner ('yes'), or
-    *allow_inconclusive_continuation* is true and continuation ancestry is undecidable
-    ('unknown')). Proven foreign ownership ('no') always raises. Legacy snapshots
-    without ``source_session_id`` are accepted for any session (migration compatibility).
+    match *expected_session_id* (unless *allow_continuation* is true and positive
+    authority is established via backward continuation ancestry or forward owner
+    succession ('yes')). Inconclusive ancestry ('unknown') and proven foreign
+    ownership ('no') both fail closed and raise. Legacy snapshots without
+    ``source_session_id`` are accepted for any session (migration compatibility).
     """
     token = str(token or "").strip()
     if not token:
@@ -1404,9 +1484,9 @@ def _read_share_snapshot(
             and expected
             and owner != expected
         ):
-            state = _compression_continuation_state(expected, owner)
-            authorized = (allow_continuation and state == "yes") or (
-                allow_inconclusive_continuation and state == "unknown"
+            authorized = allow_continuation and (
+                _compression_continuation_state(expected, owner) == "yes"
+                or _share_succession_state(owner, expected) == "yes"
             )
             if not authorized:
                 raise ShareTokenOwnershipError(token, owner, expected)
@@ -1604,13 +1684,13 @@ def revoke_share_owned_by(token: str, session_id: str) -> bool:
 def revoke_share(session) -> bool:
     """Revoke the share snapshot associated with *session*.
 
-    Enforces ownership against the snapshot on disk. Accepts the session itself,
-    a verified compression continuation of the owner, or an inconclusive
-    continuation ('unknown' ancestry state, such as an unsaved compression child
-    or hop budget exhaustion) so that inherited links can be closed cleanly.
-    Raises :class:`ShareTokenOwnershipError` when foreign ownership is proven
-    ('no'). Returns True on successful revocation or if the snapshot was
-    already revoked, and False on I/O or resolution failure.
+    Enforces positive ownership against the snapshot on disk. Accepts the session
+    itself, a verified backward compression continuation of the owner, or a verified
+    forward owner succession so that inherited links can be closed cleanly.
+    Inconclusive ancestry ('unknown') does not authorize revocation.
+    Raises :class:`ShareTokenOwnershipError` when positive authority is not proven.
+    Returns True on successful revocation or if the snapshot was already revoked,
+    and False on I/O or resolution failure.
     """
     token = str(getattr(session, "share_token", "") or "").strip()
     if not token:
@@ -1633,14 +1713,13 @@ def revoke_share(session) -> bool:
         # #8734: revoke must prove the token is this session's. Otherwise the
         # request would take down another session's link while its owner still
         # shows it as shared. Raises ShareTokenOwnershipError (named refusal).
-        # #8950: accept a durably verified compression continuation as owner,
-        # or an inconclusive ancestry ('unknown') so inherited links can be closed.
+        # #8950: require positive authority via backward compression continuation
+        # or forward owner succession; inconclusive ancestry ('unknown') is refused.
         try:
             payload = _read_share_snapshot(
                 token,
                 expected_session_id=session_id,
                 allow_continuation=True,
-                allow_inconclusive_continuation=True,
             )
         except ShareSnapshotUnreadable:
             return False
