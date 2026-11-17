@@ -1881,7 +1881,12 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                revoked token is never republished (the handler checks it, and
                                the snapshot writer leaves a revoked file untouched and mints a
                                new token), so an old URL stays dead for anyone who kept it.
+                               Returns 200 and mints a replacement token with token_reassigned: true
+                               and replaced_token when the recorded token belongs to another owner
+                               (does not answer 409).
     /api/share/revoke          {"session_id"} -> revokes the current public snapshot link.
+                               Returns 409 when positive ownership cannot be established,
+                               leaving the snapshot and the public link untouched.
                                The token is resolved from the durable session sidecar under a
                                per-session *share* lock (create/revoke only — never the agent
                                turn lock) and not from the LRU-cached session, whose share

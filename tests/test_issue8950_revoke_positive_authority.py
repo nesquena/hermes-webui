@@ -278,21 +278,16 @@ def test_stranger_cannot_revoke_when_the_owner_sidecar_is_unreadable(isolated_st
     assert shares.load_share(token) is not None, "the owner's public link stopped serving"
 
 
-# ── the bound is a work limit, never an authorization ────────────────────────
+# ── the forward walk completes any real chain without a hop cap ──────────────
 
 
-def test_succession_walk_authorizes_at_the_bound_and_refuses_past_it(
-    isolated_state, monkeypatch
-):
-    bound = 4
-    monkeypatch.setattr(shares, "_MAX_SHARE_REVOCATION_CHAIN_HOPS", bound)
-    root_at = "s_8950r11_bound_at"
-    tip_at = _build_chain(root_at, bound)
-    root_past = "s_8950r11_bound_past"
-    tip_past = _build_chain(root_past, bound + 1)
+def test_succession_walk_completes_a_long_chain_and_keeps_strangers_refused(isolated_state):
+    root = "s_8950r11_long_chain"
+    tip = _build_chain(root, 257)
+    root_other = "s_8950r11_other_chain"
+    tip_other = _build_chain(root_other, 4)
 
-    assert shares._share_succession_state(root_at, tip_at) == "yes"
-    assert shares._share_succession_state(root_past, tip_past) == "unknown"
+    assert shares._share_succession_state(root, tip) == "yes"
 
     # An unrelated actor is never authorized, not even between two valid chains.
-    assert shares._share_succession_state(root_at, tip_past) == "no"
+    assert shares._share_succession_state(root, tip_other) == "no"

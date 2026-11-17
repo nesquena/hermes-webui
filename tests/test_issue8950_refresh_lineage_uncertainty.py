@@ -263,11 +263,18 @@ def test_genuinely_foreign_token_control_mints_a_separate_token(isolated_state):
     claimer = models.Session.load(sid_claimer)
     assert claimer is not None
     models.SESSIONS[sid_claimer] = claimer
-    claimer.share_token = owner_token
-    claimer.save(touch_updated_at=False, skip_index=True)
+    routes._persist_share_fields(
+        sid_claimer,
+        claimer,
+        share_token=owner_token,
+        share_created_at=1000.0,
+        delete_generation=0,
+    )
 
     status, body = _post("/api/share/create", {"session_id": sid_claimer})
     assert status == 200, body
+    assert body["share"]["token_reassigned"] is True
+    assert body["share"]["replaced_token"] == owner_token
     replacement = body["share"]["token"]
     assert replacement != owner_token, "a proven foreign token must not be overwritten"
     assert sorted(_tokens()) == sorted([owner_token, replacement])

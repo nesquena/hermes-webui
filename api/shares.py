@@ -1351,14 +1351,13 @@ def _is_compression_continuation(child_sid: str, parent_sid: str) -> bool:
     return _compression_continuation_state(child_sid, parent_sid) == "yes"
 
 
-_MAX_SHARE_REVOCATION_CHAIN_HOPS = 256
-
-
 def _share_succession_state(owner_sid: str, acting_sid: str) -> str:
     """'yes' | 'no' | 'unknown' — does the owner's durable record hand its share to acting_sid?
 
     Follows the durable reciprocal compression chain forward from *owner_sid*
-    to *acting_sid* up to a work limit (_MAX_SHARE_REVOCATION_CHAIN_HOPS).
+    to *acting_sid*. Work is proportional to the durable chain, termination is
+    proven by distinct ids in the visited set, and the answer stays positive-only
+    ('yes' only when the walk reaches acting_sid through reciprocally verified hops).
     Each hop requires the ancestor to be a ``pre_compression_snapshot`` naming
     the next session as its ``pre_compression_continuation_session_id``, and the
     declared child to name that exact previous session as its ``parent_session_id``.
@@ -1366,11 +1365,11 @@ def _share_succession_state(owner_sid: str, acting_sid: str) -> str:
     sidecar is accepted because the owner durably declared the succession; a
     readable sidecar that names a different parent contradicts it and answers 'no'.
 
-    Returns 'yes' when the owner's durable record hands its share to *acting_sid*.
+    Returns 'yes' only when the walk reaches *acting_sid* through reciprocally
+    verified hops.
     Returns 'no' when the chain ends elsewhere, points at a deleted or unparseable
     session, contradicts itself, or cycles.
-    Returns 'unknown' when an ancestor read is inconclusive (I/O failure) or the
-    work bound is reached without finding *acting_sid*.
+    Returns 'unknown' only for a genuinely inconclusive read (I/O failure on a sidecar).
     """
     if not owner_sid or not acting_sid or owner_sid == acting_sid:
         return "no"
@@ -1382,7 +1381,6 @@ def _share_succession_state(owner_sid: str, acting_sid: str) -> str:
 
         visited: set[str] = {owner_sid}
         curr = owner_sid
-        hops = 0
 
         while True:
             curr_lineage = _read_session_lineage(curr)
@@ -1398,10 +1396,6 @@ def _share_succession_state(owner_sid: str, acting_sid: str) -> str:
                 return "no"
             if continuation_id in visited:
                 return "no"
-
-            hops += 1
-            if hops > _MAX_SHARE_REVOCATION_CHAIN_HOPS:
-                return "unknown"
 
             if continuation_id == acting_sid:
                 acting_lineage = _read_session_lineage(acting_sid)
