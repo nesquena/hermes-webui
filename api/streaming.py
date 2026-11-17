@@ -6835,20 +6835,61 @@ _TITLE_RESPONSE_FORMAT = {
 }
 
 
+# Wording an endpoint uses when it refuses a request parameter. Kept in step
+# with the Agent's ``UNSUPPORTED_PARAM_MARKERS`` (agent/error_classifier.py).
+_TITLE_UNSUPPORTED_PARAM_MARKERS = (
+    "unsupported parameter", "unsupported_parameter", "not supported", "does not support",
+    "doesn't support", "is deprecated for this model",
+    "unknown parameter", "unrecognized request argument", "unrecognized parameter",
+    "invalid parameter", "extra inputs are not permitted",
+    "invalid option: expected one of",
+)
+
+
+def _title_structured_output_rejected(exc) -> bool:
+    """True when an HTTP 400/422 error refuses the structured-output field itself.
+
+    Mirrors the Agent's auxiliary-client check: the error must name the
+    structured-output field (``response_format``, or ``output_config`` on the
+    Anthropic wire), a grammar backend that compiles it, or Gemini's schema
+    keys, and say it is unsupported, unknown or malformed. Any other 400/422
+    (context length, message validation, ...) is not about the schema, so
+    removing the schema cannot repair it.
+    """
+    status = getattr(exc, 'status_code', None)
+    if status not in (400, 422):
+        return False
+    err = str(exc).lower()
+    if any(k in err for k in ('guided_grammar', 'xgrammar', 'compile_grammar_error')):
+        return True
+    if any(k in err for k in ('response mime type', 'response_schema', 'response_json_schema')):
+        return True
+    if 'response_format' in err and ('json_schema' in err or 'unavailable' in err):
+        return True
+    if 'response_format' not in err and 'output_config' not in err:
+        return False
+    return any(k in err for k in _TITLE_UNSUPPORTED_PARAM_MARKERS)
+
+
 def _send_title_request(send):
     """Call ``send(response_format)`` asking for a strict ``{"title"}`` object.
 
-    Endpoints with constrained decoding (llama.cpp, vLLM, Ollama, LM Studio,
-    OpenAI-compatible hosts) then cannot put reasoning in the title. A request
-    rejected with HTTP 400/422 is resent once without the schema; other errors
-    propagate. Nothing is cached, so a later request always tries the schema
-    again. (Newer Agent ``call_llm`` versions also handle rejections
-    internally; a handled rejection never reaches this layer.)
+    Used by the auxiliary title route and the agent's Chat Completions route;
+    the agent's native Anthropic Messages and Codex Responses branches do not
+    send the schema. Constrained decoding fixes the reply's shape, not its
+    content: the title string can still hold reasoning, so the sanitizer still
+    checks it.
+
+    A request whose HTTP 400/422 error names the structured-output field as
+    unsupported is resent once without the schema. Every other error
+    propagates unchanged to the caller's existing retry and error path. This
+    layer caches nothing, but the Agent's auxiliary client may remember a
+    rejection and drop the schema itself on later auxiliary requests.
     """
     try:
         return send(_TITLE_RESPONSE_FORMAT)
     except Exception as exc:
-        if getattr(exc, 'status_code', None) not in (400, 422):
+        if not _title_structured_output_rejected(exc):
             raise
         return send(None)
 
