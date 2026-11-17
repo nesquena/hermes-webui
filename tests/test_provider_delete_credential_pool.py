@@ -312,7 +312,7 @@ class TestReaddLiftsSuppression:
 
         from api.providers import remove_provider_key, set_provider_key
 
-        auth_path = _write_auth_store(
+        _write_auth_store(
             tmp_path,
             {
                 "credential_pool": {
