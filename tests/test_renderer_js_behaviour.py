@@ -1816,3 +1816,54 @@ class TestCallerNulTokenAmplification9072Round4:
         assert m, repr(out)[:400]
         assert chr(0) not in m.group(1), repr(out.replace(chr(0), '<NUL>'))[:400]
         assert 'doc' in m.group(1), repr(out)[:400]
+
+
+class TestAttributedCodeTokenJoin9072Round5:
+    """Greptile round 5 on #9072: H normalization can manufacture the C token
+    shape after ``_cPre`` was chosen.
+
+    ``_hFlat`` (the boundary-stripped form the adaptive prefixes are chosen
+    against) stripped only bare ``<code>`` openings, while the H plain-text
+    extraction strips attributed openings too (``<code class="...">``).  An
+    image alt could therefore hide ``\x00C0\x00`` split by the opening tag:
+    the tag made the prefix scan miss the shape, then resolving the H token
+    joined the caller NULs with the element's plain text ``C0`` and the alt
+    resolver read the result as an owned C index -- there was no such stash
+    entry, so the attribute rendered ``aundefinedb``.  The flattened form now
+    removes the same attributed openings the extraction removes, and every
+    resolution keeps a token's literal bytes when its index was never
+    stashed.
+    """
+
+    CONTROLS = ''.join(chr(c) for c in list(range(9)) + list(range(14, 32)))
+    IMAGE = (
+        CONTROLS
+        + '![a\x00<code class="language-text">C0\x00</code>b]'
+        + '(http://localhost/one.png)'
+    )
+
+    def _assert_alt_keeps_caller_bytes(self, out, where):
+        assert "undefined" not in out, f"{where}: a stash index leaked: {out!r}"
+        assert '<img' in out, f"{where}: the image must still render: {out!r}"
+        m = re.search(r'alt="([^"]*)"', out)
+        assert m, f"{where}: no alt attribute: {out!r}"
+        # The attributed element resolves to its plain text, so the alt is the
+        # caller's NUL + `C0` + NUL sequence exactly -- never a C reference.
+        assert m.group(1) == "a\x00C0\x00b", (
+            f"{where}: caller bytes must survive verbatim: "
+            f"{m.group(1).replace(chr(0), '<NUL>')!r}"
+        )
+
+    def test_attributed_code_alt_in_a_heading(self, driver_path):
+        self._assert_alt_keeps_caller_bytes(
+            _render(driver_path, "## " + self.IMAGE), "heading"
+        )
+
+    def test_attributed_code_alt_in_a_list_item(self, driver_path):
+        self._assert_alt_keeps_caller_bytes(
+            _render(driver_path, "- " + self.IMAGE), "list"
+        )
+
+    def test_attributed_code_alt_in_a_table_cell(self, driver_path):
+        table = "| h |\n| --- |\n| " + self.IMAGE + " |"
+        self._assert_alt_keeps_caller_bytes(_render(driver_path, table), "table")

@@ -11142,8 +11142,18 @@ function renderMd(raw){
     const _html_code_plain=[];
     // A prefix this line does not contain, so the restore below only ever see
     // placeholders this pass wrote (see _tokPrefix).  The boundary-stripped
-    // form guards the same alt-flattening join as the outer K stash.
-    const _hFlat=t.split('<code>').join('').split('</code>').join('').split('`').join('');
+    // form guards the same alt-flattening join as the outer K stash, and it
+    // must strip every opening the H plain-text extraction strips -- including
+    // attributed ones like `<code class="language-text">`, not just the bare
+    // tag.  Resolving an H token replaces the whole element with its plain
+    // text, so caller NUL bytes on either side of the element can join that
+    // text into the C token shape AFTER _cPre was chosen while the shape was
+    // still split by the tag (gate G9072-ATTRIBUTED-CODE-TOKEN-JOIN).  With
+    // the attributed opening removed here, _cPre sees the joined bytes and
+    // takes a lead the restored alt cannot spell.  The `[^>]*` class keeps
+    // the strip linear; a lazy tag pattern would be another ReDoS candidate.
+    const _hFlat=t.split('<code>').join('').split('</code>').join('').split('`').join('')
+      .replace(/<code\b[^>]*>/g,'');
     const _hPre=_tokPrefix('\x00H',t,_hFlat);
     const _hTok=new RegExp(_hPre+'(\\d+)\x00','g');
     // The C tokens get the same treatment.  A caller can type real NUL bytes,
@@ -11200,7 +11210,13 @@ function renderMd(raw){
       // point; every resolution produces plain text, never markup.
       let a=String(alt);
       for(let n=0;n<8;n++){
-        const b=a.replace(_hTok,(_,i)=>_html_code_plain[+i]).replace(_cTok,(_,i)=>_code_plain[+i]);
+        // An index with no stash entry is caller text that merely spells the
+        // token shape after normalization, not a token this pass wrote: keep
+        // its bytes verbatim instead of emitting `undefined` (gate
+        // G9072-ATTRIBUTED-CODE-TOKEN-JOIN).  The adaptive prefix makes this
+        // unreachable for well-formed lines; it is the last line of defence.
+        const b=a.replace(_hTok,(m,i)=>{const v=_html_code_plain[+i];return v===undefined?m:v;})
+          .replace(_cTok,(m,i)=>{const v=_code_plain[+i];return v===undefined?m:v;});
         if(b===a)break;
         a=b;
       }
@@ -11209,8 +11225,8 @@ function renderMd(raw){
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
-    t=t.replace(_cTok,(_,i)=>_code_stash[+i]);
-    t=t.replace(_hTok,(_,i)=>_html_code_stash[+i]);
+    t=t.replace(_cTok,(m,i)=>{const v=_code_stash[+i];return v===undefined?m:v;});
+    t=t.replace(_hTok,(m,i)=>{const v=_html_code_stash[+i];return v===undefined?m:v;});
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
