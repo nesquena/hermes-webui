@@ -3462,8 +3462,11 @@ async function bulkUpdateKanban(){
   const status = $('kanbanBulkStatus') ? $('kanbanBulkStatus').value : '';
   if (!ids.length || !status) return;
   try {
-    await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
-    showToast(t('kanban_bulk_action'));
+    const res = await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
+    // The endpoint answers 200 with a per-card result; a refused card must not read as success.
+    const refused = (res && Array.isArray(res.results)) ? res.results.filter(r => r && r.ok === false) : [];
+    if (refused.length) showToast(t('kanban_bulk_refused', refused.length, ids.length, refused[0].error || ''), 'error');
+    else showToast(t('kanban_bulk_action'));
     await loadKanban(true);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
@@ -4239,7 +4242,10 @@ function _kanbanRenderTaskDetail(data){
   // touch/tablet user can move a task INTO the Scheduled column. It reuses
   // _kanbanColumnLabel + the same PATCH path, which the bridge routes through
   // the Agent's schedule_task() verb.
-  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'done', 'archived'].map(status =>
+  // 'review' is the touch path INTO the Review column for the same reason;
+  // the bridge routes it through request_review() so the reviewer handoff
+  // keeps its provenance instead of becoming a raw status write.
+  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'review', 'done', 'archived'].map(status =>
     `<button class="btn secondary" onclick="updateKanbanTask(${jsArg(task.id)},{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
   ).join('') + `<button class="btn secondary" onclick="blockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-header">
