@@ -1935,21 +1935,52 @@ def _message_rows_match(row_a: object, row_b: object) -> bool:
         row_a.get("role") == row_b.get("role")
         and row_a.get("content") == row_b.get("content")
     )
+    if not role_content_match:
+        return False
+    # Two turns with the same text are still distinct rows; the timestamp the
+    # writer stamps at creation tells them apart when neither carries an id.
+    a_ts = row_a.get("timestamp")
+    b_ts = row_b.get("timestamp")
+    if a_ts is not None and b_ts is not None and a_ts != b_ts:
+        return False
     a_stable, a_valid = _stable_message_identity_details(row_a)
     b_stable, b_valid = _stable_message_identity_details(row_b)
     if a_valid and b_valid and a_stable is not None and b_stable is not None:
-        if a_stable == b_stable:
-            return role_content_match
-        return False
+        return a_stable == b_stable
 
     has_a_id = "id" in row_a and row_a.get("id") is not None
     has_b_id = "id" in row_b and row_b.get("id") is not None
     if has_a_id and has_b_id:
-        if row_a.get("id") == row_b.get("id"):
-            return role_content_match
-        return False
+        return row_a.get("id") == row_b.get("id")
 
-    return role_content_match
+    return True
+
+
+def _row_already_held(disk_row: object, our_rows: list) -> bool:
+    """True when ``disk_row`` is a row this array already holds.
+
+    A disk row that survives the prefix match can still be one this writer
+    already carries further down its own tail — the gateway finalization
+    backfills context-only rows into the middle of the display transcript, so
+    its array is not a positional extension of the sidecar it loaded. Inserting
+    such a row again duplicates the turn (#3300: two identical visible turns).
+    Rows that match on identity but carry different timestamps are distinct
+    turns and are never treated as duplicates.
+    """
+    if not isinstance(disk_row, dict):
+        return False
+    disk_ts = disk_row.get("timestamp")
+    for our_row in our_rows:
+        if not _message_rows_match(disk_row, our_row):
+            continue
+        if isinstance(our_row, dict):
+            our_ts = our_row.get("timestamp")
+        else:
+            our_ts = None
+        if disk_ts is not None and our_ts is not None and disk_ts != our_ts:
+            continue
+        return True
+    return False
 
 
 def _merge_concurrent_message_arrays(
@@ -1974,7 +2005,12 @@ def _merge_concurrent_message_arrays(
         return list(our_msgs)
 
     prefix = our_msgs[:prefix_len]
-    disk_tail = disk_msgs[prefix_len:]
+    disk_tail = [
+        row for row in disk_msgs[prefix_len:]
+        if not _row_already_held(row, our_msgs)
+    ]
+    if not disk_tail:
+        return list(our_msgs)
     our_tail = our_msgs[prefix_len:]
     return prefix + disk_tail + our_tail
 

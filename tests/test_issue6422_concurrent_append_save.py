@@ -450,3 +450,47 @@ def test_corrupted_disk_sidecar_degrades_gracefully(temp_session_dir):
     loaded = Session.load(sid)
     assert len(loaded.messages) == 1
     assert loaded.messages[0]["content"] == "clean"
+
+
+def test_merge_does_not_duplicate_a_row_the_array_already_holds():
+    """A disk row the writer already carries further down is not inserted twice.
+
+    Gateway finalization backfills context-only rows into the middle of the
+    display transcript, so the writer's array is not a positional extension of
+    the sidecar it loaded (#3300: repeated identical visible turns).
+    """
+    disk = [
+        {"role": "user", "content": "same", "timestamp": 1.0},
+        {"role": "assistant", "content": "first reply", "timestamp": 1.1},
+        {"role": "user", "content": "new question", "timestamp": 4.0},
+    ]
+    our = [
+        {"role": "user", "content": "same", "timestamp": 1.0},
+        {"role": "assistant", "content": "first reply", "timestamp": 1.1},
+        {"role": "user", "content": "context only gap", "timestamp": 2.0},
+        {"role": "user", "content": "new question", "timestamp": 4.0},
+    ]
+
+    merged = _merge_concurrent_message_arrays(disk, our, allow_zero_prefix_merge=False)
+    contents = [m["content"] for m in merged]
+
+    assert contents.count("new question") == 1
+    assert "context only gap" in contents
+    assert contents.count("same") == 1
+
+
+def test_merge_keeps_identical_rows_with_distinct_timestamps():
+    """Two turns with the same text but different timestamps are distinct rows."""
+    disk = [
+        {"role": "user", "content": "ok", "timestamp": 1.0},
+        {"role": "user", "content": "ok", "timestamp": 9.0},
+    ]
+    our = [
+        {"role": "user", "content": "ok", "timestamp": 1.0},
+        {"role": "user", "content": "ok", "timestamp": 5.0},
+    ]
+
+    merged = _merge_concurrent_message_arrays(disk, our, allow_zero_prefix_merge=False)
+
+    assert len(merged) == 3
+    assert [m["timestamp"] for m in merged] == [1.0, 9.0, 5.0]
