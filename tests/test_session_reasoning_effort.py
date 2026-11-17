@@ -1107,7 +1107,7 @@ def test_session_import_keeps_transcript_with_unknown_effort(imported, expected)
             self.session_id = "imported"
             self.messages = kwargs["messages"]
 
-        def save(self):
+        def save(self, *_a, **_k):
             pass
 
         def compact(self):

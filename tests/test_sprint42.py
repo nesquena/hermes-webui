@@ -176,7 +176,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 self.pending_attachments = []
                 self.pending_started_at = None
 
-            def save(self, touch_updated_at=True):
+            def save(self, touch_updated_at=True, append_intent=False):
                 self._saved = True
 
             def compact(self):
@@ -361,7 +361,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
             pending_attachments = []
             pending_started_at = None
 
-            def save(self, touch_updated_at=True, skip_index=True):
+            def save(self, touch_updated_at=True, skip_index=True, append_intent=False):
                 pass
 
             def compact(self):
@@ -1134,7 +1134,7 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
             pending_attachments = []
             pending_started_at = None
 
-            def save(self, touch_updated_at=True):
+            def save(self, touch_updated_at=True, append_intent=False):
                 pass
 
             def compact(self):

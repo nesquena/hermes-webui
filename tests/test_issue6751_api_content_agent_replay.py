@@ -1290,7 +1290,7 @@ def test_issue6751_branch_endpoint_reconciles_provider_sidecars_into_first_agent
             self.session_id = "issue6751-branch"
             captured["branch"] = self
 
-        def save(self):
+        def save(self, *_a, **_k):
             captured["saved"] = True
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
@@ -1762,7 +1762,7 @@ def test_issue6751_branch_keep_count_retains_final_assistant_sidecar(
             self.session_id = f"issue6751-keep-count-{keep_count}"
             captured["branch"] = self
 
-        def save(self):
+        def save(self, *_a, **_k):
             captured["saved"] = True
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)

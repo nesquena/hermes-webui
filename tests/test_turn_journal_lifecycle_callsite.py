@@ -14,7 +14,7 @@ def test_streaming_appends_assistant_started_before_final_save():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     block_idx = src.index("if not ephemeral and s.messages:")
     assistant_idx = src.index('"event": "assistant_started"', block_idx)
-    save_idx = src.index("s.save()", assistant_idx)
+    save_idx = src.index("s.save(", assistant_idx)
 
     assert block_idx < assistant_idx < save_idx
 
@@ -26,13 +26,17 @@ def test_streaming_assistant_started_uses_latest_assistant_message():
     block = src[block_idx:assistant_idx]
 
     assert "range(len(s.messages) - 1, -1, -1)" in block
-    assert '"assistant_message_index": _latest_assistant_idx' in src[assistant_idx:src.index("s.save()", assistant_idx)]
+    assert '"assistant_message_index": _latest_assistant_idx' in src[assistant_idx:src.index("s.save(", assistant_idx)]
 
 
 def test_streaming_appends_completed_after_final_save():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     assistant_idx = src.index('"event": "assistant_started"')
-    save_idx = src.index("s.save()", assistant_idx)
+    # The final transcript writeback is the save inside the "session_save"
+    # writeback stage; pinning the bare call text would follow the wakeup
+    # restore save that runs later.
+    stage_idx = src.index('_stream_writeback_stage(_writeback_timings, "session_save")', assistant_idx)
+    save_idx = src.index("s.save(", stage_idx)
     completed_idx = src.index('"event": "completed"', save_idx)
 
     assert save_idx < completed_idx
