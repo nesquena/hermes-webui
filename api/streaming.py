@@ -14547,6 +14547,8 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _success_terminal_published = False
+    _stream_end_published = False
     _steer_settled = False
     _returned_pending_steer = []
 
@@ -14581,6 +14583,7 @@ def _run_agent_streaming(
             })
 
     def put(event, data):
+        nonlocal _stream_end_published
         if event in ('done', 'apperror', 'stream_end'):
             _settle_pending_steer()
         # If cancelled, drop all further events except the cancel event itself
@@ -14608,6 +14611,8 @@ def _run_agent_streaming(
         try:
             queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
+            if event == 'stream_end':
+                _stream_end_published = True
         except Exception:
             logger.debug("Failed to put event to queue")
 
@@ -15069,12 +15074,14 @@ def _run_agent_streaming(
         try:
             try:
                 from api.route_approvals import (
+                    require_approval_bridge as _require_approval_bridge,
                     settle_gateway_pending_local_notification as _settle_pending_for_polling,
                     retire_gateway_pending_mirror as _retire_gateway_pending_mirror,
                 )
                 def _cleanup_gateway_pending_mirror():
                     _retire_gateway_pending_mirror(session_id)
             except ImportError:
+                _require_approval_bridge = None
                 _settle_pending_for_polling = None
                 _cleanup_gateway_pending_mirror = None
             from tools.approval import (
@@ -15082,6 +15089,10 @@ def _run_agent_streaming(
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
+                if _require_approval_bridge is not None:
+                    # Raises when WebUI could show this card but never settle
+                    # it (#9119): the Agent then denies it as notify_failed.
+                    _require_approval_bridge()
                 if _settle_pending_for_polling is not None:
                     try:
                         auto_resolved, head, total = _settle_pending_for_polling(
@@ -18415,6 +18426,7 @@ def _run_agent_streaming(
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
                 put('done', _done_payload)
+                _success_terminal_published = True
                 # Emit one last metering packet for the live message-header TPS label.
                 meter_stats = meter().get_stats(stream_id)
                 meter_stats['session_id'] = session_id
@@ -18985,6 +18997,45 @@ def _run_agent_streaming(
                         stream_id,
                         getattr(s, 'active_stream_id', None),
                     )
+                    # hwc: turn-terminal-event — this stream still needs a
+                    # terminal frame. Skipping the transcript writeback is
+                    # correct when this worker no longer owns the session.
+                    # Do not clear or save ``s`` here. ``active_stream_id is
+                    # None`` on the worker-held object is not authority:
+                    # cancel_stream clears that field eagerly, and a rename
+                    # after eviction lives on a different instance. Saving
+                    # this snapshot reverts that metadata.
+                    _error_payload['session_id'] = getattr(s, 'session_id', session_id)
+                    _error_payload['old_session_id'] = session_id
+                    _error_payload['stale_writeback_skipped'] = True
+                    # Stop won the race (it landed after this worker's cancel check).
+                    # cancel_stream queues its live ``cancel`` frame without journaling
+                    # it (possibly only after this put), so this apperror is the run's
+                    # only journaled terminal. Make it a cancel: the run settles as
+                    # interrupted-by-user and a replay shows the cancel, not an error.
+                    # Drop the provider fields (the cancel marker says no provider
+                    # failure occurred) and name the server when it settled the run,
+                    # as _worker_cancel_event_payload does.
+                    if cancel_event.is_set():
+                        for _provider_key in ('hint', 'details', 'reason'):
+                            _error_payload.pop(_provider_key, None)
+                        _error_payload['type'] = 'cancelled'
+                        _server_reason = _server_settle_reason(stream_id)
+                        if _server_reason:
+                            _error_payload['message'] = _server_reason
+                            _error_payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+                        else:
+                            _error_payload['message'] = 'Task cancelled.'
+                    # The success path clears active_stream_id and publishes
+                    # ``done`` before post-success housekeeping (title thread
+                    # start). If that fails, keep the published outcome: a
+                    # later apperror would turn a completed run into errored.
+                    # The initial title thread owns ``stream_end``, so when its
+                    # start failed, close the transport here instead.
+                    if not _success_terminal_published:
+                        put('apperror', _error_payload)
+                    elif not _stream_end_published:
+                        put('stream_end', {'session_id': session_id})
                     return
 
                 if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
