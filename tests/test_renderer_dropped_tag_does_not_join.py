@@ -5,11 +5,11 @@ replace. The sanitizer returns "" for a tag it removes (an unknown name, a
 closing tag it does not keep, an image whose src it does not accept), and a
 replace never scans its own output again. A "<" written just before such a tag
 used to join the text after it into a new tag that was never checked:
-"<<x>img src=x title=t>" rendered a raw <img> with its title. The same pass
+"<<x>img src=x title=t>" rendered a raw <img> with its title, and a joined
+"<https://...>" element was then kept whole by the autolink pass. The same pass
 now turns every "<" it does not hand to the sanitizer into "&lt;", so the text
 around a removed tag stays text in paragraphs, list items, headings, table
-cells and blockquotes, and a URL written just after a removed tag is linked
-with its exact value, never made into a tag.
+cells and blockquotes.
 
 Each case parses the output and checks that every element and attribute is one
 the sanitizer itself writes, that no element was formed from the text around
@@ -177,7 +177,7 @@ class _Links(HTMLParser):
         self.text += data
 
 
-@pytest.mark.parametrize("suffix", ["<", "<3"])
+@pytest.mark.parametrize("suffix", ["<", "<3", "<b"])
 @pytest.mark.parametrize("wrap", list(_BOUNDARY_CONTEXTS.values()), ids=list(_BOUNDARY_CONTEXTS))
 def test_angle_bracket_after_a_bare_url_ends_the_link(driver_path, wrap, suffix):  # noqa: F811
     html = _render(driver_path, wrap("see https://example.com/" + suffix))
