@@ -6831,6 +6831,24 @@ function renderModelDropdown(){
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
+  // #9074: the backend's badge label is English ("Primary", "Fallback 2"), so
+  // every renderer translates the role here. t() returns the key itself when
+  // no locale has it, which falls back to the English text.
+  const _badgeText=(key,english,...args)=>{
+    const value=t(key,...args);
+    return value&&value!==key?String(value):english;
+  };
+  const _modelBadgeLabel=(badge)=>{
+    if(!badge) return '';
+    const role=String(badge.role||'');
+    const label=String(badge.label||'');
+    if(role==='primary') return _badgeText('model_badge_primary','Primary');
+    if(role==='fallback'){
+      const index=(label.match(/(\d+)\s*$/)||[])[1]||'';
+      return _badgeText('model_badge_fallback',`Fallback ${index}`.trim(),index).trim();
+    }
+    return label&&!label.includes('@')?label:_badgeText('model_group_configured','Configured');
+  };
   const _renderProviderEndpointHint=(entry,parent)=>{
     if(!entry||!entry.label||!entry.modelsEndpointError) return;
     const hint=document.createElement('div');
@@ -6843,7 +6861,7 @@ function renderModelDropdown(){
   const _buildModelRow=(m,withProviderChip)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
-    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(_modelBadgeLabel(m.badge))}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
     row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
@@ -7017,7 +7035,7 @@ function renderModelDropdown(){
   const _makeModelRow=(m,shouldRenderHeading)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
-    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(_modelBadgeLabel(m.badge))}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
@@ -7163,10 +7181,7 @@ function renderModelDropdown(){
           // stays reachable on the row subtitle, and the chip's title keeps master's
           // full "key (provider)" text, so the provider the chip used to name isn't lost.
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
-          const roleLabel = String(m.badge.role||'').replace(/^./,c=>c.toUpperCase());
-          badgeLabel = (m.badge.label && !String(m.badge.label).includes('@'))
-            ? String(m.badge.label)
-            : (roleLabel || 'Configured');
+          badgeLabel = _modelBadgeLabel(m.badge);
           badgeTitle = rawId;
           if(m.badge.provider){
             const providerName=String(m.badge.provider).replace(/^custom:/,'').split('/')[0];
@@ -7175,10 +7190,26 @@ function renderModelDropdown(){
         }
         const badgeAttrs = badgeTitle ? ` title="${esc(badgeTitle)}"` : '';
         const badgeHtml=m.badge?`<span${badgeAttrs} class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
+        // #9074: a title is out of reach on touch and keyboard, so the provider
+        // the chip used to name gets the muted pill the group rows use. It sits
+        // beside the chip rather than inside it, and ellipsizes on narrow phones.
+        // It names the provider the click selects, from that provider's own group:
+        // m.group can be the backend's injected "Default" group, or empty.
+        const providerId=String((m.badge&&m.badge.provider)||m.providerId||'');
+        const providerMeta=_groupMeta.get(providerId);
+        const providerLabel=providerMeta?String(providerMeta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
+        const providerName=(providerLabel&&providerLabel!=='Default')?providerLabel
+          :providerId.replace(/^custom:/,'').split('/')[0];
+        // A short name keeps its full width and wraps whole: an ellipsis on it
+        // leaves a stub ("Ope…") that can't tell OpenAI from OpenRouter.
+        const providerFit=providerName.length<=14?' model-opt-provider--fit':'';
+        const providerChip=providerName
+          ?`<span class="model-opt-provider model-opt-provider--configured${providerFit}" title="${esc(providerName)}">${esc(providerName)}</span>`
+          :'';
         // #8733: the chip no longer carries the routing key, so the matched key
         // rides on the chip's title. The subtitle stays the option id, which the
         // Configured section has always shown.
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
@@ -15021,7 +15052,7 @@ async function applyUpdates(opts){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       if(forceActiveRuns) _applyBody.force_active_runs=true;
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:300000});
       if(!res.ok){
         _showUpdateError(target,res);
         if(res.restart_blocked&&res.force_available){
@@ -15156,7 +15187,7 @@ async function applyClearUpdateLock(btn,opts){
   try{
     const _clearBody={target};
     if(forceActiveRuns) _clearBody.force_active_runs=true;
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:60000});
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:300000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
@@ -15310,7 +15341,7 @@ async function forceUpdate(btn,opts){
     const _ch=window._updateData?.[target]?.channel;
     if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
     if(forceActiveRuns) _forceBody.force_active_runs=true;
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
