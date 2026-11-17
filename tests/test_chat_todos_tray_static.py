@@ -1489,8 +1489,8 @@ def test_workspace_todos_desc_drops_the_contradictory_sidebar_sentence():
         assert tail not in i18n, f"locale tail still present: {tail!r}"
     # The HTML fallback text (pre-i18n first paint) drops it too.
     assert "remains available regardless" not in idx
-    # ...while the key itself survives in all 15 locales that carried it.
-    assert i18n.count("settings_desc_workspace_todos_tab") == 15
+    # ...while the key itself survives in all 16 locales that carried it.
+    assert i18n.count("settings_desc_workspace_todos_tab") == 16
     assert (
         "settings_desc_workspace_todos_tab: 'When enabled, a Todos tab appears in the workspace panel.',"
         in i18n

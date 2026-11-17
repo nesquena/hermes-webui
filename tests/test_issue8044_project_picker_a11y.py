@@ -25,7 +25,7 @@ STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = REPO / "static" / "i18n.js"
 
 LOCALE_CODES = [
-    "en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr", "cs", "tr", "pl", "vi",
+    "en", "ca", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr", "cs", "tr", "pl", "vi",
 ]
 
 

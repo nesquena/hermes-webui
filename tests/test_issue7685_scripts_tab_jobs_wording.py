@@ -166,7 +166,7 @@ def _locale_blocks() -> dict[str, str]:
     starts = {}
     for m in re.finditer(r"^  ('?[a-zA-Z-]+'?): \{$", I18N_JS, re.MULTILINE):
         starts[m.start()] = m.group(1).strip("'")
-    assert len(starts) == 15, sorted(starts.values())
+    assert len(starts) == 16, sorted(starts.values())
     offsets = sorted(starts)
     blocks = {}
     for idx, start in enumerate(offsets):

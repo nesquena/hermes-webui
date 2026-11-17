@@ -593,7 +593,7 @@ def test_configured_status_key_is_present_once_in_all_locale_blocks():
         i18n,
     )
     blocks = [body for _, body in locale_blocks]
-    assert len(blocks) == 15
+    assert len(blocks) == 16
     assert all(block.count("providers_status_configured_label:") == 1 for block in blocks)
     assert all(block.count("providers_status_configured:") == 1 for block in blocks)
     labels = {
@@ -616,6 +616,7 @@ def test_configured_status_key_is_present_once_in_all_locale_blocks():
         "tr": "Yapılandırıldı",
         "pl": "Skonfigurowano",
         "vi": "Đã cấu hình",
+        "ca": "Configurat",
     }
 
 
