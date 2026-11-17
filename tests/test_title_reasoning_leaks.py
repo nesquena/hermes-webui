@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import api.streaming as streaming
 from api.streaming import (
     _TITLE_RESPONSE_FORMAT,
     _looks_invalid_generated_title,
@@ -56,9 +55,8 @@ def test_rejects_reasoning_sentences(raw):
     "Docker Volume Permissions</think>",
     'Okay here it is {"title": "Docker Volume Permissions"}',
     '{"name": "Docker Volume Permissions"}',
-    "The conversation covers Docker volume permissions on Linux hosts and how to fix ownership",
 ])
-def test_rejects_payload_fragments_tags_and_overlong_replies(raw):
+def test_rejects_payload_fragments_and_tags(raw):
     assert _sanitize_generated_title(raw) == ""
 
 
@@ -69,6 +67,9 @@ def test_rejects_payload_fragments_tags_and_overlong_replies(raw):
     "Analysis: Q3 Sales Trends",
     "Maybelline Product Comparison",
     "Python dict lookups",
+    # Vietnamese spaces syllables, so long titles have many tokens (#9129 gate).
+    "Sửa lỗi phân quyền thư mục khi dùng Docker volume trên máy chủ Linux",
+    "Sửa lỗi phân quyền Docker volume trên Linux",
 ])
 def test_keeps_ordinary_titles(title):
     assert _sanitize_generated_title(title) == title
@@ -134,8 +135,7 @@ def test_agent_route_requests_title_schema():
     assert calls[0]["response_format"] == _TITLE_RESPONSE_FORMAT
 
 
-def test_agent_route_resends_without_rejected_schema_and_remembers(monkeypatch):
-    monkeypatch.setattr(streaming, "_TITLE_SCHEMA_REJECTED_ROUTES", set())
+def test_agent_route_resends_without_rejected_schema():
     calls = []
 
     def create(**kwargs):
@@ -148,13 +148,13 @@ def test_agent_route_resends_without_rejected_schema_and_remembers(monkeypatch):
     assert generate_title_raw_via_agent(agent, "q", "a") == ("Docker Volume Permissions", "llm")
     assert ["response_format" in c for c in calls] == [True, False]
 
+    # Nothing is cached: the next title tries the schema again.
     calls.clear()
     assert generate_title_raw_via_agent(agent, "q", "a") == ("Docker Volume Permissions", "llm")
-    assert ["response_format" in c for c in calls] == [False]
+    assert ["response_format" in c for c in calls] == [True, False]
 
 
-def test_agent_route_does_not_resend_on_other_errors(monkeypatch):
-    monkeypatch.setattr(streaming, "_TITLE_SCHEMA_REJECTED_ROUTES", set())
+def test_agent_route_does_not_resend_on_other_errors():
     calls = []
 
     def create(**kwargs):
@@ -165,11 +165,9 @@ def test_agent_route_does_not_resend_on_other_errors(monkeypatch):
     assert raw is None and status == "llm_error"
     # One schema call per prompt; a rate limit never triggers the compatibility resend.
     assert all("response_format" in c for c in calls)
-    assert streaming._TITLE_SCHEMA_REJECTED_ROUTES == set()
 
 
-def test_aux_route_resends_without_rejected_schema(monkeypatch):
-    monkeypatch.setattr(streaming, "_TITLE_SCHEMA_REJECTED_ROUTES", set())
+def test_aux_route_resends_without_rejected_schema():
     calls = []
 
     def fake_call_llm(**kwargs):

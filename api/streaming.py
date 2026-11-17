@@ -5402,16 +5402,11 @@ _TITLE_LEAK_RE = re.compile(
     r'</?(?:think|thinking|thought|reasoning|analysis)>|["\']title["\']\s*:|^\{',
     flags=re.IGNORECASE,
 )
-_TITLE_MAX_WORDS = 12
 
 
 def _looks_like_leaked_reasoning(title: str) -> bool:
     """True when a fresh title candidate is reasoning rather than a title."""
-    return bool(
-        _TITLE_REASONING_LEAD_RE.search(title)
-        or _TITLE_LEAK_RE.search(title)
-        or len(title.split()) > _TITLE_MAX_WORDS
-    )
+    return bool(_TITLE_REASONING_LEAD_RE.search(title) or _TITLE_LEAK_RE.search(title))
 
 
 def _is_bad_new_title(text: str) -> bool:
@@ -6838,30 +6833,24 @@ _TITLE_RESPONSE_FORMAT = {
         },
     },
 }
-# Title routes that answered the schema request with HTTP 400/422.
-_TITLE_SCHEMA_REJECTED_ROUTES: set = set()
 
 
-def _send_title_request(send, route: tuple):
+def _send_title_request(send):
     """Call ``send(response_format)`` asking for a strict ``{"title"}`` object.
 
     Endpoints with constrained decoding (llama.cpp, vLLM, Ollama, LM Studio,
-    OpenAI-compatible hosts) then cannot put reasoning in the title. A route
-    that rejects the schema with HTTP 400/422 is resent once without it and,
-    if that succeeds, remembered so later titles skip the schema. Other errors
-    propagate. (Newer Agent ``call_llm`` versions also do this internally; the
-    two layers compose, since a handled rejection never reaches this one.)
+    OpenAI-compatible hosts) then cannot put reasoning in the title. A request
+    rejected with HTTP 400/422 is resent once without the schema; other errors
+    propagate. Nothing is cached, so a later request always tries the schema
+    again. (Newer Agent ``call_llm`` versions also handle rejections
+    internally; a handled rejection never reaches this layer.)
     """
-    if route not in _TITLE_SCHEMA_REJECTED_ROUTES:
-        try:
-            return send(_TITLE_RESPONSE_FORMAT)
-        except Exception as exc:
-            if getattr(exc, 'status_code', None) not in (400, 422):
-                raise
-            resp = send(None)
-            _TITLE_SCHEMA_REJECTED_ROUTES.add(route)
-            return resp
-    return send(None)
+    try:
+        return send(_TITLE_RESPONSE_FORMAT)
+    except Exception as exc:
+        if getattr(exc, 'status_code', None) not in (400, 422):
+            raise
+        return send(None)
 
 
 def _title_provider_name_ambiguous(provider: str, base_url: str) -> bool:
@@ -6974,7 +6963,7 @@ def generate_title_raw_via_aux(
                             timeout=_timeout,
                             extra_body=extra or None,
                         )
-                    resp = _send_title_request(_send, ('aux', provider, model, base_url))
+                    resp = _send_title_request(_send)
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
                         return raw, ('llm_aux' if idx == 0 and budget_idx == 0 else 'llm_aux_retry')
@@ -7088,12 +7077,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                             if response_format:
                                 kwargs['response_format'] = response_format
                             return client.chat.completions.create(**kwargs)
-                        resp = _send_title_request(_send, (
-                            'agent',
-                            getattr(agent, 'provider', ''),
-                            getattr(agent, 'model', ''),
-                            getattr(agent, 'base_url', ''),
-                        ))
+                        resp = _send_title_request(_send)
                         raw, empty_status = _extract_title_response(resp)
                     raw = str(raw or '').strip()
                     if raw:
