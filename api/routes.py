@@ -17470,7 +17470,7 @@ def _session_turn_index(messages):
     for k, start in enumerate(starts):
         message = messages[start]
         text = _session_search_message_text(message)
-        preview = re.sub(r"\s+", " ", _redact_text(text)).strip()[:80]
+        preview = _redact_text(re.sub(r"\s+", " ", text).strip())[:80]
         timestamp = message.get("timestamp")
         try:
             timestamp = float(timestamp) if timestamp is not None else None

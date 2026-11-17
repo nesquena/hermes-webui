@@ -77,6 +77,43 @@ def test_preview_joins_text_parts_truncates_and_redacts(monkeypatch):
     assert turns[1]["preview"] == "b" * 80
 
 
+@pytest.mark.parametrize("separator", [" ", "\t", "\n"], ids=["space", "tab", "newline"])
+def test_preview_normalizes_bearer_headers_before_redaction(monkeypatch, separator):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    synthetic_bearer = "synthetic-turn-index-bearer-token-1234567890"
+    text = f"Authorization:{separator}Bearer{separator}{synthetic_bearer} trailing text"
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert synthetic_bearer not in preview
+    assert preview == routes._redact_text(
+        f"Authorization: Bearer {synthetic_bearer} trailing text"
+    )[:80]
+    assert len(preview) <= 80
+
+
+def test_preview_normalizes_bearer_headers_when_redaction_is_disabled(monkeypatch):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": False})
+    synthetic_bearer = "synthetic-turn-index-bearer-token-1234567890"
+    text = f"Authorization:\tBearer\n{synthetic_bearer} trailing " + "x" * 100
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert preview == (
+        f"Authorization: Bearer {synthetic_bearer} trailing " + "x" * 100
+    )[:80]
+    assert len(preview) <= 80
+
+
+def test_preview_normalizes_and_truncates_ordinary_text():
+    text = "  ordinary\ttext\nwith whitespace  " + "x" * 100
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert preview == ("ordinary text with whitespace " + "x" * 100)[:80]
+    assert len(preview) <= 80
+
+
 @pytest.mark.parametrize("prefix_length", [60, 61, 70])
 def test_preview_redacts_complete_credentials_before_truncation(monkeypatch, prefix_length):
     monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
