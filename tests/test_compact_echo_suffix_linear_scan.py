@@ -7,11 +7,16 @@ with ``window x suffix`` instead of with the data actually inspected. On a
 6000-character conclusion block that is seconds of pure CPU, held under the
 GIL, which stalls every other stream in the process.
 
+The current implementation walks ``value`` and ``suffix`` backwards from the
+end (skipping whitespace in ``value``) and has no fixed search window, so a
+compact-equivalent echo is found regardless of how much interior whitespace
+stretches its raw span.
+
 These tests pin both halves of the contract:
 
 * the fast path must return byte-identical results to a straightforward
   reference implementation, including the leftmost-cut tie-break; and
-* it must not re-fold the search window once per candidate cut index.
+* it must not fold the whole buffer once per candidate cut index.
 """
 import random
 import re
@@ -20,11 +25,12 @@ import string
 import pytest
 
 
-def _reference_strip_compact_echo_suffix(value, suffix, *, search_window: int = 4096):
-    """Deliberately naive oracle: probe every cut index, fold the whole tail.
+def _reference_strip_compact_echo_suffix(value, suffix):
+    """Deliberately naive oracle: probe every cut index, fold the tail.
 
-    This mirrors the original behaviour exactly and exists only so the
-    optimised implementation can be proven equivalent to it.
+    This mirrors the pre-window semantics (the original probing loop) with no
+    search window, and exists only so the optimised backward walk can be
+    proven equivalent to it.
     """
     def compact(v):
         return re.sub(r'\s+', '', str(v or ''))
@@ -33,11 +39,9 @@ def _reference_strip_compact_echo_suffix(value, suffix, *, search_window: int = 
     candidate = compact(suffix)
     if not raw or not candidate:
         return raw, False
-    tail = raw[-max(len(str(suffix or '')) * 3, search_window):]
-    offset = len(raw) - len(tail)
-    for idx in range(len(tail) + 1):
-        if compact(tail[idx:]) == candidate:
-            return raw[: offset + idx].rstrip(), True
+    for idx in range(len(raw) + 1):
+        if compact(raw[idx:]) == candidate:
+            return raw[:idx].rstrip(), True
     return raw, False
 
 
@@ -74,8 +78,8 @@ def _cases():
         ("aaaa", "aa"),
         # Long buffer with the echo at the very end.
         ("remplissage " * 500 + "la vraie conclusion", "la vraie conclusion"),
-        # Echo whose whitespace-padded span is wider than the search window:
-        # the window only exposes ``conclusion``, so nothing may be stripped.
+        # Echo whose whitespace-padded span is wider than any fixed fold
+        # window: the backward walk must still strip it.
         ("bla une" + " " * 5000 + "conclusion", "une conclusion"),
         # Exotic whitespace that ``\s`` and ``str.isspace`` must treat alike.
         ("bla\u00a0bla une conclusion", "une\u00a0conclusion"),
@@ -111,45 +115,29 @@ def test_strip_compact_echo_suffix_matches_reference_oracle():
     )
 
 
-def test_strip_compact_echo_suffix_honours_a_custom_search_window():
-    """The bounded window must keep its meaning on the fast path."""
-    import api.streaming as streaming
-
-    buffer_text = "z" * 400 + " la conclusion"
-    for window in (16, 64, 512, 4096):
-        assert streaming._strip_compact_echo_suffix(
-            buffer_text, "la conclusion", search_window=window
-        ) == _reference_strip_compact_echo_suffix(
-            buffer_text, "la conclusion", search_window=window
-        ), f"window={window}"
-
-
-def test_strip_compact_echo_suffix_rejects_an_echo_wider_than_the_window():
-    """An echo that only fits inside a wider window must not be found.
+def test_strip_compact_echo_suffix_finds_an_echo_wider_than_any_fixed_window():
+    """An echo stretched past any fold window must still be stripped.
 
     The buffer ends with the echo, but interior whitespace stretches its raw
-    span past the default window, so the folded window only exposes the last
-    word. Widening the window to cover the whole span makes the same echo
-    visible again, which proves the non-match is caused by the window and
-    not by the text.
+    span far beyond a fixed fold window (the retired windowed implementation
+    exposed only the last word and left the buffer untouched). The backward
+    walk has no window, so the cut point is found and the echo is removed.
     """
     import api.streaming as streaming
 
     buffer_text = "bla une" + " " * 5000 + "conclusion"
     suffix = "une conclusion"
 
-    for impl in (streaming._strip_compact_echo_suffix, _reference_strip_compact_echo_suffix):
-        assert impl(buffer_text, suffix) == (buffer_text, False), impl.__name__
-        assert impl(buffer_text, suffix, search_window=len(buffer_text)) == ("bla", True), impl.__name__
+    assert streaming._strip_compact_echo_suffix(buffer_text, suffix) == ("bla", True)
+    assert _reference_strip_compact_echo_suffix(buffer_text, suffix) == ("bla", True)
 
 
-def test_strip_compact_echo_suffix_does_not_refold_the_window_per_cut(monkeypatch):
+def test_strip_compact_echo_suffix_does_not_refold_per_cut(monkeypatch):
     """One pass, not one fold per candidate cut index.
 
-    The original implementation called the whitespace-folding helper once per
-    possible cut position — roughly 4097 times for a default window — and each
-    of those calls re-scanned the remaining tail. Counting the calls pins the
-    algorithmic property directly, without depending on wall-clock timing.
+    Counting the folding-helper calls pins the algorithmic property directly,
+    without depending on wall-clock timing: the backward walk folds the
+    suffix once and then compares characters.
     """
     import api.streaming as streaming
 
@@ -168,7 +156,7 @@ def test_strip_compact_echo_suffix_does_not_refold_the_window_per_cut(monkeypatc
 
     assert calls['n'] <= 8, (
         f"whitespace folding ran {calls['n']} times for a single call; the scan "
-        "is re-folding the window once per candidate cut index"
+        "is re-folding once per candidate cut index"
     )
 
 

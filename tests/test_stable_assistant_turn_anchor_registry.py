@@ -777,6 +777,9 @@ let _assistantSegmentSeq=3;
 let _currentActivityBurstId=4;
 let renderCount=0;
 function _renderAnchorLiveScene(){{ renderCount+=1; return true; }}
+let flushCount=0;
+const appliedAtFlush=[];
+function _flushPendingReasoningRender(){{ flushCount+=1; appliedAtFlush.push(applied.length); }}
 {apply_source}
 const renderOutcome={{}};
 const result=_applyToAnchor(
@@ -786,7 +789,7 @@ const result=_applyToAnchor(
   renderOutcome,
   {{render:false}}
 );
-console.log(JSON.stringify({{result,applied,renderCount,renderOutcome}}));
+console.log(JSON.stringify({{result,applied,renderCount,renderOutcome,flushCount,appliedAtFlush}}));
 """
     result = subprocess.run(
         [NODE, "-e", script], text=True, capture_output=True, check=False
@@ -796,6 +799,10 @@ console.log(JSON.stringify({{result,applied,renderCount,renderOutcome}}));
     data = json.loads(result.stdout)
     assert data["result"] == {"applied": True}
     assert data["renderCount"] == 0
+    # #8171: a non-reasoning event flushes coalesced reasoning first, so a
+    # pending Thinking render can never land after the event it preceded.
+    assert data["flushCount"] == 1
+    assert data["appliedAtFlush"] == [0], "pending reasoning must flush BEFORE the event is applied"
     assert data["renderOutcome"] == {"rendered": False}
     assert data["applied"][0]["event"]["source_event_type"] == "state_saved"
     assert data["applied"][0]["event"]["event_id"] == "run-owned-outcome:7"
@@ -1471,14 +1478,17 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     assert "_upsertAnchorProcessProse(displayText" in src
     reasoning_body = _event_listener_body(src, "reasoning")
     assert "_applyToAnchor" not in reasoning_body
-    assert "const liveThinkingText=_liveThinkingText();" in reasoning_body
-    assert "const anchorReasoningFallback={};" in reasoning_body
-    assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback))" in reasoning_body
-    assert "_updateLiveThinkingCard(liveThinkingText,{" in reasoning_body
-    assert "...anchorReasoningFallback" in reasoning_body
-    assert "anchorRenderFallback:true" in reasoning_body
-    assert "sessionId:activeSid" in reasoning_body
-    assert "streamId" in reasoning_body
+    # #8171: the reasoning listener coalesces; the render runs in
+    # _flushPendingReasoningRender().
+    assert "_reasoningRenderPending=true;" in reasoning_body
+    assert "_scheduleRender();" in reasoning_body
+    flush_body = src[src.index("function _flushPendingReasoningRender(){"):src.index("// Split a content string")]
+    assert "if(!_upsertAnchorReasoning(text, opts)&&!opts.deferRender){" in flush_body
+    assert "_updateLiveThinkingCard(text,{" in flush_body
+    assert "...opts" in flush_body
+    assert "anchorRenderFallback:true" in flush_body
+    assert "sessionId:activeSid" in flush_body
+    assert "streamId" in flush_body
     assert "function _flushReasoningToAnchor()" in src
     assert "_upsertAnchorReasoning(reasoningText" in src
     assert "`live-reasoning:${streamId}:final`" in src

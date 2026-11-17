@@ -21,7 +21,10 @@ def test_webui_ephemeral_prompt_includes_browser_surface_context():
     assert "Use a concise tone." in prompt
     assert "WebUI session context" in prompt
     assert "Source: webui" in prompt
-    assert "Session ID: session-123" in prompt
+    # #8148: the id is per chat, so it is opt-in (webui.pass_session_id) and
+    # emitted last; see tests/test_issue8148_session_id_prefix_cache.py.
+    assert "Session ID" not in prompt
+    assert "session-123" not in prompt
     assert "Profile: default" in prompt
     assert "Workspace: /tmp/example-workspace" in prompt
     assert "not the same live transcript as Telegram" in prompt

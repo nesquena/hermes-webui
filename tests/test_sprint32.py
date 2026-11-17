@@ -1,8 +1,7 @@
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 import subprocess
 import os
-from api.startup import auto_install_agent_deps, _trusted_agent_dir
+from api.startup import auto_install_agent_deps
 
 
 class TestAutoInstallAgentDeps:
@@ -24,7 +23,7 @@ class TestAutoInstallAgentDeps:
         with patch.dict('os.environ', env, clear=False):
             os.environ.pop('HERMES_WEBUI_AUTO_INSTALL', None)
             with patch('subprocess.run') as mock_run:
-                assert auto_install_agent_deps() is False
+                assert auto_install_agent_deps(expected_agent_dir=agent_dir) is False
                 assert not mock_run.called
         assert 'disabled' in capsys.readouterr().out.lower()
 
@@ -38,9 +37,18 @@ class TestAutoInstallAgentDeps:
             with patch('api.startup._trusted_agent_dir', return_value=True):
                 with patch('subprocess.run') as mock_run:
                     mock_run.return_value = MagicMock(returncode=0, stderr='')
-                    assert auto_install_agent_deps() is True
+                    assert auto_install_agent_deps(expected_agent_dir=agent_dir) is True
                     args = mock_run.call_args[0][0]
                     assert '-r' in args and str(req) in args
+
+    def test_skips_without_selected_agent_identity(self, tmp_path):
+        agent_dir = tmp_path / 'hermes-agent'
+        agent_dir.mkdir()
+        (agent_dir / 'requirements.txt').write_text('pyyaml\n')
+        env = {'HERMES_WEBUI_AGENT_DIR': str(agent_dir), 'HERMES_WEBUI_AUTO_INSTALL': '1'}
+        with patch.dict('os.environ', env, clear=False), patch('subprocess.run') as mock_run:
+            assert auto_install_agent_deps() is False
+            mock_run.assert_not_called()
 
     def test_falls_back_to_pyproject(self, tmp_path):
         agent_dir = tmp_path / 'hermes-agent'
@@ -51,7 +59,7 @@ class TestAutoInstallAgentDeps:
             with patch('api.startup._trusted_agent_dir', return_value=True):
                 with patch('subprocess.run') as mock_run:
                     mock_run.return_value = MagicMock(returncode=0, stderr='')
-                    assert auto_install_agent_deps() is True
+                    assert auto_install_agent_deps(expected_agent_dir=agent_dir) is True
                     args = mock_run.call_args[0][0]
                     assert str(agent_dir) in args and '-r' not in args
 
@@ -64,7 +72,7 @@ class TestAutoInstallAgentDeps:
         }
         with patch.dict('os.environ', env_overrides, clear=False):
             with patch('subprocess.run') as mock_run:
-                assert auto_install_agent_deps() is False
+                assert auto_install_agent_deps(expected_agent_dir=missing) is False
                 assert not mock_run.called
         out = capsys.readouterr().out.lower()
         assert 'skipped' in out or 'not found' in out
@@ -76,7 +84,7 @@ class TestAutoInstallAgentDeps:
         with patch.dict('os.environ', env, clear=False):
             with patch('api.startup._trusted_agent_dir', return_value=True):
                 with patch('subprocess.run') as mock_run:
-                    assert auto_install_agent_deps() is False
+                    assert auto_install_agent_deps(expected_agent_dir=agent_dir) is False
                     assert not mock_run.called
         assert 'skipped' in capsys.readouterr().out.lower()
 
@@ -89,7 +97,7 @@ class TestAutoInstallAgentDeps:
         with patch.dict('os.environ', env, clear=False):
             with patch('api.startup._trusted_agent_dir', return_value=False):
                 with patch('subprocess.run') as mock_run:
-                    assert auto_install_agent_deps() is False
+                    assert auto_install_agent_deps(expected_agent_dir=agent_dir) is False
                     assert not mock_run.called
         assert 'trust' in capsys.readouterr().out.lower()
 
@@ -102,7 +110,7 @@ class TestAutoInstallAgentDeps:
             with patch('api.startup._trusted_agent_dir', return_value=True):
                 with patch('subprocess.run') as mock_run:
                     mock_run.return_value = MagicMock(returncode=1, stderr='ERROR: could not find package')
-                    assert auto_install_agent_deps() is False
+                    assert auto_install_agent_deps(expected_agent_dir=agent_dir) is False
         out = capsys.readouterr().out.lower()
         assert 'failed' in out or 'pip' in out
 
@@ -114,5 +122,5 @@ class TestAutoInstallAgentDeps:
         with patch.dict('os.environ', env, clear=False):
             with patch('api.startup._trusted_agent_dir', return_value=True):
                 with patch('subprocess.run', side_effect=subprocess.TimeoutExpired('pip', 120)):
-                    assert auto_install_agent_deps() is False
+                    assert auto_install_agent_deps(expected_agent_dir=agent_dir) is False
         assert 'timed out' in capsys.readouterr().out.lower()

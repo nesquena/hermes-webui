@@ -537,7 +537,7 @@ def test_handle_chat_sync_passes_result_turn_authority_to_settlement(tmp_path, m
     monkeypatch.setattr(routes, "get_session", models.get_session)
     monkeypatch.setattr(routes, "title_from", models.title_from)
     monkeypatch.setattr(routes, "get_config", lambda: {"model": "m", "provider": "p"})
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(routes, "load_settings", lambda: {})
     monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_k: None)
