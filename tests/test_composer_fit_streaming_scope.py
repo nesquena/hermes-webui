@@ -51,6 +51,10 @@ const production = [
 
 function makeWorld(initialContentWidth, collapseHidesLabel) {
   let contentWidth = initialContentWidth;
+  const typography = {
+    fontFamily: 'sans-serif', fontSize: '14px', fontWeight: '400',
+    fontStyle: 'normal', lineHeight: '20px', letterSpacing: 'normal',
+  };
   const raf = [];
   const mutationObservers = [];
   let measurements = 0;
@@ -94,7 +98,9 @@ function makeWorld(initialContentWidth, collapseHidesLabel) {
       return null;
     }},
     requestAnimationFrame(cb) { raf.push(cb); return raf.length; },
-    getComputedStyle(el) { return {display: el.display || 'inline-flex'}; },
+    getComputedStyle(el) {
+      return Object.assign({display: el.display || 'inline-flex'}, el === left ? typography : {});
+    },
     _onPhoneBoundaryChange() { boundaryCalls++; },
     addEventListener() {},
   };
@@ -137,6 +143,10 @@ function makeWorld(initialContentWidth, collapseHidesLabel) {
       label.textContent = text;
       left.textContent = text;
     },
+    setTypography(width, family) {
+      contentWidth = width;
+      typography.fontFamily = family;
+    },
     measurements() { return measurements; },
     boundaryCalls() { return boundaryCalls; },
     burger() { return classes.has('cf-burger'); },
@@ -178,6 +188,17 @@ const shorterScheduled = shorterLabel.icons();
 shorterLabel.ctx._fitComposerFooter(true);
 const shorterForced = shorterLabel.icons();
 
+const typography = makeWorld(300);
+typography.setTypography(900, 'monospace');
+typography.notify(typography.left);
+typography.flush();
+const typographyScheduled = typography.icons();
+typography.ctx._fitComposerFooter(false);
+typography.ctx._fitComposerFooter(false);
+const typographyMemoMeasurements = typography.measurements();
+typography.ctx._fitComposerFooter(true);
+const typographyForced = typography.icons();
+
 const burger = makeWorld(900);
 burger.ctx._fitComposerFooter(false);
 burger.ctx._fitComposerFooter(false);
@@ -196,6 +217,7 @@ process.stdout.write(JSON.stringify({
   explicit: {measurements: explicit.measurements()},
   longerLabel: {scheduled: longerScheduled, forced: longerForced},
   shorterLabel: {scheduled: shorterScheduled, forced: shorterForced},
+  typography: {scheduled: typographyScheduled, forced: typographyForced, memoMeasurements: typographyMemoMeasurements},
   burger: {calls: burger.boundaryCalls(), active: burger.burger()},
   selfObserved: {measurements: selfObserved.measurements()},
 }));
@@ -241,6 +263,12 @@ def test_unchanged_width_longer_label_collapses_through_scheduled_path(outcome):
 
 def test_unchanged_width_shorter_label_expands_through_scheduled_path(outcome):
     assert outcome["shorterLabel"] == {"scheduled": False, "forced": False}
+
+
+def test_same_geometry_typography_invalidates_then_unchanged_fit_memoizes(outcome):
+    assert outcome["typography"] == {
+        "scheduled": True, "forced": True, "memoMeasurements": 2,
+    }
 
 
 def test_burger_transition_still_closes_composer_menus_once(outcome):

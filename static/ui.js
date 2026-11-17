@@ -7727,7 +7727,11 @@ function _fitComposerFooter(force){
       return (el.hidden?'1':'0')+getComputedStyle(el).display+'|'+(el.className||'')+
         '|'+(el.style?el.style.cssText:'');
     }).join(',') : '';
-    return footer.clientWidth+':'+left.clientWidth+':'+left.textContent+':'+descendants;
+    const type=typeof getComputedStyle==='function'?getComputedStyle(left):{};
+    const typography=[type.fontFamily,type.fontSize,type.fontWeight,type.fontStyle,
+      type.lineHeight,type.letterSpacing].join('|');
+    return footer.clientWidth+':'+left.clientWidth+':'+left.textContent+':'+
+      typography+':'+descendants;
   };
   const key=fitKey();
   if(arguments[0]===false && footer===_composerFitLastFooter && key===_composerFitLastKey) return;
