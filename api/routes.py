@@ -17470,7 +17470,7 @@ def _session_turn_index(messages):
     for k, start in enumerate(starts):
         message = messages[start]
         text = _session_search_message_text(message)
-        preview = _redact_text(re.sub(r"\s+", " ", text).strip()[:80])
+        preview = re.sub(r"\s+", " ", _redact_text(text)).strip()[:80]
         timestamp = message.get("timestamp")
         try:
             timestamp = float(timestamp) if timestamp is not None else None
@@ -18149,6 +18149,10 @@ def _handle_session_get(handler, parsed, *, turn_index=False) -> bool:
         # the wire shape stays byte-equivalent to the previous inline
         # synthesis (the frontend has been reading these exact keys).
         msgs = list(synth.messages or [])
+        if turn_index:
+            payload = _session_turn_index(msgs)
+            payload["session_id"] = sid
+            return j(handler, payload)
         sess = {
             "session_id": synth.session_id,
             "title": synth.title,

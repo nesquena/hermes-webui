@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 import time
 
+import pytest
+
 from api import config, models, routes
 
 
@@ -75,6 +77,18 @@ def test_preview_joins_text_parts_truncates_and_redacts(monkeypatch):
     assert turns[1]["preview"] == "b" * 80
 
 
+@pytest.mark.parametrize("prefix_length", [60, 61, 70])
+def test_preview_redacts_complete_credentials_before_truncation(monkeypatch, prefix_length):
+    monkeypatch.setattr("api.config.load_settings", lambda: {"api_redact_enabled": True})
+    synthetic_access_key = "AKIAIOSFODNN7EXAMPLE"
+    text = "x" * prefix_length + synthetic_access_key + " trailing text"
+
+    preview = routes._session_turn_index([{"role": "user", "content": text}])["turns"][0]["preview"]
+
+    assert preview.startswith("x" * prefix_length + "AKIAIO...")
+    assert len(preview) <= 80
+
+
 def _session_fixture(monkeypatch, tmp_path, messages):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -121,6 +135,99 @@ def test_route_msg_idx_agrees_with_full_session_positions(monkeypatch, tmp_path)
         if m["role"] == "user" and m.get("_source") != "delegation_wakeup"
     ] == [1, 4]
     assert "messages" not in turns_payload
+
+
+def _foreign_session_fixture():
+    sid = "foreign-turn-index"
+    messages = [
+        {"role": "user", "content": "foreign-user-alpha", "timestamp": 1},
+        {"role": "assistant", "content": "foreign-assistant-alpha"},
+        {"role": "user", "content": "foreign-user-beta", "timestamp": 2},
+        {"role": "assistant", "content": "foreign-assistant-beta"},
+    ]
+    session = models.Session(
+        session_id=sid,
+        profile="turn-test",
+        messages=messages,
+        created_at=1.0,
+        updated_at=2.0,
+        title="Synthetic foreign session",
+        workspace="/synthetic/foreign",
+        is_cli_session=True,
+        source_tag="cli",
+        raw_source="cli",
+        session_source="cli",
+        source_label="CLI",
+        read_only=True,
+    )
+    metadata = {
+        "session_id": sid,
+        "profile": session.profile,
+        "source_tag": session.source_tag,
+        "raw_source": session.raw_source,
+    }
+    return sid, session, metadata
+
+
+def test_valid_foreign_session_returns_turn_index_and_ordinary_full_envelope(monkeypatch):
+    sid, synth, metadata = _foreign_session_fixture()
+    monkeypatch.setattr(routes, "_refuse_cross_profile_before_load", lambda *_, **__: False)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "turn-test")
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: metadata)
+
+    def no_sidecar(*_, **__):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes, "get_session", no_sidecar)
+    monkeypatch.setattr(
+        routes,
+        "_claim_or_synthesize_cli_session",
+        lambda *_args, **_kwargs: (synth, "not_claimable"),
+    )
+
+    status, payload = _get_payload(f"/api/session/turns?session_id={sid}")
+    assert status == 200
+    assert payload == {
+        "turns": [
+            {"k": 0, "msg_idx": 0, "ts": 1.0, "preview": "foreign-user-alpha", "n_msgs": 1},
+            {"k": 1, "msg_idx": 2, "ts": 2.0, "preview": "foreign-user-beta", "n_msgs": 1},
+        ],
+        "total_messages": 4,
+        "session_id": sid,
+    }
+    assert "session" not in payload
+    assert "messages" not in payload
+
+    full_status, full_payload = _get_payload(f"/api/session?session_id={sid}&resolve_model=0")
+    assert full_status == 200
+    assert full_payload["session"]["messages"] == synth.messages
+
+
+def test_foreign_cross_profile_refusal_discloses_no_index_or_transcript(monkeypatch):
+    sid, _synth, metadata = _foreign_session_fixture()
+    metadata["profile"] = "other-profile"
+    monkeypatch.setattr(routes, "_refuse_cross_profile_before_load", lambda *_, **__: False)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "turn-test")
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: metadata)
+
+    def no_sidecar(*_, **__):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes, "get_session", no_sidecar)
+    with patch.object(routes, "_claim_or_synthesize_cli_session") as synthesize:
+        status, payload = _get_payload(f"/api/session/turns?session_id={sid}")
+
+    assert status == 409
+    assert payload == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": sid,
+        "profile": "other-profile",
+    }
+    assert "turns" not in payload
+    assert "session" not in payload
+    assert "messages" not in payload
+    synthesize.assert_not_called()
 
 
 def test_unknown_session_uses_session_404(monkeypatch):
