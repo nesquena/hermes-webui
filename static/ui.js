@@ -11022,7 +11022,56 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    // Autolink only the text between tags, as the block pass below does: set
+    // aside complete links, images and pre blocks and every other tag, then
+    // turn a raw tag left without its closing ">" on its line into text by
+    // escaping its "<" (the block pass escapes those too), so a URL in an
+    // attribute value stays as written.
+    // - A bracketed address such as <https://example.com> or <mailto:a@b.c>
+    //   (any scheme, any case) is not a tag: it stays in place, so the URL in
+    //   it is linked as before. A name holding ":" is never an allowed tag.
+    // - Only the "<" of an unclosed tag is escaped; the rest stays plain text,
+    //   so a URL after it is linked with its "&" and quotes left as written.
+    //   The escaped "<" is set aside too, so it still ends a URL before it.
+    //   Each line is scanned once: a "<" before a letter is escaped when no
+    //   ">" follows it on its line.
+    // - Restoring scans every stash token in one left-to-right pass, so a run
+    //   of text between two tokens is never read as a token.
+    // - Setting tags aside is one forward scan that remembers where the next
+    //   ">", "</a>" and "</pre>" are (or that there is none), so a long line
+    //   of "<" without a close is read once, not once per "<".
+    const _tag_stash=[];
+    t=(()=>{
+      const out=[];
+      const head=/<(?![a-zA-Z][a-zA-Z0-9+.-]*:)\/?[a-zA-Z]/y;
+      let at=0,emitted=0,gt=-1,aClose=-2,preClose=-2;
+      while((at=t.indexOf('<',at))!==-1){
+        if(gt<at) gt=t.indexOf('>',at+1);
+        if(gt<0) break;
+        let end=-1;
+        if(t.startsWith('<a',at)&&!/\w/.test(t[at+2]||'')){
+          if(aClose===-2||(aClose>=0&&aClose<=gt)) aClose=t.indexOf('</a>',gt+1);
+          if(aClose>=0) end=aClose+4;
+        }
+        if(end<0&&t.startsWith('<img',at)&&!/\w/.test(t[at+4]||'')) end=gt+1;
+        if(end<0&&t.startsWith('<pre',at)&&!/\w/.test(t[at+4]||'')){
+          if(preClose===-2||(preClose>=0&&preClose<=gt)) preClose=t.indexOf('</pre>',gt+1);
+          if(preClose>=0) end=preClose+6;
+        }
+        if(end<0){head.lastIndex=at;if(head.test(t)) end=gt+1;}
+        if(end<0){at++;continue;}
+        out.push(t.slice(emitted,at));
+        _tag_stash.push(t.slice(at,end));
+        out.push(`\x00T${_tag_stash.length-1}\x00`);
+        emitted=end;
+        at=end;
+      }
+      out.push(t.slice(emitted));
+      return out.join('');
+    })();
+    t=t.split(/([\r\n\u2028\u2029])/).map(line=>{const at=line.lastIndexOf('>')+1;return line.slice(0,at)+line.slice(at).replace(/<(?=[a-zA-Z])/g,()=>{_tag_stash.push('&lt;');return `\x00T${_tag_stash.length-1}\x00`;});}).join('');
     t=_autolinkBareText(t);
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='T'?_tag_stash[+i]:m);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -11423,12 +11472,17 @@ function renderMd(raw){
       run=>_autolinkBareRun(run),
     );
   }
-  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
+  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them, and
+  // every other tag (an opening <a> without its </a>, for one) so autolink
+  // never rewrites text inside a tag. The sanitizer pass above set aside every
+  // "<" it did not hand to _tag() as "&lt;", so every tag here was written
+  // by _tag(), with escaped, double-quoted attribute values, and ends at its
+  // first ">".
   // Restoring scans every stash token (\x00, capital letters, digits, \x00) in
   // one left-to-right pass and puts back only these entries, so a run of text
   // between two tokens (math, code block, media) is never read as a token.
   const _alRestore=t=>t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='B'?_al_stash[+i]:m);
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(_alRestore(m));return `\x00B${_al_stash.length-1}\x00`;});
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<\/?[a-zA-Z][^>]*>)/g,m=>{_al_stash.push(_alRestore(m));return `\x00B${_al_stash.length-1}\x00`;});
   // Split high-confidence sentence boundaries while preserving valid CJK IRI
   // content, then rescan each plain-text trail so adjacent URLs all link.
   s=_autolinkBareText(s);
