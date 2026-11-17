@@ -18170,13 +18170,16 @@ function _anchorSceneToolRenderSignature(row, opts){
 function _liveSceneIncrementalEnabled(){ return window._liveSceneIncremental!==false; }
 function _anchorSceneRenderKeyPart(value){
   try{
-    return JSON.stringify(value,(_key,item)=>typeof item==='string'&&item.length>48
-      ? `string:${item.length}:${item.slice(0,16)}:${item.slice(-32)}`
-      : item);
+    // Complete input identity is authoritative: sampled string ends collide on
+    // same-length corrections and would incorrectly authorize stale DOM reuse.
+    return JSON.stringify(value);
   }catch(_){ return null; }
 }
 function _anchorSceneRowRenderPrefs(opts){
-  return {opts:opts||{},language:document.documentElement.lang,showThinking:window._showThinking,timestamps:window._transparentEventTimestamps,
+  // Timestamp visibility is reconciled in place by the transparent renderer.
+  // Excluding it keeps content identity stable across preference-only updates,
+  // preserving expanded details, connected nodes, and reader text selection.
+  return {opts:opts||{},language:document.documentElement.lang,showThinking:window._showThinking,
     simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),detailsExpanded:window._worklogDetailsExpandedByDefault===true,mode:typeof chatActivityMode==='function'?chatActivityMode():'',sessionId:S.session&&S.session.session_id,proseIncremental:typeof window.__anchorProseIncrementalNode==='function'};
 }
 function _anchorSceneRowRenderKey(row, prefs){

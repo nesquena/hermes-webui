@@ -198,6 +198,63 @@ async (mode) => {
 """
 
 
+_CORRECTION_SCENARIO = r"""
+async ({mode, field}) => {
+  const stream='oracle-correction-stream';
+  Date.now=()=>1700000001000;
+  window._chatActivityDisplayMode=mode;
+  window._showThinking=true;
+  window._simplifiedToolCalling=true;
+  S.session={session_id:'oracle-session',messages:[],pending_started_at:1700000000};
+  S.messages=[]; S.toolCalls=[]; S.activeStreamId=stream;
+  $('msgInner').innerHTML='';
+  const makeTurn=()=>{const turn=_createAssistantTurn();turn.id='liveAssistantTurn';return turn;};
+  const prefix='PREFIX-123456789'; // exactly 16 characters
+  const suffix='SUFFIX-abcdefghijklmnopqrstuvwxy'; // exactly 32 characters
+  if(prefix.length!==16||suffix.length!==32)throw new Error('bad collision fixture ends');
+  const originalText=prefix+'a'.repeat(96)+suffix;
+  const correctedText=prefix+'b'.repeat(96)+suffix;
+  const row={row_id:'tool:collision',local_id:'collision',role:'tool',kind:'tool_call',
+    source_event_type:'tool_complete',status:'completed',created_at:1700000000,
+    tool:{id:'collision',tid:'collision',name:'terminal',args:{command:originalText},
+      preview:originalText,snippet:originalText,done:true,duration:0.25,created_at:1700000000}};
+  row.payload=row.tool;
+  const scene=()=>({version:'activity_scene_v1',mode,
+    identity:{session_id:'oracle-session',stream_id:stream,run_id:stream},
+    activity_rows:[JSON.parse(JSON.stringify(row))]});
+  let retained=makeTurn();$('msgInner').appendChild(retained);
+  renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+  const select=turn=>turn.querySelector('[data-anchor-row-id="tool:collision"]');
+  const first=select(retained);
+  const firstDetail=first.querySelector('.tool-card-detail');
+  const header=first.querySelector('.tool-card-header');
+  if(header)header.click();
+  const openedDetail=first.querySelector('.tool-card-detail');
+  const beforeHtml=first.innerHTML;
+  renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+  const unchanged=select(retained)===first&&first.isConnected&&first.innerHTML===beforeHtml&&
+    first.querySelector('.tool-card-detail')===openedDetail;
+  if(field==='nested_argument')row.tool.args.command=correctedText;
+  else {row.tool.preview=correctedText;row.tool.snippet=correctedText;}
+  const currentScene=scene();
+  retained.remove();
+  const fresh=makeTurn();$('msgInner').appendChild(fresh);
+  renderLiveAnchorActivityScene(stream,currentScene,{sessionId:'oracle-session'});
+  const freshHeader=select(fresh).querySelector('.tool-card-header');
+  if(freshHeader)freshHeader.click();
+  const freshHtml=select(fresh).innerHTML;
+  const freshText=select(fresh).textContent;
+  fresh.remove();$('msgInner').appendChild(retained);
+  renderLiveAnchorActivityScene(stream,currentScene,{sessionId:'oracle-session'});
+  const corrected=select(retained);
+  return {unchanged,correctedVisible:corrected.textContent.includes(correctedText),
+    freshVisible:freshText.includes(correctedText),freshMatches:corrected.innerHTML===freshHtml,
+    detailReused:corrected.querySelector('.tool-card-detail')===firstDetail,
+    nodeReused:corrected===first};
+}
+"""
+
+
 _STATUS_SCENARIO = r"""
 async (mode) => {
   const stream='oracle-status-stream';
@@ -283,6 +340,21 @@ def test_300_step_live_scene_matches_fresh_render(browser, mode, incremental):
         "disclosureRetained": True,
     }, result
     assert result["rows"] > 50, result
+
+
+@pytest.mark.parametrize("mode", ["compact_worklog", "transparent_stream"])
+@pytest.mark.parametrize("field", ["tool_result", "nested_argument"])
+def test_middle_only_tool_correction_matches_fresh_render(browser, mode, field):
+    page, errors = _oracle_page(browser, True)
+    try:
+        result = page.evaluate(_CORRECTION_SCENARIO, {"mode": mode, "field": field})
+    finally:
+        page.close()
+    assert not errors, errors
+    assert result["unchanged"] is True, result
+    assert result["freshVisible"] is True, result
+    assert result["correctedVisible"] is True, result
+    assert result["freshMatches"] is True, result
 
 
 @pytest.mark.parametrize("mode", ["compact_worklog", "transparent_stream"])
