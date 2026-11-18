@@ -10,6 +10,7 @@ Maintainer contract:
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -71,6 +72,8 @@ def _reset_cache(monkeypatch, **overrides):
     monkeypatch.setattr(updates, "_update_cache_by_key", {})
     if hasattr(updates, "_manual_update_checks"):
         monkeypatch.setattr(updates, "_manual_update_checks", {})
+    if hasattr(updates, "_update_check_failures"):
+        monkeypatch.setattr(updates, "_update_check_failures", {})
     monkeypatch.setattr(updates, "_check_in_progress", False)
     if hasattr(updates, "_running_key"):
         monkeypatch.setattr(updates, "_running_key", None)
@@ -573,4 +576,125 @@ def test_manual_force_route_to_consumer_control_disabled_non_forced(monkeypatch)
         f"consumer rendered {result['statusText']!r} instead of the disabled text"
     )
     assert result["bannerCalls"] == 0, "banner must NOT fire when the server answers disabled"
+
+
+# ── Terminal failure of a background refresh (gate on #9056) ──────────────────
+#
+# A refresh that raises publishes nothing, so the completing consumer used to
+# read the cache: cold cache answered empty targets and warm cache answered the
+# previous result (behind: 7). Both looked like a successful check. The producer
+# now records a terminal failure per key; POST and the completion-recovery GET
+# must both report it, with pending off because the worker is gone.
+
+
+def _raise_incomplete_read(path, name, channel=updates.DEFAULT_UPDATE_CHANNEL):
+    """Mirror the release-tag HTTP producer: urllib can raise on a short read."""
+    raise http.client.IncompleteRead(b'{"name": "v0.52.7', 512)
+
+
+def _healthy_check(behind: int):
+    def _check(path, name, channel=updates.DEFAULT_UPDATE_CHANNEL):
+        return {"name": name, "behind": behind if name == "webui" else 0, "channel": channel}
+
+    return _check
+
+
+def test_failed_refresh_reports_terminal_failure_cold_cache(monkeypatch):
+    """Cold cache: the failed check must answer failed, never pending and never empty-success."""
+    _reset_cache(monkeypatch)
+    monkeypatch.setenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", "0")
+    monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": True})
+    monkeypatch.setattr(updates, "_check_repo", _raise_incomplete_read)
+
+    post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+    assert post_payload.get("pending") is True, (
+        f"a zero budget must still answer pending from the POST: {post_payload}"
+    )
+    _drain_background()
+
+    completed = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+    assert completed.get("pending") is not True, (
+        f"GET kept answering pending after the worker terminated: {completed}"
+    )
+    assert completed.get("failed") is True, (
+        f"GET lost the terminal failure of the refresh: {completed}"
+    )
+    assert "IncompleteRead" in str(completed.get("error") or ""), (
+        f"GET error does not name the producer exception: {completed}"
+    )
+    assert completed.get("webui", {}).get("behind") is None, (
+        f"empty targets were published as an answer: {completed}"
+    )
+    assert "IncompleteRead" in str(completed.get("webui", {}).get("error") or "")
+    assert "IncompleteRead" in str(completed.get("agent", {}).get("error") or "")
+
+    # The POST observes the same terminal failure once the worker is gone.
+    plain_post = _dispatch_post(monkeypatch, {"channel": "stable"})["ok"]
+    assert plain_post.get("failed") is True, f"non-forced POST did not report the failure: {plain_post}"
+    assert plain_post.get("pending") is not True
+
+    # Control: a successful refresh supersedes the failure.
+    monkeypatch.delenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", raising=False)
+    monkeypatch.setattr(updates, "_check_repo", _healthy_check(7))
+    healthy_post = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+    _drain_background()
+    assert healthy_post.get("pending") is not True, f"healthy POST answered pending: {healthy_post}"
+    assert healthy_post.get("webui", {}).get("behind") == 7, (
+        f"healthy refresh lost its answer: {healthy_post}"
+    )
+    assert healthy_post.get("failed") is not True
+    assert "error" not in (healthy_post.get("webui") or {})
+
+    healthy_get = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+    assert healthy_get.get("webui", {}).get("behind") == 7, (
+        f"failure record outlived the successful refresh: {healthy_get}"
+    )
+    assert healthy_get.get("failed") is not True
+
+
+def test_failed_refresh_reports_terminal_failure_warm_cache(monkeypatch):
+    """Warm cache: the previous behind:7 must never stand in for the failed check."""
+    _reset_cache(monkeypatch)
+    monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": True})
+    updates._publish_update_cache(
+        {"name": "webui", "behind": 7},
+        {"name": "agent", "behind": 0},
+        True,
+        "stable",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", "0")
+    monkeypatch.setattr(updates, "_check_repo", _raise_incomplete_read)
+
+    post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+    assert post_payload.get("pending") is True, f"zero budget must answer pending: {post_payload}"
+    _drain_background()
+
+    completed = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+    assert completed.get("pending") is not True, (
+        f"GET kept answering pending after the worker terminated: {completed}"
+    )
+    assert completed.get("failed") is True, (
+        f"GET served the stale cache as a successful check: {completed}"
+    )
+    assert completed.get("webui", {}).get("behind") != 7, (
+        f"stale behind:7 survived the failed refresh: {completed}"
+    )
+    assert completed.get("webui", {}).get("behind") is None
+    assert "IncompleteRead" in str(completed.get("error") or "")
+
+    # Control: the same warm cache is answered again once a refresh succeeds.
+    monkeypatch.delenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", raising=False)
+    monkeypatch.setattr(updates, "_check_repo", _healthy_check(9))
+    healthy_post = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+    _drain_background()
+    assert healthy_post.get("pending") is not True
+    assert healthy_post.get("webui", {}).get("behind") == 9, (
+        f"healthy refresh lost its answer: {healthy_post}"
+    )
+    assert healthy_post.get("failed") is not True
+
+    healthy_get = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+    assert healthy_get.get("webui", {}).get("behind") == 9
+    assert healthy_get.get("failed") is not True
+
 

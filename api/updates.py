@@ -52,6 +52,14 @@ except ImportError:
 _update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}
 _update_cache_by_key: dict[tuple[str, bool], dict] = {}
 _manual_update_checks: dict[tuple[str, bool], float] = {}
+# A refresh that raised publishes nothing, so answering loud from the cache
+# (or from an empty one) reported the *previous* answer -- or empty targets --
+# as if the check the caller asked for had succeeded (#9056). A refresh now
+# publishes a terminal failure for its own (channel, include_agent) key, and
+# both the POST (check_for_updates) and the cache-only GET
+# (cached_update_status) report it instead of stale or empty data until a
+# successful publish supersedes it.
+_update_check_failures: dict[tuple[str, bool], dict] = {}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
@@ -63,6 +71,7 @@ def _invalidate_update_cache():
         _update_cache['checked_at'] = 0
         _update_cache_by_key.clear()
         _manual_update_checks.clear()
+        _update_check_failures.clear()
 _check_in_progress = False
 _running_key = None
 _refresh_queue: list[tuple[str, bool]] = []
@@ -1988,10 +1997,28 @@ def cached_update_status(*, include_agent=True, channel=None):
         if float(_update_cache.get('checked_at') or 0) == 0:
             _update_cache_by_key.clear()
 
+        # A key whose last refresh raised has no answer to serve: report the
+        # failure instead of the previous (or empty) payload, which would read
+        # as success for a check that never completed (#9056). While a retry for
+        # this key is still in flight the pending answer stays the honest one.
         key_in_flight = _check_in_progress and (
             _running_key == requested_key
             or requested_key in _refresh_queue
         )
+        failure = _failure_for_key_locked(requested_key, time.time())
+        if failure is not None and not key_in_flight:
+            checked_at = float(_update_cache.get('checked_at') or 0)
+            if requested_key in _update_cache_by_key:
+                checked_at = float(
+                    _update_cache_by_key[requested_key].get('checked_at') or 0
+                )
+            return _failure_payload(
+                failure,
+                channel=channel,
+                include_agent=include_agent,
+                checked_at=checked_at,
+            )
+
         if key_in_flight:
             pending = {
                 'pending': True,
@@ -2090,6 +2117,76 @@ def _update_check_wait_budget():
         return DEFAULT_UPDATE_CHECK_WAIT
 
 
+def _update_check_failure_message(exc) -> str:
+    """Short, display-safe description of a refresh exception."""
+    detail = str(exc).strip()
+    if not detail:
+        detail = type(exc).__name__
+    else:
+        detail = f'{type(exc).__name__}: {detail}'
+    if len(detail) > _GIT_DIAGNOSTIC_MAX_CHARS:
+        detail = detail[:_GIT_DIAGNOSTIC_MAX_CHARS].rstrip() + '...'
+    return f'update check failed: {detail}'
+
+
+def _failure_payload(failure, *, channel, include_agent, checked_at=0.0) -> dict:
+    """Payload for a key whose last refresh terminated with an exception.
+
+    ``pending`` is deliberately False: the worker is gone, so the only honest
+    answers are "failed" or a later success. Both targets carry the error so
+    every consumer that already renders per-target failures ("WebUI: ...") shows
+    it, and neither target can be mistaken for an up-to-date result.
+    """
+    message = str(failure.get('error') or 'update check failed')
+    payload = {
+        'pending': False,
+        'cached': True,
+        'failed': True,
+        'error': message,
+        'failed_at': failure.get('failed_at', 0),
+        'channel': channel,
+        'include_agent': include_agent,
+        'checked_at': checked_at,
+        'webui': {'name': 'webui', 'behind': None, 'error': message},
+    }
+    if include_agent:
+        payload['agent'] = {'name': 'agent', 'behind': None, 'error': message}
+    else:
+        payload['agent'] = _ignored_agent_update_info()
+    return payload
+
+
+def _publish_update_check_failure(include_agent, channel, exc) -> None:
+    """Record a terminal failure for one key so every reader can observe it."""
+    now = time.time()
+    with _cache_lock:
+        _prune_update_check_failures(now)
+        _update_check_failures[(channel, include_agent)] = {
+            'error': _update_check_failure_message(exc),
+            'failed_at': now,
+            'channel': channel,
+            'include_agent': include_agent,
+        }
+
+
+def _prune_update_check_failures(now) -> None:
+    """Drop failure records older than the cache TTL (caller holds the lock)."""
+    for key, entry in list(_update_check_failures.items()):
+        if now - float(entry.get('failed_at') or 0) >= CACHE_TTL:
+            del _update_check_failures[key]
+
+
+def _failure_for_key_locked(key, now):
+    """Return the live failure record for ``key``, or None (caller holds lock)."""
+    failure = _update_check_failures.get(key)
+    if failure is None:
+        return None
+    if now - float(failure.get('failed_at') or 0) >= CACHE_TTL:
+        _update_check_failures.pop(key, None)
+        return None
+    return failure
+
+
 def _publish_update_cache(webui_info, agent_info, include_agent, channel):
     with _cache_lock:
         now = time.time()
@@ -2099,6 +2196,7 @@ def _publish_update_cache(webui_info, agent_info, include_agent, channel):
         ]
         for k in expired_keys:
             del _update_cache_by_key[k]
+        _prune_update_check_failures(now)
 
         entry = {
             'webui': webui_info,
@@ -2108,6 +2206,8 @@ def _publish_update_cache(webui_info, agent_info, include_agent, channel):
             'channel': channel,
         }
         _update_cache_by_key[(channel, include_agent)] = dict(entry)
+        # A fresh answer supersedes any terminal failure recorded for this key.
+        _update_check_failures.pop((channel, include_agent), None)
 
         _update_cache['webui'] = webui_info
         _update_cache['agent'] = agent_info
@@ -2134,10 +2234,15 @@ def _refresh_updates_in_background(include_agent, channel, done):
                 else _ignored_agent_update_info()
             )
             _publish_update_cache(webui_info, agent_info, include_agent, channel)
-    except Exception:
-        # The caller answers from the cache either way; the failure belongs in the
-        # log rather than in a stack trace no request can act on.
+    except Exception as exc:
+        # The caller answers from the cache either way, so log the traceback --
+        # but also publish a terminal failure for this key: without it the cache
+        # answer reads as success even though the requested check raised (#9056).
         logger.exception('background update check failed')
+        try:
+            _publish_update_check_failure(include_agent, channel, exc)
+        except Exception:
+            logger.exception('failed to publish update check failure')
     finally:
         with _cache_lock:
             done.set()
@@ -2185,6 +2290,18 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
         # in-progress check for the other channel must not short-circuit this one
         # with a stale cross-channel payload (Codex SILENT #5).
         if not force:
+            in_flight_now = _check_in_progress and (
+                _running_key == requested_key
+                or requested_key in _refresh_queue
+            )
+            failure = _failure_for_key_locked(requested_key, time.time())
+            if failure is not None and not in_flight_now:
+                return _failure_payload(
+                    failure,
+                    channel=channel,
+                    include_agent=include_agent,
+                    checked_at=float(_update_cache.get('checked_at') or 0),
+                )
             if requested_key in _update_cache_by_key:
                 entry = _update_cache_by_key[requested_key]
                 if time.time() - float(entry.get('checked_at') or 0) < CACHE_TTL:
@@ -2264,6 +2381,27 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
         if refreshed_entry is not None:
             refreshed_entry['cached'] = False
             return refreshed_entry
+
+        # The worker terminated without publishing a fresh answer. If it raised,
+        # the terminal failure for this key is the answer; the stale or empty
+        # cache must never stand in for the check the caller asked for (#9056).
+        key_in_flight = _check_in_progress and (
+            _running_key == requested_key
+            or requested_key in _refresh_queue
+        )
+        failure = _failure_for_key_locked(requested_key, time.time())
+        if failure is not None and not key_in_flight:
+            failure_checked_at = 0.0
+            if requested_key in _update_cache_by_key:
+                failure_checked_at = float(
+                    _update_cache_by_key[requested_key].get('checked_at') or 0
+                )
+            return _failure_payload(
+                failure,
+                channel=channel,
+                include_agent=include_agent,
+                checked_at=failure_checked_at,
+            )
 
         pending = {
             'pending': True,

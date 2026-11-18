@@ -46,6 +46,8 @@ def _reset_cache(monkeypatch, **overrides):
     cache.update(overrides)
     monkeypatch.setattr(updates, '_update_cache', dict(cache))
     monkeypatch.setattr(updates, '_update_cache_by_key', {})
+    if hasattr(updates, '_update_check_failures'):
+        monkeypatch.setattr(updates, '_update_check_failures', {})
     monkeypatch.setattr(updates, '_check_in_progress', False)
     if hasattr(updates, '_running_key'):
         monkeypatch.setattr(updates, '_running_key', None)
