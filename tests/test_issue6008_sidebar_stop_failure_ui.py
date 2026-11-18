@@ -61,12 +61,16 @@ def test_stop_callers_gate_success_toasts_on_cancel_result():
         "if(awaitcancelStream('slash-stop'))showToast(t('stream_stopped'));"
         "elseshowToast(t('cancel_failed'),null,'error');"
     ) in compact_commands
+    # /interrupt may cancel by stream id when the user switched chats while the
+    # follow-up was being queued; the success toast is still gated on the result.
+    assert "await cancelStream('slash-interrupt')".replace(" ", "") in compact_commands
     assert (
-        "if(awaitcancelStream('slash-interrupt'))showToast(t('cmd_interrupt_confirm'),2000);"
+        "if(_cancelled)showToast(t('cmd_interrupt_confirm'),2000);"
         "elseshowToast(t('cancel_failed'),null,'error');"
     ) in compact_commands
+    assert "awaitcancelStream('busy-interrupt')" in compact_messages
     assert (
-        "if(awaitcancelStream('busy-interrupt'))showToast(t('busy_interrupt_confirm'),2000);"
+        "if(_cancelled)showToast(t('busy_interrupt_confirm'),2000);"
         "elseshowToast(t('cancel_failed'),null,'error');"
     ) in compact_messages
     assert (
