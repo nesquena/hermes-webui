@@ -584,7 +584,7 @@ def test_routes_register_goal_endpoint_and_kickoff_stream():
 
 
 def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_path):
-    from api import routes
+    from api import config, gateway_chat, routes, run_drain
     import api.turn_journal as turn_journal
 
     class FakeSession:
@@ -622,21 +622,33 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex="goal-stream-id"))
 
-    response = routes._start_chat_stream_for_session(
-        FakeSession(),
-        msg="continue the goal",
-        attachments=[],
-        workspace=str(tmp_path),
-        model="gpt-5.5",
-        model_provider="openai-codex",
-        goal_related=True,
-    )
+    # #8904: FakeThread never runs the Gateway worker that unregisters the stream
+    # and releases its Gateway launch row.
+    streams_before = set(config.STREAMS)
+    try:
+        response = routes._start_chat_stream_for_session(
+            FakeSession(),
+            msg="continue the goal",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="gpt-5.5",
+            model_provider="openai-codex",
+            goal_related=True,
+        )
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
+            gateway_chat.release_gateway_stream_state(stream_id)
 
     assert response["stream_id"] == "goal-stream-id"
     assert captured["target"] is routes._run_gateway_chat_streaming
     assert captured["kwargs"]["goal_related"] is True
     assert captured["kwargs"]["model_provider"] == "openai-codex"
     assert captured["started"] is True
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_streaming_post_turn_goal_hook_surfaces_and_continues():
