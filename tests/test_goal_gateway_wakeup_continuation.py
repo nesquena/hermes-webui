@@ -700,7 +700,7 @@ def test_start_detached_goal_continuation_does_not_start_when_skipped(monkeypatc
     webui_goals.start_detached_goal_continuation("sid-x", "continue", cid)
     for t in threads:
         t.join(5)
-    assert started == [(("sid-x", "continue"), {"source": "goal_wakeup", "goal_continuation_id": cid})]
+    assert started == [(("sid-x", "continue"), {"source": "goal_wakeup", "goal_continuation_id": cid, "goal_explicit_resume": False})]
 
 
 # ── Review 5593825504: regression table ─────────────────────────────────────
@@ -1972,7 +1972,7 @@ def test_goal_resume_restarts_server_owned_continuation_after_stop(monkeypatch, 
     assert res["status"] == 200
     assert kickoffs == []
     assert started == [
-        (sid, "continue the goal", {"source": "goal_wakeup", "goal_continuation_id": cid})
+        (sid, "continue the goal", {"source": "goal_wakeup", "goal_continuation_id": cid, "goal_explicit_resume": True})
     ]
 
 
@@ -2154,5 +2154,71 @@ def test_goal_resume_inside_browser_lease_survives_stop_of_intervening_turn(monk
     assert _wait_for(lambda: bool(started), timeout=5.0)
     join_all()
     assert started == [
-        (sid, "continue the goal", {"source": "goal_wakeup", "goal_continuation_id": cid})
+        (sid, "continue the goal", {"source": "goal_wakeup", "goal_continuation_id": cid, "goal_explicit_resume": True})
     ]
+
+
+# ── Greptile 4612840786: Stop between the runner's preflight and admission ──
+
+
+@pytest.mark.parametrize("explicit_resume", [False, True], ids=["automatic", "goal_resume"])
+def test_stop_between_detached_preflight_and_admission(
+    _admission_env, tmp_path, monkeypatch, explicit_resume
+):
+    """A user turn started and Stopped while the runner resolves its workspace blocks
+    the automatic continuation; only /goal resume may still admit it, exactly once."""
+    import threading as _threading
+
+    from api import background_process, profiles, streaming
+
+    s, _goal_active = _admission_env
+    sid = s.session_id
+    launches = []
+    monkeypatch.setattr(routes, "_run_agent_streaming", lambda *_a, **kw: launches.append(kw))
+    monkeypatch.setattr(background_process, "_session_has_active_turn", lambda _sid: False)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _name: str(tmp_path))
+    monkeypatch.setattr(routes, "_server_initiated_turn_routing", lambda *_a, **_kw: (False, None))
+    paused, release = _threading.Event(), _threading.Event()
+
+    def _blocking_workspace(_s, _ws):
+        paused.set()
+        assert release.wait(5.0)
+        return str(tmp_path)
+
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", _blocking_workspace)
+    cid = webui_goals.register_pending_goal_continuation(sid, "continue the goal")
+    assert webui_goals.mark_detached_goal_continuation(sid, cid)
+    join_all = _capture_goal_threads(monkeypatch)
+    webui_goals.start_detached_goal_continuation(
+        sid, "continue the goal", cid, explicit_resume=explicit_resume
+    )
+    assert paused.wait(5.0), "runner never passed its cancel-marker preflight"
+
+    user = routes._start_chat_stream_for_session(
+        s, msg="genuine user turn", attachments=[], workspace=str(tmp_path),
+        model=s.model, model_provider=s.model_provider, external_runtime_owned=False,
+    )
+    assert user.get("stream_id") and len(launches) == 1
+    assert streaming.cancel_stream(user["stream_id"]) is True
+    settled = models.get_session(sid)
+    assert settled.active_stream_id is None
+    assert streaming._session_has_cancel_marker(settled)
+
+    release.set()
+    join_all()
+    if explicit_resume:
+        assert len(launches) == 2 and launches[1].get("goal_related") is True
+        assert webui_goals.peek_pending_goal_continuation_id(sid) is None
+    else:
+        assert len(launches) == 1, "automatic continuation started after Stop"
+        # Rejected, not consumed: the record waits for /goal resume, no timer is armed.
+        assert webui_goals.peek_pending_goal_continuation_id(sid) == cid
+        assert sid not in webui_goals._BROWSER_GRACE_TIMERS
+        assert webui_goals.retry_detached_goal_continuation(sid) is True
+        join_all()
+        assert len(launches) == 1
+        assert webui_goals.retry_detached_goal_continuation(sid, explicit_resume=True)
+        assert webui_goals.retry_detached_goal_continuation(sid, explicit_resume=True)
+        join_all()
+        assert len(launches) == 2 and launches[1].get("goal_related") is True
+        assert webui_goals.peek_pending_goal_continuation_id(sid) is None

@@ -1413,7 +1413,11 @@ def start_detached_goal_continuation(
                     retire_continuation_for_sealed_parent(sid)
                 return
             result = start_session_turn(
-                sid, prompt, source="goal_wakeup", goal_continuation_id=cid
+                sid,
+                prompt,
+                source="goal_wakeup",
+                goal_continuation_id=cid,
+                goal_explicit_resume=explicit_resume,
             )
             status = 0
             if isinstance(result, dict):

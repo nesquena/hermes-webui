@@ -30702,6 +30702,7 @@ def _start_chat_stream_for_session(
     diag=None,
     goal_related: bool = False,
     goal_continuation_id: str = "",
+    goal_explicit_resume: bool = False,
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
@@ -30801,8 +30802,13 @@ def _start_chat_stream_for_session(
             from api.goals import has_active_goal, pending_goal_continuation_matches
             from api.profiles import get_hermes_home_for_profile
 
+            from api.streaming import _session_has_cancel_marker
+
             if not pending_goal_continuation_matches(s.session_id, goal_continuation_id):
                 return "goal_continuation_stale"
+            # A Stop since the runner's preflight blocks it; only /goal resume overrides.
+            if not goal_explicit_resume and _session_has_cancel_marker(s):
+                return "cancelled"
             if not has_active_goal(
                 s.session_id,
                 profile_home=get_hermes_home_for_profile(getattr(s, "profile", None)),
@@ -31294,6 +31300,7 @@ def _start_run(
     regeneration=None,
     goal_related: bool = False,
     goal_continuation_id: str = "",
+    goal_explicit_resume: bool = False,
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
@@ -31389,6 +31396,7 @@ def _start_run(
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
                 goal_continuation_id=goal_continuation_id,
+                goal_explicit_resume=goal_explicit_resume,
                 process_id=process_id,
                 retry_attempt=retry_attempt,
                 rearm_deferred_wakeup=rearm_deferred_wakeup,
@@ -31443,6 +31451,7 @@ def _start_run(
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
         goal_continuation_id=goal_continuation_id,
+        goal_explicit_resume=goal_explicit_resume,
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
@@ -31513,6 +31522,7 @@ def start_session_turn(
     consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
     goal_continuation_id: str = "",
+    goal_explicit_resume: bool = False,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -31752,6 +31762,7 @@ def start_session_turn(
                 if turn_source == "goal_wakeup"
                 else ""
             ),
+            goal_explicit_resume=goal_explicit_resume,
             process_id=process_id,
             retry_attempt=retry_attempt,
             rearm_deferred_wakeup=rearm_deferred_wakeup,
@@ -32302,6 +32313,7 @@ def _handle_goal_command(handler, body):
                 gateway_chat_enabled=gateway_owned,
                 goal_related=True,
                 goal_continuation_id=kickoff_continuation_id,
+                goal_explicit_resume=resume_kickoff,
             )
         except Exception:
             _discard_resume_kickoff_record(s.session_id, kickoff_continuation_id)
