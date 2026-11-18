@@ -53,13 +53,15 @@ from api import models
 def isolated_session_env():
     """Redirect the SESSIONS cache, the session dir and the tombstone file.
 
-    ``api.models`` binds ``SESSION_DIR`` / ``SESSION_INDEX_FILE`` at module
-    load, so both module copies must be redirected.  The tombstone file lives
-    under ``SESSION_DIR`` (``_deleted_webui_sessions.json``), so this also
-    isolates tombstone reads/writes.  Everything is restored on teardown.
+    ``api.models`` and ``api.routes`` bind ``SESSION_DIR`` /
+    ``SESSION_INDEX_FILE`` at module load, so both module copies must be
+    redirected.  The tombstone file lives under ``SESSION_DIR``
+    (``_deleted_webui_sessions.json``), so this also isolates tombstone
+    reads/writes.  Everything is restored on teardown.
     """
     import collections
 
+    import api.routes as routes
     from api import config as _cfg
 
     tmpdir = tempfile.mkdtemp()
@@ -69,21 +71,31 @@ def isolated_session_env():
     old = {
         "cfg_SESSION_DIR": _cfg.SESSION_DIR,
         "models_SESSION_DIR": getattr(models, "SESSION_DIR", None),
+        "routes_SESSION_DIR": getattr(routes, "SESSION_DIR", None),
         "cfg_SESSION_INDEX_FILE": _cfg.SESSION_INDEX_FILE,
         "models_SESSION_INDEX_FILE": getattr(models, "SESSION_INDEX_FILE", None),
-        "SESSIONS": _cfg.SESSIONS,
-        "LOCK": _cfg.LOCK,
+        "routes_SESSION_INDEX_FILE": getattr(routes, "SESSION_INDEX_FILE", None),
+        "cfg_SESSIONS": _cfg.SESSIONS,
+        "models_SESSIONS": getattr(models, "SESSIONS", None),
+        "routes_SESSIONS": getattr(routes, "SESSIONS", None),
+        "cfg_LOCK": _cfg.LOCK,
+        "models_LOCK": getattr(models, "LOCK", None),
+        "routes_LOCK": getattr(routes, "LOCK", None),
     }
 
     index_file = sessions_dir / "_index.json"
     _cfg.SESSION_DIR = sessions_dir
     models.SESSION_DIR = sessions_dir
+    routes.SESSION_DIR = sessions_dir
     _cfg.SESSION_INDEX_FILE = index_file
     models.SESSION_INDEX_FILE = index_file
+    routes.SESSION_INDEX_FILE = index_file
     _cfg.LOCK = threading.Lock()
     models.LOCK = _cfg.LOCK
+    routes.LOCK = _cfg.LOCK
     _cfg.SESSIONS = collections.OrderedDict()
     models.SESSIONS = _cfg.SESSIONS
+    routes.SESSIONS = _cfg.SESSIONS
 
     try:
         yield sessions_dir
@@ -91,13 +103,23 @@ def isolated_session_env():
         _cfg.SESSION_DIR = old["cfg_SESSION_DIR"]
         if old["models_SESSION_DIR"] is not None:
             models.SESSION_DIR = old["models_SESSION_DIR"]
+        if old["routes_SESSION_DIR"] is not None:
+            routes.SESSION_DIR = old["routes_SESSION_DIR"]
         _cfg.SESSION_INDEX_FILE = old["cfg_SESSION_INDEX_FILE"]
         if old["models_SESSION_INDEX_FILE"] is not None:
             models.SESSION_INDEX_FILE = old["models_SESSION_INDEX_FILE"]
-        _cfg.SESSIONS = old["SESSIONS"]
-        models.SESSIONS = old["SESSIONS"]
-        _cfg.LOCK = old["LOCK"]
-        models.LOCK = old["LOCK"]
+        if old["routes_SESSION_INDEX_FILE"] is not None:
+            routes.SESSION_INDEX_FILE = old["routes_SESSION_INDEX_FILE"]
+        _cfg.SESSIONS = old["cfg_SESSIONS"]
+        if old["models_SESSIONS"] is not None:
+            models.SESSIONS = old["models_SESSIONS"]
+        if old["routes_SESSIONS"] is not None:
+            routes.SESSIONS = old["routes_SESSIONS"]
+        _cfg.LOCK = old["cfg_LOCK"]
+        if old["models_LOCK"] is not None:
+            models.LOCK = old["models_LOCK"]
+        if old["routes_LOCK"] is not None:
+            routes.LOCK = old["routes_LOCK"]
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -282,3 +304,85 @@ def test_tombstone_helper_raises_and_leaves_no_temp_file_on_a_real_write_failure
     assert sid in payload["ids"]
     residue = [p.name for p in sessions_dir.iterdir() if ".tmp." in p.name]
     assert residue == [], residue
+
+
+# --- Fixture isolation (review 2026-11-18T04:29:33Z on #9148) -----------------
+#
+# ``api.routes`` imports ``SESSION_DIR`` / ``SESSIONS`` / ``LOCK`` from
+# ``api.config`` and ``SESSION_INDEX_FILE`` from ``api.models``, so it holds its
+# own module-level copies.  The fixture has to redirect and restore those copies
+# too, whichever order the suite imports the module in.
+
+_ROUTE_ALIAS_NAMES = ("SESSION_DIR", "SESSION_INDEX_FILE", "SESSIONS", "LOCK")
+
+
+def _route_aliases():
+    import api.routes as routes
+
+    return {name: getattr(routes, name) for name in _ROUTE_ALIAS_NAMES}
+
+
+def test_fixture_redirects_the_route_module_aliases_on_a_cold_import(
+    isolated_session_env,
+):
+    """Cold order: the fixture imports routes and points it at the temp dir."""
+    import api.routes as routes
+
+    sessions_dir = isolated_session_env
+    aliases = _route_aliases()
+
+    assert aliases["SESSION_DIR"] == sessions_dir, aliases["SESSION_DIR"]
+    assert aliases["SESSION_INDEX_FILE"] == sessions_dir / "_index.json"
+    assert aliases["SESSIONS"] is models.SESSIONS
+    assert aliases["LOCK"] is models.LOCK
+    assert routes.SESSION_DIR == sessions_dir
+
+
+def test_fixture_redirects_the_route_module_aliases_when_already_imported(
+    isolated_session_env,
+):
+    """Already-imported order: the stale copies must be redirected too."""
+    _route_aliases()  # routes is imported by now, from the previous test
+    sessions_dir = isolated_session_env
+    aliases = _route_aliases()
+
+    assert aliases["SESSION_DIR"] == sessions_dir, aliases["SESSION_DIR"]
+    assert aliases["SESSION_INDEX_FILE"] == sessions_dir / "_index.json"
+    assert aliases["SESSIONS"] is models.SESSIONS
+    assert aliases["LOCK"] is models.LOCK
+
+
+def test_delete_physically_removes_the_sidecar_and_evicts_the_cache(
+    isolated_session_env, monkeypatch
+):
+    """The handler must act on the isolated dir: sidecar gone, cache evicted."""
+    sessions_dir = isolated_session_env
+    sid = "sess-delete-physical-sidecar"
+    sidecar = sessions_dir / f"{sid}.json"
+    sidecar.write_text(
+        json.dumps({"session_id": sid, "title": "physical", "messages": []}),
+        encoding="utf-8",
+    )
+    assert sidecar.exists()
+
+    captured = _drive_delete(monkeypatch, sid)
+
+    assert captured["status"] == 200, captured
+    assert captured["payload"].get("ok") is True, captured
+    assert not sidecar.exists(), "the delete handler wrote outside the fixture dir"
+    assert sid not in models.SESSIONS
+    assert sid in models._load_webui_deleted_session_tombstone()
+
+
+def test_fixture_restores_every_module_alias_after_teardown():
+    """Teardown must restore routes/config/models to the same shared objects."""
+    from api import config as _cfg
+
+    aliases = _route_aliases()
+
+    assert aliases["SESSION_DIR"] is models.SESSION_DIR is _cfg.SESSION_DIR
+    assert aliases["SESSION_INDEX_FILE"] is models.SESSION_INDEX_FILE is (
+        _cfg.SESSION_INDEX_FILE
+    )
+    assert aliases["SESSIONS"] is models.SESSIONS is _cfg.SESSIONS
+    assert aliases["LOCK"] is models.LOCK is _cfg.LOCK
