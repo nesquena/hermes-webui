@@ -448,6 +448,8 @@ Some WebUI entry points still execute the agent in the WebUI process and have no
 
 `POST /api/session/handoff-summary` is the exception. It exists specifically for gateway sessions, so in gateway mode it returns its deterministic local fallback (`"fallback": true`, computed from the WebUI's transcript copy) instead of constructing an in-process agent or answering `409`.
 
+When the Agent compacts a Gateway turn mid-run, WebUI adopts the Agent's saved compaction as that session's model context, so later turns send the compacted history instead of the pre-compaction one. It adopts only when the session's `state.db` rows contain a compaction summary written during this turn and the turn's prompt can be located after it; the adopted rows are model context only and never appear in the visible chat. The previous context is kept when no compaction happened in this turn, when `state.db` or the session's rows are missing, when the prompt cannot be matched, and when the Gateway returned its own canonical session history (which stays authoritative).
+
 `HERMES_WEBUI_CHAT_BACKEND` is intentionally strict: only `gateway`,
 `api_server`, or `api-server` enable the bridge. Generic truthy values such as
 `1` or `true` are ignored so existing deployments do not change execution
