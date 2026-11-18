@@ -265,6 +265,8 @@ def _native_compaction(session_id, history, prompt, compress_start, compress_end
 
 
 def _run_native_turns(sid, history, compress_start, compress_end):
+    pytest.importorskip("agent.context_compressor", reason="hermes-agent modules not importable")
+    pytest.importorskip("persistence_assembly", reason="hermes-agent persistence not importable")
     session = make_session(sid, [row for row in history if row["role"] != "system"])
     _start_turn(session, f"{sid}-1", "live ask")
     compacted = _native_compaction(session.session_id, history, "live ask", compress_start, compress_end)
