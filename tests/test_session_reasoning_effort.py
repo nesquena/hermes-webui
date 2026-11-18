@@ -18,6 +18,7 @@ import api.config as config
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.routes as routes
+import api.run_drain as run_drain
 from api import profiles
 from api.config import resolve_session_reasoning_effort
 from api.gateway_chat import _gateway_reasoning_effort_for_request
@@ -928,17 +929,27 @@ def test_btw_and_background_children_inherit_parent_effort(
     body = {"session_id": parent.session_id}
     body["question" if route == "btw" else "prompt"] = "hi"
     handler = _DummyHandler(body, command="POST")
-    with (
-        patch("api.models.new_session", side_effect=capture),
-        patch("api.models.Session.save"),
-        patch("threading.Thread"),
-    ):
-        handle_post(handler, urlparse(f"/api/{route}"))
+    # #8904: the patched-out Thread never runs the worker that unregisters the stream.
+    streams_before = set(config.STREAMS)
+    try:
+        with (
+            patch("api.models.new_session", side_effect=capture),
+            patch("api.models.Session.save"),
+            patch("threading.Thread"),
+        ):
+            handle_post(handler, urlparse(f"/api/{route}"))
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
 
     assert created, handler.status
     # Profile default is "low"; the child keeps the parent's raw value,
     # including None (legacy) and "" (provider default).
     assert created[0].reasoning_effort == parent_effort
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 @pytest.mark.parametrize("config_location", ["root", "external", "unset"])
