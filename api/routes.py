@@ -21582,6 +21582,7 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
+        tombstone_persist_failed = False
         try:
             # #8837: revoke its link first; a revoke that fails refuses the delete.
             if not _revoke_owned_shares_before_delete(sid, p):
@@ -21740,7 +21741,8 @@ def handle_post(handler, parsed) -> bool:
                 try:
                     _record_webui_deleted_session_tombstone(sid)
                 except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    logger.error("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    tombstone_persist_failed = True
         finally:
             session_lock.release()
         try:
@@ -21773,6 +21775,16 @@ def handle_post(handler, parsed) -> bool:
             "state_db_cleanup_failed": state_db_cleanup_failed,
             **worktree_retained,
         }
+        if tombstone_persist_failed:
+            response["tombstone_persist_failed"] = True
+            response.update(
+                {
+                    "ok": False,
+                    "error": "delete_tombstone_failed",
+                    "action": "session_delete",
+                }
+            )
+            return j(handler, response, status=500)
         if draft_delete_failed:
             response["draft_delete_failed"] = True
             response.update(
