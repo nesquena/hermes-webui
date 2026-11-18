@@ -333,7 +333,7 @@ def test_session_owner_only_recorded_for_existing_sessions(env, tmp_path, monkey
 
     monkeypatch.setattr(models, "SESSION_DIR", tmp_path / "sessions")
     (tmp_path / "sessions").mkdir()
-    (tmp_path / "sessions" / "real123.json").write_text("{}")
+    (tmp_path / "sessions" / "real123.json").write_text(json.dumps({"session_id": "real123", "profile": "default"}))
     seen = []
     monkeypatch.setattr(web_push, "register_session_owner", lambda sid, owner: seen.append(sid) or True)
     h = _H(DEV_A)

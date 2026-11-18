@@ -24,6 +24,20 @@ _LOCK = threading.Lock()
 _STOP = threading.Event()
 
 
+def _open_directory(path, *, dir_fd=None):
+    # Verify the held inode as well as O_NOFOLLOW. Some emulated filesystems
+    # ignore that flag; a symlink or a check/open substitution must still fail.
+    before = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        raise OSError("not a directory")
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    after = os.fstat(fd)
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        os.close(fd)
+        raise OSError("directory changed during open")
+    return fd
+
+
 def _outputs(home: str):
     """Bounded-memory walk with held directory descriptors and no symlink hops.
 
@@ -32,18 +46,17 @@ def _outputs(home: str):
     """
     if not hasattr(os, "O_NOFOLLOW"):
         return
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fds = []
     try:
-        for part in (home, "cron", "output"):
-            fds.append(os.open(part, flags, **({"dir_fd": fds[-1]} if fds else {})))
+        for part in (*Path(home).parts, "cron", "output"):
+            fds.append(_open_directory(part, dir_fd=fds[-1] if fds else None))
         with os.scandir(fds[-1]) as jobs:
             for job in jobs:
                 yield None
                 if not job.is_dir(follow_symlinks=False):
                     continue
                 try:
-                    fd = os.open(job.name, flags, dir_fd=fds[-1])
+                    fd = _open_directory(job.name, dir_fd=fds[-1])
                 except OSError:
                     continue
                 try:

@@ -28843,7 +28843,14 @@ def _note_session_device(handler, session_id) -> None:
 
         owner = web_push.owner_from_headers(handler.headers)
         if owner and session_id and web_push.is_enabled() and _push_session_exists(session_id):
-            web_push.register_session_owner(str(session_id), owner)
+            # Push enrollment is a write too. A rejected foreign-profile read
+            # must not enroll the caller before the route's ownership preflight.
+            readings = session_owner_readings_readonly(str(session_id), full_load=True)
+            if readings and all(
+                reading is not UNVERIFIABLE_SESSION_OWNER and _session_visible_to_active_profile(reading, handler)
+                for reading in readings
+            ):
+                web_push.register_session_owner(str(session_id), owner)
     except Exception:
         logger.debug("push session-owner note failed", exc_info=True)
 
