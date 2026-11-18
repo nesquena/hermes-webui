@@ -54,6 +54,7 @@ def test_subarg_dropdown_has_distinct_parent_and_argument_styling():
     assert ".cmd-item-parent" in STYLE_CSS
     assert ".cmd-item-subarg" in STYLE_CSS
     assert ".cmd-item.selected{background:var(--accent-bg);" in STYLE_CSS
-    assert "_cmdSelectedIdx=matches.length?0:-1;" in COMMANDS_JS
+    assert "let selectedIdx=rows.length?0:-1;" in COMMANDS_JS
+    assert "_cmdSelectedIdx=selectedIdx;" in COMMANDS_JS
     assert "getSlashAutocompleteMatches(nextValue).then(matches=>" in COMMANDS_JS, \
         "selecting a first-level command with sub-args should immediately open second-level suggestions"

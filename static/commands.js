@@ -272,28 +272,32 @@ function _slashCommandNameIncludes(name,q){
 // a whole skill name could leave a neighbour whose DESCRIPTION merely mentions
 // it at row zero: `/next` ran context7-mcp ("Next.js docs") instead of the
 // `next` skill (#9035).
-// Bands, best first: 0 exact name, 1 name prefix, 2 name substring, 3
-// description-only. Inside a band the assembled order is kept: sorting equal
-// strength rows by name moves row zero for a short prefix (`/st` accepted
-// `status` instead of `stop`, `/c` a skill instead of the builtin `clear`)
-// without any gain in match quality. The literal as-typed prefix check on top
-// preserves #8203: with both `_` and `-` spellings registered, row zero must be
-// the spelling the user typed, in either registration order.
+// Bands, best first: 0 exact name (any `_`/`-` spelling of the needle),
+// 1 name prefix, 2 name substring, 3 description-only. Inside a band the
+// assembled order is kept: sorting equal strength rows by name moves row
+// zero for a short prefix (`/st` accepted `status` instead of `stop`, `/c`
+// a skill instead of the builtin `clear`) without any gain in match quality.
+// The literal as-typed prefix check on top preserves #8203: with both `_`
+// and `-` spellings registered, row zero must be the spelling the user
+// typed, in either registration order. The ranker trims once before banding
+// so `/next ` still exact-matches `next`. Inclusion in getMatchingCommands
+// stays on the raw query, so a description that only contains `next.js`
+// does not newly match `next ` (#9110).
 function _slashCommandMatchBand(row,q){
   const needle=String(q||'').toLowerCase();
   const name=String(row&&row.name||'').toLowerCase();
-  if(name===needle)return 0;
+  if(_slashCommandSlugVariants(needle).some(v=>name===v))return 0;
   if(_slashCommandMatchesPrefix(name,needle))return 1;
   if(_slashCommandNameIncludes(name,needle))return 2;
   return 3;
 }
 function _rankSlashCommandMatches(matches,q){
-  const needle=String(q||'').toLowerCase();
+  const needle=String(q||'').trim().toLowerCase();
   if(!needle||matches.length<2)return matches;
   return matches
-    .map((row,index)=>({row,index}))
+    .map((row,index)=>({row,index,band:_slashCommandMatchBand(row,needle)}))
     .sort((a,b)=>{
-      const band=_slashCommandMatchBand(a.row,needle)-_slashCommandMatchBand(b.row,needle);
+      const band=a.band-b.band;
       if(band)return band;
       const an=String(a.row&&a.row.name||'').toLowerCase();
       const bn=String(b.row&&b.row.name||'').toLowerCase();
@@ -2899,7 +2903,7 @@ function refreshSlashCommandDropdown(){
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
     if(slashDropdownDismissedFor(text)) return;
-    if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
+    if(matches.length)showCmdDropdown(matches,true);else hideCmdDropdown();
   });
 }
 function ensureSkillCommandsLoadedForAutocomplete(){
@@ -2933,17 +2937,56 @@ function ensureSkillCommandsLoadedForAutocomplete(){
 
 let _cmdSelectedIdx=-1;
 
+// The row identity a background refresh re-selects by. Argument rows all carry
+// their parent command as `name`, so they are told apart by `parent` and `value`.
+function _cmdDropdownRowKey(row){
+  if(!row)return '';
+  if(row.source==='subarg')return 'subarg:'+String(row.parent||'')+' '+String(row.value||'');
+  return String(row.name||'');
+}
+
 function showCmdDropdown(matches){
   const dd=$('cmdDropdown');
   if(!dd)return;
+  // The second argument is the preserve flag, passed only by
+  // refreshSlashCommandDropdown. Keystrokes and the sub-arg reopen below
+  // stay one-argument calls and still preselect row zero. Preserve applies
+  // only while the list is already open, so a late load that opens a closed
+  // empty list keeps ranked order. The parameter stays undeclared so the
+  // function head pinned by #3924 still matches (#9110).
+  const preserve=arguments[1];
+  const keeping=!!preserve&&!!(dd.classList&&dd.classList.contains&&dd.classList.contains('open'));
+  let keptName='';
+  let arrowed=false;
+  if(keeping){
+    const items=dd.querySelectorAll('.cmd-item');
+    const current=items&&items[_cmdSelectedIdx];
+    keptName=current&&current.dataset?String(current.dataset.cmdKey||''):'';
+    arrowed=_cmdSelectedIdx>0;
+  }
+  let rows=matches;
+  if(keeping&&keptName&&!arrowed){
+    const at=matches.findIndex(row=>_cmdDropdownRowKey(row)===keptName);
+    if(at>0){
+      rows=matches.slice();
+      rows.unshift(rows.splice(at,1)[0]);
+    }
+  }
   dd.innerHTML='';
-  _cmdSelectedIdx=matches.length?0:-1;
-  for(let i=0;i<matches.length;i++){
-    const c=matches[i];
+  let selectedIdx=rows.length?0:-1;
+  if(keeping&&arrowed&&keptName){
+    const at=rows.findIndex(row=>_cmdDropdownRowKey(row)===keptName);
+    if(at>=0)selectedIdx=at;
+  }
+  _cmdSelectedIdx=selectedIdx;
+  for(let i=0;i<rows.length;i++){
+    const c=rows[i];
     const el=document.createElement('div');
     el.className='cmd-item';
     if(i===_cmdSelectedIdx) el.classList.add('selected');
     el.dataset.idx=i;
+    el.dataset.cmdName=c.name||'';
+    el.dataset.cmdKey=_cmdDropdownRowKey(c);
     const isSubArg=c.source==='subarg';
     const isPath=c.source==='path';
     const usage=(!isSubArg&&c.arg)?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
@@ -3001,6 +3044,12 @@ function showCmdDropdown(matches){
     dd.appendChild(el);
   }
   dd.classList.add('open');
+  // A kept arrowed row can land below the fold when the refresh inserts rows
+  // above it, so scroll it back into view as navigateCmdDropdown does (#838).
+  if(keeping&&arrowed&&_cmdSelectedIdx>0){
+    const kept=dd.children&&dd.children[_cmdSelectedIdx];
+    if(kept&&typeof kept.scrollIntoView==='function')kept.scrollIntoView({block:'nearest'});
+  }
 }
 
 function hideCmdDropdown(){
