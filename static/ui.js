@@ -27896,7 +27896,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -27929,7 +27929,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;

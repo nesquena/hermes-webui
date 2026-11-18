@@ -55,6 +55,32 @@ Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
 (and periodically refresh it for long sessions).
 
+Title requests on the auxiliary title route and on Chat Completions routes ask
+for a strict `{"title": "..."}` JSON schema. Endpoints with constrained decoding
+(llama.cpp, vLLM, Ollama, LM Studio and most OpenAI-compatible hosts) then
+return a title object instead of free text, which reduces reasoning leaks. The
+schema fixes the reply's shape, not its content, so the title string is still
+checked below. The agent's native Anthropic Messages and Codex Responses routes
+do not send it, and on the auxiliary route the Agent's adapter for the provider
+decides whether it reaches the endpoint. When an endpoint's HTTP 400/422 error says the structured-output
+field (`response_format`) is unsupported, the request is resent once without
+it; other errors are not resent and follow the normal error path. The Agent's
+auxiliary client may remember such a rejection and leave the schema off later
+auxiliary requests. A short reply (up to 2 KB) that is exactly a `{"title"}`
+object, optionally inside a JSON code fence, is unwrapped. A fresh
+candidate is discarded when it opens with a hedge or opinion (`Maybe`,
+`Perhaps`, `I think`, `I'd go with`, `How about`, `Something like`, `The best
+title is`, ...), still contains a thinking tag or a JSON `"title":` fragment,
+or starts with `{`. What happens next depends on the trigger: the first
+automatic title tries the alternate title route, then keeps the provisional
+title until the existing recovery limit allows a local summary; a periodic
+refresh keeps the current title; a manual regenerate can use a local summary
+right away.
+The existing 80-character cap still applies; there is no word-count rule, since
+some languages put spaces inside words. These checks are best effort: they apply only to newly
+generated titles, never rename a saved title, and can turn down a real title
+that happens to start with one of those phrases.
+
 For structured messages containing text and native images, title generation
 uses the user text without flattening or modifying the stored message. Title
 comparison and title-model inputs remove the internal `[Workspace::v1: ...]`
