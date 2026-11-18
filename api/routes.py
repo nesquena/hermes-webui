@@ -108,17 +108,19 @@ def _publish_session_list_changed(
         publish_session_list_changed(reason)
 
 
-def _sync_session_title_to_insights(session) -> None:
-    """Write title-only session metadata updates through to state.db when enabled."""
+def _sync_session_title_to_insights(session, *, rename: bool = False) -> None:
+    """Write title-only session metadata updates through to state.db when enabled.
+
+    ``rename=True`` only from /api/session/rename: an explicit user rename,
+    including clearing it back to an automatic label. Other callers sync
+    passively (``api.state_sync.sync_session_usage``).
+    """
     try:
         if not load_settings().get("sync_to_insights"):
             return
         from api.state_sync import sync_session_usage
 
         messages = getattr(session, "messages", None) or []
-        # Rename intent: ``manual_title`` is set only by a user rename
-        # (apply_session_title_rename) and cleared for generated titles
-        # (mark_session_title_generated), so the regenerate path stays passive.
         sync_session_usage(
             session_id=session.session_id,
             input_tokens=getattr(session, "input_tokens", None) or 0,
@@ -130,7 +132,7 @@ def _sync_session_title_to_insights(session) -> None:
             profile=getattr(session, "profile", None),
             cache_read_tokens=getattr(session, "cache_read_tokens", None) or 0,
             cache_write_tokens=getattr(session, "cache_write_tokens", None) or 0,
-            rename=getattr(session, "manual_title", False) is True,
+            rename=rename,
         )
     except Exception:
         logger.debug("Failed to update session title in state.db", exc_info=True)
@@ -21028,7 +21030,7 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-        _sync_session_title_to_insights(s)
+        _sync_session_title_to_insights(s, rename=True)
         publish_session_list_changed(
             "session_rename",
             profile=getattr(s, "profile", None),

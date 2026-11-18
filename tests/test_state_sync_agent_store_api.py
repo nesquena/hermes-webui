@@ -37,18 +37,79 @@ def _row(db_path, session_id):
 # ── Agent-free: drift is visible once, never raised ─────────────────────────
 
 
-def test_no_store_api_logs_one_warning_and_returns_none(monkeypatch, tmp_path, caplog):
+class _PreFloorSessionDB:
+    """An older Agent's SessionDB (v2026.4.30..v2026.7.30 shape): no set_auto_title, no storage interface."""
+
+    instances: list = []
+
+    def __init__(self, db_path):
+        self.db_path, self.calls, self.closed = db_path, [], False
+        _PreFloorSessionDB.instances.append(self)
+
+    def ensure_session(self, session_id, source="unknown", model=None):
+        self.calls.append(("ensure_session", session_id, source))
+
+    def update_token_counts(self, session_id, **kw):
+        self.calls.append(("update_token_counts", session_id, kw["input_tokens"], kw["absolute"]))
+
+    def set_session_title(self, session_id, title):
+        self.calls.append(("set_session_title", session_id, title))
+
+    def _execute_write(self, fn):
+        self.calls.append(("_execute_write",))
+
+    def get_session(self, session_id):
+        return {"id": session_id, "source": "webui", "cwd": None}
+
+    def update_session_cwd(self, session_id, cwd):
+        self.calls.append(("update_session_cwd", session_id, cwd))
+        return 1
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def pre_floor_agent(monkeypatch, tmp_path):
     fake = types.ModuleType("hermes_state")
-    fake.SessionDB = type("SessionDB", (), {"get_session": lambda self, sid: None})
+    fake.SessionDB = _PreFloorSessionDB
     monkeypatch.setitem(sys.modules, "hermes_state", fake)
     monkeypatch.setitem(sys.modules, "persistence_assembly", None)  # import raises ImportError
+    monkeypatch.setattr(_PreFloorSessionDB, "instances", [])
     monkeypatch.setattr(state_sync, "_DRIFT_WARNED", set())
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: state_sync._open_state_db(tmp_path / "state.db"))
+    return _PreFloorSessionDB.instances
+
+
+def test_pre_storage_interface_session_db_without_every_verb_is_used_as_before(pre_floor_agent, tmp_path):
+    """No persistence_assembly and a SessionDB lacking set_auto_title: used exactly as before this
+    bridge learned the storage interface (totals, message count, title, cwd all written)."""
+    db = state_sync._open_state_db(tmp_path / "state.db")
+    assert isinstance(db, _PreFloorSessionDB)
+    state_sync.sync_session_usage("sid-old", input_tokens=7, title="Untitled", message_count=3, profile="default")
+    assert pre_floor_agent[-1].calls == [
+        ("ensure_session", "sid-old", "webui"), ("update_token_counts", "sid-old", 7, True),
+        ("set_session_title", "sid-old", "Untitled"), ("_execute_write",),
+    ]
+    assert state_sync.sync_session_cwd("sid-old", "/w/a", profile="default") is True
+    assert pre_floor_agent[-1].calls[-1] == ("update_session_cwd", "sid-old", "/w/a")
+
+
+def test_a_verb_the_old_session_db_lacks_logs_one_warning(pre_floor_agent, caplog):
+    with caplog.at_level(logging.DEBUG, logger="api.state_sync"):
+        state_sync.sync_session_title("sid-a", "A title", profile="default")
+        state_sync.sync_session_title("sid-b", "B title", profile="default")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "set_auto_title" in warnings[0].getMessage()
+    assert all(db.closed for db in pre_floor_agent) and len(pre_floor_agent) == 2
+
+
+def test_no_agent_store_api_at_all_returns_none_quietly(monkeypatch, tmp_path, caplog):
+    monkeypatch.setitem(sys.modules, "hermes_state", None)
+    monkeypatch.setitem(sys.modules, "persistence_assembly", None)
     with caplog.at_level(logging.DEBUG, logger="api.state_sync"):
         assert state_sync._open_state_db(tmp_path / "state.db") is None
-        assert state_sync._open_state_db(tmp_path / "state.db") is None
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "persistence_assembly is missing" in warnings[0].getMessage()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_api_shape_error_in_a_sync_warns_once_then_debug(monkeypatch, caplog):
@@ -229,6 +290,26 @@ def test_passive_usage_sync_keeps_the_agents_generated_title_and_a_rename_replac
     assert (row["title"], row["title_source"]) == ("Renamed by user", "user")
 
 
+@pytest.mark.requires_agent_modules
+def test_renaming_back_to_an_automatic_label_releases_the_title_for_auto_titling(tmp_path, monkeypatch):
+    """Storage-interface Agents: a user rename pins a 'user' title; renaming back to an empty or
+    automatic label must clear it (title and provenance), so a later generated title can land."""
+    sid = "webui-real-clear"
+    db_path = _run_webui_turns(tmp_path, sid)
+    if not _storage_api(db_path):
+        pytest.skip("legacy SessionDB Agent: usage sync keeps writing the title as before")
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: state_sync._open_state_db(db_path))
+
+    for cleared_label in ("Untitled", ""):
+        state_sync.sync_session_usage(sid, title="Foo", profile="default", rename=True)
+        assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == ("Foo", "user")
+        state_sync.sync_session_usage(sid, title=cleared_label, profile="default", rename=True)
+        assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == (None, None)
+
+    state_sync.sync_session_title(sid, "Generated later", profile="default")
+    assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == ("Generated later", "llm")
+
+
 class _RecordingSessions:
     def __init__(self):
         self.calls = []
@@ -257,22 +338,41 @@ def test_storage_interface_usage_sync_writes_the_title_only_for_a_rename(monkeyp
     state_sync.sync_session_usage("sid-1", title="Chosen name", profile="default", rename=True)
     assert sessions.calls[1:] == [("create", "sid-1"), ("set_title", "sid-1", "Chosen name")]
 
+    del sessions.calls[:]
+    for label in ("Untitled", " new chat ", "", None):  # a rename back to an automatic label clears
+        state_sync.sync_session_usage("sid-1", title=label, profile="default", rename=True)
+    assert [c for c in sessions.calls if c[0] == "set_title"] == [("set_title", "sid-1", None)] * 4
 
-def test_routes_title_sync_passes_rename_intent_only_for_a_user_rename(monkeypatch):
+
+def test_legacy_session_db_title_writes_are_unchanged_by_rename_intent(monkeypatch):
+    """Legacy SessionDB: the title is written whenever given, rename or not, as before (no clearing)."""
+    class _LegacyDB(_PreFloorSessionDB):
+        def set_auto_title(self, *a, **k):
+            return True
+
+    written = []
+    monkeypatch.setattr(_PreFloorSessionDB, "instances", [])
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: _LegacyDB(None))
+    monkeypatch.setattr(_LegacyDB, "set_session_title", lambda self, sid, title: written.append(title))
+    for title, rename in (("Provisional", False), ("Untitled", False), ("Untitled", True), ("", True), ("Mine", True)):
+        state_sync.sync_session_usage("sid-l", title=title, profile="default", rename=rename)
+    assert written == ["Provisional", "Untitled", "Untitled", "Mine"]
+
+
+def test_routes_title_sync_forwards_the_call_sites_rename_intent(monkeypatch):
+    """Rename intent comes from the call site (/api/session/rename passes rename=True), not from
+    session flags: a copied ``manual_title`` (e.g. a duplicate) does not make a sync a rename."""
     import api.routes as routes
-    from api.session_ops import apply_session_title_rename, mark_session_title_generated
 
     seen = []
     monkeypatch.setattr(routes, "load_settings", lambda: {"sync_to_insights": True})
     monkeypatch.setattr(state_sync, "sync_session_usage", lambda **kw: seen.append((kw["title"], kw["rename"])))
-    session = types.SimpleNamespace(session_id="sid-r", title="Untitled", messages=[], profile="default")
+    session = types.SimpleNamespace(session_id="sid-r", title="My name", messages=[], profile="default",
+                                    manual_title=True)
 
-    apply_session_title_rename(session, "My chosen name")  # /api/session/rename
-    routes._sync_session_title_to_insights(session)
-    session.title = "Generated name"  # _persist_generated_session_title (regenerate / imported)
-    mark_session_title_generated(session)
-    routes._sync_session_title_to_insights(session)
-    apply_session_title_rename(session, "Untitled")  # clearing back to an automatic label
-    routes._sync_session_title_to_insights(session)
+    routes._sync_session_title_to_insights(session, rename=True)  # /api/session/rename
+    routes._sync_session_title_to_insights(session)  # _persist_generated_session_title and any other caller
+    session.title = "Untitled"
+    routes._sync_session_title_to_insights(session, rename=True)  # rename back to an automatic label
 
-    assert seen == [("My chosen name", True), ("Generated name", False), ("Untitled", False)]
+    assert seen == [("My name", True), ("My name", False), ("Untitled", True)]

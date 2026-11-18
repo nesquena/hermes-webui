@@ -13,12 +13,16 @@ All operations are wrapped in try/except -- if state.db is unavailable,
 locked, or the schema doesn't match, the WebUI continues normally; an
 Agent API shape change is logged once per process at WARNING.
 
-Agents whose ``hermes_state.SessionDB`` carries the verbs used here are
-written through it. Newer Agents (``hermes_state`` a plugin stand-in) are
-written through ``persistence_assembly`` (``_StoreStateDB``); there the
-Agent records token and message counts itself and no absolute setter
+Agents whose ``hermes_state.SessionDB`` carries the verbs used here (or
+that have no storage interface at all) are written through it, as before.
+Newer Agents (``hermes_state`` a plugin stand-in) are written through
+``persistence_assembly`` (``_StoreStateDB``). There the Agent records
+token, call and message counts itself for turns that run with a session
+store (the streaming path passes ``session_db=``) and no absolute setter
 exists, so ``sync_session_usage`` writes only the row, plus the title for
-an explicit rename.
+an explicit rename. The non-streaming /api/chat route and turns whose
+``_build_session_db_for_stream`` returned None get no totals on those
+Agents (no worse than before this bridge supported them; a follow-up).
 
 The bridge uses absolute token counts (not deltas) because the WebUI
 Session object already accumulates totals across turns. This avoids
@@ -41,27 +45,28 @@ _DRIFT_WARNED: set = set()
 _DRIFT_WARNED_LOCK = threading.Lock()
 
 
-def _warn_drift_once(key, message: str, *args) -> bool:
-    """Log ``message`` at WARNING the first time ``key`` is seen in this process; True when it was logged."""
-    with _DRIFT_WARNED_LOCK:
-        first = key not in _DRIFT_WARNED
-        _DRIFT_WARNED.add(key)
-    if first:
-        logger.warning(message + " Logged once per process.", *args)
-    return first
-
-
 def _log_sync_failure(what: str, session_id=None) -> None:
     """Log a swallowed failure: debug, except AttributeError/TypeError (an
     Agent API shape change), logged once per process and kind at WARNING."""
     exc = sys.exc_info()[1]
-    if isinstance(exc, (AttributeError, TypeError)) and _warn_drift_once(
-        (what, type(exc).__name__),
-        "state_sync: %s failed (%s: %s); the installed hermes-agent's state API may have changed.",
-        what, type(exc).__name__, exc,
-    ):
-        return
+    if isinstance(exc, (AttributeError, TypeError)):
+        key = (what, type(exc).__name__)
+        with _DRIFT_WARNED_LOCK:
+            first = key not in _DRIFT_WARNED
+            _DRIFT_WARNED.add(key)
+        if first:
+            logger.warning("state_sync: %s failed (%s: %s); the installed hermes-agent's state API may have "
+                           "changed. Logged once per process.", what, type(exc).__name__, exc)
+            return
     logger.debug("state_sync: %s failed for %s", what, session_id, exc_info=True)
+
+
+def _is_automatic_title(title) -> bool:
+    """Empty or an automatic label ("Untitled"): what a user rename uses to drop a custom title."""
+    from api.session_ops import AUTO_TITLE_LABELS
+
+    text = str(title or "").strip()
+    return not text or text.casefold() in AUTO_TITLE_LABELS
 
 
 class _StoreStateDB:
@@ -114,10 +119,10 @@ def _open_state_db(db_path: Path):
         try:
             from persistence_assembly import open_persistence, profile_scope
         except ImportError:
-            if SessionDB is not None:
-                _warn_drift_once("no-store-api", "state_sync: hermes_state.SessionDB lacks the verbs used here "
-                                 "and persistence_assembly is missing; nothing is mirrored into state.db.")
-            return None
+            # No storage interface: an older SessionDB without every verb (before
+            # set_auto_title) is used exactly as before; a sync that needs a verb
+            # it lacks fails alone, with the one-time WARNING.
+            return None if SessionDB is None else SessionDB(db_path)
         return _StoreStateDB(open_persistence(profile_scope(home=Path(db_path).parent), eager=True))
     except Exception:
         _log_sync_failure("opening state.db", db_path)
@@ -363,9 +368,10 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
     Called after each turn completes. Uses absolute=True to set totals
     (the WebUI Session already accumulates across turns).
 
-    ``rename`` marks ``title`` as an explicit user rename. Storage-interface
-    Agents get the title (with user provenance) only then; the legacy
-    SessionDB path writes it as before either way.
+    ``rename`` marks ``title`` as an explicit user rename (/api/session/rename).
+    Storage-interface Agents get the title, with user provenance, only then;
+    a rename to an empty or automatic label clears the stored title and its
+    provenance. The legacy SessionDB path writes ``title`` as before either way.
 
     ``profile`` lets the caller name the target state.db explicitly,
     which is what fixes #2762: this function is invoked from the
@@ -382,9 +388,10 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
         # Ensure session exists first (idempotent)
         db.ensure_session(session_id=session_id, source='webui', model=model)
         # Totals and message count: legacy SessionDB only. A real-Agent probe of a
-        # WebUI-shaped turn (Refs #9157) showed the Agent records tokens, call and
-        # message counts itself on both store APIs; the storage interface has no
-        # absolute setter, and a synthetic delta would double count.
+        # streaming-shaped WebUI turn (session_db= passed; Refs #9157) showed the
+        # Agent records tokens, call and message counts itself; the storage
+        # interface has no absolute setter, and a synthetic delta would double
+        # count. Turns run without a session store record none (module docstring).
         legacy_db = not isinstance(db, _StoreStateDB)
         # Set absolute token counts. WebUI's sidecar already accumulates
         # input/output/cache totals across turns, so mirror the same absolute
@@ -403,11 +410,20 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
                 model=model,
                 absolute=True,
             )
-        # Update title if we have one, using the public API. On the storage
-        # interface only an explicit rename: set_title records user provenance,
-        # which would pin a provisional title over the Agent's generated one
-        # (Refs #9157); generated titles go through sync_session_title.
-        if title and (legacy_db or rename):
+        # Title. Legacy SessionDB: written whenever given, as before. Storage
+        # interface: only for an explicit rename, because set_title records user
+        # provenance and would pin a provisional title over the Agent's generated
+        # one (Refs #9157); a rename to an empty or automatic label writes None,
+        # which clears the title and its provenance so auto-titling can name the
+        # row again. Streaming auto titles reach the store via sync_session_title;
+        # regenerated and imported titles do not (a follow-up).
+        if legacy_db:
+            write_title = bool(title)
+        else:
+            write_title = rename
+            if rename and _is_automatic_title(title):
+                title = None
+        if write_title:
             try:
                 db.set_session_title(session_id, title)
             except Exception:
