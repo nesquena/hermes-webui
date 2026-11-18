@@ -2839,7 +2839,8 @@ def _gateway_compacted_context_prefix(session, msg_text, turn_started_at):
     prompt = _normalize_user_text(raw_prompt)
     if not prompt:
         return None
-    for index in range(len(kept) - 1, summary_index, -1):
+    # The summary carrier itself may end with the prompt (summary, end marker, live ask).
+    for index in range(len(kept) - 1, summary_index - 1, -1):
         row = kept[index]
         if row.get("role") != "user":
             continue
@@ -3782,10 +3783,12 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to filter gateway display context markers", exc_info=True)
                 display_context = previous_context
-            display_context = [
-                msg for msg in display_context
-                if not (isinstance(msg, dict) and msg.get(_GATEWAY_COMPACTION_ADOPTED_KEY))
-            ]
+            # Adopted rows stand for turns the display already holds; no merge may show them.
+            def _visible(rows):
+                return [m for m in rows if not (isinstance(m, dict) and m.get(_GATEWAY_COMPACTION_ADOPTED_KEY))]
+
+            visible_context = _visible(previous_context)
+            display_context = _visible(display_context)
             display = merge_session_messages_append_only(
                 previous_messages,
                 display_context,
@@ -3795,8 +3798,8 @@ def _run_gateway_chat_streaming(
 
                 s.messages = _merge_display_messages_after_agent_result(
                     display,
-                    previous_context,
-                    s.context_messages,
+                    visible_context,
+                    visible_context + [user_msg, assistant_msg],
                     str(msg_text or ""),
                     source=pending_source,
                     verification_nudge_provenance={

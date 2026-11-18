@@ -226,3 +226,82 @@ def test_the_context_is_left_alone_when_state_db_is_missing():
         "old question one", "old answer one", "old question two", "old answer two",
         "new question", "turn answer",
     ]
+
+
+# Native producer shapes: the real Agent compressor assembles the compacted set and the
+# store's messages.compact (SQLite archive_and_compact) commits it, as the Agent does mid-turn.
+NATIVE_SUMMARY = "[CONTEXT COMPACTION — REFERENCE ONLY] The user asked q0 and q1; both were answered."
+NATIVE_OLD = [
+    {"role": "user", "content": "q0"}, {"role": "assistant", "content": "a0"},
+    {"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"},
+    {"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2"},
+]
+
+
+def _native_compaction(session_id, history, prompt, compress_start, compress_end):
+    """Commit what the Agent writes when it compacts *history* + *prompt* mid-turn."""
+    from agent.context_compressor import ContextCompressor, _HandoffScan
+    from persistence.conversation.messages import NewMessage
+    from persistence.conversation.sessions import NewSession
+    from persistence_assembly import open_persistence, profile_scope
+
+    messages = [dict(row) for row in history] + [{"role": "user", "content": prompt}]
+    with patch("agent.context_compressor.get_model_context_length", return_value=1_000_000):
+        compressor = ContextCompressor(model="test/model", quiet_mode=True)
+    scan = _HandoffScan(
+        turns_to_summarize=messages[compress_start:compress_end], summary_indices=set(),
+        tail_start=compress_end, previous_summary_before=None, has_user_turn_before=None,
+    )
+    compacted = compressor._assemble_compressed(messages, compress_start, compress_end, scan, NATIVE_SUMMARY)
+    db_path = models._active_state_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with open_persistence(profile_scope(home=db_path.parent), eager=True) as store:
+        store.sessions.create(NewSession(session_id=session_id, source="api_server"))
+        for row in messages:
+            store.messages.append(session_id, NewMessage.from_live(row))
+        store.messages.compact(session_id, [NewMessage.from_live(row) for row in compacted])
+        store.messages.append(session_id, NewMessage.from_live({"role": "assistant", "content": "turn answer"}))
+    return compacted
+
+
+def _run_native_turns(sid, history, compress_start, compress_end):
+    session = make_session(sid, [row for row in history if row["role"] != "system"])
+    _start_turn(session, f"{sid}-1", "live ask")
+    compacted = _native_compaction(session.session_id, history, "live ask", compress_start, compress_end)
+    _run_turn(session.session_id, "live ask", f"{sid}-1")
+    session = get_session(session.session_id)
+    _start_turn(session, f"{sid}-2", "follow up")
+    _run_turn(session.session_id, "follow up", f"{sid}-2")
+    return compacted, get_session(session.session_id)
+
+
+@pytest.mark.requires_agent_modules
+def test_a_summary_merged_into_a_retained_user_row_never_reaches_the_display():
+    # Head [q0, a0] ends in an assistant, so the summary folds into the retained user q2.
+    compacted, saved = _run_native_turns("native-merged", NATIVE_OLD, 2, 4)
+    carrier = compacted[2]["content"]
+    assert NATIVE_SUMMARY in carrier and carrier.startswith("[PRIOR CONTEXT")
+
+    assert history_rows(CAPTURED_BODIES[-1]) == [
+        ("user", "q0"), ("assistant", "a0"), ("user", carrier), ("assistant", "a2"),
+        ("user", "live ask"), ("assistant", "turn answer"),
+    ]
+    # The fake Gateway repeats "turn answer", so the display merge keeps one copy.
+    assert _texts(saved.messages) == ["q0", "a0", "q1", "a1", "q2", "a2", "live ask", "turn answer", "follow up"]
+
+
+@pytest.mark.requires_agent_modules
+def test_a_summary_carrier_holding_the_live_ask_is_adopted_without_the_old_history():
+    # A system-only head: the summary leads the retained current user row, then the live ask.
+    history = [{"role": "system", "content": "sys"}] + NATIVE_OLD[:4]
+    compacted, saved = _run_native_turns("native-carrier", history, 1, 5)
+    carrier = compacted[-1]["content"]
+    assert carrier.startswith(NATIVE_SUMMARY) and carrier.endswith("live ask")
+    summary_part = carrier[: -len("live ask")].rstrip()
+
+    sent = history_rows(CAPTURED_BODIES[-1])
+    assert ("user", "q0") not in sent and ("user", "q1") not in sent
+    assert [text for _, text in sent if text != compacted[0]["content"]] == [
+        summary_part, "live ask", "turn answer",
+    ]
+    assert _texts(saved.messages) == ["q0", "a0", "q1", "a1", "live ask", "turn answer", "follow up"]
