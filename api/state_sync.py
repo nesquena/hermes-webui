@@ -448,7 +448,7 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
             logger.debug("Failed to close state.db")
 
 
-def sync_session_title(session_id: str, title: str, profile: Optional[str] = None) -> None:
+def sync_session_title(session_id: str, title: str, profile: Optional[str] = None, *, source: str = "llm") -> None:
     """Sync an auto-generated title to state.db (not gated by sync_to_insights).
 
     Background title generation writes the title to the WebUI sidecar JSON but
@@ -456,7 +456,7 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
     titles for WebUI sessions.  This function bridges that gap and is called
     from the background title update/refresh paths after a title is persisted.
 
-    Uses ``set_auto_title`` (LLM provenance) so it will only populate a row that
+    Uses ``set_auto_title`` (automatic provenance, see ``source``) so it will only populate a row that
     is NULL or holds a lower-authority auto-title, and never overwrites a manual
     rename made via CLI/Gateway/TUI (``set_auto_title`` returns ``False``,
     untouched, when a higher-authority title holds the row).  This means title
@@ -467,6 +467,12 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
     On a title collision (two sessions with the same auto-title), the title is
     de-duplicated via ``get_next_title_in_lineage`` (e.g. "My Session" ->
     "My Session #2") and retried, so the second session is never left blank.
+
+    ``source`` is the title's provenance: ``"llm"`` for a model-generated title,
+    ``"derived"`` for WebUI's local fallback summary. A derived title ranks below
+    an llm one, so the Agent's own model title can still replace it; stored as
+    llm it would hold the row at equal authority and the Agent's title would be
+    refused (Refs #9157).
     """
     if not title:
         return
@@ -482,9 +488,12 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
         # preserves the same "only populate NULL / never clobber a manual
         # rename" semantics (returns False, untouched, when a higher-authority
         # title holds the row) and requires an explicit auto source.
-        _llm_source = getattr(db, "TITLE_SOURCE_LLM", "llm")
+        if source == "derived":
+            _auto_source = getattr(db, "TITLE_SOURCE_DERIVED", "derived")
+        else:
+            _auto_source = getattr(db, "TITLE_SOURCE_LLM", "llm")
         try:
-            db.set_auto_title(session_id, title, source=_llm_source)
+            db.set_auto_title(session_id, title, source=_auto_source)
         except ValueError:
             # state.db enforces uniqueness on sessions.title, so a byte-identical
             # auto-title generated for two sessions raises ValueError here. Derive
@@ -492,7 +501,7 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
             # retry instead of leaving the second row blank (#6964).
             alt = db.get_next_title_in_lineage(title)
             if alt and alt != title:
-                db.set_auto_title(session_id, alt, source=_llm_source)
+                db.set_auto_title(session_id, alt, source=_auto_source)
     except Exception:
         _log_sync_failure("session title sync", session_id)
     finally:
