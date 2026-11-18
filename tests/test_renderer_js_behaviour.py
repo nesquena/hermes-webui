@@ -349,7 +349,9 @@ class TestMediaTokenBoundaries:
             "MEDIA:/tmp/one.png then MEDIA:/tmp/two.pdf after",
         )
         assert "path=%2Ftmp%2Fone.png" in out
-        assert "path=%2Ftmp%2Ftwo.pdf" in out
+        assert "path=%2Ftmp%2Ftwo.pdf" in out or (
+            "pdf-preview-load" in out and 'data-path="/tmp/two.pdf"' in out
+        )
         assert " then " in out
         assert " after" in out
 
@@ -1157,11 +1159,11 @@ class TestPublicShareSanitizerThroughRenderer:
         )
 
     def test_image_multiline_destination_placeholder_present(self, driver_path):
-        from api.shares import _strip_media_references
+        from api.shares import _PLACEHOLDER, _strip_media_references
         sanitized = _strip_media_references(
             "![secret](file:///home/alice/private\nimage.png)"
         )
-        assert "[Local attachment omitted from public share]" in sanitized, (
+        assert _PLACEHOLDER in sanitized, (
             f"Multiline image construct must be replaced wholesale: {sanitized!r}"
         )
 
@@ -1273,6 +1275,8 @@ class TestPublicShareSanitizerThroughRenderer:
     def test_media_token_inside_fenced_code_is_replaced(self, driver_path):
         """MEDIA: inside a fence must be replaced because the renderer
         processes MEDIA: before code stashing."""
+        from api.shares import _PLACEHOLDER
+
         html = self._sanitized_render(
             driver_path,
             "```\nMEDIA:/workspace/secret.png\n```",
@@ -1281,7 +1285,7 @@ class TestPublicShareSanitizerThroughRenderer:
             f"MEDIA: inside fenced code survived sanitizer: {html!r}"
         )
         # The placeholder text should appear (it's prose after sanitization)
-        assert "[Local attachment omitted" in html
+        assert _PLACEHOLDER in html
 
     def test_media_token_inside_inline_code_is_replaced(self, driver_path):
         """MEDIA: inside inline backticks must be replaced."""

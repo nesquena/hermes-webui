@@ -2,6 +2,7 @@ import json
 import urllib.error
 import urllib.request
 
+from api.shares import _PLACEHOLDER
 from tests._pytest_port import BASE
 
 
@@ -261,7 +262,7 @@ def test_share_strips_media_tokens_from_public_payload():
         # MEDIA: must not appear in public share content
         assert "MEDIA:" not in assistant_content
         # Placeholder must be present
-        assert "[Local attachment omitted from public share]" in assistant_content
+        assert _PLACEHOLDER in assistant_content
         # The descriptive text should still be present
         assert "Here is the generated image:" in assistant_content
     finally:
@@ -296,7 +297,7 @@ def test_share_strips_file_urls_from_public_payload():
         # file:// must not appear in public share
         assert "file://" not in assistant_content
         # Placeholder must be present
-        assert "[Local attachment omitted from public share]" in assistant_content
+        assert _PLACEHOLDER in assistant_content
     finally:
         post("/api/session/delete", {"session_id": sid})
 
@@ -371,7 +372,7 @@ def test_share_strips_markdown_file_links():
         # No file:// anywhere
         assert "file://" not in content
         # All three forms replaced with placeholder
-        placeholder = "[Local attachment omitted from public share]"
+        placeholder = _PLACEHOLDER
         assert content.count(placeholder) == 3
     finally:
         post("/api/session/delete", {"session_id": sid})
@@ -418,7 +419,7 @@ def test_share_preserves_code_regions():
         assert "`file:///etc/hosts`" in content or "file:///etc/hosts" in content
         # Bare file:// outside code stripped
         assert "file:///tmp/leak.csv" not in content
-        assert "[Local attachment omitted from public share]" in content
+        assert _PLACEHOLDER in content
     finally:
         post("/api/session/delete", {"session_id": sid})
 
@@ -450,7 +451,7 @@ def test_share_preserves_delimiter_before_file_url():
         content = shared["share"]["messages"][1]["content"]
         assert "file://" not in content
         # The newline before the URL should be preserved
-        assert "at:\n[Local attachment omitted from public share]" in content
+        assert ("at:\n" + _PLACEHOLDER) in content
         # The text after should still be present
         assert "(end of line)" in content
     finally:
@@ -490,7 +491,7 @@ def test_share_strips_image_destinations_with_spaces_and_newlines():
         content = shared["share"]["messages"][1]["content"]
         # No file:// anywhere — including whitespace/newline destinations
         assert "file://" not in content
-        placeholder = "[Local attachment omitted from public share]"
+        placeholder = _PLACEHOLDER
         assert content.count(placeholder) == 3
     finally:
         post("/api/session/delete", {"session_id": sid})
@@ -502,6 +503,7 @@ def test_legacy_snapshot_strips_media_on_read():
     from api.shares import SHARES_DIR, _write_json_atomic, _share_path, load_share
     import secrets
 
+    sid = _make_session_with_messages()
     token = "test_legacy_" + secrets.token_hex(6)
     legacy_content = (
         "[the data](file:///old/path.csv)\n"
@@ -512,7 +514,7 @@ def test_legacy_snapshot_strips_media_on_read():
     )
     payload = {
         "token": token,
-        "source_session_id": "test-legacy-sid",
+        "source_session_id": sid,
         "title": "Legacy Snapshot",
         "messages": [
             {"role": "user", "content": "Read this."},
@@ -531,13 +533,14 @@ def test_legacy_snapshot_strips_media_on_read():
         assert result is not None
         content = result["messages"][1]["content"]
         assert "file://" not in content
-        placeholder = "[Local attachment omitted from public share]"
+        placeholder = _PLACEHOLDER
         assert content.count(placeholder) == 5
     finally:
         try:
             path.unlink(missing_ok=True)
         except Exception:
             pass
+        post("/api/session/delete", {"session_id": sid})
 
 
 # ── Orphan LONG opener + later SHORT complete fence (re-gate #6285) ───────────
@@ -554,7 +557,6 @@ _ORPHAN_OPENER_CONTENT = (
     + _ORPHAN_OPENER_FENCE
     + "\n"
 )
-_PLACEHOLDER = "[Local attachment omitted from public share]"
 
 
 def test_share_orphan_long_fence_opener_keeps_later_short_fence():
@@ -602,10 +604,11 @@ def test_legacy_snapshot_orphan_long_fence_opener_keeps_later_short_fence():
     from api.shares import _write_json_atomic, _share_path, load_share
     import secrets
 
+    sid = _make_session_with_messages()
     token = "test_legacy_fence_" + secrets.token_hex(6)
     payload = {
         "token": token,
-        "source_session_id": "test-legacy-fence-sid",
+        "source_session_id": sid,
         "title": "Legacy Orphan Fence",
         "messages": [
             {"role": "user", "content": "Read this."},
@@ -640,3 +643,4 @@ def test_legacy_snapshot_orphan_long_fence_opener_keeps_later_short_fence():
             path.unlink(missing_ok=True)
         except Exception:
             pass
+        post("/api/session/delete", {"session_id": sid})

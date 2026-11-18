@@ -120,21 +120,20 @@ def _strip_media_references(text: str) -> str:
 
     Process order matches the real renderer's (ui.js) pipeline:
       1. CRLF normalisation (renderer normalises before any parsing)
-      1b. Blockquote pre-pass (renderer groups >-prefixed lines, strips the
-          prefix, recursively renders — mirrors that here; preserves
-          complete blockquoted fences byte-for-byte)
+      1b. Blockquote pre-pass (iterative walk with depth cap ~400, preserving
+          original > or &gt; line prefixes and complete blockquoted fences)
       2. MEDIA: replacement (renderer converts MEDIA: to media tokens
-         before fenced/inline code processing, so MEDIA: inside code
-         regions is also rendered — matching that here means MEDIA:
-         never survives into a public payload)
+         before fenced/inline code processing, using _SHARE_MEDIA_RE and
+         split_media_token_ref)
       3. Fenced code stashing (only complete balanced fences — an
          unmatched opener stays as active prose for sanitisation)
       4. Inline code stashing
-      4b. Raw <pre> block stashing (renderer stashes these before its
-          bare file:// pass, so file:// inside them stays inert)
-      5. file:// URL replacement (images with renderer-matched [^\)]+
+      4b. Display math stashing ($$...$$ and \\[...\\])
+      4c. Raw <pre> and entity-encoded <pre> block stashing
+      5. file:// URL replacement (images with renderer-matched [^\\)]+
          destinations first, then links, then bare URLs)
-      6. Stash restoration (raw <pre>, fences, inline, blockquotes)
+      6. Stash restoration (raw <pre>, math, inline, fences)
+      7. Blockquote restoration in reverse nesting order
     """
     if not isinstance(text, str) or not text:
         return text
@@ -143,180 +142,216 @@ def _strip_media_references(text: str) -> str:
     # so the close-fence regex does not miss \r\n-terminated lines.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
-    placeholder = "[Local attachment omitted from public share]"
-
-    # (1b) Blockquote pre-pass — mirror renderMd()'s _applyBlockquotes
-    # (ui.js ~L7115-7162).  The renderer groups consecutive >-prefixed
-    # lines, strips the "> " prefix, and recursively runs the FULL
-    # pipeline on the stripped text.  We do the same: group, strip,
-    # recurse this sanitizer, re-prefix every line, and stash the result
-    # as a \x00Q token so no outer pass re-processes it.  This keeps
-    # file:// inside a COMPLETE blockquoted fence byte-for-byte
-    # (renderer-inert there: the recursion stashes the fence) while still
-    # stripping file:// in blockquote prose (renderer-active there).
-    # Like the renderer, a ">" line that sits inside a non-blockquote
-    # backtick fence is fence content, NOT a blockquote — track fence
-    # state so it passes through untouched.
-    _bq: list[str] = []
-    _lines = text.split("\n")
-    _bq_out: list[str] = []
-    _in_fence = False
-    _fence_len = 0
-
-    def _bq_flush(end):
-        if _bq_start[0] < 0:
-            return
-        _stripped = "\n".join(
-            re.sub(r"^> ?", "", l) for l in _lines[_bq_start[0]:end]
-        )
-        _resanitized = _strip_media_references(_stripped)
-        _reprefixed = "\n".join(
-            ("> " + l) if l else ">" for l in _resanitized.split("\n")
-        )
-        _bq.append(_reprefixed)
-        _bq_out.append("")
-        _bq_out.append(f"\x00Q{len(_bq) - 1}\x00")
-        _bq_out.append("")
-        _bq_start[0] = -1
-
-    _bq_start = [-1]
-    _i = 0
-    while _i < len(_lines):
-        _line = _lines[_i]
-        if _in_fence:
-            _bq_out.append(_line)
-            _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _line)
-            if _cm and len(_cm.group(1)) >= _fence_len:
-                _in_fence = False
-            _i += 1
+    # (1b) Iterative blockquote walk — mirror renderMd()'s _applyBlockquotes
+    # using an explicit worklist and bounded depth cap (~400).
+    # segments: [segment_text, depth, parent_idx, saved_prefixes]
+    segments: list[list] = [[text, 0, -1, []]]
+    seg_idx = 0
+    while seg_idx < len(segments):
+        cur_text, depth, _, _ = segments[seg_idx]
+        if depth >= 400:
+            seg_idx += 1
             continue
-        _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _line)
-        if _om:
-            _bq_flush(_i)
-            _bq_out.append(_line)
-            _in_fence = True
-            _fence_len = len(_om.group(1))
-            _i += 1
-            continue
-        if _line.startswith(">"):
-            if _bq_start[0] < 0:
-                _bq_start[0] = _i
-        else:
-            _bq_flush(_i)
-            _bq_out.append(_line)
-        _i += 1
-    _bq_flush(len(_lines))
-    text = "\n".join(_bq_out)
 
-    # (2) Replace MEDIA: EVERYWHERE before code stashing — the renderer
-    # converts MEDIA: to media-stash tokens before fenced/inline code
-    # processing, so MEDIA: inside code regions would also be rendered
-    # as /api/media links.
-    text = re.sub(r"MEDIA:\S+", placeholder, text)
+        _lines = cur_text.split("\n")
+        _bq_out: list[str] = []
+        _in_fence = False
+        _fence_len = 0
+        _bq_start = -1
+        _has_bq = False
 
-    # (3) Stash fenced code blocks.  Match the renderer's line-anchored
-    # variable-length fence grammar exactly.  Only stash a COMPLETE
-    # balanced fence — an unmatched opener (no valid closing fence) is
-    # emitted as active prose for sanitisation and classification resumes
-    # on the FOLLOWING line (review #6285 issue 1: renderMd()'s global
-    # fence regex skips that failed opener and can still recognise a later
-    # complete shorter fence, so consuming the whole suffix as prose would
-    # corrupt content the renderer keeps inert inside <pre><code>).
-    # Opening fence: ^[ ]{0,3}(`{3,})([^`]*)$
-    # Closing fence: ^[ ]{0,3}(`{3,})[ \t]*$  (length >= opening length)
-    _fenced: list[str] = []
-    _lines = text.split("\n")
-    _nlines = len(_lines)
-    # Per-line closing-fence run length (0 when the line is not a pure
-    # closing fence) plus a suffix maximum, so "is there any valid close
-    # after line i?" is an O(1) lookup.  Without it, every orphan opener
-    # rescans the remaining suffix and a file of unmatched openers becomes
-    # O(openers x suffix) instead of O(lines).
-    _close_len = [0] * (_nlines + 1)
-    for _j in range(_nlines):
-        _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _lines[_j])
-        if _cm:
-            _close_len[_j] = len(_cm.group(1))
-    _close_max_from = [0] * (_nlines + 1)
-    for _j in range(_nlines - 1, -1, -1):
-        _nxt = _close_max_from[_j + 1]
-        _close_max_from[_j] = _close_len[_j] if _close_len[_j] > _nxt else _nxt
+        # Default arguments bind the per-segment walk state at definition time
+        # (B023): one segment is classified per loop iteration, so the closure
+        # must not read the next iteration's lists.
+        def _flush(
+            end: int,
+            _lines: list[str] = _lines,
+            _bq_out: list[str] = _bq_out,
+            _depth: int = depth,
+            _seg_idx: int = seg_idx,
+        ):
+            nonlocal _bq_start, _has_bq
+            if _bq_start < 0:
+                return
+            _has_bq = True
+            child_lines = []
+            saved_prefixes = []
+            for l in _lines[_bq_start:end]:
+                m = re.match(r"^(>|&gt;)[ ]?", l)
+                if m:
+                    pref = m.group(0)
+                    saved_prefixes.append(pref)
+                    child_lines.append(l[len(pref):])
+                else:
+                    saved_prefixes.append("")
+                    child_lines.append(l)
 
-    _fence_parts: list[str] = []
-    _i = 0
-    while _i < _nlines:
-        _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _lines[_i])
-        if _om:
-            _open_len = len(_om.group(1))
-            _start = _i
-            _close_at = -1
-            if _close_max_from[_i + 1] >= _open_len:
-                _j = _i + 1
-                while _close_len[_j] < _open_len:
-                    _j += 1
-                _close_at = _j
-            if _close_at >= 0:
-                _i = _close_at + 1
-                _block = "\n".join(_lines[_start:_i])
-                _fenced.append(_block)
-                _fence_parts.append(f"\x00F{len(_fenced) - 1}\x00")
+            child_text = "\n".join(child_lines)
+            child_idx = len(segments)
+            segments.append([child_text, _depth + 1, _seg_idx, saved_prefixes])
+            _bq_out.append(f"\x00Q{child_idx}\x00")
+            _bq_start = -1
+
+        _i = 0
+        while _i < len(_lines):
+            _line = _lines[_i]
+            if _in_fence:
+                _bq_out.append(_line)
+                _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _line)
+                if _cm and len(_cm.group(1)) >= _fence_len:
+                    _in_fence = False
+                _i += 1
+                continue
+            _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _line)
+            if _om:
+                _flush(_i)
+                _bq_out.append(_line)
+                _in_fence = True
+                _fence_len = len(_om.group(1))
+                _i += 1
+                continue
+            if _line.startswith(">") or _line.startswith("&gt;"):
+                if _bq_start < 0:
+                    _bq_start = _i
             else:
-                # No valid close for this opener: only the opener line is
-                # active prose, and classification resumes on the next
-                # line so a later complete fence is still stashed.
-                _fence_parts.append(_lines[_start])
-                _i = _start + 1
-        else:
-            _fence_parts.append(_lines[_i])
+                _flush(_i)
+                _bq_out.append(_line)
             _i += 1
-    text = "\n".join(_fence_parts)
+        _flush(len(_lines))
 
-    # (4) Stash inline code spans (`...`) so file:// inside them is preserved.
-    _inline: list[str] = []
-    text = re.sub(
-        r"`[^`\n]+`",
-        lambda m: _inline.append(m.group(0)) or f"\x00I{len(_inline) - 1}\x00",
-        text,
-    )
+        if _has_bq:
+            segments[seg_idx][0] = "\n".join(_bq_out)
 
-    # (4b) Stash raw <pre> blocks so file:// inside them is preserved.
-    # The renderer stashes raw <pre>...</pre> BEFORE its bare file:// pass
-    # (ui.js ~L7269) and restores it only after all markdown passes, so a
-    # file:// inside a literal <pre> block stays inert text — mirror that.
-    _raw_pre: list[str] = []
-    text = re.sub(
-        r"(<pre\b[^>]*>[\s\S]*?</pre>)",
-        lambda m: _raw_pre.append(m.group(0)) or f"\x00R{len(_raw_pre) - 1}\x00",
-        text,
-        flags=re.IGNORECASE,
-    )
+        seg_idx += 1
 
-    # (5) file:// URL replacement — grammar matches the renderer (ui.js):
-    #   - Markdown images: destination is [^\)]+ — whitespace AND newline
-    #     destinations are accepted through the closing ')' (L7331/L7473).
-    #     The whole construct is replaced BEFORE the bare-URL pass so a
-    #     space-destination image like ![x](file:///a b.png) can never be
-    #     partially consumed by the bare-URL regex below.
-    #   - Markdown links: destination is [^\s\)]+ — whitespace terminates
-    #     the link destination (L7338/L7479).
-    #   - Bare file:// URLs: whitespace-delimited (L7277).
-    # Restrict to the renderer-active lowercase file:// spelling only —
-    # inert file: / file:/ forms are renderer-inert literals and stay.
-    text = re.sub(r"!\[[^\]]*\]\(file://[^\)]+\)", placeholder, text)
-    text = re.sub(r"\[[^\]]+\]\(file://[^\s\)]+\)", placeholder, text)
-    text = re.sub(r"(^|\s)file://[^\s<>\"')\]]+", r"\1" + placeholder, text)
+    # (2)-(6) Sanitize each segment outside blockquote markers
+    for k in range(len(segments)):
+        seg = segments[k][0]
 
-    # (6) Restore stashed regions.
-    for i, s in enumerate(_raw_pre):
-        text = text.replace(f"\x00R{i}\x00", s)
-    for i, s in enumerate(_fenced):
-        text = text.replace(f"\x00F{i}\x00", s)
-    for i, s in enumerate(_inline):
-        text = text.replace(f"\x00I{i}\x00", s)
-    for i, s in enumerate(_bq):
-        text = text.replace(f"\x00Q{i}\x00", s)
+        # (2) Replace local MEDIA: tokens using _SHARE_MEDIA_RE and split_media_token_ref.
+        # Remote MEDIA:https?:// references are excluded by grammar; delimiters preserved.
+        pieces = []
+        last_idx = 0
+        for match in _SHARE_MEDIA_RE.finditer(seg):
+            split_res = split_media_token_ref(seg, match)
+            if split_res is None:
+                continue
+            _, suffix = split_res
+            pieces.append(seg[last_idx:match.start()])
+            pieces.append(_PLACEHOLDER)
+            pieces.append(suffix)
+            last_idx = match.end()
+        if pieces:
+            pieces.append(seg[last_idx:])
+            seg = "".join(pieces)
 
-    return text
+        # (3) Stash fenced code blocks. Match the renderer's line-anchored
+        # variable-length fence grammar exactly. Complete balanced fences only.
+        _fenced: list[str] = []
+        _lines = seg.split("\n")
+        _nlines = len(_lines)
+        _close_len = [0] * (_nlines + 1)
+        for _j in range(_nlines):
+            _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _lines[_j])
+            if _cm:
+                _close_len[_j] = len(_cm.group(1))
+        _close_max_from = [0] * (_nlines + 1)
+        for _j in range(_nlines - 1, -1, -1):
+            _nxt = _close_max_from[_j + 1]
+            _close_max_from[_j] = _close_len[_j] if _close_len[_j] > _nxt else _nxt
+
+        _fence_parts: list[str] = []
+        _i = 0
+        while _i < _nlines:
+            _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _lines[_i])
+            if _om:
+                _open_len = len(_om.group(1))
+                _start = _i
+                _close_at = -1
+                if _close_max_from[_i + 1] >= _open_len:
+                    _j = _i + 1
+                    while _close_len[_j] < _open_len:
+                        _j += 1
+                    _close_at = _j
+                if _close_at >= 0:
+                    _i = _close_at + 1
+                    _block = "\n".join(_lines[_start:_i])
+                    _fenced.append(_block)
+                    _fence_parts.append(f"\x00F{len(_fenced) - 1}\x00")
+                else:
+                    _fence_parts.append(_lines[_start])
+                    _i = _start + 1
+            else:
+                _fence_parts.append(_lines[_i])
+                _i += 1
+        seg = "\n".join(_fence_parts)
+
+        # (4) Stash inline code spans (`...`) so file:// inside them is preserved.
+        _inline: list[str] = []
+        seg = re.sub(
+            r"`[^`\n]+`",
+            lambda m, _acc=_inline: _acc.append(m.group(0)) or f"\x00I{len(_acc) - 1}\x00",
+            seg,
+        )
+
+        # (4b) Stash multiline display math ($$...$$ and \[...\])
+        _math: list[str] = []
+        seg = re.sub(
+            r"(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\])",
+            lambda m, _acc=_math: _acc.append(m.group(0)) or f"\x00M{len(_acc) - 1}\x00",
+            seg,
+        )
+
+        # (4c) Stash raw and entity-encoded <pre> blocks
+        _raw_pre: list[str] = []
+        seg = re.sub(
+            r"(<pre\b[^>]*>[\s\S]*?</pre>|&lt;pre\b(?:(?!&gt;)[\s\S])*&gt;[\s\S]*?&lt;/pre&gt;)",
+            lambda m, _acc=_raw_pre: _acc.append(m.group(0)) or f"\x00R{len(_acc) - 1}\x00",
+            seg,
+            flags=re.IGNORECASE,
+        )
+
+        # (5) file:// URL replacement
+        seg = re.sub(r"!\[[^\]]*\]\(file://[^\)]+\)", _PLACEHOLDER, seg)
+        seg = re.sub(r"\[[^\]]+\]\(file://[^\s\)]+\)", _PLACEHOLDER, seg)
+        seg = re.sub(r"(^|\s)file://[^\s<>\"')\]]+", r"\1" + _PLACEHOLDER, seg)
+
+        # (6) Restore stashed regions
+        for i, s in enumerate(_raw_pre):
+            seg = seg.replace(f"\x00R{i}\x00", s)
+        for i, s in enumerate(_math):
+            seg = seg.replace(f"\x00M{i}\x00", s)
+        for i, s in enumerate(_inline):
+            seg = seg.replace(f"\x00I{i}\x00", s)
+        for i, s in enumerate(_fenced):
+            seg = seg.replace(f"\x00F{i}\x00", s)
+
+        segments[k][0] = seg
+
+    # (7) Restore blockquotes in reverse nesting order
+    for k in range(len(segments) - 1, 0, -1):
+        child_text, _, parent_idx, saved_prefixes = segments[k]
+        child_lines = child_text.split("\n")
+        reprefixed_lines = []
+        if len(child_lines) == len(saved_prefixes):
+            for line, pref in zip(child_lines, saved_prefixes, strict=True):
+                p = pref.rstrip()
+                sep = " " if (pref.endswith(" ") or not pref) else ""
+                reprefixed_lines.append((p + sep + line) if line else p)
+        else:
+            default_pref = saved_prefixes[0] if saved_prefixes else "> "
+            default_p = default_pref.rstrip()
+            default_sep = " " if default_pref.endswith(" ") else ""
+            for line in child_lines:
+                reprefixed_lines.append(
+                    (default_p + default_sep + line) if line else default_p
+                )
+        reprefixed = "\n".join(reprefixed_lines)
+        segments[parent_idx][0] = segments[parent_idx][0].replace(
+            f"\x00Q{k}\x00", reprefixed
+        )
+
+    return segments[0][0]
 
 
 def _redact_share_paths(text: str, extra_paths) -> str:
