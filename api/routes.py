@@ -437,17 +437,24 @@ def _session_counts_toward_pin_quota(session) -> bool:
     return not _hide_from_default_sidebar(row)
 
 
-# Save-order tickets per (profile, field, state.db id): a lineage mirror writes rows other
+# Save-order tickets per (state.db path, field, row id): a lineage mirror writes rows other
 # session ids own, so a mirror whose save predates the last write to any of them is stale.
-_MIRROR_ORDER_LOCK = threading.Lock()
+# Check-and-write is serialised per state.db, so a busy database never stalls another.
+_MIRROR_TICKET_LOCK = threading.Lock()
 _MIRROR_TICKETS = itertools.count(1)
 _MIRRORED_TICKET: dict = {}
+_MIRROR_DB_LOCKS: dict = {}
 
 
 def _mirror_ticket() -> int:
-    """Take right after the sidecar save, under the session lock."""
-    with _MIRROR_ORDER_LOCK:
+    """Take right after the sidecar save, under the session lock (in-memory only)."""
+    with _MIRROR_TICKET_LOCK:
         return next(_MIRROR_TICKETS)
+
+
+def _mirror_db_lock(db_key: str) -> threading.Lock:
+    with _MIRROR_TICKET_LOCK:
+        return _MIRROR_DB_LOCKS.setdefault(db_key, threading.Lock())
 
 
 def _mirror_to_state_db(session, field: str, value, ticket=None) -> None:
@@ -460,7 +467,7 @@ def _mirror_to_state_db(session, field: str, value, ticket=None) -> None:
     the sidecar so the sidebar can tell a Desktop/CLI edit (state.db moved off the recorded
     value) from a lost mirror.
     """
-    from api.state_sync import mirror_target_ids, sync_session_field
+    from api.state_sync import _resolve_state_db_path, mirror_target_ids, sync_session_field
     if ticket is None:
         ticket = _mirror_ticket()
     sid = str(_session_field(session, "session_id", "") or "").strip()
@@ -487,11 +494,14 @@ def _mirror_to_state_db(session, field: str, value, ticket=None) -> None:
                 return  # deleted (or never persisted): do not resurrect it anywhere
             if superseded(current):
                 return  # a newer operation owns the field: do not write or record this value
-            with _MIRROR_ORDER_LOCK:
-                keys = [(profile, field, i) for i in mirror_target_ids(sid, field, profile)]
+            db_path = _resolve_state_db_path(profile)
+            db_key = str(db_path.resolve()) if db_path is not None else f"missing:{profile}"
+            with _mirror_db_lock(db_key):
+                targets = mirror_target_ids(sid, field, profile)
+                keys = [(db_key, field, i) for i in targets or ()]
                 if any(_MIRRORED_TICKET.get(k, 0) > ticket for k in keys):
                     return  # a later save of another lineage member already mirrored
-                landed = sync_session_field(sid, field, value, profile=profile)
+                landed = targets is not None and sync_session_field(sid, field, value, profile=profile)
                 if landed:
                     _MIRRORED_TICKET.update(dict.fromkeys(keys, ticket))
             if not landed and field not in ("pinned", "archived"):

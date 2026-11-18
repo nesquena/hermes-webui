@@ -117,3 +117,42 @@ def test_older_root_mirror_resuming_after_newer_tip_action_keeps_the_tip_value(t
              **{k: json.loads((sdir / f"{sid}.json").read_text())[k] for k in ("pinned", "state_db_mirror")}}
             for sid in ("tip",)]
     assert _sidebar_rows(monkeypatch, rows)["tip"]["pinned"] is (not old_root_value)
+
+
+def test_busy_state_db_of_one_profile_does_not_stall_other_profiles(tmp_path, monkeypatch):
+    import time
+    from api import routes, state_sync
+    from tests.test_pinned_sessions_state_db_mirror import _pin_endpoint
+
+    homes = _homes(tmp_path, monkeypatch, names=("default", "alpha"))
+    _make_state_db(homes["alpha"] / "state.db", rows=(("a1", 0),))
+    _make_state_db(homes["default"] / "state.db", rows=(("b1", 0),))
+    a1, b1 = _PinSession("a1", profile="alpha"), _PinSession("b1")
+    post = _pin_endpoint(monkeypatch, collections.OrderedDict({"a1": a1, "b1": b1}))
+    blocker = sqlite3.connect(str(homes["alpha"] / "state.db"), isolation_level=None)
+    blocker.execute("BEGIN EXCLUSIVE")  # another client holds alpha's database
+    try:
+        a1.pinned = True
+        a1.save()  # the sidecar is saved before the mirror starts
+        timing = {}
+
+        def mirror_a():
+            start = time.monotonic()
+            routes._mirror_to_state_db(a1, "pinned", True)
+            timing["a"] = time.monotonic() - start
+
+        thread = threading.Thread(target=mirror_a)
+        thread.start()
+        time.sleep(0.1)  # alpha's mirror is now blocked on the busy database
+        start = time.monotonic()
+        routes._mirror_ticket()
+        assert post("b1", True)[0] == 200
+        elapsed = time.monotonic() - start
+        thread.join(5)
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert elapsed < state_sync.PIN_MIRROR_TIMEOUT_S  # profile B never waited behind alpha
+    assert _column(homes["default"] / "state.db", "pinned")["b1"] == 1
+    assert timing["a"] < 3 * state_sync.PIN_MIRROR_TIMEOUT_S  # alpha's mirror gave up, bounded
+    assert a1.saved is True and _column(homes["alpha"] / "state.db", "pinned")["a1"] == 0

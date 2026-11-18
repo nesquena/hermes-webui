@@ -25,7 +25,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
-from api.agent_sessions import open_state_db_readonly, state_db_file_uri
+from api.agent_sessions import open_state_db_readonly, state_db_file_uri, state_db_readonly_uri
 
 logger = logging.getLogger(__name__)
 
@@ -443,21 +443,25 @@ _MIRROR_UPDATES = {
 }
 
 
-def mirror_target_ids(session_id: str, field: str, profile: Optional[str] = None) -> set:
-    """Ids a ``sync_session_field`` call would write: the compression lineage for flags, else the row."""
+def mirror_target_ids(session_id: str, field: str, profile: Optional[str] = None) -> Optional[set]:
+    """Ids a ``sync_session_field`` call would write: the compression lineage for flags, else the row.
+
+    None when the lineage cannot be read in time: the caller must not write an unknown row set."""
     if field not in ("pinned", "archived"):
         return {session_id}
     try:
         db_path = _resolve_state_db_path(profile)
         if db_path is None:
             return {session_id}
-        with closing(open_state_db_readonly(db_path)) as conn:
+        with closing(sqlite3.connect(
+            state_db_readonly_uri(Path(db_path).resolve()), uri=True, timeout=PIN_MIRROR_TIMEOUT_S,
+        )) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
             sql = _lineage_sql(columns) + " SELECT id FROM anc UNION SELECT id FROM des"
             return {str(row[0]) for row in conn.execute(sql, (session_id, session_id))} | {session_id}
     except Exception:
         logger.debug("Failed to read the lineage of %s", session_id, exc_info=True)
-        return {session_id}
+        return None
 
 
 def sync_session_field(session_id: str, field: str, value, profile: Optional[str] = None) -> bool:
