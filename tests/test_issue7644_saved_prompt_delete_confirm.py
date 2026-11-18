@@ -882,9 +882,17 @@ def test_in_place_truncation_failure_restores_the_verified_preimage(prompt_store
     )
 
     backup = prompt_store.with_name(BACKUP_NAME)
-    assert backup.exists(), "the recovery copy exists"
-    assert [p["id"] for p in json.loads(backup.read_text(encoding="utf-8"))] == ["keepme", "gone"], (
-        "the recovery copy holds both prompts"
+    # #7647 re-review: after a *verified* restore the live store is the preimage
+    # again, so no recovery copy is left behind when no earlier generation
+    # existed. The previous behaviour (always materialize `.bak`) made a crash
+    # during the restore read an older generation that the restore had already
+    # superseded.
+    assert not backup.exists(), (
+        "a verified rollback with no earlier generation must not leave a recovery copy: "
+        "the store itself holds the preimage again"
+    )
+    assert not list(prompt_store.parent.glob("*.pending.*")), (
+        "the staged preimage is disposed of once the rollback is verified"
     )
 
 

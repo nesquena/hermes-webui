@@ -17632,6 +17632,59 @@ def _write_text_atomic(path: "Path", text: str, *, mode: "int | None" = None) ->
     _atomic_write_text(path, text, mode=mode)
 
 
+def _restore_previous_saved_prompts_backup(
+    backup_path: "Path",
+    previous_bytes: "bytes | None",
+    had_previous: bool,
+) -> None:
+    if not had_previous:
+        try:
+            backup_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    if previous_bytes is None:
+        return
+
+    tmp_path = backup_path.with_name(f"{backup_path.name}.pending.{uuid.uuid4().hex}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    fd = -1
+    try:
+        fd = os.open(str(tmp_path), flags, 0o600)
+        if hasattr(os, "fchmod"):
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass
+        with os.fdopen(fd, "wb") as f:
+            fd = -1
+            f.write(previous_bytes)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        if not hasattr(os, "fchmod"):
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
+        os.replace(tmp_path, backup_path)
+    except Exception:
+        pass
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _save_saved_prompts(
     prompts: list,
     *,
@@ -17752,10 +17805,33 @@ def _save_saved_prompts(
 
                     # Anything else — empty, partial, unreadable, or a different generation
                     # (the in-place fallback truncated and then failed) — is ambiguous.
-                    # #7647 r5: restore the store BEFORE touching `.bak`. While the restore
-                    # verifies, the previous `.bak` generation is still the only copy of an
-                    # older successfully-deleted prompt, so rotating it here would destroy
-                    # that recovery copy for a delete that reports "nothing was deleted".
+                    # Publish the staged preimage to .bak BEFORE the restore so a crash
+                    # mid-restore leaves the newest generation recoverable (#7647), while
+                    # preserving any previous .bak bytes to put back after a verified rollback.
+                    previous_backup_bytes: "bytes | None" = None
+                    had_previous_backup = False
+                    try:
+                        if backup.exists():
+                            had_previous_backup = True
+                            previous_backup_bytes = backup.read_bytes()
+                    except (OSError, ValueError):
+                        pass
+
+                    published = False
+                    publish_exc = None
+                    try:
+                        os.replace(staged_backup, backup)
+                        published = _is_saved_prompts_backup_verified(backup, p, backup_content)
+                    except Exception as p_exc:
+                        publish_exc = p_exc
+                        published = False
+
+                    verified_staged = None
+                    if not published:
+                        verified_staged = _ensure_saved_prompts_preimage_retained(
+                            staged_backup, backup_content, live_path=p
+                        )
+
                     restored = False
                     restore_exc = None
                     if backup_content is not None:
@@ -17767,31 +17843,17 @@ def _save_saved_prompts(
                             restored = False
 
                     if restored:
-                        # Only ever create the recovery copy when there is none: an existing
-                        # one belongs to an older successful delete and must survive.
-                        if not backup.exists():
-                            try:
-                                os.replace(staged_backup, backup)
-                            except OSError:
-                                pass
-                        else:
-                            try:
-                                staged_backup.unlink(missing_ok=True)
-                            except OSError:
-                                pass
+                        _restore_previous_saved_prompts_backup(
+                            backup, previous_backup_bytes, had_previous_backup
+                        )
+                        try:
+                            staged_backup.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                         raise _SavedPromptsRolledBack(
                             f"saved prompts store write failed ({exc}); store was left incomplete "
                             "and has been restored from the verified preimage"
                         ) from exc
-
-                    published = False
-                    publish_exc = None
-                    try:
-                        os.replace(staged_backup, backup)
-                        published = _is_saved_prompts_backup_verified(backup, p, backup_content)
-                    except Exception as p_exc:
-                        publish_exc = p_exc
-                        published = False
 
                     if published:
                         try:
@@ -17803,9 +17865,10 @@ def _save_saved_prompts(
                             recovery_published=True,
                         ) from (restore_exc or exc)
 
-                    verified_staged = _ensure_saved_prompts_preimage_retained(
-                        staged_backup, backup_content, live_path=p
-                    )
+                    if verified_staged is None:
+                        verified_staged = _ensure_saved_prompts_preimage_retained(
+                            staged_backup, backup_content, live_path=p
+                        )
                     err_msg = (
                         f"saved prompts store write failed ({exc}), "
                         f"recovery publication {'failed (' + str(publish_exc) + ')' if publish_exc else 'could not be verified'}, "
