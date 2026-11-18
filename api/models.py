@@ -1928,6 +1928,72 @@ def _normalize_skill_provenance(value) -> dict[str, int]:
     return normalized
 
 
+def _normalize_single_tool_call(call: object) -> tuple | None:
+    if not isinstance(call, dict):
+        return None
+    call_id = call.get("id")
+    norm_cid = str(call_id).strip() if call_id is not None and str(call_id).strip() else None
+
+    func = call.get("function")
+    if isinstance(func, dict):
+        fname = func.get("name")
+        norm_name = str(fname).strip() if fname is not None and str(fname).strip() else None
+        fargs = func.get("arguments")
+    else:
+        fname = call.get("name")
+        norm_name = str(fname).strip() if fname is not None and str(fname).strip() else None
+        fargs = call.get("arguments")
+
+    norm_args = None
+    if isinstance(fargs, dict):
+        try:
+            norm_args = json.dumps(fargs, sort_keys=True)
+        except Exception:
+            norm_args = str(fargs)
+    elif isinstance(fargs, str):
+        s = fargs.strip()
+        if s:
+            try:
+                parsed = json.loads(s)
+                norm_args = json.dumps(parsed, sort_keys=True)
+            except Exception:
+                norm_args = s
+    elif fargs is not None:
+        norm_args = str(fargs)
+
+    if norm_cid is None and norm_name is None and norm_args is None:
+        return None
+    return (norm_cid, norm_name, norm_args)
+
+
+def _normalized_tool_calls(tool_calls: object) -> tuple | None:
+    if not isinstance(tool_calls, (list, tuple)):
+        return None
+    normalized = []
+    for call in tool_calls:
+        entry = _normalize_single_tool_call(call)
+        if entry is not None:
+            normalized.append(entry)
+    return tuple(normalized) if normalized else None
+
+
+def _normalized_tool_call_id(val: object) -> str | None:
+    if val is None or isinstance(val, bool):
+        return None
+    s = str(val).strip()
+    return s if s else None
+
+
+def _row_has_tool_metadata(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _normalized_tool_calls(row.get("tool_calls")) is not None:
+        return True
+    if _normalized_tool_call_id(row.get("tool_call_id")) is not None:
+        return True
+    return False
+
+
 def _message_rows_match(row_a: object, row_b: object) -> bool:
     if not isinstance(row_a, dict) or not isinstance(row_b, dict):
         return row_a == row_b
@@ -1937,6 +2003,19 @@ def _message_rows_match(row_a: object, row_b: object) -> bool:
     )
     if not role_content_match:
         return False
+    if is_context_compression_marker(row_a) != is_context_compression_marker(row_b):
+        return False
+
+    a_has_tool = _row_has_tool_metadata(row_a)
+    b_has_tool = _row_has_tool_metadata(row_b)
+    if a_has_tool != b_has_tool:
+        return False
+    if a_has_tool:
+        if _normalized_tool_calls(row_a.get("tool_calls")) != _normalized_tool_calls(row_b.get("tool_calls")):
+            return False
+        if _normalized_tool_call_id(row_a.get("tool_call_id")) != _normalized_tool_call_id(row_b.get("tool_call_id")):
+            return False
+
     # Two turns with the same text are still distinct rows; the timestamp the
     # writer stamps at creation tells them apart when neither carries an id.
     a_ts = row_a.get("timestamp")
@@ -1987,6 +2066,7 @@ def _merge_concurrent_message_arrays(
     disk_msgs: list | None,
     our_msgs: list | None,
     allow_zero_prefix_merge: bool = False,
+    loaded_base: list | None = None,
 ) -> list:
     """Merge message arrays from concurrent writers sharing an ancestor prefix."""
     if not isinstance(our_msgs, list):
@@ -2008,6 +2088,7 @@ def _merge_concurrent_message_arrays(
     disk_tail = [
         row for row in disk_msgs[prefix_len:]
         if not _row_already_held(row, our_msgs)
+        and not (loaded_base is not None and _row_already_held(row, loaded_base))
     ]
     if not disk_tail:
         return list(our_msgs)
@@ -2121,6 +2202,8 @@ class Session:
         # Preserve malformed persisted containers so save() can fail closed
         # instead of silently normalizing a dict/string to an empty transcript.
         self.messages = messages if messages is not None else []
+        self._loaded_messages = None
+        self._loaded_context_messages = None
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -2419,7 +2502,10 @@ class Session:
                 disk_messages = disk_sidecar.get("messages")
                 if isinstance(disk_messages, list):
                     self.messages = _merge_concurrent_message_arrays(
-                        disk_messages, self.messages, allow_zero_prefix_merge=False
+                        disk_messages,
+                        self.messages,
+                        allow_zero_prefix_merge=False,
+                        loaded_base=getattr(self, "_loaded_messages", None),
                     )
 
                 disk_context = disk_sidecar.get("context_messages")
@@ -2432,7 +2518,10 @@ class Session:
                     self.context_messages = list(self.context_messages)
                 elif has_our_context and has_disk_context:
                     self.context_messages = _merge_concurrent_message_arrays(
-                        disk_context, self.context_messages, allow_zero_prefix_merge=False
+                        disk_context,
+                        self.context_messages,
+                        allow_zero_prefix_merge=False,
+                        loaded_base=getattr(self, "_loaded_context_messages", None),
                     )
                 else:
                     self.context_messages = []
@@ -2781,6 +2870,8 @@ class Session:
         self._reasoning_effort_saved = written_reasoning_effort
         self._share_token_saved = self.share_token
         self._share_created_at_saved = self.share_created_at
+        self._loaded_messages = copy.deepcopy(self.messages) if isinstance(self.messages, list) else None
+        self._loaded_context_messages = copy.deepcopy(self.context_messages) if isinstance(self.context_messages, list) else None
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -2847,6 +2938,10 @@ class Session:
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
         session._share_fields_misplaced = _share_fields_misplaced
+        if isinstance(data.get('messages'), list):
+            session._loaded_messages = copy.deepcopy(data['messages'])
+        if isinstance(data.get('context_messages'), list):
+            session._loaded_context_messages = copy.deepcopy(data['context_messages'])
         if _names_other_session:
             # Mark it so save() refuses. Loads still return it as before.
             session._sidecar_names_other_session = sid
