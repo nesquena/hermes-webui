@@ -104,6 +104,20 @@ def test_nested_fork_mouse_context_menu_preserves_picker_point():
     assert "_openSessionActionMenu(child, actions||row);" in handler
 
 
+def test_rename_input_keeps_long_press_text_toolbar():
+    guard = "e.target.closest('.session-title-input')) return;"
+    row_menu = _sessions_block("row.oncontextmenu=(e)=>{", "childList.appendChild(row);")
+    assert guard in row_menu
+    assert row_menu.find(guard) < row_menu.find("e.preventDefault();")
+    el_menu = _sessions_block("el.oncontextmenu=(e)=>{", "// Use release events")
+    assert guard in el_menu
+    assert el_menu.find(guard) < el_menu.find("e.preventDefault();")
+    rename_rule = STYLE_CSS[STYLE_CSS.find(".session-title-input{flex:1"):STYLE_CSS.find("}", STYLE_CSS.find(".session-title-input{flex:1")) + 1]
+    assert "user-select:text" in rename_rule
+    assert "-webkit-user-select:text" in rename_rule
+    assert "-webkit-touch-callout:default" in rename_rule
+
+
 def test_open_session_menu_consumes_next_row_activation():
     context_menu = _sessions_block("el.oncontextmenu=(e)=>{", "// Use release events")
     assert SESSIONS_JS.count("el.oncontextmenu=(e)=>{") == 1
