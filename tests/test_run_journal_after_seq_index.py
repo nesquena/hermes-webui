@@ -127,7 +127,7 @@ def test_warm_tail_does_not_require_pread(tmp_path, monkeypatch):
     path = rj._run_path(SID, RID, session_dir=tmp_path)
     _write(path, "".join(_row(i) for i in range(1, 521)))
     _check(tmp_path, [0])
-    monkeypatch.delattr(os, "pread")
+    monkeypatch.delattr(os, "pread", raising=False)
     got = rj.read_run_events(SID, RID, after_seq=510, session_dir=tmp_path)
     assert [event["seq"] for event in got["events"]] == list(range(511, 521))
     assert got == _oracle(path, 510)
@@ -157,6 +157,8 @@ def _append_completed_run(tmp_path, run_id):
 
 
 def test_live_open_retention_race_falls_back_to_archive(tmp_path, monkeypatch):
+    if not rj._DIR_FD_OK:
+        pytest.skip("journal archive replay requires directory file descriptors")
     path = _append_completed_run(tmp_path, RID)
     real_open = builtins.open
     swept = []
@@ -179,6 +181,8 @@ def test_live_open_retention_race_falls_back_to_archive(tmp_path, monkeypatch):
 
 
 def test_already_archived_after_seq_control(tmp_path):
+    if not rj._DIR_FD_OK:
+        pytest.skip("journal archive replay requires directory file descriptors")
     path = _append_completed_run(tmp_path, RID)
     counters = rj.sweep_run_journal(
         session_dir=tmp_path, ttl_days=0.001,
