@@ -11168,7 +11168,7 @@ function renderMd(raw){
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|obsidian:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
     // Autolink only the text between tags, as the block pass below does: set
     // aside complete links, images and pre blocks and every other tag, then
     // turn a raw tag left without its closing ">" on its line into text by
@@ -11405,7 +11405,7 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
+  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|obsidian:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -11495,7 +11495,12 @@ function renderMd(raw){
   function _markdownAnchor(label,rawUrl){
     const href=_markdownHref(rawUrl);
     const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
-    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
+    // A custom scheme (obsidian://) must be navigated in the SAME window: a
+    // target=_blank tab owns no navigation for an external protocol handler,
+    // so the click lands on about:blank instead of launching the app.
+    const customScheme=/^obsidian:/i.test(String(rawUrl||''));
+    const target=(internal||customScheme)?'':' target="_blank" rel="noopener"';
+    return `<a${internal?' class="session-link"':''} href="${href}"${target}>${_markdownLabelHtml(label)}</a>`;
   }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
@@ -11507,7 +11512,7 @@ function renderMd(raw){
     if(/^data:/i.test(compact)) return !!(img && typeof _isSafeDataImageUri==='function' && _isSafeDataImageUri(raw));
     if(/^(javascript|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
-    if(/^(mailto:|tel:|message:)/i.test(raw)) return true;
+    if(/^(mailto:|tel:|message:|obsidian:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
     if(!img && (/^api\//i.test(raw) || /^#/.test(raw) || _isInternalSessionHref(raw))) return true;
     return false;

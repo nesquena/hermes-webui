@@ -5151,7 +5151,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
-  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\/|#|\?|\.|api|session\/)/i;
+  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|obsidian:|\/|#|\?|\.|api|session\/)/i;
   // ui.js owns the image-only data URI policy. It loads before this script;
   // fail closed if that contract is unavailable rather than inventing a second
   // allowlist that can drift from settled rendering.
