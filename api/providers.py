@@ -1414,9 +1414,15 @@ def _provider_has_key(provider_id: str) -> bool:
     # Uses the cached _has_explicit_pool_credentials helper which also
     # filters gh-cli / GITHUB_TOKEN ambient entries so copilot doesn't
     # appear just because `gh` is installed.
+    # An OAuth plugin account is decided from the Agent's status in get_providers(),
+    # not from the presence of a pool row (#9143): a row can be expired with
+    # nothing to refresh it with.
     try:
         from api.config import _has_explicit_pool_credentials
-        if _has_explicit_pool_credentials(provider_id):
+        if not (
+            is_plugin_model_provider(provider_id)
+            and plugin_model_provider_is_oauth(provider_id)
+        ) and _has_explicit_pool_credentials(provider_id):
             return True
     except ImportError:
         pass
@@ -3099,6 +3105,18 @@ def get_providers() -> dict[str, Any]:
                     else ""
                 )
                 key_source = _plugin_ks or "config_yaml"
+            # A signed-in OAuth plugin account is an OAuth card, not a
+            # config.yaml one (#9143): the Agent's plugin status carries no
+            # key_source and _provider_is_oauth() only knows the built-in set.
+            # A key found in .env stays an API-key card.
+            if (
+                key_source == "config_yaml"
+                and is_plugin_model_provider(pid)
+                and plugin_model_provider_is_oauth(pid)
+                and plugin_auth_status is not None
+            ):
+                key_source = "oauth"
+                is_oauth = True
         elif not _provider_env_var_for(pid):
             # Fallback: provider is not a known API-key provider and not in
             # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or
