@@ -4787,3 +4787,81 @@ def test_dictation_end_without_final_text_keeps_the_owner_snapshot():
     assert result["visible"] == "destination private draft"
     assert result["resizes"] == 1
     assert result["sends"] == 0
+
+
+def _run_queued_file_action_supersession_harness(
+    entry: str, *, supersede: bool = True
+) -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    calls = {
+        "promptNewFile": "promptNewFile('.')",
+        "promptNewFolder": "promptNewFolder('.')",
+    }
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_blank_page_mint_function(entry)}
+        let newSessionCalls=0;const apiCalls=[];let prompts=0;let toasts=0;
+        const S={{session:null,messages:[],activeProfile:'default',_profileDefaultWorkspace:'/workspace-a',currentDir:'.',_dirCache:{{}},busy:false}};
+        const $=()=>null;
+        function api(path,options){{apiCalls.push(path);return Promise.resolve({{}});}}
+        function showPromptDialog(){{prompts+=1;return Promise.resolve('created-item');}}
+        function showConfirmDialog(){{return Promise.resolve(false);}}
+        function showToast(){{toasts+=1;}} function setStatus(){{}} function t(k){{return k;}}
+        function _workspacePathIsReadOnly(){{return false;}}
+        function _workspaceCreateTargetLabel(v){{return v;}}
+        function _workspaceJoinTargetPath(d,n){{return d==='.'?n:`${{d}}/${{n}}`;}}
+        function loadDir(){{return Promise.resolve(true);}} function openFile(){{}}
+        async function newSession(){{newSessionCalls+=1;S.session={{session_id:'minted',profile:'default',workspace:'/workspace-a'}};}}
+        (async()=>{{
+          if({str(supersede).lower()}){{
+            // Hold the queue the way a profile switch does, then pick a sidebar
+            // conversation while the file action is still waiting for its turn.
+            const held=_claimContextTransition('held-switch');
+            const action={calls[entry]};
+            await Promise.resolve();await Promise.resolve();
+            const actionClaim=_paneNavigationGeneration;
+            const sidebarClaim=_claimPaneNavigation();
+            S.session={{session_id:'sidebar-c',profile:'default',workspace:'/workspace-c'}};
+            held.release();
+            await action;
+            process.stdout.write(JSON.stringify({{actionClaim,sidebarClaim,newSessionCalls,apiCalls,prompts,toasts,activeSid:S.session&&S.session.session_id}}));
+            return;
+          }}
+          await {calls[entry]};
+          process.stdout.write(JSON.stringify({{actionClaim:null,sidebarClaim:null,newSessionCalls,apiCalls,prompts,toasts,activeSid:S.session&&S.session.session_id}}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("entry", ["promptNewFile", "promptNewFolder"])
+def test_queued_file_action_cannot_replace_newer_sidebar_navigation(entry):
+    """A blank-page create queued behind a held transition must not take over
+    the conversation the user picked while it waited."""
+    result = _run_queued_file_action_supersession_harness(entry)
+
+    assert result["sidebarClaim"] > result["actionClaim"]
+    assert result["newSessionCalls"] == 0
+    assert result["apiCalls"] == []
+    assert result["prompts"] == 0
+    assert result["toasts"] == 0
+    assert result["activeSid"] == "sidebar-c"
+
+
+@pytest.mark.parametrize("entry", ["promptNewFile", "promptNewFolder"])
+def test_blank_page_file_action_still_mints_the_session_when_uncontested(entry):
+    """The click-time claim must not stop the ordinary blank-page create."""
+    result = _run_queued_file_action_supersession_harness(entry, supersede=False)
+
+    assert result["newSessionCalls"] == 1
+    assert result["prompts"] == 1
+    assert result["activeSid"] == "minted"
+    assert result["apiCalls"] == (
+        ["/api/file/create"] if entry == "promptNewFile" else ["/api/file/create-dir"]
+    )

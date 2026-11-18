@@ -2387,6 +2387,15 @@ function _paneNavigationClaimIsCurrent(generation){
   return Number(generation)===_paneNavigationGeneration;
 }
 
+// Null means "this caller never claimed the pane"; only an explicit, older
+// claim is stale. Shared by the blank-page mint and the create entries so the
+// rule reads the same everywhere.
+function _paneNavigationOwnerIsCurrent(generation){
+  return generation==null
+    ||typeof _paneNavigationClaimIsCurrent!=='function'
+    ||_paneNavigationClaimIsCurrent(generation);
+}
+
 function _newSessionResultWasSuperseded(result){
   return !!(result&&result.status==='superseded');
 }
@@ -2463,8 +2472,11 @@ function _workspaceRepaintBoundaryIsCurrent(boundary){
 let _newSessionInFlight=null;
 let _newSessionRequest=null;
 let _blankPageSessionInFlight=null;
-async function _ensureBlankPageSession(workspace,contextIntent){
+async function _ensureBlankPageSession(workspace,contextIntent,paneNavigationGeneration){
   return _runContextTransition('blank-page-session',contextIntent,async intent=>{
+    // A caller that owns the pane from click time stays bound to that claim:
+    // once a newer navigation exists, a queued blank-page mint must not run.
+    if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return null;
     if(S.session)return S.session;
     if(_blankPageSessionInFlight)return _blankPageSessionInFlight;
     const targetWorkspace=String(
@@ -2479,7 +2491,7 @@ async function _ensureBlankPageSession(workspace,contextIntent){
       // the empty composer; deliberate New Chat remains the only consumer.
       S._pendingSessionToolsets=null;
       S._profileSwitchWorkspace=targetWorkspace;
-      await newSession(false,{worktree:false,contextTransition:intent});
+      await newSession(false,{worktree:false,contextTransition:intent,_paneNavigationGeneration:paneNavigationGeneration});
       return S.session||null;
     })();
     try{return await _blankPageSessionInFlight;}

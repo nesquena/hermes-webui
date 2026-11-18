@@ -28383,14 +28383,21 @@ async function deleteWorkspaceFile(relPath, name){
 async function promptNewFile(targetDir = S.currentDir || '.'){
   const requestedTarget=arguments[0];
   const contextIntent=arguments[1];
+  // A create action on the blank page owns the pane from click time: queued
+  // behind a held context transition it must not mint a newer claim later and
+  // displace a sidebar conversation picked while it waited (#6423 review).
+  const paneNavigationGeneration=arguments[2]!=null?arguments[2]
+    :(!contextIntent&&!S.session&&typeof _claimPaneNavigation==='function'?_claimPaneNavigation():null);
   return _runContextTransition('file-create',contextIntent,async intent=>{
+    if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
     targetDir=requestedTarget||S.currentDir||'.';
     if(!S.session){
       const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
       if(!ws) return;
       try{
-        await _ensureBlankPageSession(ws,intent);
+        await _ensureBlankPageSession(ws,intent,paneNavigationGeneration);
       }catch(e){setStatus(t('create_failed')+e.message);return;}
+      if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
     }
     if(!S.session)return;
     if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
@@ -28424,14 +28431,20 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
 async function promptNewFolder(targetDir = S.currentDir || '.'){
   const requestedTarget=arguments[0];
   const contextIntent=arguments[1];
+  // Same blank-page ownership rule as promptNewFile: claim at click time so a
+  // queued folder create cannot displace a newer sidebar navigation.
+  const paneNavigationGeneration=arguments[2]!=null?arguments[2]
+    :(!contextIntent&&!S.session&&typeof _claimPaneNavigation==='function'?_claimPaneNavigation():null);
   return _runContextTransition('folder-create',contextIntent,async intent=>{
+    if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
     targetDir=requestedTarget||S.currentDir||'.';
     if(!S.session){
       const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
       if(!ws) return;
       try{
-        await _ensureBlankPageSession(ws,intent);
+        await _ensureBlankPageSession(ws,intent,paneNavigationGeneration);
       }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
+      if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
     }
     if(!S.session)return;
     if(typeof _workspacePathIsReadOnly==='function'&&_workspacePathIsReadOnly(targetDir)){
