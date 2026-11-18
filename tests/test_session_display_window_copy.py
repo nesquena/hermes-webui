@@ -10,6 +10,7 @@ All data here is synthetic.
 
 import json
 import os
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -178,6 +179,83 @@ def test_mutating_returned_rows_does_not_touch_cache():
         data["todo_state"]["todos"].clear()
     assert all("injected" not in m for m in routes._display_merge_cache[SID]["messages"])
     assert _dump(_invoke(session, rows, q)) == first
+
+
+def test_summary_is_derived_outside_the_shared_cache_lock(monkeypatch):
+    """A cache miss must not hold the process-wide lock while it walks every row.
+
+    The stub parks the miss inside derive_todo_state (the full-transcript
+    summary walk). While it is parked, no thread holds the lock, so a
+    non-blocking acquire from here must succeed. Event-driven, no sleeps.
+    """
+    session, rows = _session(50)
+    q = "messages=1&resolve_model=0&msg_limit=30"
+    real_derive = routes.derive_todo_state
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def parked_derive(messages):
+        calls.append(len(messages))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(10), "summary stub was never released"
+        return real_derive(messages)
+
+    monkeypatch.setattr(routes, "derive_todo_state", parked_derive)
+    errors = []
+
+    def cold_miss():
+        try:
+            _invoke(session, rows, q)
+        except BaseException as exc:  # surfaced via `errors` below
+            errors.append(repr(exc))
+
+    worker = threading.Thread(target=cold_miss, name="display-merge-cold-miss")
+    worker.start()
+    acquired = False
+    try:
+        assert entered.wait(10), "the cache miss never reached the summary walk"
+        acquired = routes._display_merge_cache_lock.acquire(blocking=False)
+        if acquired:
+            routes._display_merge_cache_lock.release()
+    finally:
+        release.set()
+        worker.join(10)
+    assert not worker.is_alive(), "the cache miss did not finish"
+    assert not errors, errors
+    assert acquired, "the display-merge cache lock was held while the summary was derived"
+    entry = routes._display_merge_cache[SID]
+    assert entry["summary"] == routes._display_merge_summary(entry["messages"])
+
+
+def _with_hidden_wakeup_rows(n):
+    """Like _session(n), but every fifth row is a truly hidden wakeup row."""
+    session, rows = _session(n)
+    for row in [*rows, *session.messages]:
+        if row.get("_source") == "background_process":
+            row["_source"] = "delegation_wakeup"
+    return session, rows
+
+
+@pytest.mark.parametrize("n", [50, 1000])
+def test_visible_count_excludes_truly_hidden_rows_on_miss_and_hit(monkeypatch, n):
+    session, rows = _with_hidden_wakeup_rows(n)
+    hidden = [r for r in rows if r.get("_source") == "delegation_wakeup"]
+    assert hidden and all(routes.is_hidden_transcript_row(r) for r in hidden)
+    # The PR fixture's background_process rows are visible rows, not hidden ones.
+    assert not routes.is_hidden_transcript_row({"role": "user", "_source": "background_process"})
+    expected_visible = n - len(hidden)
+    q = "messages=1&resolve_model=0&msg_limit=30"
+
+    miss = _invoke(session, rows, q)["session"]
+    entry = routes._display_merge_cache[SID]
+    assert len(entry["messages"]) == n
+    assert entry["summary"]["visible_count"] == expected_visible
+    hit = _invoke(session, rows, q)["session"]
+
+    assert miss["visible_message_count"] == expected_visible
+    assert hit["visible_message_count"] == expected_visible
+    assert _dump(miss) == _dump(hit)
 
 
 @pytest.mark.skipif(not os.environ.get("W10_BENCH"), reason="set W10_BENCH=1 to run the microbenchmark")

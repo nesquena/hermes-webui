@@ -12891,12 +12891,15 @@ def _limited_webui_messages_for_display_with_sidecar(
             cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
+        # The summary walks every row (todo state, visible count), so derive it
+        # before taking the process-wide cache lock; `merged` is not shared yet.
+        summary = _display_merge_summary(merged)
         with _display_merge_cache_lock:
             _display_merge_cache[sid] = {
                 "key": cache_key,
                 "messages": merged,
                 "owner_positions": projected_owners,
-                "summary": _display_merge_summary(merged),
+                "summary": summary,
                 "stored_at": time.monotonic(),
             }
             _display_merge_cache.move_to_end(sid, last=True)
@@ -22124,7 +22127,7 @@ def handle_post(handler, parsed) -> bool:
             reasoning_effort=getattr(source, "reasoning_effort", None),
             profile=getattr(source, "profile", None),
             title=branch_title,
-            messages=forked_messages,
+            messages=copy.deepcopy(forked_messages),  # detached: child settlement must not edit source rows
             project_id=getattr(source, "project_id", None),
             personality=getattr(source, "personality", None),
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
