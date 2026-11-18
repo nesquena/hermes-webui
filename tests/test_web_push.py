@@ -220,7 +220,8 @@ def test_pinned_session_refuses_redirects_proxies_and_http(push_env):
 
 # ── delivery ─────────────────────────────────────────────────────────────────
 
-def test_send_passes_pinned_session_and_vapid_and_prunes_410(push_env, monkeypatch):
+@pytest.mark.parametrize("status_code", [404, 410])
+def test_send_passes_pinned_session_and_vapid_and_prunes_expired(push_env, monkeypatch, status_code):
     _enable(monkeypatch, push_env)
     _stub_pinned_session(monkeypatch)
     web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
@@ -228,7 +229,7 @@ def test_send_passes_pinned_session_and_vapid_and_prunes_410(push_env, monkeypat
     seen = []
 
     class Gone(Exception):
-        response = type("R", (), {"status_code": 410})()
+        response = type("R", (), {"status_code": status_code})()
 
     def fake_webpush(**kw):
         seen.append(kw)

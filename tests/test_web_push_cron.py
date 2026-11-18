@@ -3,6 +3,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -273,3 +275,61 @@ def test_cron_dispatch_has_strict_csrf_gate(monkeypatch):
     _dispatch(monkeypatch, "POST", "/api/push/cron",
               {"Cookie": "c=cookieVALID", "X-Hermes-CSRF-Token": "goodtoken"}, calls)
     assert calls == [True]
+
+
+def test_disabled_start_creates_no_background_thread(push_env, monkeypatch):
+    from api import web_push_cron
+
+    monkeypatch.setattr(web_push_cron, "_THREAD", None)
+    monkeypatch.setattr(web_push_cron, "_STOP", threading.Event())
+    web_push_cron.start()
+    try:
+        assert web_push_cron._THREAD is None
+    finally:
+        web_push_cron.stop()
+
+
+def test_background_observer_to_delivery_worker_without_sse(push_env, tmp_path, monkeypatch):
+    from api import web_push_cron
+
+    _enable(monkeypatch, push_env)
+    _stub_pinned_session(monkeypatch)
+    web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
+    web_push.set_cron_opt_in(APPLE, OWNER_A, tmp_path, True)
+    monkeypatch.setattr(web_push_cron, "_THREAD", None)
+    monkeypatch.setattr(web_push_cron, "_STOP", threading.Event())
+    monkeypatch.setattr(web_push_cron, "_INTERVAL", 0.01)
+    monkeypatch.setattr(web_push, "_WORKERS", [])
+    monkeypatch.setattr(web_push, "_STOP", threading.Event())
+    import queue
+    monkeypatch.setattr(web_push, "_QUEUE", queue.Queue(maxsize=web_push._MAX_PENDING))
+    delivered = threading.Event()
+    scanned = threading.Event()
+    routes = web_push.cron_routes
+
+
+    def note_scan():
+        scanned.set()
+        return routes()
+
+    monkeypatch.setattr(web_push, "cron_routes", note_scan)
+    thread_names = []
+
+    def send(**kwargs):
+        thread_names.append(threading.current_thread().name)
+        delivered.set()
+
+    monkeypatch.setattr(web_push, "_pywebpush", lambda: (send, Exception))
+    web_push_cron.start()
+    try:
+        # Ensure the observer's startup baseline precedes the new cron output.
+        assert scanned.wait(3)
+        _output(tmp_path, time.time_ns())
+        assert delivered.wait(3), "cron output never reached the delivery worker"
+        assert thread_names[0].startswith("web-push-")
+        assert thread_names[0] != "web-push-cron"
+    finally:
+        web_push_cron.stop()
+        web_push.shutdown(wait=1)
+    assert not web_push_cron._THREAD.is_alive()
+    assert all(not worker.is_alive() for worker in web_push._WORKERS)

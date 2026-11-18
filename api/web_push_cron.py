@@ -18,6 +18,7 @@ from api import web_push
 
 logger = logging.getLogger(__name__)
 _BATCH = 128  # directory entries examined per profile/tick; no unbounded glob/sort
+_RECENT = 1024  # output identities per profile; retire oldest timestamps at capacity
 _INTERVAL = 2.0
 _THREAD = None
 _LOCK = threading.Lock()
@@ -79,10 +80,11 @@ def _outputs(home: str):
 class CronObserver:
     def __init__(self, *, started_ns=None):
         self.started_ns = time.time_ns() if started_ns is None else started_ns
-        self.cursors = {}  # pinned home -> [watermark, sweep upper bound, iterator]
+        self.cursors = {}  # pinned home -> {floor, scan, seen}; no live profile globals
 
     def close(self):
-        for _, _, scan in self.cursors.values():
+        for cursor in self.cursors.values():
+            scan = cursor["scan"]
             if scan is not None:
                 scan.close()
         self.cursors.clear()
@@ -95,24 +97,24 @@ class CronObserver:
         for home in list(self.cursors):
             if home not in routes:
                 cursor = self.cursors.pop(home)
-                if cursor[2] is not None:
-                    cursor[2].close()
+                if cursor["scan"] is not None:
+                    cursor["scan"].close()
         now = time.time_ns() if now_ns is None else now_ns
         for home, targets in routes.items():
             # Enrollment time suppresses pre-consent history; process start
             # suppresses replay after a restart. Never infer a session owner.
             floor = max(self.started_ns, min(since for _, since in targets))
-            cursor = self.cursors.setdefault(home, [floor, floor, None])
-            cursor[0] = max(cursor[0], floor)
-            if cursor[2] is None:
-                cursor[1], cursor[2] = now, _outputs(home)
+            cursor = self.cursors.setdefault(home, {"floor": floor, "scan": None, "seen": {}})
+            cursor["floor"] = max(cursor["floor"], floor)
+            if cursor["scan"] is None:
+                cursor["scan"] = _outputs(home)
             try:
                 for _ in range(_BATCH):
-                    event = next(cursor[2])
+                    event = next(cursor["scan"])
                     if event is None:
                         continue
                     identity, stamp = event
-                    if not cursor[0] < stamp <= cursor[1]:
+                    if not cursor["floor"] < stamp <= now or cursor["seen"].get(identity) == stamp:
                         continue
                     owners = sorted({owner for owner, since in targets if since <= stamp})
                     if not owners:
@@ -125,11 +127,17 @@ class CronObserver:
                     ).hexdigest()[:24]
                     payload.update(_cron_home=home, _cron_stamp=stamp)
                     web_push.enqueue(payload)  # full queue drops; never retries/backlogs
+                    cursor["seen"][identity] = stamp
+                    if len(cursor["seen"]) > _RECENT:
+                        oldest = min(cursor["seen"], key=cursor["seen"].get)
+                        cursor["floor"] = max(cursor["floor"], cursor["seen"].pop(oldest))
             except StopIteration:
-                cursor[0], cursor[2] = cursor[1], None
+                # Never advance to wall time: an atomic rename can publish a
+                # file whose mtime predates the last directory scan.
+                cursor["scan"] = None
             except OSError:
-                cursor[2].close()
-                cursor[2] = None  # retry next tick without advancing the watermark
+                cursor["scan"].close()
+                cursor["scan"] = None  # retry next tick; seen suppresses duplicates
 
 
 def _run():
@@ -146,8 +154,10 @@ def _run():
 
 
 def start():
-    """One dormant observer per WebUI process; absent dependencies do no IO."""
+    """One observer per enabled WebUI process; absent dependencies start nothing."""
     global _THREAD
+    if not web_push.is_enabled():
+        return
     with _LOCK:
         if _THREAD is not None or _STOP.is_set():
             return

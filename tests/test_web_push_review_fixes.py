@@ -97,7 +97,7 @@ def test_disable_failed_i18n_present():
 # 3. VAPID script default state dir -------------------------------------------
 
 def test_generate_vapid_keys_uses_server_default_state_dir(tmp_path):
-    pytest.importorskip("py_vapid")
+    pytest.importorskip("cryptography")
     home = tmp_path / "hh"
     e = {k: v for k, v in os.environ.items() if k != "HERMES_WEBUI_STATE_DIR"}
     e.update(HERMES_HOME=str(home), HERMES_WEBUI_VAPID_SUBJECT="mailto:t@example.com")
