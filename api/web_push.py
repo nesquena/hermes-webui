@@ -176,6 +176,12 @@ def _addr_is_blocked(addr: str) -> bool:
         obj = obj.ipv4_mapped
     if isinstance(obj, ipaddress.IPv4Address) and obj in _CGNAT_NETWORK:
         return True
+    # is_global alone includes multicast and deprecated IPv6 site-local ranges
+    # on supported Python versions. None is a public unicast push destination.
+    if obj.is_multicast or obj.is_reserved:
+        return True
+    if isinstance(obj, ipaddress.IPv6Address) and obj.is_site_local:
+        return True
     return not obj.is_global
 
 

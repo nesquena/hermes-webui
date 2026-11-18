@@ -196,6 +196,23 @@ def test_unsafe_endpoints_rejected(push_env, endpoint):
     assert web_push.subscription_count() == 0
 
 
+@pytest.mark.parametrize("address", [
+    "fec0::1", "feff:ffff::1",  # deprecated site-local range is_global on Python 3.12
+    "ff02::1", "ff0e::1", "224.0.0.1", "239.255.255.255",  # multicast
+    "4000::1", "240.0.0.1",  # reserved
+])
+def test_non_public_global_flag_addresses_rejected(push_env, monkeypatch, address):
+    _fake_dns(monkeypatch, {"unsafe.example": [address]})
+    with pytest.raises(ValueError, match="non-public"):
+        web_push.validate_endpoint("https://unsafe.example/push")
+
+
+@pytest.mark.parametrize("address", ["17.253.1.1", "2607:f8b0:4004::200a"])
+def test_global_unicast_addresses_allowed(push_env, monkeypatch, address):
+    _fake_dns(monkeypatch, {"safe.example": [address]})
+    assert web_push.validate_endpoint("https://safe.example/push") == "https://safe.example/push"
+
+
 def test_delivery_rechecks_endpoint_and_skips_rebound_dns(push_env, monkeypatch):
     """Stored endpoint that later resolves to a private IP must not be contacted."""
     _enable(monkeypatch, push_env)
