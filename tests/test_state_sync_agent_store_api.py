@@ -451,8 +451,8 @@ def test_background_title_syncs_a_local_fallback_as_derived(monkeypatch, model_t
     assert [source for _title, source in synced] == [expected_source]
 
 
-def _clear_route_session(monkeypatch, tmp_path, sid, title):
-    """An isolated session store holding one titled conversation; returns the clear-route caller."""
+def _clear_route_session(monkeypatch, tmp_path, sid, title, *, sync_to_insights=True, read_only=False):
+    """An isolated session store holding one renamed conversation; returns the clear-route caller."""
     from io import BytesIO
 
     import api.models as models
@@ -468,51 +468,98 @@ def _clear_route_session(monkeypatch, tmp_path, sid, title):
         title=title,
         messages=[{"id": "u1", "role": "user", "content": "first", "timestamp": 1.0},
                   {"id": "a1", "role": "assistant", "content": "reply", "timestamp": 2.0}],
+        read_only=read_only,
     )
     session.manual_title = True
     session.save()
     real_settings = routes.load_settings
-    monkeypatch.setattr(routes, "load_settings", lambda: {**real_settings(), "sync_to_insights": True})
+    monkeypatch.setattr(routes, "load_settings", lambda: {**real_settings(), "sync_to_insights": sync_to_insights})
     monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
     monkeypatch.setattr("api.config._evict_session_agent", lambda _sid: None)
     captured = {}
     monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, extra_headers=None: captured.update(payload=payload))
 
-    def clear():
-        body = json.dumps({"session_id": sid}).encode()
+    def clear(path="/api/session/clear", **extra):
+        body = json.dumps({"session_id": sid, **extra}).encode()
         handler = types.SimpleNamespace(headers={"Content-Length": str(len(body))}, rfile=BytesIO(body))
-        routes.handle_post(handler, types.SimpleNamespace(path="/api/session/clear"))
+        routes.handle_post(handler, types.SimpleNamespace(path=path))
         return captured["payload"]
 
     return clear
 
 
-def test_clearing_a_conversation_syncs_its_untitled_reset_as_a_rename(monkeypatch, tmp_path):
-    """/api/session/clear resets the title to 'Untitled' and syncs that as an explicit rename."""
-    seen = []
-    clear = _clear_route_session(monkeypatch, tmp_path, "sid-clear-sync", "User Name")
-    monkeypatch.setattr(state_sync, "sync_session_usage", lambda **kw: seen.append((kw["title"], kw["rename"])))
+@pytest.mark.parametrize(
+    ("sync_to_insights", "read_only", "expect_clear"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+    ids=["mirroring-on", "mirroring-off", "read-only-import"],
+)
+def test_clearing_a_conversation_releases_only_its_stored_title(monkeypatch, tmp_path, sync_to_insights, read_only,
+                                                                 expect_clear):
+    """/api/session/clear releases state.db's title (nothing else) while it holds the session lock,
+    only with sync_to_insights on, and never for a read-only import."""
+    import api.routes as routes
+
+    sid = "sid-clear-title"
+    clear = _clear_route_session(monkeypatch, tmp_path, sid, "User Name",
+                                 sync_to_insights=sync_to_insights, read_only=read_only)
+    cleared, usage = [], []
+    monkeypatch.setattr(state_sync, "clear_session_title",
+                        lambda session_id, profile=None: cleared.append(
+                            (session_id, routes._get_session_agent_lock(session_id).locked())))
+    monkeypatch.setattr(state_sync, "sync_session_usage", lambda **kw: usage.append(kw))
 
     assert clear().get("ok") is True
-    assert seen == [("Untitled", True)]
+    assert cleared == ([(sid, True)] if expect_clear else [])
+    assert usage == []
 
 
 @pytest.mark.requires_agent_modules
-def test_clearing_a_renamed_conversation_lets_the_next_generated_title_land(monkeypatch, tmp_path):
-    """Storage-interface Agents: a rename pins a 'user' title; clearing the conversation must release
-    it, or every later generated title is refused and the old name stays for good."""
+def test_clearing_a_renamed_conversation_releases_the_title_and_keeps_its_counters(monkeypatch, tmp_path):
+    """On every Agent with an automatic-title verb: a renamed conversation's stored title (and its
+    provenance) is cleared by /api/session/clear, its token and message counters are left as they
+    were, and the next generated title lands."""
     db_path = tmp_path / "state.db"
-    if not _new_agent_store(db_path):
-        pytest.skip("legacy SessionDB Agent: the passive usage sync writes every title, as before")
+    _new_agent_store(db_path)
     monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: state_sync._open_state_db(db_path))
     sid = "webui-clear-renamed"
     clear = _clear_route_session(monkeypatch, tmp_path, sid, "User Name")
 
-    state_sync.sync_session_usage(sid, title="User Name", profile="default", rename=True)
-    assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == ("User Name", "user")
+    state_sync.sync_session_usage(sid, input_tokens=1000, output_tokens=200, message_count=6,
+                                  title="User Name", profile="default", rename=True)
+    before = _row(db_path, sid)
+    assert (before["title"], before["title_source"]) == ("User Name", "user")
+    counters = ("input_tokens", "output_tokens", "message_count")
 
     assert clear().get("ok") is True
-    assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == (None, None)
+    after = _row(db_path, sid)
+    assert (after["title"], after["title_source"]) == (None, None)
+    assert [after[c] for c in counters] == [before[c] for c in counters]
 
     state_sync.sync_session_title(sid, "Post-clear generated title", profile="default")
     assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == ("Post-clear generated title", "llm")
+
+
+@pytest.mark.requires_agent_modules
+def test_clear_session_title_leaves_a_missing_row_missing(tmp_path, monkeypatch):
+    """A conversation the store has never seen gets no row from a clear."""
+    db_path = tmp_path / "state.db"
+    _new_agent_store(db_path)
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: state_sync._open_state_db(db_path))
+    state_sync.clear_session_title("never-synced", profile="default")
+    assert _row(db_path, "never-synced") is None
+
+
+def test_rename_mirrors_its_title_while_holding_the_session_lock(monkeypatch, tmp_path):
+    """/api/session/rename syncs its user title under the per-session lock, so it is ordered with a
+    concurrent clear's title reset instead of landing after it with a stale title."""
+    import api.routes as routes
+
+    sid = "sid-rename-lock"
+    post = _clear_route_session(monkeypatch, tmp_path, sid, "User Name")
+    seen = []
+    monkeypatch.setattr(state_sync, "sync_session_usage",
+                        lambda **kw: seen.append((kw["title"], kw["rename"],
+                                                  routes._get_session_agent_lock(sid).locked())))
+
+    assert "session" in post("/api/session/rename", title="Chosen name")
+    assert seen == [("Chosen name", True, True)]

@@ -509,3 +509,27 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
             db.close()
         except Exception:
             logger.debug("Failed to close state.db")
+
+
+def clear_session_title(session_id: str, profile: Optional[str] = None) -> None:
+    """Clear state.db's title, and its provenance, for a conversation WebUI just cleared.
+
+    Title only: token totals, message counts and every other column stay as they are,
+    and a session with no row is left without one. Clearing, rather than storing
+    "Untitled", matters because a stored "Untitled" would carry user provenance and
+    refuse the next generated title. On storage-interface Agents a held user title is
+    never replaced by a passive sync either (Refs #9157). Both store APIs treat an
+    empty title as a clear.
+    """
+    db = _get_state_db(profile=profile)
+    if not db:
+        return
+    try:
+        db.set_session_title(session_id, None if isinstance(db, _StoreStateDB) else "")
+    except Exception:
+        _log_sync_failure("session title clear", session_id)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("Failed to close state.db")
