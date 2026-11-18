@@ -22544,6 +22544,11 @@ def handle_post(handler, parsed) -> bool:
             return _push_csrf_reject(handler)
         return _handle_push_subscribe(handler, body)
 
+    if parsed.path == "/api/push/cron":
+        if not _push_csrf_ok(handler):
+            return _push_csrf_reject(handler)
+        return _handle_push_cron(handler, body)
+
     if parsed.path == "/api/push/test":
         if not _push_csrf_ok(handler):
             return _push_csrf_reject(handler)
@@ -28897,6 +28902,32 @@ def _handle_push_subscribe(handler, body):
     except ValueError as exc:
         return bad(handler, str(exc))
     return j(handler, {"ok": True})
+
+
+def _handle_push_cron(handler, body, *, now_ns=None):
+    from api import web_push
+    from api.profiles import get_active_hermes_home
+
+    if not web_push.is_enabled():
+        return bad(handler, "Web Push is not configured", 404)
+    owner = _push_owner(handler)
+    if not owner:
+        return bad(handler, "A valid X-Hermes-Push-Device header is required - reload the page")
+    body = body if isinstance(body, dict) else {}
+    endpoint = body.get("endpoint")
+    if not isinstance(endpoint, str) or not endpoint or type(body.get("enabled")) is not bool:
+        return bad(handler, "endpoint and boolean enabled are required")
+    try:
+        found = web_push.set_cron_opt_in(
+            endpoint, owner, get_active_hermes_home(), body["enabled"], now_ns=now_ns
+        )
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    except (ValueError, OSError):
+        return bad(handler, "Cron notification profile is unavailable or at its limit")
+    if not found:
+        return bad(handler, "This device has no matching Web Push subscription", 409)
+    return j(handler, {"ok": True, "enabled": body["enabled"]})
 
 
 def _handle_push_unsubscribe(handler, body):

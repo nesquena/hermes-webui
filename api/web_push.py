@@ -57,6 +57,7 @@ import re
 import socket
 import tempfile
 import threading
+import time
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -71,6 +72,7 @@ _MAX_PENDING = 32
 _ENDPOINT_MAX_LENGTH = 2048
 _KEY_MAX_LENGTH = 256
 _MAX_SUBSCRIPTIONS = 32
+_MAX_CRON_PROFILES = 8
 _LOCAL_HOST_ALIASES = {"localhost", "ip6-localhost", "ip6-loopback"}
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
@@ -452,6 +454,13 @@ def _load() -> list[dict]:
         for s in subs:
             n = _normalize(s, check_endpoint=False)
             n["owner"] = _clean_owner(s.get("owner"))
+            profiles = s.get("cron_profiles", {})
+            if not isinstance(profiles, dict) or len(profiles) > _MAX_CRON_PROFILES:
+                raise ValueError("invalid cron profile opt-ins")
+            for home, since in profiles.items():
+                if not isinstance(home, str) or not Path(home).is_absolute() or type(since) is not int or since < 0:
+                    raise ValueError("invalid cron profile opt-in")
+            n["cron_profiles"] = profiles
             out.append(n)
         return out
     except Exception as exc:
@@ -535,15 +544,20 @@ def add_subscription(subscription: dict, *, previous_endpoint: str | None = None
         subs = _load()
         drop_new = normalized["endpoint"]
         others = []
+        cron_profiles = {}
         for s in subs:
             if s["endpoint"] == drop_new:
+                if s["owner"] == owner:
+                    cron_profiles = s["cron_profiles"]
                 continue
             if previous and s["endpoint"] == previous and (not s["owner"] or s["owner"] == owner):
+                if s["owner"] == owner and not cron_profiles:
+                    cron_profiles = s["cron_profiles"]
                 continue
             others.append(s)
         if len(others) >= _MAX_SUBSCRIPTIONS:
             raise ValueError("too many Web Push subscriptions")
-        record = dict(normalized, owner=owner)
+        record = dict(normalized, owner=owner, cron_profiles=cron_profiles)
         others.append(record)
         if others != subs:
             _save(others)
@@ -573,6 +587,35 @@ def remove_subscription(endpoint: str, owner: str | None = None) -> bool:
 
 
 # ── delivery ─────────────────────────────────────────────────────────────────
+
+def set_cron_opt_in(endpoint: str, owner: str, profile_home: Path, enabled: bool, *, now_ns=None) -> bool:
+    """Consent is for this exact device subscription and canonical profile home."""
+    home = str(Path(profile_home).resolve(strict=True))
+    owner = _clean_owner(owner)
+    with _STORE_LOCK:
+        subs = _load()
+        sub = next((s for s in subs if s["endpoint"] == endpoint and owner and s["owner"] == owner), None)
+        if sub is None:
+            return False
+        homes = {h for s in subs for h in s["cron_profiles"]}
+        if enabled:
+            if home not in homes and len(homes) >= _MAX_CRON_PROFILES:
+                raise ValueError("too many cron notification profiles")
+            sub["cron_profiles"].setdefault(home, time.time_ns() if now_ns is None else now_ns)
+        else:
+            sub["cron_profiles"].pop(home, None)
+        _save(subs)
+    return True
+
+
+def cron_routes() -> dict:
+    """Internal only: pinned home -> (owner, consent time) pairs. No unowned fanout."""
+    routes = {}
+    for sub in list_subscriptions():
+        if sub["owner"]:
+            for home, since in sub["cron_profiles"].items():
+                routes.setdefault(home, []).append((sub["owner"], since))
+    return routes
 
 def _mask(text: str) -> str:
     """Mask credentials before text leaves for Apple/Google push services.
@@ -626,6 +669,8 @@ def _send_to_all(payload: dict) -> int:
     """
     payload = dict(payload)
     owners = payload.pop("_owners", None)
+    cron_home = payload.pop("_cron_home", None)
+    cron_stamp = payload.pop("_cron_stamp", None)
     if not owners or not is_enabled():
         return 0
     try:
@@ -635,6 +680,11 @@ def _send_to_all(payload: dict) -> int:
     if owners != ALL_OWNERS:
         wanted = {_clean_owner(o) for o in owners} - {""}
         subs = [s for s in subs if s["owner"] in wanted]
+    if cron_home is not None:
+        # Recheck consent at delivery, not just enqueue: opt-out/unsubscribe wins
+        # over an event waiting in the bounded queue. Never use unowned broadcast.
+        subs = [s for s in subs if s["owner"] and cron_home in s["cron_profiles"]
+                and type(cron_stamp) is int and s["cron_profiles"][cron_home] <= cron_stamp]
     webpush_fn, _ = _pywebpush()
     if not webpush_fn or not subs:
         return 0
