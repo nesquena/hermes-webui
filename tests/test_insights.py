@@ -2604,7 +2604,12 @@ def test_insights_custom_range_row_always_stacks_full_width():
     # The side-by-side row, its arrow span and its horizontal row rules are gone.
     assert ".insights-range-arrow" not in STYLE_CSS
     assert 'class="insights-range-arrow"' not in INDEX_HTML
-    assert "\u2192" not in INDEX_HTML
+    # No arrow left inside the custom range row (the old "start \u2192 end" separator). The
+    # arrow itself is ordinary copy elsewhere (e.g. "Settings \u2192 Providers"), so scope the
+    # check to the row.
+    range_start = INDEX_HTML.index('<div id="insightsCustomRange">')
+    range_end = INDEX_HTML.index('id="insightsRangeNote"', range_start)
+    assert "\u2192" not in INDEX_HTML[range_start:range_end]
     assert "#insightsCustomRange{display:none;align-items:center;gap:6px;flex-wrap:wrap;}" not in STYLE_CSS
     assert "flex:1;min-width:106px" not in STYLE_CSS
     # The dimmer --border + 8px inset variant must not come back on the row.
