@@ -1722,17 +1722,26 @@ async function send(){
         // _trySteer clears staged files only after /api/chat/steer accepts, and
         // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){
-        // Queue the message, then cancel so drain re-sends it.
-        const _modelState=_chatPayloadModelState();
-        // #7855 (round 6): this invocation may itself BE the continuation drain
-        // arriving while the session is busy. Its queue entry must carry the
-        // token, or the drained turn posts an empty ID and the goal loop ends.
-        const _interruptEntry={text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
-        if(_goalContinuationId) _interruptEntry.goal_continuation_id=_goalContinuationId;
-        queueSessionMessage(S.session.session_id,_interruptEntry);
-        updateQueueBadge(S.session.session_id);
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
-        S.pendingFiles=[];renderTray();
+        // Queue the message, then cancel so the queue drains it as the next turn.
+        // Text-only, non-continuation follow-ups go to the backend FIFO (durable; nothing is
+        // cleared or cancelled unless the server accepted it). Attachments and goal
+        // continuations (#7855 token) cannot be held server-side and keep the browser queue.
+        const _sid=S.session.session_id;
+        if(!S.pendingFiles.length&&!_goalContinuationId){
+          if(!await enqueueServerFollowup(_sid,text)) return;
+          _clearComposerAfterQueuedSelectionSend(_sid);
+        } else {
+          const _modelState=_chatPayloadModelState();
+          // #7855 (round 6): this invocation may itself BE the continuation drain
+          // arriving while the session is busy. Its queue entry must carry the
+          // token, or the drained turn posts an empty ID and the goal loop ends.
+          const _interruptEntry={text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
+          if(_goalContinuationId) _interruptEntry.goal_continuation_id=_goalContinuationId;
+          queueSessionMessage(S.session.session_id,_interruptEntry);
+          updateQueueBadge(S.session.session_id);
+          _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
+          S.pendingFiles=[];renderTray();
+        }
         if(S.activeStreamId&&typeof cancelStream==='function'){
           if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
           else showToast(t('cancel_failed'),null,'error');
@@ -1740,18 +1749,26 @@ async function send(){
           showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
         }
       } else {
-        // Default: queue mode (current behavior). Also the fallback for
-        // 'steer' mode when no stream is active or _trySteer is unavailable.
-        const _modelState=_chatPayloadModelState();
-        // #7855 (round 6): same contract as the interrupt branch — a
-        // continuation that arrives while the session is busy must keep its
-        // token on the queue entry so the drain re-posts it.
-        const _busyEntry={text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
-        if(_goalContinuationId) _busyEntry.goal_continuation_id=_goalContinuationId;
-        queueSessionMessage(S.session.session_id,_busyEntry);
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
-        S.pendingFiles=[];renderTray();
-        updateQueueBadge(S.session.session_id);
+        // Default: queue mode. Also the fallback for 'steer' mode when no stream is
+        // active or _trySteer is unavailable. Text-only follow-ups go to the backend FIFO
+        // (durable, drained server-side, same as Telegram/Discord); attachment follow-ups and
+        // goal continuations (#7855 token) cannot be held server-side and stay browser-queued.
+        const _sid=S.session.session_id;
+        if(!S.pendingFiles.length&&!_goalContinuationId){
+          if(!await enqueueServerFollowup(_sid,text)) return; // toast shown; composer keeps the text
+          _clearComposerAfterQueuedSelectionSend(_sid);
+        } else {
+          const _modelState=_chatPayloadModelState();
+          // #7855 (round 6): same contract as the interrupt branch — a
+          // continuation that arrives while the session is busy must keep its
+          // token on the queue entry so the drain re-posts it.
+          const _busyEntry={text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
+          if(_goalContinuationId) _busyEntry.goal_continuation_id=_goalContinuationId;
+          queueSessionMessage(S.session.session_id,_busyEntry);
+          _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
+          S.pendingFiles=[];renderTray();
+          updateQueueBadge(S.session.session_id);
+        }
         showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
       }
     }

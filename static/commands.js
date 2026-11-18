@@ -1727,9 +1727,14 @@ async function cmdQueue(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
+  if(!S.pendingFiles.length){
+    // Text-only: backend FIFO (durable, drained server-side). Failure is reported by the helper.
+    if(!await enqueueServerFollowup(S.session.session_id,msg)) return;
+  } else {
+    queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+    updateQueueBadge(S.session.session_id);
+    S.pendingFiles=[];renderTray();
+  }
   showToast(t('cmd_queue_confirm'),2000);
 }
 
@@ -1749,10 +1754,14 @@ async function cmdInterrupt(args){
   }
   if(!S.session){showToast(t('no_active_session'));return;}
   // Queue the message first (before cancel sets busy=false and drains)
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
-  // Cancel the active stream; setBusy(false) will drain the queue
+  if(!S.pendingFiles.length){
+    if(!await enqueueServerFollowup(S.session.session_id,msg)) return;  // not accepted: do not cancel the running turn
+  } else {
+    queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+    updateQueueBadge(S.session.session_id);
+    S.pendingFiles=[];renderTray();
+  }
+  // Cancel the active stream; the queue (server-side for text) starts the follow-up
   if(typeof cancelStream==='function'){
     if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
     else showToast(t('cancel_failed'),null,'error');

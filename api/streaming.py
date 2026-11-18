@@ -19452,6 +19452,21 @@ def _run_agent_streaming(
                 exc_info=True,
             )
 
+        # Server-side follow-up FIFO (busy-time "queue" messages): start the next
+        # queued follow-up now that the session is idle.  Runs after the deferred
+        # wakeup drain so a wakeup that already took the session wins (the
+        # follow-up then stays queued and drains at that turn's teardown).
+        try:
+            from api.followup_queue import drain_followup_queue_for_session
+
+            drain_followup_queue_for_session(session_id)
+        except Exception:
+            logger.debug(
+                "turn-teardown follow-up drain failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+
 # ============================================================
 # SECTION: HTTP Request Handler
 # do_GET: read-only API endpoints + SSE stream + static HTML

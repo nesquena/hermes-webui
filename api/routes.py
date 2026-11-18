@@ -19197,6 +19197,18 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, cached_update_status(include_agent=include_agent_updates))
 
+    if parsed.path == "/api/chat/queue":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "session_id required")
+        if not _session_id_visible_to_request_profile(handler, sid):
+            return True
+        from api import followup_queue
+        try:
+            return j(handler, {"session_id": sid, "items": followup_queue.list_entries(sid)})
+        except ValueError:
+            return bad(handler, "invalid session_id")
+
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not _stream_id_visible_to_request_profile(handler, stream_id):
@@ -21576,6 +21588,8 @@ def handle_post(handler, parsed) -> bool:
         # and would otherwise recreate the session being deleted.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
+        from api.followup_queue import discard_session as _discard_followups
+        _discard_followups(sid)  # pending follow-ups die with the session
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
@@ -22197,6 +22211,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/chat":
         return _handle_chat_sync(handler, body)
+
+    if parsed.path in {"/api/chat/queue", "/api/chat/queue/remove", "/api/chat/queue/clear", "/api/chat/queue/retry"}:
+        return _handle_chat_queue(handler, parsed.path, body)
 
     if parsed.path == "/api/chat/steer":
         from api.streaming import _handle_chat_steer
@@ -32215,6 +32232,45 @@ def _save_chat_start_compression_recovery(session):
         )
         return restore_err
     return None
+
+
+def _handle_chat_queue(handler, path, body):
+    """Durable server-side follow-up FIFO (see api/followup_queue.py).
+
+    ``POST /api/chat/queue`` always accepts the message (never interrupts the
+    running turn) and then tries a drain, so a follow-up that lands just as the
+    turn ends starts immediately instead of waiting for a teardown that already
+    ran.  The response carries the full queue so the UI renders backend state.
+    """
+    from api import followup_queue as fq
+
+    sid = str((body or {}).get("session_id") or "")
+    if not sid:
+        return bad(handler, "session_id is required")
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    if _session_is_subagent_view_only(sid) or getattr(s, "read_only", False) or getattr(s, "is_read_only", False):
+        return bad(handler, "Session is read-only", 400)
+    try:
+        if path == "/api/chat/queue":
+            entry, err = fq.enqueue(sid, body.get("text"), client_id=body.get("client_id"))
+            if err:
+                return bad(handler, err, 429 if "full" in err else 400)
+            fq.drain_followup_queue_for_session(sid)
+        elif path == "/api/chat/queue/remove":
+            if not fq.remove(sid, str(body.get("id") or "")):
+                return bad(handler, "queued message not found or already starting", 404)
+        elif path == "/api/chat/queue/retry":
+            if not fq.retry(sid, str(body.get("id") or "")):
+                return bad(handler, "failed message not found", 404)
+            fq.drain_followup_queue_for_session(sid)
+        else:
+            fq.clear(sid)
+    except ValueError:
+        return bad(handler, "invalid session_id")
+    return j(handler, {"ok": True, "session_id": sid, "items": fq.list_entries(sid)})
 
 
 def _handle_chat_start(handler, body, diag=None):

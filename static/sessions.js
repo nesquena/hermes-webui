@@ -3507,28 +3507,43 @@ async function loadSession(sid){
             .find(m=>m&&m.role==='assistant');
           const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
           const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-          if(_fresh.length){
-            const _first=_fresh[0];
+          // Plain follow-ups: hand EVERY surviving entry to the backend FIFO (idempotent).
+          // The old restore kept only the first in the composer and silently dropped the rest.
+          // On failure the browser copy is kept and retried on the next load.
+          const _plain=_fresh.filter(e=>!(e&&e.goal_continuation_id));
+          const _cont=_fresh.filter(e=>e&&e.goal_continuation_id);
+          if(_plain.length&&typeof migrateLocalQueueToServer==='function'){
+            const _migrated=await migrateLocalQueueToServer(sid,_plain);
+            if(_migrated<0){
+              if(typeof showToast==='function') showToast('Could not restore queued messages yet — will retry',3500,'warning');
+              throw new Error('queue-migration-deferred');
+            }
+            if(_migrated>0&&typeof showToast==='function') showToast(_migrated>1?`${_migrated} queued messages restored`:'Queued message restored',2500);
+          }
+          // Goal continuations carry a token the server queue cannot hold: keep upstream's
+          // draft restore (#7855 round 5) so the ID rides on the composer with its exact text.
+          if(_cont.length){
+            const _first=_cont[0];
             const _msg=$&&$('msg');
             if(_msg&&_first.text&&!_msg.value){
               _msg.value=_first.text||'';
-              // #7855 (round 5): mark the restored text as an identifiable
-              // CONTINUATION DRAFT — the ID rides on the composer element
-              // together with the exact text it was restored for, and send()
-              // consumes it only while that text is still what is sent. If the
-              // user replaces or abandons the draft, the ID dies with it
-              // instead of attaching to their own message.
               if(typeof _setRestoredGoalContinuationDraft==='function'){
                 _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'');
               }
               if(typeof autoResize==='function') autoResize();
-              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
+              if(typeof showToast==='function') showToast('Queued message restored — review and send when ready');
             }
           }
           if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
         }
-      }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
+      }catch(_e){
+        // A deferred migration keeps the browser copy for the next load; any other
+        // failure falls back to the old behaviour (clear, never re-run stale entries).
+        if(!(_e&&_e.message==='queue-migration-deferred')&&typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
+      }
     }
+    // Backend queue is the source of truth for follow-ups: render it on every load/refresh/reconnect.
+    if(typeof syncServerQueue==='function') await syncServerQueue(sid);
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
     // (hasMessageToolMetadata already computed inside _ensureMessagesLoaded; S.toolCalls set there.)

@@ -81,9 +81,13 @@ class TestQueueRestore:
         """User must see a toast notification when a queue is restored."""
         assert 'queued message' in sess_src.lower() and 'restored' in sess_src.lower()
 
-    def test_restore_puts_text_in_composer(self):
-        """First queued message goes into the composer input, not auto-sent."""
-        assert "_msg.value=_first.text" in sess_src
+    def test_restore_hands_every_entry_to_backend_queue(self):
+        """Every surviving entry goes to the server FIFO (idempotent); the old restore kept
+        only the first entry in the composer and silently dropped the rest."""
+        # the composer restore is now reserved for goal continuations (token can't live server-side)
+        assert "const _first=_cont[0];" in sess_src
+        assert "const _first=_fresh[0];" not in sess_src
+        assert "migrateLocalQueueToServer(sid,_plain)" in sess_src
 
     def test_restore_clears_stale_storage(self):
         """On timestamp mismatch, stale queue state is removed from both storage layers."""
@@ -91,7 +95,8 @@ class TestQueueRestore:
 
     def test_restore_wrapped_in_try_catch(self):
         """Storage access must be wrapped in try/catch (private browsing may block it)."""
-        assert "catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}" in sess_src
+        assert "catch(_e){" in sess_src
+        assert "queue-migration-deferred" in sess_src  # a failed hand-over keeps the browser copy
 
     def test_delete_session_clears_persisted_queue_after_success(self):
         """Deleting a session must clear localStorage-backed queue state after the API succeeds."""
