@@ -121,6 +121,8 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Cuando la build termina?", ""),
         ("Quando a build termina?", ""),
         ("Je ne sais pas, non, la build est verte.", ""),
+        # Accented foreign markers survive tokenization: não blocks the backup.
+        ("Ho letto la guida, não entendi.", ""),
         # ...while short Italian replies that lost la/un/con still vote Italian.
         *[(text, "it") for text in [
             "La connessione è stata ripristinata.",
@@ -134,6 +136,10 @@ def _patch_profile_config(monkeypatch, cfg):
             "Lo faccio con una patch.",
             "Cosa faccio con una patch?",
             "Quando la build termina?",
+            "La connessione non funziona.",
+            "La build non passa.",
+            "La patch è su GitHub.",
+            "Questa cache tiene le sessioni.",
         ]],
         ("", ""),
     ],
@@ -316,6 +322,10 @@ _SHORT_ITALIAN_REPLIES = [
     "Lo faccio con una patch.",
     "Cosa faccio con una patch?",
     "Quando la build termina?",
+    "La connessione non funziona.",
+    "La build non passa.",
+    "La patch è su GitHub.",
+    "Questa cache tiene le sessioni.",
 ]
 
 
@@ -342,8 +352,11 @@ def test_english_reply_keeps_configured_voice_next_to_italian_entry(monkeypatch)
     assert captured["voice"] == "en-US-GuyNeural"
 
 
-@pytest.mark.parametrize("text", ["Lo hago con una herramienta.", "Cosa hago con una herramienta?"])
-def test_spanish_reply_does_not_take_the_italian_entry(monkeypatch, text):
+@pytest.mark.parametrize(
+    "text",
+    ["Lo hago con una herramienta.", "Cosa hago con una herramienta?", "Ho letto la guida, não entendi."],
+)
+def test_foreign_reply_does_not_take_the_italian_entry(monkeypatch, text):
     cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
     _patch_profile_config(monkeypatch, cfg)
     captured = {}

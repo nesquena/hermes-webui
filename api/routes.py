@@ -26378,7 +26378,9 @@ def _detect_text_lang(text: str) -> str:
     Returns "" when the vote is inconclusive (short texts), so callers fall back
     to the configured single voice instead of guessing wrong.
     """
-    words = re.findall(r"[a-zàèéìòù']+", (text or "").lower())
+    # Every Latin-1 letter, so accented markers such as não/você/está stay
+    # whole words instead of splitting into fragments that match nothing.
+    words = re.findall(r"[a-zà-öø-ÿ']+", (text or "").lower())
     if len(words) < 3:
         return ""
     # No articles or prepositions Italian shares with French and Spanish
@@ -26398,12 +26400,14 @@ def _detect_text_lang(text: str) -> str:
     # Words Italian shares with French/Spanish. They only back up a strong
     # Italian vote, and only when no French/Spanish/Portuguese word
     # is present, so "Le modifiche sono pronte." is Italian while
-    # "Il est allé à la maison" (il + la) stays inconclusive.
+    # "Il est allé à la maison" (il + la) stays inconclusive. The markers
+    # are words ordinary Italian doesn't use: not su or tiene ("La patch è
+    # su GitHub.", "Questa cache tiene le sessioni.").
     shared_words = {"la", "le", "un", "una", "con"}
     other_romance_words = {
         "est", "et", "les", "des", "du", "une", "je", "nous", "vous", "avec",
         "pas", "dans", "très", "mais", "es", "el", "los", "las", "y", "muy",
-        "pero", "para", "está", "tiene", "en", "su", "sus", "uma", "um",
+        "pero", "para", "está", "en", "sus", "uma", "um",
         "você", "não", "ele", "ela", "já", "os",
     }
     en_words = {
@@ -26426,8 +26430,10 @@ def _detect_text_lang(text: str) -> str:
     # vote that shared words back up ("Il a fini la ...", "Lo hago con una
     # ..."); "Lo faccio con una ..." needs an Italian-only word. Not quando:
     # Portuguese writes it too, but uses none of the shared words, so
-    # "Quando la build termina?" is Italian.
-    weak_it_words = {"il", "lo", "di", "non", "ma", "come", "cosa"}
+    # "Quando la build termina?" is Italian. Not non: Spanish says no, and a
+    # French non usually comes with pas/est/je, which block the backup, so
+    # "La build non passa." is Italian.
+    weak_it_words = {"il", "lo", "di", "ma", "come", "cosa"}
     strong_it_votes = it_votes - sum(1 for w in words if w in weak_it_words)
     if strong_it_votes and not any(w in other_romance_words for w in words):
         it_votes += sum(1 for w in words if w in shared_words)
