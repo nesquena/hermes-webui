@@ -9810,6 +9810,48 @@ def _apply_sidebar_state_db_override_rows(
             session['display_title'] = state_db_display_title
 
 
+def _overlay_old_fork_sources_by_owner(fork_rows: list[dict]) -> None:
+    """Apply source-only state.db metadata to old forks, per owning profile.
+
+    Each owner's rows are read only from that owner's state.db, and the result
+    is applied only to that owner's rows, so a same-ID row in another profile
+    never lends its source or read-only flag. An untagged row belongs to the
+    root profile (the convention all_sessions() backfills after enrichment).
+    An owner that cannot be resolved strictly gets no overlay rather than the
+    active profile's answer.
+    """
+    from api.profiles import (
+        _PROFILE_ID_RE,
+        _is_root_profile,
+        _profiles_match,
+        get_active_profile_name,
+    )
+
+    active_profile = get_active_profile_name()
+    by_owner: dict[str, list[dict]] = {}
+    for row in fork_rows:
+        owner = row.get('profile') or 'default'
+        if isinstance(owner, str):
+            by_owner.setdefault(owner, []).append(row)
+    for owner, rows in by_owner.items():
+        if _profiles_match(owner, active_profile):
+            db_path = _active_state_db_path()
+        elif _is_root_profile(owner) or _PROFILE_ID_RE.fullmatch(owner):
+            db_path = _strict_agent_state_db_path(profile=owner)
+        else:
+            continue  # a malformed owner tag would resolve to the root home
+        if db_path is None:
+            continue
+        source_metadata = _read_state_db_sidebar_overrides(
+            db_path, {str(s['session_id']) for s in rows}, count_session_ids=set(),
+        )
+        # The cheap sessions-table read also returns its message_count.
+        # Keep this fallback source/title-only, including for stale rows.
+        for entry in source_metadata.values():
+            entry.pop('_state_db_message_count', None)
+        _apply_sidebar_state_db_override_metadata(rows, source_metadata)
+
+
 def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     """Attach state.db compression lineage metadata used by sidebar collapse.
 
@@ -9835,6 +9877,22 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         candidates = owned[:_cap]
     else:
         candidates = owned
+    # Content search uses all_sessions() without the list route's uncapped
+    # source overlay. Normalize the old mirrored forks the active-db lookup
+    # below doesn't cover (owned rows past the cap, and every other profile's
+    # rows), each from its own profile's state.db, before sidebar hiding; but
+    # do not expand lineage traversal or message aggregation past the cap.
+    candidate_ids = {id(s) for s in candidates}
+    fork_rows = [
+        s for s in sessions
+        if id(s) not in candidate_ids and s.get('session_id')
+        and str(s.get('session_source') or '').strip().lower() == 'fork'
+    ]
+    if fork_rows:
+        try:
+            _overlay_old_fork_sources_by_owner(fork_rows)
+        except Exception:
+            logger.debug("Failed to normalize old sidebar fork sources")
     try:
         metadata = read_session_lineage_metadata(
             _active_state_db_path(),
@@ -12389,7 +12447,7 @@ def _load_cli_sessions_uncached(
         else:
             _archived = bool(row.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
-        cli_sessions.append({
+        cli_session = {
             'session_id': sid,
             'title': _display_title,
             'workspace': _cli_workspace(),
@@ -12423,7 +12481,20 @@ def _load_cli_sessions_uncached(
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
-        })
+        }
+        # Preserve the projection's absence of child metadata. In particular,
+        # reset successors keep ``parent_session_id`` as durable lineage but
+        # must not acquire null child-only fields while adapting state.db rows
+        # to the sidebar response shape.
+        for key in (
+            'parent_title',
+            'parent_source',
+            'relationship_type',
+            '_parent_lineage_root_id',
+        ):
+            if key not in row:
+                cli_session.pop(key, None)
+        cli_sessions.append(cli_session)
 
     if source_filter is not None:
         return _result()
