@@ -7,6 +7,7 @@ import inspect
 import logging
 import math
 import re
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -28,6 +29,9 @@ logger = logging.getLogger(__name__)
 LEGACY_ASYNC_DELIVERY_DEDUPE_MAX = 1024
 ASYNC_DELIVERY_CLAIM_RETRY_SECONDS = 301.0
 ASYNC_DELIVERY_ROUTING_RETRY_SECONDS = 5.0
+# Short in-place retries of the durable ACK on transient ledger contention.
+ASYNC_DELIVERY_ACK_RETRY_DELAYS = (0.05, 0.2)
+ASYNC_DELIVERY_ACK_RETRY_WINDOW_SECONDS = 1.0
 _LEGACY_ASYNC_DELIVERY_LOCK = threading.Lock()
 _LEGACY_ASYNC_DELIVERY_IDS: OrderedDict[str, None] = OrderedDict()
 _ASYNC_DELIVERY_RETRY_LOCK = threading.Lock()
@@ -667,6 +671,37 @@ def _mark_legacy_async_delivery_complete(delegation_id: str) -> bool:
     return False
 
 
+def _is_transient_ledger_error(exc: BaseException) -> bool:
+    """SQLite lock contention (busy/locked) clears on its own; anything else does not."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+def _complete_event_delivery_with_retry(complete_fn: Any, evt: Any, claim_id: str) -> None:
+    """Run the core ACK, retrying briefly on transient ledger contention.
+
+    The ACK only flips a row still pending under this claim, so a repeat is a
+    no-op once an attempt commits. Current cores no longer ship the
+    ``mark_completion_delivered`` fallback, so an unretried lock blip would leave
+    an already-started delivery pending and redeliverable. An attempt may spend
+    the core's own SQLite busy timeout, so only the first retry is unconditional.
+    """
+    started = _monotonic()
+    for attempt, delay in enumerate((*ASYNC_DELIVERY_ACK_RETRY_DELAYS, None)):
+        try:
+            complete_fn(evt, claim_id)
+            return
+        except Exception as exc:
+            if delay is None or not _is_transient_ledger_error(exc) or (
+                attempt and _monotonic() - started > ASYNC_DELIVERY_ACK_RETRY_WINDOW_SECONDS
+            ):
+                raise
+            logger.debug("Retrying durable async delegation ACK after %s", exc)
+            time.sleep(delay)
+
+
 def complete_async_delegation_delivery(
     evt: Any,
     claim: AsyncDelegationDeliveryClaim,
@@ -678,7 +713,9 @@ def complete_async_delegation_delivery(
             from tools.async_delegation import complete_event_delivery
 
             try:
-                complete_event_delivery(evt, claim.claim_id)
+                _complete_event_delivery_with_retry(
+                    complete_event_delivery, evt, claim.claim_id
+                )
                 _cancel_async_delegation_claim_retry(claim.delegation_id)
                 return
             except Exception:

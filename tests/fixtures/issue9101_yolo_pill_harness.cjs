@@ -85,7 +85,7 @@ function makeEl(id) {
   };
 }
 
-function createTab(server, name, overrides = null) {
+function createTab(server, name, overrides = null, extraSrc = []) {
   const sessionsJs = readStatic('sessions.js');
   const messagesJs = readStatic('messages.js');
   const commandsJs = readStatic('commands.js');
@@ -141,6 +141,7 @@ function createTab(server, name, overrides = null) {
     'function __state(){ const pill=$("yoloPill"); return {sid: S.session && S.session.session_id, yolo: _yoloEnabled,',
     '  pillVisible: pill.style.display !== "none", pillSession: pill.getAttribute("data-yolo-session"),',
     '  gen: _loadSessionGeneration, loading: _loadingSessionId}; }',
+    ...extraSrc,
   ].join('\n');
   vm.runInContext(src, ctx, { filename: name + '-harness.js' });
   return {
@@ -168,7 +169,11 @@ function createServer(sessions) {
         const meta = server.sessions[sid] || {};
         return { session: { session_id: sid, title: sid, message_count: 0, messages: [], active_stream_id: meta.active_stream_id || null } };
       }
+      if (u.pathname === '/api/session/new' && method === 'POST') {
+        return { session: { session_id: server.newSessionId || 'N', title: 'Untitled', workspace: body.workspace, messages: [] } };
+      }
       if (u.pathname === '/api/session/yolo' && method === 'GET') {
+        if (server.yoloGetBody) return server.yoloGetBody;
         return { yolo_enabled: !!server.yolo[u.searchParams.get('session_id')] };
       }
       if (u.pathname === '/api/session/yolo' && method === 'POST' && server.failPost) {
@@ -208,6 +213,88 @@ function visibleCardOverrides(server, sid) {
       return true;
     };
   };
+}
+
+// The four blank-page entry points that mint a session with POST
+// /api/session/new and install it into S.session without loadSession().
+const BLANK_PAGE_INSTALLERS = [
+  ['panels.js', 'promptWorkspacePath'], ['panels.js', 'switchToWorkspace'],
+  ['ui.js', 'promptNewFile'], ['ui.js', 'promptNewFolder'],
+];
+function blankPageInstallerSrc() {
+  return BLANK_PAGE_INSTALLERS.map(([file, fn]) => extractFunction(readStatic(file), fn));
+}
+const blankPageStubs = (base) => {
+  base.showPromptDialog = async () => null; // the user cancels the follow-up prompt
+  base.renderSessionList = async () => {};
+  base._workspaceCreateTargetLabel = () => '';
+};
+
+// A pill painted for A stays on screen when the open session is dropped
+// without a re-render (the delete paths set S.session=null); a blank-page
+// action then installs a brand-new session N (server YOLO off).
+async function blankPageInstallKeepsStalePill(fn) {
+  const server = createServer({ A: {} });
+  const tab = createTab(server, 'tab1', blankPageStubs, blankPageInstallerSrc());
+  await tab.loadSession('A');
+  await tick();
+  await tab.cmdYolo();
+  await tick();
+  check(tab.state().pillVisible && server.yolo.A === true, 'precondition: /yolo enabled A and shows its pill', tab.state());
+  tab.ctx.S.session = null;
+  tab.ctx.S._profileDefaultWorkspace = '/ws';
+  // switchToWorkspace continues into a workspace mutation after the install;
+  // a busy flag makes it stop right after the install with a toast.
+  if (fn === 'switchToWorkspace') tab.ctx.S.busy = true;
+  await vm.runInContext(fn, tab.ctx)();
+  await tick();
+  const st = tab.state();
+  const out = { entry: fn, state: st, server: { ...server.yolo }, calls: tab.calls.map(c => c.method + ' ' + c.path) };
+  check(st.sid === 'N', `precondition: ${fn} installed the new session`, out);
+  check(!st.pillVisible && st.yolo === false && !server.yolo.N,
+    `${fn} installed N (server yolo[N]=false) but pill visible=${st.pillVisible} (painted for ${st.pillSession}), mirror=${st.yolo}`, out);
+  return out;
+}
+
+// The stream's real `apperror` listener, attached to a fake EventSource for
+// stream `streamId` of session `activeSid`. Closure state is declared here;
+// rendering/anchor helpers are stubbed by apperrorStubs.
+function apperrorAttachSrc() {
+  const src = readStatic('messages.js');
+  const start = src.indexOf("source.addEventListener('apperror',e=>{");
+  if (start < 0) throw new Error('apperror listener not found');
+  let idx = start;
+  for (;;) {
+    idx = src.indexOf('});', idx + 1);
+    if (idx < 0) throw new Error('no parseable end for the apperror listener');
+    const slice = src.slice(start, idx + 3);
+    if (parses(slice)) {
+      return 'function __attachApperror(source, activeSid, streamId){\n' +
+        '  let assistantText=""; let _terminalStateReached=false; let _persistTimer=null;\n' +
+        '  let _streamFinalized=false; let _anchorRegistry=null;\n' + slice + '\n}';
+    }
+  }
+}
+const APPERROR_NOOPS = [
+  '_clearStreamEndRecovery', '_steerSettleTerminal', '_cancelThrottledSnapshotTimer', '_clearAnchorProseIncrementalNode',
+  '_cancelAnimationFramePendingStreamRender', '_streamFadeCleanupReduceMotionListener', '_smdEndParser',
+  'finalizeThinkingCard', '_clearOwnerInflightState', '_clearStreamHidden', '_clearStreamNotificationBackground',
+  '_clearApprovalForOwner', '_clearClarifyForOwner', '_flushReasoningToAnchor', '_applyToAnchor',
+  '_scheduleAnchorRegistryCleanup', 'removeThinking', 'clearCompressionUi', '_attachProjectedAnchorSceneToLastAssistant',
+  '_markSessionViewed', '_setActivePaneIdleIfOwner', 'renderSessionList', '_dispatchExtensionTurnLifecycle',
+  '_retrySettledAnchorScene', 'trackBackgroundError',
+];
+const apperrorStubs = (base) => {
+  for (const n of APPERROR_NOOPS) base[n] = function () { return undefined; };
+  base._bailOutOfTerminalEventsFromStaleStream = () => false;
+  base._streamRecoveryControlMessageText = () => false;
+  base._carryForwardEphemeralTurnFields = (prev, next) => next;
+  base._filterRecoveryControlMessages = m => m;
+  base._settledAnchorRetryOwnerKey = () => null;
+  base._restoreSettledSession = async () => false;
+};
+function fakeEventSource() {
+  return { readyState: 1, listeners: {}, close() { this.readyState = 2; }, addEventListener(ev, fn) { this.listeners[ev] = fn; } };
 }
 
 const scenarios = {
@@ -526,6 +613,260 @@ const scenarios = {
     const out = { posts_from_click: after, server: { ...server.yolo }, state: st };
     check(!server.yolo.N && after.every(b => b.session_id === 'A' && b.enabled === false) && !st.pillVisible,
       `pill painted for A, clicked on N: posted ${JSON.stringify(after)}, server yolo[N]=${!!server.yolo.N}, pill visible=${st.pillVisible}`, out);
+    return out;
+  },
+
+  // (i) two overlapping /yolo commands (the second typed before the first's
+  // read answered) both read "off" and both POST enabled:true. The second must
+  // post nothing; a /yolo after the first settled must still toggle.
+  async i_overlapping_yolo_commands_both_enable() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('B');
+    await tick();
+    await Promise.all([tab.cmdYolo(), tab.cmdYolo()]);
+    await tick();
+    const overlap = posts(tab);
+    const out = { posts_from_overlap: overlap, server: { ...server.yolo }, state: tab.state(), toasts: tab.toasts };
+    check(overlap.length === 1 && overlap[0].enabled === true && server.yolo.B === true && out.state.pillVisible,
+      `two overlapping /yolo posted ${JSON.stringify(overlap)}`, out);
+    await tab.cmdYolo();
+    await tick();
+    out.later_posts = posts(tab).slice(overlap.length);
+    out.later_state = tab.state();
+    check(out.later_posts.length === 1 && out.later_posts[0].enabled === false && server.yolo.B === false && !out.later_state.pillVisible,
+      `a /yolo after the first settled posted ${JSON.stringify(out.later_posts)}`, out);
+    return out;
+  },
+
+  // (i2) a second /yolo while the first's enable POST is still in flight reads
+  // the half-applied "on" and posts a disable; the first's late answer then
+  // paints an "on" pill over a server that is off.
+  async i2_yolo_while_first_post_in_flight_desyncs_pill() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('B');
+    await tick();
+    server.shouldHold = (name, method, p) => method === 'POST' && p === '/api/session/yolo';
+    const first = tab.cmdYolo();
+    await tick();
+    check(tab.held.length === 1 && server.yolo.B === true, 'precondition: first enable POST in flight', tab.calls);
+    server.shouldHold = null;
+    await tab.cmdYolo();
+    await tick();
+    tab.held.shift().release();
+    await first;
+    await tick();
+    const st = tab.state();
+    const out = { posts: posts(tab), server: { ...server.yolo }, state: st };
+    check(out.posts.length === 1 && server.yolo.B === true && st.pillVisible === true,
+      `second /yolo during the first's POST: posted ${JSON.stringify(out.posts)}, server yolo[B]=${!!server.yolo.B}, pill visible=${st.pillVisible}`, out);
+    return out;
+  },
+
+  // (i3) the in-flight guard is per session: a /yolo for B issued while A's
+  // /yolo is still waiting must still toggle B (here: disable B's YOLO).
+  async i3_yolo_for_other_session_while_first_in_flight_is_dropped() {
+    const server = createServer({ A: {}, B: {} });
+    server.yolo.B = true;
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('A');
+    await tick();
+    server.shouldHold = yoloGet('A');
+    const first = tab.cmdYolo();
+    await tick();
+    check(tab.held.length === 1, 'precondition: A\'s /yolo read is in flight', tab.calls);
+    server.shouldHold = null;
+    await tab.loadSession('B');
+    await tick();
+    const before = posts(tab).length;
+    await tab.cmdYolo();
+    await tick();
+    const forB = posts(tab).slice(before);
+    const out = { posts_for_b: forB, server: { ...server.yolo }, state: tab.state() };
+    tab.held.shift().release();
+    await first;
+    await tick();
+    out.after_a_settles = { server: { ...server.yolo }, state: tab.state() };
+    check(forB.length === 1 && forB[0].session_id === 'B' && forB[0].enabled === false && server.yolo.B === false,
+      `/yolo on B while A's is in flight posted ${JSON.stringify(forB)}, server yolo[B]=${!!server.yolo.B}`, out);
+    check(!out.after_a_settles.state.pillVisible && out.after_a_settles.state.sid === 'B',
+      'B stays open with its pill hidden after A\'s stale /yolo settles', out);
+    return out;
+  },
+
+  // (j) a malformed GET /api/session/yolo answer (a non-boolean flag) must
+  // not paint a "click to disable" pill for a session whose YOLO is off.
+  async j_malformed_read_paints_on_pill() {
+    const out = {};
+    for (const value of ['yes', 1, 'false']) {
+      const server = createServer({ B: {} });
+      server.yoloGetBody = { yolo_enabled: value };
+      const tab = createTab(server, 'tab-' + String(value));
+      await tab.loadSession('B');
+      await tick();
+      out[JSON.stringify(value)] = tab.state();
+    }
+    check(Object.values(out).every(st => !st.pillVisible && st.yolo === false),
+      `malformed yolo_enabled answers painted the pill: ${JSON.stringify(out)}`, out);
+    return out;
+  },
+
+  // (j2) the hiding direction: a malformed answer to a same-session re-read
+  // must leave an ON view alone instead of turning it off.
+  async j2_malformed_read_hides_on_pill() {
+    const server = createServer({ B: {} });
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('B');
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    check(tab.state().pillVisible && server.yolo.B === true, 'precondition: pill visible after /yolo enable', tab.state());
+    const out = {};
+    for (const value of [0, null, 'true']) {
+      server.yoloGetBody = { yolo_enabled: value };
+      await tab.loadSession('B', { force: true, externalRefreshReason: 'session-updated', keepStaleUntilLoaded: true });
+      await tick();
+      out[JSON.stringify(value)] = tab.state();
+    }
+    check(Object.values(out).every(st => st.pillVisible && st.yolo === true),
+      `malformed re-reads hid the pill while server yolo[B]=true: ${JSON.stringify(out)}`, out);
+    return out;
+  },
+
+  // (k1-k4) a blank-page action mints a new session without loadSession():
+  // the previous session's ON pill must not stay on screen for it.
+  async k1_prompt_workspace_path_install_keeps_stale_pill() { return blankPageInstallKeepsStalePill('promptWorkspacePath'); },
+  async k2_switch_to_workspace_install_keeps_stale_pill() { return blankPageInstallKeepsStalePill('switchToWorkspace'); },
+  async k3_prompt_new_file_install_keeps_stale_pill() { return blankPageInstallKeepsStalePill('promptNewFile'); },
+  async k4_prompt_new_folder_install_keeps_stale_pill() { return blankPageInstallKeepsStalePill('promptNewFolder'); },
+
+  // (k5) an `apperror` after a compression rotation installs the continuation
+  // session N (an EXISTING session) from d.session. A's pill must go at once,
+  // and N's own server flag must be read back.
+  async k5_apperror_rotation_keeps_stale_pill_and_skips_read() {
+    const server = createServer({ A: { active_stream_id: 'stream-a' }, N: {} });
+    server.yolo.N = true;
+    const tab = createTab(server, 'tab1', apperrorStubs, [apperrorAttachSrc()]);
+    await tab.loadSession('A');
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    check(tab.state().pillVisible && server.yolo.A === true, 'precondition: /yolo enabled A and shows its pill', tab.state());
+    const source = fakeEventSource();
+    vm.runInContext('__attachApperror', tab.ctx)(source, 'A', 'stream-a');
+    server.shouldHold = yoloGet('N');
+    source.listeners.apperror({ data: JSON.stringify({
+      type: 'error', message: 'provider failed', session_id: 'N', old_session_id: 'A', new_session_id: 'N',
+      continuation_session_id: 'N', session: { session_id: 'N', title: 'N', messages: [] },
+    }) });
+    await tick();
+    const during = tab.state();
+    const out = { while_read_in_flight: during, reads_of_N: tab.held.length, server: { ...server.yolo } };
+    check(during.sid === 'N', 'precondition: apperror installed the continuation N', out);
+    check(!during.pillVisible || during.pillSession === 'N',
+      `after rotation to N the pill painted for ${during.pillSession} is still visible`, out);
+    check(tab.held.length === 1, `rotation to N did not read N's YOLO flag (server yolo[N]=true)`, out);
+    tab.held.shift().release();
+    await tick();
+    out.after_read = tab.state();
+    check(out.after_read.pillVisible && out.after_read.pillSession === 'N' && out.after_read.yolo === true,
+      `N's flag (server yolo[N]=true) not shown after the read: ${JSON.stringify(out.after_read)}`, out);
+    return out;
+  },
+
+  // Control: an `apperror` for the open session itself (no rotation) keeps
+  // its YOLO view and issues no extra YOLO read.
+  async control_apperror_same_session_keeps_view_without_read() {
+    const server = createServer({ A: { active_stream_id: 'stream-a' } });
+    const tab = createTab(server, 'tab1', apperrorStubs, [apperrorAttachSrc()]);
+    await tab.loadSession('A');
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    check(tab.state().pillVisible && server.yolo.A === true, 'precondition: /yolo enabled A and shows its pill', tab.state());
+    const source = fakeEventSource();
+    vm.runInContext('__attachApperror', tab.ctx)(source, 'A', 'stream-a');
+    const before = tab.calls.length;
+    source.listeners.apperror({ data: JSON.stringify({
+      type: 'error', message: 'provider failed', session_id: 'A', session: { session_id: 'A', title: 'A', messages: [] },
+    }) });
+    await tick();
+    const st = tab.state();
+    const reads = tab.calls.slice(before).filter(c => c.path.startsWith('/api/session/yolo'));
+    const out = { state: st, yolo_requests_after_error: reads };
+    check(st.sid === 'A' && st.pillVisible && st.pillSession === 'A' && reads.length === 0,
+      `same-session apperror: pill visible=${st.pillVisible}, yolo requests=${JSON.stringify(reads)}`, out);
+    return out;
+  },
+
+  // Control: the /yolo in-flight guard is released on every exit: after a
+  // failed POST and after a read made stale by a session switch.
+  async control_yolo_guard_released_after_failure_and_stale_switch() {
+    const server = createServer({ A: {}, B: {} });
+    const tab = createTab(server, 'tab1');
+    await tab.loadSession('B');
+    await tick();
+    server.failPost = true;
+    await tab.cmdYolo();
+    await tick();
+    server.failPost = false;
+    await tab.cmdYolo();
+    await tick();
+    const afterFailure = posts(tab);
+    check(afterFailure.length === 2 && afterFailure[1].enabled === true && server.yolo.B === true,
+      `/yolo after a failed /yolo posted ${JSON.stringify(afterFailure)}`, { posts: afterFailure, toasts: tab.toasts });
+    server.shouldHold = yoloGet('B');
+    const stale = tab.cmdYolo();
+    await tick();
+    server.shouldHold = null;
+    await tab.loadSession('A');
+    await tick();
+    tab.held.shift().release();
+    await stale;
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    const last = posts(tab).slice(afterFailure.length);
+    // B's own guard must be free again too: a /yolo on B after its stale exit posts.
+    await tab.loadSession('B');
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    const again = posts(tab).slice(afterFailure.length + last.length);
+    const out = { posts_after_stale: last, posts_on_B_again: again, server: { ...server.yolo }, state: tab.state() };
+    check(last.length === 1 && last[0].session_id === 'A' && last[0].enabled === true && server.yolo.A === true,
+      `/yolo on A after a stale /yolo on B posted ${JSON.stringify(last)}`, out);
+    check(again.length === 1 && again[0].session_id === 'B' && again[0].enabled === false && server.yolo.B === false,
+      `/yolo on B after its own stale /yolo posted ${JSON.stringify(again)}`, out);
+    return out;
+  },
+
+  // (l) /yolo toggles from its own GET: a malformed answer (no boolean flag)
+  // must not be inverted into a POST, whichever state the server is in.
+  async l_malformed_read_never_toggles() {
+    const out = {};
+    for (const start of [false, true]) {
+      for (const body of [{}, { yolo_enabled: null }, { yolo_enabled: 'yes' }, { yolo_enabled: 0 }, { yolo_enabled: 1 }]) {
+        const server = createServer({ B: {} });
+        server.yolo.B = start;
+        const tab = createTab(server, 'tab-' + start + '-' + JSON.stringify(body));
+        await tab.loadSession('B');
+        await tick();
+        server.yoloGetBody = body;
+        await tab.cmdYolo();
+        await tick();
+        server.yoloGetBody = null;
+        await tab.cmdYolo();
+        await tick();
+        const sent = posts(tab);
+        out[start + ' ' + JSON.stringify(body)] = { posts: sent, server_B: server.yolo.B, toasts: tab.toasts.slice() };
+      }
+    }
+    // After each malformed read, the next well-formed /yolo is the only POST, and it
+    // is the inverse of the real state (so the guard was released too).
+    check(Object.entries(out).every(([k, v]) => v.posts.length === 1 && v.posts[0].enabled === !k.startsWith('true')),
+      `malformed /yolo reads posted: ${JSON.stringify(out)}`, out);
     return out;
   },
 };
