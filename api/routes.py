@@ -11833,6 +11833,23 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     return True, ""
 
 
+def _cli_read_owner_profile(sid: str, read_profile=None):
+    """Return the profile owning the state.db a CLI import/claim reads ``sid`` from (#9093).
+
+    ``read_profile`` comes from the CLI listing row or an authorized all-profiles
+    request. Without one, ``get_cli_session_messages`` reads the ACTIVE profile's
+    state.db, so the session is the active profile's: the listing row (and its
+    tag) only exists for the newest-N window, and an untagged copy was backfilled
+    to ``default`` and left its own profile's sidebar. Claude Code transcripts are
+    global, not read from any profile's state.db, so they stay untagged.
+    """
+    if read_profile:
+        return read_profile
+    if str(sid or "").startswith(f"{CLAUDE_CODE_SOURCE}_"):
+        return None
+    return _get_active_profile_name()
+
+
 def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     """Resolve a session_id that has no WebUI sidecar.
 
@@ -11915,7 +11932,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             messages=msgs,
             created_at=(cli_meta or {}).get("created_at") or 0,
             updated_at=(cli_meta or {}).get("updated_at") or 0,
-            profile=(cli_meta or {}).get("profile"),
+            profile=_cli_read_owner_profile(sid, (cli_meta or {}).get("profile")),
             # ``is_cli_flag`` is True for genuine CLI/TUI/Desktop sessions so the
             # sidebar renders the source badge and the client's external-session
             # gating applies. It is False for delegated subagent children (#5307):
@@ -14808,11 +14825,12 @@ from api.oauth import (
 # Approval system -- state and helpers live in api.route_approvals; imported
 # here for backward compatibility so existing call sites continue to resolve.
 from api.route_approvals import (  # noqa: F401 — re-exports for backward compat
-    _submit_pending_raw,
+    APPROVAL_BRIDGE,
+    approval_bridge_failure,
     approve_session,
     approve_permanent,
+    persist_grant_choice,
     save_permanent_allowlist,
-    is_approved,
     _pending,
     _lock,
     _permanent_approved,
@@ -18610,6 +18628,7 @@ def handle_get(handler, parsed) -> bool:
         payload = build_agent_health_payload()
         payload["gateway_chat"] = gateway_chat_config_status()
         payload["gateway_lifecycle"] = gateway_lifecycle_capability()
+        payload["approval_bridge"] = dict(APPROVAL_BRIDGE)
         j(handler, payload)
         return True
 
@@ -18889,6 +18908,9 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
 
     if parsed.path == "/api/session/usage":
@@ -22156,6 +22178,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         sid = str(body["session_id"] or "").strip()
         enabled = bool(body.get("enabled", True))
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         if not enabled:
             with gateway_yolo_handoff(sid):
                 set_session_yolo_enabled(sid, False)
@@ -26381,6 +26406,81 @@ def _tts_open(req, *, timeout=30, opener_factory=None):
     return _urlopen(req, timeout=timeout)
 
 
+def _detect_text_lang(text: str) -> str:
+    """Best-effort it/en detection: a stopword vote, no extra dependency.
+
+    Returns "" when the vote is inconclusive (short texts), so callers fall back
+    to the configured single voice instead of guessing wrong.
+    """
+    words = re.findall(r"[a-zàèéìòù']+", (text or "").lower())
+    if len(words) < 3:
+        return ""
+    it_words = {
+        "il", "lo", "la", "gli", "le", "un", "una", "di", "che", "non", "per",
+        "con", "sono", "questo", "questa", "anche", "più", "già", "perché",
+        "cosa", "come", "quando", "adesso", "oggi", "molto", "così", "ma",
+    }
+    en_words = {
+        "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
+        "have", "what", "when", "there", "from", "would", "should", "about",
+        "can", "will", "your", "but", "just", "very",
+    }
+    it_votes = sum(1 for w in words if w in it_words)
+    en_votes = sum(1 for w in words if w in en_words)
+    accented_it = sum(1 for w in words if any(c in "àèéìòù" for c in w))
+    it_votes += accented_it
+    if it_votes >= 2 and it_votes > en_votes:
+        return "it"
+    if en_votes >= 2 and en_votes > it_votes:
+        return "en"
+    return ""
+
+
+def _default_edge_voice(text: str = "") -> str:
+    """Default Edge voice for /api/tts, picked by the text's language.
+
+    Precedence: ``tts.edge.voices.<lang>`` from the active profile's config.yaml,
+    then a built-in per-language default (it -> Elsa, en -> Ava), then
+    ``tts.edge.voice`` (the configured single voice, all languages), then Elsa.
+    Before this, the endpoint hardcoded zh-CN-XiaoxiaoNeural and spoke Chinese.
+    """
+    cfg: dict = {}
+    try:
+        from api.profiles import get_active_hermes_home, load_profile_config
+
+        cfg = load_profile_config(get_active_hermes_home()) or {}
+    except Exception:
+        logger.debug("Failed to read the agent config for TTS voices", exc_info=True)
+    # Shape-validate: a hand-edited config must never crash the request.
+    tts_cfg = cfg.get("tts")
+    edge_cfg = tts_cfg.get("edge") if isinstance(tts_cfg, dict) else None
+    if not isinstance(edge_cfg, dict):
+        edge_cfg = {}
+
+    def _usable(value) -> str:
+        # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
+        # would trip the voice allowlist, so treat it as absent.
+        if isinstance(value, str) and value.strip() and "${" not in value:
+            return value.strip()
+        return ""
+
+    lang = _detect_text_lang(text)
+    if lang:
+        voices = edge_cfg.get("voices")
+        if isinstance(voices, dict):
+            per_lang = _usable(voices.get(lang))
+            if per_lang:
+                return per_lang
+        builtin = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}.get(lang)
+        if builtin:
+            return builtin
+    configured = _usable(edge_cfg.get("voice"))
+    if configured:
+        return configured
+    return "it-IT-ElsaNeural"
+
+
+
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
 
@@ -26399,7 +26499,7 @@ def _handle_tts(handler, parsed):
     async API at that time.
     """
     text = ""
-    voice = "zh-CN-XiaoxiaoNeural"
+    voice = ""
     rate_str = ""
     pitch_str = ""
     engine = "edge"  # "edge" | "elevenlabs" | "openai" | "browser" (browser is client-side only)
@@ -26411,7 +26511,11 @@ def _handle_tts(handler, parsed):
     try:
         data = read_body(handler)
         text = (data.get("text") or "").strip()
-        voice = data.get("voice") or voice
+        voice = data.get("voice")
+        # Explicit override only: the configured default is resolved inside the
+        # Edge branch, after admission and rate limiting, so an engine that is
+        # not Edge never reads Edge (or any profile) config.
+        voice = voice.strip() if isinstance(voice, str) else ""
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
         request_engine = data.get("engine")
@@ -26684,12 +26788,21 @@ def _handle_tts(handler, parsed):
         return True
 
     # ── Edge TTS ────────────────────────────────────────────────────────
+    # Omitted voice: resolve the configured per-language default HERE, after
+    # validation, playback-profile admission and rate limiting. An unused Edge
+    # setting therefore cannot affect an OpenAI/ElevenLabs request, and a
+    # request rejected earlier never reads profile config.
+    if not voice:
+        voice = _default_edge_voice(text)
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural",
+        "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
+        "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
         "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
         "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
+        "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
+        "it-IT-GiuseppeMultilingualNeural",
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
@@ -29192,12 +29305,18 @@ def _handle_btw(handler, body):
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
-    # Duplicate-stream guard (same pattern as chat/start)
+    # Duplicate-stream guard (same pattern as chat/start): decide under the
+    # lock, respond outside it. ``j`` writes to the client socket, and a client
+    # that stopped reading would otherwise stall every stream start/Stop/steer
+    # waiting on STREAMS_LOCK for the duration of the write.
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
         with STREAMS_LOCK:
-            if current_stream_id in STREAMS:
-                return j(handler, {"error": "session already has an active stream"}, status=409)
+            busy = current_stream_id in STREAMS
+        if busy:
+            return j(handler, {"error": "session already has an active stream"}, status=409)
+        # Only clear the id when the stream is really gone; a live stream keeps
+        # its owner even though this request is refused above.
         s.active_stream_id = None
     # Create ephemeral hidden session inheriting context
     from api.models import new_session as _new_session
@@ -31022,6 +31141,8 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
         return action
     if action in ("clear", "stop", "done"):
         return "clear"
+    if action.split(None, 1)[0] == "gate":
+        return "gate"
     return "set"
 
 
@@ -31814,6 +31935,12 @@ def _handle_goal_command(handler, body):
     )
 
     goal_adapter_action = _runtime_adapter_goal_action(goal_args)
+    if goal_adapter_action == "gate":
+        # Refuse before any kickoff setup or adapter dispatch: the goal, its
+        # gates and the session's model state stay exactly as they were.
+        from api.goals import goal_gate_refusal_payload
+
+        return j(handler, goal_gate_refusal_payload(), status=400)
     runner_goal_owned = runtime_adapter_runner_enabled()
     if runner_goal_owned and goal_adapter_action == "set":
         # Separate set and kickoff calls cannot restore the runner's prior goal
@@ -33255,12 +33382,52 @@ def _handle_cron_delivery_options(handler):
         if _known:
             _KNOWN_DELIVERY_PLATFORMS = frozenset(_known)
             break
+    # #9058: current Agents keep only the core-only rows (webhook,
+    # wecom_callback) in that constant; the messaging platforms (telegram,
+    # discord, slack, feishu, ...) live in the plugin platform registry. The
+    # Agent's validator ``_is_known_delivery_platform`` accepts the constant
+    # plus every registry entry with a ``cron_deliver_env_var``, so enumerate
+    # the registry with the same rule. Older Agents without the registry (or
+    # any failure while enumerating it) degrade to the constant alone.
+    #
+    # Only Agents that key plugin managers by profile home (from 2026-08-12,
+    # ``hermes_cli.plugins._plugin_managers_by_home``) with a profile-scoped
+    # platform registry (``current_scope_key``) are enumerated. Older
+    # Agents share one process-wide plugin manager, so the first profile to
+    # open the picker would leak its user plugin platforms into every other
+    # profile's picker; some of them also run discovery under the cron env
+    # lock. Those Agents keep today's constant-only list.
+    _registry_names = set()
+    _registry_labels = {}
+    try:
+        # import_module returns the exact registered module (tests replace it in sys.modules).
+        _agent_plugins = importlib.import_module("hermes_cli.plugins")
+        if hasattr(_agent_plugins, "_plugin_managers_by_home"):
+            from gateway.platform_registry import platform_registry
+            # The registry must be profile-scoped too (``current_scope_key``, the
+            # Agent commit right after the per-home managers); otherwise one
+            # profile's discovery can replace another's same-name adapter.
+            if callable(getattr(platform_registry, "current_scope_key", None)):
+                _agent_plugins.discover_plugins()  # idempotent, scoped to the active profile home
+                _names, _labels = set(), {}
+                for _entry in platform_registry.all_entries():
+                    _name = getattr(_entry, "name", None)
+                    if not isinstance(_name, str) or not _name:
+                        continue
+                    _label = getattr(_entry, "label", None)
+                    if isinstance(_label, str) and _label.strip():
+                        _labels[_name] = _label.strip()
+                    if getattr(_entry, "cron_deliver_env_var", None):
+                        _names.add(_name)
+                _registry_names, _registry_labels = _names, _labels
+    except Exception:
+        logger.debug("cron delivery options: platform registry unavailable", exc_info=True)
     platforms = [
         {"value": "local", "label": "Local (save output only)"},
         {"value": "origin", "label": "Origin (reply to creator)"}
     ]
-    for name in sorted(_KNOWN_DELIVERY_PLATFORMS):
-        platforms.append({"value": name, "label": name.capitalize()})
+    for name in sorted((set(_KNOWN_DELIVERY_PLATFORMS) | _registry_names) - {"local", "origin"}):
+        platforms.append({"value": name, "label": _registry_labels.get(name) or name.capitalize()})
     return j(handler, {"platforms": platforms})
 
 
@@ -34484,6 +34651,58 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
+def _scope_offered_by_entry(entry: dict | None, choice: str) -> str:
+    """Narrow a session/always answer to the scopes this approval offered.
+
+    Missing flags keep the answer as given (entries from older producers).
+    """
+    if choice not in ("session", "always") or not isinstance(entry, dict):
+        return choice
+    if entry.get("allow_session") is False or entry.get("smart_denied"):
+        return "once"
+    if choice == "always" and entry.get("allow_permanent") is False:
+        return "session"
+    return choice
+
+
+@contextlib.contextmanager
+def _session_profile_grant_scope(sid: str):
+    """Yield True with the Agent's Hermes home bound to ``sid``'s own profile.
+
+    Yields False (save nothing) when that profile home or the context-local
+    override can't be established. Agent-less mode yields True unscoped.
+    """
+    if not APPROVAL_BRIDGE["agent"]:
+        yield True
+        return
+    from api.memory_profile_scope import session_owner_profile_home
+    from api.profiles import _resolve_hermes_home_override
+
+    home = session_owner_profile_home(sid)
+    home_mod = _resolve_hermes_home_override() if home else None
+    if home_mod is None:
+        logger.warning("approval grant for session %s not saved: its profile home is unknown", sid)
+        yield False
+        return
+    try:
+        # Can raise, e.g. ScopeSwitchRefused while a hosted scope is bound.
+        token = home_mod.set_hermes_home_override(home)
+    except Exception as exc:
+        logger.warning(
+            "approval grant for session %s not saved: its profile home could not be bound (%s)", sid, exc
+        )
+        bound = False
+    else:
+        bound = True
+    if not bound:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        home_mod.reset_hermes_home_override(token)
+
+
 def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
@@ -34554,11 +34773,9 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 # .data dict carries command, pattern_key, pattern_keys.
                 gw_data = getattr(gw_entry, 'data', None) or {}
                 gateway_keys = gw_data.get("pattern_keys") or [gw_data.get("pattern_key", "")]
-                # Peek is not strict — a concurrent resolver may pop a
-                # different gateway entry before we reach
-                # resolve_gateway_approval below, but approve_session is
-                # idempotent over the session key set so the outcome is
-                # the same regardless of which entry wins the race.
+                # resolve_gateway_approval() below hands the choice to the
+                # Agent waiting on the oldest entry; that Agent saves any
+                # session/always grant itself.
                 found_target = True
         elif approval_id:
             gw_queue = _gateway_queues.get(sid)
@@ -34590,6 +34807,14 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                     if matched_data is not None:
                         matched_data["approval_id"] = approval_id
                         local_gateway_approval_id = approval_id
+        # Gateway-held: a relayed run approval, the exact local producer, the
+        # no-id head, or any gateway mirror (live, or orphaned: never used).
+        agent_held = bool(
+            run_id
+            or local_gateway_approval_id
+            or gateway_keys
+            or (pending and pending.get(_GATEWAY_MIRROR_FLAG))
+        )
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -34602,17 +34827,38 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
             else:
                 _approval_sse_notify_locked(sid, None, 0)
 
-    # Collect keys from both _pending and _gateway_queues
+    # The Agent saves a session/always answer once its wait returns, applying its
+    # per-approval scope rule (a one-operation finding saves nothing) in the
+    # session's own profile. WebUI saves only raw entries no Agent waits on, never
+    # a gateway mirror (a mirror whose producer is gone was never used), only
+    # within the scope that entry offered, and only in the session's own profile.
+    scope = "once" if agent_held else _scope_offered_by_entry(pending, choice)
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
-    all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
-    if choice == "session":
-        for k in all_keys:
-            approve_session(sid, k)
-    elif choice == "always":
-        for k in all_keys:
-            approve_session(sid, k)
-            approve_permanent(k)
-        save_permanent_allowlist(_permanent_approved)
+    all_keys = [k for k in keys_from_pending if k]
+    if scope in ("session", "always") and all_keys:
+        with _session_profile_grant_scope(sid) as in_profile:
+            if in_profile and persist_grant_choice is not None and scope == "session":
+                # A session answer uses the Agent's own grant.
+                persist_grant_choice(sid, scope, all_keys)
+            elif in_profile and APPROVAL_BRIDGE["agent"]:
+                # With an Agent bound, a WebUI-held "always" is granted for this session
+                # only: a WebUI-side save can't be combined safely with the Agent's own
+                # save of command_allowlist. It is asked again in a later session.
+                for k in all_keys:
+                    approve_session(sid, k)
+            elif in_profile:
+                # Agent-less: no profile-scoped grant store, so the answer is saved as given.
+                saved = set()
+                for k in all_keys:
+                    approve_session(sid, k)
+                    # Content-scanner (tirith) findings stay session-only, as in the
+                    # Agent's own _persist_choice; a raw entry carries no flag for them.
+                    if scope == "always" and not str(k).startswith("tirith:"):
+                        approve_permanent(k)
+                        saved.add(k)
+                if saved:
+                    # Only the keys granted now: never another profile's in-memory grants.
+                    save_permanent_allowlist(saved)
     # choice == "once": no persistence — approval lasts this single call only.
     # resolve_gateway_approval() below unblocks the parked agent thread for
     # every choice, so "once" still lets the current tool run; we just must not
@@ -35135,6 +35381,9 @@ def _handle_approval_respond(handler, body):
     requested_mirror_token = str(body.get("mirror_token") or "").strip()
 
     if enable_yolo:
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         payload, status = _enable_session_yolo_and_release_pending(
             sid,
             choice=choice,
@@ -35363,6 +35612,13 @@ def _handle_approval_respond(handler, body):
                 return j(handler, relay_payload, status=relay_status)
     except Exception:
         pass  # fall through to local approval path
+
+    # The local path settles the Agent's in-process approval. When the Agent
+    # lacks the names it needs (#9119), refuse instead of reporting ok while the
+    # Agent thread stays parked until its timeout.
+    bridge_failure = approval_bridge_failure(choice=choice)
+    if bridge_failure is not None:
+        return j(handler, bridge_failure[0], status=bridge_failure[1])
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
@@ -36560,6 +36816,31 @@ def _handle_handoff_summary(handler, body):
             agent.reasoning_config = previous_reasoning
 
         # Call LLM for summary.
+    # Gateway mode owns model execution and the session's credentials: never
+    # build an in-process helper agent here (#8971). That path either fails on
+    # missing WebUI credentials or silently runs an LLM call outside the
+    # gateway. This handler exists specifically for gateway sessions, so use
+    # the deterministic local fallback — the same path taken when no provider
+    # key resolves — instead of refusing the feature with a 409.
+    if webui_gateway_chat_enabled(get_config_snapshot()):
+        summary_text = _fallback_handoff_summary(msgs)
+        try:
+            _persist_handoff_summary(
+                sid,
+                summary_text,
+                _resolve_handoff_channel_label(),
+                rounds,
+                fallback=True,
+            )
+        except Exception:
+            pass
+        return j(handler, {
+            "ok": True,
+            "summary": summary_text,
+            "message_count": len(msgs),
+            "rounds": rounds,
+            "fallback": True,
+        })
     try:
         ensure_agent_runtime_current()
         import api.config as _cfg
@@ -37277,7 +37558,10 @@ def _handle_session_import_cli(handler, body):
         requested_profile=requested_profile,
         allow_all_profiles=allow_all_profiles,
     )
-    profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
+    profile = _cli_read_owner_profile(
+        sid,
+        cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None),
+    )
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
