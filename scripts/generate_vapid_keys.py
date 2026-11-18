@@ -2,7 +2,8 @@
 """Generate VAPID keys for Hermes WebUI Web Push.
 
 Writes ``<state-dir>/webui_vapid.json`` (mode 0600). The private key is never
-printed. Requires ``pip install pywebpush``.
+printed. Uses the server's ``cryptography`` dependency; delivery separately
+requires the optional ``pywebpush`` package.
 
     python scripts/generate_vapid_keys.py --subject mailto:you@example.com
     python scripts/generate_vapid_keys.py --force   # rotate (drops trust in old subscriptions)
@@ -47,9 +48,9 @@ def main(argv=None) -> int:
         args.state_dir = _default_state_dir()
     try:
         from cryptography.hazmat.primitives import serialization
-        from py_vapid import Vapid
+        from cryptography.hazmat.primitives.asymmetric import ec
     except ImportError:
-        print("pywebpush is required: pip install pywebpush", file=sys.stderr)
+        print("cryptography is required: pip install cryptography", file=sys.stderr)
         return 2
     state = Path(args.state_dir).expanduser()
     state.mkdir(parents=True, exist_ok=True)
@@ -57,11 +58,10 @@ def main(argv=None) -> int:
     if target.exists() and not args.force:
         print(f"{target} already exists (use --force to rotate)", file=sys.stderr)
         return 1
-    vapid = Vapid()
-    vapid.generate_keys()
-    public = vapid.public_key.public_bytes(
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public = private_key.public_key().public_bytes(
         serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
-    number = vapid.private_key.private_numbers().private_value
+    number = private_key.private_numbers().private_value
     private = number.to_bytes(32, "big")
     payload = {"public_key": _b64url(public), "private_key": _b64url(private),
                "subject": args.subject}
