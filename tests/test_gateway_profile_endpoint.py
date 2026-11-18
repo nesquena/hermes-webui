@@ -476,3 +476,52 @@ def test_a_moved_rest_url_does_not_block_a_saved_session_transport_turn(work_pro
     saved = json.loads((models.SESSION_DIR / f"{sid}.json").read_text())
     assert "Gateway URL changed" not in json.dumps(saved["messages"])
     assert saved["messages"][-1]["content"] == "recovered over the session transport"
+
+
+
+def _run_native_named_turn(sessions, monkeypatch, transport):
+    """Drive a named-profile turn (session transport ``transport``, no REST URL of its own) under a shared URL
+    that already names another profile's route; return (native profiles run, emitted events, session id)."""
+    from types import SimpleNamespace
+
+    from api import gateway_sessions
+
+    home = profiles.get_hermes_home_for_profile("work")
+    (home / "config.yaml").write_text(
+        f"webui_gateway_session_transport: {transport}\nwebui_gateway_session_socket: /run/hermes/gw.sock\n"
+        if transport else "")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", f"{SHARED}/p/alpha")
+    s = new_session(workspace=str(sessions))
+    s.profile, s.source_tag, s.session_source = "work", "desktop", "other"
+    s.active_stream_id = "stream-native"
+    s.save()
+    calls, events = [], []
+    monkeypatch.setattr(gateway_sessions, "run_session",
+                        lambda sess, stream, text, **kw: calls.append(sess.profile) or ("native reply", {}, None))
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: False)
+    with STREAMS_LOCK:
+        STREAMS["stream-native"] = SimpleNamespace(put_nowait=events.append)
+    try:
+        gateway_chat._run_gateway_chat_streaming(s.session_id, "hi", "m", str(sessions), "stream-native", [])
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop("stream-native", None)
+    return calls, events, s.session_id
+
+
+@pytest.mark.parametrize("transport", ["local", "unix"])
+def test_native_turn_is_not_blocked_by_an_unroutable_shared_rest_url(work_profile, sessions, monkeypatch, transport):
+    """Greptile 4612791550: native chat uses the profile's private connection, so REST routing must not refuse it."""
+    calls, events, sid = _run_native_named_turn(sessions, monkeypatch, transport)
+
+    assert calls == ["work"], events
+    assert not [e for e in events if e[0] == "apperror"], events
+    saved = json.loads((models.SESSION_DIR / f"{sid}.json").read_text())
+    assert saved["messages"][-1]["content"] == "native reply"
+
+
+def test_rest_turn_with_the_same_unroutable_shared_url_is_still_refused(work_profile, sessions, monkeypatch):
+    calls, events, _ = _run_native_named_turn(sessions, monkeypatch, None)
+
+    errors = [e[1] for e in events if e[0] == "apperror"]
+    assert calls == [] and errors and "already names a profile route" in json.dumps(errors)

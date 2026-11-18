@@ -2542,7 +2542,7 @@ def _resume_gateway_run_for_session(session) -> bool:
     if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
         return False
     sid = session.session_id
-    endpoint = _gateway_reattach_endpoint(session, run)
+    endpoint = None if run.get("transport") == "session" else _gateway_reattach_endpoint(session, run)
     # Review #7302 (nesquena, 01-Oct-2026) finding 2 -- "CORE": publish the
     # reattached run's ownership (ACTIVE_RUNS row + retained cancel signal) on the
     # SAME STREAMS_LOCK -> ACTIVE_RUNS_LOCK edge that creates the STREAMS entry,
@@ -3420,7 +3420,12 @@ def _run_gateway_chat_streaming(
         # The session's own profile, not the process-active one: this worker thread has no
         # thread-local profile, so get_config()/os.environ describe whichever profile the
         # process loaded. Same resolver the restart-reattach path already uses.
-        base_url, api_key = reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None))
+        from api.gateway_sessions import configured, run_session, SessionTransportDisconnected
+        _use_session_rpc = (reattach_run or {}).get("transport") == "session" or configured(vars(s), cfg)
+        # Native turns use the profile's private session connection: the REST endpoint (and its routing checks)
+        # applies only to REST turns.
+        base_url, api_key = ("", "") if _use_session_rpc else (
+            reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None)))
         # None: the profile's Gateway moved since admission, so no credential is bound to the saved URL.
         endpoint_moved, api_key = api_key is None, api_key or ""
         keyless_profile = not api_key and _is_named_profile(getattr(s, "profile", None))
@@ -3436,8 +3441,6 @@ def _run_gateway_chat_streaming(
         except Exception:
             _gw_overrides = {}
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
-        from api.gateway_sessions import configured, run_session, SessionTransportDisconnected
-        _use_session_rpc = (reattach_run or {}).get("transport") == "session" or configured(vars(s), cfg)
         _use_runs_api = _use_session_rpc or bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
