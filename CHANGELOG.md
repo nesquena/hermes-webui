@@ -37,6 +37,8 @@
 
 ### Fixed
 
+- **Opening a long conversation that's already cached copies only the messages it shows (#8993).** When a conversation was cached, the server still copied every message and rescanned the whole transcript on each load, even though it only sends the latest page. It now keeps a small summary with the cached copy and copies just the page it returns. Thanks @CharlesMcquade.
+
 - **On newer Agents, a finished turn stays in the saved conversation context (#9160, refs #9157).** The settle step checked for helpers that newer Agent builds moved to another module, so it always gave up, and the turn's prompt and answer were left out of the saved context. It now checks the module the repair actually uses. Older Agents behave exactly as before.
 
 - **`/yolo` and the auto-approval pill are steadier (#9156, refs #9101).** `/yolo` runs once per session at a time, so a double-press can't flip the setting twice. A settings read that doesn't return a clear on/off answer leaves the pill as it was and never turns auto-approval on. Opening a session from another path than the sidebar also resets the pill to that session's state.
