@@ -18,6 +18,14 @@ Mechanisms covered (letters follow the issue investigation):
         (e2: and never approve the visible approval card)
   f     a pill painted for A, clicked after the open session changed without
         loadSession(): it must not write to the new session at all
+  g/h   a failed switch leaves the previous session open with its pill
+  i/i2  overlapping /yolo commands post twice (both enable, or enable then
+        disable under an "on" pill)
+  j/j2  a non-boolean GET /api/session/yolo answer paints or hides the pill
+  k1-k4 a blank-page action (workspace prompt/switch, new file/folder) mints
+        a session without loadSession() and keeps the old session's pill
+  k5    an apperror after a compression rotation installs the continuation
+        without dropping the old pill or reading the new session's flag
 """
 
 import json
@@ -46,6 +54,17 @@ SCENARIOS = [
     "f_pill_click_after_untracked_session_swap_enables_new_session",
     "g_enable_during_failed_switch_keeps_open_session_pill",
     "h_failed_switch_reads_back_open_session_flag",
+    "i_overlapping_yolo_commands_both_enable",
+    "i2_yolo_while_first_post_in_flight_desyncs_pill",
+    "i3_yolo_for_other_session_while_first_in_flight_is_dropped",
+    "j_malformed_read_paints_on_pill",
+    "j2_malformed_read_hides_on_pill",
+    "k1_prompt_workspace_path_install_keeps_stale_pill",
+    "k2_switch_to_workspace_install_keeps_stale_pill",
+    "k3_prompt_new_file_install_keeps_stale_pill",
+    "k4_prompt_new_folder_install_keeps_stale_pill",
+    "k5_apperror_rotation_keeps_stale_pill_and_skips_read",
+    "l_malformed_read_never_toggles",
 ]
 
 
@@ -72,6 +91,10 @@ def _run(name):
         "control_streaming_load_shows_own_state",
         # A disable the server rejects keeps the authoritative error payload.
         "control_failed_pill_disable_keeps_authoritative_state",
+        # The /yolo in-flight guard is released after a failure or a stale read.
+        "control_yolo_guard_released_after_failure_and_stale_switch",
+        # A same-session apperror keeps the view and makes no extra YOLO read.
+        "control_apperror_same_session_keeps_view_without_read",
     ],
 )
 def test_controls(name):
