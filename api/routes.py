@@ -25,6 +25,7 @@ import sqlite3
 import stat as _stat
 import subprocess
 import sys
+import itertools
 import threading
 import time
 import uuid
@@ -436,7 +437,20 @@ def _session_counts_toward_pin_quota(session) -> bool:
     return not _hide_from_default_sidebar(row)
 
 
-def _mirror_to_state_db(session, field: str, value) -> None:
+# Save-order tickets per (profile, field, state.db id): a lineage mirror writes rows other
+# session ids own, so a mirror whose save predates the last write to any of them is stale.
+_MIRROR_ORDER_LOCK = threading.Lock()
+_MIRROR_TICKETS = itertools.count(1)
+_MIRRORED_TICKET: dict = {}
+
+
+def _mirror_ticket() -> int:
+    """Take right after the sidecar save, under the session lock."""
+    with _MIRROR_ORDER_LOCK:
+        return next(_MIRROR_TICKETS)
+
+
+def _mirror_to_state_db(session, field: str, value, ticket=None) -> None:
     """Best-effort: the sidecar is authoritative; Desktop and the CLI read ``state.db``.
 
     Runs under the session lock: the current sidecar value is resolved first and a
@@ -446,7 +460,9 @@ def _mirror_to_state_db(session, field: str, value) -> None:
     the sidecar so the sidebar can tell a Desktop/CLI edit (state.db moved off the recorded
     value) from a lost mirror.
     """
-    from api.state_sync import sync_session_field
+    from api.state_sync import mirror_target_ids, sync_session_field
+    if ticket is None:
+        ticket = _mirror_ticket()
     sid = str(_session_field(session, "session_id", "") or "").strip()
     profile = str(_session_field(session, "profile", None) or "").strip() or "default"  # legacy rows are root's
     try:
@@ -471,7 +487,13 @@ def _mirror_to_state_db(session, field: str, value) -> None:
                 return  # deleted (or never persisted): do not resurrect it anywhere
             if superseded(current):
                 return  # a newer operation owns the field: do not write or record this value
-            landed = sync_session_field(sid, field, value, profile=profile)
+            with _MIRROR_ORDER_LOCK:
+                keys = [(profile, field, i) for i in mirror_target_ids(sid, field, profile)]
+                if any(_MIRRORED_TICKET.get(k, 0) > ticket for k in keys):
+                    return  # a later save of another lineage member already mirrored
+                landed = sync_session_field(sid, field, value, profile=profile)
+                if landed:
+                    _MIRRORED_TICKET.update(dict.fromkeys(keys, ticket))
             if not landed and field not in ("pinned", "archived"):
                 return
             # A missed flag write records state.db as still holding the opposite, so an
@@ -489,9 +511,9 @@ def _mirror_to_state_db(session, field: str, value) -> None:
         logger.warning("state.db mirror skipped for %s.%s", sid, field, exc_info=True)
 
 
-def _mirror_session_title(session) -> None:
+def _mirror_session_title(session, ticket=None) -> None:
     """Mirror a manual rename as a user title; a reset clears it so auto titles apply again."""
-    _mirror_to_state_db(session, "title", session.title if session.manual_title else None)
+    _mirror_to_state_db(session, "title", session.title if session.manual_title else None, ticket)
 
 
 def _adopt_state_db_flag(sidecar: bool, mirrored, db: bool) -> bool:
@@ -21135,8 +21157,9 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            ticket = _mirror_ticket()
         _sync_session_title_to_insights(s)
-        _mirror_session_title(s)
+        _mirror_session_title(s, ticket)
         publish_session_list_changed(
             "session_rename",
             profile=getattr(s, "profile", None),
@@ -22978,7 +23001,8 @@ def handle_post(handler, parsed) -> bool:
             s.pinned = pin_requested
             s.save()
             _publish_saved_session(body["session_id"], s)
-        _mirror_to_state_db(s, "pinned", pin_requested)
+            ticket = _mirror_ticket()
+        _mirror_to_state_db(s, "pinned", pin_requested, ticket)
         publish_session_list_changed(
             "session_pin",
             profile=getattr(s, "profile", None),
@@ -23231,7 +23255,8 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-        _mirror_to_state_db(s, "archived", bool(s.archived))
+            ticket = _mirror_ticket()
+        _mirror_to_state_db(s, "archived", bool(s.archived), ticket)
         publish_session_list_changed(
             "session_archive",
             profile=getattr(s, "profile", None),

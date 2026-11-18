@@ -443,6 +443,23 @@ _MIRROR_UPDATES = {
 }
 
 
+def mirror_target_ids(session_id: str, field: str, profile: Optional[str] = None) -> set:
+    """Ids a ``sync_session_field`` call would write: the compression lineage for flags, else the row."""
+    if field not in ("pinned", "archived"):
+        return {session_id}
+    try:
+        db_path = _resolve_state_db_path(profile)
+        if db_path is None:
+            return {session_id}
+        with closing(open_state_db_readonly(db_path)) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            sql = _lineage_sql(columns) + " SELECT id FROM anc UNION SELECT id FROM des"
+            return {str(row[0]) for row in conn.execute(sql, (session_id, session_id))} | {session_id}
+    except Exception:
+        logger.debug("Failed to read the lineage of %s", session_id, exc_info=True)
+        return {session_id}
+
+
 def sync_session_field(session_id: str, field: str, value, profile: Optional[str] = None) -> bool:
     """Mirror a pin, archive or manual title into *profile*'s state.db row; True when it landed.
 
