@@ -1165,6 +1165,26 @@ function _clearComposerAfterQueuedSelectionSend(){
   if(typeof autoResize==='function') autoResize();
 }
 
+// After an awaited enqueue: clear the on-screen composer only if it still shows the chat and the
+// exact draft that was submitted; otherwise just drop that chat's stored draft. (The user may
+// have switched chats or kept typing while the request was in flight.)
+function _clearComposerIfStillSubmitted(sid,text){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  const sameChat=!!(S.session&&S.session.session_id===sid);
+  if(sameChat&&composer&&String(composer.value||'').trim()===String(text||'').trim()){
+    _clearComposerAfterQueuedSelectionSend(sid);
+  } else if(typeof _clearComposerDraft==='function'){
+    _clearComposerDraft(sid,String(text||''),[]);
+  }
+}
+// Cancel one specific stream by id (the chat that owns it may no longer be on screen).
+async function _cancelStreamById(streamId){
+  try{
+    const r=await fetch(new URL('api/chat/cancel?stream_id='+encodeURIComponent(streamId),document.baseURI||location.href).href,{credentials:'include'});
+    return !!(r&&r.ok);
+  }catch(_){return false;}
+}
+
 function _flushSelectionBlocksToComposer(){
   if(!_pendingSelections.length)return;
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
@@ -1723,13 +1743,14 @@ async function send(){
         // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so the queue drains it as the next turn.
-        // Text-only, non-continuation follow-ups go to the backend FIFO (durable; nothing is
-        // cleared or cancelled unless the server accepted it). Attachments and goal
-        // continuations (#7855 token) cannot be held server-side and keep the browser queue.
+        // Everything the async enqueue could outlive is captured first: the owning chat, the
+        // submitted draft and the stream to cancel (the user may switch chats during the await).
         const _sid=S.session.session_id;
-        if(!S.pendingFiles.length&&!_goalContinuationId){
+        const _streamId=S.activeStreamId;
+        if(_canServerQueue(_sid,S.pendingFiles,_goalContinuationId)){
+          // Backend FIFO: nothing is cleared or cancelled unless the server accepted it.
           if(!await enqueueServerFollowup(_sid,text)) return;
-          _clearComposerAfterQueuedSelectionSend(_sid);
+          _clearComposerIfStillSubmitted(_sid,text);
         } else {
           const _modelState=_chatPayloadModelState();
           // #7855 (round 6): this invocation may itself BE the continuation drain
@@ -1742,8 +1763,12 @@ async function send(){
           _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
           S.pendingFiles=[];renderTray();
         }
-        if(S.activeStreamId&&typeof cancelStream==='function'){
-          if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
+        if(_streamId&&typeof cancelStream==='function'){
+          // Cancel the stream that was running when the message was submitted, never whatever
+          // chat is on screen now.
+          const _onScreen=S.session&&S.session.session_id===_sid&&S.activeStreamId===_streamId;
+          const _cancelled=_onScreen?await cancelStream('busy-interrupt'):await _cancelStreamById(_streamId);
+          if(_cancelled) showToast(t('busy_interrupt_confirm'),2000);
           else showToast(t('cancel_failed'),null,'error');
         } else {
           showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
@@ -1753,10 +1778,12 @@ async function send(){
         // active or _trySteer is unavailable. Text-only follow-ups go to the backend FIFO
         // (durable, drained server-side, same as Telegram/Discord); attachment follow-ups and
         // goal continuations (#7855 token) cannot be held server-side and stay browser-queued.
+        // A message that arrives while browser-held entries exist joins that browser queue so
+        // the two stores never reorder (server entries always precede browser ones).
         const _sid=S.session.session_id;
-        if(!S.pendingFiles.length&&!_goalContinuationId){
+        if(_canServerQueue(_sid,S.pendingFiles,_goalContinuationId)){
           if(!await enqueueServerFollowup(_sid,text)) return; // toast shown; composer keeps the text
-          _clearComposerAfterQueuedSelectionSend(_sid);
+          _clearComposerIfStillSubmitted(_sid,text);
         } else {
           const _modelState=_chatPayloadModelState();
           // #7855 (round 6): same contract as the interrupt branch — a

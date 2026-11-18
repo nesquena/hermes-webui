@@ -85,7 +85,7 @@ class TestQueueRestore:
         """Every surviving entry goes to the server FIFO (idempotent); the old restore kept
         only the first entry in the composer and silently dropped the rest."""
         # the composer restore is now reserved for goal continuations (token can't live server-side)
-        assert "const _first=_cont[0];" in sess_src
+        assert "const _draftEntries=[..._cont,..._withFiles];" in sess_src
         assert "const _first=_fresh[0];" not in sess_src
         assert "migrateLocalQueueToServer(sid,_plain)" in sess_src
 
@@ -96,7 +96,7 @@ class TestQueueRestore:
     def test_restore_wrapped_in_try_catch(self):
         """Storage access must be wrapped in try/catch (private browsing may block it)."""
         assert "catch(_e){" in sess_src
-        assert "queue-migration-deferred" in sess_src  # a failed hand-over keeps the browser copy
+        assert "_retry_migrate:true" in sess_src  # a partial hand-over keeps exactly the unaccepted entries
 
     def test_delete_session_clears_persisted_queue_after_success(self):
         """Deleting a session must clear localStorage-backed queue state after the API succeeds."""

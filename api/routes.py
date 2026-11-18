@@ -21594,8 +21594,6 @@ def handle_post(handler, parsed) -> bool:
         # and would otherwise recreate the session being deleted.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
-        from api.followup_queue import discard_session as _discard_followups
-        _discard_followups(sid)  # pending follow-ups die with the session
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
@@ -21659,6 +21657,14 @@ def handle_post(handler, parsed) -> bool:
             # Prune the completion-dedup entry too. The reaper sweeps it once the
             # completion is delivered (drained from PENDING); a session deleted
             # while a completion is still pending would otherwise keep its entry.
+            try:
+                # Pending follow-ups die with the session, but only now that the delete is durable
+                # (a refused/failed delete must keep them).
+                from api.followup_queue import discard_session as _discard_followups
+
+                _discard_followups(sid)
+            except Exception:
+                logger.debug("Failed to discard follow-up queue for deleted session %s", sid)
             try:
                 from api.background_process import forget_bg_task_completion_dedup
 

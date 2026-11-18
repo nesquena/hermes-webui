@@ -3506,40 +3506,51 @@ async function loadSession(sid){
           const _lastMsg=S.messages.slice().reverse()
             .find(m=>m&&m.role==='assistant');
           const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-          // Plain follow-ups: hand EVERY surviving entry to the backend FIFO (idempotent).
-          // The old restore kept only the first in the composer and silently dropped the rest.
-          // On failure the browser copy is kept and retried on the next load.
-          const _plain=_fresh.filter(e=>!(e&&e.goal_continuation_id));
+          // `_retry_migrate` marks entries a previous load could not hand to the backend: they are
+          // unsent by definition, so the "older than the last reply" staleness guard must not drop them.
+          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst||e._retry_migrate);
+          // Entries that carry a goal continuation token, or attachments (File objects do not
+          // survive a refresh), cannot run unattended on the server: they come back as a draft.
+          const _isFile=e=>e&&Array.isArray(e.files)&&e.files.some(Boolean);
           const _cont=_fresh.filter(e=>e&&e.goal_continuation_id);
+          const _withFiles=_fresh.filter(e=>!(e&&e.goal_continuation_id)&&_isFile(e));
+          const _plain=_fresh.filter(e=>!(e&&e.goal_continuation_id)&&!_isFile(e));
+          let _keep=[];
           if(_plain.length&&typeof migrateLocalQueueToServer==='function'){
-            const _migrated=await migrateLocalQueueToServer(sid,_plain);
-            if(_migrated<0){
-              if(typeof showToast==='function') showToast('Could not restore queued messages yet — will retry',3500,'warning');
-              throw new Error('queue-migration-deferred');
+            const _r=await migrateLocalQueueToServer(sid,_plain);
+            if(_r.rest.length){
+              // Partial hand-over: keep exactly the unaccepted entries (the accepted ones are
+              // already on the server and must not be re-sent or re-shown).
+              _keep=_r.rest.map(e=>({...e,_retry_migrate:true}));
+              if(typeof showToast==='function') showToast('Could not restore all queued messages yet — will retry',3500,'warning');
             }
-            if(_migrated>0&&typeof showToast==='function') showToast(_migrated>1?`${_migrated} queued messages restored`:'Queued message restored',2500);
+            if(_r.accepted>0&&typeof showToast==='function') showToast(_r.accepted>1?`${_r.accepted} queued messages restored`:'Queued message restored',2500);
           }
-          // Goal continuations carry a token the server queue cannot hold: keep upstream's
-          // draft restore (#7855 round 5) so the ID rides on the composer with its exact text.
-          if(_cont.length){
-            const _first=_cont[0];
+          // Draft restore (#7855 round 5 for continuations): the ID rides on the composer element
+          // together with the exact text it was restored for.
+          const _draftEntries=[..._cont,..._withFiles];
+          if(_draftEntries.length){
+            const _first=_draftEntries[0];
             const _msg=$&&$('msg');
             if(_msg&&_first.text&&!_msg.value){
-              _msg.value=_first.text||'';
+              _msg.value=_draftEntries.length>1&&!_first.goal_continuation_id
+                ? _draftEntries.filter(e=>!e.goal_continuation_id).map(e=>e.text||'').filter(Boolean).join('\n\n')
+                : (_first.text||'');
               if(typeof _setRestoredGoalContinuationDraft==='function'){
-                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'');
+                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_msg.value);
               }
               if(typeof autoResize==='function') autoResize();
-              if(typeof showToast==='function') showToast('Queued message restored — review and send when ready');
+              if(typeof showToast==='function') showToast(_withFiles.length&&!_cont.length?'Queued message restored — re-attach files, review and send when ready':'Queued message restored — review and send when ready');
             }
           }
-          if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
+          if(_keep.length){
+            // Re-persist only what the server did not take; the next load retries it.
+            if(typeof _persistSessionQueueStorage==='function') _persistSessionQueueStorage(sid,_keep);
+          } else if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
         }
       }catch(_e){
-        // A deferred migration keeps the browser copy for the next load; any other
-        // failure falls back to the old behaviour (clear, never re-run stale entries).
-        if(!(_e&&_e.message==='queue-migration-deferred')&&typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
+        // Any failure here: never re-run stale entries (old behaviour).
+        if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
       }
     }
     // Backend queue is the source of truth for follow-ups: render it on every load/refresh/reconnect.

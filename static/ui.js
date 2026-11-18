@@ -294,8 +294,18 @@ function shiftQueuedSessionMessage(sid){
 // (same behaviour as Telegram/Discord busy_input_mode=queue), so they survive
 // refresh/tab close and run in order even when no tab is open. SESSION_QUEUES
 // only mirrors them (entries tagged _server_id) for display.
+// Server entries that still WILL run. A failed entry is skipped by the backend (it waits for an
+// explicit retry), so it must not hold back browser-held work.
 function _hasServerQueueEntries(sid){
-  return _getSessionQueue(sid,false).some(e=>e&&e._server_id);
+  return _getSessionQueue(sid,false).some(e=>e&&e._server_id&&e._status!=='failed');
+}
+function _hasBrowserQueueEntries(sid){
+  return _getSessionQueue(sid,false).some(e=>e&&!e._server_id);
+}
+// One ordered sequence across both stores: a message may go to the backend FIFO only when it is
+// text-only, not a goal continuation, and no browser-held entry is waiting ahead of it.
+function _canServerQueue(sid,files,goalContinuationId){
+  return !(files&&files.length)&&!goalContinuationId&&!_hasBrowserQueueEntries(sid);
 }
 function _applyServerQueue(sid,items){
   const local=_getSessionQueue(sid,false).filter(e=>e&&!e._server_id);
@@ -337,21 +347,24 @@ async function _serverQueueAction(sid,action,id){
     syncServerQueue(sid);
   }
 }
-// Pre-server-queue browsers left entries in sessionStorage/localStorage. Hand every
-// one to the backend once (idempotent client_id) instead of the old restore that
-// kept only the first and dropped the rest. Resolves to the number migrated.
+// Pre-server-queue browsers left entries in sessionStorage/localStorage. Hand every text-only
+// one to the backend once (idempotent client_id) instead of the old restore that kept only the
+// first and dropped the rest. Resolves to {accepted, rest}: `rest` are the entries the server did
+// NOT accept (the first failure and everything after it) so the caller can keep exactly those.
 async function migrateLocalQueueToServer(sid,entries){
-  let n=0;
-  for(const e of (entries||[])){
+  const list=Array.isArray(entries)?entries:[];
+  let accepted=0;
+  for(let i=0;i<list.length;i++){
+    const e=list[i];
     const text=String(e&&(e.text||e.message||e.content)||'').trim();
-    if(!text) continue;
+    if(!text){continue;}
     const cid='mig-'+(e._queued_at||0)+'-'+text.length+'-'+text.slice(0,16);
     try{
       await api('/api/chat/queue',{method:'POST',body:JSON.stringify({session_id:sid,text,client_id:cid})});
-      n++;
-    }catch(_){return -1;}  // keep the browser copy; retried on next load
+      accepted++;
+    }catch(_){return {accepted,rest:list.slice(i)};}
   }
-  return n;
+  return {accepted,rest:[]};
 }
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
@@ -12050,7 +12063,7 @@ function setBusy(v){
       const _sp=syncServerQueue(sid);
       // Hand over to browser-held entries once the backend FIFO has fully drained.
       if(_serverOwns) _sp.then(items=>{
-        if(items&&!items.length&&!S.busy&&S.session&&S.session.session_id===sid&&getQueuedSessionCount(sid)>0){_queueDrainSid=sid;setBusy(false);}
+        if(items&&!items.some(i=>i.status!=='failed')&&!S.busy&&S.session&&S.session.session_id===sid&&getQueuedSessionCount(sid)>0){_queueDrainSid=sid;setBusy(false);}
       });
     }
     const next=sid&&_isViewedSid&&!_serverOwns?shiftQueuedSessionMessage(sid):null;

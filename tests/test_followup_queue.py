@@ -23,11 +23,18 @@ def fqenv(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "STATE_DIR", tmp_path)
     monkeypatch.setattr(fq, "_START_RETRY_DELAY", 0.01)
 
+    class Sess:
+        gateway_run = None
+        pending_user_message = None
+        messages = []
+
     class Env:
         active = False          # is a turn running for SID
         started = []            # texts handed to start_session_turn, in order
         status = 200            # status start_session_turn returns
         lock = threading.Lock()
+        session = Sess()        # None => the session no longer exists
+        calls = 0
 
     env = Env()
     env.started = []
@@ -36,10 +43,13 @@ def fqenv(tmp_path, monkeypatch):
     import api.routes as routes
 
     monkeypatch.setattr(bp, "_session_has_active_turn", lambda sid: env.active)
+    monkeypatch.setattr(fq, "_load_session", lambda sid: env.session)
+    fq._DRAIN_REQUESTED.clear()
 
     def fake_start(session_id, message, **kw):
         with env.lock:
             assert kw.get("source") == "queued_followup"
+            env.calls += 1
             if env.status == 200:
                 env.started.append(message)
                 env.active = True  # the new turn is now running
@@ -87,8 +97,8 @@ def test_multiple_messages_run_fifo_one_per_turn(fqenv):
         fq.enqueue(SID, t)
     for expected in (["one"], ["one", "two"], ["one", "two", "three"]):
         assert _finish_turn(fqenv) is True
-        assert _wait(lambda: fqenv.started == expected), fqenv.started
-        assert _wait(lambda: len(fq.list_entries(SID)) == 3 - len(expected))
+        assert _wait(lambda exp=expected: fqenv.started == exp), fqenv.started
+        assert _wait(lambda exp=expected: len(fq.list_entries(SID)) == 3 - len(exp))
     assert _finish_turn(fqenv) is False  # nothing left
 
 
@@ -150,8 +160,8 @@ def test_409_keeps_entry_in_place_for_next_teardown(fqenv):
     assert _wait(lambda: fqenv.started == ["first"])
 
 
-def test_failed_start_is_reported_and_retryable(fqenv):
-    fqenv.status = 500
+def test_rejected_start_is_reported_and_retryable(fqenv):
+    fqenv.status = 400  # the server rejected it outright: visible failure, user can retry
     fq.enqueue(SID, "bad")
     fq.drain_followup_queue_for_session(SID)
     assert _wait(lambda: fq.list_entries(SID)[0]["status"] == "failed")
@@ -160,6 +170,16 @@ def test_failed_start_is_reported_and_retryable(fqenv):
     assert fq.retry(SID, fq.list_entries(SID)[0]["id"])
     assert fq.drain_followup_queue_for_session(SID) is True
     assert _wait(lambda: fqenv.started == ["bad"])
+
+
+def test_server_error_is_retried_in_bounded_rounds_not_failed_at_once(fqenv):
+    fqenv.status = 500  # e.g. Gateway not ready yet: keep the message, count the round
+    fq.enqueue(SID, "later")
+    fq.drain_followup_queue_for_session(SID)
+    assert _wait(lambda: fq.list_entries(SID)[0]["status"] == "queued")
+    fqenv.status = 200
+    assert fq.drain_followup_queue_for_session(SID) is True
+    assert _wait(lambda: fqenv.started == ["later"])
 
 
 def test_stale_processing_entry_is_recovered(fqenv):
@@ -283,3 +303,108 @@ def test_get_queue_self_heals_a_stranded_idle_queue(fqenv, monkeypatch):
         query = f"session_id={SID}"
     routes.handle_get(object(), P)
     assert _wait(lambda: fqenv.started == ["stranded"])
+
+
+# ── review-driven hardening ──────────────────────────────────────────────────
+
+def test_drain_refuses_while_a_gateway_turn_awaits_recovery(fqenv):
+    """A disconnected Gateway turn keeps gateway_run/pending_user_message on the record so it can
+    be re-attached; a follow-up must not replace it, from ANY drain trigger."""
+    fqenv.session.gateway_run = {"stream_id": "old"}
+    fq.enqueue(SID, "wait for recovery")
+    assert fq.drain_followup_queue_for_session(SID) is False
+    assert fqenv.started == [] and fq.list_entries(SID)[0]["status"] == "queued"
+    fqenv.session.gateway_run = None  # recovered/settled
+    fqenv.session.pending_user_message = "still pending"
+    assert fq.drain_followup_queue_for_session(SID) is False
+    fqenv.session.pending_user_message = None
+    assert fq.drain_followup_queue_for_session(SID) is True
+    assert _wait(lambda: fqenv.started == ["wait for recovery"])
+
+
+def test_consumed_client_id_cannot_run_twice_after_response_loss(fqenv):
+    fqenv.active = False
+    fq.enqueue(SID, "once", client_id="c-resp-lost")
+    assert fq.drain_followup_queue_for_session(SID) is True
+    assert _wait(lambda: fqenv.started == ["once"] and fq.list_entries(SID) == [])
+    entry, err = fq.enqueue(SID, "once", client_id="c-resp-lost")  # client's network retry
+    assert err is None and entry["status"] == "started"
+    assert fq.list_entries(SID) == [] and fqenv.started == ["once"]
+
+
+def test_consumed_ids_expire_and_are_bounded(fqenv, monkeypatch):
+    fqenv.active = True
+    fq.enqueue(SID, "x", client_id="old")
+    fq.complete(SID, fq.list_entries(SID)[0]["id"])
+    monkeypatch.setattr(fq, "DONE_ID_TTL_SECS", 0.0)
+    e, _ = fq.enqueue(SID, "x", client_id="old")  # expired id no longer blocks a deliberate resend
+    assert e["status"] == "queued"
+
+
+def test_release_race_redrains_when_the_ending_turn_asked(fqenv):
+    """The ending turn's teardown hit a mid-claim entry and asked for a retry: the claimer must
+    re-drain after it releases (no sleeping, no lost wake-up)."""
+    fq.enqueue(SID, "raced")
+    claimed = fq.claim_next(SID)
+    assert fq.claim_next(SID) is None and SID in fq._DRAIN_REQUESTED  # teardown's refused drain
+    fq.release(SID, claimed["id"], count_round=True)
+    fq._redrain_if_requested(SID)
+    assert _wait(lambda: fqenv.started == ["raced"])
+
+
+def test_stuck_409_is_bounded_then_failed_not_looped(fqenv):
+    fqenv.status = 409  # stale active-stream id: the session never accepts a start
+    fq.enqueue(SID, "never")
+    for _ in range(fq.MAX_START_ROUNDS + 2):
+        fq.drain_followup_queue_for_session(SID)
+        _wait(lambda: fq.list_entries(SID)[0]["status"] != "processing")
+    e = fq.list_entries(SID)[0]
+    assert e["status"] == "failed" and "busy" in e["error"]
+    calls = fqenv.calls
+    fq.drain_followup_queue_for_session(SID)
+    time.sleep(0.2)
+    assert fqenv.calls == calls  # failed entries are not retried automatically
+
+
+def test_deleted_session_queue_is_dropped(fqenv):
+    fq.enqueue(SID, "orphan")
+    fqenv.session = None
+    assert fq.drain_followup_queue_for_session(SID) is False
+    assert fq.list_entries(SID) == []
+    fqenv.session = type("S", (), {"gateway_run": None, "pending_user_message": None, "messages": []})()
+    fq.enqueue(SID, "again")
+    fqenv.status = 404
+    fq.drain_followup_queue_for_session(SID)
+    assert _wait(lambda: fq.list_entries(SID) == [])
+
+
+def test_startup_recovery_resumes_orphans_without_rerunning_started_ones(fqenv):
+    # A: claimed, process died before the start -> must run.  B: its user turn was already persisted
+    # (start_session_turn saves it before complete()) -> must be completed, not run again.
+    fq.enqueue(SID, "never started", client_id="a")
+    fq.enqueue(SID, "already ran", client_id="b")
+    items = json.loads(fq._path(SID).read_text())
+    for it in items["items"]:
+        it["status"], it["claimed_at"] = "processing", time.time()  # fresh: not "stale"
+    fq._path(SID).write_text(json.dumps(items))
+    fqenv.session.messages = [{"role": "user", "content": "already ran", "_ts": time.time()}]
+    fq.recover_on_startup(delay=0)
+    assert _wait(lambda: fqenv.started == ["never started"], 4)
+    time.sleep(0.3)
+    assert fqenv.started == ["never started"]            # B was not re-run
+    assert "already ran" not in [e["text"] for e in fq.list_entries(SID)]
+
+
+def test_startup_recovery_is_wired_in_server():
+    src = Path(__file__).parent.parent.joinpath("server.py").read_text(encoding="utf-8")
+    assert "recover_on_startup" in src
+    assert src.index("resume_gateway_runs_after_restart()") < src.index("recover_on_startup")
+
+
+def test_session_delete_discards_queue_only_after_the_delete_is_durable():
+    src = Path(__file__).parent.parent.joinpath("api", "routes.py").read_text(encoding="utf-8")
+    i = src.index("_discard_followups(sid)")
+    # after every refusal/early-return of the delete flow, i.e. next to the "delete is durable" cleanup
+    assert src.rindex("share_revoke_failed", 0, i) < i
+    assert src.rindex("state_db_cleanup_failed", 0, i) < i
+    assert "Runtime cleanup only after the delete is durable" in src[i - 900:i]

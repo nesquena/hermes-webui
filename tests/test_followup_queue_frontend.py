@@ -1,6 +1,5 @@
 """Browser side of the server-side follow-up FIFO: runs the real ui.js queue functions in node."""
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -79,19 +78,65 @@ console.log(JSON.stringify({ok,call:apiCalls[0],q:SESSION_QUEUES.s1.map(e=>e._se
 def test_reconnect_migration_hands_over_every_entry_not_just_the_first():
     out = _run("""
 const entries=[{text:'A',_queued_at:10},{text:'B',_queued_at:11},{text:'C',_queued_at:12}];
-const n=await migrateLocalQueueToServer('s1',entries);
-console.log(JSON.stringify({n,texts:apiCalls.map(c=>c[1].text),ids:new Set(apiCalls.map(c=>c[1].client_id)).size}));
+const r=await migrateLocalQueueToServer('s1',entries);
+console.log(JSON.stringify({n:r.accepted,rest:r.rest.length,texts:apiCalls.map(c=>c[1].text),ids:new Set(apiCalls.map(c=>c[1].client_id)).size}));
 """)
-    assert out["n"] == 3 and out["texts"] == ["A", "B", "C"] and out["ids"] == 3
+    assert out["n"] == 3 and out["rest"] == 0 and out["texts"] == ["A", "B", "C"] and out["ids"] == 3
 
 
-def test_migration_failure_keeps_browser_copy_for_retry():
+def test_partial_migration_reports_exactly_the_unaccepted_entries():
     out = _run("""
-apiImpl=async()=>{throw new Error('down')};
-console.log(JSON.stringify({n:await migrateLocalQueueToServer('s1',[{text:'A',_queued_at:1}])}));
+let n=0; apiImpl=async()=>{ if(++n===2) throw new Error('down'); return {items:[]}; };
+const r=await migrateLocalQueueToServer('s1',[{text:'A',_queued_at:1},{text:'B',_queued_at:2},{text:'C',_queued_at:3}]);
+console.log(JSON.stringify({accepted:r.accepted,rest:r.rest.map(e=>e.text)}));
 """)
-    assert out["n"] == -1
-    assert "queue-migration-deferred" in SESS  # sessions.js keeps persisted copy on this signal
+    # A is on the server; B (the failure) and C are returned so the caller keeps exactly those
+    assert out == {"accepted": 1, "rest": ["B", "C"]}
+    # sessions.js re-persists only `rest`, marks it so the staleness guard cannot drop it
+    assert "_retry_migrate" in SESS and "e._retry_migrate" in SESS
+
+
+def test_one_ordered_sequence_across_browser_and_server_queues():
+    out = _run("""
+apiImpl=async()=>({items:[{id:'a',text:'S1',status:'queued',queued_at:1}]});
+await syncServerQueue('s1');
+const afterServerOnly=_canServerQueue('s1',[],'');          // text, nothing browser-held ahead -> server
+const withFile=_canServerQueue('s1',[{name:'f'}],'');       // attachment -> browser
+const withToken=_canServerQueue('s1',[],'abc');             // goal continuation -> browser
+queueSessionMessage('s1',{text:'F1',files:[{name:'f'}]});   // browser-held entry now waits
+const behindBrowser=_canServerQueue('s1',[],'');            // later text must NOT jump ahead of F1
+console.log(JSON.stringify({afterServerOnly,withFile,withToken,behindBrowser}));
+""")
+    assert out == {"afterServerOnly": True, "withFile": False, "withToken": False, "behindBrowser": False}
+
+
+def test_failed_server_entries_do_not_block_browser_held_work():
+    out = _run("""
+apiImpl=async()=>({items:[{id:'f',text:'bad',status:'failed',queued_at:1,error:'x'}]});
+await syncServerQueue('s1');
+queueSessionMessage('s1',{text:'F1',files:[{name:'f'}]});
+const owns=_hasServerQueueEntries('s1');
+const shifted=shiftQueuedSessionMessage('s1');
+console.log(JSON.stringify({owns,shifted:shifted&&shifted.text}));
+""")
+    assert out["owns"] is False and out["shifted"] == "F1"
+    assert "!items.some(i=>i.status!=='failed')" in UI  # the setBusy hand-off uses the same rule
+
+
+def test_send_captures_chat_draft_and_stream_before_the_enqueue_await():
+    interrupt = MSG[MSG.index("defaultMessageMode==='interrupt'"):]
+    assert interrupt.index("const _streamId=S.activeStreamId") < interrupt.index("await enqueueServerFollowup")
+    assert "_cancelStreamById(_streamId)" in interrupt  # never cancels whatever chat is on screen now
+    guard = MSG[MSG.index("function _clearComposerIfStillSubmitted"):MSG.index("async function _cancelStreamById")]
+    assert "S.session.session_id===sid" in guard and "composer.value" in guard
+    assert MSG.count("_clearComposerIfStillSubmitted(_sid,text)") == 2
+
+
+def test_slash_commands_keep_the_text_when_queueing_fails():
+    assert "_restoreSlashDraft(_sid,'/queue '+msg)" in CMD
+    assert "_restoreSlashDraft(_sid,'/interrupt '+msg)" in CMD
+    assert "_cancelStreamById(_streamId)" in CMD
+    assert "String(inp.value||'').trim()!==''" in CMD  # never over a newer draft
 
 
 def test_composer_only_clears_after_server_accepts_and_never_cancels_on_failure():
