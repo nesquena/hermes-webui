@@ -1624,3 +1624,92 @@ def test_kanban_editor_handles_scheduled_like_blocked():
     )
     # Blocked keeps behaving the same way — the precedent Scheduled follows.
     assert labels["kanban_status_blocked"] in out["blockedHint"]
+
+
+def test_kanban_status_actions_touch_target_meets_44px_minimum():
+    """UX44-F1: the Review detail button (rendered by _kanbanRenderTaskDetail
+    into .kanban-status-actions) measured 68.8x33.2 CSS px on phone/tablet —
+    below the project's 44px touch minimum. The shared
+    `.kanban-status-actions .btn` control must carry min-height:44px scoped
+    under the repo's existing coarse-pointer condition (cf. the
+    `@media (pointer:coarse)` touch precedents elsewhere in style.css), so
+    touch layouts pass without changing desktop (fine pointer) rendering.
+    """
+    assert "@media(pointer:coarse){.kanban-status-actions.btn{min-height:44px;" in COMPACT_STYLE, (
+        "touch layouts must scope min-height:44px to .kanban-status-actions .btn "
+        "under @media (pointer:coarse)"
+    )
+
+
+def _run_bulk_update(results):
+    """Run the real ``bulkUpdateKanban`` from ``static/panels.js`` in a Node ``vm`` context
+    with ``api`` answering ``{results}`` and return the toasts it showed."""
+    import json
+    import subprocess
+
+    values = _en_i18n_values("kanban_bulk_action", "kanban_bulk_refused")
+    script = (
+        "const __results = " + json.dumps(results) + ";\n"
+        "const __tMap = " + json.dumps(values) + ";\n"
+        r"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync('static/panels.js', 'utf8');
+const toasts = [];
+const calls = [];
+const context = {
+  console,
+  setInterval(){ return 1; },
+  clearInterval(){},
+  document: { querySelectorAll(){ return []; }, getElementById(){ return null; }, addEventListener(){} },
+  window: { addEventListener(){} },
+  t(key, ...args){
+    const val = __tMap[key] !== undefined ? __tMap[key] : key;
+    return String(val).replace(/\{(\d+)\}/g, (m, i) => (i in args ? String(args[i]) : m));
+  },
+  esc(v){ return String(v); }, jsArg(v){ return String(v); }, li(){ return ''; }, S: {},
+  $(id){ return id === 'kanbanBulkStatus' ? { value: 'review' } : null; },
+  api(url, opts){ calls.push([url, JSON.parse(opts.body)]); return Promise.resolve({results: __results, read_only: false}); },
+  showToast(msg, type){ toasts.push([msg, type || null]); },
+};
+vm.createContext(context);
+vm.runInContext(src, context);
+context._kanbanSelectedTaskIds = () => ['a', 'b', 'c'];
+context._kanbanBoardQuery = () => '';
+let reloaded = 0;
+context.loadKanban = async () => { reloaded += 1; };
+vm.runInContext('bulkUpdateKanban()', context).then(() => {
+  console.log(JSON.stringify({toasts, calls, reloaded}));
+});
+"""
+    )
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(result.stdout), values
+
+
+def test_bulk_update_surfaces_refused_cards_as_an_error():
+    """#8650: the bulk endpoint answers 200 with per-card results; refused cards must show an
+    error toast with the count and the first server error, not the neutral success toast."""
+    out, values = _run_bulk_update([
+        {"id": "a", "ok": True},
+        {"id": "b", "ok": False, "error": "this card is already being reviewed"},
+        {"id": "c", "ok": False, "error": "cannot request review from status: done"},
+    ])
+    expected = values["kanban_bulk_refused"].replace("{0}", "2").replace("{1}", "3").replace(
+        "{2}", "this card is already being reviewed")
+    assert out["toasts"] == [[expected, "error"]]
+    assert out["calls"] == [["/api/kanban/tasks/bulk", {"ids": ["a", "b", "c"], "status": "review"}]]
+    assert out["reloaded"] == 1
+
+
+def test_bulk_update_all_ok_keeps_the_neutral_toast():
+    out, values = _run_bulk_update([{"id": "a", "ok": True}, {"id": "b", "ok": True}, {"id": "c", "ok": True}])
+    assert out["toasts"] == [[values["kanban_bulk_action"], None]]
+    assert out["reloaded"] == 1
+
+
+def test_bulk_refused_key_exists_in_every_locale():
+    missing = [locale for locale, body in _locale_blocks_with_body(I18N)
+               if re.search(r"\bkanban_bulk_refused\s*:\s*'[^']*\{0\}[^']*\{1\}[^']*\{2\}", body) is None
+               and re.search(r"\bkanban_bulk_refused\s*:\s*'[^']*\{1\}[^']*\{0\}[^']*\{2\}", body) is None]
+    assert missing == []
