@@ -37,6 +37,7 @@ real ``api.models`` tombstone helpers, with an isolated SESSION_DIR; no HTTP, no
 browser, no live Agent.
 """
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -48,6 +49,9 @@ import pytest
 
 from api import models
 
+# What the process inherited, so teardown can be checked to restore it exactly.
+_ATTACHMENT_ROOT_AT_IMPORT = os.environ.get("HERMES_WEBUI_ATTACHMENT_DIR")
+
 
 @pytest.fixture
 def isolated_session_env():
@@ -57,7 +61,10 @@ def isolated_session_env():
     ``SESSION_INDEX_FILE`` at module load, so both module copies must be
     redirected.  The tombstone file lives under ``SESSION_DIR``
     (``_deleted_webui_sessions.json``), so this also isolates tombstone
-    reads/writes.  Everything is restored on teardown.
+    reads/writes.  The delete branch also removes the session's attachment
+    inbox, whose root comes from ``HERMES_WEBUI_ATTACHMENT_DIR`` independently
+    of ``SESSION_DIR``, so that root is redirected into the same temporary
+    dir before any delete can run.  Everything is restored on teardown.
     """
     import collections
 
@@ -67,6 +74,9 @@ def isolated_session_env():
     tmpdir = tempfile.mkdtemp()
     sessions_dir = Path(tmpdir) / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
+    attachments_dir = Path(tmpdir) / "attachments"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    old_attachment_root = os.environ.get("HERMES_WEBUI_ATTACHMENT_DIR")
 
     old = {
         "cfg_SESSION_DIR": _cfg.SESSION_DIR,
@@ -96,10 +106,15 @@ def isolated_session_env():
     _cfg.SESSIONS = collections.OrderedDict()
     models.SESSIONS = _cfg.SESSIONS
     routes.SESSIONS = _cfg.SESSIONS
+    os.environ["HERMES_WEBUI_ATTACHMENT_DIR"] = str(attachments_dir)
 
     try:
         yield sessions_dir
     finally:
+        if old_attachment_root is None:
+            os.environ.pop("HERMES_WEBUI_ATTACHMENT_DIR", None)
+        else:
+            os.environ["HERMES_WEBUI_ATTACHMENT_DIR"] = old_attachment_root
         _cfg.SESSION_DIR = old["cfg_SESSION_DIR"]
         if old["models_SESSION_DIR"] is not None:
             models.SESSION_DIR = old["models_SESSION_DIR"]
@@ -238,6 +253,48 @@ def test_delete_succeeds_and_records_the_tombstone_when_persistence_works(
     assert captured["status"] == 200, captured
     assert captured["payload"].get("ok") is True, captured
     assert sid in models._load_webui_deleted_session_tombstone()
+
+
+@pytest.fixture
+def inherited_attachment_root(monkeypatch):
+    """An attachment inbox configured before the session fixture is entered.
+
+    Stands in for a ``HERMES_WEBUI_ATTACHMENT_DIR`` the test process inherits;
+    the delete tests must never clean anything under it.
+    """
+    parent = Path(tempfile.mkdtemp())
+    root = parent / "inherited-attachments"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(root))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_delete_leaves_an_inherited_attachment_inbox_alone(
+    inherited_attachment_root, isolated_session_env, monkeypatch
+):
+    """The fixture owns attachment cleanup: an inherited inbox is untouched."""
+    from api.upload import _attachment_root
+
+    sid = "sess-delete-tombstone-ok"
+    inherited = inherited_attachment_root / sid / "keep.txt"
+    inherited.parent.mkdir(parents=True)
+    inherited.write_text("inherited attachment", encoding="utf-8")
+
+    fixture_root = _attachment_root()
+    owned = fixture_root / sid / "owned.txt"
+    owned.parent.mkdir(parents=True, exist_ok=True)
+    owned.write_text("fixture attachment", encoding="utf-8")
+
+    captured = _drive_delete(monkeypatch, sid)
+
+    assert captured["status"] == 200, captured
+    assert inherited.exists(), "the delete removed an inbox outside the fixture"
+    assert inherited.read_text(encoding="utf-8") == "inherited attachment"
+    assert not owned.parent.exists(), "the delete did not clean the session's inbox"
+    assert fixture_root.is_relative_to(isolated_session_env.parent.resolve())
 
 
 def test_messaging_session_delete_does_not_require_a_tombstone(
@@ -386,3 +443,4 @@ def test_fixture_restores_every_module_alias_after_teardown():
     )
     assert aliases["SESSIONS"] is models.SESSIONS is _cfg.SESSIONS
     assert aliases["LOCK"] is models.LOCK is _cfg.LOCK
+    assert os.environ.get("HERMES_WEBUI_ATTACHMENT_DIR") == _ATTACHMENT_ROOT_AT_IMPORT
