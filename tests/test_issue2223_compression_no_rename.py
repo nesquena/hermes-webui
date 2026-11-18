@@ -125,6 +125,94 @@ class TestNoRenameDuringCompression:
         assert continuation.parent_session_id == "fork_parent"
         assert not continuation.pre_compression_snapshot
 
+    def test_preservation_helper_marks_only_disjoint_continuations(self, tmp_path, monkeypatch):
+        """Persist a parent offset only when the full merge adds every child row."""
+        import api.models as models
+        import api.streaming as streaming
+        from api.models import Session
+
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+        monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+        monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+        models.SESSIONS.clear()
+
+        parent_messages = [
+            {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+            for idx in range(1000)
+        ]
+        parent = Session(session_id="disjoint_parent", messages=parent_messages)
+        parent.save(touch_updated_at=False)
+        disjoint_child = Session(
+            session_id="disjoint_child",
+            messages=[
+                {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+                for idx in range(500)
+            ],
+        )
+
+        assert streaming._preserve_pre_compression_snapshot(
+            disjoint_child,
+            "disjoint_parent",
+        ) is True
+        boundary = streaming._compression_disjoint_parent_boundary(
+            disjoint_child,
+            "disjoint_parent",
+        )
+        assert boundary == {
+            "parent_session_id": "disjoint_parent",
+            "message_count": len(parent_messages),
+            "visible_message_count": len(parent_messages),
+            "last_message_at": 999.0,
+            "parent_updated_at": parent.updated_at,
+            "child_message_count": len(disjoint_child.messages),
+            "child_messages_digest": models._compression_child_messages_digest(
+                disjoint_child.messages
+            ),
+            "canonical_parent_proof": True,
+        }
+
+        replay_parent = Session(session_id="replay_parent", messages=parent_messages)
+        replay_parent.save(touch_updated_at=False)
+        suffix_replay_child = Session(
+            session_id="suffix_replay_child",
+            messages=parent_messages[-100:]
+            + [
+                {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+                for idx in range(400)
+            ],
+        )
+
+        assert streaming._preserve_pre_compression_snapshot(
+            suffix_replay_child,
+            "replay_parent",
+        ) is True
+        assert streaming._compression_disjoint_parent_boundary(
+            suffix_replay_child,
+            "replay_parent",
+        ) is None
+
+        noncanonical_messages = list(parent_messages[:-1])
+        noncanonical_messages.insert(470, dict(noncanonical_messages[470]))
+        noncanonical_parent = Session(
+            session_id="noncanonical_parent",
+            messages=noncanonical_messages,
+        )
+        noncanonical_parent.save(touch_updated_at=False)
+        canonical_child = Session(
+            session_id="canonical_child",
+            messages=[
+                {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+                for idx in range(500)
+            ],
+        )
+
+        assert streaming._disjoint_compression_parent_message_count(
+            noncanonical_messages,
+            canonical_child.messages,
+        ) is None
+
 
 class TestMergePreservesHistory:
     """_merge_display_messages_after_agent_result must preserve all previous
@@ -182,3 +270,139 @@ class TestMergePreservesHistory:
         merged = merge(previous_display, previous_context, None, "test")
 
         assert merged == previous_display
+
+
+def test_cumulative_rotation_skips_disjoint_boundary_full_history_work(monkeypatch, tmp_path):
+    import api.models as models
+    import api.streaming as streaming
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+
+    old_sid = "cumulative_rotation_parent"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {index}", "timestamp": float(index)}
+        for index in range(1000)
+    ]
+    models.Session(session_id=old_sid, messages=parent_messages).save()
+    rotating = models.Session(
+        session_id=old_sid,
+        messages=[
+            *[dict(message) for message in parent_messages],
+            {"role": "user", "content": "next", "timestamp": 1000.0},
+            {"role": "assistant", "content": "answer", "timestamp": 1001.0},
+        ],
+    )
+    new_sid = "cumulative_rotation_child"
+    agent_lock = streaming._get_session_agent_lock(old_sid)
+    with streaming.LOCK:
+        models.SESSIONS.clear()
+        models.SESSIONS[old_sid] = rotating
+
+    full_parent_loads = 0
+    merge_calls = 0
+    real_load = models.Session.load.__func__
+    real_merge = streaming.merge_session_messages_append_only
+
+    def counted_load(cls, session_id):
+        nonlocal full_parent_loads
+        if session_id == old_sid:
+            full_parent_loads += 1
+        return real_load(cls, session_id)
+
+    def counted_merge(*args, **kwargs):
+        nonlocal merge_calls
+        merge_calls += 1
+        return real_merge(*args, **kwargs)
+
+    monkeypatch.setattr(models.Session, "load", classmethod(counted_load))
+    monkeypatch.setattr(streaming, "merge_session_messages_append_only", counted_merge)
+
+    assert streaming._migrate_compression_session_ownership(
+        rotating,
+        old_sid,
+        new_sid,
+        agent_lock,
+    ) is True
+
+    assert full_parent_loads == 0
+    assert merge_calls == 0
+    assert rotating.parent_session_id == old_sid
+    assert rotating.compression_disjoint_parent_boundary is None
+    assert models.SESSIONS[new_sid] is rotating
+
+
+@pytest.mark.parametrize("persisted_count", [True, False, 1.5, "1"])
+def test_marked_prefix_count_rejects_non_exact_integers(tmp_path, persisted_count):
+    import api.models as models
+
+    path = tmp_path / "malformed-count.json"
+    path.write_text(
+        json.dumps(
+            {
+                "session_id": "malformed-count",
+                "title": "Malformed count",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "_mc_v": models._MESSAGE_COUNT_MARKER,
+                "message_count": persisted_count,
+                "messages": [{"role": "user", "content": "one"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert models._prefix_message_count(path) is None
+
+
+@pytest.mark.parametrize("persisted_count", [True, False, 1.5, -1])
+def test_invalid_persisted_count_cannot_skip_compression_boundary(
+    persisted_count,
+):
+    import api.streaming as streaming
+
+    session = type(
+        "SessionStub",
+        (),
+        {
+            "messages": [
+                {"role": "assistant", "content": "parent", "timestamp": 1.0},
+                {"role": "user", "content": "next", "timestamp": 2.0},
+            ]
+        },
+    )()
+
+    assert streaming._compression_boundary_may_add_parent_rows(
+        session,
+        persisted_count,
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("persisted_count", "expected"),
+    [(0, False), (1, False), (2, True), (3, True)],
+)
+def test_exact_persisted_count_only_skips_for_a_strictly_longer_sequence(
+    persisted_count,
+    expected,
+):
+    import api.streaming as streaming
+
+    session = type(
+        "SessionStub",
+        (),
+        {
+            "messages": [
+                {"role": "assistant", "content": "parent", "timestamp": 1.0},
+                {"role": "user", "content": "next", "timestamp": 2.0},
+            ]
+        },
+    )()
+
+    assert streaming._compression_boundary_may_add_parent_rows(
+        session,
+        persisted_count,
+    ) is expected
