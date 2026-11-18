@@ -85,7 +85,8 @@ const _clearPendingSessionModel = clearPending;
 
 // ---- command helpers the extracted cmdGoal references ----
 const t = k => k;
-const showToast = () => {};
+const _toasts = [];
+const showToast = (msg, ms, type) => { _toasts.push({ msg, ms, type }); };
 const renderMessages = () => {};
 const clearLiveToolCards = () => {};
 const appendThinking = () => {};
@@ -202,6 +203,7 @@ const S = {
     };
     await cmdGoal('gate add uv run pytest');
     out.lastMessage = S.messages[S.messages.length - 1];
+    out.toasts = _toasts;
   } else if (scenario === 'kickoff_failed_shows_error') {
     // Goal set succeeded, the kickoff was refused and rolled back: the body still
     // carries the goal-set `message`, and api() throws with `error` as e.message.
@@ -299,9 +301,10 @@ def test_goal_kickoff_without_marker_sends_no_explicit_pick(driver_path):
 
 
 def test_goal_refusal_shows_server_message_not_error_code(driver_path):
-    """A refused /goal gate shows the server's explanation, not the bare error code."""
+    """A refused /goal gate shows the server's explanation, not the bare error code, and toasts with error style."""
     out = _run_scenario(driver_path, "gate_refused_shows_message")
     assert out["lastMessage"]["content"] == "**Goal command failed:** gate refused, goal unchanged"
+    assert out["toasts"] == [{"msg": "gate refused, goal unchanged", "ms": 3000, "type": "error"}]
 
 
 def test_goal_failed_kickoff_shows_error_not_goal_set_message(driver_path):

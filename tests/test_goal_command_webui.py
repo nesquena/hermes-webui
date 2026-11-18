@@ -1237,14 +1237,24 @@ def test_goal_command_payload_double_dash_sets_goal_starting_with_control_word(m
 
 
 @pytest.mark.parametrize("adapter_mode", ["", "legacy-journal", "runner-local"])
-def test_goal_endpoint_refuses_gate_without_kickoff_or_goal_change(monkeypatch, tmp_path, adapter_mode):
-    """POST /api/goal `gate add …` is a 400 refusal before any kickoff setup, in every adapter mode."""
+@pytest.mark.parametrize(
+    "gate_args",
+    [
+        "gate add uv run pytest tests/test_export.py",
+        "gate",
+        "gate\tadd uv run pytest tests/test_export.py",
+        "gate\nadd uv run pytest tests/test_export.py",
+    ],
+)
+def test_goal_endpoint_refuses_gate_without_kickoff_or_goal_change(monkeypatch, tmp_path, adapter_mode, gate_args):
+    """POST /api/goal `gate ...` is a 400 refusal before any kickoff setup, in every adapter mode."""
     from api import goals as webui_goals
     from api import routes
 
+    existing_gate = {"command": "uv run pytest", "kind": "pre-commit"}
     existing = SimpleNamespace(
         goal="ship the feature", status="active", turns_used=0, max_turns=20,
-        last_verdict=None, last_reason=None, paused_reason=None, gates=[],
+        last_verdict=None, last_reason=None, paused_reason=None, gates=[existing_gate],
     )
     set_calls = []
 
@@ -1284,7 +1294,7 @@ def test_goal_endpoint_refuses_gate_without_kickoff_or_goal_change(monkeypatch, 
         object(),
         {
             "session_id": "sid-goal-route",
-            "args": "gate add uv run pytest tests/test_export.py",
+            "args": gate_args,
             "workspace": str(tmp_path),
             "model": "gpt-5.5",
             "model_provider": "openai-codex",
@@ -1299,7 +1309,8 @@ def test_goal_endpoint_refuses_gate_without_kickoff_or_goal_change(monkeypatch, 
     assert "stream_id" not in result["payload"]
     assert "kickoff_prompt" not in result["payload"]
     assert set_calls == []
-    assert existing.goal == "ship the feature" and existing.gates == []
+    assert existing.goal == "ship the feature"
+    assert existing.gates == [existing_gate]
     assert not hasattr(session, "model_explicit_pick_signature")
 
 
