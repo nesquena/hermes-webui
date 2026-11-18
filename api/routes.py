@@ -138,27 +138,6 @@ def _sync_session_title_to_insights(session, *, rename: bool = False) -> None:
         logger.debug("Failed to update session title in state.db", exc_info=True)
 
 
-def _clear_session_title_in_insights(session) -> None:
-    """/api/session/clear: release state.db's stored title for the cleared conversation.
-
-    Only when ``sync_to_insights`` is on, the same opt-in that lets a rename write a
-    user title there. A rename's user title would otherwise hold the row for good on
-    storage-interface Agents (Refs #9157). Title only, through
-    ``api.state_sync.clear_session_title``: token totals and counts are left alone. A
-    read-only import's row belongs to its source session, so it is never touched.
-    """
-    if getattr(session, "read_only", False):
-        return
-    try:
-        if not load_settings().get("sync_to_insights"):
-            return
-        from api.state_sync import clear_session_title
-
-        clear_session_title(session.session_id, profile=getattr(session, "profile", None))
-    except Exception:
-        logger.debug("Failed to clear session title in state.db", exc_info=True)
-
-
 def _persist_generated_session_title(
     session,
     next_title: str,
@@ -21051,9 +21030,7 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-            # Mirror the rename while the session lock is held, so it stays ordered with a
-            # concurrent clear's title reset (Refs #9157). One store write, opt-in only.
-            _sync_session_title_to_insights(s, rename=True)
+        _sync_session_title_to_insights(s, rename=True)
         publish_session_list_changed(
             "session_rename",
             profile=getattr(s, "profile", None),
@@ -21904,9 +21881,6 @@ def handle_post(handler, parsed) -> bool:
                 except OSError:
                     logger.warning("session clear could not remove stale backup for %s", sid, exc_info=True)
             _publish_saved_session(sid, s)
-            # Release state.db's stored title while the session lock is still held, so
-            # a rename that follows this clear always syncs after it (Refs #9157).
-            _clear_session_title_in_insights(s)
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
         # I/O must not hold the session mutation lock.
