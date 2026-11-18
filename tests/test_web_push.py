@@ -263,6 +263,46 @@ def test_send_passes_pinned_session_and_vapid_and_prunes_expired(push_env, monke
     assert [s["endpoint"] for s in web_push.list_subscriptions()] == [APPLE]
 
 
+@pytest.mark.parametrize("revoke", ["unsubscribe", "transfer"])
+def test_session_fanout_rechecks_later_endpoint_ownership(push_env, monkeypatch, revoke):
+    _enable(monkeypatch, push_env)
+    _stub_pinned_session(monkeypatch)
+    for endpoint in (APPLE, FCM):
+        web_push.add_subscription(_sub(endpoint), owner=OWNER_A)
+    sent = []
+
+    def send(**kwargs):
+        sent.append(kwargs["subscription_info"]["endpoint"])
+        if len(sent) == 1:
+            if revoke == "unsubscribe":
+                web_push.remove_subscription(FCM, OWNER_A)
+            else:
+                web_push.add_subscription(_sub(FCM), owner=OWNER_B)
+
+    monkeypatch.setattr(web_push, "_pywebpush", lambda: (send, Exception))
+    assert web_push._send_to_all({"title": "x", "_owners": [OWNER_A]}) == 1
+    assert sent == [APPLE]
+
+
+def test_revocation_during_connection_preparation_closes_session_without_send(push_env, monkeypatch):
+    _enable(monkeypatch, push_env)
+    web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
+    closed, sent = [], []
+
+    class Session:
+        def close(self):
+            closed.append(True)
+
+    def prepare(endpoint):
+        web_push.remove_subscription(endpoint, OWNER_A)
+        return Session()
+
+    monkeypatch.setattr(web_push, "_pinned_requests_session", prepare)
+    monkeypatch.setattr(web_push, "_pywebpush", lambda: (lambda **kw: sent.append(kw), Exception))
+    assert web_push._send_to_all({"title": "x", "_owners": [OWNER_A]}) == 0
+    assert sent == [] and closed == [True]
+
+
 def test_delivery_is_off_thread_and_enqueue_never_blocks(push_env, monkeypatch):
     _enable(monkeypatch, push_env)
     started, release = threading.Event(), threading.Event()

@@ -97,6 +97,38 @@ def test_queued_cron_delivery_rechecks_consent(push_env, tmp_path, monkeypatch, 
     assert sent == []
 
 
+@pytest.mark.parametrize("revoke", ["opt_out", "unsubscribe", "transfer", "reconsent", "corrupt"])
+def test_mid_fanout_revocation_skips_later_endpoint(push_env, tmp_path, monkeypatch, revoke):
+    _enable(monkeypatch, push_env)
+    _stub_pinned_session(monkeypatch)
+    for endpoint in (APPLE, FCM):
+        web_push.add_subscription(_sub(endpoint), owner=OWNER_A)
+        web_push.set_cron_opt_in(endpoint, OWNER_A, tmp_path, True, now_ns=100)
+    payload = web_push.notification_payload("Cron output ready", "Task finished", owners=[OWNER_A])
+    payload.update(_cron_home=str(tmp_path.resolve()), _cron_stamp=200)
+    sent = []
+
+    def send(**kwargs):
+        sent.append(kwargs["subscription_info"]["endpoint"])
+        if len(sent) != 1:
+            return
+        if revoke == "opt_out":
+            web_push.set_cron_opt_in(FCM, OWNER_A, tmp_path, False)
+        elif revoke == "unsubscribe":
+            web_push.remove_subscription(FCM, OWNER_A)
+        elif revoke == "transfer":
+            web_push.add_subscription(_sub(FCM), owner=OWNER_B)
+        elif revoke == "reconsent":
+            web_push.set_cron_opt_in(FCM, OWNER_A, tmp_path, False)
+            web_push.set_cron_opt_in(FCM, OWNER_A, tmp_path, True, now_ns=300)
+        else:
+            (push_env / "webui_push_subscriptions.json").write_text("corrupt")
+
+    monkeypatch.setattr(web_push, "_pywebpush", lambda: (send, Exception))
+    assert web_push._send_to_all(payload) == 1
+    assert sent == [APPLE]
+
+
 def test_cron_delivery_strips_profile_routing_and_never_broadcasts(push_env, tmp_path, monkeypatch):
     _enable(monkeypatch, push_env)
     _stub_pinned_session(monkeypatch)

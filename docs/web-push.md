@@ -101,8 +101,9 @@ that device's consent; transferring an endpoint to a different device does not.
 Cron sends only generic text through the same forced-redaction payload builder
 and bounded delivery queue. It never reads prompts/results, job names, or output
 content. Internal profile routing metadata is stripped before network delivery.
-Opt-out/unsubscribe is checked again when a queued event reaches the sender.
-404/410 responses prune the subscription and its cron consent; unsubscribe is
+Opt-out/unsubscribe, endpoint ownership and profile consent are rechecked immediately
+before **each endpoint's send**, including after an earlier endpoint stalls in the
+same fanout. 404/410 responses prune the subscription and its cron consent; unsubscribe is
 idempotent. An already in-flight network request may finish after revocation.
 Unreadable/corrupt stores fail closed and are not overwritten.
 

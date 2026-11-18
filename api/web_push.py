@@ -696,11 +696,6 @@ def _send_to_all(payload: dict) -> int:
     if owners != ALL_OWNERS:
         wanted = {_clean_owner(o) for o in owners} - {""}
         subs = [s for s in subs if s["owner"] in wanted]
-    if cron_home is not None:
-        # Recheck consent at delivery, not just enqueue: opt-out/unsubscribe wins
-        # over an event waiting in the bounded queue. Never use unowned broadcast.
-        subs = [s for s in subs if s["owner"] and cron_home in s["cron_profiles"]
-                and type(cron_stamp) is int and s["cron_profiles"][cron_home] <= cron_stamp]
     webpush_fn, _ = _pywebpush()
     if not webpush_fn or not subs:
         return 0
@@ -719,8 +714,19 @@ def _send_to_all(payload: dict) -> int:
             logger.debug("Web Push endpoint rejected by SSRF guard", exc_info=True)
             continue
         try:
+            # Earlier sends (and DNS resolution) can block. Re-read this exact
+            # endpoint at its own send boundary, never trusting the fanout snapshot.
+            current = next((s for s in list_subscriptions()
+                            if s["endpoint"] == endpoint and s["owner"] == sub["owner"]), None)
+            if current is None:
+                continue
+            if cron_home is not None and (
+                not current["owner"] or cron_home not in current["cron_profiles"]
+                or type(cron_stamp) is not int or current["cron_profiles"][cron_home] > cron_stamp
+            ):
+                continue
             webpush_fn(
-                subscription_info={"endpoint": sub["endpoint"], "keys": sub["keys"]},
+                subscription_info={"endpoint": current["endpoint"], "keys": current["keys"]},
                 data=data,
                 vapid_private_key=_private_key(),
                 vapid_claims={"sub": subject()},
