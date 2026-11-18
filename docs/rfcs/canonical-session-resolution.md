@@ -59,6 +59,71 @@ correct visible session target, not moving execution ownership.
 | Continuation session | The active child/tip created after compression, usually represented by `continuation_session_id`, `_lineage_tip_id`, or newer lineage metadata. |
 | Lineage relation | Links such as `parent_session_id`, `_lineage_root_id`, `_lineage_tip_id`, and `_compression_segment_count` that connect rows belonging to one logical conversation. |
 
+### Reset successors
+
+A messaging conversation created after a user-visible reset is a separate
+top-level conversation, even when Hermes Agent retains `parent_session_id` as
+durable reset lineage. Sidebar projection must preserve that identifier and mark
+the exception explicitly as `relationship_type='reset_successor'` without
+emitting child-session metadata for a reset successor. Compression
+continuations remain one visible conversation, while explicit branch and
+delegate sessions remain nested children. The canonical reset marker is
+`_reset_from == parent_session_id`, including when the parent is outside the
+query window or has been reopened. A valid `_branched_from` or `_delegate_from`
+that names an earlier ancestor is inherited provenance, not a branch of this
+parent. A marker naming the current parent, an empty or malformed marker, a
+mismatched reset marker, or explicit `session_source='fork'` blocks reset
+classification before any fallback.
+When a matching parent is known to be a messaging `session_reset`, its source
+boundary also applies before canonical intent: a different or unknown child
+source is not that messaging reset successor. Canonical classification still
+works with a missing parent or after a same-source parent has been reopened.
+
+For older messaging `session_reset` rows, the existing messaging rule remains
+authoritative: sources must match, and either both non-empty `session_key`
+values match or chat/user/thread identity matches when a key is absent. Chat
+and user identity may come from `origin_chat_id`/`origin_user_id`; empty chat or
+user identity is not evidence. If the parent's end timestamp is present, the
+child cannot predate it. Valid ancestor branch/delegate markers do not block
+this messaging compatibility rule. A failed messaging check cannot fall through
+to the generic same-key inference and bypass its source boundary.
+
+Other legacy reset inference requires a reset end reason, the same non-empty
+`session_key`, no branch/delegate marker, and finite timestamps proving
+`child.started_at >= parent.ended_at`. Missing or invalid timestamps do not
+establish this generic legacy reset. A `source=tool` child
+always remains delegated work, even with a matching routing key, timestamps, or
+reset marker. Invalid model-config
+JSON (including excessive nesting) must not abort projection of other sessions.
+Canonical reset boundaries also stop compression traversal so independent
+conversations cannot share a lineage root or produce duplicate sidebar IDs.
+
+**Known upstream ambiguity:** Agent `reopen_session()` can still backfill the
+same `_reset_from` marker onto a markerless legacy branch created before a later
+reset boundary. Its current guard excludes explicit branch/delegate markers and
+tool children, but compares against the parent's start, not its reset boundary.
+After reopening clears the parent's end fields, this row is indistinguishable
+from a genuine historical reset using the fields above. This projection does
+not repair or rewrite that provenance; fixing it requires an Agent-owned durable
+discriminator. The production-composed regression in
+`tests/test_reset_lineage_agent_integration.py` records this remaining expected
+failure; passing ordinary WebUI tests is not evidence that it is resolved.
+The maintainer accepted shipping this limitation with a release note on
+[2026-11-02](https://github.com/nesquena/hermes-webui/pull/7179#issuecomment-6583312535),
+with a separate Agent-side provenance issue to follow. That decision does not
+turn the expected failure into a passing provenance contract.
+
+Sidebar source reconciliation keeps the state.db source authoritative for used
+WebUI branches. A plain `source='webui'` mirror must normalize the response to
+WebUI even if its sidecar still says `fork`; otherwise archiving the original
+can hide an independent, used branch. The retained `parent_session_id` drives
+its branch indicator independently of source. This does not rewrite the saved
+sidecar, remove Agent `child_session` relationships, or change unmirrored fork
+archive behavior. Source reconciliation remains uncapped in the session-list
+route. Other callers, including content search, also normalize beyond-cap fork
+sources through a cheap sessions-table lookup with no message aggregation or
+count overlay. Lineage enrichment keeps its configured top-N limit.
+
 ## Resolution Rules
 
 1. **Directly valid non-snapshot IDs stay stable.** If the requested session ID

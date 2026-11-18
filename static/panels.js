@@ -3462,8 +3462,11 @@ async function bulkUpdateKanban(){
   const status = $('kanbanBulkStatus') ? $('kanbanBulkStatus').value : '';
   if (!ids.length || !status) return;
   try {
-    await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
-    showToast(t('kanban_bulk_action'));
+    const res = await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
+    // The endpoint answers 200 with a per-card result; a refused card must not read as success.
+    const refused = (res && Array.isArray(res.results)) ? res.results.filter(r => r && r.ok === false) : [];
+    if (refused.length) showToast(t('kanban_bulk_refused', refused.length, ids.length, refused[0].error || ''), 'error');
+    else showToast(t('kanban_bulk_action'));
     await loadKanban(true);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
@@ -4239,7 +4242,10 @@ function _kanbanRenderTaskDetail(data){
   // touch/tablet user can move a task INTO the Scheduled column. It reuses
   // _kanbanColumnLabel + the same PATCH path, which the bridge routes through
   // the Agent's schedule_task() verb.
-  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'done', 'archived'].map(status =>
+  // 'review' is the touch path INTO the Review column for the same reason;
+  // the bridge routes it through request_review() so the reviewer handoff
+  // keeps its provenance instead of becoming a raw status write.
+  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'review', 'done', 'archived'].map(status =>
     `<button class="btn secondary" onclick="updateKanbanTask(${jsArg(task.id)},{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
   ).join('') + `<button class="btn secondary" onclick="blockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-header">
@@ -9822,6 +9828,8 @@ function _preferencesPayloadFromUi(){
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
   const showQuotaChipCb=$('settingsShowQuotaChip');
   if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
+  const quotaChipWindowSel=$('settingsQuotaChipWindow');
+  if(quotaChipWindowSel) payload.quota_chip_window=_normalizeQuotaChipWindow(quotaChipWindowSel.value);
   const showConversationOutlineCb=$('settingsShowConversationOutline');
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
@@ -10561,6 +10569,19 @@ async function loadSettingsPanel(){
             : ((typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null);
           void refreshProviderQuotaIndicator(provider);
         }
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const quotaChipWindowSel=$('settingsQuotaChipWindow');
+    if(quotaChipWindowSel){
+      quotaChipWindowSel.value=_normalizeQuotaChipWindow(settings.quota_chip_window);
+      window._quotaChipWindow=quotaChipWindowSel.value;
+      // Only meaningful while the chip is shown; the saved choice is kept either way.
+      quotaChipWindowSel.disabled=showQuotaChipCb?!showQuotaChipCb.checked:false;
+      if(showQuotaChipCb){showQuotaChipCb.addEventListener('change',function(){quotaChipWindowSel.disabled=!showQuotaChipCb.checked;},{once:false});}
+      quotaChipWindowSel.addEventListener('change',()=>{
+        window._quotaChipWindow=_normalizeQuotaChipWindow(quotaChipWindowSel.value);
+        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator(typeof _currentQuotaProvider==='function'?_currentQuotaProvider():undefined);
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -14197,6 +14218,7 @@ async function saveSettings(andClose){
     }
   }
   body.show_quota_chip=showQuotaChip===true;
+  body.quota_chip_window=_normalizeQuotaChipWindow(($('settingsQuotaChipWindow')||{}).value);
   body.show_conversation_outline=showConversationOutline===true;
   body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
