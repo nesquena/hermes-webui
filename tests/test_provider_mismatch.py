@@ -1018,7 +1018,9 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     import contextlib
     import io
     import json
+    import api.config as config
     import api.routes as routes
+    import api.run_drain as run_drain
 
     monkeypatch.setattr(
         routes,
@@ -1103,10 +1105,19 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
 
     handler = FakeHandler()
-    routes._handle_chat_start(
-        handler,
-        {"session_id": session.session_id, "message": "new turn"},
-    )
+    # #8904: FakeThread never runs the worker that unregisters the stream.
+    streams_before = set(config.STREAMS)
+    try:
+        routes._handle_chat_start(
+            handler,
+            {"session_id": session.session_id, "message": "new turn"},
+        )
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
     payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
 
     assert handler.status == 200
@@ -1117,6 +1128,7 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     assert captured_thread["args"][2] == "gpt-5.5"
     assert captured_thread["kwargs"]["model_provider"] == "openai-codex"
     assert save_calls[-1]["model_provider"] == "openai-codex"
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):

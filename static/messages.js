@@ -7493,6 +7493,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
+            // #9101: a compression rotation installs the continuation (an
+            // existing session): drop the old id's YOLO view, read the new one.
+            if(d.session.session_id&&d.session.session_id!==currentSid&&typeof _applyYoloState==='function'){_applyYoloState(d.session.session_id,false,{reset:true});_fetchYoloState(d.session.session_id);}
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
             // Same persist-before-offset trap as settle/cancel: refresh paging
@@ -8514,7 +8517,8 @@ async function _fetchYoloState(sid, opts) {
       readSeq: _yoloView.seq,
     };
     const data = await api('/api/session/yolo?session_id=' + encodeURIComponent(sid));
-    _applyYoloState(sid, !!(data && data.yolo_enabled), meta);
+    // A malformed answer leaves the view unchanged (as the POST paths do).
+    if (data && typeof data.yolo_enabled === 'boolean') _applyYoloState(sid, data.yolo_enabled, meta);
   } catch (_) { /* ignore: fire-and-forget, must never reject */ }
 }
 
