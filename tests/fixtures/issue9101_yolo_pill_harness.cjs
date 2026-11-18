@@ -136,6 +136,28 @@ function createTab(server, name, overrides = null, extraSrc = []) {
     'let _messageUserUnpinned = false; let _scrollPinned = true;',
     'let _messagesTruncated = false; let _oldestIdx = 0; let _loadingOlder = false;',
     extractFunction(sessionsJs, 'loadSession'),
+    // This branch routes every blank-page installer through the context-transition
+    // coordinator, so the harness needs those primitives (master's inlined
+    // /api/session/new no longer applies here). newSession() is stubbed to the same
+    // request shape the coordinator issues.
+    'let _contextTransitionGeneration = 0; let _contextTransitionTail = Promise.resolve();',
+    // Symbol is shadowed in this vm sandbox (its Proxy reports every global as
+    // present), so the marker is a plain frozen object with the same identity role.
+    'const _CONTEXT_TRANSITION_INTENT = Object.freeze({marker:"context-transition-intent"});',
+    extractFunction(sessionsJs, '_claimContextTransition'),
+    extractFunction(sessionsJs, '_runContextTransition'),
+    extractFunction(sessionsJs, '_captureContextTransitionOwner'),
+    extractFunction(sessionsJs, '_contextTransitionOwnerIsCurrent'),
+    'let _blankPageSessionInFlight = null;',
+    extractFunction(sessionsJs, '_ensureBlankPageSession'),
+    // Mirrors the install side effects master's inlined block performed: drop the
+    // staged toolsets, adopt the session, then reset YOLO to that session's own state.
+    'async function newSession(){ const r = await api("/api/session/new", {method:"POST", body:JSON.stringify({workspace:(S._profileDefaultWorkspace||""), worktree:false})});'
+      + ' if(r && r.session){ S._pendingSessionToolsets = null; S.session = r.session;'
+      + ' if(typeof _applyYoloState === "function") _applyYoloState(r.session.session_id, false, {reset:true});'
+      + ' S.messages = []; if(typeof syncTopbar === "function") syncTopbar();'
+      + ' if(typeof renderMessages === "function") renderMessages();'
+      + ' if(typeof renderSessionList === "function") await renderSessionList(); } return r; }',
     extractSection(messagesJs, '// ── YOLO mode state ──', 'async function toggleYoloFromApproval('),
     extractSection(commandsJs, '// ── YOLO mode toggle ──', '// ── Branch / fork command'),
     'function __state(){ const pill=$("yoloPill"); return {sid: S.session && S.session.session_id, yolo: _yoloEnabled,',
