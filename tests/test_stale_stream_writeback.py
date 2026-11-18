@@ -200,11 +200,19 @@ def test_outer_exception_path_checks_stream_ownership_before_error_writeback():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     outer_error_payload = src.index("_error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)")
     start = src.index("# Persist the error so it survives page reload.", outer_error_payload)
-    end = src.index("put('apperror', _error_payload)", start)
-    block = src[start:end]
     guard = "if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
+    guard_pos = src.index(guard, start)
+    # The rejected-writeback branch emits its own terminal apperror and
+    # returns before any transcript mutation. Ownership for the real
+    # writeback is the later put, after materialize.
+    materialize = src.index("_materialize_pending_user_turn_before_error(s)", guard_pos)
+    end = src.index("put('apperror', _error_payload)", materialize)
+    block = src[start:end]
+    rejected = src[guard_pos:materialize]
 
     assert guard in block
-    assert block.index(guard) < block.index("_materialize_pending_user_turn_before_error(s)")
+    assert "put('apperror'" in rejected
+    assert ".save(" not in rejected
+    assert block.index(guard) < materialize - start
     assert block.index(guard) < block.index("s.active_stream_id = None")
     assert block.index(guard) < block.index("s.messages.append(_error_message)")
