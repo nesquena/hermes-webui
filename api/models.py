@@ -2204,6 +2204,10 @@ class Session:
         self.messages = messages if messages is not None else []
         self._loaded_messages = None
         self._loaded_context_messages = None
+        # Set by a streaming run to the history the agent actually ran against;
+        # its terminal append-intent save reads it (see _save_locked) and clears
+        # it right after that save.
+        self._replacement_baseline = None
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -2499,13 +2503,29 @@ class Session:
                 except Exception:
                     disk_sidecar = None
             if isinstance(disk_sidecar, dict):
+                # A terminal streaming save declares the history the run actually
+                # ran against, so an intermediate import is not read here as a
+                # deliberate local removal. Without a declaration the last
+                # persisted snapshot is the base, which is what keeps an in-place
+                # compression replacement authoritative for the rows it dropped.
+                _declared_baseline = getattr(self, "_replacement_baseline", None)
+                loaded_messages_base = (
+                    _declared_baseline.get("messages")
+                    if _declared_baseline is not None
+                    else getattr(self, "_loaded_messages", None)
+                )
+                loaded_context_base = (
+                    _declared_baseline.get("context_messages")
+                    if _declared_baseline is not None
+                    else getattr(self, "_loaded_context_messages", None)
+                )
                 disk_messages = disk_sidecar.get("messages")
                 if isinstance(disk_messages, list):
                     self.messages = _merge_concurrent_message_arrays(
                         disk_messages,
                         self.messages,
                         allow_zero_prefix_merge=False,
-                        loaded_base=getattr(self, "_loaded_messages", None),
+                        loaded_base=loaded_messages_base,
                     )
 
                 disk_context = disk_sidecar.get("context_messages")
@@ -2521,7 +2541,7 @@ class Session:
                         disk_context,
                         self.context_messages,
                         allow_zero_prefix_merge=False,
-                        loaded_base=getattr(self, "_loaded_context_messages", None),
+                        loaded_base=loaded_context_base,
                     )
                 else:
                     self.context_messages = []
