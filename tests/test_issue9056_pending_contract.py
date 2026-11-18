@@ -88,7 +88,12 @@ def _extract_startup_block(boot_js: str) -> str:
     end_marker = "const _bootActiveProfileUnauthRedirectBudget"
     end = boot_js.find(end_marker, start)
     assert end >= 0, "end of startup check block not found in boot.js"
-    return boot_js[start:end]
+    block = boot_js[start:end]
+    # The block delegates the completion observation to a named helper (#9056
+    # gate RED: the fixed twelve-reply window moved out of the inline loop), so
+    # the rendered harness has to carry that helper with the block.
+    helper = extract_function(boot_js, "_observeStartupUpdateCompletion", prefix="async function")
+    return f"{helper}\n\n{block}"
 
 
 def _run_node(script: str) -> dict:

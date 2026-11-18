@@ -13585,21 +13585,45 @@ async function checkUpdatesNow(channelOverride){
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
     const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
-    let data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
-    if(data&&data.pending===true){
-      const pollChannel=encodeURIComponent(data.channel||(channelOverride==='experimental'?'experimental':'stable'));
-      const pollIncludeAgent=data.include_agent===false?'0':'1';
-      const pollUrl=`/api/updates/check?channel=${pollChannel}&include_agent=${pollIncludeAgent}`;
-      for(let attempt=0;attempt<12;attempt++){
-        await new Promise(r=>setTimeout(r,1500));
-        data=await api(pollUrl,{method:'GET'});
+    // #9056 gate RED: a fixed twelve-reply window abandoned legitimate slow
+    // work. The worker's Git fetch allowance plus queued keys outlive it, so
+    // the panel kept "Checking…" with no observer and never fired the banner.
+    // Observation now follows the work with a growing interval, and a check
+    // that is still running when the bound is reached leaves a retrievable
+    // continuation in window._pendingUpdatePollUrl: the next press of
+    // "Check now" fetches that completed result (a cache-only GET) instead of
+    // starting new Git work.
+    const _observeMaxReplies=240;
+    const _observeBaseMs=1500;
+    const _observeCapMs=5000;
+    const _pendingUrl=window._pendingUpdatePollUrl;
+    let data=null;
+    let pollUrl=null;
+    if(_pendingUrl){
+      try{ data=await api(_pendingUrl,{method:'GET'}); }catch(_continuation){ data=null; }
+      if(data&&data.pending===true) pollUrl=_pendingUrl;
+    }
+    if(!data||data.pending===true){
+      if(!pollUrl){
+        data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
+        if(data&&data.pending===true){
+          const pollChannel=encodeURIComponent(data.channel||(channelOverride==='experimental'?'experimental':'stable'));
+          const pollIncludeAgent=data.include_agent===false?'0':'1';
+          pollUrl=`/api/updates/check?channel=${pollChannel}&include_agent=${pollIncludeAgent}`;
+        }
+      }
+      for(let attempt=0;pollUrl&&attempt<_observeMaxReplies;attempt++){
         if(!data||data.pending!==true) break;
+        await new Promise(r=>setTimeout(r,Math.min(_observeBaseMs+attempt*250,_observeCapMs)));
+        data=await api(pollUrl,{method:'GET'});
       }
     }
     if(data&&data.pending===true){
+      window._pendingUpdatePollUrl=pollUrl||_pendingUrl||null;
       if(status){status.textContent=t('settings_checking');status.style.color='var(--muted)';}
       return;
     }
+    window._pendingUpdatePollUrl=null;
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {

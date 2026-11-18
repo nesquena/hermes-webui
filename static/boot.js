@@ -4350,11 +4350,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           const pollChannel=encodeURIComponent(d.channel||'stable');
           const pollIncludeAgent=d.include_agent===false?'0':'1';
           const pollUrl=`api/updates/check?channel=${pollChannel}&include_agent=${pollIncludeAgent}`;
-          for(let attempt=0;attempt<12;attempt++){
-            await new Promise(r=>setTimeout(r,1500));
-            d=await api(pollUrl,{method:'GET'});
-            if(!d||d.pending!==true) break;
-          }
+          // #9056 gate RED: the same fixed twelve-reply window existed here, so
+          // a legitimately slow first check was abandoned at startup. The named
+          // helper keeps observing and leaves a retrievable continuation.
+          d=await _observeStartupUpdateCompletion(pollUrl,d);
         }
         if(d&&d.pending!==true){
           if(!_testUpdates) sessionStorage.setItem('hermes-update-checked','1');
@@ -4832,6 +4831,26 @@ async function shutdownServer() {
   try { var bc = new BroadcastChannel('hermes-webui-shutdown'); bc.postMessage('stop'); bc.close(); } catch(_) {}
   _showServerStopped();
   try { await api('/api/shutdown', { method: 'POST' }); } catch (_) {}
+}
+
+async function _observeStartupUpdateCompletion(pollUrl, initial) {
+  // Observe a legitimately slow startup update check until it actually
+  // finishes (#9056 gate RED). The server's Git fetch allowance and queued
+  // keys outlive any short fixed window, so abandoning after a dozen replies
+  // left the banner unshown and the tab marked as already checked. When the
+  // bound is finally reached the continuation stays retrievable, so the next
+  // Settings check fetches the completed result instead of starting new work.
+  var d = initial;
+  var maxReplies = 240;
+  var baseMs = 1500;
+  var capMs = 5000;
+  for (var attempt = 0; attempt < maxReplies; attempt++) {
+    if (!d || d.pending !== true) break;
+    await new Promise(function (r) { setTimeout(r, Math.min(baseMs + attempt * 250, capMs)); });
+    d = await api(pollUrl, { method: 'GET' });
+  }
+  if (d && d.pending === true) window._pendingUpdatePollUrl = pollUrl;
+  return d;
 }
 
 function _showServerStopped() {
