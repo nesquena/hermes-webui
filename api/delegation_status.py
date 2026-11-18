@@ -11,8 +11,9 @@ This module is the read-only advisory slice the maintainer approved:
 * distinguish work still running from completions waiting for delivery;
 * report an unavailable source as ``unknown``, never as zero — a zero read by
   a pre-switch guard would silently bless an unsafe switch;
-* return metadata/counts only: no prompts, results, secrets, or rows belonging
-  to another profile;
+* return counts, plus live child metadata when the in-process registry can be
+  read (id, status, tool name, count, age): no prompts, results, secrets,
+  paths, or rows belonging to another profile;
 * stay advisory: a snapshot before switching is not an atomic guarantee that no
   work can arrive afterwards.
 
@@ -33,7 +34,9 @@ Two sources are consulted, deliberately independently:
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +66,14 @@ _TERMINAL_STATES = (
 # dispatch-time session_key INTO origin_session; the in-memory record keeps the
 # session_key field name). origin_ui_session_id / parent_session_id match.
 _SELECTOR_COLUMNS = ("origin_ui_session_id", "origin_session", "parent_session_id")
+
+# Live-child rows are metadata the CLI monitor already shows (tool name, not
+# the goal or any transcript). A value that does not look like an identifier
+# is dropped rather than forwarded.
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_LIVE_CHILD_STATUSES = frozenset({"running", "stalling", "finalizing"})
+_TERMINAL_STATES_SET = frozenset(_TERMINAL_STATES)
 
 
 def _profile_state_db_path(profile: str | None = None) -> Path | None:
@@ -149,14 +160,146 @@ def _durable_counts(db_path: Path | None, session_id: str) -> tuple[int, int] | 
     return running, awaiting
 
 
+def _token(value: Any, *, pattern: re.Pattern[str] = _TOKEN_RE) -> str:
+    text = str(value or "").strip()
+    if not text or pattern.fullmatch(text) is None:
+        return ""
+    return text
+
+
+def _load_subagent_records() -> list[dict[str, Any]] | None:
+    """Snapshot the in-process subagent registry, or None when it cannot be read.
+
+    ``list_active_subagents`` strips the child agent object, and the session id
+    the sidebar already uses lives on that object. The snapshot is taken under
+    the registry lock and only the fields ``_children_from_records`` keeps are
+    returned to callers. An import failure is unknown (``None``), not an empty
+    list: an empty list means the registry was readable and nothing matched.
+    """
+    try:
+        from tools.delegate_tool_registry import (
+            _active_subagents,
+            _active_subagents_lock,
+        )
+    except Exception:
+        logger.debug("delegation status: subagent registry unavailable", exc_info=True)
+        return None
+    try:
+        with _active_subagents_lock:
+            return [dict(record) for record in _active_subagents.values()]
+    except Exception:
+        logger.debug("delegation status: subagent registry read failed", exc_info=True)
+        return None
+
+
+def _owner_ids(record: dict[str, Any]) -> set[str]:
+    owners = set()
+    for key in ("owner_session_id", "owner_agent_session_id"):
+        token = str(record.get(key) or "").strip()
+        if token:
+            owners.add(token)
+    return owners
+
+
+def _record_belongs(
+    record: dict[str, Any],
+    session_id: str,
+    by_id: dict[str, dict[str, Any]],
+    seen: set[str],
+) -> bool:
+    subagent_id = str(record.get("subagent_id") or "").strip()
+    if subagent_id and subagent_id in seen:
+        return False
+    if subagent_id:
+        seen.add(subagent_id)
+    if session_id in _owner_ids(record):
+        return True
+    parent_id = str(record.get("parent_id") or "").strip()
+    parent = by_id.get(parent_id) if parent_id else None
+    if parent is None:
+        return False
+    return _record_belongs(parent, session_id, by_id, seen)
+
+
+def _child_session_id(record: dict[str, Any]) -> str | None:
+    agent = record.get("agent")
+    raw = getattr(agent, "session_id", None) if agent is not None else None
+    token = _token(raw, pattern=_SESSION_ID_RE)
+    return token or None
+
+
+def _children_from_records(
+    records: list[dict[str, Any]],
+    session_id: str,
+    now: float,
+) -> list[dict[str, Any]]:
+    """Public child rows for one session. No goal, path, transcript, or result."""
+    by_id: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        subagent_id = str(record.get("subagent_id") or "").strip()
+        if subagent_id:
+            by_id[subagent_id] = record
+    children: list[dict[str, Any]] = []
+    for record in by_id.values():
+        if not _record_belongs(record, session_id, by_id, set()):
+            continue
+        started = record.get("started_at")
+        age: int | None
+        if isinstance(started, (int, float)):
+            age = max(0, int(now - float(started)))
+        else:
+            age = None
+        try:
+            tool_count = int(record.get("tool_count") or 0)
+        except (TypeError, ValueError):
+            tool_count = 0
+        if tool_count < 0:
+            tool_count = 0
+        status = _token(record.get("status")) or "running"
+        if status not in _LIVE_CHILD_STATUSES | _TERMINAL_STATES_SET:
+            status = "running"
+        children.append({
+            "subagent_id": _token(record.get("subagent_id")),
+            "status": status,
+            "last_tool": _token(record.get("last_tool")),
+            "tool_count": tool_count,
+            "age_seconds": age,
+            "child_session_id": _child_session_id(record),
+        })
+    children.sort(key=lambda row: (row.get("age_seconds") is None, row.get("age_seconds") or 0, row["subagent_id"]))
+    return children
+
+
+def _memory_children(session_id: str) -> list[dict[str, Any]] | None:
+    """Live children for *session_id*, or None when the registry cannot be read."""
+    if not session_id:
+        return None
+    records = _load_subagent_records()
+    if records is None:
+        return None
+    try:
+        return _children_from_records(records, session_id, time.time())
+    except Exception:
+        logger.debug("delegation status: child snapshot failed", exc_info=True)
+        return None
+
+
 def session_delegation_status(session_id: str, *, profile: str | None = None) -> dict[str, Any]:
     """Advisory read-only snapshot of one session's live async delegations.
 
-    Returns counts only. ``status`` is ``"ok"`` when the durable ledger was
-    readable and ``"unknown"`` when it was not — in the unknown case the count
-    fields are ``None`` so a caller can never mistake "could not check" for
-    "nothing is running". ``memory_live`` is a bool when the in-process Agent
-    registry is reachable and ``None`` when it is not.
+    Returns the existing counts unchanged. ``children`` is an extra list of
+    live subagent metadata when the in-process registry can be read, and
+    ``None`` when it cannot — never an empty list standing in for "unknown".
+    Each child is an id, a status token, a tool name, a count, and an age.
+    Goals, transcripts, paths, and results are not included.
+
+    ``status`` is ``"ok"`` when the durable ledger was readable and
+    ``"unknown"`` when it was not — in the unknown case the count fields are
+    ``None`` so a caller can never mistake "could not check" for "nothing is
+    running". ``memory_live`` is a bool when the in-process Agent registry is
+    reachable and ``None`` when it is not.
     """
     session_id = str(session_id or "").strip()
     if not session_id:
@@ -166,6 +309,7 @@ def session_delegation_status(session_id: str, *, profile: str | None = None) ->
             "running": None,
             "awaiting_delivery": None,
             "memory_live": None,
+            "children": None,
         }
 
     durable = _durable_counts(_profile_state_db_path(profile), session_id)
@@ -183,10 +327,16 @@ def session_delegation_status(session_id: str, *, profile: str | None = None) ->
     else:
         status = "ok"
         running, awaiting = durable
+    try:
+        children = _memory_children(session_id)
+    except Exception:
+        logger.debug("delegation status: child probe raised", exc_info=True)
+        children = None
     return {
         "session_id": session_id,
         "status": status,
         "running": running,
         "awaiting_delivery": awaiting,
         "memory_live": memory_live,
+        "children": children,
     }

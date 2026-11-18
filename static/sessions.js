@@ -11244,6 +11244,7 @@ function renderSessionListFromCache(){
   // current session-row window plus top/bottom spacers inside each group body;
   // headers remain real DOM so pin/archive/date grouping and clicks survive.
   let globalSessionRowIndex=0;
+  const visibleDelegationSids=[];
   for(const g of groups){
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
@@ -11275,7 +11276,10 @@ function renderSessionListFromCache(){
       if(isGroupCollapsed) continue;
       const rowIndex=globalSessionRowIndex++;
       const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
-      if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+      if(inWindow){
+        body.appendChild(_renderOneSession(s, Boolean(g.isPinned)));
+        if(s&&s.session_id) visibleDelegationSids.push(s.session_id);
+      }
       else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
       else { groupBottomPad+=virtualWindow.itemHeight; }
     }
@@ -11284,6 +11288,7 @@ function renderSessionListFromCache(){
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   }
+  _delegationVisibleSids=new Set(visibleDelegationSids);
   if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;
   }else if(listScrollTopBeforeRender>0){
@@ -11354,19 +11359,22 @@ function renderSessionListFromCache(){
   // is actually gone. (Repaints that were deferred for the picker returned at
   // the top of this function and never reach here.)
   if(typeof _reanchorProjectPickerAfterRepaint==='function') _reanchorProjectPickerAfterRepaint();
+  if(typeof _paintDelegationDock==='function') _paintDelegationDock();
+  if(typeof _syncDelegationWatch==='function') _syncDelegationWatch();
 
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
-    const isStreaming=ownStreaming||!!s._child_session_streaming;
+    const delegationLive=typeof _sessionDelegationLive==='function'&&_sessionDelegationLive(s);
+    const isStreaming=ownStreaming||!!s._child_session_streaming||delegationLive;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming||delegationLive?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -11963,18 +11971,48 @@ function renderSessionListFromCache(){
           childList.appendChild(row);
           continue;
         }
-        const row=document.createElement('button');
-        row.type='button';
-        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        row.textContent=childLabelFor(child);
-        row.title='Open child session';
-        row.onclick=async(e)=>{
-          e.stopPropagation();
-          if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
-          await openChildSession(child);
-        };
-        _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
-        childList.appendChild(row);
+        const delegated=_isDelegatedSubagentRow(child);
+        const liveChild=delegated&&typeof _delegationChildRecord==='function'?_delegationChildRecord(child):null;
+        const childLive=!!(liveChild&&_delegationChildIsLive(liveChild));
+        const childLabel=childLabelFor(child)+(childLive&&liveChild.last_tool?` · ${liveChild.last_tool}`:'');
+        if(delegated){
+          const row=document.createElement('div');
+          row.className='session-child-session session-child-session-subagent'
+            +(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'')
+            +(childLive?' streaming':'');
+          row.dataset.sid=child.session_id;
+          const mainBtn=document.createElement('button');
+          mainBtn.type='button';
+          mainBtn.className='session-child-session-main'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+          mainBtn.textContent=childLabel;
+          mainBtn.title=childLive&&liveChild.last_tool?childLabel:'Open child session';
+          mainBtn.onclick=async(e)=>{
+            e.stopPropagation();
+            if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
+            await openChildSession(child);
+          };
+          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true});
+          row.appendChild(mainBtn);
+          const state=document.createElement('span');
+          state.className='session-state-indicator session-child-session-state'+(childLive?' is-streaming':'');
+          state.setAttribute('aria-hidden','true');
+          if(childLive) state.title=typeof t==='function'?t('delegation_running',1):'Running';
+          row.appendChild(state);
+          childList.appendChild(row);
+        }else{
+          const row=document.createElement('button');
+          row.type='button';
+          row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+          row.textContent=childLabel;
+          row.title='Open child session';
+          row.onclick=async(e)=>{
+            e.stopPropagation();
+            if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
+            await openChildSession(child);
+          };
+          _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
+          childList.appendChild(row);
+        }
       }
       sessionText.appendChild(childList);
     }
@@ -14840,3 +14878,177 @@ document.addEventListener('keydown',(e)=>{
   e.preventDefault();
   navigateSession(e.key==='j'?1:-1);
 });
+
+// Live delegate_task children are not WebUI streams, so the sidebar clock and
+// the idle composer stay quiet unless this snapshot says otherwise. Counts
+// come from GET /api/session/delegations; children is null when the in-process
+// registry cannot be read (unknown, not "nothing is running").
+const _delegationStatusBySid=new Map();
+const _delegationIdleAtCount=new Map();
+const _delegationSignatureBySid=new Map();
+let _delegationVisibleSids=new Set();
+let _delegationPollTimer=0;
+let _delegationPollInFlight=false;
+const _DELEGATION_POLL_MS=3000;
+const _DELEGATION_LIVE_STATUSES={running:1,stalling:1,finalizing:1};
+
+function _delegationChildIsLive(child){
+  return !!(child&&_DELEGATION_LIVE_STATUSES[String(child.status||'')]);
+}
+
+function _delegationLiveChildren(status){
+  if(!status||!Array.isArray(status.children)) return null;
+  return status.children.filter(_delegationChildIsLive);
+}
+
+function _delegationSignature(status){
+  if(!status) return '';
+  const kids=Array.isArray(status.children)
+    ? status.children.map(child=>[child&&child.child_session_id, child&&child.status, child&&child.last_tool, child&&child.tool_count].join(':')).join('|')
+    : 'null';
+  return [status.status, status.running, status.awaiting_delivery, kids].join('#');
+}
+
+function _delegatedChildCount(sid){
+  if(!sid||typeof _allSessions==='undefined'||!Array.isArray(_allSessions)) return 0;
+  let count=0;
+  for(const row of _allSessions){
+    if(row&&row.parent_session_id===sid&&typeof _isDelegatedSubagentRow==='function'&&_isDelegatedSubagentRow(row)) count++;
+  }
+  return count;
+}
+
+function _delegationStatusIsLive(status){
+  if(!status||status.status!=='ok') return false;
+  if(Number(status.running)>0||Number(status.awaiting_delivery)>0) return true;
+  const live=_delegationLiveChildren(status);
+  return !!(live&&live.length);
+}
+
+function _delegationNeedsPoll(sid){
+  if(!sid) return false;
+  const active=typeof S!=='undefined'&&S&&S.session&&S.session.session_id===sid&&S.busy;
+  const status=_delegationStatusBySid.get(sid);
+  const count=_delegatedChildCount(sid);
+  const latched=_delegationIdleAtCount.get(sid);
+  if(!status){
+    if(latched!=null&&count<=latched&&!active) return false;
+    return count>0||active;
+  }
+  if(status.status!=='ok') return false;
+  if(_delegationStatusIsLive(status)) return true;
+  if(active) return true;
+  return latched==null||count>latched;
+}
+
+function _delegationWatchIds(){
+  const ids=new Set();
+  const active=typeof S!=='undefined'&&S&&S.session&&S.session.session_id;
+  if(active&&_delegationNeedsPoll(active)) ids.add(active);
+  for(const sid of _delegationVisibleSids){
+    if(_delegationNeedsPoll(sid)) ids.add(sid);
+  }
+  return [...ids];
+}
+
+function _sessionDelegationLive(session){
+  if(!session||!session.session_id) return false;
+  const status=_delegationStatusBySid.get(session.session_id);
+  if(!status||status.status!=='ok') return false;
+  const live=_delegationLiveChildren(status);
+  if(live&&live.length) return true;
+  return Number(status.running)>0&&(status.children==null||Array.isArray(status.children));
+}
+
+function _delegationChildRecord(child){
+  if(!child||!child.session_id||!child.parent_session_id) return null;
+  const status=_delegationStatusBySid.get(child.parent_session_id);
+  if(!status||!Array.isArray(status.children)) return null;
+  return status.children.find(row=>row&&row.child_session_id===child.session_id)||null;
+}
+
+function _delegationDockText(status, childCount){
+  if(!status||status.status!=='ok') return null;
+  const live=_delegationLiveChildren(status)||[];
+  const awaiting=Number(status.awaiting_delivery)||0;
+  const ledgerRunning=Number(status.running)||0;
+  if(live.length){
+    const total=Math.max(live.length, Number(childCount)||0);
+    const tool=[...live].reverse().map(row=>row&&row.last_tool).find(Boolean)||'';
+    let text=total>live.length?t('delegation_running_of', live.length, total):t('delegation_running', live.length);
+    if(tool) text+=` · ${t('delegation_last_tool', tool)}`;
+    return {text, live:true};
+  }
+  if(status.children==null&&ledgerRunning>0) return {text:t('delegation_step_unknown'), live:true};
+  if(Array.isArray(status.children)&&ledgerRunning>0) return {text:t('delegation_step_unknown'), live:true};
+  if(awaiting>0) return {text:t('delegation_awaiting'), live:false};
+  return null;
+}
+
+function _paintDelegationDock(){
+  const el=typeof document!=='undefined'?document.getElementById('delegationDock'):null;
+  if(!el) return;
+  const sid=typeof S!=='undefined'&&S&&S.session&&S.session.session_id;
+  const model=sid?_delegationDockText(_delegationStatusBySid.get(sid), _delegatedChildCount(sid)):null;
+  if(!model){
+    el.hidden=true;
+    el.classList.remove('is-live');
+    const text=el.querySelector('[data-delegation-dock-text]');
+    if(text) text.textContent='';
+    return;
+  }
+  el.hidden=false;
+  el.classList.toggle('is-live', !!model.live);
+  const text=el.querySelector('[data-delegation-dock-text]');
+  if(text) text.textContent=model.text;
+  const dot=el.querySelector('.delegation-dock-dot');
+  if(dot) dot.classList.toggle('is-streaming', !!model.live);
+}
+
+async function _refreshDelegationStatus(sid){
+  if(!sid||typeof api!=='function') return false;
+  const data=await api('/api/session/delegations?session_id='+encodeURIComponent(sid),{retries:0,timeoutMs:8000,timeoutToast:false});
+  if(!data||data.status!=='ok'){
+    if(!_delegationStatusBySid.has(sid)) _delegationIdleAtCount.set(sid, _delegatedChildCount(sid));
+    return false;
+  }
+  const previous=_delegationSignatureBySid.get(sid)||'';
+  const next=_delegationSignature(data);
+  _delegationStatusBySid.set(sid, data);
+  _delegationSignatureBySid.set(sid, next);
+  if(_delegationStatusIsLive(data)) _delegationIdleAtCount.delete(sid);
+  else _delegationIdleAtCount.set(sid, _delegatedChildCount(sid));
+  return previous!==next;
+}
+
+function _syncDelegationWatch(){
+  const ids=_delegationWatchIds();
+  if(!ids.length){
+    if(_delegationPollTimer){
+      clearTimeout(_delegationPollTimer);
+      _delegationPollTimer=0;
+    }
+    _paintDelegationDock();
+    return;
+  }
+  if(_delegationPollTimer||_delegationPollInFlight) return;
+  const wait=ids.some(sid=>!_delegationStatusBySid.has(sid))?0:_DELEGATION_POLL_MS;
+  _delegationPollTimer=setTimeout(()=>{
+    _delegationPollTimer=0;
+    const pending=_delegationWatchIds();
+    if(!pending.length){
+      _paintDelegationDock();
+      return;
+    }
+    _delegationPollInFlight=true;
+    Promise.all(pending.map(sid=>_refreshDelegationStatus(sid).catch(()=>false))).then(changed=>{
+      _delegationPollInFlight=false;
+      if(changed.some(Boolean)&&typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      else _paintDelegationDock();
+      _syncDelegationWatch();
+    }).catch(()=>{
+      _delegationPollInFlight=false;
+      _syncDelegationWatch();
+    });
+  }, wait);
+}

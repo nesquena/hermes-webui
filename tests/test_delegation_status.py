@@ -515,3 +515,96 @@ class TestLedgerPathEncoding:
         assert result["status"] == "unknown"
         assert result["running"] is None
         assert result["awaiting_delivery"] is None
+
+
+class _ChildAgent:
+    def __init__(self, session_id):
+        self.session_id = session_id
+
+
+def _child_record(**overrides):
+    record = {
+        "subagent_id": "sa-1",
+        "parent_id": None,
+        "owner_session_id": "sess_a",
+        "owner_agent_session_id": "agent-parent",
+        "status": "running",
+        "last_tool": "web_search",
+        "tool_count": 3,
+        "started_at": 1780000000.0,
+        "goal": "do not leak this goal",
+        "agent": _ChildAgent("child-session-1"),
+    }
+    record.update(overrides)
+    return record
+
+
+class TestDelegationChildren:
+    def test_missing_registry_is_null_not_empty(self, monkeypatch):
+        monkeypatch.setattr(delegation_status, "_load_subagent_records", lambda: None)
+        assert delegation_status._memory_children("sess_a") is None
+
+    def test_children_keep_only_public_fields(self):
+        rows = delegation_status._children_from_records(
+            [_child_record(
+                last_tool="cat /etc/passwd",
+                goal="secret goal",
+                live_transcript="/tmp/secret.json",
+            )],
+            "sess_a",
+            1780000030.0,
+        )
+        assert rows == [{
+            "subagent_id": "sa-1",
+            "status": "running",
+            "last_tool": "",
+            "tool_count": 3,
+            "age_seconds": 30,
+            "child_session_id": "child-session-1",
+        }]
+        assert "goal" not in rows[0]
+        assert "live_transcript" not in rows[0]
+
+    def test_foreign_and_grandchild_ownership(self):
+        rows = delegation_status._children_from_records(
+            [
+                _child_record(),
+                _child_record(
+                    subagent_id="sa-other",
+                    owner_session_id="someone-else",
+                    owner_agent_session_id="other-agent",
+                    agent=_ChildAgent("foreign-child"),
+                ),
+                _child_record(
+                    subagent_id="sa-grand",
+                    parent_id="sa-1",
+                    owner_session_id="",
+                    owner_agent_session_id="child-agent",
+                    last_tool="read_file",
+                    tool_count=1,
+                    agent=_ChildAgent("grand-child"),
+                ),
+            ],
+            "sess_a",
+            1780000000.0,
+        )
+        assert [row["subagent_id"] for row in rows] == ["sa-1", "sa-grand"]
+        assert rows[1]["child_session_id"] == "grand-child"
+        assert rows[1]["last_tool"] == "read_file"
+
+    def test_status_response_adds_children_without_changing_counts(self, two_profile_world, monkeypatch):
+        monkeypatch.setattr(
+            delegation_status, "_load_subagent_records",
+            lambda: [_child_record()],
+        )
+        _write_delegation_db(
+            two_profile_world / "alpha" / "state.db",
+            [_row("deleg_1", origin_ui_session_id="sess_a", state="running")],
+        )
+        result = delegation_status.session_delegation_status("sess_a", profile="alpha")
+        assert result["status"] == "ok"
+        assert result["running"] == 1
+        assert result["awaiting_delivery"] == 0
+        assert result["memory_live"] is None
+        assert result["children"][0]["subagent_id"] == "sa-1"
+        assert "goal" not in result["children"][0]
