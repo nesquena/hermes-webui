@@ -5,20 +5,19 @@ things on the aged-out session lookup (#8061):
 
 (a) a non-empty persisted ``cwd`` from state.db wins over the browser's
     last-workspace fallback that the CLI projection puts on every row;
-(b) local sources are materialized through ``_claim_or_synthesize_cli_session``
-    (enforcing its verdict) and persisted with that resolved workspace, instead
-    of importing through ``get_last_workspace()``.
+(b) local sources are resolved through ``_claim_or_synthesize_cli_session``
+    (its ownership verdict is enforced) and persisted with that resolved
+    workspace instead of ``get_last_workspace()``.
 
 Both paths are driven here through the real helpers on a real isolated
 state.db, with ``get_last_workspace`` pointing at a different directory than the
-session's own ``cwd`` so a fallback leak is visible.
+session's own ``cwd`` so a fallback leak is visible. The last case is the
+boundary control: a scheduled row is not claimed and still materializes.
 """
 
 import json
 import sqlite3
 import time
-
-import pytest
 
 from api import models, routes
 
@@ -118,15 +117,20 @@ def test_absent_cwd_keeps_the_workspace_fallback(tmp_path, monkeypatch):
     assert session.workspace == str(tmp_path)
 
 
-def test_materialize_enforces_the_claim_verdict(tmp_path, monkeypatch):
-    """A discovered-but-unclaimable row must be refused, not imported writable."""
+def test_non_local_source_keeps_the_plain_import(tmp_path, monkeypatch):
+    """Control: a cron row is not claimed, and still materializes for display.
+
+    The claim/synthesis path is scoped to the local interactive sources this PR
+    resolves; scheduled rows stay on the plain import so their ownership
+    boundary is unchanged.
+    """
     db = tmp_path / "state.db"
     _make_state_db(
         db,
         sessions=2,
         messages_per_session=1,
-        source="external_agent",
-        session_source="external_agent",
+        source="cron",
+        session_source="cron",
     )
     _add_cwd_column(db)
     _configure_real_single_profile(monkeypatch, tmp_path, db)
@@ -134,24 +138,24 @@ def test_materialize_enforces_the_claim_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "_get_profile_home", lambda _profile: tmp_path)
 
     sid = "cli_perf_0001"
-    foreign_meta = {
+    cron_meta = {
         "session_id": sid,
-        "title": "Foreign",
+        "title": "Cron Session",
         "model": "openai/gpt-5",
-        "source_tag": "external_agent",
-        "raw_source": "external_agent",
-        "session_source": "external_agent",
+        "source_tag": "cron",
+        "raw_source": "cron",
+        "session_source": "cron",
+        "source_label": "Cron",
         "profile": "default",
     }
     monkeypatch.setattr(
         routes,
-        "_resolve_cli_import_metadata",
-        lambda session_id, **_kwargs: dict(foreign_meta),
+        "_lookup_cli_session_metadata",
+        lambda session_id, **_kwargs: dict(cron_meta),
     )
 
-    with pytest.raises(PermissionError):
-        routes._get_or_materialize_session(sid)
+    session = routes._get_or_materialize_session(sid)
 
-    assert not (tmp_path / "sessions" / f"{sid}.json").exists(), (
-        "an unclaimable foreign row must not be materialized as a writable sidecar"
-    )
+    assert session.source_tag == "cron"
+    assert session.is_cli_session is False
+    assert (tmp_path / "sessions" / f"{sid}.json").exists()

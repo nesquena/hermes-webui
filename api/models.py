@@ -10482,17 +10482,23 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    workspace=None,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
     Preserve parent_session_id from state.db so imported continuation segments
     keep their lineage in the WebUI store and sidebar instead of reappearing as
     detached orphan chats.
+
+    *workspace* lets a caller that already resolved the session's own directory
+    (the #8061 aged-out claim path) persist it instead of the generic
+    last-workspace fallback; it stays optional so every existing caller keeps
+    the old behaviour.
     """
     s = Session(
         session_id=session_id,
         title=title,
-        workspace=get_last_workspace(profile=profile),
+        workspace=workspace or get_last_workspace(profile=profile),
         model=model,
         messages=messages,
         profile=profile,
