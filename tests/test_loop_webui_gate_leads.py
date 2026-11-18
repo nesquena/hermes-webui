@@ -8,7 +8,7 @@ from tests.test_cancel_restart_journal_recovery import (
     _isolated_state,  # noqa: F401 - imported autouse isolation fixture
     _start_cancelled_turn,
 )
-from tests.test_loop_webui import _due, _loop, _setup
+from tests.test_loop_webui import _due, _loop, _setup, _stop_marker
 
 
 def test_stop_after_steer_stamps_only_the_original_prompt_row():
@@ -98,12 +98,10 @@ def test_profile_move_pauses_instead_of_clearing(tmp_path, monkeypatch):
 
 @requires_agent_modules
 def test_server_settled_cancel_is_not_judged_as_a_user_stop(tmp_path, monkeypatch):
-    from api.streaming import CANCEL_INITIATOR_SERVER, _cancelled_turn_content
     session = NS(session_id="s1", profile=None, messages=[])
     agent, loops, started = _setup(tmp_path, monkeypatch, session)
     loops.run_due_loops()
-    session.messages.append({"role": "assistant", "_error": True, "cancel_initiator": CANCEL_INITIATOR_SERVER,
-                             "content": _cancelled_turn_content("Server restarting.", initiator="server")})
+    session.messages.append(_server_settle_row())
     loops.run_due_loops()
     s = _loop(agent, loops)
     assert s.status == "active" and not s.awaiting_response and s.ticks_fired == 0  # rolled back, fires again
@@ -164,7 +162,7 @@ def test_tick_fired_but_never_launched_is_rolled_back_not_settled(tmp_path, monk
         assert mgr.fire_tick()  # the process dies here, before start_session_turn returns
         db = agent._get_session_db()
         if record:
-            db.set_meta(loops._TURN_PREFIX + "s1", json.dumps(record))
+            loops._meta_set(db, loops._TURN_PREFIX + "s1", json.dumps(record))
     loops.run_due_loops()
     s = _loop(agent, loops)
     assert s.status == "active" and s.ticks_fired == 0 and not s.awaiting_response and started == []
@@ -178,3 +176,58 @@ def test_busy_alias_keeps_a_draft_typed_during_the_metadata_wait():
   ctx.__msg.value='new draft'; release(); await first; out.composer=ctx.__msg.value;""", "true", strict=True)
     assert out["posts"] == [["/api/commands/exec", {"command": "/loop pause", "session_id": "A"}]]
     assert out["composer"] == "new draft"
+
+
+def _server_settle_row():
+    return _stop_marker(message="Server restarting.", initiator="server")
+
+
+def _restart_interrupted_row():
+    from api.models import _interrupted_recovery_marker
+    return _interrupted_recovery_marker(recovered_output=False)
+
+
+@requires_agent_modules
+@pytest.mark.parametrize("make_row,status,ticks,reason", [
+    (lambda: {"role": "assistant", "content": 'The log says "response interrupted"; it reconnected.'},
+     "active", 1, None),  # ordinary prose quoting the diagnostic: a completed tick, as in the CLI
+    (lambda: {"role": "assistant", "content": "Task cancelled. was the last log line"}, "active", 1, None),
+    (_stop_marker, "paused", 1, "user-interrupted (Stop)"),
+    (_server_settle_row, "active", 0, None),  # server settle: rolled back, fires again
+    (_restart_interrupted_row, "active", 0, None),  # process restart lost the turn: not the user's Stop
+])
+def test_wakeup_settles_on_cancel_provenance_not_reply_text(tmp_path, monkeypatch, make_row, status, ticks, reason):
+    session = NS(session_id="s1", profile=None, messages=[])
+    agent, loops, started = _setup(tmp_path, monkeypatch, session)
+    loops.run_due_loops()
+    row = make_row()
+    session.messages.append(row)
+    loops.run_due_loops()
+    s = _loop(agent, loops)
+    assert (s.status, s.ticks_fired, s.paused_reason, s.awaiting_response) == (status, ticks, reason, False)
+    if status == "active" and ticks:  # same verdict as the native LoopManager for the same reply
+        with loops._home(None):
+            native = agent.LoopManager(session_id="native")
+            native.set("5m check")
+            native.fire_tick()
+            native.complete_tick(row["content"])
+            assert native.state.status == "active"
+
+
+@requires_agent_modules
+def test_gateway_canonical_completion_keeps_the_wakeup_identity(tmp_path, monkeypatch):
+    """LOOP_COMPLETE settled through the Gateway's display-history replacement ends the loop."""
+    from api.gateway_sessions import display_history
+    session = NS(session_id="s1", profile=None, messages=[])
+    agent, loops, started = _setup(tmp_path, monkeypatch, session)
+    loops.run_due_loops()
+    wake = session.messages[-1]
+    snapshot = {"display_messages": [  # the Gateway's rows carry its row ids and clock, not WebUI's token
+        {"role": "user", "text": wake["content"], "row_id": 7, "timestamp": 1700000000.5},
+        {"role": "assistant", "text": "all green\nLOOP_COMPLETE", "row_id": 8}]}
+    session.messages = display_history(snapshot, wake["_active_turn_token"], wake["content"])
+    loops.run_due_loops()
+    with loops._home(None):
+        _due(agent)
+    loops.run_due_loops()
+    assert _loop(agent, loops).status == "done" and len(started) == 1

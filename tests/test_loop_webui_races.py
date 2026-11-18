@@ -5,7 +5,7 @@ import pytest
 
 from tests.conftest import requires_agent_modules
 from tests import test_issue7193_eager_start_rollback as _r7193
-from tests.test_loop_webui import _due, _loop, _setup, _src
+from tests.test_loop_webui import _due, _loop, _setup, _src, _stop_marker
 
 _start7193 = _r7193._start
 issue7193_env = _r7193.issue7193_env  # reused fixture: the eager chat-start sandbox
@@ -104,6 +104,13 @@ def test_loop_command_rechecks_profile_under_retag_lock(tmp_path, monkeypatch):
     assert _loop(agent, loops, home="b") is None  # profile b's store was never written
 
 
+def _child(db, sid, parent=None):
+    if not hasattr(db, "sessions"):  # an Agent that still hands out SessionDB
+        return db.create_session(sid, "webui", parent_session_id=parent)
+    from persistence.conversation.sessions import NewSession
+    db.sessions.create(NewSession(session_id=sid, source="webui", parent_session_id=parent))
+
+
 @requires_agent_modules
 @pytest.mark.parametrize("rotations", [1, 2])
 def test_compression_mid_wakeup_keeps_turn_and_loop(tmp_path, monkeypatch, rotations):
@@ -113,12 +120,12 @@ def test_compression_mid_wakeup_keeps_turn_and_loop(tmp_path, monkeypatch, rotat
     with loops._home(None):
         loops.run_due_loops()
         db = agent._get_session_db()
-        db.create_session("s1", "webui")
-        db.create_session("c1", "webui", parent_session_id="s1")
+        _child(db, "s1")
+        _child(db, "c1", parent="s1")
         assert agent.migrate_loop_to_session("s1", "c1")  # agent compressed; WebUI hasn't rotated yet
         cur = "c1"
         if rotations == 2:  # two rotations in one wakeup leave the turn record on the grandparent
-            db.create_session("c2", "webui", parent_session_id="c1")
+            _child(db, "c2", parent="c1")
             assert agent.migrate_loop_to_session("c1", "c2")
             cur = "c2"
     monkeypatch.setattr(config, "ACTIVE_RUNS", {"stream1": {"session_id": "s1"}})  # turn still running
@@ -131,7 +138,7 @@ def test_compression_mid_wakeup_keeps_turn_and_loop(tmp_path, monkeypatch, rotat
     loops.run_due_loops()
     assert _loop(agent, loops, cur).status == "done"
     if rotations == 2:
-        assert db.get_meta(loops._TURN_PREFIX + cur)  # re-keyed to the current session
+        assert loops._meta_get(db, loops._TURN_PREFIX + cur)  # re-keyed to the current session
     with loops._home(None):
         _due(agent, cur)
     loops.run_due_loops()
@@ -143,7 +150,7 @@ def test_message_after_stop_does_not_hide_stop(tmp_path, monkeypatch):
     session = NS(session_id="s1", profile=None, messages=[])
     agent, loops, started = _setup(tmp_path, monkeypatch, session)
     loops.run_due_loops()
-    session.messages += [{"role": "assistant", "content": "Task cancelled."},
+    session.messages += [_stop_marker(),
                          {"role": "user", "content": "next question", "timestamp": 2000.0},
                          {"role": "assistant", "content": "answer"}]
     loops.run_due_loops()
@@ -221,7 +228,7 @@ def test_stop_on_wakeup_pauses_loop_after_reload(tmp_path, monkeypatch, session_
 @pytest.mark.parametrize("tail,status,reason", [
     ([{"role": "assistant", "content": "done\nLOOP_COMPLETE"}], "done", None),  # Steer, then complete
     ([{"role": "user", "content": "check", "_recovered": True, "_steered_tok": True},  # Steer, then Stop
-      {"role": "assistant", "content": "Task cancelled."}], "paused", "user-interrupted (Stop)"),
+      "stop"], "paused", "user-interrupted (Stop)"),
 ])
 def test_steer_during_wakeup_keeps_its_outcome(tmp_path, monkeypatch, tail, status, reason):
     """A typed Steer row (and Stop's same-token recovery row) must not cut the wakeup's outcome short."""
@@ -231,7 +238,7 @@ def test_steer_during_wakeup_keeps_its_outcome(tmp_path, monkeypatch, tail, stat
     token = session.messages[0]["_active_turn_token"]
     session.messages.append({"role": "user", "content": "also check logs", "display_kind": "steer", "timestamp": 1500})
     for row in tail:
-        row = dict(row)
+        row = _stop_marker() if row == "stop" else dict(row)
         if row.pop("_steered_tok", False):
             row["_active_turn_token"] = token
         session.messages.append(row)
@@ -324,3 +331,36 @@ def test_loop_js_wiring_is_session_scoped_and_chat_bound():
     assert '("/loop", "loop", "/proactive", "proactive")' in _src("api/routes.py")  # raw /api/commands/exec too
     assert "_ownMsgs.push({role:'assistant'" in busy and "S.messages.push({role:'assistant'" not in busy
     assert "S.messages===_ownMsgs&&(S.session&&S.session.session_id)===_ownSid" in busy
+
+
+@requires_agent_modules
+@pytest.mark.parametrize("control,status", [("stop", "cleared"), ("pause", "paused")])
+def test_control_during_compression_migration_reaches_the_child(tmp_path, monkeypatch, control, status):
+    """Stop/pause landing while compression copies the loop to its child must hold on the child."""
+    session = NS(session_id="s1", profile=None, messages=[])
+    agent, loops, started = _setup(tmp_path, monkeypatch, session, due=False)
+    real_save, gate, parked = agent.save_loop, threading.Event(), threading.Event()
+
+    def save(sid, state):
+        if sid == "c1":  # park the migration between reading the parent and writing the child
+            parked.set()
+            gate.wait(5)
+        return real_save(sid, state)
+
+    monkeypatch.setattr(agent, "save_loop", save)
+
+    def migrate():
+        with loops._home(None):
+            agent.migrate_loop_to_session("s1", "c1", reason="compression")
+
+    t = threading.Thread(target=migrate)
+    t.start()
+    assert parked.wait(5)
+    loops.run_loop_command("s1", control)
+    gate.set()
+    t.join(5)
+    with loops._home(None):
+        _due(agent, "c1")
+    session.session_id = "c1"
+    loops.run_due_loops()
+    assert started == [] and _loop(agent, loops, "c1").status == status

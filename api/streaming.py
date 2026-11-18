@@ -3423,6 +3423,15 @@ def _session_has_cancel_marker(session) -> bool:
     return False
 
 
+def _turn_end_provenance(msg):
+    """'user'/'server' when this row is a persisted cancel or interruption marker, else None (read from its fields)."""
+    if not isinstance(msg, dict) or msg.get('role') != 'assistant' or msg.get('_error') is not True:
+        return None
+    if msg.get('provider_details_label') == 'Cancellation details':
+        return 'server' if _cancel_initiator_is_server(msg.get('cancel_initiator')) else 'user'
+    return 'server' if msg.get('type') == 'interrupted' else None
+
+
 def _cancelled_turn_content(
     message: str = 'Task cancelled.',
     agent_name: str | None = None,

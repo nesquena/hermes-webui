@@ -36,25 +36,48 @@ def _home(profile):
         reset_hermes_home_override(token)
 
 
-def _cas(db, key, expected, value):
+def _meta_get(db, key):
+    meta = getattr(db, "state_meta", None)  # the persistence interface; older Agents expose SessionDB
+    return meta.get(key) if meta is not None else db.get_meta(key)
+
+
+def _meta_set(db, key, value):
+    meta = getattr(db, "state_meta", None)
+    meta.set(key, value) if meta is not None else db.set_meta(key, value)
+
+
+def _parent_id(db, sid):
+    repo = getattr(db, "sessions", None)
+    if repo is not None:
+        return getattr(repo.get(sid), "parent_session_id", None)
+    return (db.get_session(sid) or {}).get("parent_session_id")
+
+
+def _cas(key, expected, value):
     """Write state_meta[key]=value only if it still holds `expected` (another writer wins otherwise)."""
-    def _do(conn):
+    import sqlite3
+    from hermes_constants import get_hermes_home
+    conn = sqlite3.connect(str(Path(get_hermes_home()) / "state.db"), timeout=30, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT value FROM state_meta WHERE key = ?", (key,)).fetchone()
         if (row[0] if row else None) != expected:
+            conn.execute("ROLLBACK")
             return False
         conn.execute("INSERT INTO state_meta (key, value) VALUES (?, ?) "
                      "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+        conn.execute("COMMIT")
         return True
-    return db._execute_write(_do)
+    finally:
+        conn.close()
 
 
 def _wakeup_outcome(messages, turn):
     """(cancelled, reply) of the recorded wakeup turn, read from that turn's own rows only.
 
-    `cancelled` is "server" when the WebUI server, not the user, cancelled the turn.
+    `cancelled` is "user" for a Stop, "server" when the server settled or lost the turn, else False.
     """
-    from types import SimpleNamespace
-    from api.streaming import _cancel_initiator_is_server, _session_has_cancel_marker
+    from api.streaming import _turn_end_provenance
     msgs, turn = list(messages or []), turn or {}
     token, at = turn.get("token"), turn.get("started_at")
     for i, m in enumerate(msgs):
@@ -66,26 +89,23 @@ def _wakeup_outcome(messages, turn):
             end = next((j for j in range(i + 1, len(msgs)) if msgs[j].get("role") == "user"
                         and msgs[j].get("display_kind") != "steer"
                         and not (token and msgs[j].get("_active_turn_token") == token)), len(msgs))
-            rows = msgs[i + 1:end]
-            replies = [n for n in rows if n.get("role") == "assistant"]
-            cancelled = _session_has_cancel_marker(SimpleNamespace(messages=[n for n in rows if n.get("role") != "user"]))
-            if cancelled and any(_cancel_initiator_is_server(n.get("cancel_initiator")) for n in replies):
-                cancelled = "server"
-            return cancelled, str(replies[-1].get("content") or "") if replies else ""
+            replies = [n for n in msgs[i + 1:end] if n.get("role") == "assistant"]
+            ends = [e for e in map(_turn_end_provenance, replies) if e]
+            return (ends[-1] if ends else False), str(replies[-1].get("content") or "") if replies else ""
     return False, ""
 
 
 def _turn_record(db, sid):
     """The wakeup turn fired for this loop; walks the whole compression parent chain, then re-keys it to sid."""
-    raw, seen, cur = db.get_meta(_TURN_PREFIX + sid), {sid}, sid
+    raw, seen, cur = _meta_get(db, _TURN_PREFIX + sid), {sid}, sid
     while raw is None:  # several rotations in one wakeup leave the record on an older ancestor
-        cur = (db.get_session(cur) or {}).get("parent_session_id")
+        cur = _parent_id(db, cur)
         if not cur or cur in seen:
             break
         seen.add(cur)
-        raw = db.get_meta(_TURN_PREFIX + cur)
+        raw = _meta_get(db, _TURN_PREFIX + cur)
     if raw is not None and cur != sid:
-        db.set_meta(_TURN_PREFIX + sid, raw)
+        _meta_set(db, _TURN_PREFIX + sid, raw)
     return json.loads(raw or "{}")
 
 
@@ -153,6 +173,33 @@ def _chat_writable(session):
                 or source == "subagent" or _is_subagent_child_session_id(session.session_id))
 
 
+_CONTROL_PREFIX = "webui_loop_control:"
+
+
+def _record_control(before, after):
+    """File a control's outcome under the loop's identity, so a copy compression is still writing obeys it."""
+    from hermes_cli import loops as cli
+    db = cli._get_session_db()
+    if db is not None and before.created_at:
+        state = after.status if after is not None else "cleared"
+        _meta_set(db, _CONTROL_PREFIX + repr(before.created_at),
+                  json.dumps({"status": state, "reason": getattr(after, "paused_reason", None)}))
+
+
+def _apply_recorded_control(db, mgr):
+    """True when a Stop or pause made on another row of this loop was applied here instead of a tick."""
+    s = mgr.state
+    raw = s.created_at and _meta_get(db, _CONTROL_PREFIX + repr(s.created_at))
+    rec = json.loads(raw) if raw else {}
+    if rec.get("status") == "cleared":
+        mgr.clear()
+    elif rec.get("status") == "paused":
+        mgr.pause(reason=rec.get("reason") or "user-paused")
+    else:
+        return False
+    return True
+
+
 def run_loop_command(session_id, args, request_profile=None):
     """`request_profile`: the caller's profile; re-checked under the lock a retag takes."""
     from api.models import get_session
@@ -173,8 +220,11 @@ def run_loop_command(session_id, args, request_profile=None):
         if args.strip().lower() not in _CONTROL_COMMANDS and not _chat_writable(session):
             return "/loop: this chat is read-only in the WebUI, so it can't run a loop."
         with _home(profile):
-            out = dispatch_loop_command(LoopManager(session_id=session_id), args,
-                                        route={"platform": "webui", "chat_id": session_id})
+            mgr = LoopManager(session_id=session_id)
+            before = mgr.state
+            out = dispatch_loop_command(mgr, args, route={"platform": "webui", "chat_id": session_id})
+            if before is not None and args.strip().lower() in {"pause", "resume", "stop", "clear", "cancel"}:
+                _record_control(before, mgr.state)
     _WAKE.set()
     return out["output"]
 
@@ -186,13 +236,13 @@ def _conditional_manager(session_id, db):
     class _CasLoop(cli.LoopManager):
         def __init__(self):
             self.session_id, self._db, self._key = session_id, db, cli._meta_key(session_id)
-            self._raw = db.get_meta(self._key)
+            self._raw = _meta_get(db, self._key)
             self._state = cli._parse_state(self._raw, session_id) if self._raw else None
             self.lost = False
 
         def _save(self):
             new = self._state.to_json()
-            if not self.lost and _cas(self._db, self._key, self._raw, new):
+            if not self.lost and _cas(self._key, self._raw, new):
                 self._raw = new
             else:
                 self.lost = True  # a /loop command or another process changed it first
@@ -236,6 +286,8 @@ def _run_one(profile, sid):
             or _session_has_active_turn(sid)):
         return
     try:
+        if _apply_recorded_control(db, mgr):
+            return
         if state.awaiting_response:  # judge only once the wakeup turn settled: same verdicts as the CLI hook
             turn = _turn_record(db, sid)
             if _turn_running(turn):  # e.g. compression moved the loop to a child id mid-turn
@@ -246,7 +298,7 @@ def _run_one(profile, sid):
             cancelled, reply = _wakeup_outcome(get_session(sid).messages, turn)
             if cancelled == "server":
                 mgr.abandon_tick()  # a server restart/settle, not the user's Stop: run the tick again
-            elif cancelled:
+            elif cancelled == "user":
                 with _profile_env(profile):
                     mgr.pause(reason="user-interrupted (Stop)")
             else:
@@ -266,7 +318,7 @@ def _run_one(profile, sid):
         msg = mgr.fire_tick()
         if not msg or mgr.lost:
             return
-        db.set_meta(_TURN_PREFIX + sid, json.dumps({"tick": mgr.state.ticks_fired}))
+        _meta_set(db, _TURN_PREFIX + sid, json.dumps({"tick": mgr.state.ticks_fired}))
         try:
             resp = start_session_turn(sid, msg, source="loop_wakeup")
         except Exception:  # nothing ran: roll the tick back so it is never judged
@@ -277,7 +329,7 @@ def _run_one(profile, sid):
             mgr.clear() if status == 404 else mgr.abandon_tick()
             return
         at, stream = resp.get("pending_started_at"), resp.get("stream_id")
-        db.set_meta(_TURN_PREFIX + sid, json.dumps(
+        _meta_set(db, _TURN_PREFIX + sid, json.dumps(
             {"token": build_active_turn_token(stream, at), "started_at": at, "stream_id": stream,
              "tick": mgr.state.ticks_fired, "launched": True}))
     except KeyError:  # session deleted

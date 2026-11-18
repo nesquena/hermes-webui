@@ -49,6 +49,15 @@ def _setup(tmp_path, monkeypatch, session, cmd="5m check", due=True, get_session
     return agent, loops, started
 
 
+def _stop_marker(**kw):
+    """The cancel row a Stop (or, with initiator="server", a server settle) persists."""
+    from api.streaming import _persist_cancelled_turn
+    s = NS(messages=[], active_stream_id="x", pending_user_message=None, pending_attachments=[],
+           pending_started_at=None, pending_user_source=None)
+    _persist_cancelled_turn(s, **kw)
+    return s.messages[-1]
+
+
 @requires_agent_modules
 def test_webui_loop_matches_cli(tmp_path, monkeypatch):
     from hermes_cli import goals
@@ -61,7 +70,7 @@ def test_webui_loop_matches_cli(tmp_path, monkeypatch):
             s.next_due_at, s.max_ticks = 0, max_ticks
             agent.save_loop("s1", s)
         loops.run_due_loops()
-        session.messages.append({"role": "assistant", "content": reply})
+        session.messages.append(reply if isinstance(reply, dict) else {"role": "assistant", "content": reply})
         loops.run_due_loops()
         return _loop(agent, loops)
 
@@ -73,7 +82,7 @@ def test_webui_loop_matches_cli(tmp_path, monkeypatch):
         assert "1/100 budget" in loops.run_loop_command("s1", "status")
         assert tick("still rolling", max_ticks=2).paused_reason == "tick budget exhausted (2/2)"  # pause, as CLI
         loops.run_loop_command("s1", "resume")
-        assert tick("Task cancelled.").paused_reason == "user-interrupted (Stop)"  # CLI Ctrl+C parity
+        assert tick(_stop_marker()).paused_reason == "user-interrupted (Stop)"  # CLI Ctrl+C parity
         loops.run_loop_command("s1", "resume")
         assert tick("done\nLOOP_COMPLETE").status == "done" and len(started) == 4
         for cmd in ("5m poll CI --times 2", "5m watch the queue --until queue is empty"):  # CLI flags, CLI text
