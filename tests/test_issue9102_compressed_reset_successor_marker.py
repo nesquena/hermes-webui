@@ -95,35 +95,37 @@ def _sidebar_rows(metadata, session_ids, titles=None):
 
 
 @pytest.mark.parametrize(
-    "source,parent_end_reason,parent_ended_at",
+    "source,parent_end_reason,reset_marker",
     [
-        # Gateway messaging reset: the compatibility rule (source + chat key).
-        ("telegram", "session_reset", 200.0),
+        # Gateway messaging reset: no canonical marker on the reset segment, so
+        # the source + chat-key compatibility rule is the only thing that can
+        # classify this edge.
+        ("telegram", "session_reset", None),
         # Canonical ``_reset_from`` marker on a non-messaging surface.
-        ("webui", "session_switch", 200.0),
+        ("webui", "session_switch", {"_reset_from": "A"}),
     ],
 )
 def test_compressed_reset_successor_tip_keeps_reset_marker(
-    tmp_path, source, parent_end_reason, parent_ended_at
+    tmp_path, source, parent_end_reason, reset_marker
 ):
     db = tmp_path / "state.db"
     conn = _make_db(db)
     try:
         _insert(
             conn, "A", source=source, started_at=100.0,
-            ended_at=parent_ended_at, end_reason=parent_end_reason,
+            ended_at=200.0, end_reason=parent_end_reason,
             session_key="dm-1",
         )
         # Reset successor: new conversation, durable parent link.
         _insert(
             conn, "B", parent="A", source=source, started_at=210.0,
             ended_at=300.0, end_reason="compression", session_key="dm-1",
-            model_config={"_reset_from": "A"},
+            model_config=reset_marker,
         )
         # Context compression rotates the id; model_config is inherited verbatim.
         _insert(
             conn, "B2", parent="B", source=source, started_at=310.0,
-            session_key="dm-1", model_config={"_reset_from": "A"},
+            session_key="dm-1", model_config=reset_marker,
         )
     finally:
         conn.close()
