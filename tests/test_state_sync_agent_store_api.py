@@ -21,8 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from api import state_sync
-
-_LEGACY_VERBS = ("ensure_session", "update_session_cwd", "set_auto_title", "update_token_counts")
+from tests._agent_state_store import expected_store_is_storage_interface, open_agent_store
 
 
 def _row(db_path, session_id):
@@ -138,18 +137,16 @@ def test_api_shape_error_in_a_sync_warns_once_then_debug(monkeypatch, caplog):
 
 @pytest.mark.requires_agent_modules
 def test_open_state_db_picks_the_store_api_this_agent_has(tmp_path):
-    db = state_sync._open_state_db(tmp_path / "state.db")
-    if db is None:
-        pytest.skip("no hermes-agent state store API importable")
+    """The expected API comes from what is installed (see expected_store_is_storage_interface); an
+    installed Agent whose store does not open fails here instead of skipping."""
+    db = open_agent_store(tmp_path / "state.db")
     try:
-        try:
+        storage = expected_store_is_storage_interface()
+        assert isinstance(db, state_sync._StoreStateDB) is storage
+        if not storage:
             from hermes_state import SessionDB
-        except ImportError:
-            SessionDB = None
-        legacy = SessionDB is not None and all(hasattr(SessionDB, v) for v in _LEGACY_VERBS)
-        assert isinstance(db, state_sync._StoreStateDB) is (not legacy)
-        if not legacy:
-            pytest.importorskip("persistence_assembly")
+
+            assert isinstance(db, SessionDB)
     finally:
         db.close()
 
@@ -233,12 +230,11 @@ def _run_webui_turns(tmp_path, sid):
 
 
 def _storage_api(db_path):
-    probe = state_sync._open_state_db(db_path)
+    probe = open_agent_store(db_path)
     try:
         return isinstance(probe, state_sync._StoreStateDB)
     finally:
-        if probe is not None:
-            probe.close()
+        probe.close()
 
 
 @pytest.mark.requires_agent_modules

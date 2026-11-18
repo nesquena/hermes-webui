@@ -562,10 +562,9 @@ def test_delayed_workspace_sync_skips_a_session_that_no_longer_resolves(monkeypa
 
 
 def _real_db(db_path):
-    db = state_sync._open_state_db(db_path)
-    if db is None:
-        pytest.skip("no hermes-agent state store API importable")
-    return db
+    from tests._agent_state_store import open_agent_store
+
+    return open_agent_store(db_path)
 
 
 def _seed(db, session_id, source="webui", cwd=None):

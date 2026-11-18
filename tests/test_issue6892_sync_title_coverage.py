@@ -15,12 +15,9 @@ import pytest
 
 
 def _make_db(tmp_path):
-    from api import state_sync
+    from tests._agent_state_store import open_agent_store
 
-    db = state_sync._open_state_db(tmp_path / "state.db")
-    if db is None:
-        pytest.skip("no hermes-agent state store API importable")
-    return db
+    return open_agent_store(tmp_path / "state.db")
 
 
 def _row(tmp_path, session_id):

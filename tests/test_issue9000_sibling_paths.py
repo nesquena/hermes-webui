@@ -78,9 +78,9 @@ def test_workspace_update_never_mirrors_into_the_swapped_in_session(store, tmp_p
     monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: state_sync._open_state_db(dbs[profile]))
 
     def _db_call(profile, method, *args, **kwargs):
-        db = state_sync._open_state_db(dbs[profile])
-        if db is None:
-            pytest.skip("no hermes-agent state store API importable")
+        from tests._agent_state_store import open_agent_store
+
+        db = open_agent_store(dbs[profile])
         try:
             return getattr(db, method)(*args, **kwargs)
         finally:

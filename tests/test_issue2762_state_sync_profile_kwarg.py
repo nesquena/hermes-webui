@@ -102,13 +102,13 @@ def _read_session(db_path: Path, session_id: str):
 def _mirrors_usage_totals(home: Path) -> bool:
     """True when this Agent's store takes WebUI's absolute usage totals (legacy SessionDB)."""
     from api import state_sync
+    from tests._agent_state_store import open_agent_store
 
-    db = state_sync._open_state_db(home / 'state.db')
+    db = open_agent_store(home / 'state.db')
     try:
-        return db is not None and not isinstance(db, state_sync._StoreStateDB)
+        return not isinstance(db, state_sync._StoreStateDB)
     finally:
-        if db is not None:
-            db.close()
+        db.close()
 
 
 def _make_message_state_db(path: Path, session_id: str, message_count: int, label: str):
@@ -190,8 +190,9 @@ def test_get_state_db_honors_explicit_profile_kwarg(two_profile_homes):
         pytest.skip("hermes_state package not available in this test env")
 
     db = _get_state_db(profile='maiko')
-    if db is None:
-        pytest.skip("SessionDB could not open the test db (env issue)")
+    # hermes_state imports (checked above), so an Agent store API is installed: a None
+    # here is a broken opener, not an environment gap, and must fail rather than skip.
+    assert db is not None, "_get_state_db(profile='maiko') returned None with an Agent store API installed"
     # We don't have a public accessor for the underlying path on SessionDB,
     # but writing through it and reading the raw file should work.
     db.ensure_session(session_id='probe-2762', source='webui', model='test')
