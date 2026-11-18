@@ -37,6 +37,8 @@
 
 ### Fixed
 
+- **A timing test for the update lock-recovery retry no longer fails on a busy machine (#9172).** The test speeds its timers up by a factor of 1,000, which put its "just under" and "just over" the 300-second limit cases 1 ms apart in real time, close enough for a loaded runner to swap them. They now sit 10 seconds either side of the limit. No product code changes.
+
 - **Opening a long conversation that's already cached copies only the messages it shows (#8993).** When a conversation was cached, the server still copied every message and rescanned the whole transcript on each load, even though it only sends the latest page. It now keeps a small summary with the cached copy and copies just the page it returns. Thanks @CharlesMcquade.
 
 - **On newer Agents, a finished turn stays in the saved conversation context (#9160, refs #9157).** The settle step checked for helpers that newer Agent builds moved to another module, so it always gave up, and the turn's prompt and answer were left out of the saved context. It now checks the module the repair actually uses. Older Agents behave exactly as before.
