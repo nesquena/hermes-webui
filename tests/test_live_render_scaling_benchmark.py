@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -105,6 +106,32 @@ def test_explicit_chrome_path_precedes_discovery(monkeypatch, tmp_path):
     )
 
     assert benchmark.resolve_chrome_path(executable, platform="darwin") == str(executable)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX PATH lookup regression")
+@pytest.mark.parametrize("path_form", ["absolute", "relative"])
+def test_explicit_chrome_path_launches_the_checked_file(monkeypatch, tmp_path, path_form):
+    executable = tmp_path / "chrome"
+    shutil.copy2(sys.executable, executable)
+    executable.chmod(0o755)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    argument = str(executable) if path_form == "absolute" else "./chrome"
+    resolved = benchmark.resolve_chrome_path(argument, platform="linux")
+    with subprocess.Popen(
+        [resolved, "-c", "print('checked executable launched')"],
+        cwd=tmp_path,
+        env={"PATH": str(empty_path)},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as process:
+        stdout, stderr = process.communicate(timeout=30)
+
+    assert process.returncode == 0, stderr
+    assert stdout.strip() == "checked executable launched"
 
 
 @pytest.mark.parametrize("executable", [False, True])

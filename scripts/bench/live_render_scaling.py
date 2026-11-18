@@ -64,7 +64,7 @@ def resolve_chrome_path(
         candidate = Path(explicit).expanduser()
         if not _is_executable(candidate):
             raise ValueError(f"--chrome-path is not an executable file: {candidate}")
-        return str(candidate)
+        return str(candidate.resolve())
 
     platform = platform or sys.platform
     release = release if release is not None else platform_module.release()
