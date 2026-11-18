@@ -257,3 +257,29 @@ def test_teardown_hook_drains_followups():
     src = Path(__file__).parent.parent.joinpath("api", "streaming.py").read_text(encoding="utf-8")
     assert "drain_followup_queue_for_session(session_id)" in src
     assert src.index("drain_deferred_wakeups_for_session(session_id)") < src.index("drain_followup_queue_for_session(session_id)")
+
+
+def test_gateway_backend_teardown_drains_followups():
+    """HERMES_WEBUI_CHAT_BACKEND=gateway never runs streaming.py's teardown: the Gateway
+    worker's own finally block must drain too (found by the live test on the deployed host)."""
+    src = Path(__file__).parent.parent.joinpath("api", "gateway_chat.py").read_text(encoding="utf-8")
+    tail = src[src.rindex("unregister_active_run(stream_id)"):]
+    assert "drain_followup_queue_for_session(session_id)" in tail
+    assert tail.index("clear_session_writeback_owner_if_owned") < tail.index("drain_followup_queue_for_session")
+
+
+def test_get_queue_self_heals_a_stranded_idle_queue(fqenv, monkeypatch):
+    import api.routes as routes
+
+    seen = {}
+    monkeypatch.setattr(routes, "j", lambda h, payload, status=200: seen.update(payload=payload) or True)
+    monkeypatch.setattr(routes, "bad", lambda h, msg, status=400: seen.update(payload={"error": msg}) or True)
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda *a, **k: True)
+    fqenv.active = False
+    fq.enqueue(SID, "stranded")  # e.g. teardown ran before the entry existed / server restarted
+    fq.release(SID, fq.claim_next(SID)["id"])  # leave it queued, not processing
+    class P:  # parsed url
+        path = "/api/chat/queue"
+        query = f"session_id={SID}"
+    routes.handle_get(object(), P)
+    assert _wait(lambda: fqenv.started == ["stranded"])

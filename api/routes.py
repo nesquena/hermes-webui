@@ -19205,7 +19205,13 @@ def handle_get(handler, parsed) -> bool:
             return True
         from api import followup_queue
         try:
-            return j(handler, {"session_id": sid, "items": followup_queue.list_entries(sid)})
+            items = followup_queue.list_entries(sid)
+            if any(i["status"] != "failed" for i in items):
+                # Self-heal: a queue stranded by a restart or a missed teardown starts as
+                # soon as any client looks at an idle session (no-op while a turn runs).
+                followup_queue.drain_followup_queue_for_session(sid)
+                items = followup_queue.list_entries(sid)
+            return j(handler, {"session_id": sid, "items": items})
         except ValueError:
             return bad(handler, "invalid session_id")
 
