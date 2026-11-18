@@ -29,6 +29,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _slice(start_marker, end_marker, start_from=0):
@@ -105,6 +106,16 @@ def _boot_speech_mirror():
     return BOOT_JS[start:end]
 
 
+def _ui_quota_chip_window_helper():
+    """The real ui.js helper `_preferencesPayloadFromUi` calls for the quota-chip
+    window setting (#8548). The page loads ui.js before panels.js, so the
+    harness composes it the same way instead of stubbing it."""
+    start = UI_JS.index("function _normalizeQuotaChipWindow(")
+    end = UI_JS.index("function _quotaWindowSeconds(", start)
+    assert start < end
+    return UI_JS[start:end]
+
+
 def _payload_helpers():
     """Preferences payload builders plus the real autosave POST path.
 
@@ -112,7 +123,7 @@ def _payload_helpers():
     autosave regression exercises the same `_schedulePreferencesAutosave`,
     `_rememberPreferencesSaved` and `_autosavePreferencesSettings` the panel uses.
     """
-    return _slice(
+    return _ui_quota_chip_window_helper() + _slice(
         "function _setOwnedSpeechPayload(",
         "function _retryPreferencesAutosave(",
     )
