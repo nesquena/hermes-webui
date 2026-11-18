@@ -339,7 +339,8 @@ def test_handlers_never_disclose_private_key_or_subscriptions(push_env, monkeypa
     blob = json.dumps(cap.out)
     assert PRIVATE_MARK not in blob
     assert "private" not in blob.lower()
-    assert cap.out[0][1] == {"configured": True, "dependency_available": True, "enabled": True, "subscribed": False}
+    assert cap.out[0][1] == {"configured": True, "dependency_available": True, "enabled": True,
+                           "subscribed": False, "cron_subscribed": False}
     assert cap.out[1] == (200, {"public_key": "PUBKEY"})
     assert cap.out[3][1]["subscribed"] is True
     assert cap.out[4][1] == {"ok": True, "removed": True}

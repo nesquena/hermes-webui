@@ -448,7 +448,7 @@ def _load() -> list[dict]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         subs = data["subscriptions"]
-        if not isinstance(subs, list):
+        if not isinstance(subs, list) or len(subs) > _MAX_SUBSCRIPTIONS:
             raise ValueError("subscriptions is not a list")
         out = []
         for s in subs:
@@ -462,6 +462,8 @@ def _load() -> list[dict]:
                     raise ValueError("invalid cron profile opt-in")
             n["cron_profiles"] = profiles
             out.append(n)
+        if len({h for s in out for h in s["cron_profiles"]}) > _MAX_CRON_PROFILES:
+            raise ValueError("too many cron notification profiles")
         return out
     except Exception as exc:
         logger.warning("Web Push subscription store %s is unreadable; failing closed", path.name)
@@ -616,6 +618,14 @@ def cron_routes() -> dict:
             for home, since in sub["cron_profiles"].items():
                 routes.setdefault(home, []).append((sub["owner"], since))
     return routes
+
+
+def cron_opted_in(endpoint: str, owner: str, profile_home: Path) -> bool:
+    home = str(Path(profile_home).resolve())
+    owner = _clean_owner(owner)
+    return any(s["endpoint"] == endpoint and owner and s["owner"] == owner and home in s["cron_profiles"]
+               for s in list_subscriptions())
+
 
 def _mask(text: str) -> str:
     """Mask credentials before text leaves for Apple/Google push services.

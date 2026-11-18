@@ -28874,6 +28874,8 @@ def _handle_push_status(handler, parsed):
             if not subscribed and web_push.adopt_legacy_subscription(endpoint, owner):
                 subscribed = True
         out["subscribed"] = subscribed
+        from api.profiles import get_active_hermes_home
+        out["cron_subscribed"] = bool(subscribed and web_push.cron_opted_in(endpoint, owner, get_active_hermes_home()))
     except web_push.PushStoreUnavailable as exc:
         return bad(handler, str(exc), 503)
     return j(handler, out)

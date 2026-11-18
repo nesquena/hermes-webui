@@ -333,3 +333,72 @@ def test_background_observer_to_delivery_worker_without_sse(push_env, tmp_path, 
         web_push.shutdown(wait=1)
     assert not web_push_cron._THREAD.is_alive()
     assert all(not worker.is_alive() for worker in web_push._WORKERS)
+
+
+def test_late_atomic_publish_is_not_lost_to_scan_wall_time(push_env, tmp_path, monkeypatch):
+    from api import web_push_cron
+
+    _enable(monkeypatch, push_env)
+    web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
+    web_push.set_cron_opt_in(APPLE, OWNER_A, tmp_path, True, now_ns=100)
+    observer = web_push_cron.CronObserver(started_ns=100)
+    queued = []
+    monkeypatch.setattr(web_push, "enqueue", lambda p: queued.append(p) or True)
+    # The producer prepared bytes at 200, but published them after a scan at 300.
+    observer.poll(now_ns=300)
+    _output(tmp_path, 200)
+    observer.poll(now_ns=400)
+    observer.poll(now_ns=500)
+    assert len(queued) == 1
+    observer.close()
+
+
+def test_recent_identity_memory_is_bounded_without_replay(push_env, tmp_path, monkeypatch):
+    from api import web_push_cron
+
+    _enable(monkeypatch, push_env)
+    monkeypatch.setattr(web_push_cron, "_RECENT", 2)
+    web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
+    web_push.set_cron_opt_in(APPLE, OWNER_A, tmp_path, True, now_ns=100)
+    observer = web_push_cron.CronObserver(started_ns=100)
+    queued = []
+    monkeypatch.setattr(web_push, "enqueue", lambda p: queued.append(p) or True)
+    for stamp in (200, 300, 400, 500):
+        _output(tmp_path, stamp, f"{stamp}.md")
+        observer.poll(now_ns=600)
+        assert len(observer.cursors[str(tmp_path.resolve())]["seen"]) <= 2
+    observer.poll(now_ns=700)
+    observer.poll(now_ns=800)
+    assert len(queued) == 4
+    observer.close()
+
+
+def test_store_cannot_expand_observer_beyond_profile_limit(push_env, monkeypatch):
+    monkeypatch.setattr(web_push, "_MAX_CRON_PROFILES", 1)
+    records = [dict(_sub(APPLE), owner=OWNER_A, cron_profiles={"/profile/a": 100}),
+               dict(_sub(FCM), owner=OWNER_B, cron_profiles={"/profile/b": 100})]
+    (push_env / "webui_push_subscriptions.json").write_text(json.dumps({"subscriptions": records}))
+    with pytest.raises(web_push.PushStoreUnavailable):
+        web_push.cron_routes()
+
+
+def test_status_reports_only_callers_current_profile_consent(push_env, tmp_path, monkeypatch):
+    from api import profiles
+    from urllib.parse import urlparse
+
+    _enable(monkeypatch, push_env)
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    web_push.add_subscription(_sub(APPLE), owner=OWNER_A)
+    web_push.set_cron_opt_in(APPLE, OWNER_A, a, True)
+    cap = _Capture(monkeypatch)
+    query = urlparse("/api/push/status?endpoint=" + APPLE)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: b)
+    cap.routes._handle_push_status(_H(), query)
+    assert cap.out[-1][1]["cron_subscribed"] is False
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: a)
+    cap.routes._handle_push_status(_H(), query)
+    assert cap.out[-1][1]["cron_subscribed"] is True
+    assert str(a) not in json.dumps(cap.out)
+    assert OWNER_A not in json.dumps(cap.out)
