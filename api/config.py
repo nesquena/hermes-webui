@@ -3332,6 +3332,7 @@ def _configured_custom_provider_identity(
     if not isinstance(source, dict):
         return False
     providers_cfg = source.get("providers")
+    model_cfg = source.get("model")
     parts = rest.split(":")
     for index in range(1, len(parts) + 1):
         prefix = ":".join(parts[:index])
@@ -3343,8 +3344,15 @@ def _configured_custom_provider_identity(
                 if not key:
                     continue
                 display_name = record.get("name") if isinstance(record, dict) else None
-                if _custom_record_names_identity(display_name or key, key, pid, slug):
+                if (
+                    _custom_record_names_identity(display_name or key, key, pid, slug)
+                    or _custom_record_claims_slug(record, slug)
+                ):
                     return True
+        if isinstance(model_cfg, dict) and _custom_record_claims_slug(
+            model_cfg, slug, allow_name=False
+        ):
+            return True
         if _named_custom_provider_slug_for_provider(pid, source):
             return True
         try:
