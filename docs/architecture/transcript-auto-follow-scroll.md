@@ -8,8 +8,10 @@
   `tests/test_issue3319_pinned_scroll_jump.py`,
   `tests/test_pinned_restore_stale_bottom_gap.py`,
   `tests/test_scroll_collapse_clamp_keeps_follow.py`,
-  `tests/test_2111_ios_pwa_bottom_scroll_stutter.py`, and
-  `tests/test_mobile_layout.py`.
+  `tests/test_2111_ios_pwa_bottom_scroll_stutter.py`,
+  `tests/test_mobile_layout.py`,
+  `tests/test_issue6653_input_authority.py`, and
+  `tests/test_issue6653_catch_tail_and_short_transcript.py`.
 
 This document is the authority for how the transcript decides to stay glued to
 the live tail, when reader input releases that glue, and how a reader regains
@@ -18,7 +20,7 @@ all consult this same state, so a change here must keep all three consistent.
 
 ## State model
 
-Three pieces of state own the outcome, all inside `static/ui.js`:
+Four pieces of state own the outcome, all inside `static/ui.js`:
 
 - `_scrollPinned` — the live-tail follow latch. While true, every streamed
   write re-anchors the viewport to the bottom.
@@ -31,6 +33,20 @@ Three pieces of state own the outcome, all inside `static/ui.js`:
   bump additionally requires the event to target the transcript scroll surface
   (see the capture rule below) so input consumed by a nested scroll surface
   never becomes transcript re-pin authority.
+- `_messageFollowIntentCache` — layout-free synchronous follow intent. Synchronous
+  readers (notably the SSE cancel path in `static/messages.js`) consult this
+  cache to determine whether the reader was actively following without forcing a
+  synchronous layout (`scrollHeight` reflow on WKWebView) or waiting for deferred
+  rAF scroll handler flags. The cache is invalidated synchronously only by
+  authoritative upward reader input that actually has room to move the transcript
+  (`el.scrollTop > 0` on wheel, touch, or keyboard navigation targeting the
+  transcript surface) or by a cumulative scrollbar drag away from the bottom.
+  It must never be re-armed from automatic writers, retry frames, settle passes,
+  or bare programmatic scrolls (`scrollToBottom()`, re-anchors). Its legitimate
+  re-arms are limited to confirmed reader return: an authoritative input-tail
+  catch (`caughtInputTail`), verified near-bottom debounce confirmation
+  (`_nearBottomCount >= 2` within the bottom boundary), explicit user bottom
+  navigation, and clean stream or session resets.
 
 ## Input-tail capture and reader-resume re-pinning (catch-tail contract)
 

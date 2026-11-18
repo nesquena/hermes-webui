@@ -9164,7 +9164,7 @@ function _recordNonMessageScrollIntent(e){
     // Gestures Lose Re-Pinning).
     if(_isTranscriptScrollTarget(target,el,dir)){
       _captureMessageScrollInputTail(el);
-      if(dir<0) _messageFollowIntentCache=false;
+      if(dir<0&&el.scrollTop>0) _messageFollowIntentCache=false;
     }
     if(jumpScrollOwned||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
@@ -9480,7 +9480,7 @@ if(typeof window!=='undefined'){
       // downward key both leave a follower following.
       if(_isTranscriptScrollTarget(keyTarget,el,keyDir)){
         _captureMessageScrollInputTail(el);
-        if(keyDir<0) _messageFollowIntentCache=false;
+        if(keyDir<0&&el.scrollTop>0) _messageFollowIntentCache=false;
       }
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -9601,6 +9601,7 @@ if(typeof window!=='undefined'){
           _nearBottomCount=0;
           _messageUserUnpinned=false;
           _scrollPinned=true;
+          _messageFollowIntentCache=true;
           if(typeof window!=='undefined'&&window._autoScrollFollow&&typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
         }else{
         _nearBottomCount=_nearBottomCount+1;

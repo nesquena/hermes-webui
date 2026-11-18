@@ -222,20 +222,22 @@ def test_follow_intent_cache_is_fed_by_the_input_tail_ownership():
     # for an upward gesture.
     wheel = c.find(_compact("if(_isTranscriptScrollTarget(target,el,dir)){"))
     assert wheel != -1, "wheel/touch path must keep the input-tail capture gate (#7494)"
-    wheel_seg = c[wheel : wheel + 220]
+    wheel_seg = c[wheel : wheel + 260]
     assert _compact("_captureMessageScrollInputTail(el);") in wheel_seg
-    assert _compact("if(dir<0)_messageFollowIntentCache=false;") in wheel_seg, (
+    assert _compact("if(dir<0&&el.scrollTop>0)_messageFollowIntentCache=false;") in wheel_seg, (
         "an upward wheel/touch gesture the transcript actually scrolls must "
         "invalidate the follow-intent cache inside the same ownership gate that "
-        "captures the input tail (#6653)"
+        "captures the input tail, and only when upward travel is possible — "
+        "ownership alone does not move the transcript (#6653 re-gate)"
     )
     # Keydown: same gate, direction from keyDir only.
     key = c.find(_compact("if(_isTranscriptScrollTarget(keyTarget,el,keyDir)){"))
     assert key != -1, "keydown path must keep the input-tail capture gate (#7494)"
-    key_seg = c[key : key + 220]
-    assert _compact("if(keyDir<0)_messageFollowIntentCache=false;") in key_seg, (
+    key_seg = c[key : key + 260]
+    assert _compact("if(keyDir<0&&el.scrollTop>0)_messageFollowIntentCache=false;") in key_seg, (
         "an upward scroll key the transcript actually scrolls must invalidate the "
-        "follow-intent cache inside the same ownership gate (#6653)"
+        "follow-intent cache inside the same ownership gate, and only when upward "
+        "travel is possible (#6653 re-gate)"
     )
     # Scroll listener: the scrollbar-drag invalidation precedes BOTH guards (the
     # drag is reader input on the transcript surface; a programmatic scroll never
@@ -287,9 +289,9 @@ def test_keydown_follow_intent_direction_comes_from_keydir():
     invalidate = kc.index("_messageFollowIntentCache=false")
     stmt_start = kc.rindex("if(", 0, invalidate)
     stmt = kc[stmt_start : invalidate + len("_messageFollowIntentCache=false")]
-    assert _compact("if(keyDir<0)") in stmt, (
-        "the keydown invalidation must be gated on keyDir<0, not on a second "
-        "literal key list (#6653)"
+    assert _compact("if(keyDir<0&&el.scrollTop>0)") in stmt, (
+        "the keydown invalidation must be gated on keyDir<0 and on real upward "
+        "travel, not on a second literal key list (#6653 re-gate)"
     )
     assert "e.key===" not in stmt, (
         "no divergent key list may live in the invalidation statement — keyDir "
