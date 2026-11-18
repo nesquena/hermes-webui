@@ -37,6 +37,8 @@
 
 ### Fixed
 
+- **On newer Agents, a finished turn stays in the saved conversation context (#9160, refs #9157).** The settle step checked for helpers that newer Agent builds moved to another module, so it always gave up, and the turn's prompt and answer were left out of the saved context. It now checks the module the repair actually uses. Older Agents behave exactly as before.
+
 - **`/yolo` and the auto-approval pill are steadier (#9156, refs #9101).** `/yolo` runs once per session at a time, so a double-press can't flip the setting twice. A settings read that doesn't return a clear on/off answer leaves the pill as it was and never turns auto-approval on. Opening a session from another path than the sidebar also resets the pill to that session's state.
 
 - **Session titles from open-weight models no longer show the model's reasoning (#9129, supersedes #7539).** Title requests on the auxiliary and Chat Completions routes now ask for a strict `{"title": ...}` reply and unwrap it. A freshly generated title that opens with a hedge ("Maybe", "I think", "How about" and similar), still carries a thinking tag, or contains a JSON fragment is rejected and falls back to the alternate route or the local summary, as other bad titles already do. Saved titles are never renamed. When an endpoint refuses the schema itself, the request is resent once without it; any other error is not resent. Thanks @UnknownIntegral.
