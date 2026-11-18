@@ -8984,11 +8984,11 @@ let _messageUserUnpinned=false;
 // (the SSE cancel handler in messages.js). _scrollPinned/_messageUserUnpinned
 // are only updated inside the scroll listener's requestAnimationFrame callback,
 // so a reader who JUST scrolled away (scrollbar or keyboard) can still read
-// stale pin state until the next frame. Every scroll-away-up invalidates this
-// cache SYNCHRONOUSLY in the scroll/keydown listeners (before the
-// programmatic-scroll early-return and the rAF deferral); every re-pin re-arms
-// it. Reads never touch scrollHeight/clientHeight, so this is safe inside a
-// synchronous EventSource callback on WKWebView (#6653).
+// stale pin state until the next frame. Invalidation happens where upstream
+// proves the gesture governs the transcript (_isTranscriptScrollTarget), plus
+// the cumulative scrollbar-drag comparison before the guards; every re-pin
+// re-arms it. Reads never touch scrollHeight/clientHeight, so this is safe
+// inside a synchronous EventSource callback on WKWebView (#6653).
 let _messageFollowIntentCache=true;
 // #6653 re-gate: cumulative scrollTop baseline captured at scrollbar pointerdown.
 // A scrollbar drag that starts inside the programmatic-suppression window has its
@@ -9162,7 +9162,10 @@ function _recordNonMessageScrollIntent(e){
     // A pane pinned at the gesture's boundary chains the gesture to the
     // transcript, so it must not swallow the capture (#7494, Boundary
     // Gestures Lose Re-Pinning).
-    if(_isTranscriptScrollTarget(target,el,dir)) _captureMessageScrollInputTail(el);
+    if(_isTranscriptScrollTarget(target,el,dir)){
+      _captureMessageScrollInputTail(el);
+      if(dir<0) _messageFollowIntentCache=false;
+    }
     if(jumpScrollOwned||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
     }
@@ -9401,6 +9404,7 @@ if(typeof window!=='undefined'){
     if(e.target===el&&e.offsetX>=el.clientWidth){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       _scrollbarDragActive=true;
+      _scrollbarDragBaselineScrollTop=el.scrollTop;
       // The scrollbar belongs to the transcript itself: drag input always
       // targets the transcript scroll surface (#7494).
       if(typeof _captureMessageScrollInputTail==='function') _captureMessageScrollInputTail(el);
@@ -9409,16 +9413,18 @@ if(typeof window!=='undefined'){
   window.addEventListener('pointerup',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
+    _scrollbarDragBaselineScrollTop=null;
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('pointercancel',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
+    _scrollbarDragBaselineScrollTop=null;
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
-  window.addEventListener('blur',()=>{ _scrollbarDragActive=false; },{passive:true});
+  window.addEventListener('blur',()=>{ _scrollbarDragActive=false; _scrollbarDragBaselineScrollTop=null; },{passive:true});
   document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='hidden') _scrollbarDragActive=false;
+    if(document.visibilityState==='hidden'){ _scrollbarDragActive=false; _scrollbarDragBaselineScrollTop=null; }
   },{passive:true});
   // #4970 review (greptile P1): record keyboard-driven message-pane scrolling as
   // user intent. PageUp/PageDown, Arrow keys, Space/Shift+Space, Home/End scroll
@@ -9467,20 +9473,29 @@ if(typeof window!=='undefined'){
       // (#7494 re-gate: PageDown from a nested pane's boundary was undone by
       // the queued live-render restore).
       const keyDir=(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home'||((e.key===' '||e.key==='Spacebar')&&e.shiftKey))?-1:1;
-      if(_isTranscriptScrollTarget(keyTarget,el,keyDir)) _captureMessageScrollInputTail(el);
+      // #6653: the follow-intent cache rides on the same ownership decision that
+      // mints the input tail - a key the transcript actually scrolls, in the up
+      // direction (keyDir already encodes the browser's own key semantics, so
+      // there is no second key list here). A key consumed by a nested pane and a
+      // downward key both leave a follower following.
+      if(_isTranscriptScrollTarget(keyTarget,el,keyDir)){
+        _captureMessageScrollInputTail(el);
+        if(keyDir<0) _messageFollowIntentCache=false;
+      }
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(bottomDistance>120) _lastMessageScrollIntentMs=now;
-      // #6653: a keyboard scroll-away (PageUp/ArrowUp/Home, or Shift+Space which
-      // pages up) invalidates the layout-free follow-intent cache synchronously,
-      // before the native scroll event and the rAF that flip
-      // _scrollPinned/_messageUserUnpinned - so a cancel landing in that window
-      // never treats the reader as still pinned.
-      if(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home'||((e.key===' '||e.key==='Spacebar')&&e.shiftKey)) _messageFollowIntentCache=false;
     }
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
+    // #6653: the follow-intent cache is invalidated BEFORE the jump-owner and
+    // programmatic guards, because a scrollbar drag is reader input on the
+    // transcript surface itself (a programmatic scroll never sets
+    // _scrollbarDragActive) and a drag that starts inside the programmatic
+    // suppression window has its per-event deltas swallowed by the latch.
+    if(_scrollbarDragActive&&_scrollbarDragBaselineScrollTop!==null
+      &&el.scrollTop<_scrollbarDragBaselineScrollTop-2) _messageFollowIntentCache=false;
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;

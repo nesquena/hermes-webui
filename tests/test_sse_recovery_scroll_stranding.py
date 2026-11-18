@@ -201,80 +201,99 @@ def test_cancel_handler_avoids_sync_scrollheight_layout():
     )
 
 
-def test_follow_intent_cache_synchronously_invalidated_before_raf():
-    """#6653: the layout-free follow-intent cache must be invalidated in ui.js
-    SYNCHRONOUSLY on scroll-away-up - in the scroll listener BEFORE the
-    programmatic-scroll early-return and the rAF deferral, and in the keydown
-    listener for upward keys. A cancel landing between a scroll-away and the
-    next animation frame must never read stale pin state.
+def test_follow_intent_cache_is_fed_by_the_input_tail_ownership():
+    """#6653 port: the layout-free follow-intent cache must be invalidated in
+    ui.js SYNCHRONOUSLY on scroll-away-up, and the invalidation must ride on the
+    #8070 input-tail ownership - the same `_isTranscriptScrollTarget` gate that
+    mints re-pin authority, and the same `keyDir` the keyboard path already
+    computes - plus the cumulative scrollbar-drag comparison that sits before the
+    scroll listener's guards, because the drag deltas are swallowed by the
+    programmatic latch. A cancel landing between a scroll-away and the next
+    animation frame must never read stale pin state.
+
+    The behavioral half of this contract (wheel/touch, drag, keydown, nested-pane
+    controls) lives in `tests/test_issue6653_input_authority.py`.
     """
     c = _compact(UI_JS)
     assert _compact("let _messageFollowIntentCache=true") in c, (
         "follow-intent cache declaration missing in ui.js (#6653)"
     )
-    # Scroll listener: the invalidation must precede the programmatic-scroll
-    # early-return and the rAF deferral within the same listener body.
-    anchor = "if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;"
-    listener = UI_JS[UI_JS.index(anchor):]
-    listener = listener[:listener.index("_scrollRaf=requestAnimationFrame")]
+    # Wheel/touch: invalidation inside the very gate that captures the tail, only
+    # for an upward gesture.
+    wheel = c.find(_compact("if(_isTranscriptScrollTarget(target,el,dir)){"))
+    assert wheel != -1, "wheel/touch path must keep the input-tail capture gate (#7494)"
+    wheel_seg = c[wheel : wheel + 220]
+    assert _compact("_captureMessageScrollInputTail(el);") in wheel_seg
+    assert _compact("if(dir<0)_messageFollowIntentCache=false;") in wheel_seg, (
+        "an upward wheel/touch gesture the transcript actually scrolls must "
+        "invalidate the follow-intent cache inside the same ownership gate that "
+        "captures the input tail (#6653)"
+    )
+    # Keydown: same gate, direction from keyDir only.
+    key = c.find(_compact("if(_isTranscriptScrollTarget(keyTarget,el,keyDir)){"))
+    assert key != -1, "keydown path must keep the input-tail capture gate (#7494)"
+    key_seg = c[key : key + 220]
+    assert _compact("if(keyDir<0)_messageFollowIntentCache=false;") in key_seg, (
+        "an upward scroll key the transcript actually scrolls must invalidate the "
+        "follow-intent cache inside the same ownership gate (#6653)"
+    )
+    # Scroll listener: the scrollbar-drag invalidation precedes BOTH guards (the
+    # drag is reader input on the transcript surface; a programmatic scroll never
+    # sets _scrollbarDragActive).
+    start = UI_JS.index("el.addEventListener('scroll'")
+    listener = UI_JS[start : start + 1200]
     lc = _compact(listener)
     invalidate = lc.find("_messageFollowIntentCache=false")
-    prog_return = lc.find("if(_freshProgrammaticScrollActive())return;")
     assert invalidate != -1, (
         "scroll listener must synchronously invalidate the follow-intent cache "
-        "on scroll-away-up (#6653)"
+        "on an upward scrollbar drag (#6653)"
     )
-    assert prog_return != -1 and invalidate < prog_return, (
-        "cache invalidation must run BEFORE the programmatic-scroll early-return "
-        "(and thus before the rAF deferral) in the scroll listener (#6653)"
+    assert _compact("_scrollbarDragActive") in lc[:invalidate], (
+        "the pre-guard invalidation must be gated on an active scrollbar drag — "
+        "a programmatic scroll can never invalidate follow-intent (#6653)"
     )
-    # Keydown listener: upward keys invalidate synchronously (the native scroll
-    # event and its rAF have not fired yet when the cancel lands).
-    keydown = UI_JS[UI_JS.index("const _MESSAGE_SCROLL_KEYS=new Set(["):]
-    keydown = keydown[:keydown.index("let _scrollRaf=0")]
-    assert "_messageFollowIntentCache=false" in _compact(keydown), (
-        "keydown listener must synchronously invalidate the follow-intent cache "
-        "on keyboard scroll-away (#6653)"
+    jump_guard = lc.find(_compact("if(_messageJumpScrollOwner){"))
+    prog_return = lc.find(_compact("if(_freshProgrammaticScrollActive())return;"))
+    assert jump_guard != -1 and prog_return != -1 and invalidate < jump_guard < prog_return, (
+        "the drag invalidation must run BEFORE the jump-owner and "
+        "programmatic-scroll early-returns in the scroll listener (#6653)"
     )
 
 
-def test_shift_space_pages_up_invalidates_follow_intent_cache():
-    """#6653 re-gate (maintainer round-2, finding 3): Shift+Space is a page-UP
-    scroll-away and must synchronously invalidate the layout-free follow-intent
-    cache in the keydown path, exactly like PageUp/ArrowUp/Home. Plain Space
-    (page-down) and PageDown scroll TOWARD the bottom and must NOT invalidate -
-    a follower paging down through a stream stays a follower.
+def test_keydown_follow_intent_direction_comes_from_keydir():
+    """Shift+Space is a page-UP scroll-away and must invalidate the follow-intent
+    cache exactly like PageUp/ArrowUp/Home; plain Space (page-down) and PageDown
+    scroll TOWARD the bottom and must NOT invalidate.
+
+    The direction has exactly one source: `keyDir`. A second literal key list in
+    the invalidation statement would drift from the browser's own semantics (and
+    did, in the pre-port branch), so it is forbidden here.
     """
+    keydir = _compact(
+        "const keyDir=(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home'"
+        "||((e.key===' '||e.key==='Spacebar')&&e.shiftKey))?-1:1;"
+    )
+    assert keydir in _compact(UI_JS), (
+        "keyDir must keep encoding the browser's key semantics, including "
+        "Shift+Space as page-up (#6653)"
+    )
     keydown = UI_JS[UI_JS.index("const _MESSAGE_SCROLL_KEYS=new Set(["):]
-    keydown = keydown[:keydown.index("let _scrollRaf=0")]
+    keydown = keydown[: keydown.index("let _scrollRaf=0")]
     kc = _compact(keydown)
-    # The Shift+Space branch must be part of the same synchronous invalidation
-    # statement as the other upward keys (PageUp/ArrowUp/Home). Compacted the
-    # same way as kc (the space inside the ' ' key literal is stripped too).
-    shift_space = _compact("((e.key===' '||e.key==='Spacebar')&&e.shiftKey)")
+    assert kc.count("_messageFollowIntentCache=false") == 1, (
+        "the keydown path must have exactly one follow-intent invalidation, "
+        "derived from keyDir (#6653)"
+    )
     invalidate = kc.index("_messageFollowIntentCache=false")
-    # The invalidation statement: from the enclosing if( up to the cache write.
     stmt_start = kc.rindex("if(", 0, invalidate)
-    stmt = kc[stmt_start:invalidate + len("_messageFollowIntentCache=false")]
-    assert shift_space in stmt, (
-        "Shift+Space must be wired into the synchronous cache invalidation "
-        "statement (#6653)"
+    stmt = kc[stmt_start : invalidate + len("_messageFollowIntentCache=false")]
+    assert _compact("if(keyDir<0)") in stmt, (
+        "the keydown invalidation must be gated on keyDir<0, not on a second "
+        "literal key list (#6653)"
     )
-    # Downward keys must NOT invalidate follow-intent - they scroll toward the
-    # bottom, so a follower paging down through a stream stays a follower.
-    assert "e.key==='PageDown'" not in stmt, (
-        "PageDown must not invalidate follow-intent - it scrolls toward the "
-        "bottom (#6653)"
-    )
-    # Plain Space (page-down) must only invalidate when gated on shiftKey.
-    plain_space = _compact("(e.key===' '||e.key==='Spacebar')")
-    assert stmt.count(plain_space) == 1, (
-        "plain Space must appear exactly once in the invalidation statement, "
-        "as the Shift+Space branch (#6653)"
-    )
-    assert plain_space + "&&e.shiftKey" in stmt, (
-        "plain Space must not invalidate follow-intent on its own - only "
-        "Shift+Space (page-up) may (#6653)"
+    assert "e.key===" not in stmt, (
+        "no divergent key list may live in the invalidation statement — keyDir "
+        "already encodes PageUp/ArrowUp/Home and Shift+Space as up (#6653)"
     )
 
 

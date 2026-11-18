@@ -155,18 +155,19 @@ def test_programmatic_scroll_guard_still_skips_listener():
         "so programmatic scrollToBottom() calls never update _lastScrollTop "
         "and never spuriously unpin (#1731)."
     )
-    # #6653 re-gate: the synchronous follow-intent invalidation sits before the
-    # guard (it must run before the rAF deferral so a cancel landing in that
-    # window reads fresh state), but it must be GATED on the programmatic latch
-    # being clear — a programmatic scrollToBottom() must never invalidate the
-    # follow-intent cache, or a genuine follower would silently miss the next
-    # cancellation notice. (An active scrollbar drag is the sole exception, and
-    # it is authoritative user input, not a programmatic scroll.)
+    # #6653: the follow-intent invalidation that sits before the guard must be
+    # gated on an ACTIVE SCROLLBAR DRAG — a programmatic scrollToBottom() never
+    # sets _scrollbarDragActive, so a programmatic scroll can never invalidate
+    # the follow-intent cache (or a genuine follower would silently miss the next
+    # cancellation notice). The drag is the one authoritative pre-guard input,
+    # because its per-event deltas are swallowed by the latch (port of #6653 onto
+    # the #8070 input-tail ownership).
     cache_idx = listener.find("_messageFollowIntentCache=false")
     if cache_idx != -1 and cache_idx < bail_idx:
         pre_guard = listener[:bail_idx]
-        assert "!_programmaticScroll" in pre_guard, (
-            "synchronous cache invalidation before the guard must be gated on "
-            "!_programmaticScroll so programmatic scrollToBottom() calls never "
-            "invalidate follow-intent (#6653 re-gate)"
+        assert "_scrollbarDragActive" in pre_guard, (
+            "synchronous cache invalidation before the guard must be gated on an "
+            "active scrollbar drag (_scrollbarDragActive), the only reader input "
+            "that can precede the programmatic guard, so programmatic "
+            "scrollToBottom() calls never invalidate follow-intent (#6653)"
         )
