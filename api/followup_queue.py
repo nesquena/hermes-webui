@@ -359,7 +359,7 @@ def _start_claimed(session_id: str, entry: dict, recovering: bool = False) -> No
 
             resp = start_session_turn(session_id, entry["text"], source="queued_followup")
             status = int((resp or {}).get("_status", 200) or 200)
-        except Exception as exc:
+        except Exception:
             logger.warning("followup start crashed for %s", session_id, exc_info=True)
             release(session_id, entry["id"], count_round=True)
             _redrain_if_requested(session_id)
