@@ -111,8 +111,9 @@ def _publish_session_list_changed(
 def _sync_session_title_to_insights(session, *, rename: bool = False) -> None:
     """Write title-only session metadata updates through to state.db when enabled.
 
-    ``rename=True`` only from /api/session/rename: an explicit user rename,
-    including clearing it back to an automatic label. Other callers sync
+    ``rename=True`` only from /api/session/rename (an explicit user rename,
+    including clearing it back to an automatic label) and /api/session/clear,
+    which resets the title to "Untitled". Other callers sync
     passively (``api.state_sync.sync_session_usage``).
     """
     try:
@@ -21936,6 +21937,10 @@ def handle_post(handler, parsed) -> bool:
                 except OSError:
                     logger.warning("session clear could not remove stale backup for %s", sid, exc_info=True)
             _publish_saved_session(sid, s)
+        # The reset is an explicit "Untitled" rename: on storage-interface Agents
+        # it releases a held user title so the next generated title can land;
+        # otherwise the pre-clear name would stay there for good (Refs #9157).
+        _sync_session_title_to_insights(s, rename=True)
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
         # I/O must not hold the session mutation lock.

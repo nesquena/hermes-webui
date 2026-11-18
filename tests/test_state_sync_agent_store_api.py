@@ -372,3 +372,147 @@ def test_routes_title_sync_forwards_the_call_sites_rename_intent(monkeypatch):
     routes._sync_session_title_to_insights(session, rename=True)  # rename back to an automatic label
 
     assert seen == [("My name", True), ("My name", False), ("Untitled", True)]
+
+
+# ── Title provenance: local fallback and conversation clear (Refs #9157) ─────
+
+
+def _new_agent_store(db_path):
+    """Create an empty state.db on the installed Agent; skip when its store has no automatic-title verb."""
+    hermes_state = pytest.importorskip("hermes_state")
+    hermes_state.SessionDB(db_path=db_path).close()
+    probe = open_agent_store(db_path)
+    try:
+        if not hasattr(probe, "set_auto_title"):
+            pytest.skip("this Agent's store has no automatic-title verb (before v2026.8.13)")
+        return isinstance(probe, state_sync._StoreStateDB)
+    finally:
+        probe.close()
+
+
+@pytest.mark.requires_agent_modules
+def test_a_local_fallback_title_is_derived_so_the_agents_model_title_replaces_it(tmp_path, monkeypatch):
+    """WebUI's local fallback title is stored with 'derived' provenance, so the Agent's own model
+    title ('llm') can still replace it on every Agent with an automatic-title verb."""
+    db_path = tmp_path / "state.db"
+    _new_agent_store(db_path)
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: state_sync._open_state_db(db_path))
+    sid = "webui-fallback-title"
+
+    state_sync.sync_session_title(sid, "Plan the billing database migration", profile="default", source="derived")
+    row = _row(db_path, sid)
+    assert (row["title"], row["title_source"]) == ("Plan the billing database migration", "derived")
+
+    agent_store = state_sync._open_state_db(db_path)
+    try:
+        agent_store.set_auto_title(sid, "Billing migration plan", source=getattr(agent_store, "TITLE_SOURCE_LLM", "llm"))
+    finally:
+        agent_store.close()
+    row = _row(db_path, sid)
+    assert (row["title"], row["title_source"]) == ("Billing migration plan", "llm")
+
+
+@pytest.mark.parametrize(
+    ("model_title", "expected_source"),
+    [(None, "derived"), ("Billing migration plan", "llm")],
+    ids=["local-fallback", "model-title"],
+)
+def test_background_title_syncs_a_local_fallback_as_derived(monkeypatch, model_title, expected_source):
+    """The background title path passes 'derived' for its local fallback and 'llm' for a model title."""
+    from unittest.mock import MagicMock
+
+    import api.streaming as streaming
+
+    user_text = "Help me plan the database migration for the billing service"
+    assistant_text = "Sure. Start by listing every table the billing service writes to."
+    session = MagicMock()
+    session.title = "Untitled"
+    session.llm_title_generated = False
+    session.manual_title = False
+    session.messages = [{"role": "user", "content": user_text}, {"role": "assistant", "content": assistant_text}]
+    monkeypatch.setattr(streaming, "get_session", lambda *_a, **_k: session)
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda *_a, **_k: True)
+    status = "llm" if model_title else "llm_length_aux"
+    monkeypatch.setattr(streaming, "_generate_llm_session_title_via_aux", lambda *_a, **_k: (model_title, status, ""))
+    synced = []
+    monkeypatch.setattr(
+        state_sync, "sync_session_title",
+        lambda sid, title, profile=None, **kw: synced.append((title, kw.get("source", "llm"))),
+    )
+    events = []
+
+    streaming._run_background_title_update(
+        session_id="sid-title-source", user_text=user_text, assistant_text=assistant_text,
+        placeholder_title="Untitled", put_event=lambda kind, data: events.append((kind, data)), agent=None,
+    )
+
+    statuses = [data["status"] for kind, data in events if kind == "title_status"]
+    assert statuses == (["fallback"] if model_title is None else [status])
+    assert [source for _title, source in synced] == [expected_source]
+
+
+def _clear_route_session(monkeypatch, tmp_path, sid, title):
+    """An isolated session store holding one titled conversation; returns the clear-route caller."""
+    from io import BytesIO
+
+    import api.models as models
+    import api.routes as routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    models.SESSIONS.clear()
+    session = models.Session(
+        session_id=sid,
+        title=title,
+        messages=[{"id": "u1", "role": "user", "content": "first", "timestamp": 1.0},
+                  {"id": "a1", "role": "assistant", "content": "reply", "timestamp": 2.0}],
+    )
+    session.manual_title = True
+    session.save()
+    real_settings = routes.load_settings
+    monkeypatch.setattr(routes, "load_settings", lambda: {**real_settings(), "sync_to_insights": True})
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr("api.config._evict_session_agent", lambda _sid: None)
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, extra_headers=None: captured.update(payload=payload))
+
+    def clear():
+        body = json.dumps({"session_id": sid}).encode()
+        handler = types.SimpleNamespace(headers={"Content-Length": str(len(body))}, rfile=BytesIO(body))
+        routes.handle_post(handler, types.SimpleNamespace(path="/api/session/clear"))
+        return captured["payload"]
+
+    return clear
+
+
+def test_clearing_a_conversation_syncs_its_untitled_reset_as_a_rename(monkeypatch, tmp_path):
+    """/api/session/clear resets the title to 'Untitled' and syncs that as an explicit rename."""
+    seen = []
+    clear = _clear_route_session(monkeypatch, tmp_path, "sid-clear-sync", "User Name")
+    monkeypatch.setattr(state_sync, "sync_session_usage", lambda **kw: seen.append((kw["title"], kw["rename"])))
+
+    assert clear().get("ok") is True
+    assert seen == [("Untitled", True)]
+
+
+@pytest.mark.requires_agent_modules
+def test_clearing_a_renamed_conversation_lets_the_next_generated_title_land(monkeypatch, tmp_path):
+    """Storage-interface Agents: a rename pins a 'user' title; clearing the conversation must release
+    it, or every later generated title is refused and the old name stays for good."""
+    db_path = tmp_path / "state.db"
+    if not _new_agent_store(db_path):
+        pytest.skip("legacy SessionDB Agent: the passive usage sync writes every title, as before")
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda profile=None: state_sync._open_state_db(db_path))
+    sid = "webui-clear-renamed"
+    clear = _clear_route_session(monkeypatch, tmp_path, sid, "User Name")
+
+    state_sync.sync_session_usage(sid, title="User Name", profile="default", rename=True)
+    assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == ("User Name", "user")
+
+    assert clear().get("ok") is True
+    assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == (None, None)
+
+    state_sync.sync_session_title(sid, "Post-clear generated title", profile="default")
+    assert (_row(db_path, sid)["title"], _row(db_path, sid)["title_source"]) == ("Post-clear generated title", "llm")
