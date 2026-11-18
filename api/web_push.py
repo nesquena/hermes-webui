@@ -764,6 +764,10 @@ def _worker() -> None:
         if _STOP.is_set():
             continue
         try:
+            if "_approval_required" in job:
+                job = _approval_payload(*job["_approval_required"])
+                if job is None:
+                    continue
             _send_to_all(job)
         except Exception:
             logger.debug("Web Push background delivery failed", exc_info=True)
@@ -885,17 +889,35 @@ def _first_time(*key) -> bool:
         return True
 
 
+def _first_approval(session_id: str, approval: dict) -> bool:
+    ident = approval.get("approval_id") or approval.get("request_id") or approval.get("description")
+    return _first_time("approval", session_id, str(ident))
+
+
+def _approval_payload(session_id: str, approval: dict) -> dict | None:
+    owners = _targets_for_session(session_id)
+    if not owners:
+        return None
+    body = str(approval.get("description") or "Tool approval needed")
+    return notification_payload("Approval required", body, session_id=session_id, owners=owners)
+
+
+@_safe
+def enqueue_approval_required(session_id: str, approval: dict) -> bool:
+    """Reserve this head once, before scheduling any bounded background work."""
+    approval = dict(approval or {})
+    if not _first_approval(session_id, approval):
+        return False
+    return enqueue({"_approval_required": (session_id, approval)})
+
+
 @_safe
 def notify_approval_required(session_id: str, approval: dict) -> bool:
     approval = approval or {}
-    ident = approval.get("approval_id") or approval.get("request_id") or approval.get("description")
-    if not _first_time("approval", session_id, str(ident)):
+    if not _first_approval(session_id, approval):
         return False
-    owners = _targets_for_session(session_id)
-    if not owners:
-        return False
-    body = str(approval.get("description") or "Tool approval needed")
-    return enqueue(notification_payload("Approval required", body, session_id=session_id, owners=owners))
+    payload = _approval_payload(session_id, approval)
+    return enqueue(payload) if payload is not None else False
 
 
 @_safe

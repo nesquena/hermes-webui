@@ -342,22 +342,15 @@ def _approval_sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
 
 
 def _schedule_web_push_head(session_id: str, head: dict) -> None:
-    """Push for whichever approval is now the queue head, off the caller's lock.
+    """Coalesce the current head before handing it to the bounded push pool.
 
-    Called from ``_approval_sse_notify_locked`` on every head change, so a
-    request that becomes active after an earlier one is resolved still gets
-    its own push. web_push dedupes per approval id. The work runs on a short
-    daemon thread so no web_push lock/IO happens while ``_lock`` is held.
+    Owner lookup, payload preparation and delivery run on those workers, not on
+    a new thread per mirror or under the caller's approval lock.
     """
     try:
-        from api import web_push
+        from api.web_push import enqueue_approval_required
 
-        if not web_push.is_enabled():
-            return
-        threading.Thread(
-            target=_web_push_approval, args=(session_id, head),
-            name="web-push-approval", daemon=True,
-        ).start()
+        enqueue_approval_required(session_id, head)
     except Exception:
         pass
 

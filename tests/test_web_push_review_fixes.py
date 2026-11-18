@@ -148,13 +148,19 @@ def test_clarify_push_deduped_per_request_id(env):
     assert len(env) == 2
 
 
-def test_each_queued_approval_pushes_when_it_becomes_head(monkeypatch):
+def test_each_queued_approval_pushes_when_it_becomes_head(push_env, monkeypatch):
+    import queue
+    import threading
     from api import route_approvals as ra
     pushed = []
-    monkeypatch.setattr(web_push, "is_enabled", lambda: True)
+    _enable(monkeypatch, push_env)
     monkeypatch.setattr(web_push, "_SEEN", {})
+    monkeypatch.setattr(web_push, "_QUEUE", queue.Queue(maxsize=web_push._MAX_PENDING))
+    monkeypatch.setattr(web_push, "_STOP", threading.Event())
+    monkeypatch.setattr(web_push, "_WORKERS", [])
+    monkeypatch.setattr(web_push, "_ATEXIT", [True])
     monkeypatch.setattr(web_push, "_targets_for_session", lambda sid: ["o"])
-    monkeypatch.setattr(web_push, "enqueue", lambda p: pushed.append(p["options"]["body"]) or True)
+    monkeypatch.setattr(web_push, "_send_to_all", lambda p: pushed.append(p["options"]["body"]) or 1)
     key = "approval-queue-test"
 
     def wait(n):
@@ -177,3 +183,4 @@ def test_each_queued_approval_pushes_when_it_becomes_head(monkeypatch):
     finally:
         with ra._lock:
             ra._pending.pop(key, None)
+        web_push.shutdown(wait=2)

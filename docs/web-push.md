@@ -48,7 +48,9 @@ Endpoints are SSRF-guarded: HTTPS, globally-routable addresses only, delivery-ti
 DNS revalidation, connection pinning, no redirects or proxies. Delivery uses at
 most two daemon workers, ten-second request timeouts and a 32-item queue. Producers
 use a nonblocking enqueue; full queues drop notifications rather than blocking
-SSE settlement or creating a retry backlog.
+SSE settlement or creating a retry backlog. Repeated approval heads are coalesced
+before scheduling; approval preparation and delivery use this same pool, with no
+per-notification threads.
 
 ## Cron delivery (advanced API opt-in)
 
