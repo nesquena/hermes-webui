@@ -37,6 +37,8 @@
 
 ### Fixed
 
+- **Newer Agents: WebUI's workspace folder and titles reach the Agent's session store again, and goal checks can wait (#9163, refs #9157).** Newer Agent builds replaced the session store, so WebUI's copy of a session's workspace folder and title into the Agent's records stopped without an error. Agent-side tools, search and the CLI read those records. Profile goal checks also lost the Agent's "wait" answer, so a goal loop could continue when it should wait. WebUI now uses the Agent's storage interface for both. A rename still sets the Agent's title, and older Agents behave as before.
+
 - **Opening a long conversation that's already cached copies only the messages it shows (#8993).** When a conversation was cached, the server still copied every message and rescanned the whole transcript on each load, even though it only sends the latest page. It now keeps a small summary with the cached copy and copies just the page it returns. Thanks @CharlesMcquade.
 
 - **On newer Agents, a finished turn stays in the saved conversation context (#9160, refs #9157).** The settle step checked for helpers that newer Agent builds moved to another module, so it always gave up, and the turn's prompt and answer were left out of the saved context. It now checks the module the repair actually uses. Older Agents behave exactly as before.
