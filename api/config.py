@@ -1754,17 +1754,40 @@ def _native_fallback_identities(providers_cfg: object) -> set[str]:
     answer was the configured provider's endpoint. The picker asks for such a row
     explicitly instead (``@custom:<name>:<model>``), which still routes to the
     record's own endpoint and credential.
+
+    Provenance is per IDENTITY: an identity is new only when the fallback is its
+    SOLE producer. An explicit key (``custom:晨光``) or a record whose own display
+    name already spells the identity mints it on master too, so excluding it would
+    drop a route an existing owner answers. That is the r15 P1: a disabled or
+    empty bare key beside a complete ``custom:晨光`` record put ``custom:晨光`` in
+    this set, both exclusions skipped the explicit record, and the model fell to
+    the generic ``model:`` route with the model block's credential, where master
+    kept the record's endpoint and key. Whether the explicit minter can SERVE the
+    identity is decided downstream, by the view's own disabled/inert verdict, not
+    here: ``providers: {custom:晨光: {}, 晨光: <complete>}`` still answers from the
+    bare record, exactly as master did through the keyed alias.
     """
     if not isinstance(providers_cfg, dict):
         return set()
-    identities = set()
-    for key in providers_cfg:
-        if not _custom_provider_slug_is_fallback(key):
+    fallback_identities: set[str] = set()
+    explicit_identities: set[str] = set()
+    for key, record in providers_cfg.items():
+        if not _is_native_custom_provider_key(key):
             continue
-        identity = _custom_provider_slug_from_name(key)
-        if identity:
-            identities.add(identity)
-    return identities
+        values = [key]
+        if isinstance(record, dict):
+            name = record.get("name")
+            if str(name or "").strip():
+                values.append(name)
+        for value in values:
+            identity = _custom_provider_slug_from_name(value)
+            if not identity:
+                continue
+            if _custom_provider_slug_is_fallback(value):
+                fallback_identities.add(identity)
+            else:
+                explicit_identities.add(identity)
+    return fallback_identities - explicit_identities
 
 
 def _provider_record_may_own_slug(record_key: object, record: object, slug: str) -> bool:

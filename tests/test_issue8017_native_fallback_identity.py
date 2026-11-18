@@ -235,6 +235,106 @@ def test_a_configured_native_identity_still_routes_to_its_own_record(monkeypatch
     assert config.resolve_model_provider(MODEL) == (MODEL, PID, NATIVE_URL)
 
 
+DISABLED_SIBLING = {"enabled": False, "base_url": "https://disabled.invalid/v1",
+                    "api_key": "disabled-key"}
+COMPLETE_SIBLING = {"base_url": NATIVE_URL, "api_key": "sibling-key", "model": MODEL}
+
+
+def _sibling_config(*, explicit_url=NATIVE_URL, sibling=DISABLED_SIBLING,
+                    sibling_first=False):
+    """The round-15 reproduction: an INERT bare sibling beside an explicit owner.
+
+    The sibling mints the same fallback identity but can never serve it (disabled
+    or empty), so it must not be read as proof that the identity is fallback-new.
+    ``sibling=None`` builds the no-sibling control.
+    """
+    explicit = {
+        "base_url": explicit_url,
+        "api_key": "explicit-key",
+        "model": MODEL,
+    }
+    providers = {}
+    pairs = [(PID, explicit)]
+    if sibling is not None:
+        pairs.append((NATIVE_KEY, sibling))
+    if sibling_first:
+        pairs.reverse()
+    for key, record in pairs:
+        providers[key] = record
+    return {
+        "model": {
+            "provider": "custom",
+            "default": MODEL,
+            "base_url": DEFAULT_URL,
+            "api_key": "model-key",
+        },
+        "providers": providers,
+    }
+
+
+def _assert_explicit_owner_keeps_the_model(data, explicit_url=NATIVE_URL) -> None:
+    """The resolver triple AND the constructor bundle, exactly as pinned master.
+
+    Master's own answer for this configuration, measured on 041a32514: the
+    resolver names the explicit record at its endpoint, and the constructor
+    bundle keeps that endpoint with the record's credential. The bundle's
+    provider field reads ``custom`` on master too, so asserting it as the
+    qualified id would pin a shape master never produced.
+    """
+    assert config.resolve_model_provider(MODEL) == (MODEL, PID, explicit_url)
+    bundle = config.merge_custom_provider_runtime_bundle(
+        PID, "model-key", explicit_url, None
+    )
+    assert (bundle["provider"], bundle["base_url"], bundle["api_key"]) == (
+        "custom", explicit_url, "explicit-key",
+    )
+
+
+@pytest.mark.parametrize("explicit_url", [NATIVE_URL, DEFAULT_URL],
+                         ids=["different-url", "equal-url"])
+@pytest.mark.parametrize("sibling", [DISABLED_SIBLING, {}],
+                         ids=["disabled-sibling", "empty-sibling"])
+@pytest.mark.parametrize("sibling_first", [False, True],
+                         ids=["owner-first", "sibling-first"])
+def test_an_inert_bare_sibling_does_not_suppress_the_explicit_owner(
+    monkeypatch, explicit_url, sibling, sibling_first
+):
+    """An inert sibling is not evidence that the identity is fallback-new.
+
+    Red on the round-14 head: the sibling's bare key put ``custom:晨光`` in the
+    fallback identity set, both exclusions skipped the explicit record, and the
+    model fell to the generic ``model:`` route (``model-key`` at DEFAULT_URL)
+    where master kept the record's endpoint and credential.
+    """
+    data = _sibling_config(
+        explicit_url=explicit_url, sibling=sibling, sibling_first=sibling_first
+    )
+    _bind(monkeypatch, data)
+    _assert_explicit_owner_keeps_the_model(data, explicit_url)
+
+
+def test_the_explicit_owner_alone_still_owns_the_model(monkeypatch):
+    """Control: with no sibling at all the explicit record answers, as before."""
+    data = _sibling_config(sibling=None)
+    _bind(monkeypatch, data)
+    _assert_explicit_owner_keeps_the_model(data)
+
+
+def test_an_empty_explicit_key_still_reaches_the_bare_records_alias(monkeypatch):
+    """Control: an inert explicit key does not hide a complete bare record.
+
+    Master answered this shape from the bare record through the keyed alias, so
+    the identity is not fallback-only here either. The empty explicit key keeps
+    master's verdict: the record that can serve is the bare one.
+    """
+    data = _sibling_config(sibling=dict(COMPLETE_SIBLING))
+    data["providers"][PID] = {}
+    _bind(monkeypatch, data)
+    assert config.resolve_model_provider(MODEL) == (MODEL, PID, NATIVE_URL)
+    bundle = config.merge_custom_provider_runtime_bundle(PID, "model-key", NATIVE_URL, None)
+    assert (bundle["base_url"], bundle["api_key"]) == (NATIVE_URL, "sibling-key")
+
+
 def test_a_url_match_on_an_ascii_entry_still_promotes(monkeypatch):
     """Control: only fallback-derived native identities are excluded.
 
