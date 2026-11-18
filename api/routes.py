@@ -22200,7 +22200,6 @@ def handle_post(handler, parsed) -> bool:
         return _handle_bg_task_complete_ack(handler, body)
 
     if parsed.path == "/api/chat/start":
-        _note_session_device(handler, (body or {}).get("session_id"))
         return _handle_chat_start(handler, body, diag=diag)
 
     if parsed.path == "/api/chat":
@@ -32801,6 +32800,10 @@ def _handle_chat_start(handler, body, diag=None):
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
+        # CLI/TUI/Desktop sessions may have no WebUI sidecar at dispatch.
+        # Enroll only after materialization and profile validation, but before
+        # the run can publish its first approval or completion.
+        _note_session_device(handler, s.session_id)
         recovery_cleared_for_start = None
         recovery_restore_error = None
         def _restore_cleared_recovery():

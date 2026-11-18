@@ -34,7 +34,9 @@ If the redactor is unavailable, text is dropped rather than sent unmasked.
 Response-complete, approval-needed, clarification-needed and background-task
 notifications target devices that opened/started the owning session. Enrollment
 requires readable session ownership visible to the request's profile; an unknown,
-unreadable or foreign-profile session cannot enroll a device. The server stores
+unreadable or foreign-profile session cannot enroll a device. On first continuation
+of a CLI/TUI/Desktop session, enrollment follows successful WebUI materialization
+and profile validation, before the run starts. The server stores
 only a hash of the per-browser `X-Hermes-Push-Device` identifier, not the raw id.
 
 Subscriptions live in `<state-dir>/webui_push_subscriptions.json` (0600), and
