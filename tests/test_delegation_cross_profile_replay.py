@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -63,6 +64,24 @@ def _dead_pid() -> int:
     return proc.pid
 
 
+@contextmanager
+def _ledger_conn(home):
+    """A write transaction on *home*'s ledger, created by the Agent itself.
+
+    A claim on an unknown id makes the Agent create the store with its own
+    schema and writes no row, on every core; the fixture rows are then written
+    to the file directly (newer cores no longer expose a connection helper).
+    """
+    with owner_mod.ledger_home_scope(home):
+        assert ad.claim_completion_delivery("__fixture_seed__", "fixture") is True
+    conn = sqlite3.connect(home / "state.db", timeout=10)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def _row(home, delegation_id, *, session="s-web", state="completed", age_hours=0.0, owner_pid=None):
     now = time.time()
     at = now - age_hours * 3600
@@ -71,7 +90,7 @@ def _row(home, delegation_id, *, session="s-web", state="completed", age_hours=0
         "type": "async_delegation", "delegation_id": delegation_id, "status": state,
         "origin_ui_session_id": session, "session_key": "", "goal": "g",
     })
-    with owner_mod.ledger_home_scope(home), ad._DB_LOCK, ad._transaction() as conn:
+    with _ledger_conn(home) as conn:
         conn.execute(
             """INSERT INTO async_delegations
                (delegation_id, origin_session, origin_ui_session_id, parent_session_id, state,
@@ -110,6 +129,12 @@ def _digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
 
 
+def _listing(path):
+    """Directory entries without SQLite's WAL files: a read-only reader of a WAL-mode store (every profile
+    store on newer cores) recreates ``-shm`` and an empty ``-wal`` when no connection holds them open."""
+    return sorted(p.name for p in path.iterdir() if not p.name.endswith(("-wal", "-shm")))
+
+
 def test_sweep_never_writes_another_profiles_ledger(world):
     named = world["homes"]["named"]
     world["sessions"]["s-web"] = "named"
@@ -126,13 +151,15 @@ def test_sweep_never_writes_another_profiles_ledger(world):
     (linked / "state.db").symlink_to(outside / "state.db")
     before_named = _rows(named)
     before_outside = _digest(outside / "state.db")
-    before_listing = sorted(p.name for p in outside.iterdir())
+    before_listing = _listing(outside)
 
     assert _sweep(named, linked) == []
 
     assert _rows(named) == before_named == {"d-run": ("running", "pending"), "d-old": ("completed", "pending")}
     assert _digest(outside / "state.db") == before_outside
-    assert sorted(p.name for p in outside.iterdir()) == before_listing
+    assert _listing(outside) == before_listing
+    wal = outside / "state.db-wal"
+    assert not wal.exists() or wal.stat().st_size == 0  # nothing was written through it either
 
 
 def test_webui_origin_row_in_a_named_ledger_is_replayed_and_delivered_once(world):
