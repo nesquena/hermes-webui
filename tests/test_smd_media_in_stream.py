@@ -31,12 +31,10 @@ notes head-on:
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import re
 import shutil
 import subprocess
-import tempfile
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -65,13 +63,14 @@ def _extract_js_function(src: str, name: str) -> str:
 def _run_real_smd_media_cases() -> dict:
     helpers = "\n".join(
         [
+            _extract_js_function(UI_JS, "_mediaTokenParts"),
             _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
             _extract_js_function(MESSAGES_JS, "_smdAppendPlainText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSet"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
-            _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTokenParts"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlush"),
             _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
@@ -179,6 +178,18 @@ def _run_real_smd_media_cases() -> dict:
         "  visit(root); return out;\n"
         "}\n"
         "function collectClassTexts(root, cls){ return root.querySelectorAll('.'+cls).map(node=>node.textContent); }\n"
+        "function collectMediaRefs(root){\n"
+        "  const out=[];\n"
+        "  const visit=node=>{ for(const child of node.children){ const ref=child.getAttribute&&child.getAttribute('data-ref'); const path=child.getAttribute&&child.getAttribute('data-path'); if(ref||path) out.push(ref||path); visit(child); } };\n"
+        "  visit(root); return out;\n"
+        "}\n"
+        "function settledParts(source){\n"
+        "  const match=/MEDIA:([^\\s\\)\\]]+)/.exec(source);\n"
+        "  if(!match) return {ref:null,remainder:source};\n"
+        "  const parts=_mediaTokenParts(source,match.index,match[1]);\n"
+        "  if(!parts) return {ref:null,remainder:source};\n"
+        "  return {ref:parts[0],remainder:(parts[1]||'')+source.slice(match.index+match[0].length)};\n"
+        "}\n"
         "function renderChunks(chunks, mode){\n"
         "  postProcessCalls = 0; playbackCalls = 0;\n"
         "  const root=document.createElement('div');\n"
@@ -190,9 +201,38 @@ def _run_real_smd_media_cases() -> dict:
         "  smd.parser_end(parser);\n"
         "  _smdMediaTailFlush(parser);\n"
         "  _smdMediaTailClear(parser);\n"
-        "  return { html: root.outerHTML, text: root.textContent, liTexts: collectTagTexts(root, 'li'), fadeWords: collectClassTexts(root, 'stream-fade-word'), postProcessCalls, playbackCalls };\n"
+        "  const mediaRefs=collectMediaRefs(root);\n"
+        "  return { html: root.outerHTML, text: root.textContent, ref: mediaRefs[0]||null, remainder: root.textContent, liTexts: collectTagTexts(root, 'li'), fadeWords: collectClassTexts(root, 'stream-fade-word'), postProcessCalls, playbackCalls };\n"
         "}\n"
         "function renderModes(chunks){ return { safe: renderChunks(chunks, 'safe'), fade: renderChunks(chunks, 'fade') }; }\n"
+        "function compareWithSettled(chunks){ return {settled:settledParts(chunks.join('')),modes:renderModes(chunks)}; }\n"
+        "function renderDirectCallbacks(chunks){\n"
+        "  const root=document.createElement('div');\n"
+        "  const parser={};\n"
+        "  const data={};\n"
+        "  const writeText=(parent,_data,text)=>parent.appendChild(document.createTextNode(text));\n"
+        "  for(const chunk of chunks) _smdMediaAwareAddText(null,root,data,chunk,_SMD_MEDIA_TAIL,parser,writeText);\n"
+        "  _smdMediaTailFlush(parser);\n"
+        "  const mediaRefs=collectMediaRefs(root);\n"
+        "  return {ref:mediaRefs[0]||null,remainder:root.textContent};\n"
+        "}\n"
+        "function compareDirectWithSettled(chunks){ return {settled:settledParts(chunks.join('')),streamed:renderDirectCallbacks(chunks)}; }\n"
+        "function sweepDirectWithSettled(source){\n"
+        "  const settled=settledParts(source);\n"
+        "  const partitions=[];\n"
+        "  for(let split=0;split<=source.length;split+=1){\n"
+        "    partitions.push({split,streamed:renderDirectCallbacks([source.slice(0,split),source.slice(split)])});\n"
+        "  }\n"
+        "  return {settled,partitions};\n"
+        "}\n"
+        "function sweepModesWithSettled(source){\n"
+        "  const settled=settledParts(source);\n"
+        "  const partitions=[];\n"
+        "  for(let split=0;split<=source.length;split+=1){\n"
+        "    partitions.push({split,modes:renderModes([source.slice(0,split),source.slice(split)])});\n"
+        "  }\n"
+        "  return {settled,partitions};\n"
+        "}\n"
         "const marker='MEDIA:';\n"
         "const prefixSplits={};\n"
         "for(let i=1;i<marker.length;i++) prefixSplits[i]=renderModes(['\\n\\n'+marker.slice(0,i), marker.slice(i)+'C:/tmp/live.png ']);\n"
@@ -201,14 +241,56 @@ def _run_real_smd_media_cases() -> dict:
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "// #6580 re-gate: quoted MEDIA tokens with spaces, split across chunks.\n"
-        "const quotedComplete=renderModes(['MEDIA:\"/tmp/my screenshot.png\" done']);\n"
-        "const quotedSplit=renderModes(['MEDIA:\"/tmp/my scre', 'enshot.png\" done']);\n"
-        "const quotedSplitAfterSpace=renderModes(['MEDIA:\"/tmp/my ', 'screenshot.png\" done']);\n"
-        "const quotedSingle=renderModes([\"MEDIA:'/tmp/my screenshot.png' done\"]);\n"
-        "const quotedUnclosed=renderModes(['MEDIA:\"/tmp/my screenshot.png']);\n"
-        "const multipleTokens=renderModes(['MEDIA:/tmp/a.png and MEDIA:\"/tmp/b c.png\" done']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, quotedComplete, quotedSplit, quotedSplitAfterSpace, quotedSingle, quotedUnclosed, multipleTokens}));\n"
+        "const completionBoundaries={\n"
+        "  knownExtensionThenFilename:compareWithSettled(['MEDIA:/tmp/a.png', '.bak ']),\n"
+        "  knownExtensionThenQuery:compareWithSettled(['MEDIA:https://example.com/a.png', '?signature=value ']),\n"
+        "  punctuationThenFilename:compareWithSettled(['MEDIA:/tmp/a.png.', 'bak ']),\n"
+        "  finalKnownExtension:compareWithSettled(['MEDIA:/tmp/a.png']),\n"
+        "};\n"
+        "const callbackBoundaries={\n"
+        "  knownExtensionThenFilename:compareDirectWithSettled(['MEDIA:/tmp/a.png', '.bak ']),\n"
+        "  knownExtensionThenQuery:compareDirectWithSettled(['MEDIA:https://example.com/a.png', '?signature=value ']),\n"
+        "  punctuationThenFilename:compareDirectWithSettled(['MEDIA:/tmp/a.png.', 'bak ']),\n"
+        "};\n"
+        "const callbackSplitSweeps={\n"
+        "  filenameSuffix:sweepDirectWithSettled('MEDIA:/tmp/a.png.bak '),\n"
+        "  querySuffix:sweepDirectWithSettled('MEDIA:https://example.com/a.png?signature=value '),\n"
+        "  fragmentSuffix:sweepDirectWithSettled('MEDIA:https://example.com/a.png#section '),\n"
+        "  finalKnownExtension:sweepDirectWithSettled('MEDIA:/tmp/a.png'),\n"
+        "};\n"
+        "const realParserSplitSweeps={\n"
+        "  wrappedPunctuation:sweepModesWithSettled('**MEDIA:/tmp/chart.png!** '),\n"
+        "};\n"
+        "const boundedOverflow=renderModes(['MEDIA:'+('a'.repeat(_MEDIA_TAIL_MAX))]);\n"
+        "const boundaries={\n"
+        "  bold:renderModes(['**MEDIA:/tmp/report.xlsx** ']),\n"
+        "  boldSplit:renderModes(['**MEDIA:/tmp/report.', 'xlsx** ']),\n"
+        "  trailingPeriod:renderModes(['MEDIA:/tmp/report.xlsx. ']),\n"
+        "  trailingPeriodEnd:renderModes(['MEDIA:/tmp/report.xlsx.']),\n"
+        "  bareMarker:renderModes(['`MEDIA:` ']),\n"
+        "  queryFragment:renderModes(['MEDIA:https://example.com/a.png?size=1#preview ']),\n"
+        "  wrappedRemoteQueryPunctuation:renderModes(['**MEDIA:https://example.com/a.png?signature=value.**. ']),\n"
+        "  quotedDouble:renderModes(['\"MEDIA:/tmp/report.xlsx\". ']),\n"
+        "  quotedSingleSplit:renderModes([\"'MEDIA:/tmp/report.\", \"xlsx'.\"]),\n"
+        "  entityQuotedDoubleSplit:renderModes(['&quot;', 'MEDIA:/tmp/report.xlsx&quot;. ']),\n"
+        "  entityQuotedSingleEnd:renderModes(['&#39;MEDIA:/tmp/report.xlsx&#39;.']),\n"
+        "  entityQuotedDoubleOpenerSplit:renderModes(['&quo', 't;MEDIA:/tmp/report.xlsx&quot;. ']),\n"
+        "  quotedRemoteQuery:renderModes(['\"MEDIA:https://example.com/a.png?signature=value!\". ']),\n"
+        "  quotedRemoteFragment:renderModes(['\"MEDIA:https://example.com/a.png#preview!\". ']),\n"
+        "  windowsPath:renderModes(['MEDIA:C:\\\\Temp\\\\report.xlsx ']),\n"
+        "  unmatchedDelimiter:renderModes(['MEDIA:/tmp/report.xlsx* ']),\n"
+        "  multiple:renderModes(['MEDIA:/tmp/one.png then MEDIA:/tmp/two.pdf after']),\n"
+        "};\n"
+        "const punctuation={};\n"
+        "for(const mark of ['.',',',';',':','!','?',')']) punctuation[mark]=renderModes([`MEDIA:/tmp/report.xlsx${mark} `]);\n"
+        "const literalRefs={};\n"
+        "for(const ref of ['https://example.com/a.png!','https://example.com/a.png;','https://example.com/a.png:','_','__','*']) literalRefs[ref]=renderModes(['MEDIA:'+ref+' ']);\n"
+        "const remoteSuffixPunctuation={query:{},fragment:{}};\n"
+        "for(const mark of ['.',',',';',':','!','?']){\n"
+        "  remoteSuffixPunctuation.query[mark]=renderModes([`MEDIA:https://example.com/a.png?signature=value${mark} `]);\n"
+        "  remoteSuffixPunctuation.fragment[mark]=renderModes([`MEDIA:https://example.com/a.png#section${mark} `]);\n"
+        "}\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, completionBoundaries, callbackBoundaries, callbackSplitSweeps, realParserSplitSweeps, boundedOverflow, boundaries, punctuation, remoteSuffixPunctuation, literalRefs}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -352,7 +434,7 @@ class TestSmdMediaInStream(unittest.TestCase):
 
     def test_cross_chunk_media_tail_buffer_exists(self):
         # Greptile #2 (cross-chunk split): when smd flushes a MEDIA token
-        # in two pieces (e.g. "MEDIA:C:\\Users\\Admin" then "\\foo.png"),
+        # in two pieces (e.g. "MEDIA:C:\\Temp\\fo" then "o.png"),
         # the second half alone would not match the MEDIA regex; if we
         # only operate on each chunk independently both pieces render as
         # raw text. The new implementation keeps a per-parser tail buffer
@@ -387,72 +469,21 @@ class TestSmdMediaInStream(unittest.TestCase):
         self.assertIn("_SMD_MEDIA_PREFIX.startsWith(suffix)", MESSAGES_JS)
 
     def test_partial_media_ref_at_chunk_end_is_buffered_until_boundary(self):
-        # Greptile re-review: /MEDIA:([^\s)\]]+)/g will happily match
-        # "MEDIA:fo" at the end of a chunk even if the next chunk is "o.png".
-        # The interceptor must not emit a media node for that partial ref;
-        # it should keep the candidate in unmatchedTail unless a delimiter or
-        # reliable filename suffix proves the ref is complete. The selected
-        # capture is now named `ref` (m[1]/m[2] are quoted arms, m[3] bare).
+        # Any add_text callback can stop in the middle of a logical filename or
+        # URL. A familiar extension is not a grammar delimiter: `.bak`, a query,
+        # or a fragment may still arrive in the next callback.
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 6500]
-        self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
-        self.assertIn("matchEnd===combined.length", block)
-        self.assertIn("!_smdMediaRefHasReliableBoundary(ref)", block)
+        self.assertIn("if(matchEnd===combined.length){", block)
         self.assertIn("unmatchedTail = candidate", block)
+        self.assertNotIn("_smdMediaRefHasReliableBoundary", MESSAGES_JS)
 
-    def test_unterminated_quoted_candidate_is_buffered_not_emitted(self):
-        # #6580 re-gate: a chunk ending inside an open quoted MEDIA token
-        # (e.g. 'MEDIA:"/tmp/my ') must be held in the tail buffer until the
-        # closing quote arrives. The bare arm must never consume the partial
-        # as a quote-prefixed media ref, and the flush entry must render an
-        # unclosed quote as literal text.
-        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
-        block = MESSAGES_JS[idx:idx + 7000]
-        self.assertIn('const quotedRef = m[1]||m[2];', block)
-        self.assertIn("/^[\"']/.test(m[3])", block)
-        self.assertIn("if(!ref){", block)
-        flush = MESSAGES_JS[
-            MESSAGES_JS.index("function _smdMediaTailFlushEntry"):
-            MESSAGES_JS.index("function _smdMediaTailFlush(")
-        ]
-        self.assertIn("/^MEDIA:\"([^\"]+)\"$", flush)
-        self.assertIn(r"|^MEDIA:([^\s\)\]\n]+)$", flush)
-
-    def test_media_ref_boundary_extension_list_matches_renderer_formats(self):
-        # Keep the streaming boundary whitelist aligned with ui.js media
-        # renderer extension families. Otherwise complete refs at chunk end
-        # (e.g. MEDIA:clip.aac) can be buffered and then dropped on stream end.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        for ext in [
-            "png", "jpe?g", "gif", "webp", "bmp", "ico", "svg", "avif",
-            "mp4", "webm", "mov", "m4v", "mkv", "avi", "ogv",
-            "mp3", "wav", "ogg", "m4a", "aac", "wma", "opus", "flac", "oga",
-            "pdf", "html?", "csv", "diff", "patch", "excalidraw",
-        ]:
-            self.assertIn(ext, block)
-
-    def test_extensionless_https_media_ref_is_a_reliable_boundary(self):
-        # _inlineMediaHtmlForRef renders any http(s) ref as an image, including
-        # extensionless CDN URLs such as fal.media generated assets. The stream
-        # boundary check must therefore treat a complete http(s) ref as complete
-        # even when it has no filename extension.
+    def test_parser_finalization_flushes_a_delimiter_free_media_tail(self):
+        # Final parser shutdown is authoritative even when the token has no
+        # trailing whitespace or other grammar delimiter.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        # Flush-entry regex: quoted (double + single) arms in front of the bare
-        # arm; the bare arm still admits a complete extensionless https ref at
-        # stream end (e.g. MEDIA:https://fal.media/generated).
-        self.assertIn('/^MEDIA:"([^"]+)"$', MESSAGES_JS)
-        self.assertIn(r"|^MEDIA:([^\s\)\]\n]+)$", MESSAGES_JS)
+        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
-
-    def test_extensionless_https_tail_waits_until_stream_end(self):
-        # A chunk ending at MEDIA:https://fal.med may still be mid-URL. Do not
-        # treat http(s) scheme alone as a reliable boundary; the stream-end
-        # flush is responsible for rendering a final extensionless URL.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        self.assertNotIn("/^https?:", block)
-        self.assertIn("_smdMediaTailFlush", MESSAGES_JS)
 
     def test_tail_buffer_size_cap(self):
         # Defensive: a runaway tail buffer from a malformed stream could
@@ -606,274 +637,150 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                     self.assertTrue(result["fadeWords"])
                     self.assertEqual("".join(result["fadeWords"]), "MEow")
 
-    # ── #6580 re-gate: quoted MEDIA tokens with spaces ──────────────────────
-    def test_real_smd_parser_quoted_token_emits_exact_ref(self):
-        for mode, result in self.cases["quotedComplete"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('class="media-node"', result["html"])
-                self.assertIn('data-ref="/tmp/my screenshot.png"', result["html"])
-                self.assertIn("done", result["text"])
-                self.assertNotIn("MEDIA:", result["text"])
+    def test_real_smd_parser_completion_is_invariant_to_callback_partitioning(self):
+        for case_name, case in self.cases["completionBoundaries"].items():
+            expected = (case["settled"]["ref"], case["settled"]["remainder"])
+            for mode, result in case["modes"].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertEqual((result["ref"], result["remainder"]), expected)
 
-    def test_real_smd_parser_quoted_token_split_mid_ref(self):
-        # "MEDIA:\"/tmp/my scre" + "enshot.png\" done" — the closing quote
-        # arrives in the second chunk; the ref must still be captured whole.
-        for mode, result in self.cases["quotedSplit"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('class="media-node"', result["html"])
-                self.assertIn('data-ref="/tmp/my screenshot.png"', result["html"])
-                self.assertIn("done", result["text"])
-                self.assertNotIn("MEDIA:", result["text"])
+    def test_media_add_text_callback_completion_matches_settled_parsing(self):
+        for case_name, case in self.cases["callbackBoundaries"].items():
+            expected = (case["settled"]["ref"], case["settled"]["remainder"])
+            actual = (case["streamed"]["ref"], case["streamed"]["remainder"])
+            with self.subTest(case=case_name):
+                self.assertEqual(actual, expected)
 
-    def test_real_smd_parser_quoted_token_split_after_space_buffered(self):
-        # The exact re-gate scenario: the chunk ends after an opening quote
-        # AND a space ('MEDIA:"/tmp/my '). The bare arm must NOT consume
-        # 'MEDIA:"/tmp/my' as a media ref — the candidate stays buffered until
-        # the closing quote completes it in the next chunk.
-        for mode, result in self.cases["quotedSplitAfterSpace"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('class="media-node"', result["html"])
-                self.assertIn('data-ref="/tmp/my screenshot.png"', result["html"])
-                self.assertNotIn('data-ref="/tmp/my"', result["html"])
-                self.assertIn("done", result["text"])
-                self.assertNotIn("MEDIA:", result["text"])
+    def test_media_add_text_completion_is_invariant_at_every_callback_split(self):
+        for case_name, case in self.cases["callbackSplitSweeps"].items():
+            expected = (case["settled"]["ref"], case["settled"]["remainder"])
+            for partition in case["partitions"]:
+                actual = (partition["streamed"]["ref"], partition["streamed"]["remainder"])
+                with self.subTest(case=case_name, split=partition["split"]):
+                    self.assertEqual(actual, expected)
 
-    def test_real_smd_parser_single_quoted_token_emits_exact_ref(self):
-        for mode, result in self.cases["quotedSingle"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('class="media-node"', result["html"])
-                self.assertIn('data-ref="/tmp/my screenshot.png"', result["html"])
-                self.assertIn("done", result["text"])
-                self.assertNotIn("MEDIA:", result["text"])
+    def test_real_smd_safe_and_fade_match_settled_at_every_wrapped_punctuation_split(self):
+        case = self.cases["realParserSplitSweeps"]["wrappedPunctuation"]
+        expected_ref = case["settled"]["ref"]
+        self.assertEqual(expected_ref, "/tmp/chart.png!")
+        for partition in case["partitions"]:
+            for mode, result in partition["modes"].items():
+                with self.subTest(split=partition["split"], mode=mode):
+                    self.assertEqual(result["ref"], expected_ref)
+                    self.assertEqual(result["remainder"], " ")
 
-    def test_real_smd_parser_unclosed_quote_flushes_as_literal_text(self):
-        # Malformed/unclosed quote at stream end: never a media node, never a
-        # quote-prefixed partial ref — the buffered token flushes as text.
-        for mode, result in self.cases["quotedUnclosed"].items():
+    def test_real_smd_parser_fails_an_oversized_unterminated_tail_to_literal_text(self):
+        expected = "MEDIA:" + ("a" * 4096)
+        for mode, result in self.cases["boundedOverflow"].items():
             with self.subTest(mode=mode):
+                self.assertIsNone(result["ref"])
+                self.assertEqual(result["remainder"], expected)
+
+    def test_real_smd_parser_keeps_proven_wrappers_outside_media_refs(self):
+        for case_name in ("bold", "boldSplit"):
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx**"', result["html"])
+
+    def test_real_smd_parser_preserves_ambiguous_bare_suffix_bytes(self):
+        for case_name in ("trailingPeriod", "trailingPeriodEnd"):
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx."', result["html"])
+
+        for punctuation, modes in self.cases["punctuation"].items():
+            for mode, result in modes.items():
+                with self.subTest(punctuation=punctuation, mode=mode):
+                    if punctuation == ")":
+                        self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                        self.assertIn(punctuation, result["text"])
+                    else:
+                        self.assertIn(
+                            f'data-ref="/tmp/report.xlsx{punctuation}"', result["html"]
+                        )
+
+    def test_real_smd_parser_preserves_unmatched_delimiter_in_ref(self):
+        for mode, result in self.cases["boundaries"]["unmatchedDelimiter"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('data-ref="/tmp/report.xlsx*"', result["html"])
+
+    def test_real_smd_parser_detaches_balanced_quotes_in_safe_fade_split_and_tail_paths(self):
+        for case_name in (
+            "quotedDouble",
+            "quotedSingleSplit",
+            "entityQuotedDoubleSplit",
+            "entityQuotedSingleEnd",
+            "entityQuotedDoubleOpenerSplit",
+        ):
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx%22"', result["html"])
+                    self.assertNotIn("data-ref=\"/tmp/report.xlsx'\"", result["html"])
+                    expected_quote = "'" if case_name in ("quotedSingleSplit", "entityQuotedSingleEnd") else '"'
+                    self.assertTrue(
+                        result["text"].rstrip().endswith(f"{expected_quote}."),
+                        result["text"],
+                    )
+
+    def test_real_smd_parser_preserves_quoted_remote_query_and_fragment_values(self):
+        expected = {
+            "quotedRemoteQuery": "https://example.com/a.png?signature=value!",
+            "quotedRemoteFragment": "https://example.com/a.png#preview!",
+        }
+        for case_name, ref in expected.items():
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn(f'data-ref="{ref}"', result["html"])
+                    self.assertIn(".", result["text"])
+
+    def test_real_smd_parser_preserves_literal_path_bytes(self):
+        for ref, modes in self.cases["literalRefs"].items():
+            for mode, result in modes.items():
+                with self.subTest(ref=ref, mode=mode):
+                    self.assertIn(f'data-ref="{ref}"', result["html"])
+
+    def test_real_smd_parser_preserves_remote_query_and_fragment_punctuation(self):
+        for suffix_kind, punctuation_cases in self.cases["remoteSuffixPunctuation"].items():
+            separator = "?signature=value" if suffix_kind == "query" else "#section"
+            for punctuation, modes in punctuation_cases.items():
+                expected = f"https://example.com/a.png{separator}{punctuation}"
+                for mode, result in modes.items():
+                    with self.subTest(
+                        suffix_kind=suffix_kind,
+                        punctuation=punctuation,
+                        mode=mode,
+                    ):
+                        self.assertIn(f'data-ref="{expected}"', result["html"])
+
+        wrapped_ref = "https://example.com/a.png?signature=value."
+        for mode, result in self.cases["boundaries"]["wrappedRemoteQueryPunctuation"].items():
+            with self.subTest(suffix_kind="wrapped_query", mode=mode):
+                self.assertIn(f'data-ref="{wrapped_ref}"', result["html"])
+                self.assertIn(".", result["text"])
+
+    def test_real_smd_parser_preserves_other_requested_token_shapes(self):
+        for mode, result in self.cases["boundaries"]["bareMarker"].items():
+            with self.subTest(case="bareMarker", mode=mode):
+                self.assertIn("MEDIA:", result["text"])
                 self.assertNotIn('class="media-node"', result["html"])
-                self.assertIn('MEDIA:"/tmp/my screenshot.png', result["text"])
 
-    def test_real_smd_parser_multiple_tokens_bare_and_quoted(self):
-        for mode, result in self.cases["multipleTokens"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('data-ref="/tmp/a.png"', result["html"])
-                self.assertIn('data-ref="/tmp/b c.png"', result["html"])
-                self.assertIn("and", result["text"])
-                self.assertIn("done", result["text"])
-                self.assertNotIn("MEDIA:", result["text"])
+        expected = {
+            "queryFragment": "https://example.com/a.png?size=1#preview",
+            "windowsPath": r"C:\Temp\report.xlsx",
+        }
+        for case_name, ref in expected.items():
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn(f'data-ref="{ref}"', result["html"])
 
-
-class TestInlineMediaHtmlEncoding(unittest.TestCase):
-    """#6580 re-gate point 2: quoted MEDIA refs stay raw in renderMd() and are
-    normalized exactly once inside the canonical _inlineMediaHtmlForRef().
-
-    Raw-space and already-%20 inputs must both land on the SAME query path
-    with %20 (never %2520). This drives the REAL renderMd() +
-    _inlineMediaHtmlForRef() extracted from ui.js — the simplified harnesses
-    that emit %2520 are exactly what the re-gate flagged.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.cases = _run_inline_media_encoding_cases()
-
-    def test_raw_space_ref_encodes_space_once(self):
-        html = self.cases["quotedRawSpace"]
-        self.assertIn("api/media?path=%2Ftmp%2Fmy%20screenshot.png", html)
-        self.assertNotIn("%2520", html)
-        self.assertIn("done", html)
-
-    def test_already_percent20_ref_is_not_double_encoded(self):
-        html = self.cases["quotedAlreadyEncoded"]
-        # Same intended query path as the raw-space form above.
-        self.assertIn("api/media?path=%2Ftmp%2Fmy%20screenshot.png", html)
-        self.assertNotIn("%2520", html)
-        self.assertIn("done", html)
-
-    def test_raw_and_encoded_forms_produce_identical_query_path(self):
-        raw = self.cases["quotedRawSpace"]
-        enc = self.cases["quotedAlreadyEncoded"]
-        path_raw = raw.split('api/media?path=')[1].split('"')[0]
-        path_enc = enc.split('api/media?path=')[1].split('"')[0]
-        self.assertEqual(path_raw, path_enc)
-
-    def test_bare_raw_space_token_stops_at_space(self):
-        # Unquoted MEDIA:/tmp/my screenshot.png done — the bare arm must stop
-        # at the space so "screenshot.png done" stays as prose (first re-gate
-        # regression, still guarded). The bare ref is exactly "/tmp/my".
-        html = self.cases["bareRawSpace"]
-        self.assertIn("api/media?path=%2Ftmp%2Fmy", html)
-        self.assertIn("screenshot.png", html)
-        self.assertIn("done", html)
-
-
-def _run_inline_media_encoding_cases() -> dict:
-    """Drive the REAL renderMd() + _inlineMediaHtmlForRef() from ui.js (not a
-    stub) so the query-path encoding is asserted on production code. Follows
-    the test_data_uri_images.py driver pattern: the node driver extracts the
-    renderer functions from ui.js in source order and runs them with the
-    production extension tables."""
-    driver_src = r"""
-const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
-global.window = {};
-global.document = { createElement: () => ({ innerHTML: '', textContent: '' }), baseURI: 'http://localhost/app/' };
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
-  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
-const _SVG_EXTS=/\.svg$/i;
-const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
-const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
-const _PDF_EXTS=/\.pdf$/i;
-const _HTML_EXTS=/\.html?$/i;
-const _CSV_EXTS=/\.(csv|tsv)$/i;
-const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
-const _mediaKindForName=(name='')=>{
-  const clean=String(name||'').split('?')[0].toLowerCase();
-  if(_AUDIO_EXTS.test(clean)) return 'audio';
-  if(_VIDEO_EXTS.test(clean)) return 'video';
-  if(_IMAGE_EXTS.test(clean)) return 'image';
-  return '';
-};
-const _mediaPlayerHtml=(k,s,n)=>`<${k} src="${esc(s)}"></${k}>`;
-const t = k => k;
-const S = {};
-
-function extractFunc(name) {
-  const re = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = src.search(re);
-  if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start);
-  let depth = 1; i++;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
-    i++;
-  }
-  return src.slice(start, i);
-}
-eval(extractFunc('_isSafeDataImageUri'));
-eval(extractFunc('_dataImageHtml'));
-eval(extractFunc('_mdImageHtml'));
-eval(extractFunc('_inlineMediaHtmlForRef'));
-eval(extractFunc('_matchBacktickFenceLine'));
-eval(extractFunc('_isBacktickFenceClose'));
-eval(extractFunc('renderMd'));
-
-let buf = '';
-process.stdin.on('data', c => { buf += c; });
-process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
-"""
-    driver_path = pathlib.Path(tempfile.mkdtemp(prefix="smd_enc_")) / "driver.js"
-    driver_path.write_text(driver_src, encoding="utf-8")
-    results = {}
-    for key, markdown in [
-        ("quotedRawSpace", 'MEDIA:"/tmp/my screenshot.png" done'),
-        ("quotedAlreadyEncoded", 'MEDIA:"/tmp/my%20screenshot.png" done'),
-        ("bareRawSpace", "MEDIA:/tmp/my screenshot.png done"),
-    ]:
-        completed = subprocess.run(
-            [NODE, str(driver_path), str(REPO_ROOT / "static" / "ui.js")],
-            input=markdown,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"node media-encoding probe ({key}) failed: {completed.stderr[-2000:]}"
-            )
-        results[key] = completed.stdout
-    return results
-
-
-def _extract_replace_regex(src: str, marker: str) -> str:
-    """Extrai a regex literal de uma linha `s=s.replace(<regex>/g, ...)` do ui.js.
-
-    marker: fragmento único que identifica a linha (ex.: 's=s.replace(/MEDIA:"').
-    """
-    i = src.index(marker)
-    start = src.index("replace(", i) + len("replace(")
-    assert src[start] == "/", f"regex não começa com '/' em: {src[start:start+40]!r}"
-    end = src.index("/g", start) + 2
-    return src[start:end]
-
-
-class TestSettledRendererBoundaries(unittest.TestCase):
-    """#6580 re-gate: quoted MEDIA:/file:// and Markdown destination arms in
-    the settled renderMd() must terminate at CR/LF — a malformed opening quote
-    must never pair with an unrelated quote on a later line and swallow prose.
-    These drive the REAL regexes extracted from static/ui.js.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.media_dq = _extract_replace_regex(UI_JS, 's=s.replace(/MEDIA:"')
-        cls.media_sq = _extract_replace_regex(UI_JS, "s=s.replace(/MEDIA:'")
-        cls.file_dq = _extract_replace_regex(UI_JS, 's=s.replace(/(^|\\s)file:\\/\\/"')
-        cls.file_sq = _extract_replace_regex(UI_JS, "s=s.replace(/(^|\\s)file:\\/\\/'")
-        cls.md_img = _extract_replace_regex(UI_JS, "t=t.replace(/!\\[")
-        cls.md_link = _extract_replace_regex(UI_JS, "t=t.replace(/\\[([^\\]]+)\\]\\(")
-
-    def _captures(self, regex: str, text: str) -> list:
-        # retorna o ÚLTIMO grupo de cada match (o ref/url de destino; o lead/label
-        # das arms file:// e markdown são grupos anteriores)
-        js = f"const re={regex};const text={json.dumps(text)};const out=[];let m;while((m=re.exec(text))){{out.push(m[m.length-1]);}}process.stdout.write(JSON.stringify(out));"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False, encoding="utf-8") as tf:
-            tf.write(js)
-            script = tf.name
-        try:
-            result = subprocess.run([NODE, script], capture_output=True, text=True, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            return json.loads(result.stdout or "[]")
-        finally:
-            os.unlink(script)
-
-    def test_media_dq_lf_terminates_capture(self):
-        # um quote malformado na linha 1 não pode casar com um quote na linha 2
-        text = 'MEDIA:"/tmp/a.png\n"unrelated" done'
-        self.assertEqual(self._captures(self.media_dq, text), [], "LF deve terminar a arm quoted")
-        text2 = 'MEDIA:"/tmp/a.png" done'
-        self.assertEqual(self._captures(self.media_dq, text2), ["/tmp/a.png"])
-
-    def test_media_dq_cr_and_crlf_terminate_capture(self):
-        for sep in ("\r", "\r\n"):
-            text = f'MEDIA:"/tmp/a.png{sep}b.png" done'
-            self.assertEqual(self._captures(self.media_dq, text), [], repr(sep))
-
-    def test_media_sq_lf_terminates_capture(self):
-        text = "MEDIA:'/tmp/a.png\n'unrelated' done"
-        self.assertEqual(self._captures(self.media_sq, text), [])
-        text2 = "MEDIA:'/tmp/a.png' done"
-        self.assertEqual(self._captures(self.media_sq, text2), ["/tmp/a.png"])
-
-    def test_quoted_file_uri_lf_terminates_capture(self):
-        text = 'file://"/tmp/a.png\n"unrelated" done'
-        self.assertEqual(self._captures(self.file_dq, text), [])
-        text2 = 'file://"/tmp/a.png" done'
-        self.assertEqual(self._captures(self.file_dq, text2), ["/tmp/a.png"])
-        text3 = "file://'/tmp/a.png\n'unrelated' done"
-        self.assertEqual(self._captures(self.file_sq, text3), [])
-        text4 = "file://'/tmp/a.png' done"
-        self.assertEqual(self._captures(self.file_sq, text4), ["/tmp/a.png"])
-
-    def test_markdown_image_destination_lf_terminates_capture(self):
-        text = "![x](file:///tmp/a\nb.png) done"
-        self.assertEqual(self._captures(self.md_img, text), [])
-        text2 = "![x](file:///tmp/a.png) done"
-        self.assertEqual(self._captures(self.md_img, text2), ["file:///tmp/a.png"])
-
-    def test_markdown_link_destination_lf_terminates_capture(self):
-        text = "[x](https://example.com/a\nb) done"
-        self.assertEqual(self._captures(self.md_link, text), [])
-        text2 = "[x](https://example.com/a.png) done"
-        self.assertEqual(self._captures(self.md_link, text2), ["https://example.com/a.png"])
-
-    def test_prose_after_quoted_media_preserved(self):
-        # a prosa na mesma linha após a referência fecha NÃO é engolida
-        text = 'MEDIA:"/tmp/my screenshot.png" done'
-        self.assertEqual(self._captures(self.media_dq, text), ["/tmp/my screenshot.png"])
+        for mode, result in self.cases["boundaries"]["multiple"].items():
+            with self.subTest(case="multiple", mode=mode):
+                self.assertIn('data-ref="/tmp/one.png"', result["html"])
+                self.assertIn('data-path="/tmp/two.pdf"', result["html"])
+                self.assertIn("then", result["text"])
+                self.assertIn("after", result["text"])
 
 
 if __name__ == "__main__":

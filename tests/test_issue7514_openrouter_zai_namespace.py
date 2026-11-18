@@ -34,10 +34,22 @@ def _ids(provider_id: str) -> list[str]:
 
 
 def _expected_openrouter_id(model_id: str) -> str:
-    """Independent reference implementation of the namespace translation."""
+    """Independent reference implementation of the namespace translation.
+
+    One Z.AI model has no OpenRouter counterpart: ``glm-4.5-flash`` is not in
+    OpenRouter's catalog, so #7520 serves Z.AI's nearest light model
+    ``z-ai/glm-4.5-air`` in its place (same slot, so order is unchanged).
+    """
+    if model_id in _OPENROUTER_REMAPS:
+        return _OPENROUTER_REMAPS[model_id]
     if model_id.startswith("zai/"):
         return "z-ai/" + model_id[len("zai/") :]
     return model_id
+
+
+# #7520: fallback ids that OpenRouter does not serve, mapped to the id the
+# wizard offers instead. Keep this list tiny and explicit.
+_OPENROUTER_REMAPS = {"zai/glm-4.5-flash": "z-ai/glm-4.5-air"}
 
 
 def test_openrouter_setup_never_serves_direct_zai_namespace():
@@ -66,14 +78,19 @@ def test_openrouter_setup_exposes_z_ai_models():
 
 
 def test_openrouter_projection_is_namespace_only():
-    """The OpenRouter list stays a 1:1, order-preserving projection."""
+    """The OpenRouter list stays a 1:1, order-preserving projection.
+
+    Labels are preserved for every entry except the #7520 remap slots, whose
+    label names the model actually served.
+    """
     fallback = config._FALLBACK_MODELS
     openrouter = _models("openrouter")
 
     assert len(openrouter) == len(fallback)
     for source, projected in zip(fallback, openrouter, strict=True):
-        assert projected["label"] == source["label"]
         assert projected["id"] == _expected_openrouter_id(source["id"])
+        if source["id"] not in _OPENROUTER_REMAPS:
+            assert projected["label"] == source["label"]
 
 
 def test_direct_zai_setup_keeps_direct_provider_ids():

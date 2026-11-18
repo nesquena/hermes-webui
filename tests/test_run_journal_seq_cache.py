@@ -14,19 +14,19 @@ from api import run_journal
 
 
 def test_append_run_event_seeds_seq_once_and_stays_gapless(tmp_path, monkeypatch):
-    calls = {"next_seq": 0, "read_jsonl": 0}
-    real_next_seq = run_journal._next_seq
+    calls = {"prepare": 0, "read_jsonl": 0}
+    real_prepare = run_journal._prepare_journal_append
     real_read_jsonl = run_journal._read_jsonl
 
-    def counting_next_seq(path):
-        calls["next_seq"] += 1
-        return real_next_seq(path)
+    def counting_prepare(*args, **kwargs):
+        calls["prepare"] += 1
+        return real_prepare(*args, **kwargs)
 
     def counting_read_jsonl(path):
         calls["read_jsonl"] += 1
         return real_read_jsonl(path)
 
-    monkeypatch.setattr(run_journal, "_next_seq", counting_next_seq)
+    monkeypatch.setattr(run_journal, "_prepare_journal_append", counting_prepare)
     monkeypatch.setattr(run_journal, "_read_jsonl", counting_read_jsonl)
 
     n = 25
@@ -39,7 +39,7 @@ def test_append_run_event_seeds_seq_once_and_stays_gapless(tmp_path, monkeypatch
 
     assert seqs == list(range(1, n + 1))
     # Seeded from the file exactly once; every later append is in-memory only.
-    assert calls["next_seq"] == 1
+    assert calls["prepare"] == 1
     assert calls["read_jsonl"] <= 1
 
 

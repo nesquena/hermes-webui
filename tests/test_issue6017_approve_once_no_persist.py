@@ -19,7 +19,8 @@ thread for every choice) and writes nothing to ``_session_approved``.
 State layer: ``tools.approval._session_approved`` -- the session-scoped approval
 allowlist that ``is_approved()`` consults. These tests drive the real
 ``_resolve_approval_legacy`` against a seeded gateway approval entry and assert
-the persistence outcome directly via ``is_approved()``.
+the persistence outcome directly via ``is_approved()``. The "session" test parks
+a real Agent approval instead: the Agent waiting on it saves the grant itself.
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ import importlib
 import uuid
 
 from tests.conftest import requires_agent_modules
+from tests._real_agent_approval import parked_agent_approval
 
 pytestmark = requires_agent_modules
 
@@ -44,7 +46,7 @@ def _seed_gateway_entry(ta, sid, pattern_key):
         "description": "recursive delete",
     })
     with ta._lock:
-        ta._pending.pop(sid, None)
+        importlib.import_module("api.route_approvals")._pending.pop(sid, None)
         ta._gateway_queues.setdefault(sid, []).append(entry)
     return entry
 
@@ -53,7 +55,7 @@ def _cleanup(ta, sid):
     with ta._lock:
         ta._gateway_queues.pop(sid, None)
         ta._session_approved.pop(sid, None)
-        ta._pending.pop(sid, None)
+        importlib.import_module("api.route_approvals")._pending.pop(sid, None)
 
 
 def test_approve_once_releases_call_but_does_not_persist():
@@ -80,21 +82,20 @@ def test_approve_once_releases_call_but_does_not_persist():
         _cleanup(ta, sid)
 
 
-def test_approve_session_persists_session_approval():
+def test_approve_session_persists_session_approval(monkeypatch):
     """Regression guard: 'session' still persists, so a later matching call in
-    the same session is not re-prompted."""
+    the same session is not re-prompted. The Agent waiting on the approval
+    saves the grant itself once WebUI hands it the answer."""
     routes = importlib.import_module("api.routes")
     ta = importlib.import_module("tools.approval")
 
     sid = f"issue6017-session-{uuid.uuid4().hex[:8]}"
-    key = f"pattern-{uuid.uuid4().hex[:8]}"
-    entry = _seed_gateway_entry(ta, sid, key)
-    try:
+    with parked_agent_approval(monkeypatch, sid) as parked:
+        assert not any(ta.is_approved(sid, key) for key in parked.keys)
+
         routes._resolve_approval_legacy(sid, "", "session")
 
-        assert entry.event.is_set(), "'session' must release the currently parked call"
-        assert ta.is_approved(sid, key) is True, (
+        assert parked.finish()["approved"] is True, "'session' must release the currently parked call"
+        assert parked.keys and all(ta.is_approved(sid, key) for key in parked.keys), (
             "'session' must persist so later matching calls are not re-prompted"
         )
-    finally:
-        _cleanup(ta, sid)

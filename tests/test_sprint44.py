@@ -72,9 +72,23 @@ class TestHandleWorkspaceCloseLogic(unittest.TestCase):
         self.assertGreater(idx, 0, "handleWorkspaceClose() not found")
         body = BOOT_JS[idx:idx + 500]
         self.assertIn(
-            "closeWorkspacePanel()",
+            "closeWorkspacePanel(",
             body,
             "handleWorkspaceClose() must call closeWorkspacePanel() as fallback",
+        )
+
+    def test_falls_back_to_close_panel_returns_focus_to_the_invoker(self):
+        """The drawer's own X is an explicit dismiss, so it must hand focus back to
+        the control that opened the panel (same pattern as the "Close menu" X)."""
+        idx = BOOT_JS.find("function handleWorkspaceClose()")
+        self.assertGreater(idx, 0, "handleWorkspaceClose() not found")
+        body = BOOT_JS[idx:idx + 500]
+        self.assertIn(
+            "closeWorkspacePanel(_workspacePanelInvokerForBand())",
+            body,
+            "handleWorkspaceClose() must pass the band-appropriate invoker to "
+            "closeWorkspacePanel(), not close bare — a bare close strands focus "
+            "inside the now-hidden drawer",
         )
 
 

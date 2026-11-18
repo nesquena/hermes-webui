@@ -143,7 +143,12 @@ def test_new_project_and_move_shortcut_guards_503():
     assert "move failed" in block.lower(), (
         "a failed move must surface an actionable toast (#3746)"
     )
-    # The authoritative refetch (#2551) must remain in the success path.
-    assert "await renderSessionList()" in block, (
+    # The authoritative refetch (#2551) must remain on both shortcut paths,
+    # now through the keep-picker contract so it publishes under a newer picker.
+    refresh = (
+        "await renderSessionList({deferWhileInteracting:false,"
+        "keepProjectPicker:true})"
+    )
+    assert block.count(refresh) == 2, (
         "the shortcut must keep its authoritative /api/sessions refetch (#2551)"
     )
