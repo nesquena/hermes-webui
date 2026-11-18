@@ -91,7 +91,9 @@ def _wakeup_outcome(messages, turn):
                         and not (token and msgs[j].get("_active_turn_token") == token)), len(msgs))
             replies = [n for n in msgs[i + 1:end] if n.get("role") == "assistant"]
             ends = [e for e in map(_turn_end_provenance, replies) if e]
-            return (ends[-1] if ends else False), str(replies[-1].get("content") or "") if replies else ""
+            # An error row is a failed turn: the native hook judges it with "" (never the error text).
+            last = replies[-1] if replies else {}
+            return (ends[-1] if ends else False), "" if last.get("_error") else str(last.get("content") or "")
     return False, ""
 
 
@@ -173,6 +175,19 @@ def _chat_writable(session):
                 or source == "subagent" or _is_subagent_child_session_id(session.session_id))
 
 
+class SessionRotated(Exception):
+    """The chat was compressed into a continuation: refuse it the way chat/start does."""
+
+    def __init__(self, continuation):
+        super().__init__("This session was compressed. Open its continuation before starting a loop.")
+        self.continuation = continuation
+
+
+def _sealed(session):
+    from api.compression_continuation import durable_compression_continuation
+    return durable_compression_continuation(session)
+
+
 _CONTROL_PREFIX = "webui_loop_control:"
 
 
@@ -219,6 +234,9 @@ def run_loop_command(session_id, args, request_profile=None):
         # A new loop sends turns into this chat: same write admission as chat/start. Controls stay allowed.
         if args.strip().lower() not in _CONTROL_COMMANDS and not _chat_writable(session):
             return "/loop: this chat is read-only in the WebUI, so it can't run a loop."
+        sealed, tip = _sealed(session)
+        if sealed and args.strip().lower() not in _CONTROL_COMMANDS:
+            raise SessionRotated(tip)
         with _home(profile):
             mgr = LoopManager(session_id=session_id)
             before = mgr.state
@@ -315,6 +333,13 @@ def _run_one(profile, sid):
         if getattr(meta, "archived", False):
             mgr.pause(reason="session archived")  # a hidden chat must not keep spending provider calls
             return
+        sealed, tip = _sealed(meta)
+        if sealed:  # never write into a sealed parent: follow a resumable WebUI continuation, else pause
+            if tip and _sidecar_exists(tip) and cli.migrate_loop_to_session(sid, tip, reason="compression"):
+                _WAKE.set()
+            else:
+                mgr.pause(reason="session compressed")
+            return
         msg = mgr.fire_tick()
         if not msg or mgr.lost:
             return
@@ -334,6 +359,11 @@ def _run_one(profile, sid):
              "tick": mgr.state.ticks_fired, "launched": True}))
     except KeyError:  # session deleted
         mgr.clear()
+
+
+def _sidecar_exists(sid):
+    from api.config import SESSION_DIR
+    return (Path(SESSION_DIR) / f"{sid}.json").is_file()
 
 
 def run_due_loops():

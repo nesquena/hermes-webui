@@ -231,3 +231,114 @@ def test_gateway_canonical_completion_keeps_the_wakeup_identity(tmp_path, monkey
         _due(agent)
     loops.run_due_loops()
     assert _loop(agent, loops).status == "done" and len(started) == 1
+
+
+def _provider_error_row(tmp_path, monkeypatch, mode):
+    """The row the real worker persists when the provider call is interrupted (raised or returned failed)."""
+    import queue
+    from api import config, models, profiles, routes, streaming
+
+    class Agent:
+        def __init__(self, **kw):
+            self.session_id, self.platform, self.model = "perr", "webui", "m"
+            self.context_compressor = self.ephemeral_system_prompt = None
+
+        def run_conversation(self, user_message, conversation_history=None, **kw):
+            if mode == "raise":
+                raise RuntimeError("Operation was interrupted")
+            return {"completed": False, "failed": True, "error": "Request was aborted", "final_response": None,
+                    "messages": list(conversation_history or []) + [{"role": "user", "content": user_message}]}
+
+    with monkeypatch.context() as m:
+        m.setattr(streaming, "_get_ai_agent", lambda: Agent)
+        m.setattr(streaming, "_build_session_db_for_stream", lambda _: None)
+        m.setattr(streaming, "resolve_model_provider", lambda *a, **k: ("m", None, None))
+        m.setattr(streaming, "get_config", lambda: {})
+        m.setattr(config, "get_config", lambda: {})
+        m.setattr(config, "_resolve_cli_toolsets", lambda *a, **k: [])
+        m.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        config.SESSION_AGENT_CACHE.clear()  # a cached agent from the other mode would answer instead
+        s = models.Session(session_id="perr", model="m")
+        s.save()
+        models.SESSIONS["perr"] = s
+        routes._prepare_chat_start_session_for_stream(s, msg="Q", attachments=[], workspace=str(tmp_path), model="m",
+                                                      model_provider=None, stream_id="perr-run", started_at=5.0)
+        config.STREAMS["perr-run"] = queue.Queue()
+        streaming._run_agent_streaming("perr", "Q", "m", str(tmp_path), "perr-run", [])
+        row = models.Session.load("perr").messages[-1]
+    assert row["_error"] is True and row["provider_details_label"] == "Interruption details" and "type" not in row
+    assert row["provider_details"] == ("Operation was interrupted" if mode == "raise" else "Request was aborted")
+    return row
+
+
+@requires_agent_modules
+@pytest.mark.parametrize("mode", ["raise", "result"])
+@pytest.mark.parametrize("cmd,times,status", [("5m check", 0, "active"), ("5m --times 1 check", 1, "done")])
+def test_provider_interrupted_wakeup_is_a_failed_tick_like_the_cli(tmp_path, monkeypatch, mode, cmd, times, status):
+    """A provider-interrupted wakeup counts as a tick judged on "" (the CLI's failed-turn verdict), never its error text."""
+    row = _provider_error_row(tmp_path, monkeypatch, mode)
+    session = NS(session_id="s1", profile=None, messages=[])
+    agent, loops, started = _setup(tmp_path, monkeypatch, session, cmd=cmd)
+    judged = []
+    real = agent.LoopManager.complete_tick
+    monkeypatch.setattr(agent.LoopManager, "complete_tick", lambda self, reply: judged.append(reply) or real(self, reply))
+    loops.run_due_loops()
+    session.messages.append(row)
+    loops.run_due_loops()
+    s = _loop(agent, loops)
+    assert (s.status, s.ticks_fired, s.paused_reason, s.awaiting_response, judged) == (status, 1, None, False, [""])
+    with loops._home(None):  # the native manager reaches the same state for a failed turn
+        native = agent.LoopManager(session_id="native")
+        native.set("check", interval_seconds=300, times=times)
+        native.fire_tick()
+        assert native.complete_tick("")["status"] == status
+
+
+def _seal(monkeypatch, tip="c1"):
+    """Durable lineage says s1 was compressed into `tip` (by CLI/Desktop); the WebUI sidecar is untouched."""
+    from api import compression_continuation
+    monkeypatch.setattr(compression_continuation, "durable_compression_continuation",
+                        lambda session: (True, tip) if session.session_id == "s1" else (False, None))
+
+
+@requires_agent_modules
+def test_loop_on_an_externally_compressed_chat_is_refused_like_chat_start(tmp_path, monkeypatch):
+    """The stale sidecar looks writable; /loop must 409 session_rotated with no loop state and no worker."""
+    from urllib.parse import urlparse
+    from api import routes
+    session = NS(session_id="s1", profile=None, messages=[])
+    agent, loops, started = _setup(tmp_path, monkeypatch, session, cmd="", due=False)
+    _seal(monkeypatch)
+    assert loops._chat_writable(session)
+    out = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda h: True)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: None)
+    monkeypatch.setattr(routes, "read_body", lambda h: {"command": "/loop 5m check", "session_id": "s1"})
+    monkeypatch.setattr(routes, "j", lambda h, payload, status=200, **kw: out.update(payload, _status=status))
+    routes.handle_post(NS(headers={}), urlparse("/api/commands/exec"))
+    assert out == {"error": "This session was compressed. Open its continuation before starting a loop.",
+                   "code": "session_rotated", "continuation_session_id": "c1", "_status": 409}
+    assert _loop(agent, loops) is None and started == []
+    assert loops.run_loop_command("s1", "status")  # read-only controls still answer on the old id
+
+
+@requires_agent_modules
+@pytest.mark.parametrize("child_sidecar,owner,status", [(True, "c1", "active"), (False, "s1", "paused")])
+def test_registered_loop_never_fires_on_a_sealed_parent(tmp_path, monkeypatch, child_sidecar, owner, status):
+    """Compressed after /loop: the loop follows the WebUI continuation (Agent migration), else pauses; never fires on s1."""
+    from api import config
+    session = NS(session_id="s1", profile=None, messages=[])
+    agent, loops, started = _setup(tmp_path, monkeypatch, session)
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sidecars")
+    (tmp_path / "sidecars").mkdir()
+    if child_sidecar:
+        (tmp_path / "sidecars" / "c1.json").write_text("{}")
+    _seal(monkeypatch)
+    loops.run_due_loops()
+    assert started == []
+    s = _loop(agent, loops, sid=owner)
+    assert (s.status, s.ticks_fired) == (status, 0)
+    if child_sidecar:
+        assert _loop(agent, loops).status == "cleared"
+    else:
+        assert s.paused_reason == "session compressed"

@@ -22392,9 +22392,13 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "command is required")
         name, *rest = command.split(maxsplit=1)  # any whitespace, like _parse_slash_command()
         if name.lower() in ("/loop", "loop", "/proactive", "proactive"):
-            from api.loops import run_loop_command  # session_id ownership: the generic POST guard above
-            return j(handler, {"output": run_loop_command(str(body.get("session_id") or ""), "".join(rest),
-                                                          request_profile=_get_active_profile_name())})
+            from api.loops import SessionRotated, run_loop_command  # ownership: the generic POST guard above
+            try:
+                return j(handler, {"output": run_loop_command(str(body.get("session_id") or ""), "".join(rest),
+                                                              request_profile=_get_active_profile_name())})
+            except SessionRotated as e:
+                return j(handler, {"error": str(e), "code": "session_rotated",
+                                   "continuation_session_id": e.continuation}, status=409)
 
         try:
             return j(handler, {"output": execute_agent_command(command)})
