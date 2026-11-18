@@ -828,9 +828,45 @@ const scenarios = {
     await tab.cmdYolo();
     await tick();
     const last = posts(tab).slice(afterFailure.length);
-    const out = { posts_after_stale: last, server: { ...server.yolo }, state: tab.state() };
+    // B's own guard must be free again too: a /yolo on B after its stale exit posts.
+    await tab.loadSession('B');
+    await tick();
+    await tab.cmdYolo();
+    await tick();
+    const again = posts(tab).slice(afterFailure.length + last.length);
+    const out = { posts_after_stale: last, posts_on_B_again: again, server: { ...server.yolo }, state: tab.state() };
     check(last.length === 1 && last[0].session_id === 'A' && last[0].enabled === true && server.yolo.A === true,
       `/yolo on A after a stale /yolo on B posted ${JSON.stringify(last)}`, out);
+    check(again.length === 1 && again[0].session_id === 'B' && again[0].enabled === false && server.yolo.B === false,
+      `/yolo on B after its own stale /yolo posted ${JSON.stringify(again)}`, out);
+    return out;
+  },
+
+  // (l) /yolo toggles from its own GET: a malformed answer (no boolean flag)
+  // must not be inverted into a POST, whichever state the server is in.
+  async l_malformed_read_never_toggles() {
+    const out = {};
+    for (const start of [false, true]) {
+      for (const body of [{}, { yolo_enabled: null }, { yolo_enabled: 'yes' }, { yolo_enabled: 0 }, { yolo_enabled: 1 }]) {
+        const server = createServer({ B: {} });
+        server.yolo.B = start;
+        const tab = createTab(server, 'tab-' + start + '-' + JSON.stringify(body));
+        await tab.loadSession('B');
+        await tick();
+        server.yoloGetBody = body;
+        await tab.cmdYolo();
+        await tick();
+        server.yoloGetBody = null;
+        await tab.cmdYolo();
+        await tick();
+        const sent = posts(tab);
+        out[start + ' ' + JSON.stringify(body)] = { posts: sent, server_B: server.yolo.B, toasts: tab.toasts.slice() };
+      }
+    }
+    // After each malformed read, the next well-formed /yolo is the only POST, and it
+    // is the inverse of the real state (so the guard was released too).
+    check(Object.entries(out).every(([k, v]) => v.posts.length === 1 && v.posts[0].enabled === !k.startsWith('true')),
+      `malformed /yolo reads posted: ${JSON.stringify(out)}`, out);
     return out;
   },
 };

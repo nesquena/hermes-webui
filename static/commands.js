@@ -2599,6 +2599,9 @@ async function cmdYolo(){
     // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
     if(!viewIsCurrent())return;
+    // Same boolean rule as the pill's own read: a malformed answer is never
+    // inverted into a toggle (it would post enabled:true for {} or null).
+    if(!status||typeof status.yolo_enabled!=='boolean')throw new Error('unexpected answer from the server');
     const enable=!status.yolo_enabled;
     // A visible approval must belong to this exact session load before any
     // command handler may POST through it. Otherwise fail closed.

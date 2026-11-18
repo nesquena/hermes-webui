@@ -64,6 +64,7 @@ SCENARIOS = [
     "k3_prompt_new_file_install_keeps_stale_pill",
     "k4_prompt_new_folder_install_keeps_stale_pill",
     "k5_apperror_rotation_keeps_stale_pill_and_skips_read",
+    "l_malformed_read_never_toggles",
 ]
 
 
