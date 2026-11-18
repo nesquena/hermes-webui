@@ -872,13 +872,26 @@ def goal_message_key(decision: Dict[str, Any]) -> str:
     return "goal_continuing"
 
 
-def _hold_while_delegations_run(decision: Dict[str, Any], session_id: str, profile_home) -> Dict[str, Any]:
+# WebUI-owned continuations held for running subagents: {sid: (prompt, profile_home)}.
+_HELD_GOAL_CONTINUATIONS: dict[str, tuple[str, Any]] = {}
+
+
+def _hold_while_delegations_run(
+    decision: Dict[str, Any], session_id: str, profile_home, *, remember: bool = False
+) -> Dict[str, Any]:
     """Defer a continuation while subagents run; their completion wakeup re-evaluates the goal."""
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        _HELD_GOAL_CONTINUATIONS.pop(str(session_id or ""), None)
     if not decision.get("should_continue"):
         return decision
     live = _state_db_live_delegations(session_id, profile_home)
     if live <= 0:
         return decision
+    prompt = str(decision.get("continuation_prompt") or "").strip()
+    if remember and prompt:
+        # The last completion may be folded into an ordinary turn that never re-judges.
+        with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+            _HELD_GOAL_CONTINUATIONS[str(session_id)] = (prompt, profile_home)
     return {
         **decision,
         "should_continue": False,
@@ -1211,7 +1224,8 @@ def dispatch_browser_owned_goal_continuation(
     if want and not secrets.compare_digest(record["continuation_id"], want):
         return False
     deadline = record.get("grace_deadline")
-    if deadline is None or time.monotonic() < deadline:
+    # /goal resume takes the lease over at once; admission stays single-use.
+    if not explicit_resume and (deadline is None or time.monotonic() < deadline):
         return False
     if not mark_detached_goal_continuation(session_id, record["continuation_id"]):
         return False
@@ -1471,20 +1485,47 @@ def retry_detached_goal_continuation(session_id: str, *, explicit_resume: bool =
     return True
 
 
+def _release_held_goal_continuation(session_id: str) -> bool:
+    """Dispatch a held continuation once its subagents finished; True when one started."""
+    sid = str(session_id or "").strip()
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        held = _HELD_GOAL_CONTINUATIONS.pop(sid, None)
+        if held is None or _locked_pending_record(sid) is not None:
+            return False
+    prompt, profile_home = held
+    if _state_db_live_delegations(sid, profile_home) > 0:
+        with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+            _HELD_GOAL_CONTINUATIONS.setdefault(sid, held)
+        return False
+    if not has_active_goal(sid, profile_home=profile_home):
+        return False
+    cid = register_pending_goal_continuation(sid, prompt)
+    if not cid or not mark_detached_goal_continuation(sid, cid):
+        return False
+    start_detached_goal_continuation(sid, prompt, cid)
+    return True
+
+
 def settle_goal_continuation_after_turn(
     session_id: str,
     continuation_prompt: str,
     continuation_id: str,
     *,
     cancelled: bool,
+    registered_continuation_id: str = "",
 ) -> None:
     """Start the server-owned continuation, else retry a stopped one.
 
-    A cancelled turn never dispatches; admission still admits one turn.
+    A cancelled turn never dispatches and retires the record (and lease timer)
+    it registered itself, so Stop during judging cannot leave a live dispatch.
     """
     if cancelled:
+        if registered_continuation_id:
+            discard_pending_goal_continuation(session_id, registered_continuation_id)
         return
     try:
+        if not continuation_prompt and _release_held_goal_continuation(session_id):
+            return
         if continuation_prompt:
             start_detached_goal_continuation(
                 session_id, continuation_prompt, continuation_id
@@ -1588,7 +1629,7 @@ def evaluate_goal_after_turn(
     decision.setdefault("message", "")
     decision = dict(decision)
     decision = _goal_decision_payload(decision, getattr(mgr, "state", None))
-    return _hold_while_delegations_run(decision, sid, profile_home)
+    return _hold_while_delegations_run(decision, sid, profile_home, remember=True)
 
 
 # ── #6885 goal-continuation admission (single-record lifecycle) ─────────────
@@ -1854,6 +1895,7 @@ def clear_pending_goal_continuation(session_id: str) -> None:
         return
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
         _drop_pending_goal_continuation(session_id)
+        _HELD_GOAL_CONTINUATIONS.pop(session_id, None)
 
 
 def sweep_expired_goal_continuations() -> int:

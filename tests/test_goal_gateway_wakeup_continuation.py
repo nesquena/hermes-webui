@@ -2041,3 +2041,118 @@ def test_resume_kickoff_rejected_by_workspace_leaves_no_pending_record(monkeypat
     res = routes._handle_goal_command(object(), {"session_id": session.session_id, "args": "resume"})
     assert res["status"] == 200
     assert len(kickoffs) == 1 and kickoffs[0]["source"] == "goal_wakeup"
+
+
+# ── Gate 6944863410: Stop during goal evaluation retires the continuation ──
+
+
+@pytest.mark.parametrize("subscribed", [True, False], ids=["browser_lease", "detached"])
+def test_stop_during_goal_evaluation_dispatches_no_continuation(
+    tmp_path, monkeypatch, subscribed
+):
+    """A real Stop while the judge returns 'continue' leaves no record, timer or late turn."""
+    import time as _time
+
+    from api import streaming
+
+    stream_id = f"stream-stop-during-judge-{'lease' if subscribed else 'detached'}"
+    s, channel, admitted, started = _browser_lease_env(
+        tmp_path, monkeypatch, stream_id=stream_id, grace=0.2
+    )
+    stops = []
+
+    def _judge_then_stop(*_a, **_kw):
+        stops.append(streaming.cancel_stream(stream_id))
+        return dict(_LEASE_DECISION)
+
+    monkeypatch.setattr(webui_goals, "evaluate_goal_after_turn", _judge_then_stop)
+    if subscribed:
+        channel.subscribe()
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "[Continuing toward your standing goal]",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=True,
+    )
+    assert stops == [True]
+    assert webui_goals.peek_pending_goal_continuation_id(s.session_id) is None
+    assert s.session_id not in webui_goals._BROWSER_GRACE_TIMERS
+    # Neither the lease fallback nor an idle/detached retry revives it.
+    _time.sleep(0.6)
+    assert webui_goals.retry_detached_goal_continuation(s.session_id) is False
+    assert not started.is_set()
+    assert admitted == []
+
+
+def test_cancelled_teardown_retires_only_the_record_its_turn_registered(monkeypatch):
+    """Registration/teardown race: cancelled teardown drops its own record and timer, nothing else."""
+    sid = "sid-cancel-teardown-race"
+    cid = webui_goals.register_pending_goal_continuation(sid, "continue the goal")
+    assert webui_goals.hand_goal_continuation_to_browser(sid, cid, grace_seconds=30)
+    webui_goals.settle_goal_continuation_after_turn(
+        sid, "", "", cancelled=True, registered_continuation_id="0" * 32
+    )
+    assert webui_goals.peek_pending_goal_continuation_id(sid) == cid
+    webui_goals.settle_goal_continuation_after_turn(
+        sid, "", "", cancelled=True, registered_continuation_id=cid
+    )
+    assert webui_goals.peek_pending_goal_continuation_id(sid) is None
+    assert sid not in webui_goals._BROWSER_GRACE_TIMERS
+
+
+def test_off_pane_refused_continuation_leaves_the_viewed_running_session_alone():
+    """A's late 409 must not clear B's busy/thinking/composer state after a session switch."""
+    import json, shutil, subprocess
+    from pathlib import Path
+
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    root = Path(__file__).parents[1] / "static"
+    msgs = root.joinpath("messages.js").read_text(encoding="utf-8")
+    ui = root.joinpath("ui.js").read_text(encoding="utf-8")
+    start = msgs.index("    // Refused continuation token:")
+    body = msgs[start : msgs.index("      return;\n    }", start)] + "      return;\n    }"
+    set_busy = ui[ui.index("function setBusy(") : ui.index("// ── Queue chip display")]
+    script = """
+const INFLIGHT={sA:1,sB:1};const activeSid='sA';const e={status:409};const errMsg='goal_continuation_stale';
+const _failedSendDraftText='continue';const _failedSendFilesSnapshot=[];const _composerDraftClearPromise=Promise.resolve();
+let _queueDrainSid=null;const userMsg={};const log=[];let thinking=true;let composer='B running';
+const S={busy:true,messages:[],pendingFiles:[],session:{session_id:'sB'}};
+function shiftQueuedSessionMessage(){return null}function queueSessionMessage(){}
+const $=()=>null;function updateSendBtn(){}function setStatus(){}function updateQueueBadge(){}
+function setComposerStatus(t){composer=t}function removeThinking(){thinking=false}
+function showToast(){}function renderSessionList(){}function clearInflightState(sid){log.push(sid)}
+function _restoreComposerDraftAfterFailedSend(){}
+%s
+(function(){%s})();
+console.log(JSON.stringify({busy:S.busy,thinking,composer,inflightB:'sB' in INFLIGHT,inflightA:'sA' in INFLIGHT,log}));
+""" % (set_busy, body)
+    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert out == {
+        "busy": True, "thinking": True, "composer": "B running",
+        "inflightB": True, "inflightA": False, "log": ["sA"],
+    }
+
+
+def test_goal_resume_inside_browser_lease_survives_stop_of_intervening_turn(monkeypatch, tmp_path):
+    """/goal resume before the lease expires keeps its authority when the fallback fires after a Stop."""
+    sid = "sid-resume-browser-lease-after-stop"
+    _session, holder, kickoffs, cid, started = _stopped_detached_env(monkeypatch, tmp_path, sid)
+    from api.config import PENDING_GOAL_CONTINUATION_LOCK, PENDING_GOAL_CONTINUATION_PROMPTS
+
+    with PENDING_GOAL_CONTINUATION_LOCK:
+        PENDING_GOAL_CONTINUATION_PROMPTS[sid]["detached_owned"] = False
+    assert webui_goals.hand_goal_continuation_to_browser(sid, cid, grace_seconds=0.3)
+    join_all = _capture_goal_threads(monkeypatch)
+    holder["state"].status = "paused"
+    res = routes._handle_goal_command(object(), {"session_id": sid, "args": "resume"})
+    assert res["status"] == 200
+    assert kickoffs == []
+    assert _wait_for(lambda: bool(started), timeout=5.0)
+    join_all()
+    assert started == [
+        (sid, "continue the goal", {"source": "goal_wakeup", "goal_continuation_id": cid})
+    ]

@@ -86,3 +86,55 @@ def test_every_ledger_session_selector_holds_the_continuation(tmp_path, row):
     _db(tmp_path, [row])
     assert goals._state_db_live_delegations("sid", tmp_path) == 1
     assert goals._hold_while_delegations_run(dict(CONTINUE), "sid", tmp_path)["verdict"] == "wait"
+
+
+def _real_schema_db(home, rows):
+    """async_delegations with the Agent's real column names (persistence/sqlite/_schema_ddl.py)."""
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute(
+        "CREATE TABLE async_delegations (delegation_id TEXT PRIMARY KEY, origin_session TEXT NOT NULL,"
+        " origin_ui_session_id TEXT NOT NULL DEFAULT '', parent_session_id TEXT, state TEXT NOT NULL,"
+        " dispatched_at REAL NOT NULL, completed_at REAL, updated_at REAL NOT NULL,"
+        " delivery_state TEXT NOT NULL DEFAULT 'pending', origin_session_id TEXT NOT NULL DEFAULT '')"
+    )
+    conn.executemany(
+        "INSERT INTO async_delegations (delegation_id, origin_session, origin_ui_session_id,"
+        " parent_session_id, state, dispatched_at, updated_at) VALUES (?,?,?,?,?,1,1)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_held_goal_resumes_when_last_completion_lands_inside_an_ordinary_turn(tmp_path, monkeypatch):
+    """A held continuation is released by the next settled turn once no subagent is live."""
+    sid = "sid-held-ordinary-turn"
+    _real_schema_db(tmp_path, [("d1", sid, sid, sid, "running")])
+    held = goals._hold_while_delegations_run(dict(CONTINUE), sid, tmp_path, remember=True)
+    assert held["verdict"] == "wait"
+    started = []
+    monkeypatch.setattr(goals, "has_active_goal", lambda *_a, **_kw: True)
+    monkeypatch.setattr(
+        goals, "start_detached_goal_continuation", lambda *a, **k: started.append(a)
+    )
+    try:
+        # Still running: an ordinary turn's teardown keeps the hold.
+        goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=False)
+        assert started == [] and goals.peek_pending_goal_continuation_id(sid) is None
+        # A Stop never releases it either.
+        conn = sqlite3.connect(tmp_path / "state.db")
+        conn.execute("UPDATE async_delegations SET state='completed'")
+        conn.commit()
+        conn.close()
+        goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=True)
+        assert started == []
+        # The ordinary turn that folded the last completion releases it exactly once.
+        goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=False)
+        cid = goals.peek_pending_goal_continuation_id(sid)
+        assert cid and started == [(sid, "go on", cid)]
+        # Later teardowns only retry that same record (admission consumes it once).
+        goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=False)
+        assert {a[2] for a in started} == {cid}
+        assert sid not in goals._HELD_GOAL_CONTINUATIONS
+    finally:
+        goals.clear_pending_goal_continuation(sid)

@@ -14357,6 +14357,7 @@ def _run_agent_streaming(
     # Bound before any exit path: the outer-finally teardown reads them.
     _detached_goal_continuation_prompt = ''
     _detached_goal_continuation_id = ''
+    _registered_goal_continuation_id = ''
     _turn_route_model = model
     _turn_route_provider = model_provider
     cancel_event = threading.Event()
@@ -18592,6 +18593,9 @@ def _run_agent_streaming(
                         # ID, so the browser may edit or combine the queued
                         # entry without losing the goal.
                         continuation_id = register_pending_goal_continuation(session_id, continuation_prompt)
+                        _registered_goal_continuation_id = continuation_id or ''
+                        if cancel_event.is_set():  # Stop during judging
+                            continuation_id = None
                         if not continuation_id:
                             continuation_prompt = ''
                     if continuation_prompt:
@@ -19471,6 +19475,7 @@ def _run_agent_streaming(
             _detached_goal_continuation_prompt,
             _detached_goal_continuation_id,
             cancelled=cancel_event.is_set(),
+            registered_continuation_id=_registered_goal_continuation_id,
         )
 
 # ============================================================

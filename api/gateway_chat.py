@@ -3189,6 +3189,7 @@ def _run_gateway_chat_streaming(
     _turn_started_at = _reattached_turn_started_at(reattach_run) or time.time()
     _detached_goal_continuation_prompt = ""
     _detached_goal_continuation_id = ""
+    _registered_goal_continuation_id = ""
     q = peek_stream(stream_id)
     if q is not None:
         # A snapshot lookup is not admission. A concurrent chat/start can classify
@@ -3891,6 +3892,9 @@ def _run_gateway_chat_streaming(
                         # is what admits the turn later, so the browser can
                         # edit or combine the queued entry freely.
                         continuation_id = register_pending_goal_continuation(session_id, continuation_prompt)
+                        _registered_goal_continuation_id = continuation_id or ""
+                        if cancel_event.is_set():  # Stop during judging
+                            continuation_id = None
                         if not continuation_id:
                             continuation_prompt = ""
                     if continuation_prompt:
@@ -3985,4 +3989,5 @@ def _run_gateway_chat_streaming(
             _detached_goal_continuation_prompt,
             _detached_goal_continuation_id,
             cancelled=cancel_event.is_set(),
+            registered_continuation_id=_registered_goal_continuation_id,
         )
