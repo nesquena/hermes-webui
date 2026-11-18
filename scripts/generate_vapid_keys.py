@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -55,9 +56,6 @@ def main(argv=None) -> int:
     state = Path(args.state_dir).expanduser()
     state.mkdir(parents=True, exist_ok=True)
     target = state / "webui_vapid.json"
-    if target.exists() and not args.force:
-        print(f"{target} already exists (use --force to rotate)", file=sys.stderr)
-        return 1
     private_key = ec.generate_private_key(ec.SECP256R1())
     public = private_key.public_key().public_bytes(
         serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
@@ -65,11 +63,32 @@ def main(argv=None) -> int:
     private = number.to_bytes(32, "big")
     payload = {"public_key": _b64url(public), "private_key": _b64url(private),
                "subject": args.subject}
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
-        fh.write("\n")
-    os.chmod(target, 0o600)
+    temporary = None
+    if args.force:
+        # Write a private sibling then replace the directory entry atomically.
+        # Never truncate or follow a symlink at the destination, even on rotation.
+        fd, temporary = tempfile.mkstemp(prefix=".webui_vapid-", dir=state)
+    else:
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            print(f"{target} already exists (use --force to rotate)", file=sys.stderr)
+            return 1
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        if temporary is not None:
+            os.replace(temporary, target)
+            temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
     print(f"wrote {target} (public key {payload['public_key']})")
     return 0
 
