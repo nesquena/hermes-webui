@@ -461,6 +461,7 @@ function t(k, arg) {{
   if (k === 'settings_checking') return 'Checking...';
   if (k === 'settings_check_now') return 'Check now';
   if (k === 'settings_updates_disabled') return 'Updates are disabled in settings';
+  if (k === 'settings_update_check_failed') return 'Update check failed';
   return k;
 }}
 const bannerCalls = [];
@@ -592,6 +593,22 @@ def _raise_incomplete_read(path, name, channel=updates.DEFAULT_UPDATE_CHANNEL):
     raise http.client.IncompleteRead(b'{"name": "v0.52.7', 512)
 
 
+def _failing_producer():
+    """Return a synchronization gate and a failing _check_repo that waits for it.
+
+    Holding the gate keeps the background refresh thread alive so the POST and the
+    in-flight GET observe the deterministic pending=True state. Raising IncompleteRead
+    after the gate opens simulates a broken HTTP read during tag/manifest fetching.
+    """
+    gate = threading.Event()
+
+    def _check(path, name, channel=updates.DEFAULT_UPDATE_CHANNEL):
+        gate.wait(timeout=5)
+        _raise_incomplete_read(path, name, channel)
+
+    return gate, _check
+
+
 def _healthy_check(behind: int):
     def _check(path, name, channel=updates.DEFAULT_UPDATE_CHANNEL):
         return {"name": name, "behind": behind if name == "webui" else 0, "channel": channel}
@@ -604,13 +621,21 @@ def test_failed_refresh_reports_terminal_failure_cold_cache(monkeypatch):
     _reset_cache(monkeypatch)
     monkeypatch.setenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", "0")
     monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": True})
-    monkeypatch.setattr(updates, "_check_repo", _raise_incomplete_read)
+    gate, failing_check = _failing_producer()
+    monkeypatch.setattr(updates, "_check_repo", failing_check)
 
-    post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
-    assert post_payload.get("pending") is True, (
-        f"a zero budget must still answer pending from the POST: {post_payload}"
-    )
-    _drain_background()
+    try:
+        post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+        assert post_payload.get("pending") is True, (
+            f"a zero budget must still answer pending from the POST: {post_payload}"
+        )
+        in_flight = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+        assert in_flight.get("pending") is True, (
+            f"in-flight GET did not answer pending: {in_flight}"
+        )
+    finally:
+        gate.set()
+        _drain_background()
 
     completed = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
     assert completed.get("pending") is not True, (
@@ -663,11 +688,17 @@ def test_failed_refresh_reports_terminal_failure_warm_cache(monkeypatch):
         "stable",
     )
     monkeypatch.setenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", "0")
-    monkeypatch.setattr(updates, "_check_repo", _raise_incomplete_read)
+    gate, failing_check = _failing_producer()
+    monkeypatch.setattr(updates, "_check_repo", failing_check)
 
-    post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
-    assert post_payload.get("pending") is True, f"zero budget must answer pending: {post_payload}"
-    _drain_background()
+    try:
+        post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+        assert post_payload.get("pending") is True, f"zero budget must answer pending: {post_payload}"
+        in_flight = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+        assert in_flight.get("pending") is True, f"in-flight GET did not answer pending: {in_flight}"
+    finally:
+        gate.set()
+        _drain_background()
 
     completed = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
     assert completed.get("pending") is not True, (
@@ -696,5 +727,85 @@ def test_failed_refresh_reports_terminal_failure_warm_cache(monkeypatch):
     healthy_get = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
     assert healthy_get.get("webui", {}).get("behind") == 9
     assert healthy_get.get("failed") is not True
+
+
+def _failing_producer_payloads(monkeypatch) -> dict:
+    """Drive the real route handlers with a failing producer under a gate and return the payloads."""
+    _reset_cache(monkeypatch)
+    monkeypatch.setenv("HERMES_WEBUI_UPDATE_CHECK_WAIT", "0")
+    monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": False})
+
+    gate, failing_check = _failing_producer()
+    monkeypatch.setattr(updates, "_check_repo", failing_check)
+
+    try:
+        post_payload = _dispatch_post(monkeypatch, {"force": True, "channel": "stable"})["ok"]
+        in_flight_payload = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+    finally:
+        gate.set()
+        _drain_background()
+
+    completed_payload = _dispatch_get(monkeypatch, query="channel=stable&include_agent=1")["ok"]
+    return {
+        "post": post_payload,
+        "in_flight": in_flight_payload,
+        "completed": completed_payload,
+    }
+
+
+def test_failed_refresh_route_to_consumer(monkeypatch):
+    """Coupled producer-to-consumer failure regression: server failure must render error, not Up-to-date.
+
+    Drive the real route handlers with the producer failing under the gate, collect real
+    post, in_flight, and completed payloads, and replay exactly those three through checkUpdatesNow().
+    The consumer must render the error text (containing 'Update check failed'), never render
+    'Up to date', hide the spinner, never fire the banner, and poll via the key-consistent GET URL.
+    Then replay real payloads from a healthy refresh (_producer_payloads) as retry control,
+    requiring 'Updates available' and exactly one banner call.
+    """
+    payloads = _failing_producer_payloads(monkeypatch)
+
+    result = _run_node(_build_consumer_harness(payloads["post"], [payloads["in_flight"], payloads["completed"]]))
+    assert result["requestCount"] >= 2, f"expected a poll round-trip, got {result['requestCount']} request(s)"
+    assert "Update check failed" in result["statusText"], (
+        f"consumer rendered {result['statusText']!r} instead of the update check failed text"
+    )
+    assert "Up to date" not in result["statusText"], (
+        f"consumer rendered up-to-date text on failure: {result['statusText']!r}"
+    )
+    assert result["spinnerDisplay"] == "none", f"spinner was not hidden: {result['spinnerDisplay']!r}"
+    assert result["bannerCalls"] == 0, f"banner must NOT fire when check failed: {result['bannerCalls']}"
+    assert result["requests"][1] == {
+        "url": "/api/updates/check?channel=stable&include_agent=1",
+        "method": "GET",
+    }, f"poll did not target the key-consistent GET: {result['requests']}"
+
+    # Producer-side contract behind the replayed answers.
+    assert payloads["post"].get("pending") is True, f"POST did not answer pending: {payloads['post']}"
+    assert payloads["in_flight"].get("pending") is True, (
+        f"in-flight GET did not answer pending: {payloads['in_flight']}"
+    )
+    assert payloads["completed"].get("pending") is not True, (
+        f"completed GET still pending: {payloads['completed']}"
+    )
+    assert payloads["completed"].get("failed") is True, (
+        f"completed GET did not report failed: {payloads['completed']}"
+    )
+
+    # Retry control: a healthy refresh supersedes the failure and drives the consumer to available.
+    healthy_payloads = _producer_payloads(monkeypatch)
+    healthy_result = _run_node(
+        _build_consumer_harness(
+            healthy_payloads["post"],
+            [healthy_payloads["in_flight"], healthy_payloads["completed"]],
+        )
+    )
+    assert "Updates available" in healthy_result["statusText"], (
+        f"retry consumer rendered {healthy_result['statusText']!r} instead of updates-available text"
+    )
+    assert healthy_result["bannerCalls"] == 1, (
+        f"retry banner must fire exactly once, got {healthy_result['bannerCalls']}"
+    )
+
 
 
