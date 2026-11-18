@@ -54,7 +54,7 @@ SSE settlement or creating a retry backlog. Repeated approval heads are coalesce
 before scheduling; approval preparation and delivery use this same pool, with no
 per-notification threads.
 
-## Cron delivery (advanced API opt-in)
+## Cron delivery (Settings opt-in)
 
 Cron runs in another process, and the gateway session watcher parks without SSE
 clients and excludes cron. A separate read-only observer therefore watches the
@@ -63,10 +63,18 @@ Agent's existing `<profile-home>/cron/output/<job-id>/*.md` publication seam
 poll is needed. A persisted output is reported as **Cron output ready**, not as
 proof that the job succeeded. Success and error outputs can both generate it.
 
-Cron is **off by default even on a push-enabled device**. Enrollment is currently
-API-only; there is no additional Settings control. Select the intended profile in
-the WebUI, enable normal Web Push on the device, then run this in that app's browser
-console (it neither prints nor copies the endpoint or key material):
+Cron is **off by default even on a push-enabled device**. The primary opt-in is in
+**Settings → Preferences → Push when the app is closed**: once closed-app push is
+enabled on this device, an **Also notify when scheduled jobs finish** checkbox
+appears (it stays hidden until the device is subscribed). It reflects
+`cron_subscribed` from `GET /api/push/status?endpoint=...` for the currently selected
+profile and is re-read whenever the Preferences section is opened. Toggling it calls
+`POST /api/push/cron` with `{endpoint, enabled}`, is disabled while the request is in
+flight, and reverts with an inline error on failure. Consent is per profile and per
+device, so select the intended profile first.
+
+Advanced alternative (same endpoint, no UI): run this in that app's browser console
+(it neither prints nor copies the endpoint or key material):
 
 ```javascript
 const registration = await navigator.serviceWorker.ready;
@@ -130,7 +138,7 @@ system delivery. No device verification is claimed by this table.
 | Maintainer item | Automated coverage | Device evidence still needed |
 | --- | --- | --- |
 | Closed-app completions, approvals, clarification, background tasks | `test_web_push.py`, `test_web_push_owners.py`, `test_web_push_review_fixes.py`: producer wiring, targeting, deduplication, SW source handlers | Installed PWA closed/backgrounded, permission granted, receive each event and tap it |
-| Closed-app cron | `test_web_push_cron.py`: separate-process atomic output, live observer-to-delivery-worker without SSE, profile pinning, late publication, history suppression | Real scheduled Agent job while installed PWA is closed, then tap and inspect Tasks |
+| Closed-app cron | `test_web_push_cron.py`: Settings checkbox wiring (static source), separate-process atomic output, live observer-to-delivery-worker without SSE, profile pinning, late publication, history suppression | Real scheduled Agent job while installed PWA is closed, then tap and inspect Tasks |
 | Optional install | `test_web_push.py`, `test_web_push_deps_dir.py`, `test_web_push_cron.py`: absent keys/dependency no-op, managed `-I` opt-in directory, disabled startup has no observer | Fresh install without extras has no push controls; opt-in install works |
 | Forced payload redaction | `test_web_push_review_fixes.py`: API redaction off, cut-straddling secrets, missing redactor, generic snippets; cron never reads result content | Inspect received notifications; no credential/client-content disclosure |
 | Profile/device-safe subscriptions | `test_web_push_owners.py`, `test_web_push_cron.py`: device isolation, strict CSRF, legacy migration, foreign-session denial, two homes with identical job ids, symlink rejection, profile-specific status and consent | Two profiles/devices, profile switch and server restart; no cross-delivery |

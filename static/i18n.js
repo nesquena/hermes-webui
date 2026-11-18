@@ -1363,6 +1363,8 @@ const LOCALES = {
     web_push_disable_failed: 'Could not turn off push in this browser. Try again.',
     web_push_test_sent: 'Test push sent. Close the app to see it.',
     web_push_error: 'Push error',
+    web_push_cron_label: 'Also notify when scheduled jobs finish',
+    web_push_cron_failed: 'Could not update scheduled-job notifications. Try again.',
     settings_desc_token_usage: 'Displays input/output token count below each assistant reply. Also toggled with /usage.',
     settings_label_api_redact: 'Redact sensitive data in API responses',
     settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',

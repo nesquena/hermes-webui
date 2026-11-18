@@ -15146,9 +15146,18 @@ function _webPushSetStatus(text){
   const el=$('webPushStatus');
   if(el) el.textContent=text||'';
 }
+function _webPushSetCronRow(subscribed,cronOn){
+  const row=$('webPushCronRow');
+  const box=$('webPushCronToggle');
+  if(row) row.style.display=subscribed?'flex':'none';
+  if(box){ box.checked=!!(subscribed&&cronOn); box.disabled=!subscribed; }
+}
+let _webPushStatusSeq=0;
 async function updateWebPushStatus(){
   const block=$('webPushSettings');
   if(!block) return;
+  const seq=++_webPushStatusSeq;
+  _webPushSetCronRow(false,false);
   let info=null;
   try{ info=await api('/api/push/status'); }catch(_e){ info=null; }
   if(!info||!info.enabled){ block.style.display='none'; return; }
@@ -15164,12 +15173,16 @@ async function updateWebPushStatus(){
   const reg=await _webPushRegistration();
   const sub=reg?await reg.pushManager.getSubscription().catch(()=>null):null;
   let subscribed=false;
+  let cronOn=false;
   if(sub){
     try{
       const st=await api('/api/push/status?endpoint='+encodeURIComponent(sub.endpoint),{headers:_webPushHeaders()});
       subscribed=!!(st&&st.subscribed);
+      cronOn=!!(st&&st.cron_subscribed);
     }catch(_e){ subscribed=false; }
   }
+  if(seq!==_webPushStatusSeq) return;  // a newer refresh (e.g. profile switch) superseded this one
+  _webPushSetCronRow(subscribed,cronOn);
   if(toggle){
     toggle.disabled=false;
     toggle.textContent=subscribed?t('web_push_disable_btn'):t('web_push_enable_btn');
@@ -15251,6 +15264,27 @@ async function toggleWebPush(){
     showToast(t('web_push_error')+': '+(e&&e.message?e.message:e),5000,'error');
   }finally{
     await updateWebPushStatus();
+  }
+}
+// Per-profile, per-device opt-in for cron ("Cron output ready") pushes. The
+// server derives the profile from the request context; only endpoint+enabled
+// are sent. Revert the checkbox when the request (or subscription lookup) fails.
+async function toggleWebPushCron(enabled){
+  const box=$('webPushCronToggle');
+  if(!box) return;
+  const want=!!enabled;
+  box.disabled=true;
+  try{
+    const reg=await _webPushRegistration();
+    const sub=reg?await reg.pushManager.getSubscription():null;
+    if(!sub) throw new Error(t('web_push_no_sw'));
+    await api('/api/push/cron',{method:'POST',headers:_webPushHeaders(),body:JSON.stringify({endpoint:sub.endpoint,enabled:want})});
+    box.checked=want;
+  }catch(e){
+    box.checked=!want;
+    _webPushSetStatus(t('web_push_cron_failed'));
+  }finally{
+    box.disabled=false;
   }
 }
 async function sendWebPushTest(){

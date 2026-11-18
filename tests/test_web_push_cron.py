@@ -442,3 +442,67 @@ def test_status_reports_only_callers_current_profile_consent(push_env, tmp_path,
     assert cap.out[-1][1]["cron_subscribed"] is True
     assert str(a) not in json.dumps(cap.out)
     assert OWNER_A not in json.dumps(cap.out)
+
+
+# Settings control for cron opt-in (static-source wiring) ----------------------
+
+def _static(name):
+    from pathlib import Path
+    return (Path(__file__).resolve().parent.parent / "static" / name).read_text(encoding="utf-8")
+
+
+def _fn_src(js, start, end):
+    i = js.index(start)
+    return js[i:js.index(end, i + len(start))]
+
+
+def test_settings_cron_checkbox_lives_inside_closed_app_push_block():
+    html = _static("index.html")
+    block = html[html.index('id="webPushSettings"'):]
+    assert 'id="webPushCronToggle"' in block
+    assert block.index('id="webPushStatus"') < block.index('id="webPushCronToggle"')
+    # hidden until updateWebPushStatus() proves the device is subscribed
+    assert 'id="webPushCronRow" style="display:none' in html
+    assert 'onchange="toggleWebPushCron(this.checked)"' in html
+    assert 'data-i18n="web_push_cron_label"' in html
+
+
+def test_cron_checkbox_is_gated_on_push_enabled_and_subscribed_and_reads_cron_subscribed():
+    js = _static("panels.js")
+    upd = _fn_src(js, "async function updateWebPushStatus()", "// Boot-time silent re-bind")
+    # hidden on entry, and the early returns (push disabled / unsupported) never reveal it
+    assert upd.index("_webPushSetCronRow(false,false)") < upd.index("!info.enabled")
+    assert upd.index("!info.enabled") < upd.index("_webPushSetCronRow(subscribed,cronOn)")
+    assert upd.index("_webPushSupported()") < upd.index("_webPushSetCronRow(subscribed,cronOn)")
+    assert "cronOn=!!(st&&st.cron_subscribed)" in upd
+    assert "/api/push/status?endpoint=" in upd
+    # a superseded refresh (e.g. after a profile switch) must not paint stale state
+    assert "seq!==_webPushStatusSeq" in upd
+    row = _fn_src(js, "function _webPushSetCronRow(", "let _webPushStatusSeq")
+    assert "subscribed?'flex':'none'" in row
+    assert "box.checked=!!(subscribed&&cronOn)" in row
+
+
+def test_cron_toggle_posts_with_push_headers_disables_in_flight_and_reverts_on_failure():
+    js = _static("panels.js")
+    fn = _fn_src(js, "async function toggleWebPushCron(", "async function sendWebPushTest")
+    assert "api('/api/push/cron',{method:'POST',headers:_webPushHeaders()" in fn
+    assert "JSON.stringify({endpoint:sub.endpoint,enabled:want})" in fn
+    # nothing profile- or path-shaped is client-supplied
+    assert "profile" not in fn.lower()
+    # in-flight lock is released in finally, after being taken before the request
+    assert fn.index("box.disabled=true") < fn.index("api('/api/push/cron'")
+    assert "finally{" in fn and fn.index("finally{") < fn.index("box.disabled=false")
+    # success commits only after the server accepted; failure reverts + inline status line
+    assert fn.index("api('/api/push/cron'") < fn.index("box.checked=want")
+    catch = fn[fn.index("catch(e){"):fn.index("finally{")]
+    assert "box.checked=!want" in catch
+    assert "_webPushSetStatus(t('web_push_cron_failed'))" in catch
+
+
+def test_cron_strings_ride_the_en_fallback_not_pasted_into_every_locale():
+    i18n = _static("i18n.js")
+    en = i18n[i18n.index("  en: {"):i18n.index("\n  it: {")]
+    for key in ("web_push_cron_label", "web_push_cron_failed"):
+        assert en.count(f"    {key}:") == 1
+        assert i18n.count(f"    {key}:") == 1, f"{key} must live in en only (docs/GUIDELINES.md #8)"

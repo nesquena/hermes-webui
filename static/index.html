@@ -1385,6 +1385,10 @@
                   <button type="button" class="sm-btn" id="webPushTestButton" onclick="sendWebPushTest()" style="padding:5px 10px;font-size:12px" data-i18n="web_push_test_btn">Send test push</button>
                   <span id="webPushStatus" style="font-size:11px;color:var(--muted)"></span>
                 </div>
+                <label id="webPushCronRow" style="display:none;align-items:center;gap:8px;margin-top:8px;font-size:12px;cursor:pointer">
+                  <input type="checkbox" id="webPushCronToggle" onchange="toggleWebPushCron(this.checked)" style="width:15px;height:15px;accent-color:var(--accent)">
+                  <span data-i18n="web_push_cron_label">Also notify when scheduled jobs finish</span>
+                </label>
               </div>
             </div>
             <div class="settings-field">
