@@ -337,34 +337,42 @@ def test_background_observer_to_delivery_worker_without_sse(push_env, tmp_path, 
     monkeypatch.setattr(web_push, "_QUEUE", queue.Queue(maxsize=web_push._MAX_PENDING))
     delivered = threading.Event()
     scanned = threading.Event()
-    routes = web_push.cron_routes
+    wait_seconds = 10  # Fixture-only scheduling budget, not a delivery deadline.
+    poll = web_push_cron.CronObserver.poll
 
+    def note_scan(observer):
+        poll(observer)
+        scanned.set()  # Observe a completed real poll, not just store-read entry.
 
-    def note_scan():
-        scanned.set()
-        return routes()
-
-    monkeypatch.setattr(web_push, "cron_routes", note_scan)
-    thread_names = []
+    monkeypatch.setattr(web_push_cron.CronObserver, "poll", note_scan)
+    senders = []
 
     def send(**kwargs):
-        thread_names.append(threading.current_thread().name)
+        senders.append((threading.current_thread(), kwargs))
         delivered.set()
 
     monkeypatch.setattr(web_push, "_pywebpush", lambda: (send, Exception))
-    web_push_cron.start()
     try:
+        web_push_cron.start()
         # Ensure the observer's startup baseline precedes the new cron output.
-        assert scanned.wait(3)
+        assert scanned.wait(wait_seconds), "cron observer never completed its first poll"
         _output(tmp_path, time.time_ns())
-        assert delivered.wait(3), "cron output never reached the delivery worker"
-        assert thread_names[0].startswith("web-push-")
-        assert thread_names[0] != "web-push-cron"
+        assert delivered.wait(wait_seconds), "cron output never reached the delivery worker"
     finally:
         web_push_cron.stop()
-        web_push.shutdown(wait=1)
+        if web_push_cron._THREAD is not None:
+            web_push_cron._THREAD.join(timeout=wait_seconds)
+        # shutdown divides its budget between workers. The old 1s budget gave
+        # each only 0.5s, racing their real 0.5s idle queue wait at teardown.
+        web_push.shutdown(wait=wait_seconds)
     assert not web_push_cron._THREAD.is_alive()
     assert all(not worker.is_alive() for worker in web_push._WORKERS)
+    assert len(senders) == 1
+    sender, kwargs = senders[0]
+    assert sender in web_push._WORKERS
+    assert sender is not web_push_cron._THREAD
+    assert kwargs["subscription_info"]["endpoint"] == APPLE
+    assert json.loads(kwargs["data"])["title"] == "Cron output ready"
 
 
 def test_late_atomic_publish_is_not_lost_to_scan_wall_time(push_env, tmp_path, monkeypatch):
