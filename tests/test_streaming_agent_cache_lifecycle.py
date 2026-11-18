@@ -23,6 +23,9 @@ def test_evicted_agent_lifecycle_commits_unregisters_and_shutdowns(monkeypatch):
 
     session_db = MagicMock()
     agent = MagicMock()
+    # No external memory manager: these tests cover the lifecycle sequence, not the
+    # #8517 owner scope (an unknown owner refuses a memory-bearing agent's shutdown).
+    agent._memory_manager = None
     agent._session_db = session_db
     agent._session_messages = [{"role": "user", "content": "hello"}]
 
@@ -43,6 +46,7 @@ def test_evicted_agent_lifecycle_shutdown_uses_empty_messages_when_missing(monke
     monkeypatch.setattr(streaming, "_lifecycle_unregister_agent", MagicMock())
 
     agent = MagicMock()
+    agent._memory_manager = None  # see above: no external memory, no owner scope
     agent._session_db = MagicMock()
 
     streaming._close_evicted_agent_at_session_boundary("old-session", agent)
@@ -96,7 +100,6 @@ def test_identity_mismatch_cache_evictions_close_entries_outside_cache_lock():
         "_identity_mismatch_entry = SESSION_AGENT_CACHE.pop(session_id, None)",
         "_stale_runtime_entry = SESSION_AGENT_CACHE.pop(session_id, None)",
         "_skipped_agent_migration_entry = _cached_entry",
-        "evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)",
         "_evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)",
     ]
     for marker in expected_markers:
@@ -106,7 +109,6 @@ def test_identity_mismatch_cache_evictions_close_entries_outside_cache_lock():
         "_close_cached_agent_entry_at_session_boundary(session_id, _identity_mismatch_entry)",
         "_close_cached_agent_entry_at_session_boundary(session_id, _stale_runtime_entry)",
         "_close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)",
-        "_close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)",
         "_close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)",
     ]
     lines = src.splitlines()

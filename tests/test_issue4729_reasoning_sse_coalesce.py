@@ -97,10 +97,16 @@ def test_reasoning_buffer_flushed_at_every_boundary():
     # terminal catch-all: flush right after the agent run returns, AND a guaranteed-exit
     # flush in the inner finally so exception / retry paths (which bypass the post-run
     # flush) still emit the tail before the outer apperror.
-    assert re.search(
-        r"agent\.run_conversation\(\*\*_run_conversation_kwargs\)\n\s*# #4729",
-        STREAMING,
-    ), "must flush after agent.run_conversation() returns (success path, before done)"
+    run_idx = STREAMING.index("result = agent.run_conversation(**_run_conversation_kwargs)")
+    resolve_idx = STREAMING.index(
+        "_active_turn_identity = _resolve_active_turn_authority(",
+        run_idx,
+    )
+    flush_idx = STREAMING.index("_flush_reasoning_buffer()", resolve_idx)
+    assert run_idx < resolve_idx < flush_idx, (
+        "must flush after agent.run_conversation() returns, after turn authority is resolved, "
+        "and before terminal SSE delivery"
+    )
     # the inner finally must also flush (covers exception/retry exits)
     fin = STREAMING[STREAMING.index("        finally:\n            # #4729"):]
     fin = fin[:700]

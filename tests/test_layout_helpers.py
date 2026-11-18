@@ -137,3 +137,89 @@ def test_raw_i18n_key_detected():
                 assert_no_raw_i18n_keys(page)
         finally:
             browser.close()
+
+
+# A tall dialog with overflow-y:auto on a short viewport: the lower input is
+# below the fold at rest but reachable by scrolling the dialog. It must NOT be
+# flagged as an off-viewport degenerate (that is a false positive for a valid
+# scroll-to-reach pattern). Its sibling case (no scrollable ancestor) MUST still
+# be flagged.
+_SCROLLABLE_OFFVIEWPORT_HTML = """\
+<!doctype html>
+<html><head><meta charset="utf-8" />
+<style>
+  body { margin: 0; }
+  .dialog { height: 900px; overflow-y: auto; }
+  .spacer { height: 1000px; }
+  input { display: block; }
+</style></head>
+<body>
+  <div class="dialog" id="dlg">
+    <div class="spacer"></div>
+    <input id="lowerField" type="text" />
+  </div>
+</body></html>"""
+
+
+_UNREACHABLE_OFFVIEWPORT_HTML = """\
+<!doctype html>
+<html><head><meta charset="utf-8" />
+<style>
+  body { margin: 0; overflow: hidden; }
+  .fixedbox { height: 900px; overflow: hidden; }
+  .spacer { height: 1000px; }
+  input { display: block; }
+</style></head>
+<body>
+  <div class="fixedbox" id="box">
+    <div class="spacer"></div>
+    <input id="lostField" type="text" />
+  </div>
+</body></html>"""
+
+
+def test_offviewport_interactive_reachable_by_scroll_is_not_flagged():
+    """An interactive input below the fold but inside an overflow-y:auto ancestor
+    is reachable by scrolling and must NOT be reported off-viewport."""
+    sp = _require_playwright()
+    with sp() as pw:
+        browser = pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            # 320px tall viewport; the dialog is 900px so the field sits well
+            # below the fold at rest — but the dialog scrolls.
+            page = browser.new_page(viewport={"width": 480, "height": 320})
+            page.set_content(_SCROLLABLE_OFFVIEWPORT_HTML)
+            violations = collect_layout_violations(page, checks=["degenerate"])
+            degenerate = [
+                v for v in violations
+                if v["type"] == "degenerate" and "lowerField" in " ".join(v["elements"])
+            ]
+            assert not degenerate, (
+                "a field reachable by scrolling an overflow-y:auto ancestor must not "
+                f"be flagged off-viewport; got {degenerate}"
+            )
+        finally:
+            browser.close()
+
+
+def test_offviewport_interactive_with_no_scroll_escape_is_still_flagged():
+    """Positive control: an off-viewport input whose only ancestor is
+    overflow:hidden (no scroll escape) is genuinely unreachable and MUST still
+    be flagged — the scrollable-ancestor exemption must not create false negatives."""
+    sp = _require_playwright()
+    with sp() as pw:
+        browser = pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            page = browser.new_page(viewport={"width": 480, "height": 320})
+            page.set_content(_UNREACHABLE_OFFVIEWPORT_HTML)
+            violations = collect_layout_violations(page, checks=["degenerate"])
+            degenerate = [
+                v for v in violations
+                if v["type"] == "degenerate" and "lostField" in " ".join(v["elements"])
+            ]
+            assert degenerate, (
+                "an off-viewport field with no scrollable ancestor is unreachable "
+                "and must still be flagged off-viewport"
+            )
+        finally:
+            browser.close()
