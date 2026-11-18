@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opening a parent conversation marks its delegated subagent children read.** Those children are not a second conversation: their result comes back as a hidden wakeup, so an unread child kept the parent's dot after the parent itself had been opened. Visiting the parent, including clicking the parent again while it is already open, now clears that delegated unread state. Forked conversations are unchanged: a parent still shows unread while a different fork is unread.
+
 ### Performance
 
 - **Fork a scheduled-job (cron) conversation into your own editable chat.** Cron-run sessions are read-only (the scheduler owns them), so you couldn't continue one. You can now branch/fork a cron session into a new WebUI-owned conversation — the original read-only session is never modified, and the fork picks up its history so you can carry on. Only genuine cron sessions qualify (verified by the server-side source, not a guessable id), and every other read-only session stays unbranchable. Thanks @rodboev. (#5555, #5477)
