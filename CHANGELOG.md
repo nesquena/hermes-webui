@@ -27,6 +27,8 @@
 
 ### Security
 
+- **Share and Stop sharing refuse a link that belongs to another conversation (#9192, closes #8734).** A conversation's record can name a public share link that a different, still-existing conversation published. Share now answers 409 and changes nothing instead of replacing that conversation's public page, and Stop sharing no longer revokes its link. A conversation's own link, and links within compressed conversation chains, behave as before.
+
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
