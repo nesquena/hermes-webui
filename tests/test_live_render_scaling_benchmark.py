@@ -112,7 +112,7 @@ def test_explicit_chrome_path_precedes_discovery(monkeypatch, tmp_path):
 @pytest.mark.parametrize("path_form", ["absolute", "relative"])
 def test_explicit_chrome_path_launches_the_checked_file(monkeypatch, tmp_path, path_form):
     executable = tmp_path / "chrome"
-    shutil.copy2(sys.executable, executable)
+    executable.write_text("#!/bin/sh\nprintf 'checked executable launched\\n'\n", encoding="utf-8")
     executable.chmod(0o755)
     empty_path = tmp_path / "empty-path"
     empty_path.mkdir()
