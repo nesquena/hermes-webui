@@ -13656,13 +13656,19 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
     compressor = getattr(agent, "context_compressor", None)
     bind = getattr(compressor, "bind_session_state", None)
     if callable(bind):
-        bind_kwargs = {
-            "session_db": new_session_db,
-            "session_id": getattr(agent, "session_id", ""),
-        }
+        # Call the hook like the Agent's producers: first two arguments
+        # positional, persistence only when accepted, failures best-effort.
+        # The Agent handles above already point at the live adopted handle.
+        bind_kwargs = {}
         if _supports_kwarg(bind, "persistence"):
             bind_kwargs["persistence"] = getattr(agent, "persistence", None)
-        bind(**bind_kwargs)
+        try:
+            bind(new_session_db, getattr(agent, "session_id", ""), **bind_kwargs)
+        except Exception:
+            logger.debug(
+                "context engine bind_session_state during cached adoption failed",
+                exc_info=True,
+            )
     return new_session_db
 
 
