@@ -90,7 +90,8 @@ os.chdir(repo)
 OWNERS = {"DUMMY_KEY_PROFILE_A": "alpha", "DUMMY_KEY_PROFILE_B": "beta",
           "DUMMY_OPERATOR_TOKEN": "operator", "DUMMY_OPERATOR_OVERRIDE": "operator-override",
           "DUMMY_ROOT_KEY": "root", "DUMMY_ROOT_KEY_NEW": "root-new",
-          "DUMMY_ROOT\tKEY": "root-decoded", "DUMMY_ROOT\\tKEY": "root-literal"}
+          "DUMMY_ROOT\tKEY": "root-decoded", "DUMMY_ROOT\\tKEY": "root-literal",
+          "DUMMY_KEY\tPROFILE_A": "alpha-decoded", "DUMMY_KEY\\tPROFILE_A": "alpha-literal"}
 
 
 def owner(value):
@@ -532,6 +533,59 @@ def test_active_named_profile_scope_gets_the_launchers_value_for_a_trailing_esca
                   updates={"LITELLM_API_KEY": "DUMMY_ROOT_KEY_NEW"})
     assert obs["launch_profile"] == "alpha", "precondition: the saved active profile is the launch profile"
     assert obs["launch_scope_before"] == "root", "the launch scope added a newline the launcher never exported"
+
+
+# 4d ── an escaped value in a NAMED launch home's .env: ctl.sh exports it decoded, as for the root .env
+
+
+@needs_agent_scopes
+def test_named_launch_scope_drops_an_escaped_key_removed_in_settings(tmp_path):
+    obs, _ = _run(tmp_path, "launch_settings_save", launch="alpha",
+                  alpha={"OPENROUTER_API_KEY": '"DUMMY_KEY\\tPROFILE_A"'},
+                  extra_env={"OPENROUTER_API_KEY": "DUMMY_KEY\tPROFILE_A"},
+                  updates={"OPENROUTER_API_KEY": None})
+    assert obs["launch_profile"] == "alpha", "precondition: the named profile is the launch profile"
+    assert obs["launch_scope_before"] in ("alpha-decoded", "alpha-literal"), "precondition: the key is set before the delete"
+    assert obs["live_after"] is None
+    assert obs["launch_env"] is None, "the frozen launch env keeps an escaped key removed from the launch home's .env"
+    assert obs["launch_scope"] is None, "the launch scope keeps an escaped key removed in Settings"
+    assert obs["scope"] is None, "the cron fire scope keeps an escaped key removed in Settings"
+    assert obs["get_secret"] is None
+
+
+# 4e ── a server started after sourcing the .env in a shell (`set -a; . ~/.hermes/.env`): bash keeps `\t` literal
+# inside double quotes and drops the inline comment, which is how the Agent's .env reader reads the line, not ctl.sh.
+SHELL_SOURCED = {"root": ('"DUMMY_ROOT\\tKEY" # provider key', "DUMMY_ROOT\\tKEY"),
+                 "alpha": ('"DUMMY_KEY\\tPROFILE_A" # provider key', "DUMMY_KEY\\tPROFILE_A")}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize("launch", sorted(SHELL_SOURCED))
+def test_shell_sourcing_exports_the_value_the_shell_sourced_cases_use(tmp_path, launch):
+    line, exported = SHELL_SOURCED[launch]
+    env_file = tmp_path / "e.env"
+    env_file.write_text(f"OPENROUTER_API_KEY={line}\n", encoding="utf-8")
+    cp = subprocess.run(["bash", "-c", 'set -a; . "$1"; printf %s "$OPENROUTER_API_KEY"', "_", str(env_file)],
+                        env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=30)
+    assert cp.returncode == 0, cp.stderr
+    assert cp.stdout == exported
+
+
+@needs_agent_scopes
+@pytest.mark.parametrize("launch", sorted(SHELL_SOURCED))
+def test_launch_scope_drops_a_shell_sourced_key_removed_in_settings(tmp_path, launch):
+    line, exported = SHELL_SOURCED[launch]
+    scenario = "root_settings_save" if launch == "root" else "launch_settings_save"
+    file_kw = {"root_env" if launch == "root" else "alpha": {"OPENROUTER_API_KEY": line}}
+    obs, _ = _run(tmp_path, scenario, launch=launch, extra_env={"OPENROUTER_API_KEY": exported},
+                  updates={"OPENROUTER_API_KEY": None}, **file_kw)
+    assert obs["launch_profile"] == launch, "precondition: the launch profile"
+    assert obs["launch_scope_before"] in (f"{launch}-decoded", f"{launch}-literal"), "precondition: the key is set"
+    assert obs["live_after"] is None
+    assert obs["launch_env"] is None, "the frozen launch env keeps a shell-sourced key removed from the .env"
+    assert obs["launch_scope"] is None, "the launch scope keeps a shell-sourced key removed in Settings"
+    assert obs["scope"] is None, "the cron fire scope keeps a shell-sourced key removed in Settings"
+    assert obs["get_secret"] is None
 
 
 # 5 ── the launcher reading must match ctl.sh's real decoding ──
