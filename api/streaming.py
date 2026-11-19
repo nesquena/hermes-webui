@@ -12853,7 +12853,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
         elif role == 'tool':
             tid = m.get('tool_call_id') or m.get('tool_use_id', '')
             raw = m.get('content', '')
-            seq = {'msg_idx': msg_idx, 'raw': raw, 'resolved': False}
+            seq = {'msg_idx': msg_idx, 'raw': raw, 'tid': tid, 'resolved': False}
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
@@ -12869,19 +12869,58 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
 
     live = [tc for tc in (live_tool_calls or []) if isinstance(tc, dict) and tc.get('name') and tc.get('name') != 'clarify']
     if live:
+        # A live entry the transcript already resolved by id belongs to that row
+        # and must not be handed to a different one. When the ledger carries no
+        # id for that position (legacy agents), claim the row's own slot so the
+        # positional pairing below keeps master's alignment.
+        claimed = set()
         for seq_idx, seq in enumerate(tool_msg_sequence):
-            if seq.get('resolved'):
+            if not seq.get('resolved'):
                 continue
-            if seq_idx >= len(live):
-                break
-            live_tc = live[seq_idx]
+            tid = seq.get('tid')
+            matched = False
+            if tid:
+                for l_idx, ltc in enumerate(live):
+                    if l_idx not in claimed and ltc.get('tid') == tid:
+                        claimed.add(l_idx)
+                        matched = True
+                        break
+            if not matched and seq_idx < len(live) and seq_idx not in claimed and not live[seq_idx].get('tid'):
+                claimed.add(seq_idx)
+
+        unresolved = [seq for seq in tool_msg_sequence if not seq.get('resolved')]
+
+        def _append_live_summary(seq, ltc, tid):
             tool_calls.append({
-                'name': live_tc.get('name', 'tool'),
+                'name': ltc.get('name', 'tool'),
                 'snippet': _tool_result_snippet(seq.get('raw', '')),
-                'tid': live_tc.get('tid', '') or '',
+                'tid': tid,
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
-                'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
+                'args': _truncate_tool_args(ltc.get('args', {}), limit=4),
             })
+
+        remaining = [(l_idx, ltc) for l_idx, ltc in enumerate(live) if l_idx not in claimed]
+
+        # 1. A row whose id the ledger knows takes its own entry, wherever it sits.
+        still_unresolved = []
+        for seq in unresolved:
+            tid = seq.get('tid')
+            match = None
+            if tid:
+                for pos, (_l_idx, ltc) in enumerate(remaining):
+                    if ltc.get('tid') == tid:
+                        match = pos
+                        break
+            if match is None:
+                still_unresolved.append(seq)
+                continue
+            _l_idx, ltc = remaining.pop(match)
+            _append_live_summary(seq, ltc, tid)
+
+        # 2. Every remaining row pairs with the remaining entries in order, so an
+        #    id the ledger cannot name still keeps its result row.
+        for seq, (_l_idx, ltc) in zip(still_unresolved, remaining, strict=False):
+            _append_live_summary(seq, ltc, seq.get('tid') or ltc.get('tid') or '')
 
     return tool_calls
 
@@ -15624,8 +15663,6 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
-            _live_tool_event_start_names = set()
-            _live_tool_event_complete_names = set()
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -15729,16 +15766,11 @@ def _run_agent_streaming(
 
                 # Modern Hermes Agent builds can call both tool_progress_callback
                 # and the structured tool_start/tool_complete callbacks for the
-                # same tool. Prefer the structured path when it is supported so
-                # the browser receives one tid-tagged tool card per real call.
-                # Only suppress the legacy emit for calls the structured path
-                # actually handles. Since the legacy callback fires BEFORE the
-                # structured one, use tid-correlation instead of name look-
-                # behind: extract tool_call_id from positional args.
-                tid = cb_args[4] if len(cb_args) >= 5 else None
+                # same tool. When structured callbacks are wired, suppress the
+                # legacy progress path so the structured path is the single owner
+                # of tool events (#4666).
                 if event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params:
-                    if tid:
-                        return
+                    return
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
                         'name': name,
@@ -15785,8 +15817,7 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
-                    if tid:
-                        return
+                    return
                 if event_type == 'tool.completed':
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
@@ -15861,7 +15892,6 @@ def _run_agent_streaming(
                     _record_live_tool_start(tool_call_id, name, args)
                     if tool_call_id and tool_call_id not in _live_tool_event_start_ids:
                         _live_tool_event_start_ids.add(tool_call_id)
-                        _live_tool_event_start_names.add(name)
                         _live_tool_calls.append({
                             'name': name,
                             'args': args if isinstance(args, dict) else {},
@@ -15895,7 +15925,6 @@ def _run_agent_streaming(
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
-                        _live_tool_event_complete_names.add(name)
                         result_snippet = _tool_result_snippet(function_result)
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
