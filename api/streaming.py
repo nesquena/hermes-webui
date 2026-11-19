@@ -7567,9 +7567,16 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 'expectedCurrent': current,
             })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
+            # A local fallback is synced as 'derived' so the Agent's own model
+            # title can still replace it (Refs #9157).
             try:
                 from api.state_sync import sync_session_title
-                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+                sync_session_title(
+                    session_id,
+                    effective_title,
+                    profile=getattr(s, 'profile', None) or 'default',
+                    source='derived' if source == 'fallback' else 'llm',
+                )
             except Exception:
                 logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:

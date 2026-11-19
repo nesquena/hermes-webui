@@ -234,7 +234,9 @@ def test_lock_recovery_waits_for_update_and_keeps_timeout_cleanup():
         f"""
         const assert=require('node:assert/strict');
         const realSetTimeout=setTimeout;
-        // Scale seconds to milliseconds without changing timer ordering.
+        // Scale seconds to milliseconds without changing timer ordering. The cases
+        // sit 10 s (10 ms scaled) either side of the 300 s deadline: a 1 s margin
+        // scales to 1 ms, which a busy runner can reorder.
         global.setTimeout=(fn,ms)=>realSetTimeout(fn,ms/1000);
         global.document={{baseURI:'http://example.test/hermes/'}};
         global.location={{href:document.baseURI,pathname:'/hermes/',search:''}};
@@ -244,8 +246,8 @@ def test_lock_recovery_waits_for_update_and_keeps_timeout_cleanup():
         (async()=>{{
           for(const [target,forceActiveRuns,delayMs,success] of [
             ['webui',false,70000,true],
-            ['agent',true,299000,true],
-            ['webui',false,301000,false],
+            ['agent',true,290000,true],
+            ['webui',false,310000,false],
           ]){{
             const events=[],requests=[];
             const error={{style:{{}},textContent:''}};
