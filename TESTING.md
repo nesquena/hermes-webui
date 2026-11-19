@@ -1,5 +1,29 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Desktop session sidebar compatibility (#7415)
+
+Run `./scripts/test.sh -q tests/test_desktop_session_sidebar_visibility.py`.
+The suite uses disposable SQLite databases and executes the shipped browser
+classifier in Node. It covers Desktop source normalization, ended histories,
+known assistant/tool-only stubs, missing role columns, per-session NULL roles,
+and the message-count fallback when no messages table exists.
+
+For a manual cross-client check, create a conversation in Hermes Desktop and
+open WebUI on the same profile. The interactive session list should show the
+conversation with a `Desktop` source label. Empty sessions and sessions with
+known roles but no user turn stay hidden. Legacy Desktop histories with positive
+message counts remain visible when role metadata is absent or entirely NULL;
+that fallback does not prove their messages contain a user turn. This is a
+read-side projection change, not a database migration or live-streaming change.
+
+Also run `./scripts/test.sh -q tests/test_desktop_orphan_sidecar_prune.py`.
+Desktop sidecars use only the strict owning-profile orphan pass, even though
+Desktop is now classified as interactive. The fresh-process regressions assert
+that an isolated profile with an empty database cannot remove another profile's
+entry from the shared persisted `_index.json`. Confirmed owning-profile deletion
+must still prune with the interactive-session toggle either on or off. Hiding an
+interactive row from the response must not prune its retained index entry.
+
 ## User-bounded legacy tool anchors (#8427)
 
 Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.
@@ -768,6 +792,52 @@ EXPECT:
   - The dropdown updates to "Gemini 2.5 Pro"
   - Switching away and back to the conversation restores the same model in the footer selector
 FAIL: Dropdown shows the wrong active model after a session switch, or sending uses a stale model.
+
+### T3.2a: Reasoning Effort Reflects Active Conversation
+SETUP: Two sessions using the same reasoning-capable model.
+STEPS:
+  1. In session A, select Low reasoning effort.
+  2. In session B, select High reasoning effort.
+  3. Switch A → B → A using the sidebar.
+  4. Repeat at desktop width and at a narrow/mobile width using the mobile composer configuration action.
+  5. Reload the page on each session and send a turn.
+EXPECT:
+  - The reasoning chip/action reads Low in session A and High in session B after every switch and reload.
+  - The next turn in each session uses that session's restored effort.
+  - The model chip remains unchanged when both sessions use the same model.
+FAIL: The reasoning control keeps the previously viewed session's value, resets after reload, or the next turn uses a stale effort.
+
+Repeat with different models: use a fast model with High/XHigh/Max in session A
+and a flagship model with Low in session B, selecting efforts supported by each
+model. Both the model and reasoning controls must restore together on desktop
+and narrow/mobile after A → B → A and reload. Capture before/after screenshots
+of both sessions for PR review.
+
+Configuration regressions are covered by `tests/test_session_reasoning_effort.py`:
+new-session model/effort defaults honor an external `HERMES_CONFIG_PATH` for root.
+With request-local context set to a named profile, a root/external config override
+must not replace that profile's model or effort; an override inside its own home
+still applies. Gateway legacy and runs API requests use the named session
+profile's reasoning default when no stored override exists. An explicit session
+override wins over both the named and process/root profile values. With distinct
+root/named Gateway URLs and keys, the initial request's URL, Authorization header,
+and retained stream endpoint must all belong to the session's profile, matching
+the endpoint used for reattachment, Stop, and approval replies while the stream
+holds it. (Once that entry is cleaned up, Stop and approval fall back to the
+ambient endpoint, as on master.)
+
+Same-chat ordering is covered by `tests/test_reasoning_effort_save_race.py` too:
+pick High then Low in one chat with the first save delayed. Low must not be sent
+until High settles, and the chip must end on Low. If the newest save fails, the
+chip must re-read the stored value.
+
+Delayed-save regressions are covered by `tests/test_reasoning_effort_save_race.py`.
+With a throttled connection, change A's effort through the dropdown or
+`/reasoning high`, then switch to B before the save returns. B must keep its own
+effort after the response and routine topbar sync; returning to A must fetch its
+saved effort. Repeat on desktop and mobile, and with a model, provider, or profile
+change while the save is pending. A save in an unchanged context must still update
+both desktop and mobile labels, even if an older reasoning GET returns afterward.
 
 ### T3.3: Context Badge Shares Footer Space Cleanly
 SETUP: Active session with at least one completed response.
@@ -2512,3 +2582,78 @@ format-specific fallback and download link. A 401 directs the user to reload.
   Matching empty wrappers such as `**MEDIA:**` must remain prose.
 - Recheck settled and safe/fade streaming output across callback boundaries.
   Automated coverage: renderer behavior, MEDIA consumer parity, and SMD stream tests.
+
+
+## Reset lineage against a real Agent checkout
+
+For the current-master merge contract, also run
+`./scripts/test.sh tests/test_reset_lineage_master_integration.py -q`.
+This disposable SQLite matrix checks the list, metadata and report readers
+together, including messaging resets without a session key, direct/origin
+identity, inherited ancestor markers, missing optional columns, and a canonical
+reset whose parent is unavailable. Explicit forks, tool children, malformed or
+conflicting markers, and cross-surface legacy links must remain children.
+For a known messaging `session_reset` parent, cross-surface links must also
+remain children when they carry a matching canonical reset marker. Same-source
+canonical resets still work after parent reopen or when the parent is absent.
+The gateway reopen/recompress cases must retain independent reset roots and
+separate transcripts rather than merely avoiding compression collapse.
+
+`tests/test_reset_lineage_agent_integration.py` is opt-in because it imports a
+separate Hermes Agent checkout and its dependencies. It starts a credential-free
+subprocess with disposable home/state paths, exercises real `SessionDB`
+create/end/reopen calls and `SessionStore.reset_session()`, then checks WebUI's
+read-only projection and sidebar grouping. Only the historical clock is fixed.
+It does not send platform messages or run a model.
+
+```bash
+HERMES_WEBUI_TEST_REAL_AGENT=1 \
+HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent \
+HERMES_WEBUI_PYTHON=/path/to/hermes-agent/venv/bin/python \
+  ./scripts/test.sh tests/test_reset_lineage_agent_integration.py -q -rxX
+```
+
+`HERMES_WEBUI_TEST_REAL_AGENT=1` is the only opt-in. `HERMES_WEBUI_AGENT_DIR`
+also configures the normal WebUI runtime, so setting it alone never activates
+this module. With the flag, set both location variables explicitly. `HERMES_WEBUI_PYTHON` selects the Agent probe's
+interpreter, using the existing runtime override; point it at the environment
+with that checkout's dependencies installed (`.venv/bin/python` or
+`venv/Scripts/python.exe` are also valid layouts). The WebUI runner still uses
+its own repo `.venv` for pytest; this module does not start the shared WebUI
+HTTP test server. It neither installs Agent dependencies nor
+silently uses that interpreter for the probe. Its subprocess environment sets
+`HERMES_DISABLE_LAZY_INSTALLS=1` so Agent bootstrap cannot install dependencies
+into the disposable home. Node must also be on `PATH` for the real sidebar checks.
+
+Without `HERMES_WEBUI_TEST_REAL_AGENT=1` the module skips, even when
+`HERMES_WEBUI_AGENT_DIR` is set. Once opted in, missing or invalid
+checkout/interpreter settings, missing dependencies, probe
+failures, and invalid probe output are fixture **errors**, not expected failures
+or skips. `tests/test_reset_lineage_agent_fixture.py` runs by default without
+an Agent installation and verifies this distinction against the marked test.
+
+Verified Agent `8d91e48efdfd68437781fe5a23f5cd1d991dce9e` preserves explicit
+branch/delegate/tool children and real reset successors, but still backfills
+`_reset_from` onto a markerless same-key legacy branch in this exact schedule:
+parent starts at 100, branch starts at 150, parent ends as `branched` at 160,
+reopens at 170, ends as `session_switch` at 200, and reopens at 210. WebUI then
+projects that branch as `reset_successor`. This is a **known failing integration
+contract**, represented by one strict, `AssertionError`-only xfail. The
+[2026-11-02 maintainer decision](https://github.com/nesquena/hermes-webui/pull/7179#issuecomment-6583312535)
+accepts shipping it with a release note and a separate Agent-side provenance
+issue; the failing contract itself remains visible. This full real-Agent check remains opt-in, so default CI
+does not detect an upstream fix by itself.
+Run it without expected-failure handling to see the unresolved assertion:
+
+```bash
+HERMES_WEBUI_TEST_REAL_AGENT=1 \
+HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent \
+HERMES_WEBUI_PYTHON=/path/to/hermes-agent/venv/bin/python \
+  ./scripts/test.sh tests/test_reset_lineage_agent_integration.py \
+  -k markerless_branch --runxfail -q
+```
+
+An Agent fix that makes the test pass produces strict XPASS, requiring removal
+of the xfail and revalidation of genuine legacy resets across later parent
+reopens. A timestamp-only WebUI workaround cannot recover provenance after the
+Agent has written the marker and cleared the parent's end fields.

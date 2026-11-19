@@ -143,6 +143,7 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                 str(last.data.get("question", "")) == str(data.get("question", ""))
                 and list(last.data.get("choices_offered") or [])
                 == list(data.get("choices_offered") or [])
+                and (not data.get("clarify_id") or data["clarify_id"] == last.clarify_id)
             ):
                 entry = last
                 # Dedup re-uses the existing entry with its original clarify_id.

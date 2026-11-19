@@ -978,6 +978,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "reset_at": "2030-03-17T17:30:00Z",
                 "detail": None,
                 "limit_window_seconds": None,
+                "scope": "account",
             },
             {
                 "label": "Weekly",
@@ -986,6 +987,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "reset_at": "2030-03-24T12:30:00Z",
                 "detail": None,
                 "limit_window_seconds": None,
+                "scope": "account",
             },
         ],
         "details": ["Credits balance: $12.50"],
@@ -1807,8 +1809,134 @@ def test_account_usage_snapshot_without_window_duration_remains_compatible():
             "reset_at": "2030-03-17T17:30:00Z",
             "detail": None,
             "limit_window_seconds": None,
+            "scope": "account",
         }
     ]
+
+
+def test_account_usage_window_scope_survives_serialization():
+    """Model-only windows keep their scope; a missing or empty scope means account."""
+    import api.providers as providers
+
+    def _win(label, used, **extra):
+        return SimpleNamespace(label=label, used_percent=used, reset_at=None, detail=None, **extra)
+
+    snapshot = SimpleNamespace(
+        provider="anthropic", source="oauth_usage_api", title="Account limits", plan=None,
+        windows=(
+            _win("Current week", 40, scope="account"),
+            _win("Opus week", 100, scope="model"),
+            _win("Sonnet week", 10, scope=" Model "),
+            _win("Older agent", 20),
+            _win("Empty scope", 30, scope=""),
+        ),
+        details=(), available=True, unavailable_reason=None, fetched_at=None,
+    )
+
+    serialized = providers._serialize_account_usage_snapshot(snapshot)
+
+    assert [w["scope"] for w in serialized["windows"]] == ["account", "model", "model", "account", "account"]
+
+
+def _probe_worker_payload(monkeypatch, capsys, snapshot):
+    """Run the probe worker's code (what the subprocess executes) on a fake Agent snapshot
+    and return the JSON it prints."""
+    import api.providers as providers
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    usage_mod = types.ModuleType("agent.account_usage")
+    usage_mod.fetch_account_usage = lambda provider, *, base_url=None, api_key=None: snapshot
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", usage_mod)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", snapshot.provider, ""])
+    capsys.readouterr()
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, {"__name__": "__main__"})
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_anthropic_windows_get_nominal_lengths_only_when_none_is_reported(monkeypatch, capsys):
+    """Anthropic reports no window lengths; the serializer fills nominal ones for the Agent's labels."""
+    import api.providers as providers
+
+    def snapshot(provider, windows):
+        return SimpleNamespace(
+            provider=provider, source="oauth_usage_api", title="Account limits", plan=None,
+            windows=tuple(SimpleNamespace(used_percent=10, reset_at=None, detail=None, **w) for w in windows),
+            details=(), available=True, unavailable_reason=None, fetched_at=None,
+        )
+
+    def seconds(payload):
+        return {w["label"]: w["limit_window_seconds"] for w in payload["windows"]}
+
+    anthropic = providers._serialize_account_usage_snapshot(snapshot("anthropic", [
+        {"label": "Current session"}, {"label": "Current week"},
+        {"label": "Opus week", "scope": "model"}, {"label": "Sonnet week", "scope": "model"},
+        {"label": "Some new window"},
+    ]))
+    assert seconds(anthropic) == {
+        "Current session": 18000, "Current week": 604800, "Opus week": 604800, "Sonnet week": 604800,
+        # An unknown label stays untimed, so the chip keeps its most-constrained fallback.
+        "Some new window": None,
+    }
+    # A length the Agent reports wins over the nominal one.
+    reported = providers._serialize_account_usage_snapshot(snapshot("anthropic", [
+        {"label": "Current session", "limit_window_seconds": 3600},
+    ]))
+    assert seconds(reported) == {"Current session": 3600}
+    # A length it reports but that isn't a usable number stays untimed (the chip's fallback),
+    # directly and after the probe worker's JSON round trip.
+    for bad in (float("nan"), float("inf"), "garbage", False):
+        windows = [{"label": "Current session", "limit_window_seconds": bad}, {"label": "Current week"}]
+        direct = providers._serialize_account_usage_snapshot(snapshot("anthropic", windows))
+        assert seconds(direct) == {"Current session": None, "Current week": 604800}, bad
+        rebuilt = providers._account_usage_payload_to_snapshot(
+            _probe_worker_payload(monkeypatch, capsys, snapshot("anthropic", windows)))
+        assert seconds(providers._serialize_account_usage_snapshot(rebuilt)) == {
+            "Current session": None, "Current week": 604800}, bad
+    # Other providers' windows are never given Anthropic's lengths.
+    other = providers._serialize_account_usage_snapshot(snapshot("openai-codex", [
+        {"label": "Current session"}, {"label": "Current week"},
+    ]))
+    assert seconds(other) == {"Current session": None, "Current week": None}
+
+
+def test_model_window_scope_survives_the_probe_worker_round_trip(monkeypatch, capsys):
+    """Scope crosses the worker JSON and the parent's reconstruction intact."""
+    import api.providers as providers
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    account_usage_mod = types.ModuleType("agent.account_usage")
+
+    def fake_fetch_account_usage(provider, *, base_url=None, api_key=None):
+        def win(label, used, **extra):
+            return SimpleNamespace(label=label, used_percent=used, reset_at=None, detail=None, **extra)
+
+        return SimpleNamespace(
+            provider="anthropic", source="oauth_usage_api", title="Account limits", plan=None,
+            windows=(
+                win("Current session", 20, scope="account"),
+                win("Current week", 40, scope="account"),
+                win("Opus week", 100, scope="model"),
+                win("Older agent", 50),
+            ),
+            details=(), available=True, unavailable_reason=None, fetched_at=None,
+        )
+
+    account_usage_mod.fetch_account_usage = fake_fetch_account_usage
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "anthropic", ""])
+
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, {"__name__": "__main__"})
+    worker_payload = json.loads(capsys.readouterr().out.strip())
+
+    assert [w["scope"] for w in worker_payload["windows"]] == ["account", "account", "model", "account"]
+    serialized = providers._serialize_account_usage_snapshot(
+        providers._account_usage_payload_to_snapshot(worker_payload)
+    )
+    assert [w["scope"] for w in serialized["windows"]] == ["account", "account", "model", "account"]
 
 
 def test_codex_agent_snapshot_with_duration_propagates_limit_window_seconds(monkeypatch, tmp_path):
@@ -3103,3 +3231,18 @@ process.stdout.write(JSON.stringify(windows.map(window =>
 """
         rendered = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
         assert json.loads(rendered.stdout) == ["Weekly limit", "5-hour limit"]
+
+
+def test_usage_api_windows_carry_durations_for_the_fixed_chip_modes():
+    """#8548 review: quota_chip_window shortest / longest order windows by limit_window_seconds,
+    which neither usage API reports; the sanitizers supply the documented lengths."""
+    from api.providers import _sanitize_commandcode_quota, _sanitize_opencode_go_quota
+
+    go = _sanitize_opencode_go_quota({"quota": {
+        "rolling": {"percent": 20}, "weekly": {"percent": 50}, "monthly": {"percent": 80}}})
+    assert [(w["label"], w["limit_window_seconds"]) for w in go["windows"]] == [
+        ("5-hour", 18000), ("Weekly", 604800), ("Monthly", 2592000)]
+    cc = _sanitize_commandcode_quota({"windowLimits": {
+        "fiveHour": {"used": 1, "limit": 10}, "weekly": {"used": 5, "limit": 10}}})
+    assert [(w["label"], w["limit_window_seconds"]) for w in cc["windows"]] == [
+        ("5-hour", 18000), ("Weekly", 604800)]

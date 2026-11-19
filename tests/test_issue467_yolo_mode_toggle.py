@@ -22,6 +22,11 @@ from tests.conftest import requires_agent_modules
 TEST_BASE = f"http://127.0.0.1:{os.environ.get('HERMES_WEBUI_TEST_PORT', '8788')}"
 
 
+def _js_block(source, start_marker, end_marker):
+    start = source.index(start_marker)
+    return source[start:source.index(end_marker, start)]
+
+
 def _read_static_file(name: str) -> str:
     return (pathlib.Path(__file__).resolve().parents[1] / "static" / name).read_text(
         encoding="utf-8"
@@ -213,7 +218,13 @@ class TestYoloPillHTML:
         assert 'id="yoloPill"' in index_html
 
     def test_yolo_pill_has_onclick(self, index_html):
-        assert 'onclick="cmdYolo()"' in index_html
+        # #9101: the pill is shown only while YOLO is ON and is titled "click
+        # to disable", so its click only disables (the session it was painted
+        # for). /yolo stays the toggle; the pill must not route through it.
+        pill_match = re.search(r'<button[^>]*id="yoloPill"[^>]*>', index_html)
+        assert pill_match
+        assert 'onclick="disableYoloFromPill()"' in pill_match.group(0)
+        assert "cmdYolo" not in pill_match.group(0)
 
     def test_yolo_pill_hidden_by_default(self, index_html):
         pill_match = re.search(r'<button[^>]*id="yoloPill"[^>]*>', index_html)
@@ -272,6 +283,7 @@ class TestYoloI18n:
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_yolo_command_ignores_stale_same_session_generation():
     commands_js = _read_static_file("commands.js")
+    messages_js = _read_static_file("messages.js")
     start = commands_js.index("async function cmdYolo(")
     cmd_yolo = commands_js[start:commands_js.index("\n// ── Branch / fork command", start)]
 
@@ -281,6 +293,10 @@ def test_yolo_command_ignores_stale_same_session_generation():
             "const S={session:{session_id:'old-session'}};",
             "let _loadSessionGeneration=1;",
             "let _yoloEnabled=false; let _approvalSessionId=null; let _approvalCurrentId=null;",
+            # #9101: cmdYolo writes through the keyed view's single writer.
+            "let _loadingSessionId=null;",
+            _js_block(messages_js, "let _yoloView =", "\n"),
+            _js_block(messages_js, "function _applyYoloState(", "\n// Fire-and-forget read"),
             "const t=k=>k; const showToast=msg=>toasts.push(msg);",
             "const $=()=>({classList:{contains:()=>false}});",
             "const _updateYoloPill=()=>{pillUpdates+=1;};",

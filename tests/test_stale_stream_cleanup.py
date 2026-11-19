@@ -5,6 +5,7 @@ from pathlib import Path
 
 import api.config as config
 import api.routes as routes
+import api.run_drain as run_drain
 
 REPO = Path(__file__).resolve().parents[1]
 ROUTES_SRC = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
@@ -423,10 +424,19 @@ def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch
 
     cleanup_thread = threading.Thread(target=cleanup_stale_stream)
     writer_thread = threading.Thread(target=start_new_stream)
-    cleanup_thread.start()
-    writer_thread.start()
-    cleanup_thread.join(2)
-    writer_thread.join(2)
+    # #8904: nothing ever unregisters the stream the stand-in writer registers.
+    streams_before = set(config.STREAMS)
+    try:
+        cleanup_thread.start()
+        writer_thread.start()
+        cleanup_thread.join(2)
+        writer_thread.join(2)
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
 
     assert not cleanup_thread.is_alive()
     assert not writer_thread.is_alive()
@@ -435,6 +445,7 @@ def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch
     assert session.pending_user_message == "new prompt"
     assert session.pending_attachments == ["new.txt"]
     assert session.pending_started_at == 456
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_frontend_drops_inflight_cache_when_server_session_is_idle():
