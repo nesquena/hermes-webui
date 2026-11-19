@@ -31,6 +31,16 @@ edit cannot silently re-break them:
     slate           Settings hovered       #0D0D1A on #64748B -> 4.05:1  (was 4.76:1)
     ares            msg-edit/toolsets      #fff    on #FF4444 -> 3.41:1  (was 5.66:1)
     hepburn         Send/Queue             #fff    on #c6246a -> 5.44:1
+
+Queue is resolved as its own control, not as an alias of Send: the Queue
+toggle is the send button with a ``.queue`` class toggled on, so it carries
+BOTH classes. Matching is done on the selector's SUBJECT compound — every
+class it names must be one the element carries. That makes a ``.queue``-only
+rule visible to the Queue variant (and only it), makes a ``.send-btn.queue``
+compound paint the Queue variant without being attributed to the plain Send
+button, and keeps the unrelated ``.queue-card``/``.queue-pill`` families out
+of the resolution — under substring matching their ``color-mix()`` hover
+fills hijacked the Queue background and the gate silently skipped the check.
 """
 from __future__ import annotations
 
@@ -61,7 +71,13 @@ CONTROL_CLASS_ALIASES = {
     "#mainSettings .settings-btn": ("settings-btn",),
     '#mainSettings .sm-btn[onclick^="saveSettings"]': ("sm-btn",),
     ".send-btn": ("send-btn",),
-    ".send-btn.queue": ("send-btn",),
+    # The Queue toggle is the SAME send button with a `.queue` class toggled
+    # on it (`btn.classList.toggle('queue', …)` in static/ui.js), so it carries
+    # BOTH classes: a rule naming either one paints it. The classes an element
+    # carries are therefore the full set, not a single alias — and a rule
+    # naming BOTH (`.send-btn.queue`) paints ONLY the Queue variant, never the
+    # plain `.send-btn` that lacks `.queue`.
+    ".send-btn.queue": ("send-btn", "queue"),
     ".toolsets-apply-btn": ("toolsets-apply-btn",),
     ".msg-edit-send": ("msg-edit-send",),
 }
@@ -226,16 +242,36 @@ def _declarations(body: str, *, include_custom_props: bool = False):
     return out
 
 
+def _subject_classes(sel: str) -> tuple[str, ...]:
+    """Class tokens named by the selector's SUBJECT compound — the rightmost
+    compound selector, the one that must match the element itself
+    (``:root.dark .send-btn.queue:hover`` -> ``("send-btn", "queue")``).
+
+    Classes inside ``:not(...)`` are not subject classes, and neither are
+    classes on ancestor compounds (``.dark`` on ``:root.dark`` is an ancestor
+    the element need not carry — ``_matches_skin`` scopes those instead).
+    """
+    probe = re.sub(r":not\([^)]*\)", "", sel)
+    compounds = [c for c in re.split(r"[\s>+~]+", probe.strip()) if c]
+    if not compounds:
+        return ()
+    return tuple(re.findall(r"\.([\w-]+)", compounds[-1]))
+
+
 def _matches_hover(sel: str, control: str) -> bool:
     """Selector applies to the control while it is hovered.
 
     A hovered element still matches its neutral rules: the ID-bearing
     ``:root.dark #mainSettings …`` foreground beats a later, lower-specificity
     skin hover rule in the browser — the exact production bug this suite exists
-    for. So ``:hover`` is NOT required here. The class/id tokens are REQUIRED;
-    the attribute-value token is only a DISCRIMINATOR (``#mainSettings
-    .sm-btn[onclick^="saveSettings"]`` is one button, but a skin may restyle
-    ``.sm-btn`` wholesale and that broader rule still paints it).
+    for. So ``:hover`` is NOT required here. What IS required is that the
+    selector's subject compound names ONLY classes the element actually
+    carries: ``.send-btn.queue`` paints the Queue variant but not the plain
+    Send button, a ``.queue``-only rule paints the Queue variant without
+    naming ``send-btn`` at all, and a skin may restyle ``.sm-btn`` wholesale
+    (that broader rule still paints the Save button — the attribute-value
+    token is a DISCRIMINATOR, not a requirement). Substring/ANY matching
+    conflated all of these and hid Queue-only overrides from the resolver.
 
     State pseudo-classes that contradict a hovered-enabled element, and the
     stop/interrupt/steer chrome variants, are excluded.
@@ -248,12 +284,16 @@ def _matches_hover(sel: str, control: str) -> bool:
     if _STATE_PSEUDOS.search(state_probe):
         return False
     # The element's classes are alternatives (one element, several classes), so
-    # ANY of them matches. An ancestor like #mainSettings is only required when
-    # the selector names one: a skin may restyle `.sm-btn` directly without
-    # repeating the modal id, and that rule still paints this button.
+    # a selector naming ANY of them matches — but a selector naming a class the
+    # element does NOT carry (`.send-btn.queue` vs a plain `.send-btn`) does
+    # not. An ancestor like #mainSettings is only required when the selector
+    # names one: a skin may restyle `.sm-btn` directly without repeating the
+    # modal id, and that rule still paints this button.
     classes = CONTROL_CLASS_ALIASES.get(control, ())
-    if classes and not any(c in sel for c in classes):
-        return False
+    if classes:
+        named = _subject_classes(sel)
+        if not named or not set(named) <= set(classes):
+            return False
     if "mainSettings" in sel and "mainSettings" not in control:
         return False
     return True
@@ -381,13 +421,15 @@ REGRESSION_MIN_RATIO = {
 }
 
 
-@pytest.mark.parametrize("skin", sorted(REGRESSION_SKINS))
-def test_reviewed_skins_hover_contrast_clears_aa(skin):
-    """The four skins the review reproduced must reach their pre-regression ratio."""
-    floors = REGRESSION_MIN_RATIO[skin]
+def _hover_contrast_failures(css: str, skin: str, floors: dict[str, float]) -> dict[str, str]:
+    """Controls whose effective hover foreground falls below their floor.
+
+    Shared by the production gate and the Queue-only override controls below,
+    so those controls exercise the real gate rather than a lookalike.
+    """
     failures = {}
     for control, floor in floors.items():
-        fg, bg = _effective_hover_fg_bg(CSS, skin, control)
+        fg, bg = _effective_hover_fg_bg(css, skin, control)
         if not fg or not bg:
             failures[control] = "no rule resolved"
             continue
@@ -397,6 +439,13 @@ def test_reviewed_skins_hover_contrast_clears_aa(skin):
         # A hair of tolerance for float representation of the measured value.
         if ratio < floor - 0.01:
             failures[control] = f"{fg} on {bg} = {ratio:.2f}:1 (floor {floor})"
+    return failures
+
+
+@pytest.mark.parametrize("skin", sorted(REGRESSION_SKINS))
+def test_reviewed_skins_hover_contrast_clears_aa(skin):
+    """The four skins the review reproduced must reach their pre-regression ratio."""
+    failures = _hover_contrast_failures(CSS, skin, REGRESSION_MIN_RATIO[skin])
     assert not failures, (
         f"skin '{skin}' hover foregrounds below their pre-regression ratio: {failures}"
     )
@@ -548,3 +597,56 @@ def test_resolver_rejects_a_regressed_hover_foreground():
             "the injected regression should drop hepburn below AA — if it does not, "
             "the resolver is not honoring the injected rule"
         )
+
+
+def test_queue_only_class_override_must_fail_the_gate():
+    """Queue-specific control #1: a rule scoped to the ``.queue`` class ALONE
+    (never naming ``send-btn``) paints the real Queue toggle — the send button
+    with ``.queue`` toggled on — in the browser. The resolver must see it for
+    the ``.send-btn.queue`` control and the gate must go red when it breaks
+    contrast, while the plain ``.send-btn`` (which does not carry ``.queue``)
+    stays untouched.
+
+    Before the queue class joined the control's class set, this rule was
+    invisible: the Queue variant kept resolving exactly like ``.send-btn`` and
+    a dark-on-dark Queue override passed the gate silently.
+    """
+    injected = (
+        ':root.dark[data-skin="hepburn"] button.queue:not(:disabled):hover'
+        "{color:var(--bg);}"
+    )
+    modified = _strip_comments(CSS) + "\n" + injected
+    failures = _hover_contrast_failures(modified, "hepburn", REGRESSION_MIN_RATIO["hepburn"])
+    assert ".send-btn.queue" in failures, (
+        "a Queue-only `.queue` override that breaks contrast must fail the gate, "
+        f"got failures={failures}"
+    )
+    assert ".send-btn" not in failures, (
+        "the Queue-only `.queue` override must NOT be attributed to the plain "
+        f"Send button, got failures={failures}"
+    )
+
+
+def test_queue_compound_override_must_fail_the_gate():
+    """Queue-specific control #2: the compound ``.send-btn.queue`` names a
+    class the plain Send button does not carry, so it is Queue-only even
+    though it contains ``send-btn``. It must fail the gate for the Queue
+    variant only.
+
+    Under substring matching this rule painted BOTH controls, ``queue == send``
+    still held, and the override passed — the conflation the review flagged.
+    """
+    injected = (
+        ':root.dark[data-skin="hepburn"] .send-btn.queue:not(:disabled):hover'
+        "{color:var(--bg);}"
+    )
+    modified = _strip_comments(CSS) + "\n" + injected
+    failures = _hover_contrast_failures(modified, "hepburn", REGRESSION_MIN_RATIO["hepburn"])
+    assert ".send-btn.queue" in failures, (
+        "a Queue-only `.send-btn.queue` override that breaks contrast must fail "
+        f"the gate, got failures={failures}"
+    )
+    assert ".send-btn" not in failures, (
+        "the `.send-btn.queue` override must NOT be attributed to the plain "
+        f"Send button, got failures={failures}"
+    )
