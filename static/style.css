@@ -4883,6 +4883,10 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-turn-footer .lf-time{color:var(--text);}
 .transparent-turn-footer .lf-sep{opacity:.4;}
 .transparent-turn-footer .lf-status{color:var(--muted);opacity:.85;}
+/* Turn-stream connection verdict beside "Running" (live / reconnecting / no run). */
+.lf-conn-live{color:var(--ok,#3fb950);opacity:.9;}
+.lf-conn-reconnecting{color:var(--warn,#d29922);opacity:1;}
+.lf-conn-down{color:var(--danger,#f85149);opacity:1;}
 .transparent-turn-footer .lf-model{color:var(--muted);opacity:.85;}
 .transparent-turn-footer .lf-ttft{color:var(--accent);opacity:.9;}
 .transparent-turn-footer .lf-tokens{font-variant-numeric:tabular-nums;}
