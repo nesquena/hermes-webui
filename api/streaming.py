@@ -13396,17 +13396,53 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
 
 
 def _session_db_is_open(session_db) -> bool:
-    """True when *session_db* still has a live sqlite connection.
+    """True when *session_db* still holds a live store.
 
     SessionDB.close() sets ``_conn = None``. Subagents capture the parent's
     SessionDB object by reference at spawn time (delegate_tool), so closing
     that object mid-parent-turn makes every subsequent child
     ``append_message`` fail with
     ``'NoneType' object has no attribute 'execute'``.
+
+    hermes-agent 0.23.2 replaced that class with a shim over
+    ``persistence_assembly`` handles: it has no ``_conn`` at all, so the old
+    probe reported every fresh handle as closed and the WebUI closed the store
+    a cached agent had borrowed (see ``_rebind_agent_persistence``). The shim
+    is open while it is not closed and still holds a bound store.
     """
     if session_db is None:
         return False
-    return getattr(session_db, "_conn", None) is not None
+    if getattr(session_db, "_conn", None) is not None:
+        return True
+    store = getattr(session_db, "_store", None)
+    return store is not None and getattr(session_db, "_closed", True) is False
+
+
+def _rebind_agent_persistence(agent, session_db) -> None:
+    """Point ``agent.persistence`` at the handle *session_db* holds **now**.
+
+    ``agent_init_session.stand_in_interface`` hands the agent the
+    ``persistence_assembly`` handle its SessionDB held at build time, and the
+    agent writes through it for the rest of its life (turn leases, activity,
+    memory). The WebUI builds a fresh SessionDB per stream and closes the ones
+    a cached agent is no longer using, so that borrowed handle can be dead
+    while the SessionDB object itself is fine — every later write then raised
+    ``RuntimeError: persistence handle used after close``. Re-pointing it keeps
+    the documented contract ("keep that SessionDB open for the agent's life")
+    without rebuilding the agent.
+    """
+    if agent is None or session_db is None:
+        return
+    if getattr(agent, "_owns_session_db", False):
+        return  # the agent opened its own handle; its close() releases it
+    live = getattr(session_db, "_store", None)
+    if live is None:
+        return
+    if getattr(agent, "persistence", None) is not live:
+        try:
+            agent.persistence = live
+        except Exception:
+            logger.debug("Failed to rebind the agent's borrowed persistence handle", exc_info=True)
 
 
 def _adopt_session_db_for_cached_agent(agent, new_session_db):
@@ -13441,6 +13477,7 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
                 "Failed to close unused session_db handle in adopt helper",
                 exc_info=True,
             )
+        _rebind_agent_persistence(agent, existing)
         return existing
     if existing is not None:
         try:
@@ -13451,6 +13488,7 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
                 exc_info=True,
             )
     agent._session_db = new_session_db
+    _rebind_agent_persistence(agent, new_session_db)
     return new_session_db
 
 
