@@ -17409,7 +17409,11 @@ function _anchorSceneRowsForRendering(scene, opts){
     // inline segment stays folded, so the rail is still its only home.
     // Transparent Stream keeps every prose row (chronological contract) and
     // the LIVE render keeps them (the open live rail is the streaming surface).
+    // A row explicitly marked NOT inline-visible (a bare string / input_text /
+    // output_text content part, which msgContent() drops) must keep its rail
+    // row: dropping it would erase the only rendered copy of that prose.
     if(settled&&row.role==='prose'&&row.kind==='process_prose'
+       &&row._inline_prose_visible!==false
        &&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'
        &&typeof _interimProseIsSubstantive==='function'
        &&_interimProseIsSubstantive(text)) continue;

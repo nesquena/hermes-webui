@@ -83,6 +83,7 @@ function buildScene(){
     mode: 'compact_worklog',
     final_answer: FINAL,
     activity_rows: [
+      {role:'prose', kind:'process_prose', source_event_type:'settled_message', text:SUBSTANTIVE + ' Bare string variant.', local_id:'prose-bare', row_id:'row-prose-bare', _inline_prose_visible:false},
       {role:'prose', kind:'process_prose', source_event_type:'settled_message', text:SUBSTANTIVE, local_id:'prose-big', row_id:'row-prose-big'},
       {role:'prose', kind:'process_prose', source_event_type:'settled_message', text:SHORT, local_id:'prose-small', row_id:'row-prose-small'},
       {role:'thinking', kind:'reasoning', source_event_type:'reasoning', text:'Plan the audit', local_id:'think-1', row_id:'row-think-1'},
@@ -134,6 +135,7 @@ function runCase(name){
     const kept = (role, localId)=>rows.some((row)=>row.role === role && row.local_id === localId);
     return {
       substantiveProseKept: kept('prose', 'prose-big'),
+      bareStringProseKept: kept('prose', 'prose-bare'),
       shortProseKept: kept('prose', 'prose-small'),
       finalDupKept: kept('prose', 'prose-final'),
       thinkingKept: kept('thinking', 'think-1'),
@@ -220,6 +222,16 @@ def test_settled_transparent_keeps_substantive_prose_row():
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+def test_settled_compact_keeps_prose_with_no_inline_copy():
+    """A prose row whose text never reaches the inline body (e.g. a bare string
+    part, which msgContent() drops) must keep its rail row — dropping it would
+    erase the only rendered copy. Rows known to be inline-visible still drop."""
+    data = _run_scenario("rows_settled_compact")
+    assert data["bareStringProseKept"] is True
+    assert data["substantiveProseKept"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
 def test_live_render_keeps_prose_rows():
     data = _run_scenario("rows_live_compact")
     assert data["substantiveProseKept"] is True
@@ -240,6 +252,20 @@ def test_threshold_helper_defaults_fail_closed():
     source = _ui_js_source()
     assert "const _INTERIM_PROSE_SUBSTANTIVE_MIN_CHARS=200;" in source
     assert source.count("function _interimProseIsSubstantive(") == 1
+
+
+def test_content_part_rows_mark_inline_visibility():
+    """Bare string and input_text/output_text parts never reach the inline body
+    (msgContent() joins only `type==='text'`), so their rows must carry the
+    marker the settled renderer keys on to keep the rail copy."""
+    src = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    anchor = "const row=_anchorSceneProseRow(text,rows.length,messageIndex);"
+    occurrences = src.count(anchor)
+    assert occurrences == 2, occurrences
+    first = src.index(anchor)
+    assert "row._inline_prose_visible=false" in src[first:first + 500]
+    second = src.index(anchor, first + 1)
+    assert "if(part.type!=='text') row._inline_prose_visible=false" in src[second:second + 500]
 
 
 def test_settled_rail_install_spares_substantive_segments():

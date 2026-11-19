@@ -3643,13 +3643,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!part||typeof part!=='object'){
         if(isFinalMessage&&i>lastToolIndex) continue;
         const text=_anchorSceneContentText(part);
-        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
+        if(_anchorSceneCleanText(text)){
+          const row=_anchorSceneProseRow(text,rows.length,messageIndex);
+          // msgContent() only joins `type==='text'` parts, so a bare string
+          // part never reaches the inline body: its rail row is the only
+          // rendered copy and must not be dropped as an inline duplicate.
+          row._inline_prose_visible=false;
+          rows.push(row);
+        }
         continue;
       }
       if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
         if(isFinalMessage&&i>lastToolIndex&&_anchorSceneContentVisibleText(part)) continue;
         const text=_anchorSceneContentText(part);
-        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
+        if(_anchorSceneCleanText(text)){
+          const row=_anchorSceneProseRow(text,rows.length,messageIndex);
+          // msgContent() keeps `type==='text'` only; input_text/output_text
+          // rows have no inline copy either.
+          if(part.type!=='text') row._inline_prose_visible=false;
+          rows.push(row);
+        }
         continue;
       }
       if(part.type==='thinking'||part.type==='reasoning'){
