@@ -39,6 +39,17 @@
 
 - **Newer Agents: WebUI's workspace folder and titles reach the Agent's session store again, and goal checks can wait (#9163, refs #9157).** Newer Agent builds replaced the session store, so WebUI's copy of a session's workspace folder and title into the Agent's records stopped without an error. Agent-side tools, search and the CLI read those records. Profile goal checks also lost the Agent's "wait" answer, so a goal loop could continue when it should wait. WebUI now uses the Agent's storage interface for both. A rename still sets the Agent's title. WebUI's own fallback title is now stored as a derived title, so the Agent's model-generated title can still replace it. Older Agents otherwise behave as before.
 
+- **Deleting a conversation reports a failure when its delete record can't be saved (#9148).** The delete record is what stops a deleted conversation from coming back from the Agent's store or reappearing in the sidebar. If it couldn't be written, the delete still answered success. It now finishes the rest of the cleanup and then answers `delete_tombstone_failed`, so the conversation is never left readable on disk, and a retry completes the delete. Thanks @webtecnica.
+
+- **A timing test for the update lock-recovery retry no longer fails on a busy machine (#9172).** The test speeds its timers up by a factor of 1,000, which put its "just under" and "just over" the 300-second limit cases 1 ms apart in real time, close enough for a loaded runner to swap them. They now sit 10 seconds either side of the limit. No product code changes.
+
+- **Newer Agents: compressed conversations, compressed messaging sessions and busy-ledger delegation results work again (#9166, refs #9157).** Newer Agent builds replaced the session store, and three things failed quietly:
+  - **Reload recovery:** reloading a compressed conversation that lands on its archived part didn't find the continuation.
+  - **Messaging sessions:** compressed Telegram and Discord sessions on the Gateway backend couldn't continue.
+  - **Delegation results:** a finished delegation's acknowledgement wasn't retried while the Agent's ledger was busy.
+
+  WebUI now reads compression lineage through the Agent's storage interface and treats a busy ledger as a reason to retry. Older Agents behave as before.
+
 - **Opening a long conversation that's already cached copies only the messages it shows (#8993).** When a conversation was cached, the server still copied every message and rescanned the whole transcript on each load, even though it only sends the latest page. It now keeps a small summary with the cached copy and copies just the page it returns. Thanks @CharlesMcquade.
 
 - **On newer Agents, a finished turn stays in the saved conversation context (#9160, refs #9157).** The settle step checked for helpers that newer Agent builds moved to another module, so it always gave up, and the turn's prompt and answer were left out of the saved context. It now checks the module the repair actually uses. Older Agents behave exactly as before.
