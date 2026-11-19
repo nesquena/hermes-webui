@@ -1112,15 +1112,17 @@ def _session_record(sid) -> dict | None:
     return data if isinstance(data, dict) and data.get("session_id") == sid else None
 
 
-def _chain_parent(record) -> str:
+def _chain_parent(record):
     """The parent a record names as a lineage link, or "" for none or a fork.
 
     A fork (``/api/session/branch``) also names its source as parent, but it is
-    a separate conversation with its own link, so it is not a chain link.
+    a separate conversation with its own link, so it is not a chain link. The
+    value is returned as stored: only a parent equal to the owner's id, type
+    included, links the two records.
     """
     if record.get("session_source") == "fork":
         return ""
-    return str(record.get("parent_session_id") or "")
+    return record.get("parent_session_id") or ""
 
 
 def _link_owned_by_other_conversation(payload, session_id: str) -> bool:

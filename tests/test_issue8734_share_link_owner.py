@@ -575,6 +575,17 @@ def test_refuses_a_conversation_whose_parent_is_a_third_conversation(state, sour
     _assert_both_buttons_refused(OTHER, token, OWNER, "owner words")
 
 
+NUMERIC_OWNER = "873400000001"
+
+
+def test_refuses_a_parent_that_names_the_owner_only_as_a_number(state):
+    _save(NUMERIC_OWNER, "owner words")
+    _save(OTHER, "other words")
+    token = _share(NUMERIC_OWNER)
+    _edit_sidecar(OTHER, share_token=token, share_created_at=1234.5, parent_session_id=int(NUMERIC_OWNER))
+    _assert_both_buttons_refused(OTHER, token, NUMERIC_OWNER, "owner words")
+
+
 def test_pin_stop_sharing_from_the_continuation_of_a_compressed_fork(state):
     _save(OWNER, "owner words")
     fork = _fork(OWNER)
