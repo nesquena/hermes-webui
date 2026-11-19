@@ -17,7 +17,9 @@ account home from ``pwd``, the starting ``HOME`` and the root of the starting ``
 and published in ``HERMES_WEBUI_TEST_REAL_HERMES_ROOTS`` so later imports and child processes
 inherit them instead of re-deriving them from the already sandboxed environment. Allowed roots
 (the checkout, the test state/sandbox dirs, the temp dir, pytest's ``--basetemp``) win over
-protected ones: a checkout or scratch temp dir may legitimately live under ``~/.hermes``.
+protected ones: a checkout or scratch temp dir may legitimately live under ``~/.hermes``. An
+allowed entry that equals or contains a whole protected root is dropped instead, since it would
+exempt every write into that root.
 
 Descriptor-relative calls (``dir_fd``) are resolved against their directory through
 ``/proc/self/fd`` (Linux) or ``F_GETPATH`` (macOS); Windows has no ``dir_fd``. Where neither
@@ -209,9 +211,15 @@ def install(allowed) -> None:
     """Protect the real roots (minus *allowed*) for the rest of this process."""
     PROTECTED[:] = real_roots()
     # Union, never replace: conftest.py can run again mid-session (a test loads it by path), and a path
-    # allowed earlier, such as --basetemp from pytest_configure, must stay allowed.
-    ALLOWED[:] = sorted(set(ALLOWED) | {os.path.realpath(os.fspath(p)) for p in allowed})
-    _STATE["profiles"] = _profiles_listing()
+    # allowed earlier, such as --basetemp from pytest_configure, must stay allowed. An entry that equals or
+    # contains a whole protected root is dropped instead: it would exempt every write into that root (the
+    # rule violation() already applies to Agent checkouts).
+    merged = set(ALLOWED) | {os.path.realpath(os.fspath(p)) for p in allowed}
+    ALLOWED[:] = sorted(p for p in merged if not any(_under(r, [p]) for r in PROTECTED))
+    # Snapshot each root the FIRST time only: a re-run of install() must not adopt a profile created after
+    # the snapshot as its baseline, or the session-end listing check goes blind to it.
+    for root, listing in _profiles_listing().items():
+        _STATE["profiles"].setdefault(root, listing)
     _STATE["active"] = True
     if not _STATE["installed"]:  # audit hooks cannot be removed; never stack a second one
         sys.addaudithook(_hook)
