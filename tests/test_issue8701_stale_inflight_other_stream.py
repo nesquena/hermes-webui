@@ -152,7 +152,15 @@ def _prelude() -> str:
 
 
 def _node(script: str) -> dict:
-    done = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False, cwd=ROOT, timeout=60)
+    # Feed the script over stdin, not argv: the prelude embeds a large slice of
+    # static/sessions.js (from `_messageComparableText` to `// Load older
+    # messages`), and Linux caps a single argv string at 128 KiB
+    # (MAX_ARG_STRLEN). On current master the prelude is ~114 KB; #6649's
+    # inflight helpers push it to ~143 KB, so `node -e <script>` dies with
+    # `OSError: [Errno 7] Argument list too long` on the CI runners (macOS has
+    # no such cap, which is why local runs stayed green). `node -` reads the
+    # same script from stdin and has no argv limit.
+    done = subprocess.run([NODE, "-"], input=script, capture_output=True, text=True, check=False, cwd=ROOT, timeout=60)
     assert done.returncode == 0, done.stderr or done.stdout
     return json.loads(done.stdout.strip().splitlines()[-1])
 
