@@ -2222,3 +2222,189 @@ def test_stop_between_detached_preflight_and_admission(
         join_all()
         assert len(launches) == 2 and launches[1].get("goal_related") is True
         assert webui_goals.peek_pending_goal_continuation_id(sid) is None
+
+
+# ── Review 5969035518: a delegation hold belongs to the turn that judged it ──
+
+
+def _live_delegation_db(home, sid):
+    """async_delegations with the Agent's real columns and one running row for *sid*."""
+    import sqlite3
+
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute(
+        "CREATE TABLE async_delegations (delegation_id TEXT PRIMARY KEY, origin_session TEXT NOT NULL,"
+        " origin_ui_session_id TEXT NOT NULL DEFAULT '', parent_session_id TEXT, state TEXT NOT NULL,"
+        " dispatched_at REAL NOT NULL, completed_at REAL, updated_at REAL NOT NULL,"
+        " delivery_state TEXT NOT NULL DEFAULT 'pending', origin_session_id TEXT NOT NULL DEFAULT '')"
+    )
+    conn.execute(
+        "INSERT INTO async_delegations (delegation_id, origin_session, origin_ui_session_id,"
+        " parent_session_id, state, dispatched_at, updated_at) VALUES ('d1',?,?,?,'running',1,1)",
+        (sid, sid, sid),
+    )
+    conn.commit()
+    conn.close()
+
+    def finish():
+        c = sqlite3.connect(home / "state.db")
+        c.execute("UPDATE async_delegations SET state='completed'")
+        c.commit()
+        c.close()
+
+    return finish
+
+
+class _ContinueJudge:
+    """Native-like manager whose judge returns CONTINUE (optionally running a hook first)."""
+
+    state = None
+
+    def __init__(self, hook=None):
+        self.hook = hook
+
+    def is_active(self):
+        return True
+
+    def evaluate_after_turn(self, _last_response, **_kw):
+        if self.hook:
+            self.hook()
+        return dict(_LEASE_DECISION)
+
+
+def _run_gateway_turn(s, tmp_path, stream_id, *, goal_related):
+    s.active_stream_id = stream_id
+    s.pending_user_message = "turn"
+    s.pending_started_at = 123
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id, "turn", "test-model", str(tmp_path), stream_id, [], goal_related=goal_related
+    )
+
+
+def _held_env(tmp_path, monkeypatch, stream_id, hook=None):
+    real_eval = webui_goals.evaluate_goal_after_turn
+    s, _channel, admitted, _started = _browser_lease_env(
+        tmp_path, monkeypatch, stream_id=stream_id, grace=30
+    )
+    monkeypatch.setattr(webui_goals, "evaluate_goal_after_turn", real_eval)
+    finish = _live_delegation_db(tmp_path, s.session_id)
+    judge = _ContinueJudge(hook)
+    monkeypatch.setattr(webui_goals, "_manager", lambda *_a, **_kw: judge)
+    return s, admitted, finish, _capture_goal_threads(monkeypatch)
+
+
+def test_stopped_held_continuation_never_starts_after_an_unrelated_turn(tmp_path, monkeypatch):
+    """Stop while the judge returns CONTINUE under a live delegation retires that turn's hold."""
+    from api import streaming
+
+    stops = []
+    s, admitted, finish, join_all = _held_env(
+        tmp_path, monkeypatch, "stream-held-stop",
+        hook=lambda: stops.append(streaming.cancel_stream("stream-held-stop")),
+    )
+    _run_gateway_turn(s, tmp_path, "stream-held-stop", goal_related=True)
+    assert stops == [True]
+    assert webui_goals.peek_pending_goal_continuation_id(s.session_id) is None
+    assert s.session_id not in webui_goals._HELD_GOAL_CONTINUATIONS
+    finish()
+    _run_gateway_turn(s, tmp_path, "stream-unrelated", goal_related=False)
+    join_all()
+    assert admitted == [], "stopped objective launched after an unrelated turn"
+    assert webui_goals.peek_pending_goal_continuation_id(s.session_id) is None
+
+
+def test_ordinary_turn_still_releases_an_unstopped_hold_once(tmp_path, monkeypatch):
+    """Control: the same schedule without Stop recovers the goal with exactly one admission."""
+    s, admitted, finish, join_all = _held_env(tmp_path, monkeypatch, "stream-held-ok")
+    _run_gateway_turn(s, tmp_path, "stream-held-ok", goal_related=True)
+    assert webui_goals._HELD_GOAL_CONTINUATIONS[s.session_id]["owner"] == "stream-held-ok"
+    finish()
+    _run_gateway_turn(s, tmp_path, "stream-unrelated-ok", goal_related=False)
+    join_all()
+    _run_gateway_turn(s, tmp_path, "stream-unrelated-ok2", goal_related=False)
+    join_all()
+    assert len(admitted) == 1 and admitted[0][2] == "goal_wakeup"
+
+
+def test_stop_of_an_older_turn_keeps_a_newer_owners_hold(tmp_path, monkeypatch):
+    """Newer-owner control: a late cancelled teardown retires only its own hold."""
+    sid = "sid-held-newer-owner"
+    finish = _live_delegation_db(tmp_path, sid)
+    for owner in ("stream-old", "stream-new"):
+        webui_goals._hold_while_delegations_run(
+            dict(_LEASE_DECISION), sid, tmp_path, remember=True, owner=owner
+        )
+    webui_goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=True, owner="stream-old")
+    assert webui_goals._HELD_GOAL_CONTINUATIONS[sid]["owner"] == "stream-new"
+    started = []
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *_a, **_kw: True)
+    monkeypatch.setattr(
+        webui_goals, "start_detached_goal_continuation", lambda *a, **k: started.append(a)
+    )
+    finish()
+    for _ in range(2):
+        webui_goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=False, owner="stream-x")
+    cid = webui_goals.peek_pending_goal_continuation_id(sid)
+    assert cid and {a[2] for a in started} == {cid}
+    assert started[0][:2] == (sid, _LEASE_DECISION["continuation_prompt"])
+    assert webui_goals.consume_pending_goal_continuation(sid, cid)
+    assert not webui_goals.consume_pending_goal_continuation(sid, cid)
+
+
+def test_goal_resume_after_stop_retired_the_hold_kicks_off_once(monkeypatch, tmp_path):
+    """Explicit-resume control: retiring a stopped hold leaves /goal resume intact."""
+    session, holder, kickoffs = _goal_command_env(monkeypatch, tmp_path, "sid-held-resume")
+    sid = session.session_id
+    webui_goals.clear_pending_goal_continuation(sid)
+    _live_delegation_db(tmp_path, sid)
+    webui_goals._hold_while_delegations_run(
+        dict(_LEASE_DECISION), sid, tmp_path, remember=True, owner="stream-stopped"
+    )
+    webui_goals.settle_goal_continuation_after_turn(
+        sid, "", "", cancelled=True, owner="stream-stopped"
+    )
+    assert sid not in webui_goals._HELD_GOAL_CONTINUATIONS
+    holder["state"].status = "paused"
+    res = routes._handle_goal_command(object(), {"session_id": sid, "args": "resume"})
+    assert res["status"] == 200
+    assert len(kickoffs) == 1 and kickoffs[0]["goal_related"] is True
+    assert kickoffs[0]["goal_continuation_id"] == webui_goals.peek_pending_goal_continuation_id(sid)
+
+
+@pytest.mark.parametrize("delegation", ["still_running", "finished"])
+def test_goal_clear_racing_a_hold_release_leaves_nothing(monkeypatch, tmp_path, delegation):
+    """/goal clear inside the release window wins: no hold returns and no record is registered."""
+    session, _holder, _kickoffs = _goal_command_env(monkeypatch, tmp_path, "sid-held-clear-race")
+    sid = session.session_id
+    webui_goals.clear_pending_goal_continuation(sid)
+    finish = _live_delegation_db(tmp_path, sid)
+    webui_goals._hold_while_delegations_run(
+        dict(_LEASE_DECISION), sid, tmp_path, remember=True, owner="stream-judge"
+    )
+    if delegation == "finished":
+        finish()
+    cleared = []
+
+    def _clear():
+        cleared.append(routes._handle_goal_command(object(), {"session_id": sid, "args": "clear"})["status"])
+
+    real_count = webui_goals._state_db_live_delegations
+
+    def _count_then_clear(*a):
+        n = real_count(*a)  # the actual SQL count, then clear lands before reinsertion/registration
+        _clear()
+        return n
+
+    monkeypatch.setattr(webui_goals, "_state_db_live_delegations", _count_then_clear)
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *_a, **_kw: True)
+    started = []
+    monkeypatch.setattr(
+        webui_goals, "start_detached_goal_continuation", lambda *a, **k: started.append(a)
+    )
+    webui_goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=False, owner="stream-x")
+    assert cleared == [200]
+    assert sid not in webui_goals._HELD_GOAL_CONTINUATIONS
+    assert webui_goals.peek_pending_goal_continuation_id(sid) is None
+    assert started == []

@@ -3870,6 +3870,7 @@ def _run_gateway_chat_streaming(
                     user_initiated=True,
                     profile_home=profile_home,
                     min_evaluated_at=_turn_started_at if _gateway_evaluated else None,
+                    owner=stream_id,
                 ) or {}
                 goal_message = str(decision.get("message") or "").strip()
                 if goal_message:
@@ -3990,4 +3991,5 @@ def _run_gateway_chat_streaming(
             _detached_goal_continuation_id,
             cancelled=cancel_event.is_set(),
             registered_continuation_id=_registered_goal_continuation_id,
+            owner=stream_id,
         )

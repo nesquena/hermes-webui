@@ -110,7 +110,9 @@ def test_held_goal_resumes_when_last_completion_lands_inside_an_ordinary_turn(tm
     """A held continuation is released by the next settled turn once no subagent is live."""
     sid = "sid-held-ordinary-turn"
     _real_schema_db(tmp_path, [("d1", sid, sid, sid, "running")])
-    held = goals._hold_while_delegations_run(dict(CONTINUE), sid, tmp_path, remember=True)
+    held = goals._hold_while_delegations_run(
+        dict(CONTINUE), sid, tmp_path, remember=True, owner="stream-judge"
+    )
     assert held["verdict"] == "wait"
     started = []
     monkeypatch.setattr(goals, "has_active_goal", lambda *_a, **_kw: True)
@@ -121,7 +123,7 @@ def test_held_goal_resumes_when_last_completion_lands_inside_an_ordinary_turn(tm
         # Still running: an ordinary turn's teardown keeps the hold.
         goals.settle_goal_continuation_after_turn(sid, "", "", cancelled=False)
         assert started == [] and goals.peek_pending_goal_continuation_id(sid) is None
-        # A Stop never releases it either.
+        # A Stop of another turn never releases it either.
         conn = sqlite3.connect(tmp_path / "state.db")
         conn.execute("UPDATE async_delegations SET state='completed'")
         conn.commit()

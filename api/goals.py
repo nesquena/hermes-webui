@@ -887,26 +887,61 @@ def goal_message_key(decision: Dict[str, Any]) -> str:
     return "goal_continuing"
 
 
-# WebUI-owned continuations held for running subagents: {sid: (prompt, profile_home)}.
-_HELD_GOAL_CONTINUATIONS: dict[str, tuple[str, Any]] = {}
+# WebUI-owned continuations held for running subagents: {sid: {prompt, profile_home, owner}}.
+_HELD_GOAL_CONTINUATIONS: dict[str, Dict[str, Any]] = {}
+# Bumped under the record lock on every hold mutation and clear; a release
+# that read state.db outside the lock reinserts/registers only while unchanged.
+_HELD_GOAL_EPOCH: dict[str, int] = {}
+
+
+def _locked_set_held(session_id: str, held: Optional[Dict[str, Any]]) -> None:
+    """Replace (or drop) the hold for *session_id*. Caller holds the record lock."""
+    _HELD_GOAL_EPOCH[session_id] = _HELD_GOAL_EPOCH.get(session_id, 0) + 1
+    if held is None:
+        _HELD_GOAL_CONTINUATIONS.pop(session_id, None)
+    else:
+        _HELD_GOAL_CONTINUATIONS[session_id] = held
+
+
+def retire_held_goal_continuation(session_id: str, owner: str) -> bool:
+    """Drop the hold only while *owner* (the turn that judged it) still owns it."""
+    sid = str(session_id or "").strip()
+    owner = str(owner or "").strip()
+    if not sid or not owner:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        held = _HELD_GOAL_CONTINUATIONS.get(sid)
+        if not held or held.get("owner") != owner:
+            return False
+        _locked_set_held(sid, None)
+        return True
 
 
 def _hold_while_delegations_run(
-    decision: Dict[str, Any], session_id: str, profile_home, *, remember: bool = False
+    decision: Dict[str, Any],
+    session_id: str,
+    profile_home,
+    *,
+    remember: bool = False,
+    owner: str = "",
 ) -> Dict[str, Any]:
     """Defer a continuation while subagents run; their completion wakeup re-evaluates the goal."""
+    sid = str(session_id or "")
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
-        _HELD_GOAL_CONTINUATIONS.pop(str(session_id or ""), None)
+        if sid in _HELD_GOAL_CONTINUATIONS:
+            _locked_set_held(sid, None)
     if not decision.get("should_continue"):
         return decision
     live = _state_db_live_delegations(session_id, profile_home)
     if live <= 0:
         return decision
     prompt = str(decision.get("continuation_prompt") or "").strip()
-    if remember and prompt:
+    if remember and prompt and owner:
         # The last completion may be folded into an ordinary turn that never re-judges.
         with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
-            _HELD_GOAL_CONTINUATIONS[str(session_id)] = (prompt, profile_home)
+            _locked_set_held(
+                sid, {"prompt": prompt, "profile_home": profile_home, "owner": str(owner)}
+            )
     return {
         **decision,
         "should_continue": False,
@@ -1508,20 +1543,24 @@ def _release_held_goal_continuation(session_id: str) -> bool:
     """Dispatch a held continuation once its subagents finished; True when one started."""
     sid = str(session_id or "").strip()
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
-        held = _HELD_GOAL_CONTINUATIONS.pop(sid, None)
+        held = _HELD_GOAL_CONTINUATIONS.get(sid)
         if held is None or _locked_pending_record(sid) is not None:
             return False
-    prompt, profile_home = held
+        epoch = _HELD_GOAL_EPOCH.get(sid, 0)
+    profile_home = held["profile_home"]
     if _state_db_live_delegations(sid, profile_home) > 0:
-        with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
-            _HELD_GOAL_CONTINUATIONS.setdefault(sid, held)
         return False
     if not has_active_goal(sid, profile_home=profile_home):
         return False
-    cid = register_pending_goal_continuation(sid, prompt)
-    if not cid or not mark_detached_goal_continuation(sid, cid):
-        return False
-    start_detached_goal_continuation(sid, prompt, cid)
+    record = {"prompt": held["prompt"], "continuation_id": uuid.uuid4().hex, "detached_owned": True}
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        # A clear, Stop or newer judgement since the read above wins.
+        if _HELD_GOAL_EPOCH.get(sid, 0) != epoch or _locked_pending_record(sid) is not None:
+            return False
+        _locked_set_held(sid, None)
+        _cfg.PENDING_GOAL_CONTINUATION.add(sid)
+        _cfg.PENDING_GOAL_CONTINUATION_PROMPTS[sid] = record
+    start_detached_goal_continuation(sid, record["prompt"], record["continuation_id"])
     return True
 
 
@@ -1532,6 +1571,7 @@ def settle_goal_continuation_after_turn(
     *,
     cancelled: bool,
     registered_continuation_id: str = "",
+    owner: str = "",
 ) -> None:
     """Start the server-owned continuation, else retry a stopped one.
 
@@ -1541,6 +1581,7 @@ def settle_goal_continuation_after_turn(
     if cancelled:
         if registered_continuation_id:
             discard_pending_goal_continuation(session_id, registered_continuation_id)
+        retire_held_goal_continuation(session_id, owner)
         return
     try:
         if not continuation_prompt and _release_held_goal_continuation(session_id):
@@ -1564,8 +1605,12 @@ def evaluate_goal_after_turn(
     user_initiated: bool = True,
     profile_home: str | Path | None = None,
     min_evaluated_at: float | None = None,
+    owner: str = "",
 ) -> Dict[str, Any]:
-    """Evaluate a completed turn against the standing goal, if any."""
+    """Evaluate a completed turn against the standing goal, if any.
+
+    *owner* (the judging turn's stream ID) owns any delegation hold it leaves.
+    """
     sid = str(session_id or "").strip()
     if not sid:
         return {
@@ -1648,7 +1693,9 @@ def evaluate_goal_after_turn(
     decision.setdefault("message", "")
     decision = dict(decision)
     decision = _goal_decision_payload(decision, getattr(mgr, "state", None))
-    return _hold_while_delegations_run(decision, sid, profile_home, remember=True)
+    return _hold_while_delegations_run(
+        decision, sid, profile_home, remember=True, owner=owner
+    )
 
 
 # ── #6885 goal-continuation admission (single-record lifecycle) ─────────────
@@ -1914,7 +1961,7 @@ def clear_pending_goal_continuation(session_id: str) -> None:
         return
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
         _drop_pending_goal_continuation(session_id)
-        _HELD_GOAL_CONTINUATIONS.pop(session_id, None)
+        _locked_set_held(session_id, None)
 
 
 def sweep_expired_goal_continuations() -> int:

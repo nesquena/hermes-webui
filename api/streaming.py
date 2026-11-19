@@ -18574,6 +18574,7 @@ def _run_agent_streaming(
                         _last_goal_response,
                         user_initiated=True,
                         profile_home=_profile_home,
+                        owner=stream_id,
                     )
                 decision = _goal_decision or {}
                 _goal_message = str(decision.get('message') or '').strip()
@@ -19483,6 +19484,7 @@ def _run_agent_streaming(
             _detached_goal_continuation_id,
             cancelled=cancel_event.is_set(),
             registered_continuation_id=_registered_goal_continuation_id,
+            owner=stream_id,
         )
 
 # ============================================================
