@@ -13586,16 +13586,21 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
 
 
 def _session_db_is_open(session_db) -> bool:
-    """True when *session_db* still has a live sqlite connection.
+    """Recognize the lifecycle of legacy SessionDB and newer Agent handles.
 
-    SessionDB.close() sets ``_conn = None``. Subagents capture the parent's
-    SessionDB object by reference at spawn time (delegate_tool), so closing
-    that object mid-parent-turn makes every subsequent child
-    ``append_message`` fail with
-    ``'NoneType' object has no attribute 'execute'``.
+    The newer SessionDB shim has no ``_conn``: it owns a Persistence handle
+    in ``_store`` until close. Persistence itself retains its release callback
+    until close. Neither exposes a public is-open flag; inspect only these
+    lifecycle fields, without probing ``ready`` or opening a lazy backend.
+    Misclassifying a live handle closes storage still borrowed by the Agent,
+    its compressor and background consumers (#9149, #6143).
     """
     if session_db is None:
         return False
+    if isinstance(getattr(session_db, "_closed", None), bool):
+        return not session_db._closed and getattr(session_db, "_store", None) is not None
+    if hasattr(session_db, "_release"):
+        return callable(session_db._release)
     return getattr(session_db, "_conn", None) is not None
 
 
@@ -13641,6 +13646,23 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
                 exc_info=True,
             )
     agent._session_db = new_session_db
+    if hasattr(agent, "persistence"):
+        # New Agent versions borrow the shim's underlying interface at init;
+        # replacing only _session_db leaves turn admission on the closed one.
+        agent.persistence = (
+            new_session_db if hasattr(new_session_db, "_release")
+            else getattr(new_session_db, "_store", None)
+        )
+    compressor = getattr(agent, "context_compressor", None)
+    bind = getattr(compressor, "bind_session_state", None)
+    if callable(bind):
+        bind_kwargs = {
+            "session_db": new_session_db,
+            "session_id": getattr(agent, "session_id", ""),
+        }
+        if _supports_kwarg(bind, "persistence"):
+            bind_kwargs["persistence"] = getattr(agent, "persistence", None)
+        bind(**bind_kwargs)
     return new_session_db
 
 
@@ -16468,6 +16490,10 @@ def _run_agent_streaming(
                             agent, _session_db
                         )
                         agent._session_db = _session_db
+                        if 'session_db' in _agent_kwargs:
+                            # Self-heal must not rebuild from the unused handle
+                            # the adoption helper just closed.
+                            _agent_kwargs['session_db'] = _session_db
                     if hasattr(agent, '_api_call_count'):
                         agent._api_call_count = 0
                     # Reset interrupt state from a prior cancel so the reused
