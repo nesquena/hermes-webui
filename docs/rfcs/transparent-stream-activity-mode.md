@@ -26,6 +26,58 @@ Statements describing a missing selector, missing settled branch, or unwired
 live/replay renderer describe the tree when this RFC was written, not current
 `master`.
 
+## Settling a Transparent Stream turn (#7676)
+
+### Ownership rule
+
+When a Transparent Stream turn settles, **exactly one visible node may own the
+final answer**, and no visible turn may depend on a hidden
+`data-live-assistant` segment. Two rows are never allowed to show the same
+answer: the retained live node and the settled scene are alternatives, and the
+renderer resolves them through
+`_normalizeTransferredLiveProse` — the transferred live prose is revealed only
+when no visible scene row already owns that text, and left hidden when one does.
+
+### In-place settlement
+
+`STREAM_DONE` finalizes a settled turn **without rebuilding the transcript**.
+The settled scene is written by the *first* settle render while the keep-open
+token (`_armKeepSettledWorklogOpen` / `_disarmKeepSettledWorklogOpen`) is still
+armed, so that render is uncapped; the token is then disarmed and this turn's
+scene is re-rendered in place by `_finalizeJustSettledTransparentScene`, which
+applies the row cap and the retained-final-prose state. Only this turn's scene
+rows are replaced — the rest of the transcript is untouched.
+
+The finalizer returns `true` only when that in-place finalize actually happened
+**and** the turn is visibly non-blank. Otherwise the caller keeps the full
+rebuild (`innerHTML=''` over the whole transcript) as the fallback, so the
+in-place path is an optimization that never trades correctness for speed.
+
+Two invariants the in-place path must preserve:
+
+- **Reader state is bracketed.** The scene renderer replaces the turn's rows
+  with the global default detail state, so the render is bracketed by
+  `_captureWorklogDetailDisclosureState` / `_restoreWorklogDetailDisclosureState`
+  — the same bracket `renderMessages()` uses. A reader's manual disclosure
+  choices and the opened detail's scroll position survive settlement.
+- **The HTML cache entry is dropped.** The skipped full render was also the
+  one that rewrote `_sessionHtmlCache`, and the first settle render is
+  deliberately excluded while the keep-open token is armed. The in-place
+  finalize therefore deletes any cached entry for the session, so a later
+  session switch rebuilds from `S.messages` instead of restoring pre-settle
+  HTML.
+
+### Regression coverage
+
+`tests/browser_settle_visibility_7676.py` drives the settle in a real browser
+across the virtualization × detail-default × idle-probe matrix. Both
+measurements are sampled **in-page** — at the busy→idle edge and on the
+animation frame after it — because a reply that is blank for one frame and
+repaired by the next is precisely the defect being guarded against, and polling
+from python would race the renderer and never observe it. The gate requires
+both samples to be captured: a missing sample fails the run rather than being
+skipped, so the probe cannot pass without having measured the settle frame.
+
 ## Problem
 
 After the live-to-final redesign (#3401/#3741), the execution trace of a turn

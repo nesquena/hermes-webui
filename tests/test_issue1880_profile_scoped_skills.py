@@ -1,11 +1,11 @@
 import json
 import os
 import pathlib
-import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
 
+import tests.conftest as _conftest
 from tests._pytest_port import BASE
 from tests.conftest import requires_agent_modules
 
@@ -20,7 +20,7 @@ def _remove_path(path: pathlib.Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
     elif path.exists():
-        shutil.rmtree(path)
+        _conftest._rmtree_retry(path)
 
 
 class _IsolatedSkillsDirs:
@@ -30,13 +30,8 @@ class _IsolatedSkillsDirs:
         self.root_skills = self.state / "skills"
         self.profile_home = self.state / "profiles" / profile
         self.profile_skills = self.profile_home / "skills"
-        self._root_was_symlink = False
-        self._root_symlink_target = None
 
     def __enter__(self):
-        self._root_was_symlink = self.root_skills.is_symlink()
-        if self._root_was_symlink:
-            self._root_symlink_target = self.root_skills.resolve()
         _remove_path(self.root_skills)
         _remove_path(self.profile_home)
         self.root_skills.mkdir(parents=True, exist_ok=True)
@@ -46,8 +41,6 @@ class _IsolatedSkillsDirs:
     def __exit__(self, exc_type, exc, tb):
         _remove_path(self.profile_home)
         _remove_path(self.root_skills)
-        if self._root_was_symlink and self._root_symlink_target is not None:
-            self.root_skills.symlink_to(self._root_symlink_target)
 
 
 def _write_skill(skills_dir: pathlib.Path, name: str, description: str, body: str) -> pathlib.Path:

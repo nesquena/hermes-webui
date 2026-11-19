@@ -283,7 +283,10 @@ class TestReasoningCommand:
             "cmdReasoning must POST effort levels to /api/reasoning so "
             "config.yaml agent.reasoning_effort is updated (CLI parity)"
         )
-        assert "'effort:'" in fn or 'effort:arg' in fn or 'effort: arg' in fn, (
+        assert (
+            "'effort:'" in fn or 'effort:arg' in fn or 'effort: arg' in fn
+            or '_saveReasoningEffort(arg)' in fn
+        ), (
             "effort-level branch must send {effort: arg} to /api/reasoning"
         )
         # Must NOT still hold a dead local-only variable for effort.
@@ -394,11 +397,15 @@ class TestReasoningConfigHelpers:
     def test_set_reasoning_effort_rejects_invalid(self, tmp_path, monkeypatch):
         import api.config as cfg
         monkeypatch.setattr(cfg, '_get_config_path', lambda: tmp_path / 'config.yaml')
+        monkeypatch.setattr(cfg, 'reload_config', lambda: None)
         import pytest as _pt
         with _pt.raises(ValueError):
             cfg.set_reasoning_effort('garbage')
-        with _pt.raises(ValueError):
-            cfg.set_reasoning_effort('')
+        # Empty effort is ACCEPTED as "clear the override" (the Default/On
+        # re-enable path for thinking-toggle-only models, #6219 round-3). It
+        # must not raise; it removes agent.reasoning_effort so the provider
+        # default takes effect.
+        cfg.set_reasoning_effort('')
 
     def test_get_reasoning_status_defaults_to_show_true(self, tmp_path, monkeypatch):
         """When config.yaml has no display section, show_reasoning defaults
@@ -413,9 +420,7 @@ class TestReasoningConfigHelpers:
 # ── api/streaming.py — AIAgent receives reasoning_config ──────────────────────
 
 class TestStreamingReasoningWiring:
-    """Confirm api/streaming.py reads agent.reasoning_effort from config and
-    passes parsed reasoning_config to AIAgent (so effort changes take effect
-    on the next session)."""
+    """Confirm streaming resolves and passes the session's reasoning config."""
 
     def test_streaming_reads_reasoning_effort_from_config(self):
         src = read('api/streaming.py')
@@ -423,9 +428,14 @@ class TestStreamingReasoningWiring:
             "api/streaming.py must import parse_reasoning_effort to translate "
             "config.yaml agent.reasoning_effort into AIAgent reasoning_config"
         )
-        assert 'coerce_reasoning_effort_for_model' in src, (
-            "api/streaming.py must clamp/drop unsupported model-specific effort "
-            "levels before sending reasoning_config to the provider"
+        assert 'resolve_session_reasoning_effort' in src, (
+            "api/streaming.py must resolve the session preference through the "
+            "shared model-aware helper before sending it to the provider"
+        )
+        config_src = read('api/config.py')
+        assert 'coerce_reasoning_effort_for_model' in config_src, (
+            "the shared session effort resolver must clamp/drop unsupported "
+            "model-specific effort levels"
         )
         assert "reasoning_config" in src and "'reasoning_config' in _agent_params" in src, (
             "api/streaming.py must guard the reasoning_config kwarg with "
@@ -457,7 +467,7 @@ class TestReasoningRoutes:
 
     def test_post_api_reasoning_accepts_effort(self):
         src = read('api/routes.py')
-        assert 'set_reasoning_effort' in src, (
+        assert 'write_reasoning_effort' in src, (
             "POST /api/reasoning must route effort changes through "
-            "set_reasoning_effort"
+            "write_reasoning_effort"
         )

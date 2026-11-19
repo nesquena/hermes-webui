@@ -11,6 +11,29 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 | **Three-container** | Two-container PLUS the dashboard for monitoring. | `docker-compose.three-container.yml` |
 | **All-in-one image** (community fork — third-party, not maintained by us) | Podman 3.4 / multi-arch / supervisord-style preference. | [sunnysktsang/hermes-suite](https://github.com/sunnysktsang/hermes-suite) — see [#1399](https://github.com/nesquena/hermes-webui/issues/1399) for the original discussion |
 
+### Available Docker tags
+
+The WebUI Docker image is published to `ghcr.io/nesquena/hermes-webui` with these tags:
+
+| Tag | Channel | Description |
+|---|---|---|
+| `:latest` | stable | The most recent stable release (from `v*` tags). Suitable for production. |
+| `:experimental` | experimental | The most recent experimental release (from `exp-v*` tags). For early testing; may include breaking changes or unfinished features. Do not run in production. |
+| `:X.Y` / `:X.Y.Z` | stable | Pinned stable releases (e.g., `:1.5`, `:1.5.0`). |
+| `:X.Y` / `:X.Y.Z` | experimental | Pinned experimental releases — same version numbers but pushed from `exp-v*` tags. The `:experimental` floating tag always points at the latest of these. |
+
+To track experimental builds in Docker Compose, use the `:experimental` tag:
+
+```yaml
+services:
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:experimental
+```
+
+> **Note:** updating between `:experimental` builds requires `docker compose pull` followed by `docker compose up -d` — the floating tag is updated only when a new `exp-v*` release is pushed. Experimental builds are not pushed on every commit to the default branch.
+>
+> When update checks are enabled, a Docker-installed WebUI compares its baked release tag with the selected stable or experimental channel. Settings shows the number of newer channel releases and the matching `docker pull` command even though the image does not contain `.git` history.
+
 > **Note (v0.14+):** If you use `docker-compose.three-container.yml`, both
 > `hermes-agent` and `hermes-dashboard` initialise from the same image and write
 > to the same `hermes-home` volume simultaneously. This can cause overlapping lock
@@ -60,6 +83,10 @@ to tick while you are away. If System Settings shows `Gateway not configured`,
 use `docker-compose.two-container.yml`,
 `docker-compose.three-container.yml`, or run `hermes gateway` separately before
 relying on offline scheduled runs. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
+
+If your mounted `~/.hermes/hermes-agent` is a git checkout that the Agent may re-launch from (Agent v0.21.6 or newer: a self-updating checkout installed by the official installer or `hermes update`, or a writable checkout the Agent can adopt as one), the WebUI runs the container's staged copy of that Agent instead, so the Agent never re-launches the WebUI into your host's Python. As a result, Settings' Agent update reports that the Agent is not a git repository: update the Agent on the host with `hermes update`, then recreate the container (`docker compose up -d --force-recreate`) so it stages the updated Agent. The mounted checkout still runs directly, `.git` and in-app update included, whenever that Agent would not re-launch anyway (#8581, #8593): with `HERMES_DISABLE_LAZY_INSTALLS=1` (or `true`/`yes`); when its `install-stamp.json` names an update mechanism other than exactly `self`; or, with no stamp, when the checkout is mounted read-only. If the WebUI cannot tell, it runs the staged copy. A writable checkout without `install-stamp.json` (a plain `git clone`) runs the staged copy wherever it is mounted, because the Agent may adopt it as self-updating after a profile switch; update it on the host and recreate the container, as above.
+
+When opt-in auto-install is enabled (`HERMES_WEBUI_AUTO_INSTALL=1`), an already-selected staged Agent is used directly without a stage-copy warning. A different staged directory still has to pass the ownership, ancestry, source-identity, and freshness checks.
 
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an
@@ -172,6 +199,22 @@ cp .env.docker.example .env
 docker compose -f docker-compose.two-container.yml up -d
 ```
 
+The compose files forward `API_SERVER_KEY` from `.env` into the `hermes-agent`
+container. The agent only starts the gateway API listener (port 8642) when
+`API_SERVER_KEY` is a usable value (>=16 chars) — `API_SERVER_ENABLED` alone
+does nothing. Without a key, the gateway daemon still runs but port 8642 stays
+unbound and the WebUI keeps showing **"Gateway endpoint not reachable"**. To
+enable scheduled ticking and the green gateway pill, set a long random string
+in `.env`:
+
+```bash
+echo "API_SERVER_KEY=$(openssl rand -hex 24)" >> .env
+docker compose -f docker-compose.two-container.yml up -d --force-recreate
+```
+
+The compose file forwards the same value to the WebUI as
+`HERMES_WEBUI_GATEWAY_API_KEY`, so the health probe authenticates automatically.
+
 The three-container layout adds the dashboard but is otherwise the same shape. If you must stay single-container, you can run `hermes gateway` inside the container as a long-lived background process, but the compose split is sturdier.
 
 If you maintain a custom compose file, make sure the **WebUI service** points at
@@ -215,6 +258,8 @@ curl -sS "${GATEWAY_BASE_URL%/}/health/detailed" | jq '.gateway_state, .state'
 
 If the service name differs in your compose file, `docker compose -f docker-compose.two-container.yml ps` lists the running services.
 For container-to-container diagnostics, set one of `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` in the WebUI environment, then restart WebUI.
+
+In these multi-container setups the Gateway runs in the `hermes-agent` service, not in the WebUI container, so WebUI reports it as managed outside WebUI (#8391): the Gateway card in System Settings shows a note instead of Start/Stop/Restart, the agent-health banner has no Restart button, and `POST /api/gateway/start|stop|restart` answers `409` with `code: gateway_externally_managed`. Restart the Gateway where it runs, for example `docker compose -f docker-compose.two-container.yml restart hermes-agent`. A WebUI that monitors this machine's own Gateway through a loopback URL (such as `HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642`) keeps these controls once it has seen that Gateway running for the active profile; if the Gateway is stopped and WebUI has not seen it running yet, the card says WebUI hasn't confirmed it runs on this machine, and starting it once with `hermes gateway start` (or `hermes --profile <name> gateway start` for a named profile; the card shows the exact command) lets WebUI manage it from then on.
 
 Refs #2785, #4483.
 
@@ -431,6 +476,81 @@ services:
 
 Then configure the URL as `http://host.docker.internal:<port>`. Also ensure the host service binds to an address reachable from containers (not only a loopback interface the Docker bridge cannot reach) and that your host firewall allows the connection.
 
+### 9. "Failed to verify state directory" / restart loop on a bind-mounted state dir (#7027)
+
+**Symptom**: Single-container deploy with the state directory bind-mounted from a
+host directory, no `WANTED_UID` set. The container exits 1 and restart-loops:
+
+```
+-- Auto-detected workspace UID: 1024 (from /workspace)
+touch: cannot touch '/app/data/.testfile': Permission denied
+!! ERROR: Failed to verify state directory at /app/data
+```
+
+**Cause**: UID auto-detection used to read `/workspace` before the configured
+state directory. In a stock image `/workspace` exists and is owned by the
+image's own build-time `1024:1024`, so detection returned a value that carries
+no information about the host — and because `1024` is also the fallback default,
+the log read as if detection had found nothing.
+
+**Fix**: Fixed in the init script — the configured `HERMES_WEBUI_STATE_DIR` is
+now probed first. The full order is:
+
+1. `$HERMES_WEBUI_STATE_DIR` (default `/app/data`) — a bind mount by definition
+   in a single-container deploy, so its owner is the host identity to match
+2. `/home/hermeswebui/.hermes`, `$HERMES_HOME`, `/opt/data` — the hermes-home
+   shared volume in two-container setups (#668)
+3. `/workspace` — used only when nothing above resolves
+4. `1024` — fallback default
+
+Root-owned candidates (UID 0, e.g. a freshly created named volume) are skipped
+at every step. An explicitly supplied `WANTED_UID`/`WANTED_GID` always wins and
+is never overwritten by detection — including the value `1024`, which earlier
+versions treated as "unset".
+
+If you are on an older image, the workaround is to set the IDs explicitly:
+
+```bash
+docker run -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) ...
+```
+
+### 10. Fresh WebUI container fails its first start, restart works (#8106)
+
+**Symptom**: In the two- or three-container setup, a newly created WebUI
+container exits during its first start while the agent is running. Restarting
+the same container succeeds. Older images log one of:
+
+```
+usermod: Failed to change ownership of the home directory
+!! ERROR: Failed to set UID of hermeswebui user
+```
+
+```
+chown: cannot access '/home/hermeswebui/.hermes/...': No such file or directory
+!! ERROR: Failed to set owner of /home/hermeswebui
+```
+
+**Cause**: The root init changes the `hermeswebui` UID and then walks
+`/home/hermeswebui` to align ownership. `~/.hermes` is shared with the running
+agent, which replaces files by writing a temp file and renaming it, so an
+entry can disappear between being listed and being changed. A restart does not
+hit this because the UID already matches.
+
+**Fix**: Fixed in the init script. Both ownership walks skip only entries that
+no longer exist; any other `chown` error still stops startup with
+`Failed to set owner of /home/hermeswebui`. On a UID change, files still owned
+by the old UID inside `.git` directories and inside a writable
+`~/.hermes/hermes-agent` checkout move to the new UID, as `usermod -u` did
+before. A read-only agent source mount is left untouched.
+
+To reproduce the race against an image (Linux Docker, local or remote daemon):
+
+```bash
+scripts/docker_first_start_race.sh IMAGE [RACE_ROUNDS]
+```
+
+Exit code 0 means every case passed. CI runs it in `docker-smoke.yml`.
+
 ## Multi-container architecture
 
 The two- and three-container setups use **named Docker volumes** (not bind mounts) by default for a reason: named volumes solve the UID/GID problem by construction. Docker creates the volume's root directory with the correct ownership, all containers reading/writing to it see the same files, no host-side permission setup required.
@@ -456,7 +576,7 @@ The two- and three-container setups use **named Docker volumes** (not bind mount
       └─────────────────────────┘
 ```
 
-The WebUI container doesn't ship with the agent's Python deps — at startup it runs `uv pip install /home/hermeswebui/.hermes/hermes-agent` to install them from the shared volume. The WebUI mount is read-only; the agent container is the only writer.
+The WebUI container doesn't ship with the agent's Python deps. At startup it copies the agent source from the shared volume into a writable stage (`/app/hermes-agent-src`) and installs it with `uv pip install -e "/app/hermes-agent-src[all]"`, passing the agent's own `[tool.uv] override-dependencies` as `--overrides` (since agent v0.22.5 its requirements only resolve with them, #8524). The WebUI mount is read-only; the agent container is the only writer.
 
 ## Upgrading the agent container
 
@@ -551,6 +671,8 @@ volumes:
 - #681 — tools running in WebUI container, not agent container (architectural)
 - #668 — auto-detect UID/GID from mounted volume
 - #569 — UID/GID detection priority order
+- #7027 — state dir probed before `/workspace` in UID/GID detection (see [#9 above](#9-failed-to-verify-state-directory--restart-loop-on-a-bind-mounted-state-dir-7027))
+- #8106: first-start ownership walks survive files the agent replaces in the shared home (see [#10 above](#10-fresh-webui-container-fails-its-first-start-restart-works-8106))
 
 If you hit a new failure mode not covered here, please [open an issue](https://github.com/nesquena/hermes-webui/issues/new) with:
 
