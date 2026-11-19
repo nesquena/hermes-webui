@@ -1067,6 +1067,10 @@ const scenario = JSON.parse(process.argv[4]);
 
 const calls = [];
 const newSessionBodies = [];
+// The session id each creation adopted, in order (see the /api/session/new
+// stub). Distinct per POST so a test can tell the replaced session's evidence
+// from the adopted session's.
+const adoptedSessionIds = [];
 // Delayed /api/models responses: the FIRST 'deferredModelsCount' catalog
 // requests are held open until 'releaseDelayedModels()' resolves them (in
 // order), so a scenario can land an old-profile reply inside the
@@ -1225,9 +1229,20 @@ const ctx = {
       let body = null;
       try { body = JSON.parse((opts && opts.body) || 'null'); } catch (_) { body = null; }
       newSessionBodies.push(body);
+      // Every creation adopts a DISTINCT session id, exactly as the server
+      // mints a new one per POST. A single fixed id would conflate "the
+      // session this New Chat replaces" with "the session it just adopted" —
+      // the very distinction the successive-create controls assert on (a
+      // marker re-established for the adopted session must be readable by the
+      // NEXT create, while the replaced session's own marker stays cleared).
+      // 'adoptedSessionIds' lets a scenario name them explicitly.
+      const _adoptedId = (Array.isArray(scenario.adoptedSessionIds) && scenario.adoptedSessionIds.length)
+        ? String(scenario.adoptedSessionIds.shift())
+        : 'new-sid-' + newSessionBodies.length;
+      adoptedSessionIds.push(_adoptedId);
       return Promise.resolve({
         session: {
-          session_id: 'new-sid',
+          session_id: _adoptedId,
           messages: [],
           model: (body && body.model) || null,
           model_provider: (body && body.model_provider) || null,
@@ -1616,6 +1631,7 @@ if (scenario.schedule === 'delayedOldCatalog') {
         ...common(),
         calls: calls,
         newSessionBodies: newSessionBodies,
+        adoptedSessionIds: adoptedSessionIds,
         sessionUpdateCount: _sessionUpdateCount,
         afterRefresh: state.afterRefresh,
         afterPick: state.afterPick,
@@ -1625,6 +1641,101 @@ if (scenario.schedule === 'delayedOldCatalog') {
         afterRepickRefreshEvidence: state.afterRepickRefreshEvidence || null,
         afterNewSession: state.afterNewSession,
         afterNewSessionEvidence: state.afterNewSessionEvidence,
+      }));
+    })
+    .catch((err) => {
+      process.stdout.write(JSON.stringify({ok: false, error: String((err && err.stack) || err)}));
+    });
+} else if (scenario.schedule === 'twoCreates') {
+  // Maintainer follow-up (2026-11-19 gate RED, #8576): the SECOND successive
+  // New Chat. The user makes the supported pick on the loaded destination
+  // session, the later empty refresh quarantines the picker again (the reset
+  // gate stays armed), and then New Chat is clicked TWICE — the first creation
+  // is accepted and adopts a DISTINCT session id, the second runs without the
+  // picker being touched. 'postPickPersistedOverride' can still land another
+  // tab's rewrite between the two creations.
+  switched
+    .then(() => context.populateModelDropdown({freshness: 'session_visit'}))
+    .then(() => {
+      const afterRefresh = snapshot();
+      // The session-load switch chain loads the destination session AFTER the
+      // writer returns; the canonical switch auto-created it already.
+      if (scenario.flow === 'loadSwitch' && scenario.postSwitchSession) {
+        S.session = scenario.postSwitchSession;
+      }
+      const pick = scenario.customPick;
+      const afterPickState = (extra) => ({
+        afterRefresh,
+        afterPick: snapshot(),
+        afterPickEvidence: evidence(),
+        sessionStorageAfterPick: sessionStorage._dump(),
+        ...(extra || {}),
+      });
+      // No customPick = the user made no selection at all (control arm).
+      if (!pick || !pick.value) return Promise.resolve(afterPickState());
+      return context.selectModelFromDropdown(pick.value, pick.provider === undefined ? null : pick.provider)
+        .then(() => afterPickState());
+    })
+    .then((state) => (
+      scenario.postPickRefresh
+        ? context.populateModelDropdown({freshness: 'session_visit'}).then(() => ({
+            ...state,
+            afterRepickRefresh: snapshot(),
+            afterRepickRefreshEvidence: evidence(),
+          }))
+        : state
+    ))
+    .then((state) => {
+      // Another tab rewriting the shared persisted pair AFTER this tab's pick.
+      if (scenario.postPickPersistedOverride) {
+        const o = scenario.postPickPersistedOverride;
+        context._writePersistedModelState(o.model, o.model_provider || null);
+      }
+      return state;
+    })
+    // (1) First creation: accepted, and it adopts a DISTINCT session id.
+    .then((state) => context.newSession(false, scenario.newSessionOptions || {}).then(() => ({
+      ...state,
+      afterFirstCreate: snapshot(),
+      afterFirstCreateEvidence: evidence(),
+      adoptedSessionId: (S.session && S.session.session_id) || null,
+    })))
+    // Another tab rewriting the SHARED persisted pair BETWEEN the two
+    // creations, through the production writer so the stored shape is the
+    // real one. The second creation's authority must stay on this tab's own
+    // session-scoped marker, never on the shared store.
+    .then((state) => {
+      if (scenario.betweenCreatesPersistedOverride) {
+        const o = scenario.betweenCreatesPersistedOverride;
+        context._writePersistedModelState(o.model, o.model_provider || null);
+      }
+      return state;
+    })
+    // (2) Second creation: New Chat again, picker untouched.
+    .then((state) => context.newSession(false, scenario.newSessionOptions || {}).then(() => ({
+      ...state,
+      afterSecondCreate: snapshot(),
+      afterSecondCreateEvidence: evidence(),
+    })))
+    .then((state) => {
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        ...common(),
+        calls: calls,
+        newSessionBodies: newSessionBodies,
+        adoptedSessionIds: adoptedSessionIds,
+        sessionUpdateCount: _sessionUpdateCount,
+        afterRefresh: state.afterRefresh,
+        afterPick: state.afterPick,
+        afterPickEvidence: state.afterPickEvidence,
+        sessionStorageAfterPick: state.sessionStorageAfterPick || null,
+        afterRepickRefresh: state.afterRepickRefresh || null,
+        afterRepickRefreshEvidence: state.afterRepickRefreshEvidence || null,
+        afterFirstCreate: state.afterFirstCreate,
+        afterFirstCreateEvidence: state.afterFirstCreateEvidence,
+        adoptedSessionId: state.adoptedSessionId,
+        afterSecondCreate: state.afterSecondCreate,
+        afterSecondCreateEvidence: state.afterSecondCreateEvidence,
       }));
     })
     .catch((err) => {
@@ -2423,12 +2534,27 @@ def _loaded_session_pick_scenario(flow, models_payload, model_select, **extra):
     return scenario
 
 
-def _assert_switch_created_model_less_first(bodies, flow, label):
+def _marker_for(result, session_id):
+    """Read a session-scoped explicit-pick marker back out of a driver result's
+    raw sessionStorage dump — the same shape the REAL helper stores, so an
+    assertion about which key holds the authority cannot be satisfied by a
+    helper that collapsed every session onto one key."""
+    raw = (result.get("sessionStorage") or {}).get(
+        "hermes-webui-explicit-picker-pick:" + str(session_id)
+    )
+    return json.loads(raw) if raw else None
+
+
+def _assert_switch_created_model_less_first(bodies, flow, label, creates=1):
+    """The canonical switch auto-creates one session BEFORE the refresh, so the
+    chain's manual creations follow it. ``creates`` is how many manual New
+    Chats the schedule runs (1 for the single-create schedules, 2 for the
+    successive-create ones)."""
     if flow != "switch":
         return
-    assert len(bodies) == 2, (
+    assert len(bodies) == creates + 1, (
         f"[{label}] the canonical switch auto-creates one session and the "
-        f"chained New Chat creates the second; got {len(bodies)} POSTs"
+        f"chained New Chat(s) create the rest; got {len(bodies)} POSTs"
     )
     first = bodies[0]
     assert first.get("model") in (None, ""), (
@@ -2510,10 +2636,18 @@ def test_loaded_session_custom_pick_survives_the_empty_destination_catalog(flow)
         f"profile's 'old-route'; got {body.get('model_provider')!r}"
     )
     # newSession() clears the marker for the session it replaces, so the pick
-    # can never authorize anything for a later session.
-    assert result["afterNewSessionEvidence"]["explicitPick"] is None, (
+    # can never authorize anything for a LATER session. Probe the REPLACED
+    # session's own id — the session stub mints a distinct id per creation, so
+    # reading the adopted session here would test the wrong key (the fix
+    # deliberately re-establishes the authority for the session it adopts).
+    replaced_sid = (
+        result["adoptedSessionIds"][0] if flow == "switch"
+        else _DEST_SESSION["session_id"]
+    )
+    assert _marker_for(result, replaced_sid) is None, (
         "newSession must clear the explicit-pick marker of the session it "
-        "replaces"
+        f"replaces ({replaced_sid}); got "
+        f"{_marker_for(result, replaced_sid)!r}"
     )
 
 
@@ -3003,6 +3137,11 @@ def test_explicit_pick_marker_is_keyed_by_the_owning_session():
     driver now extracts the real helper; this asserts the marker lands under
     the owning session's key, that no shared key exists, and that New Chat
     clears that very key.
+
+    The driver's session stub mints a DISTINCT id per creation, so the session
+    the pick was made on and the session New Chat adopts are two different
+    ids: the cleared key is provably the replaced session's own, not an
+    artifact of the stub handing the same id back twice.
     """
     pick = {"value": "gpt-5.4-mini", "provider": "openai"}
     result = _run_refresh_driver(_loaded_session_pick_scenario(
@@ -3011,12 +3150,23 @@ def test_explicit_pick_marker_is_keyed_by_the_owning_session():
     ))
     assert result["ok"], result.get("error")
 
-    # The canonical switch auto-created 'new-sid'; the pick was made on it.
+    # The canonical switch auto-created the first adopted session; the pick was
+    # made on it, and the chained New Chat adopts a DIFFERENT one.
+    adopted = result["adoptedSessionIds"]
+    assert len(adopted) == 2, (
+        "the canonical switch auto-creates one session and the chained New Chat "
+        f"creates the second; got {adopted!r}"
+    )
+    pick_sid, new_sid = adopted[0], adopted[1]
+    assert pick_sid != new_sid, (
+        "the two creations must adopt DISTINCT session ids; got "
+        f"{pick_sid!r} for both"
+    )
     after_pick = result["sessionStorageAfterPick"]
     assert isinstance(after_pick, dict), (
         f"the driver must expose the raw sessionStorage dump; got {after_pick!r}"
     )
-    key = "hermes-webui-explicit-picker-pick:new-sid"
+    key = "hermes-webui-explicit-picker-pick:" + pick_sid
     assert key in after_pick, (
         "the marker must be stored under the session that owns the pick; "
         f"stored keys were {sorted(after_pick)!r}"
@@ -3028,7 +3178,9 @@ def test_explicit_pick_marker_is_keyed_by_the_owning_session():
         "a no-op _pickerExplicitPickKey would collapse every marker onto the "
         f"literal 'undefined' key; stored keys were {sorted(after_pick)!r}"
     )
-    # New Chat replaces the session and must clear that same real key.
+    # New Chat replaces the session and must clear that same real key — and the
+    # key it clears belongs to the session it REPLACED, which is a different id
+    # from the one it adopts.
     assert key not in result["sessionStorage"], (
         "New Chat must clear the session-scoped marker of the session it "
         f"replaces; stored keys were {sorted(result['sessionStorage'])!r}"
@@ -3177,4 +3329,379 @@ def test_foreign_qualified_payload_still_resolves_to_the_embedded_provider():
         "the parser must keep giving an embedded @provider: qualifier "
         f"precedence over model_provider; got {resolved_provider!r} for "
         f"model {resolved_model!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer re-gate (2026-11-19, PR #8576 bounded follow-up): the SECOND
+# successive New Chat must keep the current profile's accepted choice.
+#
+# The replay the maintainer ran independently against the previous head:
+#   1. switch to a model-less destination with an empty catalogue, then make
+#      the supported qualified custom pick on its loaded session;
+#   2. let the later empty refresh run and create a new chat — that first
+#      creation correctly sends gpt-5.4-mini / custom:review-route;
+#   3. complete that creation with a DISTINCT new session id, then click New
+#      Chat again without changing the still-selected picker;
+#   4. the reset remains armed, but the first creation cleared the old
+#      session's explicit marker and gave the adopted session no equivalent
+#      choice evidence, so the second completed request omits BOTH model and
+#      model_provider.
+#
+# The controls below run the whole chain TWICE with DISTINCT adopted session
+# ids on purpose: a stub that handed the same id back for both creations could
+# not tell "the choice authority moved to the adopted session" from "the
+# replaced session's evidence was never cleared at all".
+#
+# The repair is bounded to what the marker itself authorized under the armed
+# reset. The stale-profile/catalogue quarantine, the marker's ownership of
+# provider authority and the backend's qualifier precedence are all unchanged,
+# and the controls pin each of them.
+# ---------------------------------------------------------------------------
+
+
+def _two_create_scenario(flow, pick, **extra):
+    """The maintainer's two-create replay: the supported pick on the loaded
+    destination session, the later empty refresh that quarantines the picker
+    again, then TWO successive New Chats — each adopting a distinct session id,
+    the picker untouched in between."""
+    scenario = _loaded_session_pick_scenario(
+        flow, _EMPTY_CATALOG_PAYLOAD, _STALE_SAME_MODEL_PICKER,
+        customPick=pick,
+        postPickRefresh=True,
+        schedule="twoCreates",
+    )
+    scenario.update(extra)
+    return scenario
+
+
+def _assert_distinct_adopted_ids(adopted, flow, label):
+    """Every creation adopted its OWN session id.
+
+    ``flow='switch'`` auto-creates one session before the refresh and then
+    runs the two chained New Chats; ``flow='loadSwitch'`` loads the destination
+    session and runs the two chained New Chats. No id may repeat, otherwise
+    "the authority moved to the new session" is unfalsifiable.
+    """
+    expected = 3 if flow == "switch" else 2
+    assert len(adopted) == expected, (
+        f"[{label}] expected {expected} adopted session ids; got {adopted!r}"
+    )
+    assert len(set(adopted)) == len(adopted), (
+        f"[{label}] the successive creations must adopt DISTINCT session ids; "
+        f"got {adopted!r}"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_second_new_chat_keeps_the_accepted_qualified_pick(flow):
+    """The bounded RED case: the SECOND successive New Chat must keep the
+    current profile's accepted qualified pick.
+
+    RED on the reviewed head: the first creation cleared the marker of the
+    session it replaced and the adopted session carried no equivalent choice
+    evidence, so the reset gate — still armed, because the empty catalogue
+    never released it — quarantined the picker and the shared persisted pair
+    and the second POST went out with NEITHER model NOR model_provider.
+    """
+    result = _run_refresh_driver(_two_create_scenario(flow, _QUALIFIED_CUSTOM_PICK))
+    assert result["ok"], result.get("error")
+    label = f"{flow}/qualified"
+
+    _assert_qualified_pick_evidence(result, label)
+
+    # The later empty refresh quarantined the picker again and left the
+    # one-shot gate armed...
+    assert result["afterRepickRefresh"]["guard"], (
+        f"[{label}] the second empty refresh must leave the reset gate armed"
+    )
+    assert result["afterRepickRefresh"]["pickerOptions"] == [], (
+        f"[{label}] the second empty refresh must quarantine the picker "
+        f"again; got {result['afterRepickRefresh']['pickerOptions']!r}"
+    )
+    # ...and it is STILL armed at the second creation: the repair must keep the
+    # choice by re-establishing authority, never by releasing the quarantine.
+    assert result["afterSecondCreate"]["guard"], (
+        f"[{label}] the reset gate must stay armed across both creations; "
+        "releasing it would let the previous profile's state through"
+    )
+
+    adopted = result["adoptedSessionIds"]
+    _assert_distinct_adopted_ids(adopted, flow, label)
+
+    bodies = result["newSessionBodies"]
+    _assert_switch_created_model_less_first(bodies, flow, label, creates=2)
+    first, second = bodies[-2], bodies[-1]
+    assert first.get("profile") == _SWITCH_NAME, (
+        f"[{label}] the first request must be scoped to the destination "
+        f"profile; got {first.get('profile')!r}"
+    )
+    assert first.get("model") == _QUALIFIED_CUSTOM_PAIR["model"], (
+        f"[{label}] the FIRST creation must send the pick's normalised id; "
+        f"got {first.get('model')!r}"
+    )
+    assert first.get("model_provider") == "custom:review-route", (
+        f"[{label}] the FIRST creation must send the marker's provider; got "
+        f"{first.get('model_provider')!r}"
+    )
+
+    # The first creation cleared the marker of the session it REPLACED, so the
+    # second creation's authority provably is not that old marker.
+    replaced_key = "hermes-webui-explicit-picker-pick:" + adopted[-2]
+    assert replaced_key not in result["sessionStorage"], (
+        f"[{label}] the replaced session's marker must stay cleared; stored "
+        f"keys were {sorted(result['sessionStorage'])!r}"
+    )
+
+    assert second.get("profile") == _SWITCH_NAME, (
+        f"[{label}] the second request must be scoped to the destination "
+        f"profile; got {second.get('profile')!r}"
+    )
+    assert second.get("model") == _QUALIFIED_CUSTOM_PAIR["model"], (
+        f"[{label}] the SECOND successive New Chat must keep the current "
+        f"profile's accepted choice; got {second.get('model')!r}"
+    )
+    assert second.get("model_provider") == "custom:review-route", (
+        f"[{label}] the SECOND successive New Chat must keep the marker's "
+        f"provider; got {second.get('model_provider')!r}"
+    )
+
+    resolved_model, resolved_provider = _resolve_new_session_model_state(second)
+    assert resolved_provider == "custom:review-route", (
+        f"[{label}] the REAL backend parser must resolve the marker's "
+        f"provider for the second creation too; got {resolved_provider!r} "
+        f"for model {resolved_model!r}"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_second_new_chat_keeps_the_accepted_bare_pick(flow):
+    """The same lifecycle for a pick with NO provider of its own.
+
+    The repair must not be specific to the qualified representation: an
+    ordinary custom pick (``selectModelFromDropdown(value, null)``) is
+    accepted by the first creation and must still reach the second one.
+
+    RED on the reviewed head: the second POST carried no model at all.
+    """
+    result = _run_refresh_driver(_two_create_scenario(flow, _CUSTOM_PICK))
+    assert result["ok"], result.get("error")
+    label = f"{flow}/bare"
+
+    assert result["afterPickEvidence"]["explicitPick"] == {
+        "value": _CUSTOM_PICK["value"], "model_provider": None,
+    }, (
+        f"[{label}] the boot change handler must record the pick's own pair; "
+        f"got {result['afterPickEvidence']['explicitPick']!r}"
+    )
+    assert result["afterSecondCreate"]["guard"], (
+        f"[{label}] the reset gate must stay armed across both creations"
+    )
+
+    adopted = result["adoptedSessionIds"]
+    _assert_distinct_adopted_ids(adopted, flow, label)
+
+    bodies = result["newSessionBodies"]
+    _assert_switch_created_model_less_first(bodies, flow, label, creates=2)
+    first, second = bodies[-2], bodies[-1]
+    for index, body in enumerate((first, second)):
+        assert body.get("model") == _CUSTOM_PICK["value"], (
+            f"[{label}] creation {index + 1} must send the pick's own model; "
+            f"got {body.get('model')!r}"
+        )
+        assert body.get("model_provider") in (None, ""), (
+            f"[{label}] creation {index + 1} must send the pick's own "
+            f"(absent) provider, never the previous profile's route; got "
+            f"{body.get('model_provider')!r}"
+        )
+
+
+def test_second_new_chat_keeps_the_marker_provider_against_another_tabs_rewrite():
+    """Another tab must not capture the authority across the two creations.
+
+    The shared persisted pair is rewritten BETWEEN the two creations with a
+    different model AND a different provider. The second creation's authority
+    is still this tab's own session-scoped marker, so neither outgoing field
+    may come from the shared store.
+
+    RED on the reviewed head: the second POST carried neither field at all.
+    """
+    result = _run_refresh_driver(_two_create_scenario(
+        "loadSwitch", _QUALIFIED_CUSTOM_PICK,
+        # The other tab's rewrite is already in the SHARED store when the first
+        # creation runs, so a repair that re-established the authority from the
+        # persisted pair instead of the marker would hand it the foreign pair.
+        postPickPersistedOverride=dict(_DIFFERENT_MODEL_REWRITE),
+        # ...and it rewrites it again between the two creations.
+        betweenCreatesPersistedOverride=dict(_DIFFERENT_MODEL_REWRITE),
+    ))
+    assert result["ok"], result.get("error")
+    label = "loadSwitch/another tab between creates"
+
+    _assert_qualified_pick_evidence(result, label)
+
+    # The rewrite really landed in the shared store before the second create.
+    assert result["afterSecondCreateEvidence"]["persisted"] == _DIFFERENT_MODEL_REWRITE, (
+        f"[{label}] the other tab's pair must be the persisted evidence under "
+        f"test; got {result['afterSecondCreateEvidence']['persisted']!r}"
+    )
+    assert result["afterSecondCreate"]["guard"], (
+        f"[{label}] the reset gate must stay armed across both creations"
+    )
+
+    adopted = result["adoptedSessionIds"]
+    _assert_distinct_adopted_ids(adopted, "loadSwitch", label)
+
+    bodies = result["newSessionBodies"]
+    second = bodies[-1]
+    assert second.get("model") == _QUALIFIED_CUSTOM_PAIR["model"], (
+        f"[{label}] the second creation must keep the pick's own model, never "
+        f"the other tab's rewrite; got {second.get('model')!r}"
+    )
+    assert second.get("model_provider") == "custom:review-route", (
+        f"[{label}] the second creation must keep the marker's provider, never "
+        f"the other tab's rewrite; got {second.get('model_provider')!r}"
+    )
+
+    resolved_model, resolved_provider = _resolve_new_session_model_state(second)
+    assert resolved_provider == "custom:review-route", (
+        f"[{label}] the REAL backend parser must resolve the marker's "
+        f"provider; got {resolved_provider!r} for model {resolved_model!r}"
+    )
+
+
+def test_second_new_chat_without_a_pick_still_sends_nothing():
+    """The quarantine control: no pick at all, two creations.
+
+    The repair must not globally disable the reset. With no session-scoped
+    marker for the loaded session there is no current-profile choice to
+    retain, so BOTH creations must stay model-less while the gate is armed —
+    the previous profile's picker and persisted pair stay quarantined.
+    """
+    result = _run_refresh_driver(_two_create_scenario("switch", None))
+    assert result["ok"], result.get("error")
+
+    assert result["afterRefresh"]["guard"], (
+        "the empty catalogue must leave the reset gate armed"
+    )
+    assert result["afterRefresh"]["pickerOptions"] == [], (
+        f"the previous profile's options must be quarantined; got "
+        f"{result['afterRefresh']['pickerOptions']!r}"
+    )
+    assert result["afterSecondCreate"]["guard"], (
+        "the reset gate must stay armed across both creations"
+    )
+
+    adopted = result["adoptedSessionIds"]
+    _assert_distinct_adopted_ids(adopted, "switch", "no pick")
+
+    bodies = result["newSessionBodies"]
+    assert len(bodies) == 3, (
+        f"the canonical switch auto-creates one session and the two chained "
+        f"New Chats create the others; got {len(bodies)} POSTs"
+    )
+    for index, body in enumerate(bodies):
+        assert body.get("model") in (None, ""), (
+            f"creation {index + 1} must stay model-less with no pick; got "
+            f"{body.get('model')!r}"
+        )
+        assert body.get("model_provider") in (None, ""), (
+            f"creation {index + 1} must pin no provider with no pick; got "
+            f"{body.get('model_provider')!r}"
+        )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_two_creates_do_not_resurrect_the_old_profile_marker(flow):
+    """The profile-boundary control: the old profile's pick must not ride the
+    successive creates.
+
+    The OLD conversation's session-scoped marker is seeded under its own id and
+    the previous profile's persisted pair is left in shared storage. The
+    profile writer must clear the marker at the boundary, and NEITHER creation
+    may send the old profile's pair — not the first, and not the second, whose
+    authority is the accepted current-profile choice.
+    """
+    result = _run_refresh_driver(_two_create_scenario(
+        flow, _QUALIFIED_CUSTOM_PICK,
+        # The tab is still on the OLD profile's conversation when the switch
+        # runs (the session-load writer is fed by a cross-profile sidebar
+        # click), which is the shape in which that marker is live.
+        session=_OLD_SESSION,
+        messages=_OLD_MESSAGES,
+        seededSessionStorage={
+            "hermes-webui-explicit-picker-pick:old-sid": _STALE_OLD_SESSION_MARKER,
+        },
+        seededLocalStorage={"hermes-webui-model-state": _STALE_PERSISTED_PAIR},
+        staleSessionId="old-sid",
+    ))
+    assert result["ok"], result.get("error")
+    label = f"{flow}/old profile marker"
+
+    # Fixture precondition: the old profile's marker really was seeded.
+    assert result["initialStaleMarker"] == json.loads(_STALE_OLD_SESSION_MARKER), (
+        f"[{label}] the old conversation's marker must be seeded under its own "
+        f"session id; got {result['initialStaleMarker']!r}"
+    )
+    # The profile boundary dropped it, so it can authorize nothing later.
+    assert result["finalStaleMarker"] is None, (
+        f"[{label}] the profile transition must clear the old conversation's "
+        f"marker; got {result['finalStaleMarker']!r}"
+    )
+
+    adopted = result["adoptedSessionIds"]
+    _assert_distinct_adopted_ids(adopted, flow, label)
+
+    bodies = result["newSessionBodies"]
+    _assert_switch_created_model_less_first(bodies, flow, label, creates=2)
+    for index, body in enumerate(bodies[1:] if flow == "switch" else bodies):
+        assert body.get("model") != _DEST_DEFAULT, (
+            f"[{label}] creation {index + 1} must not send the previous "
+            f"profile's model; got {body.get('model')!r}"
+        )
+        assert body.get("model_provider") != "old-route", (
+            f"[{label}] creation {index + 1} must not pin the previous "
+            f"profile's provider; got {body.get('model_provider')!r}"
+        )
+
+    # No marker may survive under any id other than the session the LAST
+    # creation adopted: the authority is session-scoped, never a shared key.
+    marker_keys = [k for k in result["sessionStorage"]
+                   if k.startswith("hermes-webui-explicit-picker-pick:")]
+    assert marker_keys == [
+        "hermes-webui-explicit-picker-pick:" + adopted[-1],
+    ], (
+        f"[{label}] the choice authority must live under the session the last "
+        f"creation adopted and nowhere else; got {sorted(marker_keys)!r}"
+    )
+
+
+def test_re_established_authority_is_scoped_to_the_adopted_session():
+    """The authority is session-scoped, so it dies with its session.
+
+    After the two creations the only explicit-pick marker left belongs to the
+    session the LAST creation adopted. Loading a different session must clear
+    it — otherwise a stale pick could authorize a provider override for a
+    conversation that never made it.
+    """
+    result = _run_refresh_driver(_two_create_scenario(
+        "loadSwitch", _QUALIFIED_CUSTOM_PICK,
+    ))
+    assert result["ok"], result.get("error")
+
+    adopted = result["adoptedSessionIds"]
+    _assert_distinct_adopted_ids(adopted, "loadSwitch", "scoped authority")
+
+    marker_keys = sorted(
+        k for k in result["sessionStorage"]
+        if k.startswith("hermes-webui-explicit-picker-pick:")
+    )
+    assert marker_keys == ["hermes-webui-explicit-picker-pick:" + adopted[-1]], (
+        "the retained choice must be keyed by the adopted session and by "
+        f"nothing else; got {marker_keys!r}"
+    )
+    # The replaced session's key is gone: New Chat cleared it before its POST.
+    assert ("hermes-webui-explicit-picker-pick:" + adopted[-2]) not in result["sessionStorage"], (
+        "the replaced session's marker must stay cleared; got "
+        f"{sorted(result['sessionStorage'])!r}"
     )

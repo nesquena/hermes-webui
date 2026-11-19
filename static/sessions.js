@@ -2472,6 +2472,14 @@ async function newSession(flash, options={}){
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
+    // #8576 maintainer follow-up (2026-11-19): the pair the session-scoped
+    // marker above authorized under the armed reset, remembered so the session
+    // this creation ADOPTS can inherit the same authority (see the
+    // re-establishment after S.session is replaced). Null on every other
+    // admission path: a configured default, a project-bound model, the empty
+    // composer's override, and an unarmed picker/persisted fallback all keep
+    // their existing lifetime and must not mint a marker.
+    let markerAuthorizedPick=null;
     if(boundModel){
       newModelState={model:boundModel, model_provider:boundProvider||null};
     }else if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
@@ -2492,6 +2500,10 @@ async function newSession(flash, options={}){
       // when the destination catalogue came back empty and the gate never
       // released.
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
+      // The marker is the only reason this arm may run under the armed reset
+      // (it owns the selected value), so what it resolved is a current-profile
+      // choice: remember it for the adopted session.
+      if(S._profileSwitchModelReset&&freshExplicitPickValue) markerAuthorizedPick=newModelState;
     }else if((!S._profileSwitchModelReset||freshExplicitPickValue)
         &&typeof _readPersistedModelState==='function'){
       const _persistedModelState=_readPersistedModelState();
@@ -2537,6 +2549,11 @@ async function newSession(flash, options={}){
           model_provider:(freshExplicitPick&&freshExplicitPick.model_provider)
             ||(_markerSelection&&_markerSelection.model_provider)||null,
         };
+        // Admission came from THIS tab's marker alone, so the resolved pair is
+        // the current profile's accepted choice — remember it for the adopted
+        // session. The shared pair read just above is deliberately NOT used:
+        // it is another tab's evidence, never authority over this one.
+        markerAuthorizedPick=newModelState;
       }
     }
     if(newModelState&&newModelState.model){
@@ -2600,6 +2617,34 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    // #8576 maintainer follow-up (2026-11-19): the accepted current-profile
+    // choice must outlive the session it was made on. The marker of the session
+    // this request REPLACED was cleared above (before the POST), so a SECOND
+    // successive New Chat used to find no choice evidence for the session it
+    // was replacing: with the reset gate still armed — an empty catalogue never
+    // releases it — the picker and the SHARED persisted pair both stay
+    // quarantined, and the second POST went out with NEITHER model NOR
+    // model_provider.
+    //
+    // Re-establish the marker for the session this SUCCESSFUL creation just
+    // adopted, carrying the pair the marker itself authorized. The next create
+    // reads it back through the same marker arm, so the authority stays on this
+    // tab's own session-scoped evidence — never on the shared store another tab
+    // can rewrite, and never on a marker scoped to a different session. Nothing
+    // else changes: the quarantine is not disabled (with no marker there is
+    // still nothing to admit), and the backend's @provider: qualifier
+    // precedence is untouched (the posted model stays the pick's normalised id).
+    //
+    // Only ever written from markerAuthorizedPick, so a configured default, a
+    // project-bound model, the empty composer's override and an unarmed
+    // picker/persisted fallback mint no marker at all. loadSession() clears the
+    // marker for the session it leaves and the one it loads, so navigating away
+    // still retires it.
+    if(markerAuthorizedPick&&S.session&&S.session.session_id
+       &&typeof _rememberExplicitPickerPick==='function'){
+      _rememberExplicitPickerPick(S.session.session_id,
+        markerAuthorizedPick.model,markerAuthorizedPick.model_provider||null);
+    }
     // #8356: New Chat takes the pane without going through loadSession(), so
     // an in-flight loadSession() for the previous session still owns the load
     // (its _loadingSessionId/_loadGeneration match) and its response can write
