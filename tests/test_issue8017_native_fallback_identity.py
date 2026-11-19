@@ -351,3 +351,100 @@ def test_a_url_match_on_an_ascii_entry_still_promotes(monkeypatch):
     _bind(monkeypatch, data)
     assert config.resolve_model_provider(MODEL) == (MODEL, "custom:gateway", DEFAULT_URL)
 
+
+def test_a_removed_model_is_not_repaired_from_a_non_owner_entry(monkeypatch):
+    """A same-slug entry that is not the owner cannot rewrite a saved chat.
+
+    The ``model:`` block owns ``custom:晨光`` at DEFAULT_URL; the list entry only
+    reaches that identity through the non-ASCII fallback, so its pinned list says
+    nothing about this provider. Reading it anyway replaced a restored
+    ``@custom:晨光:chat-model`` with the entry's ``other-model`` while the chat
+    still used the block's endpoint and credential.
+    """
+    data = {
+        "model": {"provider": PID, "base_url": DEFAULT_URL, "api_key": "model-key"},
+        "custom_providers": [
+            {"name": NATIVE_KEY, "base_url": NATIVE_URL, "api_key": "entry-key",
+             "models": ["other-model"]},
+        ],
+    }
+    _bind(monkeypatch, data)
+    assert routes._repair_removed_qualified_custom_provider_model(
+        "@" + PID + ":" + MODEL, PID, config_obj=data
+    ) is None
+
+
+def test_a_removed_model_is_repaired_from_its_sole_owner(monkeypatch):
+    """Control: with no competing owner the entry's pinned list still repairs."""
+    data = {
+        "custom_providers": [
+            {"name": NATIVE_KEY, "base_url": NATIVE_URL, "api_key": "entry-key",
+             "models": ["other-model"]},
+        ],
+    }
+    _bind(monkeypatch, data)
+    assert routes._repair_removed_qualified_custom_provider_model(
+        "@" + PID + ":" + MODEL, PID, config_obj=data
+    ) == "@" + PID + ":other-model"
+
+
+def test_a_disabled_native_identity_is_not_masked_by_a_non_owner_entry(monkeypatch):
+    """A switched-off keyed route still forbids the persisted-pool probe.
+
+    ``providers['custom:晨光']`` reserves its slug whether or not it is enabled,
+    because switching that record off answers the route with a terminal miss.
+    The list entry beside it is fallback-derived and not the owner, so it no
+    longer stands in as a presentation row and the probe is refused.
+    """
+    data = {
+        "providers": {PID: {"enabled": False}},
+        "custom_providers": [
+            {"name": NATIVE_KEY, "base_url": DEFAULT_URL, "api_key": "entry-key"},
+        ],
+    }
+    _bind(monkeypatch, data)
+    assert config._custom_provider_identity_disabled(PID, data) is True
+
+
+def test_a_disabled_native_identity_is_not_answered_by_a_non_owner_entry(monkeypatch):
+    """The key lookup agrees: a switched-off route reads no key from the entry.
+
+    Same shape as the probe above, one layer down. Before the ownership context
+    reached this caller, a disabled ``custom:晨光`` route took the fallback
+    entry's ``entry-key`` and handed it to an endpoint the user had switched off.
+    """
+    data = {
+        "providers": {PID: {"enabled": False}},
+        "custom_providers": [
+            {"name": NATIVE_KEY, "base_url": DEFAULT_URL, "api_key": "entry-key"},
+        ],
+    }
+    _bind(monkeypatch, data)
+    assert providers._get_provider_api_key(PID) is None
+
+
+def test_an_enabled_keyed_route_still_reads_its_own_key(monkeypatch):
+    """Control: the owner's own credential is untouched by the exclusion."""
+    data = {
+        "providers": {
+            PID: {"base_url": NATIVE_URL, "api_key": "native-key"},
+        },
+        "custom_providers": [
+            {"name": NATIVE_KEY, "base_url": DEFAULT_URL, "api_key": "entry-key"},
+        ],
+    }
+    _bind(monkeypatch, data)
+    assert config._custom_provider_identity_disabled(PID, data) is False
+    assert providers._get_provider_api_key(PID) == "native-key"
+
+
+def test_an_entry_that_owns_the_identity_keeps_the_pool_probe(monkeypatch):
+    """Control: a list entry that IS the owner still stands for the identity."""
+    data = {
+        "custom_providers": [
+            {"name": NATIVE_KEY, "base_url": DEFAULT_URL, "api_key": "entry-key"},
+        ],
+    }
+    _bind(monkeypatch, data)
+    assert config._custom_provider_identity_disabled(PID, data) is False
+

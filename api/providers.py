@@ -1528,7 +1528,10 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         )
         if entry is None:
             entry = _unique_custom_provider_entry(
-                _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
+                _custom_provider_entries(cfg),
+                _custom_provider_slug_key(provider_id),
+                cfg.get("providers"),
+                cfg.get("model"),
             )
             if entry is not None:
                 # Selection owned nothing, so the row's own store decides whether
