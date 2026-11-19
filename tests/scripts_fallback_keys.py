@@ -49,12 +49,19 @@ SCRIPTS_FALLBACK_KEYS_ENGLISH_SPELLED = (
 # the Scripts copy.
 SCRIPTS_FALLBACK_KEYS = SCRIPTS_FALLBACK_KEYS_COMMON + SCRIPTS_FALLBACK_KEYS_ENGLISH_SPELLED
 
+# Web Push cron opt-in copy (#8101): English only, absent from every
+# non-English locale block, riding the same ``t()`` fallback.
+WEB_PUSH_CRON_FALLBACK_KEYS = (
+    "web_push_cron_label",
+    "web_push_cron_failed",
+)
+
 # The locales that also omit the English-spelled keys.
 ENGLISH_SPELLED_LOCALES = ("es", "fr", "pt", "vi")
 
 
 def scripts_fallback_keys(locale: str) -> tuple[str, ...]:
-    """Return the Scripts keys that ``locale`` legitimately omits."""
+    """Return the en-only keys that ``locale`` legitimately omits (Scripts + Web Push cron)."""
     if locale in ENGLISH_SPELLED_LOCALES:
-        return SCRIPTS_FALLBACK_KEYS
-    return SCRIPTS_FALLBACK_KEYS_COMMON
+        return SCRIPTS_FALLBACK_KEYS + WEB_PUSH_CRON_FALLBACK_KEYS
+    return SCRIPTS_FALLBACK_KEYS_COMMON + WEB_PUSH_CRON_FALLBACK_KEYS
