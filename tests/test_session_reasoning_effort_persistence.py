@@ -470,7 +470,7 @@ def test_lock_held_reload_keeps_cli_source_identity(tmp_path, monkeypatch, path,
     SESSIONS[sid] = resident
 
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value, **_kw: {})
-    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda s: None, raising=False)
+    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda s, **_kw: None, raising=False)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *a, **kw: None)
     monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *a, **kw: None)
     monkeypatch.setattr(routes, "list_profiles_api", lambda: [])

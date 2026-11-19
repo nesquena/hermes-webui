@@ -108,8 +108,13 @@ def _publish_session_list_changed(
         publish_session_list_changed(reason)
 
 
-def _sync_session_title_to_insights(session) -> None:
-    """Write title-only session metadata updates through to state.db when enabled."""
+def _sync_session_title_to_insights(session, *, rename: bool = False) -> None:
+    """Write title-only session metadata updates through to state.db when enabled.
+
+    ``rename=True`` only from /api/session/rename: an explicit user rename,
+    including clearing it back to an automatic label. Other callers sync
+    passively (``api.state_sync.sync_session_usage``).
+    """
     try:
         if not load_settings().get("sync_to_insights"):
             return
@@ -127,6 +132,7 @@ def _sync_session_title_to_insights(session) -> None:
             profile=getattr(session, "profile", None),
             cache_read_tokens=getattr(session, "cache_read_tokens", None) or 0,
             cache_write_tokens=getattr(session, "cache_write_tokens", None) or 0,
+            rename=rename,
         )
     except Exception:
         logger.debug("Failed to update session title in state.db", exc_info=True)
@@ -12669,7 +12675,37 @@ def _display_rebased_tool_calls(tool_calls, owner_positions):
     return projected
 
 
-def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None):
+def _display_merge_summary(messages):
+    """Full-transcript values GET /api/session derives from the merged rows.
+
+    Computed once when a merge is memoized so a cache hit can answer the
+    todo/visible-count/last-timestamp/turn-token post-passes without
+    rescanning every row. Each value uses the exact expression the handler
+    uses on the uncached path, so responses stay byte-identical.
+    """
+    try:
+        last_ts = max(
+            (float((m or {}).get("timestamp") or 0) for m in messages if isinstance(m, dict)),
+            default=0,
+        )
+    except (TypeError, ValueError):
+        last_ts = 0
+    try:
+        todo_state = derive_todo_state(messages) if messages else None
+    except Exception:
+        logger.debug("todo_state summary failed", exc_info=True)
+        todo_state = None
+    return {
+        "last_ts": last_ts,
+        "todo_state": todo_state,
+        "visible_count": sum(
+            1 for m in messages if isinstance(m, dict) and not is_hidden_transcript_row(m)
+        ),
+        "turn_token": any(isinstance(m, dict) and m.get("_active_turn_token") for m in messages),
+    }
+
+
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None, summary_out=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
     Lets GET /api/session skip loading the state.db rows entirely on a hit. That
@@ -12715,6 +12751,12 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
             owner_positions.clear()
             owner_positions.update(entry["owner_positions"])
         _display_merge_cache.move_to_end(sid, last=True)
+        if summary_out is not None and isinstance(entry.get("summary"), dict):
+            # Window-only contract: hand back the cached list itself (READ-ONLY)
+            # and let the caller copy just the rows it returns.
+            summary_out.clear()
+            summary_out.update(entry["summary"])
+            return entry["messages"]
         return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
 
 
@@ -12856,11 +12898,15 @@ def _limited_webui_messages_for_display_with_sidecar(
             cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
+        # The summary walks every row (todo state, visible count), so derive it
+        # before taking the process-wide cache lock; `merged` is not shared yet.
+        summary = _display_merge_summary(merged)
         with _display_merge_cache_lock:
             _display_merge_cache[sid] = {
                 "key": cache_key,
                 "messages": merged,
                 "owner_positions": projected_owners,
+                "summary": summary,
                 "stored_at": time.monotonic(),
             }
             _display_merge_cache.move_to_end(sid, last=True)
@@ -14793,7 +14839,7 @@ from api.run_journal import (
     terminal_settled_prompt_events,
     SSE_RELAY_CLOSE_EVENTS,
 )
-from api.todo_state import attach_todo_state
+from api.todo_state import attach_todo_state, derive_todo_state
 from api.providers import (
     get_providers,
     get_provider_quota,
@@ -17594,6 +17640,9 @@ def _handle_session_get(handler, parsed) -> bool:
         # reused without loading the state.db rows; must exist for every
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
+        # Set by a window-only merge-cache hit: _all_msgs is then the cached
+        # list itself (never mutate it) and this carries its O(N) summaries.
+        _display_cache_summary = {}
         _display_state_db_signature = None
         _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
             getattr(s, "messages", None) or [], include_live_partial=True
@@ -17648,6 +17697,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     limited_sidecar_messages,
                     msg_before=msg_before,
                     owner_positions=_display_owner_positions,
+                    summary_out=_display_cache_summary,
                 )
             if _display_cache_hit is not None:
                 state_db_messages = []
@@ -17802,6 +17852,8 @@ def _handle_session_get(handler, parsed) -> bool:
                 msg_before=msg_before,
                 expand_renderable=expand_renderable,
             )
+            if _display_cache_summary:
+                _truncated_msgs = [dict(m) if isinstance(m, dict) else m for m in _truncated_msgs]
             if msg_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
@@ -17895,7 +17947,9 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
         _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
-        if _summary_last_message_at is None and _all_msgs:
+        if _summary_last_message_at is None and _all_msgs and _display_cache_summary:
+            _merged_last_message_at = _display_cache_summary["last_ts"]
+        elif _summary_last_message_at is None and _all_msgs:
             try:
                 _merged_last_message_at = max(
                     float((m or {}).get("timestamp") or 0)
@@ -17955,7 +18009,10 @@ def _handle_session_get(handler, parsed) -> bool:
         # tool result is outside msg_limit, and treats an explicit empty
         # todo list as the current state instead of falling through to an
         # older non-empty write.
-        if load_messages and _all_msgs:
+        if load_messages and _all_msgs and _display_cache_summary:
+            if _display_cache_summary["todo_state"] is not None:
+                raw["todo_state"] = copy.deepcopy(_display_cache_summary["todo_state"])
+        elif load_messages and _all_msgs:
             attach_todo_state(raw, _all_msgs)
         if _merged_last_message_at:
             raw["last_message_at"] = max(
@@ -17988,9 +18045,11 @@ def _handle_session_get(handler, parsed) -> bool:
             # (it trusts the sidecar prefix / metadata counts). On message
             # loads the merged display transcript is the authority — derive
             # the visible total from it.
-            raw["visible_message_count"] = sum(
-                1 for m in _all_msgs
-                if isinstance(m, dict) and not is_hidden_transcript_row(m)
+            raw["visible_message_count"] = (
+                _display_cache_summary["visible_count"] if _display_cache_summary else sum(
+                    1 for m in _all_msgs
+                    if isinstance(m, dict) and not is_hidden_transcript_row(m)
+                )
             )
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
@@ -18024,9 +18083,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 logger.debug("[webui] #8517: memory status unavailable for session %s", sid, exc_info=True)
             if _memory_status:
                 raw["memory_status"] = _memory_status
-        imported_turn_marker = any(
-            isinstance(row, dict) and row.get("_active_turn_token")
-            for row in _all_msgs
+        imported_turn_marker = (
+            _display_cache_summary["turn_token"] if _display_cache_summary else any(
+                isinstance(row, dict) and row.get("_active_turn_token")
+                for row in _all_msgs
+            )
         )
         if (
             load_messages
@@ -21025,7 +21086,7 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-        _sync_session_title_to_insights(s)
+        _sync_session_title_to_insights(s, rename=True)
         publish_session_list_changed(
             "session_rename",
             profile=getattr(s, "profile", None),
@@ -21583,6 +21644,7 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
+        tombstone_persist_failed = False
         try:
             # #8837: revoke its link first; a revoke that fails refuses the delete.
             if not _revoke_owned_shares_before_delete(sid, p):
@@ -21741,7 +21803,8 @@ def handle_post(handler, parsed) -> bool:
                 try:
                     _record_webui_deleted_session_tombstone(sid)
                 except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    logger.error("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    tombstone_persist_failed = True
         finally:
             session_lock.release()
         try:
@@ -21774,6 +21837,16 @@ def handle_post(handler, parsed) -> bool:
             "state_db_cleanup_failed": state_db_cleanup_failed,
             **worktree_retained,
         }
+        if tombstone_persist_failed:
+            response["tombstone_persist_failed"] = True
+            response.update(
+                {
+                    "ok": False,
+                    "error": "delete_tombstone_failed",
+                    "action": "session_delete",
+                }
+            )
+            return j(handler, response, status=500)
         if draft_delete_failed:
             response["draft_delete_failed"] = True
             response.update(
@@ -22073,7 +22146,7 @@ def handle_post(handler, parsed) -> bool:
             reasoning_effort=getattr(source, "reasoning_effort", None),
             profile=getattr(source, "profile", None),
             title=branch_title,
-            messages=forked_messages,
+            messages=copy.deepcopy(forked_messages),  # detached: child settlement must not edit source rows
             project_id=getattr(source, "project_id", None),
             personality=getattr(source, "personality", None),
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
