@@ -73,6 +73,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import (
+    ShareLinkOwnedElsewhere,
     build_share_snapshot,
     load_share,
     revoke_share,
@@ -20269,7 +20270,12 @@ def handle_post(handler, parsed) -> bool:
             # Re-read inside the lock: saving the object resolved before the wait
             # would revert a title rename or an appended message that landed while
             # this request was blocked.
-            persisted_session = _reload_session_for_share(sid) or stored_session
+            # Never the resident object itself: the pre-save mirror skips its
+            # source, so a pair set here would be the resident's own change
+            # until the commit, and an eviction before it keeps it (#8735).
+            persisted_session = _reload_session_for_share(sid) or (
+                copy.copy(stored_session) if stored_session is not None else None
+            )
             if persisted_session is None:
                 persisted_session = _build_share_metadata_sidecar(
                     sid,
@@ -20322,11 +20328,14 @@ def handle_post(handler, parsed) -> bool:
             # it is live before the snapshot writer may keep it.
             if durable_token and load_share(durable_token) is None:
                 durable_token = ""
-            share_meta = write_share_snapshot(
-                snapshot,
-                token=durable_token,
-                source_session_id=sid,
-            )
+            try:
+                share_meta = write_share_snapshot(
+                    snapshot,
+                    token=durable_token,
+                    source_session_id=sid,
+                )
+            except ShareLinkOwnedElsewhere as exc:
+                return bad(handler, str(exc), 409)  # #8734: nothing was written
             persisted_session.share_token = share_meta["share_token"]
             persisted_session.share_created_at = share_meta["share_created_at"]
             # Update the live cached copy BEFORE the durable save (#8255 review,
@@ -20412,7 +20421,10 @@ def handle_post(handler, parsed) -> bool:
         if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
             return bad(handler, "Session busy, try again", 503)
         try:
-            target_session = _reload_session_for_share(sid) or stored_session
+            # Never the resident object itself (#8735, as in create).
+            target_session = _reload_session_for_share(sid) or (
+                copy.copy(stored_session) if stored_session is not None else None
+            )
             if target_session is None:
                 token = str(getattr(snapshot_session, "share_token", "") or "").strip()
                 if not token:
@@ -20434,7 +20446,10 @@ def handle_post(handler, parsed) -> bool:
                 # revoke_share() locates the published snapshot through the
                 # session's token field, so hand it the resolved authority.
                 target_session.share_token = token
-                revoke_share(target_session)
+                try:
+                    revoke_share(target_session)
+                except ShareLinkOwnedElsewhere as exc:
+                    return bad(handler, str(exc), 409)  # #8734: the link and both pairs are untouched
                 if load_share(token) is not None:
                     return bad(handler, "Share link could not be revoked", 500)
             # A writer may have saved while the revoke was reading the snapshot

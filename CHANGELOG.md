@@ -27,6 +27,12 @@
 
 ### Security
 
+- **After a share link is revoked, a conversation no longer goes back to showing that dead link (#9195, refs #8735).** When Share or Stop sharing couldn't reload the conversation from disk, it set the link on the copy held in memory. If that copy later dropped out of the cache and was saved after the link had been revoked, the save could write the revoked link back into the conversation. Both now work on a separate copy, so a later save keeps the link that's actually stored. The rarer case where every reload fails, including the one in the later Stop sharing, stays open in #8735. Thanks @webtecnica for the earlier work on this issue.
+
+- **Share and Stop sharing refuse a link that belongs to another conversation (#9192, closes #8734).** A conversation's record can name a public share link that a different, still-existing conversation published. Share now answers 409 and changes nothing instead of replacing that conversation's public page, and Stop sharing no longer revokes its link. A conversation's own link, and links within compressed conversation chains, behave as before.
+
+- **On a server that hosts several profiles, the launch profile's credential scope is built from the operator's launch environment (#9188, refs #9187).** The Agent builds the launch profile's secret scope from the server's launch environment. WebUI now gives it a frozen copy of the operator's environment, captured at startup, instead of the live process environment, which other profiles' settings can change. Other profiles' settings also no longer change the deployment-wide managed directory. A key the operator exported before starting the server stays in that scope until the next restart, even after it's removed in Settings. The rest of #9187 needs Agent changes.
+
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
@@ -72,8 +78,6 @@
 - **Settings keep working when the browser refuses to save a local copy of a setting (#8749, closes #8708).** Thanks @webtecnica. Settings mirror some speech preferences (voice mode, silence timeout, TTS engine, voice, rate, pitch) and the font size into the browser's local storage. When the browser refused that write, for example because storage was full or disabled in a private window, the error stopped the Settings panel part-way. The speech controls after it then showed defaults and did nothing when changed, and a refused font-size write could stop the whole panel. A refused write is now caught and logged once, every control is still set up and saved to the server, and a short "not applied in this browser" note shows where the browser's copy differs from the saved value. Two maintainer folds went in with it. The first keeps the voice list's labelled default selected when you switch to an engine that doesn't offer your previous voice, instead of leaving the list blank. The second puts the note on its own line under each setting, so it no longer squeezes the rate and pitch sliders or the checkbox labels on phones.
 
 - **The updater gives Git fetches time to finish and cleans up Git helpers it stops (#8480, @UncleLiu-0306).** Every fetch and pull the updater runs (update checks, apply, force-update, pull) now gets 60 seconds instead of 15, and runs with automatic maintenance and auto-GC turned off for that one command; persistent Git configuration is unchanged. On Linux and macOS the command runs in its own process group, so a timeout or interruption stops Git and every helper it started. On Windows it runs inside a Job Object, which does the same. The browser now waits up to five minutes for apply, force-update and lock recovery. While an update is applying, the update lock (and the brief hold on new chats) can now last up to about three minutes on a slow remote, instead of about one.
-
-- **Async delegation completions are no longer delivered twice when their acknowledgement hits a brief database lock on newer Hermes Agents (#9124).** Agent v0.23.2 removed `tools.async_delegation.mark_completion_delivered`, the fallback marker WebUI used when the durable completion acknowledgement raised. Without it, a transient "database is locked" left the completion pending, so it was delivered again (on the wakeup path, as a duplicate wakeup turn). WebUI now retries the acknowledgement on a busy or locked SQLite error only, at most twice (after 50 ms, then 200 ms, the second only within one second). The acknowledgement only updates a row still pending under this claim, so a retry can't apply twice. Other errors, and the marker fallback on older Agents, are unchanged.
 
 - **Deleted Desktop conversations no longer linger in the sidebar.** A Desktop-origin row whose session was deleted from its owning profile's `state.db` is pruned from the sidebar index, with either CLI-visibility setting. Pruning only happens when that profile's own database is readable and confirms the deletion; a missing, corrupt, unreadable or inaccessible database keeps the row. Thanks @pxxD1998.
 
@@ -343,6 +347,12 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.702] — 2026-11-19
+
+### Fixed
+
+- **Async delegation completions are no longer delivered twice when their acknowledgement hits a brief database lock on newer Hermes Agents (#9124).** Agent v0.23.2 removed `tools.async_delegation.mark_completion_delivered`, the fallback marker WebUI used when the durable completion acknowledgement raised. Without it, a transient "database is locked" left the completion pending, so it was delivered again (on the wakeup path, as a duplicate wakeup turn). WebUI now retries the acknowledgement on a busy or locked SQLite error only, at most twice (after 50 ms, then 200 ms, the second only within one second). The acknowledgement only updates a row still pending under this claim, so a retry can't apply twice. Other errors, and the marker fallback on older Agents, are unchanged.
 
 ## [v0.52.701] — 2026-11-19
 
