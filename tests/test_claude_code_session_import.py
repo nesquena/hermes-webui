@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import json
+import queue
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _pin_idle_cli_cache_mode(monkeypatch, models) -> None:
+    """Pin the idle (non-streaming) CLI cache mode these tests assert.
+
+    While any stream id is registered in STREAMS or ACTIVE_RUNS,
+    ``get_cli_sessions()`` deliberately freezes the volatile state.db part of
+    its cache key and widens the TTL (#4842). Those registries are process
+    globals, so a stream another test left behind would turn a fingerprint
+    change into a cache hit here.
+    """
+    monkeypatch.setattr(models, "_cli_sessions_streaming_freeze_marker", lambda: None)
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -136,6 +151,7 @@ def test_get_cli_sessions_cache_invalidates_when_sqlite_wal_changes(monkeypatch,
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
     monkeypatch.setattr(models, "get_claude_code_sessions", lambda: [])
+    _pin_idle_cli_cache_mode(monkeypatch, models)
     models.clear_cli_sessions_cache()
 
     calls = 0
@@ -222,6 +238,7 @@ def test_get_cli_sessions_all_profiles_preserves_last_known_good_rows_when_db_fa
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
     monkeypatch.setattr(models, "get_claude_code_sessions", lambda: [])
     monkeypatch.setattr(models, "_default_claude_code_projects_dir", lambda: None)
+    _pin_idle_cli_cache_mode(monkeypatch, models)
     models.clear_cli_sessions_cache()
     revision = ["first"]
     calls = 0
@@ -244,6 +261,25 @@ def test_get_cli_sessions_all_profiles_preserves_last_known_good_rows_when_db_fa
     revision[0] = "unavailable"
     assert models.get_cli_sessions(all_profiles=True) == rows
     assert calls == 2
+
+
+@pytest.mark.parametrize(
+    "idle_cache_test",
+    [
+        test_get_cli_sessions_cache_invalidates_when_sqlite_wal_changes,
+        test_get_cli_sessions_all_profiles_preserves_last_known_good_rows_when_db_fails,
+    ],
+    ids=["wal_invalidation", "all_profiles_last_known_good"],
+)
+def test_idle_cli_cache_tests_survive_a_stream_left_registered_by_another_test(
+    monkeypatch, tmp_path, idle_cache_test
+):
+    """A stream id leaked into STREAMS must not flip the idle-cache assertions."""
+    import api.config as config
+
+    monkeypatch.setitem(config.STREAMS, "stream-left-behind-by-another-test", queue.Queue())
+
+    idle_cache_test(monkeypatch, tmp_path)
 
 
 def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, tmp_path):

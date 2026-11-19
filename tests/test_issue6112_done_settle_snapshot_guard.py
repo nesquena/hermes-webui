@@ -121,6 +121,8 @@ def _harness(extra: str = "") -> dict:
     pieces = [
         _extract_function(MESSAGES_JS, "_messageIdentityKey"),
         _extract_function(MESSAGES_JS, "_carryForwardEphemeralTurnFields"),
+        _extract_function(MESSAGES_JS, "_residentMergeIdentityKey"),
+        _extract_function(MESSAGES_JS, "_mergeResidentPrefix"),
         _extract_function(MESSAGES_JS, "_adoptDoneSnapshotMessages"),
         _extract_function(MESSAGES_JS, "_finalAnswerIsInTranscript"),
         _extract_function(MESSAGES_JS, "_snapshotHasUsableFinalAssistantRow"),
@@ -156,7 +158,7 @@ def test_done_settle_has_snapshot_adoption_guard():
     """
     done = _done_listener_src()
     carry_idx = done.find("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[])")
-    guard_idx = done.find("S.messages=_adoptDoneSnapshotMessages(")
+    guard_idx = done.find("_adoptDoneSnapshotMessages(")
     filter_idx = done.find("S.messages=_filterRecoveryControlMessages")
     assert carry_idx != -1, "the done listener must still do the #3018 carry-forward"
     assert guard_idx != -1, (
@@ -386,7 +388,7 @@ def _listener_settle_harness(prev_messages: str, done_session: str, final_answer
 
     carry = _grab(
         "S.session=d.session;S.messages=_carryForwardEphemeralTurnFields",
-        "if(typeof _hydrateTodosFromSession",
+        "// #6112 settle guard.",
     )
     # Extract the REAL settle-guard + recovery-filter statements (with the
     # intermediate `_oldestIdx` reset) so the `.messages` wiring is under test.
@@ -397,6 +399,8 @@ def _listener_settle_harness(prev_messages: str, done_session: str, final_answer
     pieces = [
         _extract_function(MESSAGES_JS, "_messageIdentityKey"),
         _extract_function(MESSAGES_JS, "_carryForwardEphemeralTurnFields"),
+        _extract_function(MESSAGES_JS, "_residentMergeIdentityKey"),
+        _extract_function(MESSAGES_JS, "_mergeResidentPrefix"),
         _extract_function(MESSAGES_JS, "_adoptDoneSnapshotMessages"),
         _extract_function(MESSAGES_JS, "_finalAnswerIsInTranscript"),
         _extract_function(MESSAGES_JS, "_snapshotHasUsableFinalAssistantRow"),
@@ -420,6 +424,9 @@ def _listener_settle_harness(prev_messages: str, done_session: str, final_answer
             const _pendingTitleUpdates = new Map();
             const _pendingTitleExpectedCurrent = new Map();
             function applySessionTitleUpdate(){{}}
+            const _preSettleSession=S.session;
+            const _preSettleOldestIdx=0;
+            const _preSettleMessagesTruncated=false;
             const _preSettle=Array.isArray(S.messages)?S.messages:[];
             {carry}
             {guard}

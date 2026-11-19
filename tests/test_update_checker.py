@@ -287,10 +287,17 @@ class TestApplyUpdateDiagnostics:
         # Patch the cache's 'checked_at' key directly to avoid the lock
         # invalidation block raising. We use a fresh dict swap.
         fake_cache = {'webui': None, 'agent': None, 'checked_at': 1}
+        # #8687: the success path ends in _schedule_restart(), which spawns a
+        # daemon worker that takes api.updates._apply_lock and walks the real
+        # repository's __pycache__ tree. The worker outlives this test and
+        # refuses every later apply_update() in the session with "Update
+        # already in progress". Stub the scheduler so no worker escapes; the
+        # restart request itself is still asserted below.
         with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
              patch(f'{_MODULE}._run_git') as mock_run_git, \
              patch(f'{_MODULE}._update_cache', fake_cache), \
-             patch(f'{_MODULE}._cache_lock'):
+             patch(f'{_MODULE}._cache_lock'), \
+             patch(f'{_MODULE}._schedule_restart') as mock_schedule_restart:
             mock_run_git.side_effect = [
                 ('', True),                       # fetch succeeds
                 ('', True),                       # no release tags
@@ -301,6 +308,8 @@ class TestApplyUpdateDiagnostics:
             result = updates._apply_update_inner('webui')
 
         assert result['ok'] is True
+        # The restart was still requested — only the worker is gone.
+        mock_schedule_restart.assert_called_once()
 
     # ------------------------------------------------------------------
     # Agent target works the same as webui target

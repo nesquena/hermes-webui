@@ -63,6 +63,7 @@ eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
 """

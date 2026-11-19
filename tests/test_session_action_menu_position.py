@@ -225,3 +225,92 @@ def test_right_click_on_the_trigger_opens_on_the_button():
 def test_right_click_on_the_row_still_opens_at_the_pointer():
     data = _record_for("{clientX: 120, clientY: 400, button: 2, target: onTitle}")
     assert data.get("freshMenuAnchor") is True, f"a row right-click must keep the pointer placement; got {data}"
+
+
+def _visible_bounds_source() -> str:
+    return _block("function _projectPickerVisibleBounds(", "\nfunction ")
+
+
+def test_action_menu_cap_uses_dynamic_viewport_units():
+    """The CSS cap must track the actually-visible height (100dvh), not the
+    large-viewport 100vh: in the Android WebView 100vh resolves shorter than
+    the visual viewport, so a vh-only cap clips the menu's box and forces an
+    internal scroll even when the menu would fit. The vh line stays as the
+    fallback for older engines."""
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    marker = ".session-action-menu{"
+    start = css.find(marker)
+    assert start != -1, ".session-action-menu rule not found"
+    end = css.find("}", start)
+    rule = css[start:end]
+    assert "max-height:calc(100dvh - 16px)" in rule, (
+        f"the menu cap must use dynamic viewport units; got {rule[-120:]}"
+    )
+    assert rule.index("max-height:calc(100vh - 16px)") < rule.index(
+        "max-height:calc(100dvh - 16px)"
+    ), "the vh cap must stay first as the fallback"
+
+
+# An Android-like viewport: the layout viewport (window.innerHeight) is
+# taller than the visible box (visualViewport) once browser chrome eats
+# space. position:fixed is relative to the visible box, so the menu must
+# flip and clamp against it, not the layout height.
+_ANDROID_HARNESS = r"""
+const window = {innerWidth: 360, innerHeight: 740,
+  visualViewport: {offsetTop: 0, offsetLeft: 0, width: 360, height: 560}};
+const anchorEl = {
+  isConnected: true,
+  getBoundingClientRect: () => ({top: 430, bottom: 460, left: 16, right: 344, width: 328, height: 30}),
+  closest: () => null,
+};
+"""
+
+
+def test_low_row_menu_flips_above_inside_the_visible_box():
+    """A long-press on a low row must flip the menu above it so the whole
+    menu stays inside the visible viewport — not run off the screen bottom
+    (Android clipped-menu report). Against the old layout-viewport math the
+    220px menu would sit at top 466 and overflow the 560px visible box."""
+    script = (
+        _ANDROID_HARNESS
+        + "let _sessionActionMenu = {style: {}, scrollWidth: 180, offsetHeight: 220};\n"
+        + _visible_bounds_source()
+        + "\n"
+        + _position_source()
+        + r"""
+_positionSessionActionMenu(anchorEl);
+console.log(JSON.stringify({left: _sessionActionMenu.style.left, top: _sessionActionMenu.style.top, maxHeight: _sessionActionMenu.style.maxHeight}));
+"""
+    )
+    data = _run_node(script)
+    assert data == {"left": "124px", "top": "204px", "maxHeight": ""}, (
+        f"the menu must flip above the low row inside the visible box; got {data}"
+    )
+
+
+def test_tall_menu_caps_to_the_offset_visible_box():
+    """With an offset visible box (keyboard / pinch zoom) a menu taller than
+    it must cap its height to the visible box and dock at its top — never
+    the layout viewport's."""
+    script = (
+        "const window = {innerWidth: 360, innerHeight: 740,\n"
+        "  visualViewport: {offsetTop: 120, offsetLeft: 0, width: 360, height: 420}};\n"
+        "const anchorEl = {\n"
+        "  isConnected: true,\n"
+        "  getBoundingClientRect: () => ({top: 300, bottom: 330, left: 16, right: 344, width: 328, height: 30}),\n"
+        "  closest: () => null,\n"
+        "};\n"
+        "let _sessionActionMenu = {style: {}, scrollWidth: 180, offsetHeight: 600};\n"
+        + _visible_bounds_source()
+        + "\n"
+        + _position_source()
+        + r"""
+_positionSessionActionMenu(anchorEl);
+console.log(JSON.stringify({left: _sessionActionMenu.style.left, top: _sessionActionMenu.style.top, maxHeight: _sessionActionMenu.style.maxHeight}));
+"""
+    )
+    data = _run_node(script)
+    # Visible box is 120..540: cap to 540-120-16=404 and dock at 120+8.
+    assert data == {"left": "124px", "top": "128px", "maxHeight": "404px"}, (
+        f"the tall menu must cap to the visible box; got {data}"
+    )
