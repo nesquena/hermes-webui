@@ -4138,6 +4138,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // here even though the live path already separated them. Read the
       // occurrence from ``payload`` too (the persisted scene rows carry it
       // there — ``_anchor_scene_tool_row`` in api/routes.py).
+      //
+      // #7653 re-gate round 16 (item 3): combine BOTH coordinates instead of
+      // returning on the first one found. One assistant message can emit an id
+      // twice, so a settled row can name an owner AND an occurrence; an
+      // owner-only key would collapse the two occurrences of that message back
+      // into one card. ``tool:<tid>@<owner>#<occ>`` matches the server key.
       const group=row.group&&typeof row.group==='object'?row.group:{};
       const payload=row.payload&&typeof row.payload==='object'?row.payload:{};
       const owner=row.assistant_msg_idx!==undefined&&row.assistant_msg_idx!==null&&row.assistant_msg_idx!==''
@@ -4147,7 +4153,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           :(payload.assistant_msg_idx!==undefined&&payload.assistant_msg_idx!==null&&payload.assistant_msg_idx!==''
             ?payload.assistant_msg_idx
             :null));
-      if(owner!=null&&owner!=='') return `tool:${tid}@${owner}`;
       const occ=row.occurrence!==undefined&&row.occurrence!==null&&row.occurrence!==''
         ?row.occurrence
         :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
@@ -4155,7 +4160,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           :(payload.occurrence!==undefined&&payload.occurrence!==null&&payload.occurrence!==''
             ?payload.occurrence
             :null));
-      return occ===null?`tool:${tid}`:`tool:${tid}#${occ}`;
+      const ownerKey=(owner!=null&&owner!=='')?`@${owner}`:'';
+      const occKey=(occ!==null&&occ!==undefined&&occ!=='')?`#${occ}`:'';
+      if(ownerKey||occKey) return `tool:${tid}${ownerKey}${occKey}`;
+      return `tool:${tid}`;
     }
     if(row.role==='prose'||row.role==='thinking'){
       const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
@@ -4391,7 +4399,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const hash=rest.indexOf('#');
       const tid=at>0?rest.slice(0,at):(hash>0?rest.slice(0,hash):rest);
       if(!tid) return -1;
-      const incomingOwner=at>0?rest.slice(at+1):null;
+      // #7653 re-gate round 16 (item 3): a key may name BOTH coordinates
+      // (``tool:<tid>@<owner>#<occ>``), so the owner is the span between the
+      // ``@`` and the ``#`` — not everything after the ``@``.
+      const ownerEnd=hash>at?hash:rest.length;
+      const incomingOwner=at>0?rest.slice(at+1,ownerEnd):null;
       const incomingOcc=hash>0?rest.slice(hash+1):null;
       const ownerRows=[]; // {index, owner} in push order
       const occRows=[];   // {index, occ} in push order — includes BARE rows
@@ -4404,7 +4416,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const h=r.indexOf('#');
         const t=a>0?r.slice(0,a):(h>0?r.slice(0,h):r);
         if(t!==tid) continue;
-        if(a>0) ownerRows.push({index:i,owner:r.slice(a+1)});
+        if(a>0) ownerRows.push({index:i,owner:(h>a?r.slice(a+1,h):r.slice(a+1))});
         else occRows.push({index:i,occ:h>0?r.slice(h+1):null});
       }
       if(incomingOwner!=null){

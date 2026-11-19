@@ -17934,10 +17934,15 @@ function _toolIdentity(tc){
     // #7653 re-gate round 15 (10-27 re-review, item 3): a reused id owns
     // several worklog cards, so the step dedup must be occurrence-scoped —
     // a tid-only key dropped the second ``call_0`` card of the same step.
+    // #7653 re-gate round 16 (item 3): combine the owner AND the occurrence
+    // rather than returning on the first one found. One assistant message can
+    // emit an id twice, so two cards of the same step can share an owner while
+    // naming different occurrences — an owner-only key collapses them.
     const owner=_toolCardOwnerIndex(tc);
-    if(owner!=null) return `id:${tid}@${owner}`;
     const occ=_toolCardOccurrence(tc);
-    if(occ!=null&&occ!=='') return `id:${tid}#${occ}`;
+    const ownerKey=(owner!=null)?`@${owner}`:'';
+    const occKey=(occ!=null&&occ!=='')?`#${occ}`:'';
+    if(ownerKey||occKey) return `id:${tid}${ownerKey}${occKey}`;
     return `id:${tid}`;
   }
   const args=tc.args&&typeof tc.args==='object'?tc.args:{};
@@ -17986,10 +17991,13 @@ function _toolDisclosureIdentity(tc){
   if(tid){
     // Same occurrence scoping as _toolIdentity: two occurrences of a reused
     // id must not share one disclosure key (toggling one would open both).
+    // #7653 re-gate round 16 (item 3): combine the owner AND the occurrence,
+    // so two occurrences emitted by ONE assistant message stay separate.
     const owner=_toolCardOwnerIndex(tc);
-    if(owner!=null) return `id:${tid}@${owner}`;
     const occ=_toolCardOccurrence(tc);
-    if(occ!=null&&occ!=='') return `id:${tid}#${occ}`;
+    const ownerKey=(owner!=null)?`@${owner}`:'';
+    const occKey=(occ!=null&&occ!=='')?`#${occ}`:'';
+    if(ownerKey||occKey) return `id:${tid}${ownerKey}${occKey}`;
     return `id:${tid}`;
   }
   const stable=[
@@ -18026,6 +18034,16 @@ function _anchorSceneToolRowLogicalKey(row){
   // stream-born rows carry the occurrence ordinal instead, so it is the
   // fallback. A row naming neither keeps the historical bare-tid key, which
   // is the pre-#7653 behaviour for a provider that never reuses an id.
+  //
+  // #7653 re-gate round 16 (item 3): combine BOTH coordinates instead of
+  // returning on the first one found. Round 15 was sufficient while every
+  // occurrence of an id lived in a different assistant message, but one
+  // assistant message can emit an id twice — the reviewer's own repro — and
+  // the server now hands us rows that name owner 1 AND occurrences 0 and 1.
+  // An owner-only key gives those two rows the same key again and the settled
+  // renderer collapses them back into one card, which is item 3's defect one
+  // layer further down. ``call:<tid>@<owner>#<occ>`` matches the server's
+  // ``tool:<tid>@<owner>#<occ>`` row key.
   const owner=row.assistant_msg_idx!==undefined&&row.assistant_msg_idx!==null&&row.assistant_msg_idx!==''
     ?row.assistant_msg_idx
     :(group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null&&group.assistant_msg_idx!==''
@@ -18033,7 +18051,6 @@ function _anchorSceneToolRowLogicalKey(row){
       :(payload.assistant_msg_idx!==undefined&&payload.assistant_msg_idx!==null&&payload.assistant_msg_idx!==''
         ?payload.assistant_msg_idx
         :null));
-  if(owner!=null&&owner!=='') return `call:${id}@${owner}`;
   const occ=row.occurrence!==undefined&&row.occurrence!==null&&row.occurrence!==''
     ?row.occurrence
     :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
@@ -18041,7 +18058,9 @@ function _anchorSceneToolRowLogicalKey(row){
       :(payload.occurrence!==undefined&&payload.occurrence!==null&&payload.occurrence!==''
         ?payload.occurrence
         :null));
-  if(occ!=null&&occ!=='') return `call:${id}#${occ}`;
+  const ownerKey=(owner!=null&&owner!=='')?`@${owner}`:'';
+  const occKey=(occ!=null&&occ!=='')?`#${occ}`:'';
+  if(ownerKey||occKey) return `call:${id}${ownerKey}${occKey}`;
   return `call:${id}`;
 }
 function _anchorSceneMergeToolRows(prev, row){
