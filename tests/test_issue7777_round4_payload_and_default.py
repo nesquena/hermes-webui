@@ -193,6 +193,29 @@ def test_exclusions_are_case_preserving(_settings_store):
 # (/api/models and /api/models/live) still filter.
 
 
+def _group_for(payload: dict, provider_id: str) -> dict:
+    """The group in *payload* that belongs to *provider_id*'s provider family.
+
+    The catalog builder publishes a group under the identity it minted for the
+    provider — the namespaced ``custom:<slug>`` where the custom namespace is
+    namespaced — while the raw ``providers:`` config key is the bare slug. Two
+    spellings are the same provider when their lookup-key sets overlap, which is
+    exactly the relation :func:`api.config._provider_id_lookup_keys`
+    defines. Matching on one literal id would make these assertions pass on one
+    master and fail on the next without saying anything about the invariant.
+    """
+    wanted = set(config._provider_id_lookup_keys(provider_id))
+    for group in payload.get("groups", []):
+        if not isinstance(group, dict):
+            continue
+        if wanted & set(config._provider_id_lookup_keys(group.get("provider_id"))):
+            return group
+    raise AssertionError(
+        f"no group for provider {provider_id!r} in "
+        f"{[g.get('provider_id') for g in payload.get('groups', [])]}"
+    )
+
+
 def _drive_real_builder(monkeypatch, tmp_path):
     """Drive the REAL catalog builder with one custom provider and two ids.
 
@@ -264,9 +287,13 @@ def test_excluding_a_model_does_not_remove_it_from_routing_provenance(
         "(#7777 re-gate finding 3)"
     )
     # The picker projection must still hide it (the exclusion is not lost).
-    group = next(
-        g for g in payload["groups"] if g.get("provider_id") == "custom-llm"
-    )
+    # Match the group by provider FAMILY rather than by one literal id: the
+    # builder publishes the identity it minted for the provider (the namespaced
+    # ``custom:custom-llm`` where the custom namespace is namespaced), while the
+    # ``providers:`` key this test declares is the bare slug. Asserting on the
+    # bare spelling alone would pass on one master and fail on the next without
+    # saying anything about the invariant under test.
+    group = _group_for(payload, "custom-llm")
     visible = [str(m.get("id")) for m in group.get("models", [])]
     assert "openai/gpt-4.1" not in visible, (
         "the picker projection no longer honours the exclusion — the fix "
@@ -292,3 +319,67 @@ def test_the_published_catalog_keeps_unfiltered_provider_provenance(
         "the published catalog itself is filtered — the picker policy leaked "
         "into the routing-authoritative snapshot (#7777 re-gate finding 3)"
     )
+
+
+def test_provenance_is_found_under_every_spelling_of_the_provider(
+    _settings_store, monkeypatch, tmp_path
+):
+    """Finding 3, the lookup side: provenance must not depend on WHICH spelling
+    of the provider the caller happens to hold.
+
+    The builder publishes a group under the identity it minted for the provider
+    — the namespaced ``custom:<slug>`` where the custom namespace is namespaced —
+    while the raw ``providers:`` config key, and any session row persisted before
+    that namespacing landed, is the bare slug. The resolver used to compare the
+    two with an exact string match, so a bare-slug caller got ``None`` back for a
+    provider that HAD advertised the id.
+
+    ``None`` means "no provenance signal", and the send path answers that with
+    the legacy redundant-prefix strip (#433): the caller's ``vendor/model`` id is
+    rewritten to the bare sibling and re-routed to a backend the user never
+    picked — precisely what the unfiltered snapshot exists to prevent. This
+    asserts both spellings resolve to the SAME advertised set, whichever shape
+    the running master mints.
+    """
+    _settings_store({"picker_excludes": {"custom-llm": ["openai/gpt-4.1"]}})
+    payload = _drive_real_builder(monkeypatch, tmp_path)
+
+    # The builder published the group under SOME spelling of this provider.
+    published = {
+        str(g.get("provider_id"))
+        for g in payload.get("groups", [])
+        if set(config._provider_id_lookup_keys("custom-llm"))
+        & set(config._provider_id_lookup_keys(g.get("provider_id")))
+    }
+    assert published, (
+        "the custom provider produced no group at all — nothing to look up"
+    )
+
+    for spelling in config._provider_id_lookup_keys("custom-llm"):
+        advertised = config._endpoint_advertised_model_ids(spelling)
+        assert advertised is not None, (
+            f"provenance vanished for the spelling {spelling!r} — a caller "
+            "holding it falls back to the legacy redundant-prefix strip (#433) "
+            "and re-routes the id to a sibling backend (#7777 re-gate finding 3)"
+        )
+        assert "openai/gpt-4.1" in advertised, (
+            f"the exclusion leaked into routing provenance for {spelling!r}"
+        )
+
+
+def test_provenance_still_refuses_a_provider_with_no_group(
+    _settings_store, monkeypatch, tmp_path
+):
+    """Widening the lookup must not invent provenance for an absent provider.
+
+    The spelling tolerance only bridges forms of the SAME group. A provider the
+    catalog never advertised still has to answer ``None`` so the caller keeps
+    preserving the id verbatim rather than trusting a sibling's catalog (#5979).
+    """
+    _settings_store({"picker_excludes": {"custom-llm": ["openai/gpt-4.1"]}})
+    _drive_real_builder(monkeypatch, tmp_path)
+
+    assert config._endpoint_advertised_model_ids("no-such-provider") is None
+    assert config._endpoint_advertised_model_ids("custom:no-such-provider") is None
+    assert config._endpoint_advertised_model_ids("") is None
+    assert config._endpoint_advertised_model_ids(None) is None

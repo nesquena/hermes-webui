@@ -1776,6 +1776,47 @@ def _canonicalise_provider_id(name: object) -> str:
     return raw
 
 
+def _provider_id_lookup_keys(provider_id: object) -> tuple[str, ...]:
+    """Every spelling a caller may legitimately hold for ONE provider id.
+
+    The catalog builder publishes a group under the identity it minted for the
+    provider — for a custom provider that is the Agent's namespaced slug
+    (``custom:<slug>``, see :func:`_custom_provider_slug_from_name`), while the
+    raw ``providers:`` config key, and any session row persisted before that
+    namespacing landed, is the BARE slug. ``_endpoint_advertised_model_ids``
+    used to compare those two spellings with an exact string match, so a caller
+    holding the bare form got ``None`` back.
+
+    ``None`` means "no provenance signal", and the send path answers that with
+    the legacy redundant-prefix strip (#433) — silently re-routing an id the
+    user picked to a sibling backend. That is exactly the failure mode the
+    unfiltered provenance snapshot exists to prevent (#7777 finding 3), so the
+    lookup has to accept every spelling of the SAME provider.
+
+    Only the custom namespace pair is bridged, and only ever by ADDING the bare
+    suffix of an already-namespaced id — a non-namespaced id never gains a
+    ``custom:`` key, so a builtin group can never be reached through another
+    provider's namespace. Widening is the safe direction: a wider match can only
+    move a caller off the strip fallback and onto "preserve the id verbatim"
+    (#5979).
+    """
+    raw = str(provider_id or "").strip().lower()
+    if not raw:
+        return ()
+    keys = [raw]
+    try:
+        canonical = _canonicalise_provider_id(raw)
+    except Exception:
+        canonical = ""
+    if canonical and canonical != raw:
+        keys.append(canonical)
+    if raw.startswith("custom:"):
+        bare = raw[len("custom:") :].strip()
+        if bare and bare not in keys:
+            keys.append(bare)
+    return tuple(keys)
+
+
 def _normalize_base_url_for_match(value: object) -> str:
     url = str(value or "").strip().rstrip("/")
     if not url:
@@ -2681,8 +2722,22 @@ def get_picker_excludes(provider_id: str | None = None) -> set[str]:
             if _resolve_provider_alias(stored_key) == canonical:
                 seen.add(stored_key)
                 keys_to_union.append(stored_key)
+                continue
         except Exception:
-            continue
+            pass
+        # Same provider, different SPELLING. A custom provider is published
+        # under the namespaced identity the builder mints (``custom:<slug>``)
+        # while the raw ``providers:`` config key — and therefore a
+        # hand-written or imported settings.json — is the bare slug. Alias
+        # resolution does not bridge that pair, so without this a user's
+        # exclusion was silently ignored for exactly the providers that most
+        # need it. The union is one-directional by construction: a
+        # non-namespaced id never gains a ``custom:`` key, so a builtin
+        # provider's excludes can never be reached through another
+        # provider's namespace.
+        if set(_provider_id_lookup_keys(stored_key)) & set(_provider_id_lookup_keys(pid)):
+            seen.add(stored_key)
+            keys_to_union.append(stored_key)
     if not keys_to_union:
         return set()
     result_ids: set[str] = set()
@@ -7462,6 +7517,15 @@ def _endpoint_advertised_model_ids(provider_id: str | None) -> frozenset | None:
     the provider's OWN group prevents a same-named id in a sibling group (e.g.
     an ``openai/gpt-5.4`` sitting in the OpenRouter group) from masquerading as
     something this custom endpoint advertised.
+
+    The provider is matched on EVERY spelling of the same group, not on an exact
+    string: the catalog publishes the identity the builder minted (for a custom
+    provider the namespaced ``custom:<slug>``), while callers routinely hold the
+    bare config key or a pre-namespacing session row. An exact-match lookup
+    between the two returned ``None`` for a provider that HAD advertised the id,
+    and the caller's ``None`` fallback is the legacy redundant-prefix strip
+    (#433) — so a bare-slug caller got its id re-routed to a sibling backend.
+    See :func:`_provider_id_lookup_keys`.
     """
     global _advertised_model_ids_memo
     # Single lock-free atomic read of the immutable (snapshot, fingerprint) pair
@@ -7502,25 +7566,39 @@ def _endpoint_advertised_model_ids(provider_id: str | None) -> frozenset | None:
         for group in groups:
             if not isinstance(group, dict):
                 continue
-            slug = str(group.get("provider_id") or "").strip().lower()
-            if not slug:
-                continue
             # Union BOTH catalog buckets: a provider's models can be split across
             # ``models`` (visible) and ``extra_models`` (overflow) by the picker,
             # so an id the endpoint genuinely advertised may live in either. Only
             # reading ``models`` would miss it and mis-resolve (e.g. leave the
             # #433 bare id unstripped because it sits in extra_models).
+            #
+            # Index the group under EVERY spelling a caller may hold for it (its
+            # published id, its canonical form, and the bare slug behind a
+            # ``custom:`` namespace) — see _provider_id_lookup_keys. An
+            # exact-match-only index answers a bare-slug caller with ``None``,
+            # which the send path reads as "no provenance" and resolves with the
+            # legacy redundant-prefix strip (#433), re-routing an id the user
+            # picked to a sibling backend (#7777 finding 3).
             ids = frozenset(
                 str(m.get("id"))
                 for bucket in ("models", "extra_models")
                 for m in (group.get(bucket) or [])
                 if isinstance(m, dict) and m.get("id")
             )
-            by_slug[slug] = by_slug.get(slug, frozenset()) | ids
+            for slug in _provider_id_lookup_keys(group.get("provider_id")):
+                by_slug[slug] = by_slug.get(slug, frozenset()) | ids
         memo = (snapshot, by_slug)
         _advertised_model_ids_memo = memo
-    slug = str(provider_id or "").strip().lower()
-    return memo[1].get(slug)
+    advertised: frozenset | None = None
+    for slug in _provider_id_lookup_keys(provider_id):
+        hit = memo[1].get(slug)
+        if hit is None:
+            continue
+        # Union rather than first-hit: two spellings of the same provider can
+        # index disjoint buckets, and the wider set only ever moves a caller
+        # off the strip fallback (#5979).
+        advertised = hit if advertised is None else (advertised | hit)
+    return advertised
 
 
 # Hard wall-clock budget for a COLD live provider-catalog rebuild when it is
