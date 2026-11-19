@@ -746,8 +746,9 @@ word with `à ì ò ù`, or `-zione`) and no French, Spanish or Portuguese word
 (`est`, `les`, `es`, `el`, `muy`, `não`, ...; never a word ordinary Italian
 uses, such as `su` or `tiene`). `il`, `lo`, `di`, `ma`, `come` and `cosa`
 are French or Spanish words too, so they vote but can't be
-that Italian word (`non` can: French text that uses it nearly always has
-`pas`, `est` or `je` as well). Text in those languages therefore usually resolves to no
+that Italian word (`non` can when used as Italian pre-verbal negation, but not
+when French syntax uses it as an interjection or directly before shared articles).
+Text in those languages therefore usually resolves to no
 language, while short Italian replies such as "Le modifiche sono pronte." or
 "Quando la build termina?" still vote Italian. Mixed text is
 decided by the vote — the winner is used, a single language does not have to

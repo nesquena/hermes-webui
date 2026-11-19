@@ -121,6 +121,10 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Cuando la build termina?", ""),
         ("Quando a build termina?", ""),
         ("Je ne sais pas, non, la build est verte.", ""),
+        # French "non" as interjection or before shared words does not anchor Italian backup.
+        ("Non, le service fonctionne.", ""),
+        ("Non, la connexion fonctionne.", ""),
+        ("Non, la compilation fonctionne.", ""),
         # Accented foreign markers survive tokenization: não blocks the backup.
         ("Ho letto la guida, não entendi.", ""),
         # ...while short Italian replies that lost la/un/con still vote Italian.
@@ -362,6 +366,36 @@ def test_foreign_reply_does_not_take_the_italian_entry(monkeypatch, text):
     captured = {}
     _stub_edge_tts(monkeypatch, captured)
     h = _post({"text": text}, client="10.42.1.6")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "en-US-GuyNeural"
+
+
+_FRENCH_NON_REPLIES = [
+    "Non, le service fonctionne.",
+    "Non, la connexion fonctionne.",
+    "Non, la compilation fonctionne.",
+]
+
+
+@pytest.mark.parametrize("text", _FRENCH_NON_REPLIES)
+def test_french_non_reply_selects_multilingual_ava_with_no_configured_voice(monkeypatch, text):
+    _patch_profile_config(monkeypatch, {})
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.7")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "en-US-AvaMultilingualNeural"
+
+
+@pytest.mark.parametrize("text", _FRENCH_NON_REPLIES)
+def test_french_non_reply_keeps_configured_voice_next_to_italian_entry(monkeypatch, text):
+    cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.8")
     routes._handle_tts(h, None)
     assert h.status == 200, h.payload()
     assert captured["voice"] == "en-US-GuyNeural"
