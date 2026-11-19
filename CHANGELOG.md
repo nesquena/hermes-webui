@@ -75,8 +75,6 @@
 
 - **The updater gives Git fetches time to finish and cleans up Git helpers it stops (#8480, @UncleLiu-0306).** Every fetch and pull the updater runs (update checks, apply, force-update, pull) now gets 60 seconds instead of 15, and runs with automatic maintenance and auto-GC turned off for that one command; persistent Git configuration is unchanged. On Linux and macOS the command runs in its own process group, so a timeout or interruption stops Git and every helper it started. On Windows it runs inside a Job Object, which does the same. The browser now waits up to five minutes for apply, force-update and lock recovery. While an update is applying, the update lock (and the brief hold on new chats) can now last up to about three minutes on a slow remote, instead of about one.
 
-- **Async delegation completions are no longer delivered twice when their acknowledgement hits a brief database lock on newer Hermes Agents (#9124).** Agent v0.23.2 removed `tools.async_delegation.mark_completion_delivered`, the fallback marker WebUI used when the durable completion acknowledgement raised. Without it, a transient "database is locked" left the completion pending, so it was delivered again (on the wakeup path, as a duplicate wakeup turn). WebUI now retries the acknowledgement on a busy or locked SQLite error only, at most twice (after 50 ms, then 200 ms, the second only within one second). The acknowledgement only updates a row still pending under this claim, so a retry can't apply twice. Other errors, and the marker fallback on older Agents, are unchanged.
-
 - **Deleted Desktop conversations no longer linger in the sidebar.** A Desktop-origin row whose session was deleted from its owning profile's `state.db` is pruned from the sidebar index, with either CLI-visibility setting. Pruning only happens when that profile's own database is readable and confirms the deletion; a missing, corrupt, unreadable or inaccessible database keeps the row. Thanks @pxxD1998.
 
 - **Post-compression tool-result pruning follows the context engine that actually owns the turn.** Pruning was gated on the configured engine name, so a fallback to the built-in compressor (empty, unavailable or edited engine setting) skipped it and kept large tool results in context. The gate now reads the active engine object. Thanks @eringerli.
@@ -345,6 +343,12 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.702] — 2026-11-19
+
+### Fixed
+
+- **Async delegation completions are no longer delivered twice when their acknowledgement hits a brief database lock on newer Hermes Agents (#9124).** Agent v0.23.2 removed `tools.async_delegation.mark_completion_delivered`, the fallback marker WebUI used when the durable completion acknowledgement raised. Without it, a transient "database is locked" left the completion pending, so it was delivered again (on the wakeup path, as a duplicate wakeup turn). WebUI now retries the acknowledgement on a busy or locked SQLite error only, at most twice (after 50 ms, then 200 ms, the second only within one second). The acknowledgement only updates a row still pending under this claim, so a retry can't apply twice. Other errors, and the marker fallback on older Agents, are unchanged.
 
 ## [v0.52.701] — 2026-11-19
 
