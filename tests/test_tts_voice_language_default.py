@@ -121,7 +121,7 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Cuando la build termina?", ""),
         ("Quando a build termina?", ""),
         ("Je ne sais pas, non, la build est verte.", ""),
-        # French "non" as interjection or before shared words does not anchor Italian backup.
+        # French "non" as interjection before punctuation does not anchor Italian backup.
         ("Non, le service fonctionne.", ""),
         ("Non, la connexion fonctionne.", ""),
         ("Non, la compilation fonctionne.", ""),
@@ -142,6 +142,8 @@ def _patch_profile_config(monkeypatch, cfg):
             "Quando la build termina?",
             "La connessione non funziona.",
             "La build non passa.",
+            "Non la trovo.",
+            "Non le vedo.",
             "La patch è su GitHub.",
             "Questa cache tiene le sessioni.",
         ]],
@@ -328,6 +330,8 @@ _SHORT_ITALIAN_REPLIES = [
     "Quando la build termina?",
     "La connessione non funziona.",
     "La build non passa.",
+    "Non la trovo.",
+    "Non le vedo.",
     "La patch è su GitHub.",
     "Questa cache tiene le sessioni.",
 ]

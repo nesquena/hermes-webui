@@ -747,7 +747,7 @@ word with `à ì ò ù`, or `-zione`) and no French, Spanish or Portuguese word
 uses, such as `su` or `tiene`). `il`, `lo`, `di`, `ma`, `come` and `cosa`
 are French or Spanish words too, so they vote but can't be
 that Italian word (`non` can when used as Italian pre-verbal negation, but not
-when French syntax uses it as an interjection or directly before shared articles).
+when French syntax uses it as an interjection before punctuation).
 Text in those languages therefore usually resolves to no
 language, while short Italian replies such as "Le modifiche sono pronte." or
 "Quando la build termina?" still vote Italian. Mixed text is

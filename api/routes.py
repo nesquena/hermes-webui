@@ -26431,13 +26431,12 @@ def _detect_text_lang(text: str) -> str:
     # ..."); "Lo faccio con una ..." needs an Italian-only word. Not quando:
     # Portuguese writes it too, but uses none of the shared words, so
     # "Quando la build termina?" is Italian. French uses "non" as an
-    # interjection ("Non, ...") or directly before shared articles ("non le
-    # ...", "non la ..."), where Italian writes "no" ("No, ..."). In that
-    # context "non" cannot anchor shared-word backup votes; otherwise it
-    # is Italian pre-verbal negation ("La build non passa.") and acts as
-    # a strong vote.
+    # interjection ("Non, ..."), where Italian writes "no" ("No, ..."). An
+    # interjection "non" cannot anchor shared-word backup votes; otherwise
+    # it is Italian pre-verbal negation ("La build non passa.", "Non la trovo.")
+    # and acts as a strong vote.
     weak_it_words = {"il", "lo", "di", "ma", "come", "cosa"}
-    if re.search(r"\bnon\s*[,;:!?]|\bnon\s+(?:la|le|un|una|con)\b", text or "", re.IGNORECASE):
+    if re.search(r"\bnon\s*[,;:!?]", text or "", re.IGNORECASE):
         weak_it_words.add("non")
     strong_it_votes = it_votes - sum(1 for w in words if w in weak_it_words)
     if strong_it_votes and not any(w in other_romance_words for w in words):
