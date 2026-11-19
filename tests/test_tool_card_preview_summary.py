@@ -30,6 +30,7 @@ for (let i = 0; i < lines.length; i++) {
 if (startIdx < 0) throw new Error('_toolArgPreviewValue not found');
 eval(lines.slice(startIdx, endIdx).join('\n'));
 let buf = '';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => {
   const payload = JSON.parse(buf || '{}');
