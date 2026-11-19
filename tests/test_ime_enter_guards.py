@@ -317,3 +317,84 @@ def test_kanban_helper_composing_enter_does_not_create_task():
         {"key": "Enter", "isComposing": False, "keyCode": 13},
     ])
     assert results == [{"calls": 0}, {"calls": 0}, {"calls": 1}], results
+
+
+# ── behaviour: the custom-model-id keydown handler, executed for real ────────
+
+
+def _extract_custom_model_keydown(src: str) -> str:
+    """Return the arrow handler bound to the custom-model-id input."""
+    anchor = "const _ci=_custRow.querySelector('.model-custom-input');"
+    start = src.index(anchor)
+    marker = "_ci.addEventListener('keydown',"
+    handler_start = src.index(marker, start) + len(marker)
+    body = src.index("{", handler_start)
+    depth = 0
+    for idx in range(body, len(src)):
+        ch = src[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[handler_start:idx + 1]
+    raise AssertionError("unterminated custom model keydown handler")
+
+
+def _run_custom_model_handler(handler_src: str, cases: list) -> list:
+    script = f"""
+let applies = 0, prevented = 0, closed = 0, stopped = 0, stoppedImm = 0;
+const _applyCustom = () => {{ applies += 1; }};
+function closeDropdown() {{ closed += 1; }}
+const window = {{ _isImeEnter: (e) => !!(e.isComposing || e.keyCode === 229) }};
+const handler = {handler_src};
+const out = [];
+for (const c of {json.dumps(cases)}) {{
+  applies = 0; prevented = 0; closed = 0; stopped = 0; stoppedImm = 0;
+  handler({{
+    key: c.key,
+    isComposing: !!c.isComposing,
+    keyCode: c.keyCode,
+    preventDefault: () => {{ prevented += 1; }},
+    stopImmediatePropagation: () => {{ stoppedImm += 1; }},
+    stopPropagation: () => {{ stopped += 1; }},
+  }});
+  out.push({{applies, prevented, closed, stopped, stoppedImm}});
+}}
+console.log(JSON.stringify(out));
+"""
+    proc = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=60, env=_node_env()
+    )
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_custom_model_id_composing_enter_keeps_the_default_action():
+    """A committing Enter belongs to the IME: the custom-model field must not
+    submit AND must not call preventDefault(), or the candidate-confirm key is
+    cancelled — the other half of the bug this PR fixes."""
+    handler = _extract_custom_model_keydown(UI_JS)
+    composing, plain_enter, escape, composing_char = _run_custom_model_handler(
+        handler,
+        [
+            {"key": "Enter", "isComposing": True, "keyCode": 229},
+            {"key": "Enter", "isComposing": False, "keyCode": 13},
+            {"key": "Escape", "isComposing": False, "keyCode": 27},
+            {"key": "a", "isComposing": True, "keyCode": 229},
+        ],
+    )
+    assert composing["applies"] == 0, composing
+    assert composing["prevented"] == 0, (
+        "the IME branch must leave the candidate-confirming Enter's default action alone"
+    )
+    assert composing["stoppedImm"] >= 1, composing
+    assert plain_enter["applies"] == 1 and plain_enter["prevented"] == 1, plain_enter
+    assert escape["closed"] == 1 and escape["prevented"] == 1, escape
+    assert composing_char == {
+        "applies": 0,
+        "prevented": 0,
+        "closed": 0,
+        "stopped": 0,
+        "stoppedImm": 0,
+    }, composing_char

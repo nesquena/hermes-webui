@@ -6753,8 +6753,11 @@ function renderModelDropdown(){
   const _ci=_custRow.querySelector('.model-custom-input');
   // One keydown listener for the custom model id: a committing Enter must not
   // submit (nor reach the picker's other key paths), and Escape closes.
+  // The IME branch must NOT preventDefault(): that default action is the
+  // candidate-confirm key itself, so cancelling it would break the commit this
+  // handler is meant to protect.
   _ci.addEventListener('keydown',e=>{
-    if(e.key==='Enter'&&window._isImeEnter&&window._isImeEnter(e)){e.preventDefault();e.stopImmediatePropagation();e.stopPropagation();return;}
+    if(e.key==='Enter'&&window._isImeEnter&&window._isImeEnter(e)){e.stopImmediatePropagation();e.stopPropagation();return;}
     if(e.key==='Enter'){e.preventDefault();_applyCustom();}
     if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();}
   });
