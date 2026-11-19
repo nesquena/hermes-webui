@@ -92,6 +92,22 @@ def _identity(model, provider):
     return model, provider
 
 
+def _stored_identity(model, provider):
+    """Validate an identity read back from disk WITHOUT normalising it again.
+
+    ``set_pin`` already wrote the canonical identity; re-running
+    ``_normalize_model`` on read strips a ``<provider>/`` model namespace a
+    second time (``openrouter/auto`` became ``auto``), so the returned pin no
+    longer matches the stored one and repeating the identical POST appends a
+    second identity — 400, then a 503 GET on the duplicated store.
+    """
+    if not _is_valid_model_identity(model, provider):
+        raise PreferencesError(
+            'Saved model preferences are damaged; existing file was preserved'
+        )
+    return model.strip(), provider.strip()
+
+
 def _read_pins_path(path):
     try:
         raw = path.read_text(encoding='utf-8')
@@ -104,7 +120,7 @@ def _read_pins_path(path):
             raise ValueError()
         pins, seen = [], set()
         for p in items:
-            model, provider = _identity(p['model'], p['provider'])
+            model, provider = _stored_identity(p['model'], p['provider'])
             if (model, provider) in seen:
                 raise ValueError()
             seen.add((model, provider))
@@ -273,7 +289,7 @@ def _scan_usage(state_dir, profile, now):
                         continue
                     if e.get('event') != 'submitted':
                         continue
-                    if e.get('source') not in (None, '', 'webui'):
+                    if e.get('source') not in (None, '', 'webui', 'fork'):
                         continue
                     # Same alias contract as the index filter above.  An event
                     # with no profile stamp inherits its session's owner, which

@@ -6671,20 +6671,22 @@ function _focusModelPicker(dd){
 let _modelFrequentCache=null;       // {profile,pins:[{model,provider}],usage:[{...}],limit,fetchedAt}
 let _modelFrequentRequestSeq=0;     // request-generation guard
 let _modelFrequentInFlight=false;   // dedupe overlapping GETs
+let _modelFrequentPendingSaves=0;   // in-flight POSTs own the cache while >0
+let _modelFrequentSaveChain=Promise.resolve(); // serialize pin mutations
 const _MODEL_FREQUENT_TTL_MS=30000; // small TTL, refreshed on open / re-open
 function _frequentProfileName(){return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';}
-// Stable identity: strip ONLY the exact routing prefix `@<provider>:` or
-// `<provider>/` when it matches a known provider, and nothing else. We do NOT
-// reuse `_modelPickerOptionIdentity` (lossy dot/hyphen/last-slash normalisation)
-// for the pin key, per the exact-key requirement.
+// Stable identity: strip ONLY the exact routing prefix `@<provider>:` when it
+// matches a known provider. A bare `<provider>/` prefix is NOT stripped: that
+// form is an ordinary model namespace (`openrouter/auto`), and the server
+// stores the canonical id verbatim. Stripping it a second time turned the
+// canonical pin into `auto`, so a saved pin no longer matched its catalog row
+// (maintainer finding 1, 2026-11-17).
 function _frequentModelKey(modelId,providerId){
   const provider=String(providerId||'').trim();
   let value=String(modelId||'');
   const atPrefix=provider?`@${provider}:`:'';
   if(atPrefix&&value.startsWith(atPrefix)){
     value=value.slice(atPrefix.length);
-  }else if(provider&&value.startsWith(provider+'/')&&value.length>provider.length){
-    value=value.slice(provider.length+1);
   }
   return JSON.stringify([provider,value]);
 }
@@ -6705,8 +6707,11 @@ function _modelPreferencesAge(){
 }
 // Async load of server pin/usage state. Guards against late responses leaking
 // a prior profile or overwriting newer pin updates (seq is bumped on every
-// request AND on every local pin toggle).
-async function _loadModelFrequentPrefs(){
+// request AND on every local pin toggle). While a POST is in flight the cache
+// belongs to that save, so a stale GET snapshot is discarded instead of
+// overwriting a successful pin (maintainer finding 2, 2026-11-17).
+async function _loadModelFrequentPrefs(opts){
+  const authoritative=!!(opts&&opts.authoritative);
   const profile=_frequentProfileName();
   if(_modelFrequentInFlight===profile) return;
   _modelFrequentInFlight=profile;
@@ -6714,6 +6719,7 @@ async function _loadModelFrequentPrefs(){
   try{
     const data=await api('/api/models/preferences',{timeoutToast:false});
     if(seq!==_modelFrequentRequestSeq||profile!==_frequentProfileName()) return; // superseded/profile changed
+    if(!authoritative&&_modelFrequentPendingSaves>0) return; // a save owns the cache
     if(!data) return;
     if(data.profile&&data.profile!==profile) return; // profile switched mid-flight
     _modelFrequentCache={profile,pins:Array.isArray(data.pins)?data.pins:[],usage:Array.isArray(data.usage)?data.usage:[],limit:Number(data.limit)||6,fetchedAt:Date.now()};
@@ -6729,30 +6735,45 @@ async function _loadModelFrequentPrefs(){
 }
 // Toggle server pin state. Returns true on success (cached pins updated),
 // false on failure (UI reverts), or null when another request superseded it.
+// Mutations are SERIALISED: request-start order is not server-commit order, so
+// two overlapping stars could otherwise discard a successful save whose
+// response arrived after a later-started request (maintainer finding 2).
 async function _setModelPinned(model,provider,pinned){
-  const profile=_frequentProfileName();
-  const seq=++_modelFrequentRequestSeq;
-  _modelFrequentInFlight=false;
-  let updated;
-  try{
-    updated=await api('/api/models/preferences',{method:'POST',body:JSON.stringify({model,provider,pinned})});
-  }catch(_e){
-    if(typeof showToast==='function') showToast((t('model_pin_failed')||'Failed to update pinned model')+': '+_e.message,4000,'error');
-    return false;
-  }
-  if(seq!==_modelFrequentRequestSeq||profile!==_frequentProfileName()) return null; // superseded
-  if(typeof updated==='object'&&updated){
-    if(updated.profile&&updated.profile!==profile) return null; // profile switched
-    _modelFrequentCache={profile:updated.profile||profile,pins:Array.isArray(updated.pins)?updated.pins:[],usage:Array.isArray(updated.usage)?updated.usage:[],limit:Number(updated.limit)||6,fetchedAt:Date.now()};
-  }else{
-    // POST returned no body / wrapper: re-fetch authoritative state silently.
-    await _loadModelFrequentPrefs();
-    return _frequentIsPinned(model,provider);
-  }
-  if(typeof _refreshOpenFrequent==='function'){
-    try{_refreshOpenFrequent(_frequentModelKey(model,provider));}catch(_e){}
-  }
-  return true;
+  const work=async()=>{
+    const profile=_frequentProfileName();
+    const seq=++_modelFrequentRequestSeq;
+    _modelFrequentInFlight=false;
+    _modelFrequentPendingSaves+=1;
+    try{
+      let updated;
+      try{
+        updated=await api('/api/models/preferences',{method:'POST',body:JSON.stringify({model,provider,pinned})});
+      }catch(_e){
+        if(typeof showToast==='function') showToast((t('model_pin_failed')||'Failed to update pinned model')+': '+_e.message,4000,'error');
+        return false;
+      }
+      if(seq!==_modelFrequentRequestSeq||profile!==_frequentProfileName()) return null; // superseded
+      if(typeof updated==='object'&&updated){
+        if(updated.profile&&updated.profile!==profile) return null; // profile switched
+        _modelFrequentCache={profile:updated.profile||profile,pins:Array.isArray(updated.pins)?updated.pins:[],usage:Array.isArray(updated.usage)?updated.usage:[],limit:Number(updated.limit)||6,fetchedAt:Date.now()};
+      }else{
+        // POST returned no body / wrapper: re-fetch authoritative state
+        // silently. This read bypasses the pending-save guard because it is
+        // part of THIS save.
+        await _loadModelFrequentPrefs({authoritative:true});
+        return _frequentIsPinned(model,provider);
+      }
+      if(typeof _refreshOpenFrequent==='function'){
+        try{_refreshOpenFrequent(_frequentModelKey(model,provider));}catch(_e){}
+      }
+      return true;
+    }finally{
+      _modelFrequentPendingSaves-=1;
+    }
+  };
+  const run=_modelFrequentSaveChain.then(work,work);
+  _modelFrequentSaveChain=run.then(()=>{},()=>{});
+  return run;
 }
 // Wrapper used by row handlers to toggle pin without changing the model.
 function _toggleModelPin(model,provider){

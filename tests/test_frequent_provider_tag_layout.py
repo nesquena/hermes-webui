@@ -8,10 +8,11 @@ has margin-left:auto, which pushes it away from the name). This test renders the
 REAL dropdown with production static/ui.js + static/style.css and asserts the
 layout via actual DOM siblings and bounding boxes on desktop and mobile widths.
 
-Run from the repo root (state dir must live outside the production Hermes home):
+Run from the repo root via the required runner (it pins a supported Python and
+the managed dependencies), with the state dir outside the production home:
 
   env -u HERMES_WEBUI_TEST_STATE_DIR TMPDIR=/tmp \
-      python -m pytest tests/test_frequent_provider_tag_layout.py -q --tb=short
+      ./scripts/test.sh tests/test_frequent_provider_tag_layout.py -q --tb=short
 """
 import time
 

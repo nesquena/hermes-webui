@@ -195,6 +195,26 @@ def test_usage_tallies_native_submitted_sends_deduped():
     assert len(data["usage"]) <= 6
 
 
+def test_usage_counts_writable_fork_regeneration():
+    """Maintainer reproduction (2026-11-17 #3): a user-requested regeneration in
+    a native writable fork carries ``submitted.source='fork'``; it is a real
+    send and must count, while automation/read-only/CLI rows stay excluded."""
+    _wipe_state()
+    _write_sidecar("sFork", session_source="fork")
+    _write_index([
+        {"session_id": "sFork", "profile": "default", "is_cli_session": False,
+         "source_tag": None, "raw_source": None, "session_source": "fork", "read_only": False},
+    ])
+    _append_journal("sFork", [
+        {"event": "submitted", "stream_id": "fork-regen-1", "content": "x",
+         "model": "m1", "model_provider": "prov", "created_at": NOW - 3600,
+         "source": "fork"},
+        {"event": "completed", "stream_id": "fork-regen-1", "created_at": NOW - 3500},
+    ])
+    usage, data = _usage_map()
+    assert usage == {("m1", "prov"): 1}, data["usage"]
+
+
 def test_usage_excludes_foreign_readonly_deleted_other_profile_and_compensated():
     _wipe_state()
     now = time.time()
@@ -356,6 +376,33 @@ def test_corrupt_pins_refuses_overwrite():
                          {"model": "recovered", "provider": "p", "pinned": True})
     assert status == 400
     assert PINS_FILE.read_text(encoding="utf-8") == "{{{ not json"
+
+
+def test_repeated_pin_post_is_idempotent_for_namespace_model():
+    """Maintainer reproduction (2026-11-17 #1): pinning ``@openrouter:openrouter/auto``
+    stores ``openrouter/auto`` but a re-read normalised it again to ``auto``, so
+    repeating the identical POST wrote a second identity, returned 400 and left
+    GET returning 503. The stored canonical identity must be validated, never
+    normalised a second time."""
+    _wipe_state()
+    body = {"model": "@openrouter:openrouter/auto", "provider": "openrouter", "pinned": True}
+    expected = [{"model": "openrouter/auto", "provider": "openrouter"}]
+
+    first, status = _post("/api/models/preferences", body)
+    assert status == 200, first
+    assert first["pins"] == expected, first
+
+    second, status = _post("/api/models/preferences", body)
+    assert status == 200, second
+    assert second["pins"] == expected, second
+
+    got, status = _get("/api/models/preferences")
+    assert status == 200, got
+    assert got["pins"] == expected, got
+
+    cleared, status = _post("/api/models/preferences", {**body, "pinned": False})
+    assert status == 200, cleared
+    assert cleared["pins"] == [], cleared
 
 
 def open_composer_picker(page):
