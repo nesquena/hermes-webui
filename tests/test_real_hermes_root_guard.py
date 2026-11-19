@@ -3,6 +3,7 @@ import os
 import pathlib
 import shutil
 import sqlite3
+import subprocess
 import sys
 import urllib.parse
 from contextlib import contextmanager
@@ -145,6 +146,44 @@ def test_installing_again_keeps_paths_allowed_earlier(tmp_path, monkeypatch):
         assert guard.violation(root / "profiles" / "new") is not None
 
 
+def test_a_profile_created_before_a_reinstall_is_still_reported(tmp_path, monkeypatch):
+    """The profiles/ snapshot is the session's first one: install() runs again mid-session, and a profile a child
+    process created before that point must still reach the end-of-run check (the only place that sees it)."""
+    with _simulated_real_root(tmp_path) as root:
+        monkeypatch.setattr(guard, "real_roots", lambda: [os.path.realpath(root)])
+        monkeypatch.setitem(guard._STATE, "profiles", dict(guard._STATE["profiles"]))
+        guard.install([tmp_path / "repo"])
+        # a child process: audit hooks are per-interpreter, so this is the leak the guard can only see afterwards
+        subprocess.run([sys.executable, "-c",
+                        "import pathlib, sys; pathlib.Path(sys.argv[1]).mkdir()",
+                        str(root / "profiles" / "leaked")], check=True)
+        guard.install([tmp_path / "repo"])  # the re-executed conftest.py
+        assert [p for p in guard._profiles_changes() if "leaked" in p and str(root) in p], guard._profiles_changes()
+
+
+@pytest.mark.parametrize("via", ["install", "allow"])
+@pytest.mark.parametrize("broad", ["the-root-itself", "the-roots-parent"])
+def test_an_allowed_path_that_is_or_contains_a_real_root_still_guards_it(tmp_path, monkeypatch, via, broad):
+    """An allowed root wins over a protected one, so --basetemp=~/.hermes (a root) or --basetemp=~ (its parent)
+    must not exempt the whole root for the session. install() and allow() (pytest_configure adds --basetemp after
+    install) both drop such an entry, and a narrower allowance under the root keeps working."""
+    with _simulated_real_root(tmp_path) as root:
+        basetemp = root if broad == "the-root-itself" else root.parent
+        monkeypatch.setattr(guard, "real_roots", lambda: [os.path.realpath(root)])
+        monkeypatch.setitem(guard._STATE, "profiles", dict(guard._STATE["profiles"]))
+        if via == "install":
+            guard.install([tmp_path / "repo", basetemp])
+        else:
+            guard.install([tmp_path / "repo"])
+            guard.allow(basetemp)
+        assert guard.violation(root / "profiles" / "new") is not None
+        assert guard.violation(root / "config.yaml") is not None
+        assert guard.violation(root / "allowed-scratch" / "kept") is None  # a real scratch dir stays allowed
+        with pytest.raises(guard.RealHermesRootWriteError):
+            (root / "profiles" / "new").mkdir()
+        assert not (root / "profiles" / "new").exists()
+
+
 def test_bytecode_under_a_discovered_agent_checkout_is_not_refused(tmp_path):
     """Discovery prefers <HERMES_HOME>/hermes-agent, so a profile home's checkout sits at
     <root>/profiles/<name>/hermes-agent; importing it writes bytecode there."""
@@ -216,6 +255,23 @@ def test_session_keeps_playwrights_default_browser_cache():
         pytest.skip("no linkable Playwright browser cache on this machine")
     for src, rel in linked:
         assert os.path.realpath(conftest.SANDBOX_HOME / rel) == os.path.realpath(src), rel
+
+
+def test_session_mirrors_the_xdg_data_home_agent_checkout():
+    """api/startup.py's last discovery step also looks in $XDG_DATA_HOME/hermes-agent (default ~/.local/share).
+    HOME moves into the sandbox, so that checkout must be linked there too, as the other real ones are."""
+    conftest = _conftest_module()
+    xdg_agent = pathlib.Path(os.environ.get("XDG_DATA_HOME", "").strip()
+                             or conftest.HOME / ".local" / "share").expanduser() / "hermes-agent"
+    mirrored = {str(rel): src for src, rel in conftest._HOME_DIR_LINKS}
+    if not xdg_agent.is_relative_to(conftest.HOME):
+        assert xdg_agent not in mirrored.values(), "an XDG_DATA_HOME outside HOME needs no sandbox link"
+        return  # discovery reads the absolute variable, which the sandbox does not change
+    rel = xdg_agent.relative_to(conftest.HOME).as_posix()
+    assert mirrored.get(rel) == xdg_agent
+    if not xdg_agent.is_dir() or rel in set(conftest._LINK_FAILED):  # nothing to link, or no symlink privilege
+        pytest.skip("no XDG_DATA_HOME Agent checkout to link on this machine")
+    assert os.path.realpath(conftest.SANDBOX_HOME / rel) == os.path.realpath(xdg_agent)
 
 
 @pytest.mark.parametrize("env, uses_default", [

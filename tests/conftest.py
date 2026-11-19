@@ -216,9 +216,19 @@ _PLAYWRIGHT_CACHES = (
     (pathlib.Path(os.environ.get('LOCALAPPDATA') or HOME / 'AppData' / 'Local') / 'ms-playwright',
      'AppData/Local/ms-playwright'),
 )
-_LINK_FAILED = _hermes_root_guard.link_real_dirs(SANDBOX_HOME, (
-    (HOME / '.hermes/hermes-agent', '.hermes/hermes-agent'), (HOME / 'hermes-agent', 'hermes-agent'),
-    (_LOCALAPPDATA / 'hermes/hermes-agent', 'AppData/Local/hermes/hermes-agent')) + _PLAYWRIGHT_CACHES)
+# api/startup.py's last discovery step also looks for the Agent at $XDG_DATA_HOME/hermes-agent (default
+# ~/.local/share). HOME moves into the sandbox, so mirror that checkout at its HOME-relative place too; an
+# XDG_DATA_HOME naming a directory outside HOME needs no link (the absolute variable still resolves it).
+_XDG_AGENT = pathlib.Path(
+    os.environ.get('XDG_DATA_HOME', '').strip() or HOME / '.local' / 'share').expanduser() / 'hermes-agent'
+_HOME_DIR_LINKS = [
+    (HOME / '.hermes/hermes-agent', '.hermes/hermes-agent'),
+    (HOME / 'hermes-agent', 'hermes-agent'),
+    (_LOCALAPPDATA / 'hermes/hermes-agent', 'AppData/Local/hermes/hermes-agent'),
+]
+if _XDG_AGENT.is_relative_to(HOME):
+    _HOME_DIR_LINKS.append((_XDG_AGENT, _XDG_AGENT.relative_to(HOME).as_posix()))
+_LINK_FAILED = _hermes_root_guard.link_real_dirs(SANDBOX_HOME, tuple(_HOME_DIR_LINKS) + _PLAYWRIGHT_CACHES)
 _PLAYWRIGHT_FALLBACK = (WINDOWS and 'AppData/Local/ms-playwright' in _LINK_FAILED
                         and _hermes_root_guard.playwright_uses_default_cache(os.environ))
 if _PLAYWRIGHT_FALLBACK:  # no symlink privilege: point Playwright at the original cache directly
