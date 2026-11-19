@@ -37,6 +37,8 @@
 
 ### Fixed
 
+- **A timing test for the update lock-recovery retry no longer fails on a busy machine (#9172).** The test speeds its timers up by a factor of 1,000, which put its "just under" and "just over" the 300-second limit cases 1 ms apart in real time, close enough for a loaded runner to swap them. They now sit 10 seconds either side of the limit. No product code changes.
+
 - **Newer Agents: compressed conversations, compressed messaging sessions and busy-ledger delegation results work again (#9166, refs #9157).** Newer Agent builds replaced the session store, and three things failed quietly:
   - **Reload recovery:** reloading a compressed conversation that lands on its archived part didn't find the continuation.
   - **Messaging sessions:** compressed Telegram and Discord sessions on the Gateway backend couldn't continue.
