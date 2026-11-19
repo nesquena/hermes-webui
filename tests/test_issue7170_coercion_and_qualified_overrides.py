@@ -457,6 +457,43 @@ def test_reasoning_override_keys_for_model_enumerates_aggregator_and_custom_qual
     )
 
 
+def test_reasoning_override_keys_enumerates_mixed_dot_dash_scoped_spelling():
+    """greptile P1 (2026-11-17): a mixed dot/dash scoped spelling must still be
+    enumerated and cleared.
+
+    ``prov:claude.opus-4-5`` is a spelling of ``claude-opus-4.5`` under the
+    reader's dot/dash equivalence. The enumerator normalised in one direction
+    only, so this key was rejected before the derived-match pass could rank it.
+    """
+    keys = cfg._reasoning_override_keys_for_model(
+        "claude-opus-4.5",
+        {"prov:claude.opus-4-5": "low", "prov:claude-opus-4.5": "high"},
+        provider_id="prov",
+    )
+    assert "prov:claude.opus-4-5" in keys, (
+        "the mixed dot/dash scoped spelling must be enumerated"
+    )
+    assert "prov:claude-opus-4.5" in keys
+
+
+def test_reasoning_override_keys_recovers_provider_from_at_model():
+    """greptile P1 (2026-11-18): POSTing Default for ``@prov:m1`` must clear a
+    ``prov:m1`` scoped override.
+
+    The separate ``provider`` field is optional in the POST body; the reader
+    recovers the provider from the ``@provider:model`` form, so the setter must
+    do the same when enumerating scoped keys.
+    """
+    keys = cfg._reasoning_override_keys_for_model(
+        "@prov:m1",
+        {"prov:m1": "low", "m1": "high"},
+    )
+    assert "prov:m1" in keys, (
+        "the provider parsed out of @prov:m1 must feed the scoped-key enumeration"
+    )
+    assert "m1" in keys
+
+
 def test_fallback_matches_core_differentially(no_core):
     """No-core fallback must agree with the core resolver, both directions.
 

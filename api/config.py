@@ -7258,7 +7258,13 @@ def _reasoning_override_keys_for_model(
     orig_model = model
     parsed = _parse_provider_qualified_model_id(model)
     if parsed:
-        model = parsed[0]
+        model, parsed_provider = parsed
+        # The POST body's separate ``provider`` field is optional, while the
+        # reader recovers the provider from ``@provider:model``. Recover it
+        # here too, or ``POST {\"effort\":\"\",\"model\":\"@prov:m1\"}`` leaves a
+        # ``prov:m1`` override behind (greptile P1, 2026-11-18).
+        if not provider_id:
+            provider_id = parsed_provider
     variants = _reasoning_override_variants_for_model(model, orig_model=orig_model)
     wanted_lower = {v.lower() for v in variants}
     # The no-core fallback canonicalizes dots to dashes on BOTH sides at match
@@ -7360,9 +7366,6 @@ def _scoped_reasoning_override_keys_for_model(
     model_variants = _reasoning_override_variants_for_model(
         model, orig_model=orig_model or model_id
     )
-    wanted = {v.lower() for v in model_variants}
-    wanted |= {v.lower().replace(".", "-") for v in model_variants}
-    wanted |= {v.lower().replace("-", ".") for v in model_variants}
 
     # Ordered candidate spellings, most canonical first. This rank decides
     # which of several matching keys wins: an exact spelling always beats a
@@ -7410,8 +7413,12 @@ def _scoped_reasoning_override_keys_for_model(
         if not tail:
             continue
         tail_lower = tail.lower()
-        if tail_lower not in wanted:
-            continue
+        # No pre-filter on an exact-spelling set: dot/dash equivalence has to
+        # work in BOTH directions, and a mixed spelling such as
+        # ``claude.opus-4-5`` for ``claude-opus-4.5`` matches neither a
+        # pure dot→dash nor a pure dash→dot normalisation of the model id.
+        # The rank pass below is the single authority; ``rank is None`` means
+        # this key does not name the model (greptile P1, 2026-11-17).
         rank: int | None = None
         for position, form in enumerate(ordered):
             if tail_lower == form:
