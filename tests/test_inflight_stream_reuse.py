@@ -275,19 +275,18 @@ def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reatt
     pins the gate's shape so future refactors don't drop the flag check.
     """
     body = _function_body(SESSIONS_JS, "loadSession")
-    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence): #3899
-    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would grab
-    # the wrong one. rfind = the substantive restore branch.
-    inflight_idx = body.rfind("if(INFLIGHT[sid]){")
-    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = body[inflight_idx : inflight_idx + 4200]
-    assert "INFLIGHT[sid].reattach" in inflight_block, (
-        "loadSession()'s INFLIGHT branch must gate the SSE reattach on the "
-        "reattach flag so closeLiveStream()'s marking flows through"
+    # Anchor on the GATE itself, not on an `if(INFLIGHT[sid]){` block: upstream
+    # keeps adding INFLIGHT blocks to loadSession (#3899 idle-reset, #8701
+    # stale-stream snapshot), and the gate lives in a separate block whose
+    # distance to the reattach call differs from those block windows.
+    gate_idx = body.find("INFLIGHT[sid].reattach")
+    assert gate_idx >= 0, (
+        "loadSession()'s INFLIGHT branch must be gated on the reattach flag so "
+        "closeLiveStream()'s marking flows through"
     )
     reattach_gate = re.search(
         r"if\(INFLIGHT\[sid\]\.reattach\s*&&\s*activeStreamId.*?attachLiveStream\(sid, activeStreamId",
-        inflight_block,
+        body[max(0, gate_idx - 40) : gate_idx + 2000],
         re.DOTALL,
     )
     assert reattach_gate, (
