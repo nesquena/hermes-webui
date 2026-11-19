@@ -3327,12 +3327,22 @@ $('msg').addEventListener('paste',e=>{
     const pasteTs=Date.now();
     const files=imageItems.map((i,idx)=>{
       const blob=i.getAsFile();
+      // A clipboard can advertise an image item whose data never materialized
+      // (delayed-render screenshot tools, cloud clipboards, some browser
+      // implementations). `new File([null], ...)` would stringify null and
+      // silently upload a 4-byte file containing the literal text "null", so
+      // skip those items rather than fabricate a broken attachment.
+      if(!blob)return null;
       const ext=i.type.split('/')[1]||'png';
       const suffix=imageItems.length>1?`-${idx+1}`:'';
       return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
-    });
-    addFiles(files);
-    setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    }).filter(Boolean);
+    if(files.length){
+      addFiles(files);
+      setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    }else{
+      setStatus(t('image_paste_failed'));
+    }
     return;
   }
   const plainText=e.clipboardData?.getData('text/plain')||'';
