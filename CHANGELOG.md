@@ -29,6 +29,8 @@
 
 - **After a share link is revoked, a conversation no longer goes back to showing that dead link (#9195, refs #8735).** When Share or Stop sharing couldn't reload the conversation from disk, it set the link on the copy held in memory. If that copy later dropped out of the cache and was saved after the link had been revoked, the save could write the revoked link back into the conversation. Both now work on a separate copy, so a later save keeps the link that's actually stored. The rarer case where every reload fails, including the one in the later Stop sharing, stays open in #8735. Thanks @webtecnica for the earlier work on this issue.
 
+- **On a server that hosts several profiles, each profile's credential scope keeps to its own values (#9188, refs #9187).** The Agent builds the launch profile's secret scope from the server's launch environment. WebUI now gives it a frozen copy of the operator's environment, captured at startup, instead of the live process environment, which other profiles' settings can change. A profile's own settings also no longer change the deployment-wide managed directory. Single-profile installs are not affected.
+
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
