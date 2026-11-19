@@ -13409,6 +13409,7 @@ const LOCALES = {
     import_failed: '匯入失敗：',
     import_invalid_json: '無效的 JSON',
     image_pasted: '已貼上圖片：',
+    image_paste_failed: '❌ 無法讀取貼上的圖片，請重新截圖後再貼上。',
     text_pasted: '已將貼上文字附加為：',
     // messages.js
     edit_message: '編輯訊息',
