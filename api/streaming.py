@@ -7558,9 +7558,16 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 'expectedCurrent': current,
             })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
+            # A local fallback is synced as 'derived' so the Agent's own model
+            # title can still replace it (Refs #9157).
             try:
                 from api.state_sync import sync_session_title
-                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+                sync_session_title(
+                    session_id,
+                    effective_title,
+                    profile=getattr(s, 'profile', None) or 'default',
+                    source='derived' if source == 'fallback' else 'llm',
+                )
             except Exception:
                 logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:
@@ -8959,23 +8966,52 @@ def _merge_agent_replay_bare_user_rows(messages):
 def _installed_repair_runtime_usable():
     """True when the installed Agent's repair machinery can run unmodified.
 
-    ``repair_message_sequence`` imports the persistence codec
-    (``hermes_state.SessionDB``) at call time and reads its class attributes.
-    Test harnesses that fake ``hermes_state`` (a lambda or ``Mock`` in the
-    ``SessionDB`` slot) make those reads raise or, worse, silently return mock
-    objects that would corrupt row content. Probe the codec's actual contract
-    before trusting it: the sentinel prefix must be a real string and a plain
-    string must round-trip unchanged.
+    ``repair_message_sequence`` reads a content codec at call time (see
+    ``_installed_repair_codec`` for which one). Test harnesses that fake that
+    codec (a lambda or ``Mock`` in the ``SessionDB`` slot) make those reads
+    raise or, worse, silently return mock objects that would corrupt row
+    content. Probe the codec's actual contract before trusting it: the
+    sentinel prefix must be a real string and a plain string must round-trip
+    unchanged.
     """
     try:
-        from hermes_state import SessionDB
-
+        prefix, decode = _installed_repair_codec()
         return (
-            isinstance(getattr(SessionDB, "_CONTENT_JSON_PREFIX", None), str)
-            and SessionDB._decode_content("plain-text-probe") == "plain-text-probe"
+            isinstance(prefix, str)
+            and callable(decode)
+            and decode("plain-text-probe") == "plain-text-probe"
         )
     except Exception:
         return False
+
+
+def _installed_repair_codec():
+    """``(prefix, decode)`` of the content codec the installed repair reads.
+
+    Agents whose ``repair_message_sequence`` is defined in
+    ``session_rules.turns`` read that module's own ``_CONTENT_JSON_PREFIX`` and
+    ``decode_content`` (their ``hermes_state.SessionDB`` is a stand-in without
+    the codec attributes, so probing it closed this gate and the settle dropped
+    the current exchange from the saved model context, #9157). Older Agents
+    read ``hermes_state.SessionDB``'s class attributes. Only the codec of the
+    module the repair actually reads is probed, never the other one as a
+    fallback, so a faked codec there still keeps the gate closed.
+    """
+    try:
+        from agent import agent_runtime_helpers as _agent_helpers
+    except Exception:
+        _agent_helpers = None  # keep the SessionDB probe; _apply_installed_repair fails closed on its own import
+    repair = getattr(_agent_helpers, "repair_message_sequence", None)
+    if getattr(repair, "__module__", None) == "session_rules.turns":
+        import session_rules.turns as _turns
+
+        # The repair calls the module-level alias ``_decode_content``; probe that name, and the public
+        # ``decode_content`` only if a later Agent drops the alias.
+        decode = getattr(_turns, "_decode_content", None) or getattr(_turns, "decode_content", None)
+        return getattr(_turns, "_CONTENT_JSON_PREFIX", None), decode
+    from hermes_state import SessionDB
+
+    return getattr(SessionDB, "_CONTENT_JSON_PREFIX", None), getattr(SessionDB, "_decode_content", None)
 
 
 # The settle projection replays the Agent's argument sanitizer on a private copy; its "repaired before request"
