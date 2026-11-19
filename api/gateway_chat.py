@@ -2848,11 +2848,38 @@ def _gateway_compacted_context_prefix(session, msg_text, turn_started_at):
         if _normalize_user_text(_message_text(content)) == prompt:
             return kept[:index]
         # The Agent folds a prompt into the user row before it; keep that row's own text.
-        if isinstance(content, str) and content.rstrip().endswith(raw_prompt):
-            earlier = content.rstrip()[: -len(raw_prompt)].rstrip()
-            if earlier:
-                return kept[:index] + [{**row, "content": earlier}]
+        earlier = _content_without_trailing_prompt(content, raw_prompt)
+        if earlier is not None:
+            return kept[:index] + [{**row, "content": earlier}]
     return None
+
+
+def _content_without_trailing_prompt(content, raw_prompt):
+    """Return *content* minus the prompt text that ends it, or None when it does not end with it.
+
+    A part list keeps every non-text part (media) and every earlier text part; None also
+    when nothing but the prompt would remain.
+    """
+    if isinstance(content, str):
+        text = content.rstrip()
+        if not text.endswith(raw_prompt):
+            return None
+        return text[: -len(raw_prompt)].rstrip() or None
+    if not isinstance(content, list):
+        return None
+    text_indexes = [
+        i for i, part in enumerate(content)
+        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+    ]
+    if not text_indexes:
+        return None
+    last = text_indexes[-1]
+    earlier_text = _content_without_trailing_prompt(content[last]["text"], raw_prompt)
+    if earlier_text is None:
+        if content[last]["text"].strip() != raw_prompt or len(text_indexes) < 2:
+            return None
+        return content[:last] + content[last + 1:]
+    return content[:last] + [{**content[last], "text": earlier_text}] + content[last + 1:]
 
 
 def _drop_active_turn_rows_for_writeback(rows, active_turn_identity) -> list:

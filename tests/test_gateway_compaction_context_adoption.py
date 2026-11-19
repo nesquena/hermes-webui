@@ -238,14 +238,14 @@ NATIVE_OLD = [
 ]
 
 
-def _native_compaction(session_id, history, prompt, compress_start, compress_end):
+def _native_compaction(session_id, history, prompt, compress_start, compress_end, prompt_content=None):
     """Commit what the Agent writes when it compacts *history* + *prompt* mid-turn."""
     from agent.context_compressor import ContextCompressor, _HandoffScan
     from persistence.conversation.messages import NewMessage
     from persistence.conversation.sessions import NewSession
     from persistence_assembly import open_persistence, profile_scope
 
-    messages = [dict(row) for row in history] + [{"role": "user", "content": prompt}]
+    messages = [dict(row) for row in history] + [{"role": "user", "content": prompt_content or prompt}]
     with patch("agent.context_compressor.get_model_context_length", return_value=1_000_000):
         compressor = ContextCompressor(model="test/model", quiet_mode=True)
     scan = _HandoffScan(
@@ -264,12 +264,12 @@ def _native_compaction(session_id, history, prompt, compress_start, compress_end
     return compacted
 
 
-def _run_native_turns(sid, history, compress_start, compress_end):
+def _run_native_turns(sid, history, compress_start, compress_end, prompt_content=None):
     pytest.importorskip("agent.context_compressor", reason="hermes-agent modules not importable")
     pytest.importorskip("persistence_assembly", reason="hermes-agent persistence not importable")
     session = make_session(sid, [row for row in history if row["role"] != "system"])
     _start_turn(session, f"{sid}-1", "live ask")
-    compacted = _native_compaction(session.session_id, history, "live ask", compress_start, compress_end)
+    compacted = _native_compaction(session.session_id, history, "live ask", compress_start, compress_end, prompt_content)
     _run_turn(session.session_id, "live ask", f"{sid}-1")
     session = get_session(session.session_id)
     _start_turn(session, f"{sid}-2", "follow up")
@@ -306,4 +306,31 @@ def test_a_summary_carrier_holding_the_live_ask_is_adopted_without_the_old_histo
     assert [text for _, text in sent if text != compacted[0]["content"]] == [
         summary_part, "live ask", "turn answer",
     ]
+    assert _texts(saved.messages) == ["q0", "a0", "q1", "a1", "live ask", "turn answer", "follow up"]
+
+
+IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+
+
+@pytest.mark.requires_agent_modules
+@pytest.mark.parametrize("structured", [False, True], ids=["plain-string", "text-plus-image"])
+def test_a_structured_summary_carrier_is_split_from_the_live_ask(structured):
+    history = [{"role": "system", "content": "sys"}] + NATIVE_OLD[:4]
+    prompt_content = [{"type": "text", "text": "live ask"}, IMAGE_PART] if structured else None
+    compacted, saved = _run_native_turns(f"native-split-{structured}", history, 1, 5, prompt_content)
+    carrier = compacted[-1]["content"]
+    if structured:
+        # The compressor prepends the summary as its own text part ahead of the ask and the image.
+        assert [part.get("type") for part in carrier] == ["text", "text", "image_url"]
+        summary_part = carrier[0]["text"]
+        expected_carrier = [carrier[0], IMAGE_PART]
+    else:
+        summary_part = carrier[: -len("live ask")].rstrip()
+        expected_carrier = summary_part
+    assert summary_part.startswith(NATIVE_SUMMARY)
+
+    sent = [row for row in CAPTURED_BODIES[-1]["conversation_history"] if row.get("role") != "system"]
+    contents = [row.get("content") for row in sent]
+    assert not {"q0", "a0", "q1", "a1"} & {c for c in contents if isinstance(c, str)}
+    assert contents == [expected_carrier, "live ask", "turn answer"]
     assert _texts(saved.messages) == ["q0", "a0", "q1", "a1", "live ask", "turn answer", "follow up"]
