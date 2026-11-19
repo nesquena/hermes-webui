@@ -78,19 +78,19 @@ def _wrapped_enospc():
 def test_chat_start_enospc_reports_storage_full(monkeypatch):
     """The exact shape from #9167: POST /api/chat/start hitting Errno 28."""
     assert _drive_write(monkeypatch, _enospc()) == [
-        (507, {"error": "Storage is full. Free up space and try again."})]
+        (507, {"error": "Storage on the server is full. Free up space and try again."})]
 
 
 @pytest.mark.parametrize("make_exc", [_wrapped_enospc, lambda: OSError(errno.EDQUOT, "Disk quota exceeded")],
                          ids=["raised-from-enospc", "edquot"])
 def test_write_storage_full_variants(monkeypatch, make_exc):
     status, body = _drive_write(monkeypatch, make_exc())[0]
-    assert status == 507 and "Storage is full" in body["error"]
+    assert status == 507 and "Storage on the server is full" in body["error"]
 
 
 def test_get_path_enospc_reports_storage_full(monkeypatch):
     status, body = _drive_get(monkeypatch, _enospc())[0]
-    assert status == 507 and "Storage is full" in body["error"]
+    assert status == 507 and "Storage on the server is full" in body["error"]
 
 
 @pytest.mark.parametrize("exc", [ValueError("boom"), OSError(errno.EACCES, "Permission denied")],

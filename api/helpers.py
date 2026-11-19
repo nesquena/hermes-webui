@@ -46,7 +46,7 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
 # user can fix it by freeing space. Report it instead of the generic 500.
 _STORAGE_FULL_ERRNOS = frozenset(
     code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None)
-STORAGE_FULL_MESSAGE = "Storage is full. Free up space and try again."
+STORAGE_FULL_MESSAGE = "Storage on the server is full. Free up space and try again."
 
 
 def is_storage_full(exc: BaseException | None) -> bool:
