@@ -115,6 +115,7 @@ let _cronLoadGeneration = 0;
 let _cronAcceptedLoadGeneration = 0;
 let _cronLatestLoadSettled = Promise.resolve();
 let _skillsData = null;
+let _skillsLoadGeneration = 0;  // #9077 loader generation
 let _workspaceList = [];
 let _profileSwitchGeneration = 0;
 let _sessionListSkeletonActive = false;
