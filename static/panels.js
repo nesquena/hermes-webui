@@ -3197,6 +3197,10 @@ function _kanbanUnavailableHtml(err){
 // still active; the profile switch retires in-flight loads through
 // _resetProfileScopedPanelState(). The poller/SSE refresh re-enters here, so
 // this is also plain latest-wins for overlapping refreshes, like loadCrons.
+// loadKanbanBoards() itself stays unguarded: the board switcher and the board
+// modal call it directly, so a guard there would strand them on the previous
+// profile's board list; loadKanban() re-checks the generation as soon as it
+// returns and bails before using the reply.
 let _kanbanLoadGeneration = 0;
 
 async function loadKanban(animate){

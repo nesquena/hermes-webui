@@ -2731,10 +2731,12 @@ async function _switchProfileForSessionLoad(profile){
     // failure cannot skip it. Only a visible Tasks panel is reloaded here:
     // loadCrons is latest-wins (#6767), and it is not awaited, so the session
     // being loaded never waits on, or fails because of, it. Memory/Skills are
-    // not reloaded on this path (their loaders have no owner-profile/
-    // latest-response check yet). The Skills cache is dropped like
-    // switchToProfile does, so a later Skills open refetches, except while
-    // Skills is visible: its search/toggle re-render from that cache.
+    // not reloaded on this path either: since #9077 their loaders carry the
+    // same owner-profile/latest-response guard, so the shared reset above
+    // already retires the reply still in flight for the profile being left.
+    // The Skills cache is dropped like switchToProfile does, so a later Skills
+    // open refetches, except while Skills is visible: its search/toggle
+    // re-render from that cache.
     const skillsVisible=typeof _currentPanel!=='undefined'&&_currentPanel==='skills';
     if(typeof _skillsData!=='undefined'&&!skillsVisible) _skillsData=null;
     if(typeof _resetProfileScopedPanelState==='function') _resetProfileScopedPanelState();
