@@ -73,6 +73,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import (
+    ShareLinkOwnedElsewhere,
     build_share_snapshot,
     load_share,
     revoke_share,
@@ -20325,11 +20326,14 @@ def handle_post(handler, parsed) -> bool:
             # it is live before the snapshot writer may keep it.
             if durable_token and load_share(durable_token) is None:
                 durable_token = ""
-            share_meta = write_share_snapshot(
-                snapshot,
-                token=durable_token,
-                source_session_id=sid,
-            )
+            try:
+                share_meta = write_share_snapshot(
+                    snapshot,
+                    token=durable_token,
+                    source_session_id=sid,
+                )
+            except ShareLinkOwnedElsewhere as exc:
+                return bad(handler, str(exc), 409)  # #8734: nothing was written
             persisted_session.share_token = share_meta["share_token"]
             persisted_session.share_created_at = share_meta["share_created_at"]
             # Update the live cached copy BEFORE the durable save (#8255 review,
@@ -20440,7 +20444,10 @@ def handle_post(handler, parsed) -> bool:
                 # revoke_share() locates the published snapshot through the
                 # session's token field, so hand it the resolved authority.
                 target_session.share_token = token
-                revoke_share(target_session)
+                try:
+                    revoke_share(target_session)
+                except ShareLinkOwnedElsewhere as exc:
+                    return bad(handler, str(exc), 409)  # #8734: the link and both pairs are untouched
                 if load_share(token) is not None:
                     return bad(handler, "Share link could not be revoked", 500)
             # A writer may have saved while the revoke was reading the snapshot
