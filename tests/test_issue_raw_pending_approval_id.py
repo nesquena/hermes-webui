@@ -6,7 +6,9 @@ notify`` fires at turn end; a queued wakeup/continuation then hits a guard),
 the agent-side fallback ``tools/approval.py::_pending_result`` writes a raw
 dict — ``{command, description, pattern_key, pattern_keys}`` and NOTHING else,
 no ``approval_id``, no ``request_id`` — directly into the shared
-``tools.approval._pending[session_key]`` dict that the WebUI imports.
+``tools.approval._pending[session_key]`` dict that the WebUI imports. (Newer
+Agents dropped ``_pending``; WebUI then keeps ``route_approvals._pending``
+locally, so the tests seed the dict through WebUI's bridge.)
 
 Before the fix:
 - ``GET /api/approval/pending`` served that raw dict verbatim (reconcile passes
@@ -44,6 +46,7 @@ from unittest.mock import patch
 import pytest
 
 from api import models
+from api import route_approvals as ra
 from api import routes
 
 try:
@@ -110,16 +113,16 @@ def _seed_raw_pending(sid: str, command: str = "rm -rf /tmp/qa-probe-home",
         "pattern_keys": [key],
         "description": "recursive delete",
     }
-    with ta._lock:
-        ta._pending[sid] = pending
-        ta._gateway_queues.pop(sid, None)
+    with ra._lock:
+        ra._pending[sid] = pending
+        ra._gateway_queues.pop(sid, None)
     return pending
 
 
 def _cleanup(sid: str):
-    with ta._lock:
-        ta._pending.pop(sid, None)
-        ta._gateway_queues.pop(sid, None)
+    with ra._lock:
+        ra._pending.pop(sid, None)
+        ra._gateway_queues.pop(sid, None)
     with models.LOCK:
         models.SESSIONS.pop(sid, None)
     try:

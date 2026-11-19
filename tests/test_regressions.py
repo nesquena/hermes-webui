@@ -342,21 +342,32 @@ def test_deleted_session_does_not_appear_in_list(cleanup_test_sessions):
     assert sid not in ids_after,         f"Deleted session {sid} still appears in list -- index not invalidated on delete"
 
 
+def _session_delete_handler_block(text):
+    """Return the source of the session/delete route handler, or None if absent.
+
+    The block runs from the handler's ``if parsed.path == ...`` line to the next
+    route's ``if parsed.path ==`` line. A fixed character window broke twice as
+    the handler grew (#8300, #8864); the next route boundary doesn't move with it.
+    """
+    # Accept both single-quote and double-quote style (formatting varies by contributor)
+    delete_idx = max(
+        text.find("if parsed.path == '/api/session/delete':"),
+        text.find('if parsed.path == "/api/session/delete":'),
+    )
+    if delete_idx < 0:
+        return None
+    next_idx = text.find("if parsed.path ==", delete_idx + 1)
+    return text[delete_idx:next_idx if next_idx > delete_idx else len(text)]
+
+
 def test_server_delete_prunes_session_index(cleanup_test_sessions):
     """session/delete should prune the deleted row without discarding the index."""
     src = (REPO_ROOT / "server.py").read_text()
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text() if (REPO_ROOT / "api" / "routes.py").exists() else ""
     # Find the delete handler in either file
     for label, text in [("server.py", src), ("api/routes.py", routes_src)]:
-        # Accept both single-quote and double-quote style (formatting varies by contributor)
-        delete_idx = max(
-            text.find("if parsed.path == '/api/session/delete':"),
-            text.find('if parsed.path == "/api/session/delete":'),
-        )
-        if delete_idx >= 0:
-            # Wide window: the handler must stay within one block for this scan
-            # even after the state.db-first reordering (#8300).
-            delete_block = text[delete_idx:delete_idx+8000]
+        delete_block = _session_delete_handler_block(text)
+        if delete_block is not None:
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -366,13 +377,8 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
 def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
     """session/delete must remove sidecar backups so deleted sessions stay deleted."""
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text()
-    delete_idx = max(
-        routes_src.find("if parsed.path == '/api/session/delete':"),
-        routes_src.find('if parsed.path == "/api/session/delete":'),
-    )
-    assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    # Wide window: see test_server_delete_prunes_session_index (#8300).
-    delete_block = routes_src[delete_idx:delete_idx+8000]
+    delete_block = _session_delete_handler_block(routes_src)
+    assert delete_block is not None, "session/delete handler not found in api/routes.py"
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
