@@ -3,6 +3,7 @@ from collections import OrderedDict
 from email.message import Message
 import io
 import json
+import os
 import threading
 import urllib.error
 
@@ -147,6 +148,40 @@ def test_a_config_url_cached_while_a_worker_mirror_is_open_is_expanded_from_the_
             config.reload_config()
             assert config.get_config()["webui_gateway_base_url"] == "http://alpha-gw:9000"  # the poisoned cache
             assert gateway_chat._gateway_endpoint_for_profile("work") == expected
+    finally:
+        monkeypatch.undo()
+        config.reload_config()
+
+
+@pytest.mark.parametrize("break_file", [False, True], ids=["unresolved_variable", "unreadable_file"])
+def test_a_shared_url_only_another_profiles_worker_reload_resolved_refuses_the_turn(
+        work_profile, monkeypatch, break_file):
+    """Review 5967571769: alpha's worker reloaded config, so get_config() holds alpha's host. When the operator's file
+    cannot yield the URL at turn time, work's key must not go to that cached host: the turn is refused."""
+    from api import config
+
+    alpha = work_profile.parent / "alpha"
+    alpha.mkdir()
+    (alpha / ".env").write_text("GW_HOST=alpha-gw:9000\n")
+    cfg_file = work_profile.parent.parent / "config.yaml"
+    cfg_file.write_text("webui_gateway_base_url: http://${GW_HOST}\n")
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("GW_HOST", raising=False)
+    try:
+        with profiles.profile_env_for_background_worker("alpha"):
+            config.reload_config()
+        assert config.get_config()["webui_gateway_base_url"] == "http://alpha-gw:9000"  # the poisoned cache
+        if break_file:  # unparsable now, while the cache (same mtime) still holds alpha's expansion
+            monkeypatch.setenv("GW_HOST", "127.0.0.1:8642")
+            stat = cfg_file.stat()
+            cfg_file.write_text("webui_gateway_base_url: [unterminated\n")
+            os.utime(cfg_file, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            assert config.get_config()["webui_gateway_base_url"] == "http://alpha-gw:9000"
+        with pytest.raises(RuntimeError, match="shared gateway URL"):
+            gateway_chat._gateway_endpoint_for_profile("work")
+        (work_profile / ".env").write_text(f"HERMES_WEBUI_GATEWAY_BASE_URL=http://work-gw:9000\nAPI_SERVER_KEY={WORK_KEY}\n")
+        assert gateway_chat._gateway_endpoint_for_profile("work") == ("http://work-gw:9000", WORK_KEY)  # never shared
     finally:
         monkeypatch.undo()
         config.reload_config()

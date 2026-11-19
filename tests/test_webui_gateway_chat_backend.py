@@ -2383,6 +2383,7 @@ def test_8432_a_config_path_a_profile_env_chose_is_not_shared(tmp_path, monkeypa
     envs["alpha"]["HERMES_CONFIG_PATH"] = str(operator)
     _mirror_named_process_profile(monkeypatch, homes, envs)
     _operator_config(tmp_path, monkeypatch, "http://gw.local/alpha-chosen")
+    operator.write_text('webui_gateway_base_url: "http://gw.local/alpha-chosen"\n', encoding="utf-8")
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(operator))
 
     assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/alpha-chosen", "alpha-alias")
@@ -2391,11 +2392,14 @@ def test_8432_a_config_path_a_profile_env_chose_is_not_shared(tmp_path, monkeypa
 def test_8432_the_process_profiles_own_config_url_without_a_config_path_is_not_shared(tmp_path, monkeypatch):
     """No HERMES_CONFIG_PATH: the ambient config IS the named process profile's own config.yaml."""
     import api.config as config
+    import api.profiles as profiles
 
     envs = {"default": {}, "alpha": {"HERMES_WEBUI_GATEWAY_API_KEY": "alpha-alias"}, "beta": {"API_SERVER_KEY": "beta-key"}}
     homes = _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
     _mirror_named_process_profile(monkeypatch, homes, envs)
     monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes["alpha"])
+    (homes["alpha"] / "config.yaml").write_text('webui_gateway_base_url: "http://gw.local/alpha-own-cfg"\n')
     monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gw.local/alpha-own-cfg"})
 
     assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/alpha-own-cfg", "alpha-alias")

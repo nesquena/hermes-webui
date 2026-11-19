@@ -1926,6 +1926,7 @@ def test_gateway_cancel_during_completion_save_restores_process_wakeup_pause(tmp
     monkeypatch.setattr(gateway_chat, "RunJournalWriter", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gateway.test"})
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.test")  # the resolver re-reads files, not the cache
 
     class _GatewayResponse:
         def __enter__(self):
@@ -2019,6 +2020,7 @@ def test_gateway_late_cancel_preserves_completed_webui_turn(tmp_path, monkeypatc
     monkeypatch.setattr(gateway_chat, "RunJournalWriter", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gateway.test"})
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.test")  # the resolver re-reads files, not the cache
 
     class _GatewayResponse:
         def __enter__(self):
@@ -2113,6 +2115,7 @@ def test_gateway_late_cancel_preserves_existing_pause_for_webui_recovery(tmp_pat
     monkeypatch.setattr(gateway_chat, "RunJournalWriter", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gateway.test"})
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.test")  # the resolver re-reads files, not the cache
 
     class _GatewayResponse:
         def __enter__(self):
@@ -2218,6 +2221,7 @@ def test_gateway_post_save_cancel_after_success_commit_emits_done(tmp_path, monk
     monkeypatch.setattr(gateway_chat, "RunJournalWriter", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gateway.test"})
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.test")  # the resolver re-reads files, not the cache
 
     class _GatewayResponse:
         def __enter__(self):

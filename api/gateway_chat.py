@@ -2333,21 +2333,26 @@ def _shared_gateway_url_config(process_env: dict[str, str]) -> dict:
     """The ambient config's webui_gateway_base_url, ${VAR}s expanded from ``process_env`` (the clean process view).
 
     get_config() expands from live os.environ at reload time, so a reload while another profile's background worker
-    has mirrored its .env would cache that worker's host. Re-expand the raw file value against the clean view."""
+    has mirrored its .env would cache that worker's host. Re-expand the raw file value against the clean view and
+    never take the URL from the cache: RuntimeError when the file's URL cannot be resolved at turn time."""
     from api.config import _config_path_for_env, _get_config_path, _has_env_ref, get_config
     from api.profiles import load_profile_config
 
+    if str(process_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip():
+        return {}  # the exported URL outranks the config file
     # The process's own file (even a custom HERMES_CONFIG_PATH name), never one a worker mirrored into os.environ.
     path = Path(_config_path_for_env(process_env))
     clean = load_profile_config(path.parent, env=process_env, config_path=path).get("webui_gateway_base_url")
-    if isinstance(clean, str) and clean and not _has_env_ref(clean):
-        value = clean
-    elif path == Path(_get_config_path()):  # get_config() read this same file: keep its cached value
-        cfg = get_config()
-        value = cfg.get("webui_gateway_base_url") if isinstance(cfg, dict) else None
-    else:
-        value = None
-    return {"webui_gateway_base_url": value} if isinstance(value, str) and value else {}
+    if isinstance(clean, str) and clean:
+        if _has_env_ref(clean):
+            raise RuntimeError(f"the shared gateway URL in {path} still contains an unresolved variable ({clean}); "
+                               "set it in the environment the WebUI is started with")
+        return {"webui_gateway_base_url": clean}
+    # The cache was expanded from the live (possibly worker-mirrored) environ: a URL only it holds is refused.
+    cfg = get_config() if path == Path(_get_config_path()) else None
+    if isinstance(cfg, dict) and cfg.get("webui_gateway_base_url"):
+        raise RuntimeError(f"the shared gateway URL could not be read from {path}; check that the file is valid YAML")
+    return {}
 
 
 def _gateway_endpoint_for_profile(profile_name, *, profile_routing: bool = True) -> tuple[str, str]:
@@ -2385,7 +2390,10 @@ def _gateway_endpoint_for_profile(profile_name, *, profile_routing: bool = True)
     from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx
 
     process_env = _process_environ()
-    shared_url = _gateway_base_url(_shared_gateway_url_config(process_env), process_env)
+    try:
+        shared_url, shared_error = _gateway_base_url(_shared_gateway_url_config(process_env), process_env), None
+    except RuntimeError as exc:
+        shared_url, shared_error = "", exc  # raised below only if the turn would use the shared URL
     shared_key = _gateway_api_key(process_env)
 
     home = Path(_profiles.get_hermes_home_for_profile(str(profile_name or "").strip()))
@@ -2395,6 +2403,8 @@ def _gateway_endpoint_for_profile(profile_name, *, profile_routing: bool = True)
     own_url_env = str(own_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
     own_alias = str(own_env.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     own_key = own_alias or str(own_env.get("API_SERVER_KEY") or "").strip()
+    if shared_error is not None and not (own_url_env or own_url_cfg):
+        raise shared_error
     # The launcher's explicit WebUI alias (an export, not a value mirrored from a profile's .env) is the key
     # for the shared URL: there it keeps outranking a profile's API_SERVER_KEY, which is the key of that
     # profile's OWN Gateway (docs: HERMES_WEBUI_GATEWAY_API_KEY first, API_SERVER_KEY as the fallback).
