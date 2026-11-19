@@ -1112,14 +1112,26 @@ def _session_record(sid) -> dict | None:
     return data if isinstance(data, dict) and data.get("session_id") == sid else None
 
 
+def _chain_parent(record) -> str:
+    """The parent a record names as a lineage link, or "" for none or a fork.
+
+    A fork (``/api/session/branch``) also names its source as parent, but it is
+    a separate conversation with its own link, so it is not a chain link.
+    """
+    if record.get("session_source") == "fork":
+        return ""
+    return str(record.get("parent_session_id") or "")
+
+
 def _link_owned_by_other_conversation(payload, session_id: str) -> bool:
     """True only for a live snapshot published by a different conversation that
-    still exists and is outside any compression chain (#8734).
+    still exists, when neither side is part of a compression chain (#8734).
 
     A compression continuation inherits its parent's link, so either side of a
-    chain can hold a link the other published. A snapshot with no owner, an
-    owner that is gone, and a record that cannot be read keep the behaviour
-    from before this check.
+    chain can hold a link the other published. A record counts as part of a
+    chain when it carries a compression marker or names a parent other than as
+    a fork. A snapshot with no owner, an owner that is gone, and a record that
+    cannot be read keep the behaviour from before this check.
     """
     if not isinstance(payload, dict) or payload.get("revoked_at"):
         return False
@@ -1127,10 +1139,10 @@ def _link_owned_by_other_conversation(payload, session_id: str) -> bool:
     if not session_id or owner == session_id:
         return False
     owner_record = _session_record(owner)
-    if owner_record is None or any(owner_record.get(k) for k in (*_COMPRESSION_MARKERS, "parent_session_id")):
+    if owner_record is None or any(owner_record.get(k) for k in _COMPRESSION_MARKERS) or _chain_parent(owner_record):
         return False
     acting = _session_record(session_id) or {}
-    return not (any(acting.get(k) for k in _COMPRESSION_MARKERS) or acting.get("parent_session_id") == owner)
+    return not (any(acting.get(k) for k in _COMPRESSION_MARKERS) or _chain_parent(acting) == owner)
 
 
 def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: str = "") -> dict:

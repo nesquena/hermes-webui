@@ -523,6 +523,72 @@ def test_pin_stop_sharing_from_the_parent_after_the_continuation_was_cleared(sta
     _assert_not_served(token)
 
 
+# ── forks are separate conversations, not chain links ─────────────────────────
+
+
+def _fork(source):
+    """Fork ``source`` through the real branch route, which names it as parent."""
+    status, reply = _post("/api/session/branch", {"session_id": source})
+    assert status == 200, reply
+    fork = reply["session_id"]
+    record = json.loads(_sidecar(fork).read_text(encoding="utf-8"))
+    assert record.get("parent_session_id") == source, "precondition: the fork names its source as parent"
+    assert record.get("session_source") == "fork", "precondition: the fork is marked as a fork"
+    return fork
+
+
+def _assert_both_buttons_refused(acting, token, owner, words):
+    before = _snapshot_path(token).read_bytes()
+    owner_pair = _pair(owner)
+    acting_pair = _pair(acting)
+    for path in ("/api/share/create", "/api/share/revoke"):
+        status, reply = _post(path, {"session_id": acting})
+        assert status == 409, (path, reply)
+    assert _snapshot_path(token).read_bytes() == before
+    assert _snapshot(token)["source_session_id"] == owner
+    assert _served_words(token) == [f"{words} question", f"{words} answer"]
+    assert _pair(owner) == owner_pair
+    assert _pair(acting) == acting_pair
+
+
+def test_refuses_another_conversation_acting_on_a_forks_link(state):
+    _save(OWNER, "owner words")
+    _save(OTHER, "other words")
+    fork = _fork(OWNER)
+    token = _share(fork)
+    _edit_sidecar(OTHER, share_token=token, share_created_at=1234.5)
+    _assert_both_buttons_refused(OTHER, token, fork, "owner words")
+
+
+def test_refuses_a_fork_acting_on_its_sources_link(state):
+    _save(OWNER, "owner words")
+    token = _share(OWNER)
+    fork = _fork(OWNER)
+    _edit_sidecar(fork, share_token=token, share_created_at=1234.5)
+    _assert_both_buttons_refused(fork, token, OWNER, "owner words")
+
+
+@pytest.mark.parametrize("source", ["fork", "webui"])
+def test_refuses_a_conversation_whose_parent_is_a_third_conversation(state, source):
+    token = _seed_other_with_owner_link()
+    _edit_sidecar(OTHER, parent_session_id="s_8734_unrelated_conversation", session_source=source)
+    _assert_both_buttons_refused(OTHER, token, OWNER, "owner words")
+
+
+def test_pin_stop_sharing_from_the_continuation_of_a_compressed_fork(state):
+    _save(OWNER, "owner words")
+    fork = _fork(OWNER)
+    token = _share(fork)
+    _compress(fork, CHILD)
+    record = json.loads(_sidecar(CHILD).read_text(encoding="utf-8"))
+    assert record.get("session_source") == "fork", "precondition: the continuation keeps the fork's source"
+    assert record.get("parent_session_id") == fork
+    status, reply = _post("/api/share/revoke", {"session_id": CHILD})
+    assert status == 200, reply
+    _assert_not_served(token)
+    assert _pair(CHILD) == (None, None)
+
+
 # ── deletes are untouched ─────────────────────────────────────────────────────
 
 
