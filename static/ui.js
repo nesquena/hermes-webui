@@ -11386,7 +11386,7 @@ function _steerRowInnerHtml(text, files, footHtml, sid){
       if(!path)return '';
       const fname=path.split('/').pop()||path;
       const label=typeof file==='string'?fname:String(file.name||fname);
-      const fileUrl='api/file/raw?session_id='+encodeURIComponent(sid||'')+'&path='+encodeURIComponent(fname);
+      const fileUrl='api/file/raw?session_id='+encodeURIComponent(sid||'')+'&path='+encodeURIComponent(path);
       return _renderAttachmentHtml(label,fileUrl);
     }).join('')}</div>`;
   }
