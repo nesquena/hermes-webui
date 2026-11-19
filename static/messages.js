@@ -5053,6 +5053,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const baseAddText=renderer.add_text;
     const tokenStack=[];
     renderer.add_token=(data,token)=>{
+      // A quoted MEDIA tail is held while a closing quote may still arrive in a
+      // later chunk. A line break proves the quote never closes on that line, so
+      // the tail flushes as literal text before the break is forwarded — without
+      // this, the next line's prose is concatenated onto the pending ref and a
+      // later unrelated quote completes it.
+      if(token===window.smd.LINE_BREAK && typeof _smdMediaTailFlush==='function'){
+        _smdMediaTailFlush(_smdParserKey(data));
+      }
       if(token===window.smd.ITALIC_UND||token===window.smd.STRONG_UND){
         const marker=token===window.smd.STRONG_UND?'__':'_';
         tokenStack.push(marker);
@@ -5479,8 +5487,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
-    const parts=m&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(String(chunk),0,m[1],entry&&entry.parent):null;
+    const chunkText=String(chunk);
+    // Quoted refs first: the closed form keeps spaces; a bare capture that
+    // starts with a quote is an unterminated quoted candidate and flushes as
+    // literal text instead of becoming a quote-prefixed media node.
+    const quotedMatch=/^MEDIA:"([^"\r\n]+)"$/.exec(chunkText)||/^MEDIA:'([^'\r\n]+)'$/.exec(chunkText);
+    const bareMatch=quotedMatch?null:/^MEDIA:([^\s\)\]]+)$/.exec(chunkText);
+    const rawRef=quotedMatch?quotedMatch[1]:(bareMatch&&!/^["']/.test(bareMatch[1])?bareMatch[1]:null);
+    const parts=rawRef&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(chunkText,0,rawRef,entry&&entry.parent):null;
     const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
     if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
     else if(!emitted&&entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
@@ -5533,6 +5547,49 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
+      const rawCapture = m[1] || '';
+      if(/^["']/.test(rawCapture)){
+        // Quoted form: the bare class above stops at the opening quote, so the
+        // closing quote is resolved here. A same-line closing quote completes
+        // the ref; an EOL before it proves the quote never closes on that line
+        // and the malformed candidate flushes literally up to and including the
+        // EOL, so following prose is never swallowed by a later quote.
+        const quote = rawCapture.charAt(0);
+        const afterMarker = combined.slice(m.index + 6);
+        const closeAt = afterMarker.indexOf(quote, 1);
+        const eolAt = afterMarker.search(/\r\n|[\r\n]/);
+        if(m.index>last) writeCurrent(combined.slice(last, m.index));
+        if(closeAt > 0 && (eolAt < 0 || closeAt < eolAt)){
+          const ref = afterMarker.slice(1, closeAt);
+          const end = m.index + 6 + closeAt + 1;
+          const parts=typeof _mediaTokenParts==='function'?_smdMediaTokenParts(combined,m.index,ref,parent):null;
+          if(parts&&_smdAppendMediaNode(parent,parts[0])){
+            if(parts[1]) writeCurrent(parts[1]);
+          }else{
+            writeCurrent(combined.slice(m.index, end));
+          }
+          last = end;
+          re.lastIndex = end;
+          continue;
+        }
+        if(eolAt >= 0){
+          const candidate = combined.slice(m.index);
+          const eolMatch = candidate.match(/\r\n|[\r\n]/);
+          const eolEnd = eolMatch.index + eolMatch[0].length;
+          writeCurrent(candidate.slice(0, eolEnd));
+          last = m.index + eolEnd;
+          re.lastIndex = last;
+          continue;
+        }
+        const candidate = combined.slice(m.index);
+        if(candidate.length < _MEDIA_TAIL_MAX){
+          unmatchedTail = candidate;
+        } else {
+          writeCurrent(candidate);
+        }
+        last = combined.length;
+        break;
+      }
       const matchEnd = m.index + m[0].length;
       if(m.index>last){
         const slice = combined.slice(last, m.index);
@@ -5565,7 +5622,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      const quotedTail = /MEDIA:"[^"]*$|MEDIA:'[^']*$/.exec(rest);
+      const tailMatch = quotedTail || /MEDIA:[^\s\)\]]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
       if(tailValue && rest.length < _MEDIA_TAIL_MAX){

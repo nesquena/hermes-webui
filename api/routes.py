@@ -26972,6 +26972,7 @@ _MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
 #      class) so a filename that legally contains a backtick
 #      (``report`final.png``) is captured in full instead of being
 #      truncated at the first backtick.
+_QUOTED_MEDIA_TOKEN_RE = re.compile(r'MEDIA:"([^"\r\n]+)"|MEDIA:\'([^\'\r\n]+)\'')
 
 
 def _message_content_text(content) -> str:
@@ -27038,6 +27039,15 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
                 continue
             try:
                 if Path(ref).expanduser().resolve() == target_resolved:
+                    return True
+            except Exception:
+                continue
+        for match in _QUOTED_MEDIA_TOKEN_RE.finditer(text):
+            ref = match.group(1) or match.group(2)
+            if not ref or "://" in ref:
+                continue
+            try:
+                if Path(unquote(ref)).expanduser().resolve() == target_resolved:
                     return True
             except Exception:
                 continue
