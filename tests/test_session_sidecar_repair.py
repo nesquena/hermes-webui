@@ -1286,13 +1286,6 @@ class TestNonEmptyMessagesPendingCleared:
             {
                 "role": "user",
                 "content": "Check maintainer activity",
-                # Checkpoint identity is EXACT full-precision (2026-09 round 5):
-                # the whole-second int-vs-float allowance was removed because it
-                # let a same-second historical row win ownership of a sub-second
-                # current turn and suppress/lose the prompt. An int-truncated
-                # legacy row can no longer match and fails closed toward
-                # appending, so eager checkpoints must persist full precision.
-                "timestamp": s.pending_started_at,
             },
             {"role": "assistant", "content": "I will check GitHub first."},
         ]
@@ -1303,12 +1296,6 @@ class TestNonEmptyMessagesPendingCleared:
                 "snippet": "gh pr list --repo nesquena/hermes-webui",
                 "assistant_msg_idx": 1,
                 "done": True,
-                # Stream-scoped identity is now required for a tool card to
-                # dedupe against journal recovery (2026-09 round 5): tokenless,
-                # untagged cards cannot prove ownership, and an unprovable card
-                # must not suppress the current recovered tool. Eager core
-                # checkpoints stamp the recovered stream id.
-                "_recovered_stream_id": "duplicate_core_journal_stream",
             },
         ]
         core_path = _write_core_transcript(

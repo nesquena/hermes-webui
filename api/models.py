@@ -3291,6 +3291,22 @@ def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
     return out
 
 
+def _journal_tool_args_equal(left, right) -> bool:
+    """True when two journaled tool-argument snapshots name the same call.
+
+    Both sides come from the producer's ``_tool_args_snapshot`` (cap per
+    value), so an equal dict is an ownership signal for an id-less legacy
+    completion. Empty/missing snapshots are never a signal.
+    """
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    if not left or not right:
+        return False
+    return {str(k): str(v) for k, v in left.items()} == {
+        str(k): str(v) for k, v in right.items()
+    }
+
+
 def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
 
@@ -4006,6 +4022,84 @@ def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
         if event_name == 'tool':
             return True
     return False
+
+
+def _run_journal_visible_texts(session, stream_id: str | None) -> list[str]:
+    """Normalised visible text segments the journal recorded for this stream."""
+    if not stream_id:
+        return []
+    try:
+        from api.run_journal import read_run_events
+        journal = read_run_events(session.session_id, stream_id, validated_recovery=True)
+    except Exception:
+        return []
+    journal = journal if isinstance(journal, dict) else {}
+    texts: list[str] = []
+    for event in journal.get('events') or []:
+        if not isinstance(event, dict):
+            continue
+        event_name = str(event.get('event') or event.get('type') or '')
+        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        if event_name == 'token':
+            text = str(payload.get('text') or '')
+        elif event_name == 'interim_assistant':
+            if payload.get('already_streamed'):
+                continue
+            text = str(payload.get('text') or '')
+        else:
+            continue
+        normalised = _normalize_journal_recovery_text(text)
+        if normalised:
+            texts.append(normalised)
+    return texts
+
+
+def _core_transcript_holds_pending_turn(session, stream_id: str | None, pending_text: str) -> bool:
+    """True when the just-synced core transcript already contains this turn.
+
+    The core transcript is the authoritative durable history but carries no
+    WebUI turn identity, so ``_pending_user_row_already_materialized`` cannot
+    prove ownership for it and every repair appended a duplicate prompt +
+    answer + false interruption marker (#7167 gate certification 2026-11-18,
+    RED finding 2). The proof here is deliberately narrow:
+
+    * the LAST user row came from the core transcript,
+    * its text equals the pending prompt, and
+    * journaled visible output for THIS stream appears in an assistant/tool
+      row AFTER it.
+
+    An older same-text turn cannot satisfy the last condition because its
+    output is not this stream's journal output.
+    """
+    if not pending_text or not stream_id:
+        return False
+    messages = session.messages or []
+    last_user_idx = None
+    for idx in range(len(messages) - 1, -1, -1):
+        row = messages[idx]
+        if isinstance(row, dict) and row.get('role') == 'user':
+            last_user_idx = idx
+            break
+    if last_user_idx is None:
+        return False
+    user_row = messages[last_user_idx]
+    if user_row.get('_from_core_transcript') is not True:
+        return False
+    if _normalize_journal_recovery_text(user_row.get('content')) != pending_text:
+        return False
+    tail_rows = [
+        row for row in messages[last_user_idx + 1:]
+        if isinstance(row, dict) and row.get('role') in ('assistant', 'tool')
+    ]
+    if not tail_rows:
+        return False
+    journal_texts = _run_journal_visible_texts(session, stream_id)
+    if not journal_texts:
+        return False
+    tail_text = _normalize_journal_recovery_text(
+        ' '.join(str(row.get('content') or '') for row in tail_rows)
+    )
+    return any(text in tail_text for text in journal_texts)
 
 
 def _run_journal_event_owns_run(
@@ -4737,7 +4831,22 @@ def _append_journaled_partial_output(
                     break
                 # Ownership gate applies to EVERY match, reasoning or not.
                 # Unproven ownership => fall through to append.
-                if not content_match_owned_by_current_turn(candidate_idx):
+                _cand_row = session.messages[candidate_idx]
+                # #7167 gate certification (2026-11-18): a row synced from the
+                # authoritative core transcript carries no WebUI turn identity
+                # (no _active_turn_token, no pending timestamp), so requiring
+                # one rejected the durable copy and every repair appended a
+                # second answer + tool card + false interruption marker. The
+                # caller opts in with ``authorize_core_rows`` ONLY on the
+                # branch that just assigned session.messages from the core
+                # transcript; ordinary session rows and other turns still
+                # must prove ownership.
+                _core_row_authorized = (
+                    authorize_core_rows
+                    and isinstance(_cand_row, dict)
+                    and _cand_row.get('_from_core_transcript') is True
+                )
+                if not content_match_owned_by_current_turn(candidate_idx) and not _core_row_authorized:
                     search_excluded.add(candidate_idx)
                     continue
                 # #7167: ownership alone is NOT authorization to reuse a row.
@@ -5110,10 +5219,30 @@ def _append_journaled_partial_output(
                             matched_idx, matched_tool = idx, call
                             break
             else:
-                for idx, call in _candidates:
-                    if not name or call.get('name') == name:
-                        matched_idx, matched_tool = idx, call
-                        break
+                # Legacy tool-progress completions carry ``args`` but no
+                # ``tid``, and that producer settles its live cards
+                # NEWEST-FIRST — so the journal's completion order is not the
+                # start order and FIFO matching attaches each command's result
+                # to the other command's card (#7167 gate certification
+                # 2026-11-18, RED finding 1). The command arguments are the
+                # only reliable ownership signal an id-less completion has;
+                # claim a card only on a UNIQUE argument match. Journals that
+                # carry no arguments at all keep the historical FIFO fallback.
+                completion_args = payload.get('args')
+                args_scoped: list[tuple[int, dict]] = []
+                if isinstance(completion_args, dict) and completion_args:
+                    for idx, call in _candidates:
+                        if name and call.get('name') != name:
+                            continue
+                        if _journal_tool_args_equal(call.get('args'), completion_args):
+                            args_scoped.append((idx, call))
+                if len(args_scoped) == 1:
+                    matched_idx, matched_tool = args_scoped[0]
+                elif not (isinstance(completion_args, dict) and completion_args):
+                    for idx, call in _candidates:
+                        if not name or call.get('name') == name:
+                            matched_idx, matched_tool = idx, call
+                            break
             if matched_tool is not None and matched_idx is not None:
                 completion_consumed_cards.add(matched_idx)
                 if matched_tool.get('done'):
@@ -6804,6 +6933,18 @@ def _apply_core_sync_or_error_marker(
             # reuses the matched row instead of materializing a new one. Gated
             # on the ownership proof (and on a pending turn existing) so a
             # save-failure rollback leaves memory byte-identical.
+            if (
+                _pending_text
+                and not _tail_user_already_checkpointed
+                and _core_transcript_holds_pending_turn(session, _stream_id, _pending_text)
+            ):
+                # The core transcript already materialized this turn (proof in
+                # the helper: last core user row matches the prompt AND this
+                # stream's journaled output appears after it), so reuse the
+                # row. Without this, an identity-less core row was appended a
+                # second time and the repair also wrote a false interruption
+                # marker (#7167 gate certification 2026-11-18, finding 2).
+                _tail_user_already_checkpointed = True
             if _pending_text and _tail_user_already_checkpointed:
                 _backfill_pending_metadata_onto_reused_row(session, _last_user)
             if (
