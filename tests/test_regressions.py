@@ -475,7 +475,7 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    inflight_block = src[inflight_idx:inflight_idx+5200]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
     assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
 
@@ -774,7 +774,13 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    # #7653 re-gate round 16: this PR's verdict-map rebuild in
+    # ``_syncToolCallsForLoadedMessages`` grew the INFLIGHT restore branch, so
+    # the ``renderMessages()`` call moved from inside 4200 to offset 4478 and
+    # the ``reattach`` gate spans 3793..4396. 5200 keeps both targets inside
+    # with headroom, the same character-budget widening the #2518 and #4970
+    # source-window tests already needed.
+    inflight_block = src[inflight_idx:inflight_idx+5200]
     busy_pos = inflight_block.find("S.busy=")
     # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
     # call, so match the call form rather than the bare `renderMessages();`.
@@ -903,7 +909,7 @@ def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_card
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    inflight_block = src[inflight_idx:inflight_idx+5200]
     active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")
     replay_pos = inflight_block.find("const replayPersistedLiveToolCards=(opts)=>{")
     attach_pos = inflight_block.find("attachLiveStream(sid, activeStreamId")
