@@ -459,9 +459,17 @@ def _render_messages_harness() -> str:
             this.className = '';
             this.id = '';
             this.hidden = false;
-            this.innerHTML = '';
+            this._innerHTML = '';
             this.style = {{}};
             this.classList = new FakeClassList(this);
+          }}
+          get innerHTML() {{ return this._innerHTML; }}
+          set innerHTML(value) {{
+            this._innerHTML = String(value == null ? '' : value);
+            if (this._innerHTML === '') {{
+              for (const child of this.children) child.parentElement = null;
+              this.children = [];
+            }}
           }}
           appendChild(child) {{
             child.parentElement = this;
@@ -484,6 +492,14 @@ def _render_messages_harness() -> str:
             if (!this.parentElement) return;
             const idx = this.parentElement.children.indexOf(this);
             if (idx >= 0) this.parentElement.children.splice(idx, 1);
+            this.parentElement = null;
+          }}
+          replaceWith(other) {{
+            if (!this.parentElement) return;
+            const parent = this.parentElement;
+            const idx = parent.children.indexOf(this);
+            other.parentElement = parent;
+            parent.children.splice(idx, 1, other);
             this.parentElement = null;
           }}
           setAttribute(name, value) {{
@@ -567,7 +583,20 @@ def _render_messages_harness() -> str:
         global.window = {{}};
         global.document = {{
           createElement: (tag) => new FakeElement(tag),
-          getElementById: (id) => elements[id] || null,
+          getElementById: (id) => {{
+            if (id === 'liveAssistantTurn') {{
+              const visit = (node) => {{
+                if (node.id === id) return node;
+                for (const child of node.children) {{
+                  const found = visit(child);
+                  if (found) return found;
+                }}
+                return null;
+              }};
+              return visit(elements.msgInner);
+            }}
+            return elements[id] || null;
+          }},
         }};
         global.performance = {{ now: () => 1 }};
         global.requestAnimationFrame = (fn) => fn();
@@ -891,28 +920,32 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         renderMessages();
         const liveTurns = elements.msgInner.querySelectorAll('.assistant-turn');
         elements.liveAssistantTurn = liveTurns[liveTurns.length-1];
+        elements.liveAssistantTurn.id='liveAssistantTurn';
+        const liveBody=new FakeElement('div');
+        liveBody.className='msg-body';
+        liveBody.textContent='first token';
+        elements.liveAssistantTurn.appendChild(liveBody);
         _showSteerIndicator('use B',[]);
+        _showSteerIndicator('then C',[]);
         const liveSteerRows=elements.msgInner.querySelectorAll('.steer-row-live').length;
         const childIdx=(el)=>Array.prototype.indexOf.call(elements.msgInner.children,el);
-        const liveRowEl=elements.msgInner.querySelector('.steer-row-live');
-        const liveRowAfterTurn=!!(liveRowEl&&elements.liveAssistantTurn
-          &&childIdx(liveRowEl)>childIdx(elements.liveAssistantTurn));
-        // Mid-stream rebuild (#8559 review item 3): a renderMessages() during
-        // the stream must not drop the live Steer row, and the row must sit
-        // AFTER the live assistant turn (a direct msgInner child, not inside
-        // the turn's blocks).
+        const liveRows=elements.msgInner.querySelectorAll('.steer-row-live');
+        const liveRowAfterTurn=liveRows.length===2&&liveRows.every(row=>!!(row&&elements.liveAssistantTurn
+          &&childIdx(row)>childIdx(elements.liveAssistantTurn)));
+        // Mid-stream rebuild (#8559 review item 3): every accepted live Steer
+        // row must survive the REAL innerHTML='' wipe below, in submission order,
+        // after the live assistant turn. The FakeElement setter detaches children.
         S.activeStreamId='steer-stream-1';
         INFLIGHT['steer-order']={{}};
         renderMessages();
-        const steerRowsAfterRebuild=elements.msgInner.querySelectorAll('.steer-row-live').length;
-        const rowAfterRebuild=elements.msgInner.querySelector('.steer-row-live');
-        // Position anchor: the turn the row was appended after. (The shim's
-        // appendChild does not move nodes, so a preserved-turn re-append can
-        // leave a duplicate turn reference at the end; the original turn's
-        // index is the stable comparison point, here and in the real DOM.)
-        const steerAfterTurnAfterRebuild=steerRowsAfterRebuild===1
-          &&!!rowAfterRebuild&&!!elements.liveAssistantTurn
-          &&childIdx(rowAfterRebuild)>childIdx(elements.liveAssistantTurn);
+        const rebuiltRows=elements.msgInner.querySelectorAll('.steer-row-live');
+        const rebuiltLiveTurn=elements.msgInner.children.find(el=>el===elements.liveAssistantTurn)||null;
+        const steerRowsAfterRebuild=rebuiltRows.length;
+        const steerTextsAfterRebuild=rebuiltRows.map(row=>row.dataset.rawText);
+        // Require the live turn to exist in the rebuilt child tree. A detached
+        // pre-wipe reference would make childIdx()=-1 and position checks vacuous.
+        const steerAfterTurnAfterRebuild=steerRowsAfterRebuild===2&&!!rebuiltLiveTurn
+          &&rebuiltRows.every(row=>!!row&&childIdx(row)>childIdx(rebuiltLiveTurn));
         S.activeStreamId=null;
         delete INFLIGHT['steer-order'];
         const settledMessages=[...S.messages,
@@ -937,7 +970,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           historicalSummary,
           rawHistoricalSummary,
           duplicateReferenceSummary,
-          steerOrder:{{liveSteerRows,liveRowAfterTurn,steerRowsAfterRebuild,steerAfterTurnAfterRebuild,settledOrder,settledSteerRows,reloadOrder,reloadSteerRows}},
+          steerOrder:{{liveSteerRows,liveRowAfterTurn,rebuiltLiveTurnPresent:!!rebuiltLiveTurn,steerRowsAfterRebuild,steerTextsAfterRebuild,steerAfterTurnAfterRebuild,settledOrder,settledSteerRows,reloadOrder,reloadSteerRows}},
         }}));
         """
     )
@@ -986,9 +1019,10 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     assert duplicate_cards[0]["snippet"] == "historical persisted result"
 
     order = result["steerOrder"]
-    assert order["liveSteerRows"] == 1
+    assert order["liveSteerRows"] == 2
     assert order["liveRowAfterTurn"] is True
-    assert order["steerRowsAfterRebuild"] == 1
+    assert order["steerRowsAfterRebuild"] == 2
+    assert order["steerTextsAfterRebuild"] == ["use B", "then C"]
     assert order["steerAfterTurnAfterRebuild"] is True
     assert order["settledOrder"] == ["user", "assistant", "steer", "assistant"]
     assert order["settledSteerRows"] == 1
