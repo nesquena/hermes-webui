@@ -779,6 +779,190 @@ def test_real_marker_at_profile_home_still_refuses_legacy_location(
     assert env.destructive_total() == 0
 
 
+# ── marker location: sibling legacy profile homes ──
+#
+# A legacy (pre-v2) Agent update running under ANOTHER named profile writes
+# its marker at that profile's own home (``<root>/profiles/<other>``), and
+# the installed producer still recognizes live legacy updates in those
+# homes — including updates that hold no newer checkout lock.  The marker
+# is shared state for the installed Agent, so recovery admission must fold
+# every supported legacy profile home into its verdict: a sibling's live
+# update refuses the restart exactly like a root or own-profile marker.
+
+
+def _publish_sibling_profile_marker(env, *, name="sibling", marker_text=None):
+    """Create ``<root>/profiles/<name>`` with a live update marker in it."""
+    root = env.checkout.home
+    sibling_home = root / "profiles" / name
+    sibling_home.mkdir(parents=True, exist_ok=True)
+    marker = sibling_home / ".hermes-update-in-progress"
+    marker.write_text(
+        marker_text
+        if marker_text is not None
+        else f"{os.getpid()}\n{time.time()}\n",
+        encoding="utf-8",
+    )
+    return root, sibling_home, marker
+
+
+def test_real_marker_in_sibling_profile_home_refuses_restart(real_restart_env):
+    """A live legacy update in a sibling named profile must refuse.
+
+    Reading only the profile-tree root and the captured WebUI profile home
+    sees ``absent`` while that update is live — and an absent marker is
+    what authorises the destructive restart.  The route must fold the
+    sibling home in: state ``active``, restart refused, zero scheduling,
+    zero destructive calls.
+    """
+    env = real_restart_env
+    _relaunch_under_profile(env)
+    _publish_sibling_profile_marker(env)
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "active"
+    assert result["restart_scheduled"] is False
+    assert result["restart_available"] is True
+    assert env.checkout.workers == [], "a refused restart must not schedule anything"
+    assert env.destructive_total() == 0, (
+        "a live sibling-profile update must abort the restart"
+    )
+
+
+def test_real_marker_in_sibling_profile_home_refuses_root_launch(real_restart_env):
+    """Cross-profile control: the same sibling marker under a root launch
+    (``HERMES_HOME=<root>``, no profile of its own) is refused too."""
+    env = real_restart_env
+    _publish_sibling_profile_marker(env)
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "active"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0
+
+
+def test_real_sibling_marker_under_the_lock_refuses_without_scheduling(real_restart_env):
+    """A sibling-profile marker that appears between admission and the
+    under-lock re-check must refuse with its freshest diagnostic."""
+    env = real_restart_env
+    _relaunch_under_profile(env)
+    _root, _sibling_home, marker = _publish_sibling_profile_marker(env)
+    marker.unlink()  # admission sees a clean idle transaction
+    assert env.agent_runtime._agent_update_transaction_state() == "unverified"
+
+    try:
+        env.hook.on_acquire = lambda: marker.write_text(
+            f"{os.getpid()}\n{time.time()}\n", encoding="utf-8"
+        )
+        result = env.updates.restart_stale_runtime()
+    finally:
+        env.hook.on_acquire = None
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "active"
+    assert result["restart_scheduled"] is False
+    assert env.checkout.workers == []
+    assert env.lock.locked() is False, "the lock must be released on refusal"
+
+
+def test_real_worker_aborts_when_sibling_marker_appears_across_the_idle_wait(
+    real_restart_env,
+):
+    """The delayed worker re-reads every supported legacy marker home: a
+    sibling-profile update that begins after scheduling was accepted aborts
+    the replacement before any purge/exec/spawn/exit."""
+    env = real_restart_env
+    _relaunch_under_profile(env)
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(env.checkout.workers) == 1, "the real delayed worker must be captured"
+    # The sibling marker only exists AFTER scheduling was accepted.
+    _publish_sibling_profile_marker(env)
+    env.checkout.workers[0]()
+    assert env.destructive_total() == 0, (
+        "a sibling-profile update must abort before any destructive call"
+    )
+    assert any("aborted" in w for w in env.logs.warnings)
+
+
+def test_real_unreadable_sibling_marker_fails_closed(real_restart_env):
+    """An unverifiable marker in a sibling profile home fails closed as
+    ``unknown`` — never proof that the restart is safe."""
+    env = real_restart_env
+    _relaunch_under_profile(env)
+    _publish_sibling_profile_marker(env, marker_text="not-a-pid\nnot-a-time\n")
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "unknown"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0
+
+
+def test_real_sibling_profile_without_marker_still_allows_restart(real_restart_env):
+    """Control: merely having sibling profiles must not block recovery —
+    an idle sibling home (no marker) still permits scheduling."""
+    env = real_restart_env
+    _relaunch_under_profile(env)
+    _root, sibling_home, marker = _publish_sibling_profile_marker(env)
+    marker.unlink()
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(env.checkout.workers) == 1
+    env.checkout.workers[0]()
+    assert len(env.destructive.execv) == 1
+
+
+def test_agent_update_marker_homes_cover_every_supported_profile(monkeypatch, tmp_path):
+    """The diagnostic enumerates every supported legacy marker home: the
+    profile-tree root, the captured profile home and each sibling named
+    profile — with an un-listable profiles tree failing closed."""
+    from api import agent_runtime
+
+    root = tmp_path / "hermes-home"
+    webui_home = root / "profiles" / "webui"
+    sibling_home = root / "profiles" / "other"
+    webui_home.mkdir(parents=True)
+    sibling_home.mkdir(parents=True)
+    (root / "profiles" / "stray-file").write_text("", encoding="utf-8")
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", webui_home)
+
+    homes = agent_runtime._agent_update_marker_homes()
+
+    assert set(homes) == {root, webui_home, sibling_home}, (
+        "every supported legacy marker home must be enumerated"
+    )
+
+    # A profiles tree that exists but cannot be listed fails closed: the
+    # tree itself stays a home, so its marker read classifies ``unknown``
+    # (a regular file where the tree belongs is the un-listable shape).
+    import shutil
+
+    shutil.rmtree(root / "profiles")
+    (root / "profiles").write_text("", encoding="utf-8")
+
+    closed_homes = agent_runtime._agent_update_marker_homes()
+
+    assert root / "profiles" in set(closed_homes), (
+        "an un-listable profiles tree must fail closed"
+    )
+    assert agent_runtime._agent_update_transaction_state() == "unknown", (
+        "an un-listable profiles tree must never read as a safe absent marker"
+    )
+
+
 # ── live long-running updates must not read as a safe ``stale`` ──
 
 

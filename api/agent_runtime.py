@@ -428,14 +428,62 @@ def _agent_update_marker_homes() -> tuple[Path, ...]:
     live — and an absent marker is exactly what authorises the destructive
     stale-runtime restart.  List the unwrapped base root first and keep the
     captured profile home as the legacy second candidate.
+
+    A legacy (pre-v2) Agent update running under ANOTHER named profile
+    writes its marker at that profile's own home, and the installed
+    producer still recognizes live legacy updates in those homes —
+    including updates that hold no newer checkout lock.  The marker is
+    shared state for the installed Agent, so every supported legacy
+    profile home is enumerated as well: a sibling's live update refuses
+    the recovery restart exactly like a root or own-profile marker.  A
+    profiles tree that cannot be listed fails closed — the tree itself
+    stays a home, so its marker read classifies ``unknown`` instead of
+    silently skipping the sibling homes.
     """
+    base = _base_marker_home()
     homes: list[Path] = []
     seen: set[str] = set()
-    for candidate in (_base_marker_home(), _HERMES_HOME):
+
+    def add(candidate: Path) -> None:
         key = os.path.normcase(os.path.abspath(str(candidate)))
         if key not in seen:
             seen.add(key)
             homes.append(candidate)
+
+    add(base)
+    add(_HERMES_HOME)
+    for sibling in _legacy_profile_homes(base):
+        add(sibling)
+    return tuple(homes)
+
+
+def _legacy_profile_homes(base: Path) -> tuple[Path, ...]:
+    """Return every named profile home under the profile tree at *base*.
+
+    The Agent launcher exports ``HERMES_HOME=<base>/profiles/<name>`` for
+    any active named profile, and a pre-v2 Agent update writes its marker
+    at that home.  Enumerate every directory under ``<base>/profiles`` so a
+    sibling profile's live legacy update is never invisible to recovery
+    admission.  A profiles tree that exists but cannot be listed (or is not
+    a directory) is returned as-is: the marker read under it then fails
+    closed to ``unknown`` — an unverifiable sibling home is never proof
+    that no update is live.
+    """
+    profiles_dir = base / "profiles"
+    try:
+        entries = sorted(profiles_dir.iterdir(), key=lambda entry: entry.name)
+    except FileNotFoundError:
+        return ()
+    except OSError:
+        return (profiles_dir,)
+    homes: list[Path] = []
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        homes.append(entry)
     return tuple(homes)
 
 
