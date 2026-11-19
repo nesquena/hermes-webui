@@ -5655,7 +5655,12 @@ def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool
     if not pid.startswith("custom:"):
         return False
     slug = _custom_provider_slug_key(pid)
-    if not slug or _unique_custom_provider_entry(cfg_data.get("custom_providers"), slug) is not None:
+    if not slug or _unique_custom_provider_entry(
+        cfg_data.get("custom_providers"),
+        slug,
+        cfg_data.get("providers"),
+        cfg_data.get("model"),
+    ) is not None:
         return False
     _record, disabled = _native_custom_provider_record(cfg_data.get("providers"), pid, slug)
     return disabled

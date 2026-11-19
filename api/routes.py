@@ -10640,6 +10640,9 @@ def _repair_removed_qualified_custom_provider_model(
     profile config; ``None`` is ambiguous (no profile, unreadable profile, or
     a caller that doesn't pass one) and the shared ``cfg`` may belong to
     another profile, so it never repairs from it. Colliding slugs fail closed.
+    A same-slug list entry that only reaches the identity through the non-ASCII
+    fallback is not the owner, so its pinned list says nothing about a provider
+    the ``model:`` block or a keyed ``providers:`` record already owns.
     """
     prov = _clean_session_model_provider(provider)
     bare_model, qualified_provider = _split_provider_qualified_model(model)
@@ -10662,6 +10665,8 @@ def _repair_removed_qualified_custom_provider_model(
         entry = _unique_custom_provider_entry(
             _custom_provider_entries(config_obj),
             _custom_provider_slug_key(prov),
+            config_obj.get("providers"),
+            config_obj.get("model"),
         )
     except AmbiguousCustomProviderError:
         return None
