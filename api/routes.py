@@ -13574,6 +13574,10 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 # newest row — they are legitimate CLI-origin messages that
                 # were visible during prompt execution and must survive turn
                 # completion.  They are inserted chronologically by the merge.
+                # However, the messaging caller cannot supply the journal
+                # proof (incoming_provenance / cancelled_journal_owner_messages),
+                # so the relaxed path is disabled whenever the session carries
+                # cancelled-journal state (#6638).
                 return merge_session_messages_append_only(
                     sidecar_messages,
                     cli_messages,
@@ -13582,6 +13586,11 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     keep_state_rows_missing_from_sidecar=(
                         getattr(session, "truncation_watermark", None) in (None, "")
                         and getattr(session, "truncation_boundary", None) in (None, "")
+                        and _cancelled_journal_turn_owner(
+                            getattr(session, "messages", None) or [],
+                            include_live_partial=True,
+                        )
+                        is None
                     ),
                 )
             # CLI-dominant merge: state.db has rows the sidecar has not caught
@@ -17761,6 +17770,10 @@ def _handle_session_get(handler, parsed) -> bool:
                 # different slices of the same stitched conversation, merge
                 # them chronologically and dedupe exact repeats.
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+                if _display_owner_positions is None:
+                    _messaging_owner_positions = _display_exact_owner_positions(s, _all_msgs)
+                    if _messaging_owner_positions:
+                        _display_owner_positions = _messaging_owner_positions
             elif msg_limit is not None:
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
@@ -17822,6 +17835,10 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+                if _display_owner_positions is None:
+                    _messaging_owner_positions = _display_exact_owner_positions(s, _all_msgs)
+                    if _messaging_owner_positions:
+                        _display_owner_positions = _messaging_owner_positions
             else:
                 if metadata_summary is None:
                     metadata_summary = _message_summary(getattr(s, "messages", []) or [])
