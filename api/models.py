@@ -1047,6 +1047,13 @@ def _load_webui_deleted_session_tombstone() -> frozenset[str]:
 
 
 def _save_webui_deleted_session_tombstone(ids) -> None:
+    """Persist the durable set of deleted WebUI session IDs.
+
+    Write failures propagate so callers that require fail-closed durability
+    (such as the delete route) can detect the failure and report an error.
+    Callers performing best-effort tombstone clearing guard against write
+    exceptions so the entry remains, preserving the fail-closed invariant.
+    """
     try:
         sorted_ids = sorted(set(
             str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
@@ -1078,6 +1085,7 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
                 _tmp.unlink(missing_ok=True)
             except Exception:
                 pass
+        raise
 
 
 def _record_webui_deleted_session_tombstone(sid: str) -> None:
