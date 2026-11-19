@@ -844,10 +844,21 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
             st = os.fstat(fh.fileno())
             with _after_seq_index_lock:
                 idx = _after_seq_index.pop(key, None)
-            if idx is not None and (idx["id"] != (st.st_dev, st.st_ino) or st.st_size < idx["size"]):
+            if idx is not None and (
+                idx["id"] != (st.st_dev, st.st_ino)
+                or st.st_size < idx["size"]
+                # A speculative reader may have indexed a complete row just
+                # before the producer's failed fsync rolled it back. Later
+                # committed rows can regrow the same inode to the exact old
+                # size; size-only validation would then skip them. ctime is
+                # the filesystem's same-inode change counter, so unchanged
+                # size with a different ctime must rebuild from real bytes.
+                or (st.st_size == idx["size"] and st.st_ctime_ns != idx.get("ctime"))
+            ):
                 idx = None
             if idx is None:
-                idx = {"id": (st.st_dev, st.st_ino), "size": 0, "maxes": [float("-inf")], "offs": [0],
+                idx = {"id": (st.st_dev, st.st_ino), "ctime": st.st_ctime_ns, "size": 0,
+                       "maxes": [float("-inf")], "offs": [0],
                        "lines": [0], "malformed": [], "malformed_bytes": 0, "rows": 0}
             pos = bisect.bisect_right(idx["maxes"], threshold) - 1
             start, line_no = idx["offs"][pos], idx["lines"][pos]
@@ -906,6 +917,10 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
         off = line_end
     if archived is not None and os.path.lexists(archived):
         return None
+    # This is the stat captured before scanning; later same-size rewrites with
+    # a newer ctime invalidate above. A larger ordinary append may extend the
+    # old checkpoints, so its newly observed ctime becomes the saved baseline.
+    idx["ctime"] = st.st_ctime_ns
     with _after_seq_index_lock:
         if idx["malformed_bytes"] > _AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES:
             _after_seq_index.pop(key, None)

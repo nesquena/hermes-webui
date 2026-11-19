@@ -133,6 +133,80 @@ def test_warm_tail_does_not_require_pread(tmp_path, monkeypatch):
     assert got == _oracle(path, 510)
 
 
+def _event_line_len(seq, text, padding=""):
+    event = {
+        "version": 2,
+        "event_id": f"{RID}:{seq}",
+        "seq": seq,
+        "run_id": RID,
+        "session_id": SID,
+        "event": "token",
+        "type": "token",
+        "created_at": 0.0,
+        "terminal": False,
+        "terminal_state": None,
+        "payload": {"text": text, "pad": padding},
+    }
+    return len((json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+
+
+@pytest.mark.parametrize("interleaved_replay", [False, True])
+def test_failed_append_replay_cannot_skip_committed_regrowth(tmp_path, monkeypatch, interleaved_replay):
+    """A speculative indexed row loses all authority when its append rolls back."""
+    monkeypatch.setenv(rj._FSYNC_MODE_ENV, rj._FSYNC_MODE_EAGER)
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    for seq in range(1, 256):
+        rj.append_run_event(
+            SID, RID, "token", {"text": f"prefix {seq}", "pad": "x" * 20},
+            session_dir=tmp_path, created_at=0.0,
+        )
+    committed_prefix = path.read_bytes()
+    observed = {}
+    real_fsync = os.fsync
+
+    def fail_fsync_after_optional_replay(fd):
+        if "size" not in observed and os.fstat(fd).st_ino == path.stat().st_ino:
+            if interleaved_replay:
+                speculative = rj.read_run_events(SID, RID, after_seq=0, session_dir=tmp_path)
+                assert speculative["events"][-1]["seq"] == 256
+                assert str(path) in rj._after_seq_index
+            observed["size"] = path.stat().st_size
+            observed["inode"] = path.stat().st_ino
+            raise OSError("injected append failure after complete row became visible")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_fsync_after_optional_replay)
+    with pytest.raises(OSError, match="injected append failure"):
+        rj.append_run_event(
+            SID, RID, "token", {"text": "rolled back", "pad": "F" * 20000},
+            session_dir=tmp_path, created_at=0.0,
+        )
+    assert path.read_bytes() == committed_prefix
+
+    rj.append_run_event(
+        SID, RID, "token", {"text": "committed 256", "pad": ""},
+        session_dir=tmp_path, created_at=0.0,
+    )
+    final_without_padding = (
+        len(committed_prefix)
+        + _event_line_len(256, "committed 256")
+        + _event_line_len(257, "committed 257")
+    )
+    padding = observed["size"] - final_without_padding
+    assert padding > 0
+    rj.append_run_event(
+        SID, RID, "token", {"text": "committed 257", "pad": "P" * padding},
+        session_dir=tmp_path, created_at=0.0,
+    )
+    assert path.stat().st_ino == observed["inode"]
+    assert path.stat().st_size == observed["size"]
+    assert [event["seq"] for event in rj._read_jsonl(path)[0]][-2:] == [256, 257]
+
+    got = rj.read_run_events(SID, RID, after_seq=256, max_seq=257, session_dir=tmp_path)
+    assert [event["seq"] for event in got["events"]] == [257]
+    assert got["events"][0]["payload"]["text"] == "committed 257"
+
+
 def test_oversized_malformed_rows_are_not_cached(tmp_path, monkeypatch):
     monkeypatch.setattr(rj, "_AFTER_SEQ_INDEX_MAX_MALFORMED_BYTES", 64, raising=False)
     path = rj._run_path(SID, RID, session_dir=tmp_path)
