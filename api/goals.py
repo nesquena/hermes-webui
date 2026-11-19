@@ -889,14 +889,10 @@ def goal_message_key(decision: Dict[str, Any]) -> str:
 
 # WebUI-owned continuations held for running subagents: {sid: {prompt, profile_home, owner}}.
 _HELD_GOAL_CONTINUATIONS: dict[str, Dict[str, Any]] = {}
-# Bumped under the record lock on every hold mutation and clear; a release
-# that read state.db outside the lock reinserts/registers only while unchanged.
-_HELD_GOAL_EPOCH: dict[str, int] = {}
 
 
 def _locked_set_held(session_id: str, held: Optional[Dict[str, Any]]) -> None:
     """Replace (or drop) the hold for *session_id*. Caller holds the record lock."""
-    _HELD_GOAL_EPOCH[session_id] = _HELD_GOAL_EPOCH.get(session_id, 0) + 1
     if held is None:
         _HELD_GOAL_CONTINUATIONS.pop(session_id, None)
     else:
@@ -1546,7 +1542,6 @@ def _release_held_goal_continuation(session_id: str) -> bool:
         held = _HELD_GOAL_CONTINUATIONS.get(sid)
         if held is None or _locked_pending_record(sid) is not None:
             return False
-        epoch = _HELD_GOAL_EPOCH.get(sid, 0)
     profile_home = held["profile_home"]
     if _state_db_live_delegations(sid, profile_home) > 0:
         return False
@@ -1554,8 +1549,8 @@ def _release_held_goal_continuation(session_id: str) -> bool:
         return False
     record = {"prompt": held["prompt"], "continuation_id": uuid.uuid4().hex, "detached_owned": True}
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
-        # A clear, Stop or newer judgement since the read above wins.
-        if _HELD_GOAL_EPOCH.get(sid, 0) != epoch or _locked_pending_record(sid) is not None:
+        # Every clear, Stop or newer judgement drops or replaces this exact hold object.
+        if _HELD_GOAL_CONTINUATIONS.get(sid) is not held or _locked_pending_record(sid) is not None:
             return False
         _locked_set_held(sid, None)
         _cfg.PENDING_GOAL_CONTINUATION.add(sid)

@@ -2408,3 +2408,43 @@ def test_goal_clear_racing_a_hold_release_leaves_nothing(monkeypatch, tmp_path, 
     assert sid not in webui_goals._HELD_GOAL_CONTINUATIONS
     assert webui_goals.peek_pending_goal_continuation_id(sid) is None
     assert started == []
+
+
+def test_clearing_sessions_that_never_held_leaves_no_bookkeeping():
+    """Clear/delete of never-held sessions must not grow any per-session goals table."""
+    def sizes():
+        return {k: len(v) for k, v in vars(webui_goals).items() if isinstance(v, dict)}
+
+    before = sizes()
+    for i in range(50):
+        webui_goals.clear_pending_goal_continuation(f"sid-never-held-{i}")
+    assert sizes() == before
+
+
+def test_release_skips_a_hold_re_set_with_identical_content(monkeypatch, tmp_path):
+    """A clear plus an identical re-hold inside the release window still beats the stale release."""
+    session, _holder, _kickoffs = _goal_command_env(monkeypatch, tmp_path, "sid-held-rehold-race")
+    sid = session.session_id
+    _live_delegation_db(tmp_path, sid)
+    args = (dict(_LEASE_DECISION), sid, tmp_path)
+    webui_goals._hold_while_delegations_run(*args, remember=True, owner="stream-judge")
+    real_count = webui_goals._state_db_live_delegations
+
+    def _count_then_rehold(*a):
+        real_count(*a)
+        same = dict(webui_goals._HELD_GOAL_CONTINUATIONS[sid])
+        webui_goals.clear_pending_goal_continuation(sid)
+        with webui_goals._cfg.PENDING_GOAL_CONTINUATION_LOCK:
+            webui_goals._locked_set_held(sid, same)
+        return 0
+
+    monkeypatch.setattr(webui_goals, "_state_db_live_delegations", _count_then_rehold)
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *_a, **_kw: True)
+    started = []
+    monkeypatch.setattr(
+        webui_goals, "start_detached_goal_continuation", lambda *a, **k: started.append(a)
+    )
+    assert webui_goals._release_held_goal_continuation(sid) is False
+    assert started == []
+    assert webui_goals._HELD_GOAL_CONTINUATIONS[sid]["owner"] == "stream-judge"
+    assert webui_goals.peek_pending_goal_continuation_id(sid) is None
