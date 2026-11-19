@@ -35,7 +35,7 @@ def _focused_resolver(monkeypatch):
     monkeypatch.setattr(models, "_session_has_pending_journal_retry", lambda _s: False)
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
     monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
-    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda _s: None)
+    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda _s, **_kw: None)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *a, **kw: None)
     monkeypatch.setattr(routes, "_worktree_retained_payload", lambda _s: {})
     yield
