@@ -8,6 +8,7 @@ from __future__ import annotations
 import bisect
 import contextlib
 import gzip
+import hashlib
 import io
 import json
 import logging
@@ -854,14 +855,31 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
                 # the filesystem's same-inode change counter, so unchanged
                 # size with a different ctime must rebuild from real bytes.
                 or (st.st_size == idx["size"] and st.st_ctime_ns != idx.get("ctime"))
+                or len(idx.get("sigs", ())) != len(idx["offs"])
+                or "_segment_hash" not in idx
             ):
                 idx = None
             if idx is None:
                 idx = {"id": (st.st_dev, st.st_ino), "ctime": st.st_ctime_ns, "size": 0,
-                       "maxes": [float("-inf")], "offs": [0],
+                       "maxes": [float("-inf")], "offs": [0], "sigs": [b""],
+                       "_segment_hash": hashlib.sha256(),
                        "lines": [0], "malformed": [], "malformed_bytes": 0, "rows": 0}
             pos = bisect.bisect_right(idx["maxes"], threshold) - 1
             start, line_no = idx["offs"][pos], idx["lines"][pos]
+            if start:
+                # A size/ctime pair still cannot distinguish ordinary growth
+                # from rollback followed by larger regrowth. Validate the
+                # bounded segment leading to this checkpoint against the bytes
+                # originally indexed. A discarded transient row changes that
+                # digest even when replacement rows preserve its endpoint;
+                # ordinary append-only growth leaves it intact. Coarse ctime
+                # resolution therefore cannot hide the same replay omission.
+                segment_start = idx["offs"][pos - 1]
+                fh.seek(segment_start)
+                segment = fh.read(start - segment_start)
+                if (len(segment) != start - segment_start
+                        or hashlib.sha256(segment).digest() != idx["sigs"][pos]):
+                    return None
             fh.seek(start)
             if start:
                 checkpoint = fh.tell()
@@ -888,6 +906,12 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
         complete = line_end <= start + len(data)
         extend = complete and line_end > idx["size"]
         raw = raw_b.decode("utf-8", errors="surrogateescape")
+        if extend:
+            # Continue the digest from the prior checkpoint through every new
+            # byte, including blank/malformed rows and their newline. Checkpoints
+            # retain one digest per complete stride; a later read can therefore
+            # rehash only that bounded segment rather than the whole journal.
+            idx["_segment_hash"].update(data[max(off, idx["size"]) - start:line_end - start])
         if raw.strip():
             try:
                 parsed = json.loads(raw)
@@ -906,6 +930,8 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
                     if idx["rows"] % _AFTER_SEQ_INDEX_STRIDE == 0:
                         idx["maxes"].append(prefix_max)
                         idx["offs"].append(line_end)
+                        idx["sigs"].append(idx["_segment_hash"].digest())
+                        idx["_segment_hash"] = hashlib.sha256()
                         idx["lines"].append(line_no)
             else:
                 malformed.append({"line": line_no, "raw": raw})

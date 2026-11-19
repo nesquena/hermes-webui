@@ -151,7 +151,10 @@ def _event_line_len(seq, text, padding=""):
 
 
 @pytest.mark.parametrize("interleaved_replay", [False, True])
-def test_failed_append_replay_cannot_skip_committed_regrowth(tmp_path, monkeypatch, interleaved_replay):
+@pytest.mark.parametrize("append_after_regrowth", [False, True])
+def test_failed_append_replay_cannot_skip_committed_regrowth(
+    tmp_path, monkeypatch, interleaved_replay, append_after_regrowth,
+):
     """A speculative indexed row loses all authority when its append rolls back."""
     monkeypatch.setenv(rj._FSYNC_MODE_ENV, rj._FSYNC_MODE_EAGER)
     path = rj._run_path(SID, RID, session_dir=tmp_path)
@@ -200,7 +203,15 @@ def test_failed_append_replay_cannot_skip_committed_regrowth(tmp_path, monkeypat
     )
     assert path.stat().st_ino == observed["inode"]
     assert path.stat().st_size == observed["size"]
-    assert [event["seq"] for event in rj._read_jsonl(path)[0]][-2:] == [256, 257]
+    if append_after_regrowth:
+        rj.append_run_event(
+            SID, RID, "token", {"text": "committed 258", "pad": ""},
+            session_dir=tmp_path, created_at=0.0,
+        )
+        assert path.stat().st_size > observed["size"]
+    assert [event["seq"] for event in rj._read_jsonl(path)[0]][-2:] == (
+        [257, 258] if append_after_regrowth else [256, 257]
+    )
 
     got = rj.read_run_events(SID, RID, after_seq=256, max_seq=257, session_dir=tmp_path)
     assert [event["seq"] for event in got["events"]] == [257]
