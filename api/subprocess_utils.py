@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import shlex
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -22,6 +24,286 @@ def windows_hide_flags() -> int:
     if sys.platform == "win32":
         return getattr(subprocess, "CREATE_NO_WINDOW", 0)
     return 0
+
+
+# Windows Job Object support (stdlib ctypes only; see run_network_command_windows).
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_WINDOWS_JOB_KILL_EXITCODE = 1
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        (name, ctypes.c_ulonglong)
+        for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+        )
+    ]
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _windows_kernel32():
+    """Bind the five kernel32 entry points the job runner needs."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.SetInformationJobObject.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+    ]
+    kernel32.SetInformationJobObject.restype = ctypes.c_int
+    kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+    kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.TerminateJobObject.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    return kernel32
+
+
+# The gate bootstrap makes the Job assignment race-free: the updater assigns
+# the bootstrap to the job BEFORE the gate byte is sent, and Git (with every
+# helper and grandchild it spawns) is born inside the job instead of joining
+# one after a Popen round trip. The bootstrap must not write to stdout/stderr;
+# Git inherits those pipes directly. Closing stdin without the gate byte (or
+# any job/kernel failure before the gate) leaves Git unstarted.
+_WINDOWS_GATE_CODE = """\
+import subprocess, sys
+if sys.stdin.buffer.read(1) != b'1':
+    sys.exit(0)
+try:
+    rc = subprocess.call(
+        sys.argv[1:],
+        stdin=subprocess.DEVNULL,
+        shell=False,
+        creationflags=0x08000000,  # CREATE_NO_WINDOW, matching windows_hide_flags()
+    )
+except OSError as exc:
+    sys.stderr.write(str(exc) + '\\n')
+    sys.exit(127)
+sys.exit(rc)
+"""
+
+
+def _windows_job_terminate(kernel32, job, cleanup):
+    """Best-effort TerminateJobObject; never raises, always reports."""
+    try:
+        if not kernel32.TerminateJobObject(job, _WINDOWS_JOB_KILL_EXITCODE):
+            cleanup.append(
+                f"TerminateJobObject failed (WinError {ctypes.get_last_error()})")
+    except Exception as term_exc:
+        cleanup.append(f"TerminateJobObject raised: {term_exc!r}")
+
+
+def _windows_close_job(kernel32, job, cleanup):
+    """One CloseHandle attempt; True only when the close is confirmed."""
+    try:
+        if kernel32.CloseHandle(job):
+            return True
+        cleanup.append(f"CloseHandle failed (WinError {ctypes.get_last_error()})")
+    except Exception as close_exc:
+        cleanup.append(f"CloseHandle raised: {close_exc!r}")
+    return False
+
+
+def _windows_abort_drain(process):
+    """Close the gate and reap the bootstrap after job termination.
+
+    Returns ``(stdout, stderr, note)``. The gate has not been (successfully)
+    delivered in any failure path, so closing stdin makes an unassigned
+    bootstrap exit without starting Git, and the bounded ``communicate`` then
+    drains whatever was written and reaps the direct child. When the drain
+    still fails, a writer is alive against our reader ends: closing the text
+    wrapper would block on Windows (its close joins a reader thread parked in
+    ReadFile, which only finishes once every writer handle is gone), so the
+    reader handles are left to the ``Popen`` finalizer and the direct child is
+    killed and reaped — an unassigned bootstrap never got the gate byte and has
+    no tree, a job member is already dead, and taskkill is never used. Every
+    step is best-effort: a raise is captured as a note and cleanup advances.
+    """
+    if process is None:
+        return None, None, ""
+    notes = []
+    # The gate has not been (successfully) delivered in any failure path;
+    # closing stdin makes an unassigned bootstrap exit without starting Git.
+    if process.stdin is not None and not process.stdin.closed:
+        try:
+            process.stdin.close()
+        except Exception as close_exc:  # cleanup must always advance
+            notes.append(f"gate stdin close raised: {close_exc!r}")
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+        return stdout, stderr, "; ".join(notes)
+    except subprocess.TimeoutExpired:
+        notes.append("pipe drain timed out; reader handles left to the finalizer")
+    except Exception as drain_exc:  # the caller's original error must survive
+        notes.append(f"cleanup drain failed: {drain_exc!r}")
+    try:
+        process.kill()
+    except Exception as kill_exc:
+        notes.append(f"kill raised: {kill_exc!r}")
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        notes.append("direct child did not exit after kill")
+    except Exception as wait_exc:
+        notes.append(f"wait raised: {wait_exc!r}")
+    return None, None, "; ".join(notes)
+
+
+def run_network_command_windows(argv, *, cwd, env, timeout):
+    """Run ``argv`` under a per-call Job Object and hard-stop the tree on timeout.
+
+    Replaces the ``taskkill /T`` approach that could not find descendants once
+    their direct parent had exited: job membership survives any member's exit,
+    so terminating the job — and KILL_ON_JOB_CLOSE when the last handle closes —
+    reaps Git helpers and grandchildren no matter who already left. BREAKAWAY
+    is never allowed, so spawned helpers cannot escape.
+
+    The job is created and configured BEFORE the gate bootstrap
+    (``_WINDOWS_GATE_CODE``) is spawned, so a binder or kernel failure can
+    never leak a started child; the bootstrap is then assigned to the job
+    before the gate byte, so no Git process can exist outside the job. The
+    bootstrap interpreter is ``sys._base_executable`` — on a Windows venv
+    ``sys.executable`` is ``venvlauncher.exe``, whose real-interpreter child
+    would be spawned before the assignment — and a frozen runtime or an
+    unusable base path fails closed with OSError before any kernel or spawn
+    work. Every
+    failure fails closed before the gate: the tree is terminated and the job
+    handle closed BEFORE the pipes are touched, a stuck unassigned bootstrap is
+    killed and reaped, and the original error propagates. Cleanup steps are
+    independent — a raise or false return at any step is captured as a
+    diagnostic on the original error and cleanup still advances — and the job
+    handle is dropped only on a confirmed close, otherwise one bounded final
+    close is attempted. A success-path close that stays unconfirmed raises
+    OSError after the same bounded terminate-and-close cleanup instead of
+    returning the result. ``timeout`` covers bootstrap startup plus the
+    command; on expiry the external ``subprocess.TimeoutExpired(argv, timeout,
+    output, stderr)`` shape and the partial output are preserved.
+    """
+    started = time.monotonic()
+    # sys.executable on a Windows venv is venvlauncher.exe, which spawns the
+    # real interpreter before AssignProcessToJobObject can run, leaving Git
+    # outside the job; bootstrap with the base interpreter, never a fallback
+    # that would reintroduce the race.
+    bootstrap = getattr(sys, "_base_executable", None)
+    if getattr(sys, "frozen", False):
+        raise OSError(
+            "Windows job runner needs a standard CPython runtime; frozen "
+            "executables do not provide a usable gate bootstrap interpreter"
+        )
+    if not isinstance(bootstrap, str) or not bootstrap:
+        raise OSError(
+            "Windows job runner needs sys._base_executable to name the gate "
+            "bootstrap interpreter"
+        )
+    base_interpreter = Path(bootstrap)
+    if not base_interpreter.is_absolute() or not base_interpreter.is_file():
+        raise OSError(
+            "sys._base_executable is not an absolute path to an existing "
+            f"interpreter: {bootstrap!r}"
+        )
+    kernel32 = _windows_kernel32()
+    job = None
+    process = None
+    exc = None
+    try:
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+        limits = _JobObjectExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits), ctypes.sizeof(limits),
+        ):
+            raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+        # The bootstrap is owned only from here: a kernel failure above never
+        # leaves one behind.
+        process = subprocess.Popen(
+            [bootstrap, "-I", "-c", _WINDOWS_GATE_CODE, *argv],
+            cwd=str(cwd), env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=windows_hide_flags(),
+        )
+        # Popen._handle is private, but CPython keeps the real process HANDLE
+        # open for the Popen's whole lifetime, so the assignment cannot race a
+        # pid recycle the way an OpenProcess(pid) round trip could.
+        if not kernel32.AssignProcessToJobObject(job, ctypes.c_void_p(int(process._handle))):
+            raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+        remaining = max(0.0, timeout - (time.monotonic() - started))
+        stdout, stderr = process.communicate(input="1", timeout=remaining)
+    except BaseException as raised:
+        exc = raised
+    if exc is not None:
+        # Failure path: terminate, then close, the job BEFORE any pipe work.
+        # Each cleanup step is independent — a raise or false return is noted
+        # and cleanup still advances — so nothing masks the original error,
+        # and KILL_ON_JOB_CLOSE on the last handle sweeps up whatever a failed
+        # terminate left behind.
+        cleanup = []
+        if job:
+            _windows_job_terminate(kernel32, job, cleanup)
+            if not _windows_close_job(kernel32, job, cleanup):
+                # Unconfirmed first close: retain ownership for the single
+                # bounded final attempt; never discard a live handle.
+                if _windows_close_job(kernel32, job, cleanup):
+                    job = None
+            else:
+                job = None
+        try:
+            stdout, stderr, drain_note = _windows_abort_drain(process)
+        except Exception as drain_exc:  # cleanup must always advance
+            stdout, stderr = None, None
+            drain_note = f"cleanup drain raised: {drain_exc!r}"
+        if drain_note:
+            cleanup.append(drain_note)
+        if cleanup:
+            exc.add_note("windows job cleanup: " + "; ".join(cleanup))
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise subprocess.TimeoutExpired(
+                argv, timeout,
+                output=stdout if stdout is not None else exc.stdout,
+                stderr=stderr if stderr is not None else exc.stderr,
+            ) from exc
+        raise exc
+    cleanup = []
+    if not _windows_close_job(kernel32, job, cleanup):
+        # Success must never return while the job close is unconfirmed: kill
+        # whatever the job still holds, make the single bounded final close
+        # attempt, and surface the failure instead of the command result.
+        _windows_job_terminate(kernel32, job, cleanup)
+        if _windows_close_job(kernel32, job, cleanup):
+            cleanup.append("final CloseHandle confirmed after terminate")
+        error = OSError("job close unconfirmed after a successful command")
+        error.add_note("windows job cleanup: " + "; ".join(cleanup))
+        raise error
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 # Environment variables git honours that let a WebUI-spawned child do something

@@ -560,8 +560,14 @@ class TestProfileMutationsInIsolatedMode:
 class TestNormalModePreservation:
     """Test that normal mode behavior is completely unchanged."""
 
-    def test_normal_mode_profile_operations_work(self, temp_hermes_home):
-        """Normal mode allows profile creation and deletion."""
+    def test_normal_mode_profile_operations_work(self, temp_hermes_home, monkeypatch):
+        """Normal mode allows profile creation, and the profile lands in the test's own root."""
+        # The Agent resolves the profiles root from HERMES_HOME *and* the platform default
+        # ``Path.home()/.hermes``: a temp HERMES_HOME that sits under the real ~/.hermes (a TMPDIR
+        # in a Hermes scratch dir) resolves to the real root and creates a real profile. Make the
+        # temp home the platform default so the resolver can only answer the temp root.
+        for home_var in ("HOME", "USERPROFILE"):
+            monkeypatch.setenv(home_var, str(temp_hermes_home.parent))
         with mock.patch.dict(os.environ, {"HERMES_HOME": str(temp_hermes_home)}):
             with mock.patch("api.profiles._DEFAULT_HERMES_HOME", temp_hermes_home):
                 with mock.patch("api.profiles._is_isolated_profile_mode", return_value=False):
@@ -578,6 +584,8 @@ class TestNormalModePreservation:
                             # Should be a different error, not about isolation
                             assert "isolated" not in str(e).lower()
                             assert "single" not in str(e).lower()
+                        else:
+                            assert (temp_hermes_home / "profiles" / "testprof1").is_dir()
                     except ImportError:
                         # hermes_cli not available, skip
                         pass
