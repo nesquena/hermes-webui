@@ -39,6 +39,8 @@
 
 - **A profile switch no longer lets an older profile's panel reply land in the new one (#9077).** The Memory, Skills, Workspaces, Kanban and cron gateway-notice loaders now publish a reply only while it is still the newest load for the profile that asked for it, so a response that arrives after a switch — a late success or a late failure — is dropped instead of overwriting the new profile's panel, cache or error box. Both switch paths already retire in-flight loads through the shared panel reset, so this also covers panels that stay hidden across the switch.
 
+- **Deleting a conversation reports a failure when its delete record can't be saved (#9148).** The delete record is what stops a deleted conversation from coming back from the Agent's store or reappearing in the sidebar. If it couldn't be written, the delete still answered success. It now finishes the rest of the cleanup and then answers `delete_tombstone_failed`, so the conversation is never left readable on disk, and a retry completes the delete. Thanks @webtecnica.
+
 - **A timing test for the update lock-recovery retry no longer fails on a busy machine (#9172).** The test speeds its timers up by a factor of 1,000, which put its "just under" and "just over" the 300-second limit cases 1 ms apart in real time, close enough for a loaded runner to swap them. They now sit 10 seconds either side of the limit. No product code changes.
 
 - **Newer Agents: compressed conversations, compressed messaging sessions and busy-ledger delegation results work again (#9166, refs #9157).** Newer Agent builds replaced the session store, and three things failed quietly:
