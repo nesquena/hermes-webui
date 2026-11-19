@@ -27,6 +27,8 @@
 
 ### Security
 
+- **Share and Stop sharing refuse a link that belongs to another conversation (#9192, closes #8734).** A conversation's record can name a public share link that a different, still-existing conversation published. Share now answers 409 and changes nothing instead of replacing that conversation's public page, and Stop sharing no longer revokes its link. A conversation's own link, and links within compressed conversation chains, behave as before.
+
 - **On a server that hosts several profiles, each profile's credential scope keeps to its own values (#9188, refs #9187).** The Agent builds the launch profile's secret scope from the server's launch environment. WebUI now gives it a frozen copy of the operator's environment, captured at startup, instead of the live process environment, which other profiles' settings can change. A profile's own settings also no longer change the deployment-wide managed directory. Single-profile installs are not affected.
 
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
