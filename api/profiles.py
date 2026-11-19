@@ -69,6 +69,46 @@ def _read_dotenv_values(env_path) -> dict[str, str]:
     return values
 
 
+_LAUNCHER_DOUBLE_QUOTED = re.compile(r'^"((?:[^"\\]|\\.)*)"(\s*#.*)?\s*$')
+_LAUNCHER_SINGLE_QUOTED = re.compile(r"^'([^']*)'(\s*#.*)?\s*$")
+_LAUNCHER_ESCAPES = {'n': '\n', 'r': '\r', 't': '\t', '"': '"', '\\': '\\'}
+
+
+def _launcher_dotenv_values(env_path) -> dict[str, str]:
+    """A .env file's values as ctl.sh's ``_apply_env_file_safely`` exports them; {} on error.
+
+    Double-quoted values decode ``\\n \\r \\t \\" \\\\`` (other escapes stay as written), single-quoted
+    values are literal, and an unquoted value ends at its first whitespace-then-``#``. The Agent's
+    ``.env`` reader decodes fewer escapes, so by-value provenance checks against both readings."""
+    values: dict[str, str] = {}
+    try:
+        text = Path(env_path).expanduser().read_text(encoding="utf-8")
+    except Exception:
+        return values
+    for line in text.splitlines():
+        line = line.lstrip()
+        if not line or line.startswith('#'):
+            continue
+        if re.match(r'export\s+', line):
+            line = re.sub(r'^export\s+', '', line)
+        if '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = re.sub(r'\s', '', key)
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key) or key in ('UID', 'GID', 'EUID', 'EGID', 'PPID'):
+            continue
+        value = value.lstrip()
+        if m := _LAUNCHER_DOUBLE_QUOTED.match(value):
+            # ctl.sh decodes through awk inside $(...), which drops trailing newlines.
+            value = re.sub(r'\\(.)', lambda e: _LAUNCHER_ESCAPES.get(e.group(1), e.group(0)), m.group(1)).rstrip('\n')
+        elif m := _LAUNCHER_SINGLE_QUOTED.match(value):
+            value = m.group(1)
+        else:
+            value = re.split(r'\s#', value, maxsplit=1)[0].rstrip()
+        values[key] = value
+    return values
+
+
 # The launch home's .env as it was at startup. Shell launchers (ctl.sh) source $HERMES_HOME/.env before Python
 # starts, so for a NAMED profile home those values sit in os.environ looking like launcher exports; this snapshot
 # is the provenance record that tells them apart (#8432).
@@ -2127,17 +2167,26 @@ def _install_operator_env_as_agent_launch_env() -> None:
         load_env_file = _read_dotenv_values
     root_env = Path(_DEFAULT_HERMES_HOME) / '.env'
     root_dotenv: dict[str, str] = {}
+    root_launcher: dict[str, str] = {}
     if not _INITIAL_HERMES_HOME or _is_root_profile_home(_INITIAL_HERMES_HOME):
         root_dotenv = load_env_file(root_env)
+        root_launcher = _launcher_dotenv_values(root_env)
         if not root_dotenv:
             logger.debug("No readable root .env values to leave out of the frozen launch env")
     launch_env = operator_env()
     if _INITIAL_HERMES_HOME and not _is_root_profile_home(_INITIAL_HERMES_HOME):
-        # Also by the Agent's reader: operator_env()'s record of the named launch home misses quoted
-        # values with an inline comment, which would freeze a key later removed in Settings.
-        launch_dotenv = load_env_file(Path(_INITIAL_HERMES_HOME).expanduser() / '.env')
-        launch_env = {k: v for k, v in launch_env.items() if not _value_from_dotenv(k, v, launch_dotenv)}
-    root_keys = {k for k, v in launch_env.items() if _value_from_dotenv(k, v, root_dotenv)}
+        # Also by the Agent's reader and by ctl.sh's: operator_env()'s record of the named launch home misses
+        # quoted values with an inline comment or escapes, which would freeze a key later removed in Settings.
+        named = Path(_INITIAL_HERMES_HOME).expanduser() / '.env'
+        launch_dotenv, launch_launcher = load_env_file(named), _launcher_dotenv_values(named)
+        launch_env = {k: v for k, v in launch_env.items()
+                      if not (_value_from_dotenv(k, v, launch_dotenv) or _value_from_dotenv(k, v, launch_launcher))}
+    # A key matches the root .env as the Agent reads it or as ctl.sh decoded it (double-quoted \n \r \t);
+    # each is re-read the way it matched, so a saved active named profile keeps the value base gave it.
+    agent_keys = {k for k, v in launch_env.items() if _value_from_dotenv(k, v, root_dotenv)}
+    launcher_keys = {k for k, v in launch_env.items()
+                     if k not in agent_keys and _value_from_dotenv(k, v, root_launcher)}
+    root_keys = agent_keys | launcher_keys
     frozen = {k: v for k, v in launch_env.items() if k not in root_keys}
     if not root_keys or _is_root_profile_home(get_process_profile_home()):
         _lpp._launch_env = lambda: dict(frozen)
@@ -2145,7 +2194,9 @@ def _install_operator_env_as_agent_launch_env() -> None:
 
     def _launch_env_with_current_root_values() -> dict[str, str]:
         current = load_env_file(root_env)
-        return {**frozen, **{k: current[k] for k in root_keys if k in current}}
+        decoded = _launcher_dotenv_values(root_env) if launcher_keys else {}
+        return {**frozen, **{k: current[k] for k in agent_keys if k in current},
+                **{k: decoded[k] for k in launcher_keys if k in decoded}}
 
     _lpp._launch_env = _launch_env_with_current_root_values
 

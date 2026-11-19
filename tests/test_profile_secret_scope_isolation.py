@@ -22,6 +22,8 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import re
+import shutil
 import subprocess
 import sys
 import types
@@ -87,7 +89,8 @@ os.chdir(repo)
 
 OWNERS = {"DUMMY_KEY_PROFILE_A": "alpha", "DUMMY_KEY_PROFILE_B": "beta",
           "DUMMY_OPERATOR_TOKEN": "operator", "DUMMY_OPERATOR_OVERRIDE": "operator-override",
-          "DUMMY_ROOT_KEY": "root", "DUMMY_ROOT_KEY_NEW": "root-new"}
+          "DUMMY_ROOT_KEY": "root", "DUMMY_ROOT_KEY_NEW": "root-new",
+          "DUMMY_ROOT\tKEY": "root-decoded", "DUMMY_ROOT\\tKEY": "root-literal"}
 
 
 def owner(value):
@@ -485,7 +488,82 @@ def test_active_named_profile_scope_follows_a_root_key_changed_in_settings(tmp_p
     assert obs["operator"] == "operator", "the launch scope lost an operator-only value"
 
 
-# 5 ── the private Agent attribute the startup install replaces ──
+# 4c ── a double-quoted root .env value with an escape: ctl.sh decodes \t (and \n \r) before exporting, the
+# Agent's .env reader keeps it literal. The value must still be recognised as launcher-sourced.
+ESCAPED_ROOT = {"OPENROUTER_API_KEY": '"DUMMY_ROOT\\tKEY"'}   # the file holds the two characters backslash-t
+DECODED_EXPORT = {"OPENROUTER_API_KEY": "DUMMY_ROOT\tKEY"}     # what ctl.sh exported: a real tab
+
+
+@needs_agent_scopes
+def test_root_launch_scope_drops_an_escaped_key_removed_in_settings(tmp_path):
+    obs, _ = _run(tmp_path, "root_settings_save", launch="root", root_env=ESCAPED_ROOT,
+                  extra_env=DECODED_EXPORT, updates={"OPENROUTER_API_KEY": None})
+    # WebUI's startup load puts the file's literal reading in the live env for a root launch; the frozen launch env
+    # still holds the launcher's decoded export, which is what must not survive the delete.
+    assert obs["launch_scope_before"] in ("root-decoded", "root-literal"), "precondition: the key is set before the delete"
+    assert obs["live_after"] is None
+    assert obs["launch_env"] is None, "the frozen launch env keeps an escaped key removed from the root .env"
+    assert obs["launch_scope"] is None, "root's launch scope keeps an escaped key removed in Settings"
+    assert obs["scope"] is None, "root's cron fire scope keeps an escaped key removed in Settings"
+    assert obs["get_secret"] is None
+
+
+@needs_agent_scopes
+@needs_owner_scope_refresh
+@pytest.mark.parametrize(("update", "expected"), [("DUMMY_ROOT_KEY_NEW", "root-new"), (None, None)],
+                         ids=["rotate", "delete"])
+def test_active_named_profile_scope_follows_an_escaped_root_key_changed_in_settings(tmp_path, update, expected):
+    obs, _ = _run(tmp_path, "root_settings_save", launch="alpha-default", root_env=ESCAPED_ROOT,
+                  extra_env=DECODED_EXPORT, updates={"OPENROUTER_API_KEY": update})
+    assert obs["launch_profile"] == "alpha", "precondition: the saved active profile is the launch profile"
+    assert obs["launch_scope_before"] == "root-decoded", "the launch scope changed the value the launcher exported"
+    assert obs["launch_env"] == expected, "the launch env keeps the escaped root .env value from startup"
+    assert obs["launch_scope"] == expected, "the launch scope keeps the escaped root .env value from startup"
+    assert obs["scope"] == expected, "the cron fire scope keeps the escaped root .env value from startup"
+    assert obs["operator"] == "operator", "the launch scope lost an operator-only value"
+
+
+@needs_agent_scopes
+def test_active_named_profile_scope_gets_the_launchers_value_for_a_trailing_escaped_newline(tmp_path):
+    # ctl.sh decodes "...\n" inside $(...), which drops the trailing newline: the export has none.
+    obs, _ = _run(tmp_path, "root_settings_save", launch="alpha-default",
+                  root_env={"OPENROUTER_API_KEY": '"DUMMY_ROOT_KEY\\n"'},
+                  extra_env={"OPENROUTER_API_KEY": "DUMMY_ROOT_KEY"},
+                  updates={"LITELLM_API_KEY": "DUMMY_ROOT_KEY_NEW"})
+    assert obs["launch_profile"] == "alpha", "precondition: the saved active profile is the launch profile"
+    assert obs["launch_scope_before"] == "root", "the launch scope added a newline the launcher never exported"
+
+
+# 5 ── the launcher reading must match ctl.sh's real decoding ──
+
+LAUNCHER_CASES = [
+    'A1="plain"', 'A2="tab\\there"', 'A3="nl\\n"', 'A4="two\\n\\n"', 'A5="mid\\nend"', 'A6="cr\\r"', 'A7="q\\"x"',
+    'A8="bs\\\\"', 'A9="other\\zesc"', 'B1="v" # comment', 'B2="v"   #c', "B3='lit\\n'", "B4='s' # c", 'B5=unq # c',
+    'B6=unq#nocomment', 'B7=  spaced  ', 'export B8="exp"', 'export   B9=e2', 'C1="trail\\"', 'C2="unterminated',
+    'C3=', 'C4=""', '  C5="lead"', 'C 6=bad', 'C7="a"b', 'C8="tab\\t"', 'C9="x\\\\n"', 'D1="nl\\n" # c', 'D2=a b c',
+    'D3="\\n"', 'D4="\\\\\\n"',
+]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
+def test_launcher_reading_matches_ctl_sh_decoding(tmp_path):
+    body = re.search(r"\n(_apply_env_file_safely\(\) \{.*?\n\})\n", (REPO / "ctl.sh").read_text(encoding="utf-8"), re.S)
+    assert body, "ctl.sh no longer defines _apply_env_file_safely"
+    env_file = tmp_path / "t.env"
+    env_file.write_text("\n".join(LAUNCHER_CASES) + "\n", encoding="utf-8")
+    script = tmp_path / "run.sh"
+    script.write_text(body.group(1) + '\n_apply_env_file_safely "$1"\nexec "$2" -c '
+                      '"import json, os; print(json.dumps(dict(os.environ)))"\n', encoding="utf-8")
+    cp = subprocess.run(["bash", str(script), str(env_file), sys.executable], env={"PATH": "/usr/bin:/bin"},
+                        capture_output=True, text=True, timeout=60)
+    assert cp.returncode == 0, cp.stderr
+    exported = json.loads(cp.stdout)
+    expected = {k: v for k, v in exported.items() if k[:1] in "ABCD" and k[1:].isdigit()}
+    assert len(expected) == len(LAUNCHER_CASES), "precondition: ctl.sh exported every case"
+    assert profiles._launcher_dotenv_values(env_file) == expected
+
+
+# 6 ── the private Agent attribute the startup install replaces ──
 
 
 @pytest.mark.skipif(_LPP is None, reason="Hermes Agent launch-profile policy not importable")
