@@ -21,8 +21,16 @@ import pytest
 
 WEBUI_ROOT = Path(__file__).resolve().parents[1]
 AGENT_ROOT = Path(os.environ.get("HERMES_AGENT_ROOT", Path.home() / ".hermes" / "hermes-agent"))
+# The Agent root is only ever pointed at a real checkout (guarded by is_dir()),
+# so on a machine without one this insertion is a no-op; the importorskip below
+# is what actually gates this module when no Agent is installed. It goes ahead
+# of the repo root on purpose: same-named packages (``cron`` and friends) exist
+# in both trees, and the Agent's must win for these tests.
 if AGENT_ROOT.is_dir() and str(AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENT_ROOT))
+# The repo root must be importable too: the tests do ``from api import ...``,
+# and the api package imports its own siblings, which only resolves against the
+# repo root — under ``--noconftest`` and from any cwd no conftest has added it.
 if str(WEBUI_ROOT) not in sys.path:
     sys.path.insert(0, str(WEBUI_ROOT))
 

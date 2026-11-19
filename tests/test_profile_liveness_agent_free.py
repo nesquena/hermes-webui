@@ -35,6 +35,22 @@ from pathlib import Path
 import pytest
 
 WEBUI_ROOT = Path(__file__).resolve().parents[1]
+# Why the repo root goes on sys.path at import time, and why importorskip is
+# not an option here (the repo's usual precedent):
+#
+# * the tests below do ``from api import profiles``, and ``api.profiles``
+#   itself imports sibling ``api`` modules (``api.yaml_compat``, ``api.paths``),
+#   so only the repo root on sys.path satisfies them. Collection already
+#   imports this module, so the entry has to exist before any fixture runs —
+#   including under ``--noconftest`` and from any cwd, where no conftest has
+#   put the root there yet;
+# * this module exists to run *exactly where the Agent is absent* (CI), so a
+#   ``pytest.importorskip`` would skip it in the one place its coverage must
+#   execute — the opposite of the goal. The Agent-present file
+#   (``test_profile_enumeration_live_only.py``) keeps the importorskip gate.
+# Only the WebUI repo root is inserted — never an Agent path — and the
+# meta-path blocker below refuses every Agent module name, so this insertion
+# cannot pull Agent code into the process.
 if str(WEBUI_ROOT) not in sys.path:
     sys.path.insert(0, str(WEBUI_ROOT))
 
