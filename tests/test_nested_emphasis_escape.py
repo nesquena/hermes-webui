@@ -22,6 +22,7 @@ as a stashed tag and broke a following link.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -59,6 +60,7 @@ eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
 let buf = '';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
 """
@@ -169,6 +171,45 @@ def test_literal_nul_token_in_text_does_not_break_a_link_with_emphasis(driver_pa
     out = _render(driver_path, "[x](https://example.com/\x00B0\x00) *a **b** c*")
     assert 'href="https://example.com/' in out, out
     _no_literal_tags(out)
+
+
+# ── Emphasized link whose destination contains bold markers (review finding) ─
+
+@pytest.mark.parametrize("src", [
+    "*[x](https://example.com/**b**)*",      # the exact reviewed input
+    "[x](https://example.com/**b**)",        # same destination without italic
+    "*[x](https://example.com/**b**/c)*",    # markers mid-path
+])
+def test_link_with_bold_markers_in_url_keeps_a_clickable_href(driver_path, src):
+    """The emphasis stash restores renderer-emitted ``<strong>`` before links are
+    built, so a destination containing bold markers reached ``_markdownAnchor``
+    with markup in it. Interpolated raw, that closed the ``href`` attribute
+    early: the anchor lost its href and ``" target="_blank" rel="noopener">``
+    leaked into the page as text. The destination must be attribute-escaped.
+
+    The destination itself is still mangled by the emphasis pass (the ``**``
+    markers become escaped ``<strong>`` tags, exactly as on master) — this test
+    pins that the link stays clickable and well-formed, not the marker text.
+    """
+    out = _render(driver_path, src)
+    anchor = re.search(r"<a\b[^>]*>x</a>", out)
+    assert anchor, out
+    tag = anchor.group(0)
+    open_tag = tag[:tag.index(">") + 1]
+    assert re.search(r'href="https://example\.com/[^"]*b[^"]*"', open_tag), out
+    assert open_tag.count("<") == 1, out           # no markup inside the attributes
+    assert out.count('target="_blank"') == 1, out  # no attribute text leaked out
+
+
+def test_link_destination_with_quotes_cannot_add_attributes(driver_path):
+    """The same shape with quotes in the destination: the old raw interpolation
+    dropped everything from the first quote into the page text. The escaped
+    destination keeps one well-formed anchor and no extra attributes."""
+    out = _render(driver_path, '*[x](https://e.com/**a**"onmouseover="alert(1))*')
+    anchor = re.search(r"<a\b[^>]*>x</a>", out)
+    assert anchor, out
+    assert "onmouseover=alert(1)>" not in anchor.group(0), out
+    assert 'href="https://e.com/' in anchor.group(0), out
 
 
 # ── No regression for the previously-working shapes ──────────────────────────

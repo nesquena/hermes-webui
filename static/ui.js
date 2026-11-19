@@ -11526,7 +11526,11 @@ function renderMd(raw){
   function _markdownAnchor(label,rawUrl){
     const href=_markdownHref(rawUrl);
     const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
-    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
+    // The destination must be attribute-escaped: the emphasis stash restores
+    // renderer-emitted <strong>/<em> tags before links are built, so a URL that
+    // contained bold markers (`[x](https://e.com/**b**)`) reached this point
+    // with live markup in it and closed the href attribute early. See #8235.
+    return `<a${internal?' class="session-link"':''} href="${esc(_safeAttrValue(href))}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
   }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
