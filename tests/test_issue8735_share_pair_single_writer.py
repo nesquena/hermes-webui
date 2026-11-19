@@ -50,15 +50,11 @@ def _tails():
 
 TAILS = _tails()  # S, VS, SV, CS, SC, and the six orderings of V, C, S
 
-# Orderings that still write a revoked token back on this tree. All need the
-# ``*-direct`` route fallback: the handler sets the new pair on the resident
-# object itself (the mirror skips it, as it is the source), the object leaves
-# the cache before the post-persist commit moves its baseline, and it saves
-# while the durable pair is back at that baseline, so save() keeps the pair as
-# the object's own change. No ordering leaves a published link readable.
-KNOWN_WRITE_BACK = {
-    ("never-shared", "evict-mid", "create-direct", tail) for tail in ("VS", "VSC", "CVS")
-}
+# The ``*-direct`` first ops force the route's reload fallback. Before #8735 the
+# create handler then set the new pair on the resident object itself (the
+# mirror skips its own source), so an eviction before the post-persist commit
+# left the pair as that object's own change, and its later save wrote a revoked
+# token back. The fallback now works on a copy, so every ordering below passes.
 
 
 def _share_pair(sid):
@@ -164,11 +160,6 @@ def _run_ordering(monkeypatch, initial, holder, first_op, tail):
 def test_a_held_object_save_never_writes_a_revoked_pair_back(
     monkeypatch, request, initial, holder, first_op, tail,
 ):
-    if (initial, holder, first_op, tail) in KNOWN_WRITE_BACK:
-        request.applymarker(pytest.mark.xfail(
-            strict=True,
-            reason="#8735: the reload fallback leaves the resident owning the pair",
-        ))
     row = _run_ordering(monkeypatch, initial, holder, first_op, tail)
     for key, value in row.items():
         request.node.user_properties.append((key, repr(value)))
