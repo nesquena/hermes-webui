@@ -49,6 +49,30 @@ AGENT_DIR = Path(_LPP.__file__).resolve().parents[1] if _LPP is not None else No
 needs_agent_scopes = pytest.mark.skipif(not _AGENT_SCOPES, reason="Hermes Agent launch-profile scopes not importable")
 
 
+def _refresh_rebuilds_through_owner_scope():
+    """Whether this Agent's scope refresh rebuilds through ``owner_secret_scope`` (v0.23.2 and later).
+
+    That path carries the launch environment WebUI installs. Earlier Agents (v0.23.1) rebuild a refreshed
+    scope from the profile's files only, so no launch value can reach it, with or without this change. When
+    the source can't be read, assume the newer path so the test runs rather than skipping silently.
+    """
+    if not _AGENT_SCOPES:
+        return False
+    import inspect
+    from agent.secret_scope import refresh_installed_secret_scope
+    try:
+        return "owner_secret_scope" in inspect.getsource(refresh_installed_secret_scope)
+    except (OSError, TypeError):
+        return True
+
+
+needs_owner_scope_refresh = pytest.mark.skipif(
+    not _refresh_rebuilds_through_owner_scope(),
+    reason="this Agent's scope refresh rebuilds from the profile's files only (before v0.23.2), "
+           "so launch values never reach it, with or without this change",
+)
+
+
 CHILD = r'''
 import json, os, sys, threading
 from pathlib import Path
@@ -276,6 +300,7 @@ def test_named_launch_scope_refresh_ignores_a_concurrent_workers_values(tmp_path
 
 
 @needs_agent_scopes
+@needs_owner_scope_refresh
 def test_named_launch_scope_keeps_an_operator_value_the_root_env_also_holds(tmp_path):
     # Only a ROOT launch sources the root .env; on a named launch an equal value is the operator's.
     obs, _ = _run(tmp_path, "named_launch_refresh", launch="alpha",
@@ -285,6 +310,7 @@ def test_named_launch_scope_keeps_an_operator_value_the_root_env_also_holds(tmp_
 
 
 @needs_agent_scopes
+@needs_owner_scope_refresh
 def test_active_named_profile_scope_takes_the_root_env_values_its_launcher_exported_from_the_file(tmp_path):
     # HERMES_HOME unset: the launcher sources the root .env, but the active (launch) profile is alpha, whose
     # scope does not read the root .env; those launch values come from the current root .env (section 4b).
