@@ -39,7 +39,7 @@ def _install_fake_agent(monkeypatch, *, durable_state="pending", with_return=Tru
     monkeypatch.setitem(sys.modules, "tools.async_delegation", mod)
     monkeypatch.setattr(
         peu, "_arm_async_delegation_restore_sweep",
-        lambda queue, delay: calls["armed"].append(delay) or True,
+        lambda queue, delay, **_kwargs: calls["armed"].append(delay) or True,
     )
     return calls
 

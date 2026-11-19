@@ -3516,16 +3516,35 @@ def _resolve_current_session_for_write(session):
     lock.
 
     Returns ``None`` (fail closed) when the current object cannot be
-    resolved — missing/deleted session, transient error, or no session id.
+    resolved — missing/deleted session, transient error, no session id, or
+    a session loaded from a file whose body names another session (#8852).
     Callers MUST no-op on ``None`` and must NEVER fall back to the
     worker-held snapshot: that object may be a detached LRU-evicted
     generation whose save would overwrite the current session state.
     """
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: the object's id is that other session's, so resolving it
+        # would hand that session to this write.
+        return None
     sid = getattr(session, "session_id", None)
     if not sid:
         return None
     try:
-        return get_session(sid)
+        current = get_session(sid)
+        # #9000: the file may have been replaced since the turn started with a
+        # copy of another session's file. The reload then carries that other
+        # session's id and path (the #8852 loader marks it), so a write through
+        # it (the cwd mirror, an ephemeral cancel's unlink) would land on the
+        # other conversation. Fail closed instead.
+        if getattr(current, "_sidecar_names_other_session", None):
+            logger.info(
+                "Not resolving session %s for a delayed write: its file now "
+                "holds session %r (#9000)",
+                sid,
+                getattr(current, "session_id", None),
+            )
+            return None
+        return current
     except Exception:
         logger.debug(
             "Failed to resolve current session %s for delayed-cancel write; "
@@ -4330,7 +4349,7 @@ def _drain_webui_process_notifications(
 
     notifications: list[str] = []
     skipped_events: list[dict] = []
-    async_retry_events: list[tuple[dict, bool]] = []
+    async_retry_events: list[tuple[dict, object]] = []
     completion_queue = getattr(process_registry, 'completion_queue', None)
     if completion_queue is None:
         return []
@@ -4446,9 +4465,7 @@ def _drain_webui_process_notifications(
                 if notification_added:
                     notifications.pop()
                 release_async_delegation_delivery(evt, claim)
-                async_retry_events.append(
-                    (evt, bool(getattr(claim, "durable", False)))
-                )
+                async_retry_events.append((evt, claim))
                 logger.warning(
                     "Failed to accept async delegation completion for session %s",
                     session_id,
@@ -4479,11 +4496,12 @@ def _drain_webui_process_notifications(
         # replayed forever on later turns.
         _mark_process_completion_consumed(process_registry, evt_sid)
 
-    for evt, durable in async_retry_events:
+    for evt, claim in async_retry_events:
         requeue_async_delegation_event(
             evt,
             completion_queue,
-            durable=durable,
+            durable=bool(getattr(claim, "durable", False)),
+            claim=claim,
         )
     for evt in skipped_events:
         try:
@@ -4510,6 +4528,7 @@ def _accept_pending_async_delegations(
                 evt,
                 completion_queue,
                 durable=bool(getattr(claim, "durable", False)),
+                claim=claim,
             )
             rejected_notifications.append(notification)
             logger.warning(
@@ -5189,8 +5208,47 @@ def _strip_xml_tool_calls(text: str) -> str:
     return s.strip()
 
 
+_TITLE_THINKING_BLOCK_RE = re.compile(
+    r'^\s*<(think|thinking|thought|reasoning|analysis)>.*?</\1>\s*', flags=re.IGNORECASE | re.DOTALL
+)
+
+
+# A real ``{"title"}`` reply is a few dozen characters. Longer replies are not
+# unwrapped, which also bounds the JSON parser's nesting depth.
+_TITLE_JSON_UNWRAP_MAX_CHARS = 2048
+
+
+def _unwrap_title_json(text: str) -> str:
+    """Return the title from a reply that is exactly a ``{"title": ...}`` object.
+
+    A ```json fence around the object is allowed. Anything else is returned
+    unchanged, so JSON embedded in prose is never mined for a title. Replies
+    over ``_TITLE_JSON_UNWRAP_MAX_CHARS`` are returned unchanged. The fence is
+    removed by slicing, not a regex, so a reply cut off inside an unclosed
+    fence costs linear time.
+    """
+    s = str(text or '').strip()
+    if len(s) > _TITLE_JSON_UNWRAP_MAX_CHARS:
+        return text
+    if len(s) >= 6 and s.startswith('```') and s.endswith('```'):
+        s = s[3:-3]
+        if s[:4].lower() == 'json':
+            s = s[4:]
+        s = s.strip()
+    if not s.startswith('{'):
+        return text
+    try:
+        obj = json.loads(s)
+    except (ValueError, RecursionError):
+        return text
+    if isinstance(obj, dict) and isinstance(obj.get('title'), str):
+        return obj['title']
+    return text
+
+
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
+    text = _unwrap_title_json(_TITLE_THINKING_BLOCK_RE.sub('', str(text or ''), count=1))
     # Preserve newline candidate boundaries before markup normalization.
     if _looks_like_title_option_menu(text):
         return ''
@@ -5207,7 +5265,7 @@ def _sanitize_generated_title(text: str) -> str:
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
-    if _is_bad_new_title(s):
+    if _is_bad_new_title(s) or _looks_like_leaked_reasoning(s):
         return ''
     return s[:80]
 
@@ -5340,6 +5398,29 @@ def _looks_invalid_generated_title(text: str) -> bool:
     )
 
 
+# Reasoning that open-weight models leak into the visible reply instead of a
+# title: hedged or opinion-led sentences, leftover thinking tags, and JSON
+# payload fragments. Applied to fresh candidates only, so saved titles are
+# never renamed by these rules.
+_TITLE_REASONING_LEAD_RE = re.compile(
+    r"^(?:(?:well|so|hmm+|ok|okay),?\s+)?"
+    r"(?:maybe|perhaps|possibly|probably"
+    r"|i\s+(?:think|guess|suppose|believe|would|recommend|suggest)"
+    r"|i['’]d\s|let['’]s\s+go\s+with|how\s+about|what\s+about|my\s+pick"
+    r"|something\s+like|a\s+good\s+title|the\s+(?:best|final)\s+title|title\s+should)\b",
+    flags=re.IGNORECASE,
+)
+_TITLE_LEAK_RE = re.compile(
+    r'</?(?:think|thinking|thought|reasoning|analysis)>|["\']title["\']\s*:|^\{',
+    flags=re.IGNORECASE,
+)
+
+
+def _looks_like_leaked_reasoning(title: str) -> bool:
+    """True when a fresh title candidate is reasoning rather than a title."""
+    return bool(_TITLE_REASONING_LEAD_RE.search(title) or _TITLE_LEAK_RE.search(title))
+
+
 def _is_bad_new_title(text: str) -> bool:
     """True when a freshly generated title candidate should be discarded.
 
@@ -5349,7 +5430,13 @@ def _is_bad_new_title(text: str) -> bool:
     if _looks_invalid_generated_title(text):
         return True
     s = str(text or '').strip()
-    _token = re.sub(r'[\s.!?]+$', '', s, flags=re.IGNORECASE)
+    # Trim trailing whitespace and . ! ? by scanning back from the end. The
+    # regex this replaces retried from every start position, which is
+    # quadratic on a long punctuation run that is not at the end.
+    end = len(s)
+    while end and (s[end - 1].isspace() or s[end - 1] in '.!?'):
+        end -= 1
+    _token = s[:end]
     if re.fullmatch(
         r'(?:pong|ping|yes|no|yep|nope|hi|hello|hey|thanks|thank you|sure|k|kk|cool|nice|lol|ok|okay|done)',
         _token,
@@ -6751,6 +6838,82 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         return '', f'llm_empty{suffix}'
 
 
+_TITLE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "session_title",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+# Wording an endpoint uses when it refuses a request parameter. Kept in step
+# with the Agent's ``UNSUPPORTED_PARAM_MARKERS`` (agent/error_classifier.py).
+_TITLE_UNSUPPORTED_PARAM_MARKERS = (
+    "unsupported parameter", "unsupported_parameter", "not supported", "does not support",
+    "doesn't support", "is deprecated for this model",
+    "unknown parameter", "unrecognized request argument", "unrecognized parameter",
+    "invalid parameter", "extra inputs are not permitted",
+    "invalid option: expected one of",
+)
+
+
+def _title_structured_output_rejected(exc) -> bool:
+    """True when an HTTP 400/422 error refuses the structured-output field itself.
+
+    Mirrors the Agent's auxiliary-client check: the error must name the
+    structured-output field (``response_format``, or ``output_config`` on the
+    Anthropic wire), a grammar backend that compiles it, or Gemini's schema
+    keys, and say it is unsupported, unknown or malformed. Any other 400/422
+    (context length, message validation, ...) is not about the schema, so
+    removing the schema cannot repair it.
+    """
+    status = getattr(exc, 'status_code', None)
+    if status not in (400, 422):
+        return False
+    err = str(exc).lower()
+    if any(k in err for k in ('guided_grammar', 'xgrammar', 'compile_grammar_error')):
+        return True
+    if any(k in err for k in ('response mime type', 'response_schema', 'response_json_schema')):
+        return True
+    if 'response_format' in err and ('json_schema' in err or 'unavailable' in err):
+        return True
+    if 'response_format' not in err and 'output_config' not in err:
+        return False
+    return any(k in err for k in _TITLE_UNSUPPORTED_PARAM_MARKERS)
+
+
+def _send_title_request(send):
+    """Call ``send(response_format)`` asking for a strict ``{"title"}`` object.
+
+    Used by the auxiliary title route and the agent's Chat Completions route;
+    the agent's native Anthropic Messages and Codex Responses branches do not
+    send the schema. Constrained decoding fixes the reply's shape, not its
+    content: the title string can still hold reasoning, so the sanitizer still
+    checks it.
+
+    A request whose HTTP 400/422 error names the structured-output field as
+    unsupported is resent once without the schema. Every other error
+    propagates unchanged to the caller's existing retry and error path. This
+    layer caches nothing, but the Agent's auxiliary client may remember a
+    rejection and drop the schema itself on later auxiliary requests. Each
+    send gets its own copy of the schema, so an adapter that edits the
+    request cannot change the module constant.
+    """
+    try:
+        return send(copy.deepcopy(_TITLE_RESPONSE_FORMAT))
+    except Exception as exc:
+        if not _title_structured_output_rejected(exc):
+            raise
+        return send(None)
+
+
 def _title_provider_name_ambiguous(provider: str, base_url: str) -> bool:
     """True when the title route's provider name has two claimants (#8690).
 
@@ -6845,18 +7008,23 @@ def generate_title_raw_via_aux(
             budgets = [base_max_tokens]
             try:
                 for budget_idx, max_tokens in enumerate(budgets):
-                    resp = call_llm(
-                        task='title_generation',
-                        provider=provider or None,
-                        model=model or None,
-                        base_url=base_url or None,
-                        api_key=api_key or None,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.2,
-                        timeout=_timeout,
-                        extra_body=reasoning_extra or None,
-                    )
+                    def _send(response_format, max_tokens=max_tokens, messages=messages):
+                        extra = dict(reasoning_extra)
+                        if response_format:
+                            extra['response_format'] = response_format
+                        return call_llm(
+                            task='title_generation',
+                            provider=provider or None,
+                            model=model or None,
+                            base_url=base_url or None,
+                            api_key=api_key or None,
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=0.2,
+                            timeout=_timeout,
+                            extra_body=extra or None,
+                        )
+                    resp = _send_title_request(_send)
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
                         return raw, ('llm_aux' if idx == 0 and budget_idx == 0 else 'llm_aux_retry')
@@ -6963,9 +7131,14 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                             api_kwargs['max_completion_tokens'] = max_tokens
                         else:
                             api_kwargs['max_tokens'] = max_tokens
-                        resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
-                            **api_kwargs,
-                        )
+                        client = agent._ensure_primary_openai_client(reason='title_generation')
+
+                        def _send(response_format, api_kwargs=api_kwargs, client=client):
+                            kwargs = dict(api_kwargs)
+                            if response_format:
+                                kwargs['response_format'] = response_format
+                            return client.chat.completions.create(**kwargs)
+                        resp = _send_title_request(_send)
                         raw, empty_status = _extract_title_response(resp)
                     raw = str(raw or '').strip()
                     if raw:
@@ -7385,9 +7558,16 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 'expectedCurrent': current,
             })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
+            # A local fallback is synced as 'derived' so the Agent's own model
+            # title can still replace it (Refs #9157).
             try:
                 from api.state_sync import sync_session_title
-                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+                sync_session_title(
+                    session_id,
+                    effective_title,
+                    profile=getattr(s, 'profile', None) or 'default',
+                    source='derived' if source == 'fallback' else 'llm',
+                )
             except Exception:
                 logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:
@@ -7520,6 +7700,10 @@ def _preserve_pre_compression_snapshot(
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
     """
+    if getattr(s, '_sidecar_names_other_session', None):
+        # #8852: old_sid is the object's id, which came from a file whose body
+        # names another session, so the stamp below would land in that session.
+        return False
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
         return False
@@ -8782,23 +8966,52 @@ def _merge_agent_replay_bare_user_rows(messages):
 def _installed_repair_runtime_usable():
     """True when the installed Agent's repair machinery can run unmodified.
 
-    ``repair_message_sequence`` imports the persistence codec
-    (``hermes_state.SessionDB``) at call time and reads its class attributes.
-    Test harnesses that fake ``hermes_state`` (a lambda or ``Mock`` in the
-    ``SessionDB`` slot) make those reads raise or, worse, silently return mock
-    objects that would corrupt row content. Probe the codec's actual contract
-    before trusting it: the sentinel prefix must be a real string and a plain
-    string must round-trip unchanged.
+    ``repair_message_sequence`` reads a content codec at call time (see
+    ``_installed_repair_codec`` for which one). Test harnesses that fake that
+    codec (a lambda or ``Mock`` in the ``SessionDB`` slot) make those reads
+    raise or, worse, silently return mock objects that would corrupt row
+    content. Probe the codec's actual contract before trusting it: the
+    sentinel prefix must be a real string and a plain string must round-trip
+    unchanged.
     """
     try:
-        from hermes_state import SessionDB
-
+        prefix, decode = _installed_repair_codec()
         return (
-            isinstance(getattr(SessionDB, "_CONTENT_JSON_PREFIX", None), str)
-            and SessionDB._decode_content("plain-text-probe") == "plain-text-probe"
+            isinstance(prefix, str)
+            and callable(decode)
+            and decode("plain-text-probe") == "plain-text-probe"
         )
     except Exception:
         return False
+
+
+def _installed_repair_codec():
+    """``(prefix, decode)`` of the content codec the installed repair reads.
+
+    Agents whose ``repair_message_sequence`` is defined in
+    ``session_rules.turns`` read that module's own ``_CONTENT_JSON_PREFIX`` and
+    ``decode_content`` (their ``hermes_state.SessionDB`` is a stand-in without
+    the codec attributes, so probing it closed this gate and the settle dropped
+    the current exchange from the saved model context, #9157). Older Agents
+    read ``hermes_state.SessionDB``'s class attributes. Only the codec of the
+    module the repair actually reads is probed, never the other one as a
+    fallback, so a faked codec there still keeps the gate closed.
+    """
+    try:
+        from agent import agent_runtime_helpers as _agent_helpers
+    except Exception:
+        _agent_helpers = None  # keep the SessionDB probe; _apply_installed_repair fails closed on its own import
+    repair = getattr(_agent_helpers, "repair_message_sequence", None)
+    if getattr(repair, "__module__", None) == "session_rules.turns":
+        import session_rules.turns as _turns
+
+        # The repair calls the module-level alias ``_decode_content``; probe that name, and the public
+        # ``decode_content`` only if a later Agent drops the alias.
+        decode = getattr(_turns, "_decode_content", None) or getattr(_turns, "decode_content", None)
+        return getattr(_turns, "_CONTENT_JSON_PREFIX", None), decode
+    from hermes_state import SessionDB
+
+    return getattr(SessionDB, "_CONTENT_JSON_PREFIX", None), getattr(SessionDB, "_decode_content", None)
 
 
 # The settle projection replays the Agent's argument sanitizer on a private copy; its "repaired before request"
@@ -14524,6 +14737,8 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _success_terminal_published = False
+    _stream_end_published = False
     _steer_settled = False
     _returned_pending_steer = []
 
@@ -14558,6 +14773,7 @@ def _run_agent_streaming(
             })
 
     def put(event, data):
+        nonlocal _stream_end_published
         if event in ('done', 'apperror', 'stream_end'):
             _settle_pending_steer()
         # If cancelled, drop all further events except the cancel event itself
@@ -14585,6 +14801,8 @@ def _run_agent_streaming(
         try:
             queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
+            if event == 'stream_end':
+                _stream_end_published = True
         except Exception:
             logger.debug("Failed to put event to queue")
 
@@ -15046,12 +15264,14 @@ def _run_agent_streaming(
         try:
             try:
                 from api.route_approvals import (
+                    require_approval_bridge as _require_approval_bridge,
                     settle_gateway_pending_local_notification as _settle_pending_for_polling,
                     retire_gateway_pending_mirror as _retire_gateway_pending_mirror,
                 )
                 def _cleanup_gateway_pending_mirror():
                     _retire_gateway_pending_mirror(session_id)
             except ImportError:
+                _require_approval_bridge = None
                 _settle_pending_for_polling = None
                 _cleanup_gateway_pending_mirror = None
             from tools.approval import (
@@ -15059,6 +15279,10 @@ def _run_agent_streaming(
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
+                if _require_approval_bridge is not None:
+                    # Raises when WebUI could show this card but never settle
+                    # it (#9119): the Agent then denies it as notify_failed.
+                    _require_approval_bridge()
                 if _settle_pending_for_polling is not None:
                     try:
                         auto_resolved, head, total = _settle_pending_for_polling(
@@ -16709,7 +16933,15 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 try:
                     import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    if getattr(s, '_sidecar_names_other_session', None):
+                        # #9000: loaded from a copy of another session's file, so
+                        # s.path is that other conversation. Never delete it.
+                        logger.info(
+                            "Not removing /btw file for %s: it holds session %r (#9000)",
+                            session_id, s.session_id,
+                        )
+                    else:
+                        pathlib.Path(s.path).unlink(missing_ok=True)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions
@@ -17851,16 +18083,25 @@ def _run_agent_streaming(
                     try:
                         from agent.model_metadata import get_model_context_length
                         from api.routes import _context_length_lookup_inputs_for_model
+                        from api.routes import _context_lookup_agent_fallback
                         _cfg_base_url = getattr(agent, 'base_url', '') or resolved_base_url or ''
+                        # #8822: the lookup picks the config key that owns the URL, as
+                        # on v0.52.544; the Agent's own credential (key, URL, provider
+                        # together) is only its fallback, under the same rule, and
+                        # nothing is added after the lookup, so a key never lands on a
+                        # host it doesn't own.
                         _ctx_lookup = _context_length_lookup_inputs_for_model(
                             getattr(agent, 'model', resolved_model or '') or '',
                             resolved_provider,
                             base_url=_cfg_base_url,
                             cfg=_cfg if isinstance(_cfg, dict) else {},
+                            **_context_lookup_agent_fallback(
+                                agent, resolved_api_key, resolved_base_url, resolved_provider
+                            ),
                         )
                         _cfg_ctx_len = _ctx_lookup.config_context_length
                         _cfg_custom_providers = _ctx_lookup.custom_providers
-                        _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
+                        _cfg_api_key = _ctx_lookup.api_key
                         _cfg_base_url = _ctx_lookup.base_url or _cfg_base_url
                         _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                         _resolved_cl = get_model_context_length(
@@ -18223,15 +18464,22 @@ def _run_agent_streaming(
                 try:
                     from agent.model_metadata import get_model_context_length as _get_cl
                     from api.routes import _context_length_lookup_inputs_for_model
+                    from api.routes import _context_lookup_agent_fallback
                     _ctx_lookup = _context_length_lookup_inputs_for_model(
                         getattr(agent, 'model', resolved_model or '') or '',
                         resolved_provider,
                         base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
                         cfg=_cfg if isinstance(_cfg, dict) else {},
+                        # #8822: the Agent's own credential (key, URL, provider together)
+                        # only as the lookup's fallback, under the same ownership rule;
+                        # nothing is added afterwards.
+                        **_context_lookup_agent_fallback(
+                            agent, resolved_api_key, resolved_base_url, resolved_provider
+                        ),
                     )
                     _cfg_ctx_len = _ctx_lookup.config_context_length
                     _cfg_custom_providers = _ctx_lookup.custom_providers
-                    _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
+                    _cfg_api_key = _ctx_lookup.api_key
                     _cfg_base_url = _ctx_lookup.base_url
                     _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                     try:
@@ -18368,6 +18616,7 @@ def _run_agent_streaming(
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
                 put('done', _done_payload)
+                _success_terminal_published = True
                 # Emit one last metering packet for the live message-header TPS label.
                 meter_stats = meter().get_stats(stream_id)
                 meter_stats['session_id'] = session_id
@@ -18938,6 +19187,45 @@ def _run_agent_streaming(
                         stream_id,
                         getattr(s, 'active_stream_id', None),
                     )
+                    # hwc: turn-terminal-event — this stream still needs a
+                    # terminal frame. Skipping the transcript writeback is
+                    # correct when this worker no longer owns the session.
+                    # Do not clear or save ``s`` here. ``active_stream_id is
+                    # None`` on the worker-held object is not authority:
+                    # cancel_stream clears that field eagerly, and a rename
+                    # after eviction lives on a different instance. Saving
+                    # this snapshot reverts that metadata.
+                    _error_payload['session_id'] = getattr(s, 'session_id', session_id)
+                    _error_payload['old_session_id'] = session_id
+                    _error_payload['stale_writeback_skipped'] = True
+                    # Stop won the race (it landed after this worker's cancel check).
+                    # cancel_stream queues its live ``cancel`` frame without journaling
+                    # it (possibly only after this put), so this apperror is the run's
+                    # only journaled terminal. Make it a cancel: the run settles as
+                    # interrupted-by-user and a replay shows the cancel, not an error.
+                    # Drop the provider fields (the cancel marker says no provider
+                    # failure occurred) and name the server when it settled the run,
+                    # as _worker_cancel_event_payload does.
+                    if cancel_event.is_set():
+                        for _provider_key in ('hint', 'details', 'reason'):
+                            _error_payload.pop(_provider_key, None)
+                        _error_payload['type'] = 'cancelled'
+                        _server_reason = _server_settle_reason(stream_id)
+                        if _server_reason:
+                            _error_payload['message'] = _server_reason
+                            _error_payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+                        else:
+                            _error_payload['message'] = 'Task cancelled.'
+                    # The success path clears active_stream_id and publishes
+                    # ``done`` before post-success housekeeping (title thread
+                    # start). If that fails, keep the published outcome: a
+                    # later apperror would turn a completed run into errored.
+                    # The initial title thread owns ``stream_end``, so when its
+                    # start failed, close the transport here instead.
+                    if not _success_terminal_published:
+                        put('apperror', _error_payload)
+                    elif not _stream_end_published:
+                        put('stream_end', {'session_id': session_id})
                     return
 
                 if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
