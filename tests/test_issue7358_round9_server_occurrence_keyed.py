@@ -264,6 +264,11 @@ def _merge_driver_factory():
     for name in (
         "_anchor_scene_tool_row_id",
         "_anchor_scene_tool_rows_have_different_explicit_ids",
+        # #7653 re-gate round 16 (10-19 review, item 3): the verdict transfer
+        # is now also gated on the occurrence, so the driver must lift that
+        # gate and its reader alongside the merge it drives.
+        "_anchor_scene_tool_rows_have_different_occurrences",
+        "_anchor_scene_row_occurrence_index",
         "_anchor_scene_is_bounded_tool_body_preview",
     ):
         assert f"def {name}(" in src, f"{name} missing from routes.py"
@@ -271,6 +276,8 @@ def _merge_driver_factory():
         [
             _module_function_block(src, "_anchor_scene_tool_row_id"),
             _module_function_block(src, "_anchor_scene_tool_rows_have_different_explicit_ids"),
+            _module_function_block(src, "_anchor_scene_tool_rows_have_different_occurrences"),
+            _module_function_block(src, "_anchor_scene_row_occurrence_index"),
             _module_function_block(src, "_anchor_scene_is_bounded_tool_body_preview"),
             _nested_function_block(src, "def merge_duplicate_tool_row("),
         ]

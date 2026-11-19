@@ -13241,6 +13241,69 @@ def _tool_result_owners_by_tid(messages):
     return result_owners
 
 
+def _tool_result_occurrences_by_tid(messages):
+    """Ordered resolved-result OCCURRENCES per tid: ``{tid: [(owner, result_idx)]}``.
+
+    #7653 re-gate round 16 (10-19 review, item 3; still open at the 10-31
+    re-review): a tool-call id is not unique, and neither is an assistant
+    message. One assistant row can emit the same id twice (the reviewer's
+    ``call_0: echo FIRST`` then ``call_0: exit 3`` in ONE user turn), and
+    ``_tool_result_owners_by_tid`` deliberately dedupes that to a single
+    "occurrence slot" — so both results were attributed to one slot, both
+    bound to the tid's trailing live row, and both were persisted with the
+    same (failing) verdict. Every downstream consumer then keyed on tid (or
+    tid+owner) and collapsed the two calls into one card.
+
+    This pre-pass walks the history exactly like the settlement loop (same id
+    normalisation: ``call_id`` before ``id`` for ``tool_calls`` and for a
+    ``tool_use`` content part, a tool row resolving through ``tool_call_id`` /
+    ``tool_use_id``) and records one entry per RESOLVED tool result, in
+    message order. The k-th element of ``plan[tid]`` is therefore the k-th
+    OCCURRENCE of that id in this history — the identity the saved summary,
+    the journal replay, the hydration row key and the persisted verdict map
+    all key on.
+
+    A declared-but-unfinished call (an assistant row that emits the id and
+    never receives its result) contributes no entry, so it cannot shift a
+    completed pairing — the round-14 item-5 repair, preserved here.
+
+    Returns ``{tid: [(owner_msg_idx, result_msg_idx), ...]}``.
+    """
+    pending_owner = {}
+    plan: dict = {}
+    for m_idx, m in enumerate(messages or []):
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if role == 'assistant':
+            tids = set()
+            content = m.get('content')
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get('type') == 'tool_use':
+                        _part_tid = part.get('call_id', '') or part.get('id', '')
+                        if _part_tid:
+                            tids.add(str(_part_tid))
+            for tc in m.get('tool_calls') or []:
+                if not isinstance(tc, dict):
+                    continue
+                _tc_tid = tc.get('call_id', '') or tc.get('id', '')
+                if _tc_tid:
+                    tids.add(str(_tc_tid))
+            for _tid in tids:
+                pending_owner[_tid] = m_idx
+        elif role == 'tool':
+            tid = m.get('tool_call_id') or m.get('tool_use_id', '')
+            if not tid:
+                continue
+            tid = str(tid)
+            owner = pending_owner.get(tid)
+            if owner is None:
+                continue
+            plan.setdefault(tid, []).append((owner, m_idx))
+    return plan
+
+
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback.
 
@@ -13267,6 +13330,14 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
     summary had classified it.
     """
     tool_calls = []
+    # #7653 re-gate round 16 (10-19 review, item 3): the pending maps are
+    # per-EMISSION lists, not per-tid scalars. One assistant message can emit
+    # the same id twice, and a scalar map let the second emission overwrite the
+    # first — so BOTH results resolved with the second call's name/args/owner
+    # and the two occurrences were indistinguishable before the live mirror was
+    # even consulted. The k-th resolved result of a tid now reads the k-th
+    # emission; a tid the plan does not know falls back to the last emission,
+    # which is the previous behaviour exactly.
     pending_names = {}
     pending_args = {}
     pending_asst_idx = {}
@@ -13279,6 +13350,19 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
     # occurrence of the same id. Scope the lookups below with the
     # occurrence counts + last-owner of each tid in THIS history.
     _occ_counts, _occ_last_owner, _occ_owners = _extract_tool_call_occurrences(messages)
+    # #7653 re-gate round 16 (10-19 review, item 3): the OCCURRENCE plan —
+    # one entry per RESOLVED result of a tid, in message order. The
+    # owner-based lists above dedupe "several results of one owner are one
+    # slot", which is exactly what lost the reviewer's two ``call_0`` calls
+    # in one assistant message: both results took the owner's single slot,
+    # both bound to the tid's trailing live row, and both were persisted
+    # with the failing verdict.
+    _result_occurrences = _tool_result_occurrences_by_tid(messages)
+    _result_occurrence_index = {
+        (tid, result_idx): occ
+        for tid, pairs in _result_occurrences.items()
+        for occ, (_owner, result_idx) in enumerate(pairs)
+    }
     # #7653 re-gate round 14 (10-19 review, item 5): the settlement pairing
     # aligns live mirror rows against the occurrences that HAVE a result, so
     # a declared-but-unfinished trailing call cannot shift completed ones.
@@ -13340,9 +13424,9 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                         # display id.
                         tid = part.get('call_id', '') or part.get('id', '')
                         if tid:
-                            pending_names[tid] = part.get('name', '')
-                            pending_args[tid] = part.get('input', {})
-                            pending_asst_idx[tid] = msg_idx
+                            pending_names.setdefault(tid, []).append(part.get('name', ''))
+                            pending_args.setdefault(tid, []).append(part.get('input', {}))
+                            pending_asst_idx.setdefault(tid, []).append(msg_idx)
             for tc in m.get('tool_calls') or []:
                 if not isinstance(tc, dict):
                     continue
@@ -13365,17 +13449,32 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                 except Exception:
                     args = {}
                 if tid and name:
-                    pending_names[tid] = name
-                    pending_args[tid] = args
-                    pending_asst_idx[tid] = msg_idx
+                    pending_names.setdefault(tid, []).append(name)
+                    pending_args.setdefault(tid, []).append(args)
+                    pending_asst_idx.setdefault(tid, []).append(msg_idx)
         elif role == 'tool':
             tid = m.get('tool_call_id') or m.get('tool_use_id', '')
             raw = m.get('content', '')
             seq = {'msg_idx': msg_idx, 'raw': raw, 'resolved': False}
             if tid:
-                name = pending_names.get(tid, '')
+                # #7653 re-gate round 16 (10-19 review, item 3): the k-th
+                # resolved result of a tid reads the k-th EMISSION of that tid,
+                # so two calls of one id in one assistant message keep their own
+                # name/args/owner instead of both taking the last emission's.
+                _occurrence = _result_occurrence_index.get((tid, msg_idx))
+                _emissions = pending_names.get(tid) or []
+                if _occurrence is not None and 0 <= _occurrence < len(_emissions):
+                    _emission = _occurrence
+                else:
+                    _emission = len(_emissions) - 1
+                name = _emissions[_emission] if _emission >= 0 else ''
                 if name and name != 'tool':
-                    _owner_idx = pending_asst_idx.get(tid, -1)
+                    _owner_emissions = pending_asst_idx.get(tid) or []
+                    _owner_idx = (
+                        _owner_emissions[_emission]
+                        if 0 <= _emission < len(_owner_emissions)
+                        else -1
+                    )
                     # #7358 round 9 (reviewer Finding 1, SILENT): bind the
                     # live verdict only to the occurrence of a reused tid
                     # that owns it. An EARLIER occurrence of a reused id is
@@ -13404,52 +13503,59 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                     # occurrence that never asked for them.
                     _occ_rows = live_by_tid.get(tid) or []
                     _n_rows = len(_occ_rows)
-                    _row_idx = -1
-                    if _n_rows:
-                        # #7653 re-gate round 14 (10-19 review, item 5):
-                        # align against the occurrences that HAVE a result,
-                        # not every assistant row that emits the tid. An
-                        # assistant row that only DECLARES the call and never
-                        # receives its result (an unfinished trailing call)
-                        # used to occupy a rank in the owner list and shift
-                        # every completed pairing by one — the reviewer's
-                        # ``[(1,false),(3,true)]`` where the truth is
-                        # ``[(1,true),(3,false)]``.
+                    # #7653 re-gate round 16 (10-19 review, item 3): rank the
+                    # live mirror rows against the tid's RESOLVED RESULT
+                    # occurrences, not its deduped assistant owners. The
+                    # owner list collapses "several results of one owner are
+                    # one slot", so one assistant message emitting an id twice
+                    # gave both results the owner's single rank — and both
+                    # bound to the tid's trailing (here: failing) live row.
+                    # Ranking by occurrence pairs the k-th occurrence with the
+                    # k-th live row, which is the degenerate case the owner
+                    # rule already handled (one result per owner).
+                    _occ_plan = _result_occurrences.get(tid) or []
+                    if _occ_plan:
+                        _rank = _result_occurrence_index.get((tid, msg_idx))
+                        _slots = len(_occ_plan)
+                        if _rank is None:
+                            # The plan and the settlement loop disagree about
+                            # this result (they share the id normalisation, so
+                            # this is defensive only). Refuse to guess rather
+                            # than paint the wrong card.
+                            _rank, _slots = -1, 0
+                    else:
                         _owners = _result_owners.get(tid) or []
                         if _owner_idx in _owners:
-                            _rank = _owners.index(_owner_idx)
+                            _rank, _slots = _owners.index(_owner_idx), len(_owners)
                         elif not _owners:
-                            # No assistant row emits this tid in this
-                            # history, so it cannot be scoped at all — the
-                            # round-6 unscoped lookup, kept only when the
-                            # mirror is unambiguous.
-                            _rank = 0
+                            # No assistant row emits this tid in this history,
+                            # so it cannot be scoped at all — the round-6
+                            # unscoped lookup, kept only when the mirror is
+                            # unambiguous.
+                            _rank, _slots = 0, 0
                         else:
                             # The resolved owner is not one of this tid's
                             # occurrences (a malformed ordering); refuse to
                             # guess rather than paint the wrong card.
-                            _rank = -1
-                        if _rank >= 0:
-                            # #7653 re-gate round 11 (finding 1, SILENT): the
-                            # reviewer's exact fix. The previous CLAMPED offset
-                            # (``max(_n_owners - _n_rows, 0)``) only handled the
-                            # short-mirror case; when live rows OUTNUMBER the
-                            # surviving owners the clamp is zero and the k-th
-                            # owner still consumed the k-th row from the FRONT,
-                            # so a leading row no owner asked for shifted every
-                            # pairing (the reviewer's ``[true,false]`` mirror
-                            # settling ``[(2, true)]``). Align from the END in
-                            # both directions instead: the trailing rows belong
-                            # to the current turn and pair with the trailing
-                            # owners, and a surplus leading row is left
-                            # unpaired rather than attributed to an occurrence
-                            # that never asked for it. The unscoped branch
-                            # (no owners at all) keeps taking the first row.
-                            _row_idx = (
-                                _rank + (_n_rows - len(_owners))
-                                if _owners
-                                else _rank
-                            )
+                            _rank, _slots = -1, 0
+                    _row_idx = -1
+                    if _rank >= 0:
+                        # #7653 re-gate round 11 (finding 1, SILENT): the
+                        # reviewer's exact fix. The previous CLAMPED offset
+                        # (``max(_n_owners - _n_rows, 0)``) only handled the
+                        # short-mirror case; when live rows OUTNUMBER the
+                        # surviving owners the clamp is zero and the k-th
+                        # owner still consumed the k-th row from the FRONT,
+                        # so a leading row no owner asked for shifted every
+                        # pairing (the reviewer's ``[true,false]`` mirror
+                        # settling ``[(2, true)]``). Align from the END in
+                        # both directions instead: the trailing rows belong
+                        # to the current turn and pair with the trailing
+                        # owners, and a surplus leading row is left
+                        # unpaired rather than attributed to an occurrence
+                        # that never asked for it. The unscoped branch
+                        # (no owners at all) keeps taking the first row.
+                        _row_idx = _rank + (_n_rows - _slots) if _slots else _rank
                     live_tc = (
                         _occ_rows[_row_idx]
                         if 0 <= _row_idx < _n_rows
@@ -13542,8 +13648,24 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
                         'tid': tid,
-                        'assistant_msg_idx': pending_asst_idx.get(tid, -1),
-                        'args': _truncate_tool_args(pending_args.get(tid, {})),
+                        'assistant_msg_idx': _owner_idx,
+                        'args': _truncate_tool_args(
+                            (pending_args.get(tid) or [{}])[_emission]
+                            if 0 <= _emission < len(pending_args.get(tid) or [])
+                            else {}
+                        ),
+                        # #7653 re-gate round 16 (10-19 review, item 3): carry
+                        # the OCCURRENCE so a reused id's second call survives
+                        # the persistence/hydration chain as its own row
+                        # instead of collapsing into the first card and taking
+                        # (or donating) its verdict. ``None`` when the tid has
+                        # no occurrence plan, which keeps a legacy row's key
+                        # exactly as it was.
+                        'occurrence': (
+                            _result_occurrence_index.get((tid, msg_idx))
+                            if _result_occurrences.get(tid)
+                            else None
+                        ),
                         # Carry the live classification into the settled
                         # summary so a failed tool stays failed after
                         # settlement + reload (Finding 2).
@@ -13577,6 +13699,17 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                 'tid': live_tc.get('tid', '') or '',
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
+                # #7653 re-gate round 16 (10-19 review, item 3): the live
+                # mirror already stamps each row with its occurrence (round
+                # 11), so an unresolved result keeps it. Only trusted when the
+                # tid has NO occurrence plan — otherwise this branch and the
+                # resolved branch could mint two different ordinals for the
+                # same id and split one card in two.
+                'occurrence': (
+                    live_tc.get('occurrence')
+                    if not _result_occurrences.get(live_tc.get('tid', '') or '')
+                    else None
+                ),
                 # The live-fallback branch is the only source of this
                 # row's identity, so it must carry the live is_error too
                 # (Finding 2, fallback summaries).

@@ -6216,6 +6216,49 @@ def _anchor_scene_tool_row(tool, order_index, message_index, stream_id=""):
     return row
 
 
+def _anchor_scene_tool_call_occurrences(messages, start, end):
+    """Occurrence ordinal of every tool call a turn's messages emit.
+
+    #7653 re-gate round 16 (10-19 review, item 3): a message's own
+    ``tool_calls`` / ``_partial_tool_calls`` rows and the settled summary rows
+    are two projections of the SAME calls, so they must agree on the occurrence
+    ordinal — and therefore on the row key — or one call renders as two cards.
+    The ordinal is the emission index of the id within the turn, counted in the
+    settlement loop's own order (content ``tool_use`` parts first, then
+    ``tool_calls``), which is what makes it line up with
+    ``api.streaming._tool_result_occurrences_by_tid``.
+
+    Returns ``{(msg_idx, key, ordinal): occurrence}``.
+    """
+    out = {}
+    seen = {}
+    for idx in range(max(0, start), min(end, len(messages or []))):
+        message = messages[idx]
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "tool_use":
+                    continue
+                tid = str(part.get("call_id", "") or part.get("id", "") or "")
+                if tid:
+                    seen[tid] = seen.get(tid, 0) + 1
+        for key in ("tool_calls", "_partial_tool_calls"):
+            calls = message.get(key)
+            if not isinstance(calls, list):
+                continue
+            for ordinal, call in enumerate(calls):
+                if not isinstance(call, dict):
+                    continue
+                tid = _anchor_scene_tool_id(call)
+                if not tid:
+                    continue
+                out[(idx, key, ordinal)] = seen.get(tid, 0)
+                seen[tid] = seen.get(tid, 0) + 1
+    return out
+
+
 def _anchor_scene_tool_row_id(row) -> str:
     if not isinstance(row, dict):
         return ""
@@ -6315,6 +6358,26 @@ def _anchor_scene_tool_rows_can_name_match(existing, incoming) -> bool:
     if _anchor_scene_tool_row_has_invocation_evidence(existing) and _anchor_scene_tool_row_has_invocation_evidence(incoming):
         return _anchor_scene_tool_rows_have_compatible_invocation(existing, incoming)
     return True
+
+
+def _anchor_scene_tool_rows_have_different_occurrences(existing, incoming) -> bool:
+    """True when two rows name DIFFERENT occurrences of the same tool id.
+
+    #7653 re-gate round 16 (10-19 review, item 3): a tool id is not unique
+    and one assistant message can emit it twice, so the id (and even the
+    owning assistant index) does not identify a call. Two rows that name
+    different occurrence ordinals are different calls: neither may donate its
+    verdict to the other. A row that names NO occurrence is unscoped, so it
+    never blocks a transfer on its own — that keeps a legacy row (or a
+    content-derived row, which carries no ordinal) merging exactly as before.
+    """
+    existing_occ = _anchor_scene_row_occurrence_index(existing)
+    incoming_occ = _anchor_scene_row_occurrence_index(incoming)
+    return (
+        existing_occ is not None
+        and incoming_occ is not None
+        and existing_occ != incoming_occ
+    )
 
 
 def _anchor_scene_tool_rows_have_different_explicit_ids(existing, incoming) -> bool:
@@ -6531,6 +6594,35 @@ def _anchor_scene_row_owner_index(row) -> int | None:
     return None
 
 
+def _anchor_scene_row_occurrence_index(row):
+    """The OCCURRENCE ordinal of a hydrated tool row, if it names one.
+
+    #7653 re-gate round 16 (10-19 review, item 3): a tool-call id is not
+    unique, and one assistant message can emit the same id twice, so the
+    owning assistant index alone does not identify a call. The occurrence
+    ordinal does, and it arrives in the row payload (``_anchor_scene_tool_row``
+    copies it from the settled summary / live mirror / journal replay) — the
+    same three places the owner index is read from.
+    """
+    if not isinstance(row, dict):
+        return None
+    candidates = [row.get("occurrence")]
+    group = row.get("group")
+    if isinstance(group, dict):
+        candidates.append(group.get("occurrence"))
+    payload = row.get("payload")
+    if isinstance(payload, dict):
+        candidates.append(payload.get("occurrence"))
+    for value in candidates:
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _anchor_scene_row_tid_fallback_index(key: str, seen: dict) -> int | None:
     """Merge target for a tool row whose exact key missed, via the bare-tid chain.
 
@@ -6541,23 +6633,49 @@ def _anchor_scene_row_tid_fallback_index(key: str, seen: dict) -> int | None:
     to an owner-scoped one (or the reverse) and only when the tid has exactly
     one such entry in ``seen`` — two DIFFERENT owner-scoped occurrences of one
     tid are exactly what the owner scoping exists to keep apart.
+
+    #7653 re-gate round 16 (item 3): keys may now also carry an occurrence
+    ordinal (``tool:<tid>@<owner>#<occ>``). The bridge therefore compares the
+    tid AND the named coordinates, and still refuses whenever the tid has more
+    than one candidate — an id with two occurrences in one assistant message is
+    exactly what the occurrence scoping exists to keep apart. Comparing the
+    coordinates is also what keeps the round-14 bridge working: a runtime
+    journal row names an occurrence but no owner, and a legacy row names an
+    owner but no occurrence, and each still pairs with the single
+    owner-scoped entry describing the SAME call.
     """
     if not key or not key.startswith("tool:"):
         return None
-    tid, _, key_owner = key[len("tool:") :].partition("@")
+    tid, _, key_scope = key[len("tool:") :].partition("@")
     if not tid:
         return None
+    key_owner, key_occurrence = _anchor_scene_row_key_scope(key_scope)
     matches = []
     for seen_key, index in seen.items():
         if not seen_key.startswith("tool:"):
             continue
-        seen_tid, _, seen_owner = seen_key[len("tool:") :].partition("@")
+        seen_tid, _, seen_scope = seen_key[len("tool:") :].partition("@")
         if seen_tid != tid:
             continue
-        if key_owner and seen_owner:
-            continue  # two distinct owner-scoped occurrences: never merge
+        seen_owner, seen_occurrence = _anchor_scene_row_key_scope(seen_scope)
+        if key_owner and seen_owner and key_owner != seen_owner:
+            continue  # two different owning assistant messages: never merge
+        if key_occurrence and seen_occurrence and key_occurrence != seen_occurrence:
+            continue  # two distinct occurrences of one id: never merge
         matches.append(index)
     return matches[0] if len(matches) == 1 else None
+
+
+def _anchor_scene_row_key_scope(scope: str):
+    """Split a tool row-key scope into ``(owner, occurrence)``.
+
+    ``""`` -> ``(None, None)`` (a bare tid row), ``"1"`` -> ``("1", None)``
+    (owner-scoped, pre-round-16 shape), ``"1#0"`` -> ``("1", "0")``
+    (occurrence-scoped) and ``"#0"`` -> ``(None, "0")`` (occurrence-scoped with
+    no owner, the runtime-journal shape).
+    """
+    owner_part, _, occurrence_part = (scope or "").partition("#")
+    return (owner_part or None, occurrence_part or None)
 
 
 def _anchor_scene_row_key(row) -> str:
@@ -6584,9 +6702,23 @@ def _anchor_scene_row_key(row) -> str:
         # the bare tid key, so legacy rows and genuine duplicates (the same
         # occurrence seen twice, same owner) still collapse exactly as
         # before.
+        #
+        # #7653 re-gate round 16 (item 3, still open at the 10-31 re-review):
+        # the owner is not enough either. ONE assistant message can emit the
+        # same id twice — the reviewer's own repro — and both occurrences then
+        # shared ``tool:<tid>@<owner>``, merged into one card, and the second
+        # occurrence's failure was projected onto the first (successful) one.
+        # Scope by the occurrence ordinal as well whenever the row names one:
+        # ``tool:<tid>@<owner>#<occ>``. A row that names neither keeps the bare
+        # tid key, so a provider that never reuses an id is unchanged.
         owner = _anchor_scene_row_owner_index(row)
+        occurrence = _anchor_scene_row_occurrence_index(row)
+        if owner is not None and occurrence is not None:
+            return "tool:" + tid + "@" + str(owner) + "#" + str(occurrence)
         if owner is not None:
             return "tool:" + tid + "@" + str(owner)
+        if occurrence is not None:
+            return "tool:" + tid + "#" + str(occurrence)
         return "tool:" + tid
     if row.get("role") in ("prose", "thinking"):
         durable_identity = _anchor_scene_row_durable_identity(row)
@@ -6682,6 +6814,13 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             turn_start = idx
             break
     message_final_answer = _anchor_scene_final_answer_text(final_message)
+    # #7653 re-gate round 16 (10-19 review, item 3): the occurrence ordinal of
+    # every tool call this turn's messages emit, so the message's own
+    # ``tool_calls`` / ``_partial_tool_calls`` rows and the settled summary
+    # rows describing the same call share a row key.
+    _call_occurrences = _anchor_scene_tool_call_occurrences(
+        messages, turn_start + 1, local_final_idx + 1
+    )
     scene_final_answer = scene.get("final_answer") if isinstance(scene.get("final_answer"), str) else ""
     final_answer = message_final_answer if _anchor_scene_clean_text(message_final_answer) else scene_final_answer
     final_key = _anchor_scene_text_key(final_answer)
@@ -6838,6 +6977,15 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         )
         if payload_args_changed:
             merged_payload["args"] = merged_payload_args
+        # #7653 re-gate round 16 (10-19 review, item 3): keep the occurrence
+        # ordinal when the two rows describe the same call. A content-derived
+        # row (built from a ``tool_use`` part, which carries no occurrence)
+        # merging with the settled summary row of the SAME occurrence must not
+        # lose the ordinal — without it the merged row falls back to the
+        # owner-scoped key and two occurrences of one id in one assistant
+        # message collapse again.
+        if merged_payload.get("occurrence") is None and incoming_payload.get("occurrence") is not None:
+            merged_payload["occurrence"] = copy.deepcopy(incoming_payload["occurrence"])
         # #7358 round-3 (reviewer Finding 2, SILENT): the persisted scene
         # row is the authoritative owner of the tool's error status once
         # the live mirror has settled. Without this merge, an incoming
@@ -6859,7 +7007,15 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         # different explicit ids; the presentation keys above still merge
         # regardless, but the verdict only crosses a same-id (or
         # id-absent) seam.
-        if not _anchor_scene_tool_rows_have_different_explicit_ids(existing, incoming):
+        # #7653 re-gate round 16 (10-19 review, item 3): the same gate now
+        # also covers the OCCURRENCE. Two rows that name different
+        # occurrences of one id are different calls, so neither may donate
+        # its verdict to the other — that cross-transfer is what marked the
+        # reviewer's successful ``echo FIRST`` card failed.
+        if (
+            not _anchor_scene_tool_rows_have_different_explicit_ids(existing, incoming)
+            and not _anchor_scene_tool_rows_have_different_occurrences(existing, incoming)
+        ):
             if incoming_tool.get("is_error"):
                 merged_tool["is_error"] = True
             if incoming_payload.get("is_error"):
@@ -7033,6 +7189,16 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             calls = message.get(key)
             if isinstance(calls, list):
                 for tool_ordinal, call in enumerate(calls):
+                    # #7653 re-gate round 16 (10-19 review, item 3): stamp the
+                    # occurrence onto the message's own call so its row shares
+                    # the key of the settled summary row describing the SAME
+                    # call. Without it the two projections of one occurrence
+                    # render as two cards (and, before the occurrence scoping,
+                    # two occurrences collapsed into one).
+                    _call_occurrence = _call_occurrences.get((local_idx, key, tool_ordinal))
+                    if _call_occurrence is not None and (call or {}).get("occurrence") is None:
+                        call = dict(call)
+                        call["occurrence"] = _call_occurrence
                     row = _anchor_scene_tool_row(call, order, absolute_idx, stream_id)
                     content_match_index = _anchor_scene_matching_content_tool_row_index(
                         rows,

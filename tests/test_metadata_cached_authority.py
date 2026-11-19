@@ -4,11 +4,11 @@ These are Node VM behavior tests, not a rendered/login browser or provider run.
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests import _node_script
 from tests.js_source_extract import extract_function
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -192,9 +192,18 @@ def _run_case(**options):
     assert shutil.which("node"), "node is required for client behavior tests"
     spec = {"mode": "navigation", "total": 80, "initialTotal": 80, "offset": 0, **options}
     script = HARNESS.replace("SPEC", json.dumps(spec)).replace("SOURCE", json.dumps(_source()))
-    result = subprocess.run(
-        ["node", "--max-old-space-size=96", "-e", script],
-        cwd=ROOT, capture_output=True, text=True, timeout=15,
+    # _source() splices nine real functions out of static/*.js into this script,
+    # so handing it to node as `node -e` puts ~100 KB in ONE argv entry --
+    # execve caps one argument at MAX_ARG_STRLEN (128 KB on Linux), so any
+    # further growth of those functions turns this into OSError(E2BIG) before
+    # node runs. Run it from a file instead (see tests/_node_script.py).
+    result = _node_script.run_node_script(
+        script,
+        node="node",
+        cwd=ROOT,
+        timeout=15,
+        # keep the harness's original heap cap
+        extra_args=("--max-old-space-size=96",),
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)

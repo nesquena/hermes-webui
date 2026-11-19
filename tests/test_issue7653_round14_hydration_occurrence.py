@@ -240,7 +240,14 @@ def test_hydration_keeps_two_occurrences_of_one_tid_apart():
     tool_rows = [r for r in settled["activity_rows"] if r.get("role") == "tool"]
     assert len(tool_rows) == 2, f"expected two tool cards, got {len(tool_rows)}"
     keys = {routes._anchor_scene_row_key(r) for r in tool_rows}
-    assert keys == {"tool:call_0@1", "tool:call_0@4"}
+    # #7653 re-gate round 16 (10-19 review, item 3): the keys are now
+    # occurrence-scoped as well as owner-scoped. The round-14 invariant this
+    # test pins is unchanged — two owners of one tid are two keys, never one —
+    # and the ordinals come from the turn's own emissions (occurrence 0 on
+    # owner 1, occurrence 1 on owner 4).
+    assert keys == {"tool:call_0@1#0", "tool:call_0@4#1"}, (
+        f"expected two distinct owner+occurrence keys, got {keys}"
+    )
 
 
 # ---------------------------------------------------------------------------
