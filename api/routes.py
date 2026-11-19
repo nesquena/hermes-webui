@@ -20268,7 +20268,12 @@ def handle_post(handler, parsed) -> bool:
             # Re-read inside the lock: saving the object resolved before the wait
             # would revert a title rename or an appended message that landed while
             # this request was blocked.
-            persisted_session = _reload_session_for_share(sid) or stored_session
+            # Never the resident object itself: the pre-save mirror skips its
+            # source, so a pair set here would be the resident's own change
+            # until the commit, and an eviction before it keeps it (#8735).
+            persisted_session = _reload_session_for_share(sid) or (
+                copy.copy(stored_session) if stored_session is not None else None
+            )
             if persisted_session is None:
                 persisted_session = _build_share_metadata_sidecar(
                     sid,
@@ -20414,7 +20419,10 @@ def handle_post(handler, parsed) -> bool:
         if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
             return bad(handler, "Session busy, try again", 503)
         try:
-            target_session = _reload_session_for_share(sid) or stored_session
+            # Never the resident object itself (#8735, as in create).
+            target_session = _reload_session_for_share(sid) or (
+                copy.copy(stored_session) if stored_session is not None else None
+            )
             if target_session is None:
                 token = str(getattr(snapshot_session, "share_token", "") or "").strip()
                 if not token:
