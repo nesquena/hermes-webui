@@ -10010,12 +10010,22 @@ async function loadSettingsPanel(){
       modelSel.innerHTML='';
       let models=null;
       try{
+        // #7777 P1 ("Settings catalog race"): capture the policy identity
+        // before the request. A response held across a picker_excludes save
+        // carries the PRE-save policy; publishing it would reset
+        // window._pickerExcludes (often to {}) and resurrect model ids the
+        // user just hid. The option list from a stale response is still
+        // usable, so only the policy publication is fenced.
+        const _settingsCatalogEpoch=(typeof _liveModelFetchEpoch!=='undefined')?_liveModelFetchEpoch:null;
         models=await api('/api/models');
+        const _settingsCatalogStale=(_settingsCatalogEpoch!==null)
+          && (typeof _liveModelFetchEpoch!=='undefined')
+          && _liveModelFetchEpoch!==_settingsCatalogEpoch;
         // #7507: keep the browser-side exclude policy in sync with the
         // server so the settings picker default-model apply below (and
         // the shared _ensureModelOptionInDropdown path) honours the
         // same excludes the server already filtered out.
-        if(models&&typeof models.picker_excludes==='object'&&models.picker_excludes!==null){
+        if(!_settingsCatalogStale && models&&typeof models.picker_excludes==='object'&&models.picker_excludes!==null){
           window._pickerExcludes=models.picker_excludes;
         }
         for(const g of ((models||{}).groups||[])){
@@ -10075,8 +10085,15 @@ async function loadSettingsPanel(){
       if(typeof _applyModelToDropdown==='function'&&!_savedDefaultExcluded){
         _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel, (models&&models.active_provider)||window._activeProvider||null);
       }else if(_savedDefaultExcluded){
+        // #7777 P1 ("Settings fallback provider context"): each option must be
+        // judged against ITS OWN provider, not the active one. Against the
+        // active provider excludes a fallback row belonging to another
+        // provider was skipped (or kept) for the wrong reason.
+        const _optionProvider=(o)=>(typeof _getOptionProviderId==='function')
+          ? (_getOptionProviderId(o)||null) : null;
         const _firstEligible=Array.from(modelSel.options||[]).find(o=>
-          !(typeof _modelIsPickerExcluded==='function'&&_modelIsPickerExcluded(String(o.value||''),(models&&models.active_provider)||window._activeProvider||null)));
+          !(typeof _modelIsPickerExcluded==='function'
+            && _modelIsPickerExcluded(String(o.value||''),_optionProvider(o))));
         if(_firstEligible) modelSel.value=_firstEligible.value;
         // #7777 P1 ("Unrelated save changes default model"): the selection
         // above is a POLICY consequence, not a user edit — the saved default

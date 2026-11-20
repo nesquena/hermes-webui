@@ -5570,7 +5570,11 @@ function _pickerExcludesForProvider(providerId){
       // Also absorb every stored key that is a punctuation-variant of the
       // requested id (z.ai / zai / ZAI), which is the whole alias family
       // WebUI's provider slugs can be spelled with.
-      const norm=(k)=>String(k||'').trim().toLowerCase().replace(/[^a-z0-9]/g,'');
+      // Only the DOT folds (z.ai / zai). Every other punctuation stays
+      // significant: `custom:ab` and `custom:a-b` are different providers, and
+      // folding `-`/`_`/`:` made the hides of the first apply to the second
+      // (#7777 P1 "distinct custom provider punctuation").
+      const norm=(k)=>String(k||'').trim().toLowerCase().replace(/\./g,'');
       const target=norm(pid);
       if(target){
         for(const k of Object.keys(raw)){
@@ -5579,14 +5583,14 @@ function _pickerExcludesForProvider(providerId){
       }
       return out;
     }
-    // No provider context — union every provider's list (mirrors the
-    // server-side get_picker_excludes(None) aggregate).
-    const all=new Set();
-    for(const k of Object.keys(raw)){
-      const list=raw[k];
-      if(Array.isArray(list)) for(const m of list){ const s=String(m||'').trim(); if(s) all.add(s); }
-    }
-    return all;
+    // No provider context: publish NOTHING. The aggregate union mirrored the
+    // server-side `get_picker_excludes(None)`, but in the browser it made one
+    // provider hide list apply to every other provider with an identically
+    // named model — an `openai`-only `shared` exclusion hid
+    // `@anthropic:shared` (#7777 P1 "provider-less unions"). Every render path
+    // knows which provider it is drawing, so a provider-less match is a false
+    // positive.
+    return new Set();
   }catch(_e){ return new Set(); }
 }
 /**

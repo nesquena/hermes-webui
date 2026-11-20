@@ -346,6 +346,30 @@ function buildSelect(options) {
     out.bareBarHidden = _modelIsPickerExcluded('bar', 'openai');
   }
 
+  else if (scenario === 'r7777_provider_punctuation_stays_distinct') {
+    // P8: `custom:ab` and `custom:a-b` are different providers. Folding every
+    // non-alphanumeric character made one provider's exclusions apply to the
+    // other (#7777 P1 "distinct custom provider punctuation").
+    window._pickerExcludes = { 'custom:ab': ['model-one'], 'custom:a-b': ['model-two'] };
+    out.ab = Array.from(_pickerExcludesForProvider('custom:ab')).sort();
+    out.aB = Array.from(_pickerExcludesForProvider('custom:a-b')).sort();
+    // The dot family still folds: z.ai / zai / ZAI are one provider.
+    window._pickerExcludes = { 'z.ai': ['shared-a'], 'zai': ['shared-b'] };
+    out.dotAlias = Array.from(_pickerExcludesForProvider('z.ai')).sort();
+  }
+
+  else if (scenario === 'r7777_provider_less_policy_publishes_nothing') {
+    // P8: without a provider context the old code unioned EVERY provider's
+    // list, so an openai-only `shared` exclusion hid `@anthropic:shared`
+    // (#7777 P1 "provider-less unions"). A provider-less match is now a
+    // false positive: nothing is excluded and nothing is hidden.
+    window._pickerExcludes = { openai: ['shared'] };
+    out.policyWithoutContext = Array.from(_pickerExcludesForProvider('')).sort();
+    out.hiddenWithoutContext = _modelIsPickerExcluded('shared', '');
+    out.hiddenForOpenAI = _modelIsPickerExcluded('shared', 'openai');
+    out.hiddenForAnthropic = _modelIsPickerExcluded('@anthropic:shared', 'anthropic');
+  }
+
   else if (scenario === 'r7777_alias_exclusions_union') {
     // P3: a settings.json can carry both `zai` and `z.ai`, each with its
     // own slice of hides; the browser must union them.
@@ -603,3 +627,60 @@ def test_r7777_fallback_still_selects_an_eligible_row(driver_path):
     only the forbidden-activation path, not the fallback itself."""
     out = _run_scenario(driver_path, "r7777_excluded_fallback_skips_when_eligible_exists")
     assert out.get("selValue") == "gpt-keep", out
+
+
+# ── P8: provider punctuation, provider-less policy, Settings fences ───────
+
+
+def test_custom_provider_punctuation_stays_distinct(driver_path):
+    """`custom:ab` and `custom:a-b` are different providers.
+
+    Folding every non-alphanumeric character made one provider's exclusion list
+    apply to the other's identically named model. Only the DOT family
+    (z.ai / zai / ZAI) may fold.
+    """
+    out = _run_scenario(driver_path, "r7777_provider_punctuation_stays_distinct")
+    assert out["ab"] == ["model-one"], out
+    assert out["aB"] == ["model-two"], out
+    assert out["dotAlias"] == ["shared-a", "shared-b"], out
+
+
+def test_provider_less_policy_excludes_nothing(driver_path):
+    """Without a provider context nothing may be excluded.
+
+    The old aggregate union made an openai-only `shared` exclusion hide
+    `@anthropic:shared`. A provider-less match is now a false positive, while
+    the named-provider lookups keep working.
+    """
+    out = _run_scenario(driver_path, "r7777_provider_less_policy_publishes_nothing")
+    assert out["policyWithoutContext"] == [], out
+    assert out["hiddenWithoutContext"] is False, out
+    assert out["hiddenForOpenAI"] is True, out
+    assert out["hiddenForAnthropic"] is False, out
+
+
+def test_settings_fallback_judges_each_option_by_its_own_provider():
+    """#7777 P1: the settings fallback must not judge rows by the active provider.
+
+    Source-shape assertion: the option loop has to read the provider off the
+    option itself (`_getOptionProviderId`), because fallback rows can belong to
+    providers other than the active one.
+    """
+    src = PANELS_JS_PATH.read_text(encoding="utf-8")
+    assert "_optionProvider=(o)=>(typeof _getOptionProviderId==='function')" in src
+    assert "_modelIsPickerExcluded(String(o.value||''),_optionProvider(o))" in src
+    assert "_modelIsPickerExcluded(String(o.value||''),(models&&models.active_provider)" not in src
+
+
+def test_settings_catalog_publication_is_fenced_by_the_policy_epoch():
+    """#7777 P1: a stale /api/models response may not republish the policy.
+
+    The request is captured under `_settingsCatalogEpoch`; when the epoch has
+    moved (a picker_excludes save happened while the request was in flight) the
+    option list is still usable but `window._pickerExcludes` must not be
+    overwritten with the pre-save file — which is how it used to reset to `{}`.
+    """
+    src = PANELS_JS_PATH.read_text(encoding="utf-8")
+    assert "const _settingsCatalogEpoch=" in src
+    assert "_settingsCatalogStale" in src
+    assert "if(!_settingsCatalogStale && models&&typeof models.picker_excludes==='object'" in src
