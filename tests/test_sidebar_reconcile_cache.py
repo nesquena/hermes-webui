@@ -25,12 +25,18 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 
 import pytest
 
 import api.models as models
 
 SID = "s1"
+
+# The autouse fixture below stubs the store path; the real-store tests at the
+# end of this file put the production resolver back.
+_REAL_AGENT_STATE_DB_PATH = models._agent_state_db_path
+_REAL_STATE_DB_READER = models.get_state_db_session_messages
 
 
 @pytest.fixture(autouse=True)
@@ -434,3 +440,241 @@ def test_a_row_without_a_caller_count_is_cached_too(store, monkeypatch):
         "a row outside the paint cap re-walked on the second poll: the lookup "
         "is still gated on a caller-supplied count"
     )
+
+
+# --- The store generation fingerprints the file the reader opens ------------
+#
+# The production reader (``get_state_db_session_messages`` ->
+# ``open_state_db_readonly``) connects to ``state.db`` with any symlink
+# resolved, and SQLite keeps ``-wal``/``-journal`` beside that resolved file.
+# These tests use a REAL SQLite store in WAL mode and the REAL reader (wrapped
+# only to count calls), with a writer connection that stays open like the
+# Agent's, so a same-count commit lands where a native writer puts it: in the
+# target's WAL, with neither the message count nor the main file moving. The
+# layouts are an ordinary file, a directory symlink and an operator-made
+# ``state.db -> other/store.sqlite3`` file symlink; all three must stay fresh.
+
+_LAYOUTS = ("plain", "dir_symlink", "file_symlink")
+
+
+def _real_store(tmp_path, monkeypatch, layout):
+    """Build a WAL-mode store for *layout*; return (alias, target, writer)."""
+    root = tmp_path / "layout"
+    root.mkdir()
+    if layout == "plain":
+        home = root / "home"
+        home.mkdir()
+        target = alias = home / "state.db"
+    elif layout == "dir_symlink":
+        real_home = root / "real-home"
+        real_home.mkdir()
+        (root / "home").symlink_to(real_home, target_is_directory=True)
+        target = real_home / "state.db"
+        alias = root / "home" / "state.db"
+    elif layout == "file_symlink":
+        home = root / "home"
+        home.mkdir()
+        other = root / "other"
+        other.mkdir()
+        target = other / "store.sqlite3"
+        alias = home / "state.db"
+    else:  # pragma: no cover - parametrization guard
+        raise AssertionError(layout)
+    setup = sqlite3.connect(str(target))
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "session_id TEXT, role TEXT, content TEXT, timestamp REAL, "
+        "active INTEGER DEFAULT 1, api_content TEXT)"
+    )
+    setup.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [(SID, r["role"], r["content"], r["timestamp"]) for r in _state_rows(3)],
+    )
+    setup.commit()
+    setup.close()
+    if layout == "file_symlink":
+        alias.symlink_to(target)
+    # The writer opens the path the store is configured under, as the Agent
+    # does, and stays open for the whole test: closing the last connection
+    # would checkpoint the WAL into the main file and hide the schedule.
+    writer = sqlite3.connect(str(alias))
+    writer.execute("SELECT COUNT(*) FROM messages").fetchone()
+    monkeypatch.setattr(models, "_agent_state_db_path", _REAL_AGENT_STATE_DB_PATH)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: alias)
+    return alias, target, writer
+
+
+def _count_real_reads(monkeypatch):
+    counter = {"calls": 0}
+
+    def _read(*args, **kwargs):
+        counter["calls"] += 1
+        return _REAL_STATE_DB_READER(*args, **kwargs)
+
+    monkeypatch.setattr(models, "get_state_db_session_messages", _read)
+    return counter
+
+
+def _main_file_stat(path):
+    st = os.stat(path)
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+@pytest.mark.parametrize("count", [3, None], ids=["caller_count", "no_caller_count"])
+@pytest.mark.parametrize("layout", _LAYOUTS)
+def test_a_same_count_wal_commit_reads_fresh_through_every_store_layout(
+    store, monkeypatch, tmp_path, layout, count
+):
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    alias, target, writer = _real_store(tmp_path, monkeypatch, layout)
+    try:
+        reads = _count_real_reads(monkeypatch)
+        loads = _count_loads(monkeypatch)
+        walk = lambda: models._reconciled_visible_count_for_sidebar(  # noqa: E731
+            SID, expected_state_count=count
+        )
+
+        primed = walk()
+        assert primed is not None
+        assert (loads["loads"], reads["calls"]) == (1, 1)
+
+        # A proved hit before the write: the second poll neither parses the
+        # sidecar nor reads the store again.
+        assert walk() == primed
+        assert (loads["loads"], reads["calls"]) == (1, 1), (
+            f"{layout}: an unchanged store must be answered from the cache"
+        )
+
+        # A row-addressed rewrite: same row count, same active count. Only the
+        # WAL of the file SQLite resolved moves.
+        main_before = _main_file_stat(target)
+        writer.execute("UPDATE messages SET content = ? WHERE id = 1", ("hello",))
+        writer.commit()
+        assert writer.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 3
+        assert _main_file_stat(target) == main_before, (
+            "precondition: the commit stayed in the WAL"
+        )
+        assert os.path.getsize(f"{target}-wal") > 0, (
+            "precondition: SQLite put the WAL beside the resolved file"
+        )
+
+        refreshed = walk()
+
+        # The authority: the same question with no cache at all.
+        models._clear_sidebar_reconcile_cache()
+        authority = walk()
+        assert authority is not None and authority.visible != primed.visible, (
+            "precondition: the rewrite changes the reconciled answer "
+            f"(before={primed}, after={authority})"
+        )
+        assert refreshed == authority, (
+            f"{layout}: a same-count commit left the cached answer in place "
+            f"(served={refreshed}, fresh={authority})"
+        )
+    finally:
+        writer.close()
+
+
+def test_the_generation_names_the_resolved_store(store, monkeypatch, tmp_path):
+    alias, target, writer = _real_store(tmp_path, monkeypatch, "file_symlink")
+    try:
+        generation = models._sidebar_reconcile_store_generation()
+        assert generation is not None
+        assert generation[0] == str(target.resolve()), (
+            "the generation must fingerprint the file the reader opens, "
+            f"not the alias {alias}"
+        )
+        # Retargeting the alias at a different store is a different generation.
+        other = tmp_path / "layout" / "other" / "second.sqlite3"
+        second = sqlite3.connect(str(other))
+        second.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY)")
+        second.commit()
+        second.close()
+        alias.unlink()
+        alias.symlink_to(other)
+        moved = models._sidebar_reconcile_store_generation()
+        assert moved is not None and moved != generation
+        assert moved[0] == str(other.resolve())
+    finally:
+        writer.close()
+
+
+def test_an_unresolvable_store_path_caches_nothing(store, monkeypatch, tmp_path):
+    # A self-referencing symlink: depending on the Python version resolve()
+    # raises or hands the loop back (and stat then fails). Either way the
+    # generation is unproved, so nothing may be served or published.
+    loop = tmp_path / "loop.db"
+    loop.symlink_to(loop)
+    monkeypatch.setattr(models, "_agent_state_db_path", lambda profile=None: loop)
+    assert models._sidebar_reconcile_store_generation() is None
+
+
+@pytest.mark.parametrize("layout", ["plain", "file_symlink"])
+def test_the_native_prologue_backfill_reads_fresh_through_a_store_symlink(
+    store, monkeypatch, tmp_path, layout
+):
+    # The Agent's own writer: the turn prologue's row-addressed
+    # ``set_message_api_content`` backfill, on a store the Agent opened by the
+    # path it is configured with. The sidecar already carries the provider
+    # bytes, so the backfill makes the store row its duplicate: one row fewer,
+    # with no count moving.
+    hermes_state = pytest.importorskip("hermes_state")
+    if not hasattr(hermes_state.SessionDB, "set_message_api_content"):
+        pytest.skip("this Agent has no row-addressed api_content writer")
+    root = tmp_path / "native"
+    home = root / "home"
+    home.mkdir(parents=True)
+    alias = home / "state.db"
+    if layout == "file_symlink":
+        (root / "other").mkdir()
+        target = root / "other" / "store.sqlite3"
+        builder = hermes_state.SessionDB(db_path=target)
+        builder.close()
+        alias.symlink_to(target)
+    else:
+        target = alias
+    db = hermes_state.SessionDB(db_path=alias)
+    try:
+        db.create_session(SID, "webui")
+        row_id = db.append_message(SID, "user", "hello", timestamp=100.0)
+        db.append_message(SID, "assistant", "a1", timestamp=101.0)
+        db.append_message(SID, "user", "q2", timestamp=102.0)
+        if layout == "file_symlink":
+            assert alias.is_symlink(), "precondition: the alias is still a symlink"
+        _write_sidecar(store, [dict(_row("user", "hello", 100.0), api_content="P")])
+        monkeypatch.setattr(models, "_agent_state_db_path", _REAL_AGENT_STATE_DB_PATH)
+        monkeypatch.setattr(models, "_active_state_db_path", lambda: alias)
+        models._clear_sidebar_reconcile_cache()
+        reads = _count_real_reads(monkeypatch)
+        loads = _count_loads(monkeypatch)
+        walk = lambda: models._reconciled_visible_count_for_sidebar(  # noqa: E731
+            SID, expected_state_count=3
+        )
+
+        primed = walk()
+        assert primed is not None
+        assert walk() == primed
+        assert (loads["loads"], reads["calls"]) == (1, 1), (
+            f"{layout}: an unchanged store must be answered from the cache"
+        )
+
+        main_before = _main_file_stat(target)
+        assert db.set_message_api_content(SID, row_id, "hello", "P") == 1
+        assert _main_file_stat(target) == main_before, (
+            "precondition: the backfill stayed in the WAL"
+        )
+
+        refreshed = walk()
+        models._clear_sidebar_reconcile_cache()
+        authority = walk()
+        assert authority is not None and authority.visible != primed.visible, (
+            "precondition: the backfill changes the reconciled answer "
+            f"(before={primed}, after={authority})"
+        )
+        assert refreshed == authority, (
+            f"{layout}: the native backfill left the cached answer in place "
+            f"(served={refreshed}, fresh={authority})"
+        )
+    finally:
+        db.close()
