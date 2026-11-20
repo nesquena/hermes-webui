@@ -58,7 +58,14 @@ compatibility boundary should disappear with the session/state API migration.
 
 When a missing or closed handle is actually replaced, update the Agent's
 borrowed `persistence` interface and rebind `bind_session_state` on the context
-engine, forwarding `persistence` only to hooks that accept it. The credential
+engine, forwarding `persistence` only to hooks that accept it (the Agent's own
+`accepts_keyword_argument` rule). The rebind is best-effort: a hook that raises
+`Exception` is logged (once per Agent at WARNING, details at DEBUG) and the turn
+continues on the adopted handle; a `TypeError` from the positional call gets one
+keyword-convention retry, and `KeyboardInterrupt`/`SystemExit` propagate. A
+failed rebind is remembered on the Agent and retried on the next cached turn,
+even when that turn keeps the still-open adopted handle. A SessionDB shim whose
+own store handle was released counts as closed. The credential
 self-heal path uses the same liveness check before constructing a replacement
 Agent, and its retained constructor kwargs follow the adopted handle rather
 than the unused per-request handle. A WebUI process restart clears
