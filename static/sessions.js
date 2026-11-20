@@ -3344,6 +3344,8 @@ async function loadSession(sid){
   if(INFLIGHT[sid]){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
     const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
+    const journalInflight=INFLIGHT[sid].journalSnapshot?INFLIGHT[sid]:null;
+    const journalStreamId=String(journalInflight?.streamId||'').trim();
     S.toolCalls=[];
     // Switching between active sessions should rebuild the live worklog from
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
@@ -3369,6 +3371,22 @@ async function loadSession(sid){
     // would lose the settled answer before any live row can take over.
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+    }
+    // An assistant-only journal snapshot can split into several live rows.
+    // Recover its missing prompt before deduping those rows: otherwise the
+    // previous turn's answer can suppress identical text in this turn.
+    if(journalStreamId&&journalInflight===INFLIGHT[sid]
+      &&journalStreamId===String(S.session.active_stream_id||'').trim()
+      &&inflightMessages.filter(m=>m&&m.role==='assistant'&&m._live).length>1
+      &&!_inflightTailTurnUser(inflightMessages)){
+      const turnStart=_inflightTurnOwnerStart(S.session,journalInflight,journalStreamId);
+      const prompt=turnStart?getPendingSessionMessage(S.session,S.messages):null;
+      if(prompt){
+        prompt._recoveredTurnStart=turnStart;
+        const base=S.messages.slice();
+        base.splice(_recoveredPromptTargetIndex(base,turnStart),0,_markRecoveredPromptRow(prompt));
+        S.messages=base;
+      }
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
       _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId),
