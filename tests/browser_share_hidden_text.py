@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Browser gate: the public share page shows a message as plain text when it
+would hide part of it, and never shows a formatted message with hidden text.
+
+``static/share.js`` renders each message with ``renderMd`` and then compares the
+words of the published text with the words the rendered page shows. If any word
+is missing, it shows the whole message as plain text. This gate boots the real
+``server.py`` with isolated state, imports conversations, shares them, opens the
+real share page in Chromium and checks:
+
+1. every message in ``HIDING`` (markup the renderer hides) is shown as plain
+   text, with its marker word visible;
+2. every message in ``ORDINARY`` (realistic Markdown, code, math, tables,
+   images, links) keeps its formatting;
+3. a differential run over random messages built from the constructs renderMd
+   treats specially: for every message shown formatted, each marker word is
+   visible on the page. "Visible" is the browser's own layout-aware
+   ``innerText``, plus link and image addresses and image alt text, which are
+   out of scope (a word glued to an address becomes part of it).
+
+Run:
+    python tests/browser_share_hidden_text.py
+
+Exits 0 on success, 1 on a failed check, 2 on a setup problem.
+"""
+import os
+import random
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+MARK = "zqmark"
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+PORT = int(os.environ.get("SHARE_GATE_PORT") or _free_port())
+BASE = f"http://127.0.0.1:{PORT}"
+
+# Markup the renderer hides. Each must be shown as plain text.
+HIDING = [
+    f"before <!-- {MARK} --> after",
+    f"before &lt;!-- {MARK} --&gt; after",
+    f"before &amp;lt;!-- {MARK} --&amp;gt; after",
+    f'<span data-note="{MARK}">hello</span>',
+    f'<span title="{MARK}">hello</span>',
+    f'<a href="https://example.com/&quot;title=&quot;{MARK}">docs</a>',
+    f'<a href="https://example.com/${MARK}$">docs</a>',
+    f"<custom-{MARK}>text</custom-{MARK}>",
+    f"see <https://example.com/x> and <{MARK}> here",
+    f"```js some {MARK} words\ncode\n```",
+    f"> ```js {MARK} words\n> x\n> ```",
+    f"$x `{MARK}` y$",
+    f"\\( see `{MARK}` \\)",
+    f"a $b $${MARK}$$ c$ d",
+    f"<pre>a `{MARK}` b</pre>",
+    f"- see\u2028{MARK} here",
+    f"visible word {MARK} and a hidden copy <!-- {MARK} -->",
+    # A bare link shows its address once; a hidden copy of an address word still counts.
+    f"see https://example.com/{MARK} <!-- {MARK} -->",
+    # A code language class is free text, so it never counts as shown.
+    f'<code class="language-{MARK}">x</code>',
+    # Free-text attributes the renderer keeps from raw HTML never count as shown.
+    f'<div class="mermaid-block" data-mermaid-id="{MARK}">x</div>',
+    f'<a href="https://example.com/f" download="{MARK}">file</a>',
+]
+
+# Realistic content that must keep its formatting.
+ORDINARY = [
+    "Plain prose with **bold**, _italic_, ~~struck~~ and `inline code`.",
+    "## Setup\n\n1. Install the package\n2. Run `make test`\n   - on CI too\n3. Done\n\n> Note: this takes a minute.",
+    "| Name | Value |\n|---|:---:|\n| alpha | 1 |\n| beta | 2 |",
+    "```python\ndef add(a, b):\n    return a + b\n```\n\nThen call `add(1, 2)`.",
+    "```mermaid\ngraph TD\n  A --> B\n```",
+    'Use `Vec<String>` and `<div class="row">` in the example.',
+    "Inline math $a^2 + b^2 = c^2$ and display math:\n\n$$\\int_0^1 x\\,dx = \\frac{1}{2}$$",
+    "Costs $5 and $10; set $HOME first.",
+    "See [the docs](https://example.com/docs/intro) and https://example.com/raw for details.",
+    "![diagram](https://example.com/diagram.png)",
+    "- [x] write the code\n- [ ] write the tests",
+    "Line one<br>line two, E = mc<sup>2</sup>, press <kbd>Ctrl</kbd>.",
+    "AT&T &amp; friends &gt; others, 3 < 4.",
+    "中文**粗体**文字，还有 `代码`。 Émoji 🎉 and naïve café.",
+    "un*believ*able and snake_case_name",
+    "Shell:\n\n```bash\nexport PATH=\"$HOME/bin:$PATH\"\necho \"done\"\n```",
+    # The renderer doesn't support link titles, so this stays visible text.
+    '[docs](https://example.com/p "a title")',
+]
+
+# Random messages: tokens renderMd treats specially, with numbered marker words.
+# Address tokens end with a space so a marker never joins an address.
+FUZZ_TOKENS = [
+    "<", ">", "`", "``", "```", "````", "\n", "\n\n", " ", "&lt;", "&gt;", "&amp;", "&quot;", "&#39;",
+    "&amp;lt;", "<!--", "-->", "<b>", "</b>", "<br>", "<span>", "</span>", "<x>", "<span title=\"",
+    '<a href="https://e.com/p" ', '">', '<img src="https://e.com/i.png" ', '"', "'", "> ", "- ", "1. ",
+    "# ", "| ", " |", "|---|", "**", "*", "_", "~~", "$", "\\(", "\\)", "```js", "```js x", "```c++",
+    "[", "]", "(", ")", "$$", "\\[", "\\]", "$x", "x$", "\n```\n", "\n```py\n", "- [x] ", "\u2028",
+    "MEDIA:https://e.com/m.png ", "https://e.com/p ", "<https://e.com/ ", "](https://e.com/l ",
+    "\t", "   ", ":", "!", "?", "/", "=", "#",
+]
+
+
+def _fuzz_messages(seed, count):
+    rng = random.Random(seed)
+    out = []
+    for i in range(count):
+        parts, words = [], 0
+        for _ in range(rng.randint(1, 18)):
+            if rng.random() < 0.35:
+                parts.append(f"zq{i}w{words}x")
+                words += 1
+            else:
+                parts.append(rng.choice(FUZZ_TOKENS))
+        if not words:  # the importer drops a blank message, which would shift every later row
+            parts.append(f"zq{i}w0x")
+            words = 1
+        out.append(("".join(parts), [f"zq{i}w{k}x" for k in range(words)]))
+    return out
+
+
+SEED_JS = """async (conversations) => {
+  const post = async (path, body) => {
+    const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const data = await r.json();
+    if (!r.ok) throw new Error(path + ' failed: ' + JSON.stringify(data));
+    return data;
+  };
+  const tokens = [];
+  for (const conv of conversations) {
+    const imported = await post('/api/session/import', {title: conv.title, messages: conv.messages});
+    const shared = await post('/api/share/create', {session_id: imported.session.session_id});
+    const token = (shared.session && shared.session.share_token) || shared.share_token || shared.token;
+    if (!token) throw new Error('no share token: ' + JSON.stringify(shared));
+    tokens.push(token);
+  }
+  return tokens;
+}"""
+
+READ_JS = """() => Array.from(document.querySelectorAll('.share-message')).map(row => {
+  const body = row.querySelector('.share-message-body');
+  const addresses = Array.from(body.querySelectorAll('a[href], img'))
+    .map(el => [el.getAttribute('href'), el.getAttribute('src'), el.getAttribute('alt'), el.getAttribute('title')].filter(Boolean).join(' '))
+    .join(' ');
+  return {plain: body.classList.contains('share-plain'), text: body.innerText, addresses};
+})"""
+
+
+def _wait_for_health(timeout=40):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(BASE + "/health", timeout=2) as r:
+                if r.status == 200:
+                    return True
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def _read_share(browser, token, expected):
+    ctx = browser.new_context(base_url=BASE)
+    page = ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(f"/share/{token}", wait_until="domcontentloaded")
+    deadline = time.time() + 60
+    rows = []
+    while time.time() < deadline:
+        rows = page.evaluate(READ_JS)
+        if len(rows) >= expected:
+            break
+        page.wait_for_timeout(100)
+    ctx.close()
+    return rows, errors
+
+
+def main():
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("SKIP: playwright not installed", file=sys.stderr)
+        return 2
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    server_py = os.path.join(repo_root, "server.py")
+    state_dir = tempfile.mkdtemp(prefix="hermes-share-gate-")
+    env = os.environ.copy()
+    for k in list(env):
+        if k.endswith("_API_KEY"):
+            env.pop(k, None)
+    env.update({
+        "HERMES_WEBUI_PORT": str(PORT),
+        "HERMES_WEBUI_HOST": "127.0.0.1",
+        "HERMES_WEBUI_STATE_DIR": state_dir,
+        "HERMES_HOME": state_dir,
+        "HERMES_BASE_HOME": state_dir,
+        "HERMES_WEBUI_SKIP_ONBOARDING": "1",
+        "HERMES_WEBUI_AGENT_DIR": os.path.join(state_dir, "no-agent"),
+    })
+    seeds = [int(s) for s in os.environ.get("SHARE_GATE_SEEDS", "1,2").split(",") if s]
+    per_seed = int(os.environ.get("SHARE_GATE_FUZZ", "600"))
+    log = open(os.path.join(state_dir, "server.log"), "w")
+    proc = subprocess.Popen([sys.executable, server_py], cwd=repo_root, env=env, stdout=log, stderr=subprocess.STDOUT)
+    failures = []  # row-count mismatches are reported, so the zips below need not be strict
+    try:
+        if not _wait_for_health():
+            print("SETUP FAIL: server did not become healthy", file=sys.stderr)
+            return 2
+        convs = [
+            {"title": "hiding", "messages": [{"role": "assistant", "content": c} for c in HIDING]},
+            {"title": "ordinary", "messages": [{"role": "assistant", "content": c} for c in ORDINARY]},
+        ]
+        fuzz = []
+        for seed in seeds:
+            cases = _fuzz_messages(seed, per_seed)
+            fuzz.append(cases)
+            convs.append({"title": f"fuzz {seed}", "messages": [{"role": "assistant", "content": c} for c, _ in cases]})
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            ctx = browser.new_context(base_url=BASE)
+            page = ctx.new_page()
+            page.goto("/", wait_until="domcontentloaded")
+            tokens = page.evaluate(SEED_JS, convs)
+            ctx.close()
+
+            rows, errors = _read_share(browser, tokens[0], len(HIDING))
+            failures += [f"hiding page error: {e}" for e in errors]
+            if len(rows) != len(HIDING):
+                failures.append(f"hiding: {len(rows)} rows, expected {len(HIDING)}")
+            for content, row in zip(HIDING, rows, strict=False):
+                if not row["plain"]:
+                    failures.append(f"hiding shown formatted: {content!r}")
+                elif MARK not in row["text"]:
+                    failures.append(f"hiding fallback lost the marker: {content!r}")
+            print(f"hiding: {sum(r['plain'] for r in rows)}/{len(HIDING)} shown as plain text")
+
+            rows, errors = _read_share(browser, tokens[1], len(ORDINARY))
+            failures += [f"ordinary page error: {e}" for e in errors]
+            for content, row in zip(ORDINARY, rows, strict=False):
+                if row["plain"]:
+                    failures.append(f"ordinary shown as plain text: {content!r}")
+            print(f"ordinary: {sum(not r['plain'] for r in rows)}/{len(ORDINARY)} keep their formatting")
+
+            for seed, cases, token in zip(seeds, fuzz, tokens[2:], strict=True):
+                rows, errors = _read_share(browser, token, len(cases))
+                failures += [f"fuzz {seed} page error: {e}" for e in errors]
+                if len(rows) != len(cases):
+                    failures.append(f"fuzz {seed}: {len(rows)} rows, expected {len(cases)}")
+                formatted = misses = 0
+                for (content, marks), row in zip(cases, rows, strict=False):
+                    seen = row["text"] + " " + row["addresses"]
+                    missing = [m for m in marks if m not in seen]
+                    if not row["plain"]:
+                        formatted += 1
+                    if missing:
+                        misses += 1
+                        if misses <= 5:
+                            failures.append(f"fuzz {seed}: hidden {missing} in {'formatted' if not row['plain'] else 'plain'} {content!r}")
+                print(f"fuzz {seed}: {len(cases)} messages, {formatted} formatted, {misses} with hidden words")
+                if misses:
+                    failures.append(f"fuzz {seed}: {misses} messages with hidden words")
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+    if failures:
+        print("\nSHARE HIDDEN-TEXT GATE FAILED:", file=sys.stderr)
+        print("\n".join(failures), file=sys.stderr)
+        return 1
+    print("\nSHARE HIDDEN-TEXT GATE PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
