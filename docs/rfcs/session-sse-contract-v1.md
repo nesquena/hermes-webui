@@ -100,6 +100,55 @@ recovery waits for visibility return or explicit session loading. Behavior cover
 heartbeat interval for SSE streams. Phase 1 reuses this constant rather than
 adding a separate configurable knob.
 
+### Implemented browser-subscriber lifetime and replay
+
+The existing browser-facing subscription streams are not one unbounded HTTP
+generation. `_SSE_SUBSCRIBER_LEASE_SECONDS = 300` caps each generation for:
+
+- `GET /api/session/stream` (per-session background-completion/live-turn bridge),
+- `GET /api/sessions/events` (global session-list invalidation), and
+- `GET /api/sessions/gateway/stream` (gateway session snapshots).
+
+At the lease boundary the handler sets `BaseHTTPRequestHandler.close_connection`
+and returns; it does **not** emit a `Connection: close` response header. A live
+`EventSource` treats the resulting EOF as reconnectable and opens a replacement
+generation. If only an upstream proxy remains, no browser reconnect arrives, so
+the old handler releases its exact subscriber queue and the channel reaper can
+collect it. Active tabs therefore incur one reconnect plus the endpoint's normal
+refresh/snapshot work every five minutes.
+
+`GET /api/session/stream` also uses the native `Last-Event-ID` request header to
+bridge the reconnect gap. `SessionChannel` retains at most 32 copied events that
+carry stable payload `event_id` values, each stamped with a channel-monotonic
+sequence number. The SSE `id:` line of every retained frame is that frame's own
+replay cursor (`session-channel:<token>@<seq>`), **not** the payload `event_id`:
+the dual-name completion emit (`bg_task_complete` plus the legacy
+`process_complete` alias) repeats one `event_id` across two frames, so an
+`event_id` cannot name a unique replay position. The payload `event_id` is kept
+for the browser's `(session_id, event_id)` dedupe. Every first `initial` frame
+establishes a synthetic cursor in the same grammar; a known cursor replays only
+the retained frames recorded after its sequence number, in order. The `<token>`
+names the channel incarnation: a cursor minted by a channel the reaper has since
+collected, or by a pre-restart process, is rejected rather than read in the new
+channel's sequence space. A fresh, unknown, evicted, or foreign-incarnation
+cursor replays no old completion toast and falls back to the existing
+active-turn and persisted-message-count recovery. The channel's
+subscriber-drop grace is preserved for the full reconnect interval even when the
+channel itself is older than its idle TTL.
+
+A channel that has been explicitly closed (`SessionChannel.close()`, the #7302
+end-of-channel protocol) never replays: a late subscriber receives only the
+`None` close sentinel, so the sentinel always fits its queue, the response ends,
+and the browser reconnects onto the replacement channel, where the old
+channel's cursor is a foreign incarnation and fails closed. A sentinel met
+while the handler is still draining the replay prefix ends the response the same
+way. Every completed frame write, replayed or live, also counts as writer-side
+subscriber liveness for the reaper.
+
+This lifecycle applies only to the three endpoints above. Approval/clarify SSE,
+run-journal observers, the proposed `GET /api/sessions/{session_id}/events`, and
+other event streams keep their own documented contracts.
+
 ### Run-journal cursor and replay
 
 Current replay identity is run/stream-scoped:
@@ -112,8 +161,8 @@ shift in `api/routes.py` cannot invalidate the doc or its contract test.
 - `_parse_run_journal_event_id()` and `_parse_run_journal_after_seq()` (both in
   `api/routes.py`) parse the replay cursor from the `after_event_id` /
   `after_seq` **query params** (not the
-  `Last-Event-ID` header — that header is the *proposed* new-endpoint contract
-  below, §Reconnect).
+  `Last-Event-ID` header used by `GET /api/session/stream` above and proposed for
+  the new endpoint below, §Reconnect).
 - `_runner_event_id()` (in `api/routes.py`) constructs the event `id`
   field as `stream_id:seq`.
 - SSE frames carry their `id:` via the `_sse_with_id()` helper, emitted on the
