@@ -10034,7 +10034,15 @@ function _sidebarUserTurnCountRenderOK(s){
   const seg=Number(s._compression_segment_count||0);
   const collapsed=Number(s._lineage_collapsed_count||0);
   if(s._lineage_root_id||s.pre_compression_snapshot||seg>1||collapsed>1)return false;
-  if(s.active_stream_id||s.pending_user_message)return false;
+  // #7681 review 2026-11-18: the sidebar payload carries
+  // ``has_pending_user_message`` / ``pending_started_at`` (it drops the
+  // message text), and local sends set the pending timestamp before the first
+  // sidebar update. Both mean the count has not settled yet; ``is_streaming``
+  // covers the running row. Checking only ``pending_user_message`` let those
+  // rows render a count that was about to change.
+  if(s.active_stream_id||s.is_streaming)return false;
+  if(s.pending_user_message||s.has_pending_user_message)return false;
+  if(typeof s.pending_started_at==='number'&&s.pending_started_at>0)return false;
   // #7681 finding 3: the default compaction mode is in-place, so a compacted
   // session stays ONE segment and would otherwise render a total that still
   // counts rows the agent has compacted away (and rows removed by /undo). The

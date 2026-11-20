@@ -2975,7 +2975,16 @@ class Session:
                 'worktree_repo_root': self.worktree_repo_root,
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
-            'user_message_count': Session._compute_user_message_count(self.messages),
+            # #7681 review 2026-11-18: a metadata-only stub deliberately holds
+            # ``messages=[]`` (the transcript was never read), so computing the
+            # count here would report a confident 0 for a conversation that may
+            # have many user turns. Leave it unknown; the renderer already
+            # omits the label for a null count.
+            'user_message_count': (
+                None
+                if getattr(self, '_loaded_metadata_only', False)
+                else Session._compute_user_message_count(self.messages)
+            ),
             'visible_message_count': visible_message_count,
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,

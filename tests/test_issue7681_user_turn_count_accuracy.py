@@ -728,6 +728,9 @@ check('lineage root', {user_message_count:7, _lineage_root_id:'r'}, false);
 check('pre-compression snapshot', {user_message_count:7, pre_compression_snapshot:true}, false);
 check('pending user message', {user_message_count:7, pending_user_message:'x'}, false);
 check('streaming', {user_message_count:7, active_stream_id:'s'}, false);
+check('sidebar pending flag', {user_message_count:7, has_pending_user_message:true}, false);
+check('sidebar pending started', {user_message_count:7, pending_started_at:1234}, false);
+check('is_streaming flag', {user_message_count:7, is_streaming:true}, false);
 check('unknown count', {user_message_count:null}, false);
 process.stdout.write('ok');
 """
