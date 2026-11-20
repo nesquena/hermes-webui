@@ -6739,8 +6739,16 @@ async function _loadModelFrequentPrefs(opts){
 // two overlapping stars could otherwise discard a successful save whose
 // response arrived after a later-started request (maintainer finding 2).
 async function _setModelPinned(model,provider,pinned){
+  // #8622 (greptile P1, 2026-11-19): capture the OWNER at click time. The save
+  // chain can start after a profile switch, and resolving the profile inside
+  // work() then sends the POST with the NEW profile's cookie — rewriting that
+  // profile's pins instead of the one the user was looking at. Cancelling is
+  // the only safe option here: the POST authenticates with whatever profile is
+  // active when it leaves.
+  const ownerProfile=_frequentProfileName();
   const work=async()=>{
-    const profile=_frequentProfileName();
+    if(_frequentProfileName()!==ownerProfile) return null;
+    const profile=ownerProfile;
     const seq=++_modelFrequentRequestSeq;
     _modelFrequentInFlight=false;
     _modelFrequentPendingSaves+=1;

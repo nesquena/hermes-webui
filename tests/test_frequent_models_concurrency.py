@@ -157,3 +157,35 @@ def test_overlapping_pin_saves_match_the_server_state():
 def test_get_during_pending_save_cannot_discard_it():
     out = _run(CASE_GET_RACE)
     assert out["pins"] == ["a"], out
+
+
+CASE_PROFILE_SWITCH = """
+(async () => {
+  __hooks.cache = {profile: 'alpha', pins: [], usage: []};
+  S.activeProfile = 'alpha';
+  const calls = [];
+  apiImpl = async (path, opts) => {
+    calls.push(JSON.parse(opts.body));
+    return {profile: 'alpha', pins: [], usage: []};
+  };
+  // Queue the save while alpha is active, then switch before it can start.
+  const pending = __hooks.save('m1', 'p', true);
+  S.activeProfile = 'beta';
+  const result = await pending;
+  console.log(JSON.stringify({calls, result}));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def test_a_queued_pin_save_is_cancelled_when_the_profile_switches():
+    """#8622: the click's owner decides, not whatever profile is live at send.
+
+    The POST authenticates with the cookie of whichever profile is active when
+    it leaves, so a save queued in profile A and started after a switch to B
+    would rewrite B's pins.
+    """
+    out = _run(CASE_PROFILE_SWITCH)
+    assert out["calls"] == [], (
+        "the queued save posted under the NEW profile's cookie: " + json.dumps(out)
+    )
+    assert out["result"] is None, out
