@@ -178,7 +178,8 @@ const ctx = {
     if (path === '/api/commands') return { commands: [] };
     if (path === '/api/commands/bundles') return { bundles: [] };
     if (path.indexOf('/api/skills/content?name=') === 0) {
-      const name = decodeURIComponent(path.slice('/api/skills/content?name='.length));
+      const _skillUrl = new URL(path, 'http://localhost/');
+      const name = _skillUrl.searchParams.get('name') || '';
       if (deferredFetch.target === 'content') {
         return new Promise((resolve, reject) => {
           deferredFetch.resolve = () => resolve({ content: skillContentByName[name] || '' });
@@ -199,6 +200,7 @@ const ctx = {
   __setSkillContent(name, content) { skillContentByName[name] = content; },
   __clearSkillContent() { for (const k in skillContentByName) delete skillContentByName[k]; },
   __resetApiCalls() { apiCalls.length = 0; },
+  _refreshSessionSkillUsageForOwner(sid) { apiCalls.push({ path: '__skill_usage__', sid }); },
   __apiCalls() { return apiCalls; },
   __setComposer(text) { getEl('msg').value = text; },
   __composer() { const el = elementCache['msg']; return el ? el.value : null; },
@@ -242,6 +244,9 @@ vm.runInContext(__MESSAGES_JS__, ctx);
             .filter((c) => c && c.path.indexOf('/api/skills/content?name=') === 0)
             .map((c) => c.path),
           composerAfter: __composer(),
+          usageRefreshes: __apiCalls()
+            .filter((c) => c && c.path === '__skill_usage__')
+            .map((c) => c.sid),
         };
       };
       // #7781 [CORE] runner: park the content (or listing) fetch, switch the
@@ -397,8 +402,21 @@ def test_plugin_skill_command_loads_skill_into_dispatched_message():
     # the same original back into the composer.
     assert result["userMessage"] is not None and result["userMessage"]["content"] == "/demo:skill do X", result
     assert result["composerAfter"] == "/demo:skill do X", result
-    # The skill body must be fetched exactly once, for the canonical name.
-    assert result["contentFetches"] == ["/api/skills/content?name=demo%3Askill"], result
+    # The skill body must be fetched exactly once, for the canonical name,
+    # carrying the owning session id so the server records the use.
+    assert len(result["contentFetches"]) == 1, result
+    assert result["contentFetches"][0].startswith("/api/skills/content?name=demo%3Askill"), result
+    assert "session_id=sess-1" in result["contentFetches"][0], result
+
+
+def test_plugin_skill_use_is_recorded_on_the_owning_session():
+    """The content request carries the owning session id and the send path
+    refreshes that session's usage afterwards, so a plugin skill loaded via
+    ``/namespace:skill`` appears in the conversation's "Skills Used" list
+    instead of being recorded only when the agent happens to call the skill
+    tool (2026-11-18 review finding)."""
+    result = _run_send_harness()["positive"]
+    assert result["usageRefreshes"] == ["sess-1"], result
 
 
 def test_qualified_command_without_plugin_row_falls_through_unchanged():
@@ -426,7 +444,9 @@ def test_canonical_underscore_qualified_name_dispatches_with_skill_body():
     assert "[USER OVERRIDE]" in message, result
     assert "You MUST follow the skill 'reviewdemo:under_score' content provided below" in message, result
     # The content fetch must target the canonical underscore identity.
-    assert result["contentFetches"] == ["/api/skills/content?name=reviewdemo%3Aunder_score"], result
+    assert len(result["contentFetches"]) == 1, result
+    assert result["contentFetches"][0].startswith("/api/skills/content?name=reviewdemo%3Aunder_score"), result
+    assert "session_id=sess-1" in result["contentFetches"][0], result
 
 
 def test_ordinary_hyphen_spelling_falls_through_unchanged():
@@ -466,7 +486,7 @@ def test_picker_entry_for_underscore_name_feeds_send_verbatim():
     assert "UNDERSCORE SKILL BODY" in message, result
     assert "do Y" in message, result
     assert "[USER OVERRIDE]" in message, result
-    assert run_result["contentFetches"] == ["/api/skills/content?name=reviewdemo%3Aunder_score"], result
+    assert run_result["contentFetches"] == ["/api/skills/content?name=reviewdemo%3Aunder_score&session_id=sess-1"], result
     # The user-message echo keeps the ORIGINAL composer text (with underscore).
     assert run_result["userMessage"] is not None and run_result["userMessage"]["content"] == "/reviewdemo:under_score do Y", result
 
@@ -493,7 +513,7 @@ def test_deferred_content_session_switch_success_path_stops_send():
     untouched, chat B's draft intact (maintainer CORE finding)."""
     result = _run_send_harness()["switchSuccess"]
     # The race window was genuinely exercised: the content fetch happened.
-    assert result["contentFetches"] == ["/api/skills/content?name=demo%3Askill"], result
+    assert result["contentFetches"] == ["/api/skills/content?name=demo%3Askill&session_id=sess-A"], result
     # The send stopped before dispatch — nothing POSTed anywhere.
     assert result["startBody"] is None, result
     # Chat B's transcript was not touched (no user bubble, no directive).
@@ -508,7 +528,7 @@ def test_deferred_content_session_switch_error_path_stops_send():
     after the user switched to chat B. The "Plugin skill error" bubble must
     NOT be written into chat B and its draft must NOT be cleared."""
     result = _run_send_harness()["switchError"]
-    assert result["contentFetches"] == ["/api/skills/content?name=demo%3Askill"], result
+    assert result["contentFetches"] == ["/api/skills/content?name=demo%3Askill&session_id=sess-A"], result
     assert result["startBody"] is None, result
     assert result["messages"] == [], result
     assert result["composerAfter"] == "chat B draft", result

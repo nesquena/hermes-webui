@@ -2000,10 +2000,25 @@ async function send(){
         if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
         if(_match){
           try{
-            const _detail=await api('/api/skills/content?name='+encodeURIComponent(_match.name));
+            // #7781 review 2026-11-18: pass the owning session id so the
+            // content endpoint records the skill in the conversation's
+            // "Skills Used" list (the server skips
+            // _record_session_skill_usage without it). A brand-new chat has
+            // no id yet — create the session first, exactly as /use does.
+            let _pluginSkillSessionId=_slashOwner.sid;
+            if(!_pluginSkillSessionId){
+              if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+              _slashOwner.sid=S.session&&S.session.session_id||null;
+              _pluginSkillSessionId=_slashOwner.sid;
+            }
+            const _detail=await api('/api/skills/content?name='+encodeURIComponent(_match.name)
+              +(_pluginSkillSessionId?`&session_id=${encodeURIComponent(_pluginSkillSessionId)}`:''));
             if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
             const _content=_detail&&typeof _detail.content==='string'?_detail.content.trim():'';
             if(!_content) throw new Error(`Skill \`${_match.name}\` has no readable content.`);
+            if(_pluginSkillSessionId&&typeof _refreshSessionSkillUsageForOwner==='function'){
+              void _refreshSessionSkillUsageForOwner(_pluginSkillSessionId);
+            }
             _forcedSkillDirectivePending={sessionId:_slashOwner.sid,promise:Promise.resolve({name:_match.name,directive:`[USER OVERRIDE] You MUST follow the skill '${_match.name}' content provided below before responding to the next message.`,content:_content})};
             _slashDisplayTextOverride=text;
             text=_parsedCmd.args||'';

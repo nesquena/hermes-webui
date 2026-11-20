@@ -15671,26 +15671,30 @@ def _plugin_manager_home_context():
     the manager to the requesting profile and restores the previous home
     afterwards, so a later request on another profile is unaffected.
 
-    Fail-soft by design: when the agent modules are unavailable (isolated
-    WebUI) the context yields without binding and callers proceed with
-    their existing best-effort handling.
+    Fail-closed by design (#7781 review 2026-11-18): when the agent modules or
+    the active-home binding are unavailable, the context raises instead of
+    yielding unbound. Callers already catch the failure and return an empty
+    listing / not-found response; allowing the manager block to run would
+    resolve the AMBIENT home and leak another profile's plugin skills.
     """
     try:
         from hermes_constants import (
             reset_hermes_home_override,
             set_hermes_home_override,
         )
-    except Exception:
-        yield None
-        return
+    except Exception as exc:
+        raise RuntimeError(
+            "plugin-manager home scope unavailable: agent modules missing"
+        ) from exc
     try:
         from api.profiles import get_active_hermes_home
 
         home = Path(get_active_hermes_home()).expanduser().resolve()
         token = set_hermes_home_override(home)
-    except Exception:
-        yield None
-        return
+    except Exception as exc:
+        raise RuntimeError(
+            "plugin-manager home scope unavailable: active home could not be bound"
+        ) from exc
     try:
         yield home
     finally:
