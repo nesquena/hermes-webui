@@ -19385,7 +19385,13 @@ def _handle_session_get(handler, parsed) -> bool:
         # that second pass drops `_active_turn_user` (derived from the
         # session's active-turn token, never stored on the row) and the
         # response would then disagree with the `prefix_fp` minted over it.
-        redact = public_session_projection(redact, _messages_projected=load_messages)
+        redact = public_session_projection(
+            redact,
+            redact_enabled=(
+                _display_fp_inputs.redact_enabled if _display_fp_inputs else None
+            ),
+            _messages_projected=load_messages,
+        )
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
         resp = j(handler, {"session": redact})
