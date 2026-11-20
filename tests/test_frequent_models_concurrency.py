@@ -177,6 +177,7 @@ CASE_PROFILE_SWITCH = """
 """
 
 
+@pytest.mark.skipif(NODE is None, reason="node is required for the frequent-model helper driver")
 def test_a_queued_pin_save_is_cancelled_when_the_profile_switches():
     """#8622: the click's owner decides, not whatever profile is live at send.
 
