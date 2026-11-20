@@ -1405,15 +1405,16 @@ def _stored_row_expired(row: dict[str, Any], now: float) -> bool:
     return parsed.timestamp() <= now
 
 
-def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, Any]]]:
+def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, Any]], int]:
     """Apply the Agent's usability rules to an OAuth plugin's pool rows.
 
     Same rules as ``get_plugin_oauth_auth_status()`` (Agent), without its
     credential-pool loader: a row counts only when it carries an access token or
     agent key; an unexpired one is signed in, and when none is unexpired a row
     with a refresh token is needs-refresh, but only for a plugin that ships a
-    ``refresh_credential`` hook. Returns ``(state, counted_rows)``, where state is
-    ``"signed_in"``, ``"needs_refresh"`` or ``""`` (no usable account).
+    ``refresh_credential`` hook. Returns ``(state, counted_rows, accounts)``, where
+    state is ``"signed_in"``, ``"needs_refresh"`` or ``""`` (no usable account) and
+    ``accounts`` is the number of rows that carry a token.
     """
     rows = [
         row
@@ -1423,12 +1424,12 @@ def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, An
     now = time.time()
     live = [row for row in rows if not _stored_row_expired(row, now)]
     if live:
-        return "signed_in", live
+        return "signed_in", live, len(rows)
     if plugin_model_provider_can_refresh(provider_id):
         refreshable = [row for row in rows if row.get("refresh_token")]
         if refreshable:
-            return "needs_refresh", refreshable
-    return "", []
+            return "needs_refresh", refreshable, len(rows)
+    return "", [], len(rows)
 
 
 def _pool_view_is_stored_rows() -> bool:
@@ -1448,7 +1449,7 @@ def _plugin_oauth_account_is_oauth_row(provider_id: str) -> bool:
     no counted row at all (a stale cache while the Agent reports a signed-in
     account) there is no API-key row to contradict the Agent's OAuth status.
     """
-    _state, counted = _plugin_oauth_pool_account(provider_id)
+    _state, counted, _accounts = _plugin_oauth_pool_account(provider_id)
     return all(str(row.get("auth_type") or "").strip().lower() == "oauth" for row in counted)
 
 
@@ -1489,9 +1490,9 @@ def _provider_has_key(provider_id: str) -> bool:
     # Uses the cached _has_explicit_pool_credentials helper which also
     # filters gh-cli / GITHUB_TOKEN ambient entries so copilot doesn't
     # appear just because `gh` is installed.
-    # An OAuth plugin account is decided from the Agent's status in get_providers(),
-    # not from the presence of a pool row (#9143): a row can be expired with
-    # nothing to refresh it with.
+    # An OAuth plugin account is decided in get_providers() (the Agent's status, or
+    # the stored rows in a read-only profile scope), not from the presence of a
+    # pool row (#9143): a row can be expired with nothing to refresh it with.
     try:
         from api.config import _has_explicit_pool_credentials
         if not (
@@ -3104,13 +3105,13 @@ def get_providers() -> dict[str, Any]:
             # Agent's full pool loader, which can seed, prune and save rows, and
             # a listing request must not write the credential store (#9143).
             decided_from_stored_rows = True
-            _stored_state, _stored_rows = _plugin_oauth_pool_account(pid)
+            _stored_state, _stored_rows, _stored_accounts = _plugin_oauth_pool_account(pid)
             if _stored_state:
                 has_key = True
                 plugin_auth_status = {
                     "logged_in": _stored_state == "signed_in",
                     "needs_refresh": _stored_state == "needs_refresh",
-                    "accounts": len(_stored_rows),
+                    "accounts": _stored_accounts,
                 }
         elif not has_key and is_plugin_model_provider(pid):
             try:

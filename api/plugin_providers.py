@@ -169,13 +169,21 @@ def plugin_model_provider_can_refresh(provider_id: str) -> bool:
     """True when the plugin profile ships a ``refresh_credential`` hook.
 
     The Agent treats an expired pooled OAuth row as refreshable only for a plugin
-    that supplies this hook (``plugin_refresh_hook()`` in
-    ``hermes_cli/auth_plugin_providers.py``: a callable ``refresh_credential``
-    attribute on the registered profile). The same profile objects are read here
-    without the Agent's credential-pool loader.
+    that supplies this hook. Its ``plugin_refresh_hook()``
+    (``hermes_cli/auth_plugin_providers.py``) is a plain profile lookup that never
+    loads the credential pool, and it resolves the profile for the current home,
+    so it is asked first; WebUI's cached profile list is the fallback when it
+    cannot be imported (older Agent, no Agent). Same attribute check either way: a
+    callable ``refresh_credential``.
     """
-    profile = plugin_model_provider_profiles().get((provider_id or "").strip().lower())
-    return callable(getattr(profile, "refresh_credential", None))
+    pid = (provider_id or "").strip().lower()
+    try:
+        from hermes_cli.auth_plugin_providers import plugin_refresh_hook
+
+        return plugin_refresh_hook(pid) is not None
+    except Exception:
+        logger.debug("Agent refresh-hook lookup unavailable for %s", pid, exc_info=True)
+    return callable(getattr(plugin_model_provider_profiles().get(pid), "refresh_credential", None))
 
 
 def effective_provider_env_var(provider_id: str, static_map: dict[str, str]) -> str | None:
