@@ -15519,6 +15519,13 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
                     "by_namespace": {},
                     "representative": None,
                     "anonymous": None,
+                    # Every clock-unestablished member in build order.  The
+                    # O(1) probes above answer the common shapes; once the
+                    # representative has absorbed its replay this list lets
+                    # the next compatible clock-less copy absorb the next
+                    # one instead of appending it as a duplicate row
+                    # (#8672 review 2026-11-18).
+                    "members": [],
                 },
                 "by_identity": {},
                 "identity_values": set(),
@@ -15553,6 +15560,7 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
                 clockless["representative"] = key
             if not identities and clockless["anonymous"] is None:
                 clockless["anonymous"] = key
+            clockless["members"].append(key)
             for identity in identities:
                 clockless["by_identity"].setdefault(identity, key)
                 clockless["by_namespace"].setdefault(
@@ -15921,6 +15929,22 @@ def _visible_key_occurrence_compatible(key, identities) -> bool:
     )
 
 
+def _visible_key_identity_namespaces(key) -> set[str]:
+    """Return the identity namespaces a visible key establishes.
+
+    Used by the identity-indexed candidate walk (#8672 review 2026-11-18) to
+    decide, once per incoming signature, whether a candidate can ever be
+    compatible: a candidate whose namespaces are disjoint from the incoming
+    signature can never conflict, so it never needs to be rescanned.
+    """
+    occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+    _clock, identity_text = _occurrence_parts(occurrence)
+    return {
+        _occurrence_identity_namespace(identity)
+        for identity in _occurrence_identities(identity_text)
+    }
+
+
 def _consumption_cursor(container: dict, slot, remaining) -> dict:
     """Return the merge-local consumption cursor stored at ``container[slot]``.
 
@@ -15986,7 +16010,9 @@ def _unconsumed_candidates(ordered, cursor: dict, remaining):
         yield ordered[index]
 
 
-def _available_candidate(ordered, container, slot, remaining, identities):
+def _available_candidate(
+    ordered, container, slot, remaining, identities, *, identity_indexed=False
+):
     """Return the first unconsumed, compatible candidate of ``ordered``.
 
     ``ordered`` is a merge-stable candidate list (materialised once, never
@@ -15996,10 +16022,42 @@ def _available_candidate(ordered, container, slot, remaining, identities):
     amortized linear.  The gates keep their historical order (capacity, then
     identity compatibility), so the candidate returned is the one the
     uncached walk would have returned.
+
+    ``identity_indexed`` (#8672 review 2026-11-18): the caller already
+    resolved every exact identity match against the container's
+    ``by_identity`` map before calling. Under that premise a candidate is
+    compatible exactly when its identity namespaces are DISJOINT from the
+    incoming signature (an exact same-namespace value would be the match the
+    caller already answered). The compatible list is therefore built once per
+    signature and walked through its own cursor, so a conflicting saved row
+    is never rescanned by a later replay -- the quadratic the review found on
+    transcripts with many repeated prompts.
     """
     if not ordered:
         return None
-    cursor = _consumption_cursor(container, slot, remaining)
+    if identity_indexed and identities:
+        signature = frozenset(
+            _occurrence_identity_namespace(identity) for identity in identities
+        )
+        cache = container.setdefault("compatible_by_signature", {})
+        indexed = cache.get(signature)
+        if indexed is None:
+            indexed = [
+                candidate
+                for candidate in ordered
+                if not (_visible_key_identity_namespaces(candidate) & signature)
+            ]
+            cache[signature] = indexed
+        if not indexed:
+            return None
+        ordered = indexed
+        cursors = container.setdefault("signature_cursors", {})
+        cursor = cursors.get(signature)
+        if cursor is None or cursor.get("remaining") is not remaining:
+            cursor = {"remaining": remaining, "position": 0}
+            cursors[signature] = cursor
+    else:
+        cursor = _consumption_cursor(container, slot, remaining)
     for candidate in _unconsumed_candidates(ordered, cursor, remaining):
         if not _visible_key_capacity_remaining(candidate, remaining):
             continue
@@ -16049,6 +16107,15 @@ def _fallback_candidates(group: dict) -> list:
     return ordered
 
 
+def _clockless_candidates(clockless: dict) -> list:
+    """Return the clock-unestablished member order, materialised once."""
+    ordered = clockless.get("members_order")
+    if ordered is None:
+        ordered = list(clockless.get("members") or [])
+        clockless["members_order"] = ordered
+    return ordered
+
+
 def _clockless_duplicate_candidate(group: dict, identities, remaining=None):
     """Return a clock-unestablished representative compatible with ``identities``.
 
@@ -16075,7 +16142,21 @@ def _clockless_duplicate_candidate(group: dict, identities, remaining=None):
         if not _visible_key_capacity_remaining(candidate, remaining):
             continue
         return candidate
-    return None
+    # The representative has absorbed its replay (or conflicts). Another
+    # clock-less copy of the same turn is still a compatible saved row and
+    # must absorb this replay instead of letting the merge append a duplicate
+    # (#8672 review 2026-11-18): with one clocked image turn and two identical
+    # turns without timestamps, the second clock-less copy used to be missed
+    # and ``_clockfree_duplicate_candidate`` returned None because the group
+    # also carried ``by_clock``.
+    return _available_candidate(
+        _clockless_candidates(clockless),
+        clockless,
+        "member_cursor",
+        remaining,
+        identities,
+        identity_indexed=True,
+    )
 
 
 def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
@@ -16169,6 +16250,7 @@ def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
                 "identity_cursor",
                 remaining,
                 identities,
+                identity_indexed=True,
             )
         # No row establishes this clock.  A different ESTABLISHED clock stays
         # distinct, but a clock-unestablished copy of the same turn is still
@@ -16215,6 +16297,7 @@ def _clockfree_duplicate_candidate(group: dict, occurrence, remaining=None):
             "identity_cursor",
             remaining,
             identities,
+            identity_indexed=True,
         )
         if candidate is not None:
             return candidate
