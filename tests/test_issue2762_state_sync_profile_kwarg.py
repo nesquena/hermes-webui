@@ -54,11 +54,11 @@ def two_profile_homes(tmp_path, monkeypatch):
     maiko_home = tmp_path / 'maiko'
     for home in (hiyuki_home, maiko_home):
         home.mkdir(parents=True)
-        # Touch state.db then open via SessionDB so its own constructor
-        # runs whatever schema init / migration the production code
-        # would see at runtime. Then close immediately — each test
+        # Open via SessionDB so its own constructor creates the file and runs
+        # whatever schema init / migration the production code would see at
+        # runtime (a pre-touched 0-byte file is moved aside as damaged by
+        # storage-interface Agents). Then close immediately — each test
         # opens its own handle through the production code path.
-        (home / 'state.db').touch()
         SessionDB(home / 'state.db').close()
 
     # Stub api.profiles to return our temp paths
@@ -97,6 +97,18 @@ def _read_session(db_path: Path, session_id: str):
         return row
     finally:
         conn.close()
+
+
+def _mirrors_usage_totals(home: Path) -> bool:
+    """True when this Agent's store takes WebUI's absolute usage totals (legacy SessionDB)."""
+    from api import state_sync
+    from tests._agent_state_store import open_agent_store
+
+    db = open_agent_store(home / 'state.db')
+    try:
+        return not isinstance(db, state_sync._StoreStateDB)
+    finally:
+        db.close()
 
 
 def _make_message_state_db(path: Path, session_id: str, message_count: int, label: str):
@@ -178,8 +190,9 @@ def test_get_state_db_honors_explicit_profile_kwarg(two_profile_homes):
         pytest.skip("hermes_state package not available in this test env")
 
     db = _get_state_db(profile='maiko')
-    if db is None:
-        pytest.skip("SessionDB could not open the test db (env issue)")
+    # hermes_state imports (checked above), so an Agent store API is installed: a None
+    # here is a broken opener, not an environment gap, and must fail rather than skip.
+    assert db is not None, "_get_state_db(profile='maiko') returned None with an Agent store API installed"
     # We don't have a public accessor for the underlying path on SessionDB,
     # but writing through it and reading the raw file should work.
     db.ensure_session(session_id='probe-2762', source='webui', model='test')
@@ -225,9 +238,15 @@ def test_sync_session_usage_writes_only_to_named_profile(two_profile_homes):
 
     assert maiko_row is not None, \
         "sync_session_usage(profile='maiko') did not write to maiko's state.db"
-    assert maiko_row["cache_read_tokens"] == 1200
-    assert maiko_row["cache_write_tokens"] == 300
-    assert maiko_row["api_call_count"] == 7
+    if _mirrors_usage_totals(two_profile_homes['maiko']):
+        assert maiko_row["cache_read_tokens"] == 1200
+        assert maiko_row["cache_write_tokens"] == 300
+        assert maiko_row["api_call_count"] == 7
+    else:
+        # Storage-interface Agents record usage per call themselves and offer no
+        # absolute setter, and a passive sync writes no title (that would take
+        # user provenance): WebUI only ensures the row there.
+        assert maiko_row["title"] is None
     assert hiyuki_row is None, \
         "sync_session_usage(profile='maiko') leaked into hiyuki's state.db — #2762 regression"
 

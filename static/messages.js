@@ -8629,11 +8629,24 @@ function _updateYoloPill() {
   const openSid = (S.session && S.session.session_id) || null;
   const on = !!(openSid && _yoloView.sid === openSid && _yoloView.enabled);
   pill.style.display = on ? '' : 'none';
+  // #9101: the "hide YOLO" composer setting hides the pill only while YOLO is
+  // off; while it is on, this pill is the only sign that approvals are
+  // skipped, so the setting shrinks it to its ⚡ icon instead.
+  const vis = typeof window !== 'undefined' ? window._composerControlVisibility : null;
+  const hidePref = !!(vis && vis.hide_composer_yolo);
+  const hideByPref = hidePref && !on;
+  pill.classList.toggle('composer-control-hidden', hideByPref);
+  pill.classList.toggle('yolo-pill-compact', hidePref && on);
+  if (hideByPref) pill.setAttribute('aria-hidden', 'true');
+  else pill.removeAttribute('aria-hidden');
   if (on) {
     // The pill's click disables exactly the session it was painted for.
     pill.setAttribute('data-yolo-session', openSid);
     pill.title = t('yolo_pill_title_active');
     pill.setAttribute('data-i18n-title', 'yolo_pill_title_active');
+    // Its own name: the ⚡-only pill has no visible label text.
+    pill.setAttribute('aria-label', t('yolo_pill_title_active'));
+    pill.setAttribute('data-i18n-aria-label', 'yolo_pill_title_active');
   } else {
     pill.removeAttribute('data-yolo-session');
   }

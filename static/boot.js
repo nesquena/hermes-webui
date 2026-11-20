@@ -4227,6 +4227,9 @@ function _applyComposerFooterVisibilitySettings(){
     // when buttons are visible (Greptile feedback).
     _divider.classList.toggle('composer-control-hidden',_allLeftHidden);
   }
+  // #9101: hide_composer_yolo hides the YOLO pill only while YOLO is off
+  // (while it is on, the pill shrinks to its ⚡ icon).
+  if(typeof _updateYoloPill==='function') _updateYoloPill();
 }
 window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
 

@@ -7558,9 +7558,16 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 'expectedCurrent': current,
             })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
+            # A local fallback is synced as 'derived' so the Agent's own model
+            # title can still replace it (Refs #9157).
             try:
                 from api.state_sync import sync_session_title
-                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+                sync_session_title(
+                    session_id,
+                    effective_title,
+                    profile=getattr(s, 'profile', None) or 'default',
+                    source='derived' if source == 'fallback' else 'llm',
+                )
             except Exception:
                 logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:
@@ -8959,23 +8966,52 @@ def _merge_agent_replay_bare_user_rows(messages):
 def _installed_repair_runtime_usable():
     """True when the installed Agent's repair machinery can run unmodified.
 
-    ``repair_message_sequence`` imports the persistence codec
-    (``hermes_state.SessionDB``) at call time and reads its class attributes.
-    Test harnesses that fake ``hermes_state`` (a lambda or ``Mock`` in the
-    ``SessionDB`` slot) make those reads raise or, worse, silently return mock
-    objects that would corrupt row content. Probe the codec's actual contract
-    before trusting it: the sentinel prefix must be a real string and a plain
-    string must round-trip unchanged.
+    ``repair_message_sequence`` reads a content codec at call time (see
+    ``_installed_repair_codec`` for which one). Test harnesses that fake that
+    codec (a lambda or ``Mock`` in the ``SessionDB`` slot) make those reads
+    raise or, worse, silently return mock objects that would corrupt row
+    content. Probe the codec's actual contract before trusting it: the
+    sentinel prefix must be a real string and a plain string must round-trip
+    unchanged.
     """
     try:
-        from hermes_state import SessionDB
-
+        prefix, decode = _installed_repair_codec()
         return (
-            isinstance(getattr(SessionDB, "_CONTENT_JSON_PREFIX", None), str)
-            and SessionDB._decode_content("plain-text-probe") == "plain-text-probe"
+            isinstance(prefix, str)
+            and callable(decode)
+            and decode("plain-text-probe") == "plain-text-probe"
         )
     except Exception:
         return False
+
+
+def _installed_repair_codec():
+    """``(prefix, decode)`` of the content codec the installed repair reads.
+
+    Agents whose ``repair_message_sequence`` is defined in
+    ``session_rules.turns`` read that module's own ``_CONTENT_JSON_PREFIX`` and
+    ``decode_content`` (their ``hermes_state.SessionDB`` is a stand-in without
+    the codec attributes, so probing it closed this gate and the settle dropped
+    the current exchange from the saved model context, #9157). Older Agents
+    read ``hermes_state.SessionDB``'s class attributes. Only the codec of the
+    module the repair actually reads is probed, never the other one as a
+    fallback, so a faked codec there still keeps the gate closed.
+    """
+    try:
+        from agent import agent_runtime_helpers as _agent_helpers
+    except Exception:
+        _agent_helpers = None  # keep the SessionDB probe; _apply_installed_repair fails closed on its own import
+    repair = getattr(_agent_helpers, "repair_message_sequence", None)
+    if getattr(repair, "__module__", None) == "session_rules.turns":
+        import session_rules.turns as _turns
+
+        # The repair calls the module-level alias ``_decode_content``; probe that name, and the public
+        # ``decode_content`` only if a later Agent drops the alias.
+        decode = getattr(_turns, "_decode_content", None) or getattr(_turns, "decode_content", None)
+        return getattr(_turns, "_CONTENT_JSON_PREFIX", None), decode
+    from hermes_state import SessionDB
+
+    return getattr(SessionDB, "_CONTENT_JSON_PREFIX", None), getattr(SessionDB, "_decode_content", None)
 
 
 # The settle projection replays the Agent's argument sanitizer on a private copy; its "repaired before request"
@@ -13550,16 +13586,21 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
 
 
 def _session_db_is_open(session_db) -> bool:
-    """True when *session_db* still has a live sqlite connection.
+    """Recognize the lifecycle of legacy SessionDB and newer Agent handles.
 
-    SessionDB.close() sets ``_conn = None``. Subagents capture the parent's
-    SessionDB object by reference at spawn time (delegate_tool), so closing
-    that object mid-parent-turn makes every subsequent child
-    ``append_message`` fail with
-    ``'NoneType' object has no attribute 'execute'``.
+    The newer SessionDB shim has no ``_conn``: it owns a Persistence handle
+    in ``_store`` until close. Persistence itself retains its release callback
+    until close. Neither exposes a public is-open flag; inspect only these
+    lifecycle fields, without probing ``ready`` or opening a lazy backend.
+    Misclassifying a live handle closes storage still borrowed by the Agent,
+    its compressor and background consumers (#9149, #6143).
     """
     if session_db is None:
         return False
+    if isinstance(getattr(session_db, "_closed", None), bool):
+        return not session_db._closed and getattr(session_db, "_store", None) is not None
+    if hasattr(session_db, "_release"):
+        return callable(session_db._release)
     return getattr(session_db, "_conn", None) is not None
 
 
@@ -13605,6 +13646,29 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
                 exc_info=True,
             )
     agent._session_db = new_session_db
+    if hasattr(agent, "persistence"):
+        # New Agent versions borrow the shim's underlying interface at init;
+        # replacing only _session_db leaves turn admission on the closed one.
+        agent.persistence = (
+            new_session_db if hasattr(new_session_db, "_release")
+            else getattr(new_session_db, "_store", None)
+        )
+    compressor = getattr(agent, "context_compressor", None)
+    bind = getattr(compressor, "bind_session_state", None)
+    if callable(bind):
+        # Call the hook like the Agent's producers: first two arguments
+        # positional, persistence only when accepted, failures best-effort.
+        # The Agent handles above already point at the live adopted handle.
+        bind_kwargs = {}
+        if _supports_kwarg(bind, "persistence"):
+            bind_kwargs["persistence"] = getattr(agent, "persistence", None)
+        try:
+            bind(new_session_db, getattr(agent, "session_id", ""), **bind_kwargs)
+        except Exception:
+            logger.debug(
+                "context engine bind_session_state during cached adoption failed",
+                exc_info=True,
+            )
     return new_session_db
 
 
@@ -16432,6 +16496,10 @@ def _run_agent_streaming(
                             agent, _session_db
                         )
                         agent._session_db = _session_db
+                        if 'session_db' in _agent_kwargs:
+                            # Self-heal must not rebuild from the unused handle
+                            # the adoption helper just closed.
+                            _agent_kwargs['session_db'] = _session_db
                     if hasattr(agent, '_api_call_count'):
                         agent._api_call_count = 0
                     # Reset interrupt state from a prior cancel so the reused
