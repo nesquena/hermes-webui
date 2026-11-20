@@ -11893,6 +11893,24 @@ def _verified_tail_merge_result(
     return current_turn_rows, _protected
 
 
+def _clean_stale_merge_content(content, msg_text):
+    """Replace only the TEXT part of a user turn, keeping images/attachments.
+
+    The Agent's repair path concatenates stale context with the submitted turn
+    as text; the image parts are the user's own and must survive the cleanup.
+    """
+    if not isinstance(content, list):
+        return msg_text
+    kept = [
+        copy.deepcopy(part)
+        for part in content
+        if not (isinstance(part, dict) and str(part.get('type') or '') == 'text')
+    ]
+    if not msg_text:
+        return kept
+    return [{'type': 'text', 'text': msg_text}, *kept]
+
+
 def _strip_stale_user_merge_from_messages(
     messages,
     msg_text,
@@ -11917,11 +11935,18 @@ def _strip_stale_user_merge_from_messages(
             previous_context=previous_context,
         ):
             cleaned = copy.deepcopy(msg) if isinstance(msg, dict) else {'role': 'user', 'content': msg_text}
-            cleaned['content'] = msg_text
+            # The merged prefix is only TEXT. A multimodal row also carries
+            # image/attachment parts, and replacing the whole content list with
+            # `msg_text` deleted them from the saved model context — later
+            # settlement never restored them (greptile P1, 2026-11-18).
+            cleaned['content'] = _clean_stale_merge_content(cleaned.get('content'), msg_text)
             # The stale row's provider-facing payload describes the discarded
-            # merged prefix, so it is invalid once the visible content is
-            # rewritten to the submitted turn.
-            cleaned.pop('api_content', None)
+            # merged prefix. Rebuild it with the same non-text parts when it is
+            # itself multimodal; otherwise drop it as before.
+            if isinstance(cleaned.get('api_content'), list):
+                cleaned['api_content'] = _clean_stale_merge_content(cleaned['api_content'], msg_text)
+            else:
+                cleaned.pop('api_content', None)
             out.append(cleaned)
         else:
             out.append(msg)

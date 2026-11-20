@@ -627,3 +627,44 @@ def test_the_takeover_row_keeps_its_id_less_shape():
         f"that shape; got id={takeover[0].get('id')!r}"
     )
     assert takeover[0].get("timestamp") == 250.0
+
+
+def test_stale_user_repair_keeps_the_image_parts():
+    """A multimodal current turn keeps its images after the text repair.
+
+    The repair path concatenates stale context with the submitted turn as TEXT;
+    the row's image parts belong to the user's real turn. Replacing the whole
+    content list with the clean text deleted them from the saved model context,
+    and later settlement never restored them (greptile P1, 2026-11-18).
+    """
+    from api.streaming import _strip_stale_user_merge_from_messages
+
+    prior_tail = "please use the larger context model"
+    current_turn = "what is in this picture?"
+    polluted_text = f"{prior_tail}\n\n{current_turn}"
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    }
+
+    row = _user(polluted_text, id=21, timestamp=2)
+    row["content"] = [{"type": "text", "text": polluted_text}, copy.deepcopy(image_part)]
+    row["api_content"] = [
+        {"type": "text", "text": polluted_text},
+        copy.deepcopy(image_part),
+    ]
+
+    cleaned = _strip_stale_user_merge_from_messages(
+        [copy.deepcopy(row)], current_turn, prior_tail
+    )
+    repaired = cleaned[0]
+
+    for field in ("content", "api_content"):
+        parts = repaired.get(field)
+        assert isinstance(parts, list), (field, repaired)
+        texts = [p for p in parts if p.get("type") == "text"]
+        images = [p for p in parts if p.get("type") == "image_url"]
+        assert texts and texts[0]["text"] == current_turn, (field, parts)
+        assert images == [image_part], (
+            f"the user's image must survive the text repair ({field}): {parts}"
+        )
