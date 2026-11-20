@@ -4613,6 +4613,65 @@ def test_queue_drain_pauses_while_profile_switch_lock_is_held():
     }
 
 
+def test_queue_drain_stays_paused_when_session_and_profile_disagree():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    start = UI_JS.index("function setBusy(v){")
+    end = UI_JS.index("\n\n// ── Queue chip display", start)
+    queue_settlement = UI_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:''}};
+        const S={{
+          busy:false,
+          session:{{session_id:'source',profile:'source-profile'}},
+          activeProfile:'target-profile',pendingFiles:[]
+        }};
+        let _queueDrainSid='source';
+        const queued=[{{text:'queued turn'}}];
+        let shifts=0,sends=0,timers=[];
+        function $(id){{return id==='msg'?msg:null;}}
+        function _composerHasContent(){{return false;}}
+        function updateSendBtn(){{}}
+        function setStatus(){{}}
+        function setComposerStatus(){{}}
+        function updateQueueBadge(){{}}
+        function _getSessionQueue(){{return queued;}}
+        function _persistSessionQueueStorage(){{}}
+        function shiftQueuedSessionMessage(){{shifts++;return queued.shift()||null;}}
+        function setTimeout(fn){{timers.push(fn);}}
+        function _composerSetText(text){{msg.value=text;}}
+        function _composerReplaceFiles(files){{S.pendingFiles=files;}}
+        function autoResize(){{}}
+        function renderTray(){{}}
+        function send(){{sends++;}}
+        {queue_settlement}
+        _resumeQueuedSessionMessageIfComposerEmpty();
+        const whileApart={{shifts,sends,timers:timers.length,queue:queued.length}};
+        S.activeProfile='source-profile';
+        _resumeQueuedSessionMessageIfComposerEmpty();
+        const scheduled=timers.length;
+        timers.shift()();
+        process.stdout.write(JSON.stringify({{
+          whileApart,scheduled,shifts,sends,queue:queued.length
+        }}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "whileApart": {"shifts": 0, "sends": 0, "timers": 0, "queue": 1},
+        "scheduled": 1,
+        "shifts": 1,
+        "sends": 1,
+        "queue": 0,
+    }
+    # The mismatch guard is what keeps a failed rollback from draining the
+    # source queue under the committed target profile.
+    assert "function _queueDrainBlockedByProfileMismatch()" in UI_JS
+
+
 def test_queue_drain_requeues_if_profile_switch_starts_during_settle_window():
     node = shutil.which("node")
     if not node:

@@ -8384,7 +8384,9 @@ async function switchToProfile(name) {
       // prompt must not start while the source draft save or the profile POST
       // is pending. Now that the lock is released, resume for whatever session
       // is visible (a successful switch owns a fresh session; a rolled-back
-      // one restores the source), so its own queue can drain again.
+      // one restores the source), so its own queue can drain again. The resume
+      // helper itself re-checks that the visible session's profile matches
+      // S.activeProfile, so a failed rollback keeps the queue paused.
       if(typeof _resumeQueuedSessionMessageIfComposerEmpty==='function'){
         _resumeQueuedSessionMessageIfComposerEmpty();
       }

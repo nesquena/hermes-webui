@@ -12487,12 +12487,14 @@ function setBusy(v){
     // A profile switch freezes the composer while it saves the source draft and
     // rewrites the profile cookie. Draining here would let send() keep the
     // source session id but read the destination profile/workspace when it
-    // builds the request, which the server rejects as a profile mismatch. Keep
-    // the queued turn queued; the switch resumes the drain after it unlocks,
-    // for whichever session is visible then (greptile P1, static/ui.js:12559).
-    const _profileSwitchLocked=_queueDrainBlockedByProfileSwitch();
+    // builds the request, which the server rejects as a profile mismatch. The
+    // same applies when a failed rollback leaves the visible session and the
+    // committed profile apart: keep the queued turn queued until they agree
+    // (greptile P1, static/ui.js:12559 / static/panels.js:8389).
+    const _profileDrainBlocked=_queueDrainBlockedByProfileSwitch()
+      ||_queueDrainBlockedByProfileMismatch();
     const next=sid&&_isViewedSid&&!_composerHasUnsentContent&&!_sendAlreadyInProgress
-      &&!_profileSwitchLocked&&_queueDrainPendingSid!==sid
+      &&!_profileDrainBlocked&&_queueDrainPendingSid!==sid
       ?shiftQueuedSessionMessage(sid):null;
     if(next){
       _queueDrainPendingSid=sid;
@@ -12527,8 +12529,9 @@ function setBusy(v){
         }
         // A profile switch can take the composer lock during the settle window
         // too. Same rule as the guard above: requeue instead of draining into a
-        // transition that is rewriting the profile cookie.
-        if(_queueDrainBlockedByProfileSwitch()){
+        // transition that is rewriting the profile cookie, or into a state
+        // where the visible session and the committed profile disagree.
+        if(_queueDrainBlockedByProfileSwitch()||_queueDrainBlockedByProfileMismatch()){
           _getSessionQueue(sid,true).unshift(next);
           _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
           updateQueueBadge(sid);return;
@@ -12580,11 +12583,23 @@ function _queueDrainBlockedByProfileSwitch(){
   return !!(msg&&msg._composerDisabledReasons
     &&msg._composerDisabledReasons.has('profile-switch'));
 }
+// send() builds /api/chat/start with S.activeProfile, so a queued turn whose
+// session still belongs to another profile would be rejected as a mismatch.
+// A failed profile rollback can leave exactly that state (target profile
+// committed, source session still visible). Only block when both sides are
+// known; a session without profile metadata keeps its previous drain behavior.
+function _queueDrainBlockedByProfileMismatch(){
+  const sessionProfile=String((S.session&&S.session.profile)||'').trim();
+  const activeProfile=String(S.activeProfile||'').trim();
+  if(!sessionProfile||!activeProfile)return false;
+  return sessionProfile!==activeProfile;
+}
 function _resumeQueuedSessionMessageIfComposerEmpty(){
   if(S.busy
     ||(typeof _sendInProgress!=='undefined'&&_sendInProgress)
     ||(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight)
-    ||_queueDrainBlockedByProfileSwitch())return;
+    ||_queueDrainBlockedByProfileSwitch()
+    ||_queueDrainBlockedByProfileMismatch())return;
   const sid=S.session&&S.session.session_id;
   if(!sid||_queueDrainPendingSid===sid)return;
   if(typeof _composerHasContent==='function'
