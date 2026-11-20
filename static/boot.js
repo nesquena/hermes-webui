@@ -1439,6 +1439,11 @@ function _composerProducerOwnerState(producerHandle){
         // string left the user watching an unchanged composer, unable to tell a
         // dead mic from a quiet room.
         //
+        // An older recording's empty result must not speak for a newer one: the
+        // pending Send may have been set by a recording that started after this
+        // producer lost the composer. Reading or clearing the shared flag here
+        // would cancel that newer Send and its words would arrive unsent.
+        if(!_micProducerIsCurrent(producerHandle))return;
         // A Send click while recording is an unambiguous send intent (same rule
         // as the raw-audio path): honour it whenever the composer has anything
         // send() would accept (text, staged files or selected context), instead

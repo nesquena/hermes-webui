@@ -79,9 +79,9 @@ function _composerHasContent() {
   return !!(ta.value.trim().length > 0 || (input.pendingFiles || 0) > 0 || !!input.hasSelection);
 }
 // Composer-ownership helpers the extracted functions call. The driver has a
-// single producer and a single composer, so every claim is current and a text
-// write goes straight to the fake textarea.
-function _micProducerIsCurrent() { return true; }
+// single producer and a single composer, so every claim is current unless a
+// scenario marks the producer as having lost the composer.
+function _micProducerIsCurrent() { return !input.staleProducer; }
 // The ownership layer reports the live composer for its producer; the driver
 // has exactly one producer, so its state is always the visible textarea.
 function _composerProducerOwnerState() { return { text: ta.value, visible: true }; }
@@ -126,13 +126,14 @@ def driver_path(tmp_path_factory):
 
 
 def _run(driver_path, *, composer_text="", pending_send=False, prefix_snapshot="",
-         pending_files=0, has_selection=False):
+         pending_files=0, has_selection=False, stale_producer=False):
     payload = {
         "composerText": composer_text,
         "pendingSend": pending_send,
         "prefixSnapshot": prefix_snapshot,
         "pendingFiles": pending_files,
         "hasSelection": has_selection,
+        "staleProducer": stale_producer,
     }
     result = subprocess.run(
         [NODE, driver_path, str(BOOT_JS_PATH), json.dumps(payload)],
@@ -175,7 +176,6 @@ class TestSilentClipWithoutAnythingToSend:
 
 class TestSilentClipWithQueuedSendAndNoText:
     """A staged file or selected context is a turn even with an empty textarea."""
-
     def test_attachment_only_queued_send_is_sent(self, driver_path):
         out = _run(driver_path, composer_text="", pending_send=True, pending_files=1)
         assert out["sendCalls"] == 1, "a queued Send with a staged file must still send"
@@ -192,3 +192,21 @@ class TestSilentClipWithQueuedSendAndNoText:
         out = _run(driver_path, composer_text="", pending_send=False, pending_files=1)
         assert out["sendCalls"] == 0
         assert out["toasts"] == ["mic_no_speech"]
+
+
+class TestOlderSilentClipCannotCancelNewerSend:
+    """A's empty transcript must not clear the Send that B's recording queued."""
+
+    def test_stale_empty_result_leaves_newer_pending_send_alone(self, driver_path):
+        # Recording A stopped and is still transcribing; recording B started,
+        # captured words, and the user clicked Send. A now returns no speech.
+        out = _run(driver_path, composer_text="", pending_send=True, stale_producer=True)
+        assert out["sendCalls"] == 0, (
+            "a stale producer must not fire a send on the newer recording's behalf"
+        )
+        assert out["toasts"] == [], (
+            "a stale producer must not toast 'no speech' over the newer recording"
+        )
+        assert out["pendingSendAfter"] is True, (
+            "the newer recording's pending Send must survive A's empty result"
+        )
