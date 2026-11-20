@@ -571,3 +571,86 @@ def test_unreadable_tombstone_store_keeps_the_default_row(agent_free, monkeypatc
     assert rows is not None, "the fast path must stay on (the helpers imported fine)"
     names = [row["name"] for row in rows]
     assert names == ["default"], names
+
+
+# ── Aggregator level: the real `list_profiles_api()` inside `/api/crons` ─────
+#
+# The builder/stub tests above call `_build_profile_rows_fast()` directly, so
+# they cannot catch a regression in the two entry points the reviewer named:
+# `list_profiles_api()` and `_cron_jobs_cross_profile("default")`. These tests
+# drive both for real — no monkeypatched listing — so the default home's saved
+# job (and its ownership / read-only fields) is what is actually asserted.
+
+def _point_aggregator_at_base(monkeypatch, home: Path, profiles: Path):
+    """Point the runtime at *home* WITHOUT stubbing `list_profiles_api`.
+
+    Same boot shape as `_point_runtime_at_base`, minus the listing stub: the
+    aggregator must go through the real builder/stub chain under test.
+    """
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(webui_profiles, "_DEFAULT_HERMES_HOME", home)
+    monkeypatch.setattr(webui_profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(webui_routes, "_is_isolated_profile_mode", lambda: False)
+    webui_profiles._invalidate_list_profiles_cache()
+    webui_profiles._invalidate_root_profile_cache()
+
+
+def test_cron_aggregator_survives_an_unreadable_tombstone_store(agent_free, stub_cron_reader, monkeypatch, tmp_path):
+    """An unreadable tombstone store must not erase the default profile's jobs.
+
+    `_cron_jobs_cross_profile("default")` enumerates profiles before it reads
+    any cron store, so when that enumeration raises the aggregator loses even
+    the default home's saved job — the second half of the reported blocker.
+    This drives the REAL listing and the REAL aggregator.
+    """
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    _write_saved_job(home, "default")
+    _install_hermes_cli_profiles_stub(
+        monkeypatch, home=home, profiles=profiles,
+        tombstone_exc=PermissionError(13, "Permission denied"),
+    )
+    _point_aggregator_at_base(monkeypatch, home, profiles)
+
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    # Precondition: the listing itself must stay up (it is what raised before).
+    assert [row["name"] for row in webui_profiles.list_profiles_api()] == ["default"]
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("default")
+
+    assert other_jobs == [], other_jobs
+    assert [job["name"] for job in active_jobs] == ["default-job"], active_jobs
+    job = active_jobs[0]
+    assert job["owner_profile"] == "default", job
+    assert job["read_only"] is False, (
+        "the default profile's own job must stay writable in the active view"
+    )
+
+
+def test_cron_aggregator_healthy_control_keeps_the_default_job(agent_free, stub_cron_reader, monkeypatch, tmp_path):
+    """Control: with a readable tombstone store the same path still works.
+
+    Without this arm the regression above would also pass if the harness never
+    reached the aggregator at all.
+    """
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    _write_saved_job(home, "default")
+    _install_hermes_cli_profiles_stub(monkeypatch, home=home, profiles=profiles)
+    _point_aggregator_at_base(monkeypatch, home, profiles)
+
+    from api import profiles as webui_profiles
+    from api import routes as webui_routes
+
+    assert [row["name"] for row in webui_profiles.list_profiles_api()] == ["default", "liveprof"]
+
+    active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("default")
+
+    assert other_jobs == [], other_jobs
+    assert [job["name"] for job in active_jobs] == ["default-job"], active_jobs
+    assert active_jobs[0]["owner_profile"] == "default", active_jobs[0]
+    assert active_jobs[0]["read_only"] is False, active_jobs[0]
