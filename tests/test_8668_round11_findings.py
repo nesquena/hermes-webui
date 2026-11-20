@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import importlib.util
-import inspect
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
