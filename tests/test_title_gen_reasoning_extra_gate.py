@@ -620,7 +620,11 @@ class TestAuxReasoningExtraRouteContract:
     @pytest.mark.parametrize('agent_shape', ('candidate_only', 'resolver_import_error'))
     @pytest.mark.parametrize(
         ('title_model', 'expected_model'),
-        (('', 'candidate-model'), ('title-model', 'title-model')),
+        (
+            ('', 'candidate-model'),
+            ('title-model', 'title-model'),
+            ('vendor/title-model', 'candidate-model'),
+        ),
     )
     def test_title_model_override_survives_the_main_route_candidate(
         self, monkeypatch, agent_shape, title_model, expected_model,
@@ -630,6 +634,8 @@ class TestAuxReasoningExtraRouteContract:
         Covers an Agent that exposes only _main_route_target() and one whose
         resolver raises ImportError. A title-model override still changes only
         the model; the candidate keeps its provider, endpoint, key and transport.
+        As on the Agent's automatic route, an OpenRouter-format override gives
+        way to a candidate model with no "/" off OpenRouter.
         """
         requests = []
         agent_aux = ModuleType('agent.auxiliary_client')
@@ -664,6 +670,28 @@ class TestAuxReasoningExtraRouteContract:
             'candidate-key', 'anthropic_messages',
         )
         assert 'main_runtime' not in request
+
+    @pytest.mark.parametrize(('candidate_provider', 'candidate_url'), (
+        ('openrouter', ''),
+        ('custom', 'https://openrouter.ai/api/v1'),
+    ))
+    def test_openrouter_candidate_keeps_an_openrouter_format_title_model(
+        self, monkeypatch, candidate_provider, candidate_url,
+    ):
+        """OpenRouter serves vendor/model IDs, so the candidate keeps the override."""
+        from api.streaming import _effective_aux_title_route
+
+        agent_aux = ModuleType('agent.auxiliary_client')
+        agent_aux._main_route_target = lambda runtime, task: (
+            candidate_provider, 'route-model', candidate_url, 'candidate-key', '',
+        )
+        monkeypatch.setitem(sys.modules, 'agent.auxiliary_client', agent_aux)
+        with patch('api.streaming._aux_title_main_model_config', return_value={
+            'provider': candidate_provider, 'default': 'route-model', 'base_url': candidate_url,
+        }):
+            route = _effective_aux_title_route('auto', 'vendor/title-model', '')
+
+        assert route == (candidate_provider, 'vendor/title-model', candidate_url)
 
     def test_blank_provider_minimax_global_endpoint_preserves_route_and_extras(self):
         """The canonical global MiniMax endpoint must not inherit the main route."""
@@ -1006,6 +1034,97 @@ class TestResolvedAutoTitleTransportAndFallback:
         assert captured[-1]["base_url"] == "https://relay.example/fallback/v1"
         assert captured[-1]["api_key"] == "fallback-dummy"
         assert captured[-1]["api_mode"] is None
+
+    @pytest.mark.parametrize(
+        ("title_model", "fallback_model", "fallback_url", "expected_model"),
+        (
+            ("", "fallback-model", "https://fallback.example/v1", "fallback-model"),
+            # The Agent's own automatic route sends the title model to the
+            # fallback it selects, as it does to the main route.
+            ("title-model", "fallback-model", "https://fallback.example/v1", "title-model"),
+            # Except an OpenRouter-format model on a route whose own model has
+            # no "/" and that OpenRouter does not serve: the route keeps its model.
+            ("vendor/title-model", "fallback-model", "https://fallback.example/v1",
+             "fallback-model"),
+            ("vendor/title-model", "vendor/fallback-model", "https://fallback.example/v1",
+             "vendor/title-model"),
+            ("vendor/title-model", "fallback-model", "https://openrouter.ai/api/v1",
+             "vendor/title-model"),
+        ),
+    )
+    def test_selected_fallback_takes_the_title_model_as_the_agent_does(
+        self, title_model, fallback_model, fallback_url, expected_model,
+    ):
+        """A selected fallback keeps its endpoint and key; its model follows the Agent."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        fallback_client = SimpleNamespace(api_key="fallback-key", base_url=fallback_url)
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": title_model, "base_url": "",
+        }), patch(
+            "api.config.cfg",
+            {"model": {"provider": "custom:unavailable", "default": "dead-model"}},
+        ), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=("custom:unavailable", "dead-model", "", "", "chat_completions"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(fallback_client, fallback_model, "custom"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Fallback title", "llm_aux")
+        request = captured[-1]
+        assert (
+            request["provider"], request["model"], request["base_url"], request["api_key"],
+        ) == ("custom", expected_model, fallback_url, "fallback-key")
+        assert "main_runtime" not in request
+
+    @pytest.mark.parametrize(("title_model", "expected_gate_model"), (
+        ("title-model", "title-model"),
+        ("vendor/title-model", "main-model"),
+    ))
+    def test_main_route_gate_classifies_the_model_the_agent_sends(
+        self, title_model, expected_gate_model,
+    ):
+        """The request leaves the title model to the Agent; the gate sees what it sends."""
+        from api.streaming import _effective_aux_title_route
+
+        main_client = SimpleNamespace(api_key="main-key", base_url="https://main.example/v1")
+        credentials = {}
+        with patch("api.streaming._aux_title_main_model_config", return_value={
+            "provider": "custom", "default": "main-model",
+            "base_url": "https://main.example/v1",
+        }), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=("custom", "main-model", "https://main.example/v1", "main-key", ""),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(main_client, "main-model", "custom"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ):
+            route = _effective_aux_title_route(
+                "auto", title_model, "", resolved_credentials=credentials,
+            )
+
+        assert route == ("custom", expected_gate_model, "https://main.example/v1")
+        assert credentials["automatic_main"] is True
+        assert credentials["title_model_override"] == title_model
 
     def test_named_profile_main_route_does_not_use_root_config(self):
         """Background title preflight and the Agent runtime share the named home."""
@@ -1454,6 +1573,47 @@ class TestRealAgentTitleRouteOverHttp:
         assert [r for r in sent if r not in primary] == [
             ('/fallback/v1/chat/completions', 'fallback-key', 'fallback-model'),
         ]
+
+    @pytest.mark.parametrize(('title_model', 'fallback_model', 'expected_model'), (
+        ('', 'fallback-model', 'fallback-model'),
+        ('title-model', 'fallback-model', 'title-model'),
+        ('vendor/title-model', 'fallback-model', 'fallback-model'),
+        ('vendor/title-model', 'vendor/fallback-model', 'vendor/title-model'),
+    ))
+    def test_selected_fallback_gets_the_model_the_agents_own_title_call_sends(
+        self, real_agent_wire, monkeypatch, title_model, fallback_model, expected_model,
+    ):
+        """WebUI and the Agent's own title call send one model to a selected fallback."""
+        aux = real_agent_wire.aux
+        wire = real_agent_wire.wire
+        monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+        # Should a key reach the Agent some other way, its request lands here.
+        monkeypatch.setenv('DEEPSEEK_BASE_URL', wire.url + '/deepseek/v1')
+        real_agent_wire.write_config({
+            # A main provider with no key: the Agent's resolver selects the fallback.
+            'model': {'provider': 'deepseek', 'default': 'deepseek-chat'},
+            'fallback_providers': [{
+                'provider': 'custom', 'model': fallback_model,
+                'base_url': wire.url + '/fallback/v1', 'api_key': 'fallback-key',
+            }],
+            'auxiliary': {'title_generation': {'provider': 'auto', 'model': title_model}},
+        })
+
+        # The Agent's own title request (agent/title_generator.py) names only the task.
+        aux.call_llm(
+            task='title_generation', messages=[{'role': 'user', 'content': 'question'}],
+            max_tokens=32, main_runtime={'provider': 'deepseek', 'model': 'deepseek-chat'},
+        )
+        agent_sent = [(r['path'], _sent_key(r), r['model']) for r in wire.requests]
+        wire.requests.clear()
+        aux._reset_aux_unhealthy_cache()
+        aux.shutdown_cached_clients()
+
+        assert generate_title_raw_via_aux('question', 'answer') == ('Wire Title', 'llm_aux')
+
+        webui_sent = [(r['path'], _sent_key(r), r['model']) for r in wire.requests]
+        assert agent_sent == [('/fallback/v1/chat/completions', 'fallback-key', expected_model)]
+        assert webui_sent == agent_sent
 
     @pytest.mark.parametrize(('task_overrides', 'expected_path', 'expected_key'), (
         ({}, '/profile/v1/chat/completions', 'profile-key'),

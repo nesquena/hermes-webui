@@ -256,9 +256,12 @@ must consume that same resolved route.
   keeps its HTTP-failure fallback. If only the Agent's main-route candidate is
   available (its full resolver is missing or raises ImportError), the request
   is that candidate's provider, endpoint, key and transport, without that
-  fallback; a title-model override changes only the model. If the Agent cannot
-  resolve the route at all, the request stays implicit; WebUI's own guess only
-  classifies request controls.
+  fallback; a title-model override changes only the model. On each of these
+  routes, a selected fallback included, the override applies as on the Agent's
+  own automatic route: an OpenRouter-format `vendor/model` override gives way
+  to the route's own model when that model has no `/` and OpenRouter does not
+  serve the route. If the Agent cannot resolve the route at all, the request
+  stays implicit; WebUI's own guess only classifies request controls.
 - An inherited main route retains the main model's resolved transport
   (`api_mode`, including `anthropic_messages`), even when title_generation
   specifies only a model override. An explicit title-task `api_key` or

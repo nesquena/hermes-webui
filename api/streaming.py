@@ -6862,6 +6862,36 @@ def _aux_title_main_model_config() -> dict:
     return model_config if isinstance(model_config, dict) else {}
 
 
+def _is_openrouter_url(url) -> bool:
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit(str(url or '').strip()).hostname or '').lower()
+    except Exception:
+        return False
+    return host == 'openrouter.ai' or host.endswith('.openrouter.ai')
+
+
+def _aux_title_model_on_route(
+    title_model: str, route_model: str, *, openrouter_route: bool = False,
+) -> str:
+    """Return the model the Agent's automatic title route sends.
+
+    The Agent applies the title task's model to whichever route its automatic
+    resolver selects, a fallback included (``_resolve_auto_branch()``). An
+    OpenRouter-format ``vendor/model`` is the one exception: it gives way to
+    the route's own model when that model has no ``/`` and OpenRouter does not
+    serve the route (``_resolve_auto_branch()``, then ``_compat_model()``).
+    """
+    title_model = str(title_model or '')
+    route_model = str(route_model or '')
+    if (
+        '/' in title_model and route_model and '/' not in route_model
+        and not openrouter_route
+    ):
+        return route_model
+    return title_model or route_model
+
+
 def _effective_aux_title_route(
     provider: str, model: str, base_url: str, *,
     resolved_credentials: Optional[dict] = None,
@@ -7030,8 +7060,23 @@ def _effective_aux_title_route(
                                         selected_mode = 'anthropic_messages'
                                 resolved_credentials['api_mode'] = selected_mode
                             # A title-model override changes only the model,
-                            # not the endpoint, key, or wire protocol.
-                            return auto_provider, str(supplied_model or auto_model), auto_url
+                            # not the endpoint, key, or wire protocol, and
+                            # applies to a selected fallback too, as on the
+                            # Agent's own automatic route. A main route's
+                            # request leaves the model to the Agent, so there
+                            # this model feeds only the compatibility gate.
+                            openrouter_route = any(
+                                _is_openrouter_url(getattr(obj, 'base_url', ''))
+                                for obj in (
+                                    auto_client,
+                                    getattr(auto_client, '_client', None),
+                                    getattr(auto_client, 'client', None),
+                                )
+                            )
+                            return auto_provider, _aux_title_model_on_route(
+                                supplied_model, auto_model,
+                                openrouter_route=openrouter_route,
+                            ), auto_url
                     except ImportError:
                         # The Agent's full auto resolution is unavailable: it
                         # is not exposed, or an import inside it failed.
@@ -7043,7 +7088,13 @@ def _effective_aux_title_route(
                     # As above, a title-model override changes only the model.
                     return (
                         str(resolved_provider or supplied_provider),
-                        str(supplied_model or resolved_model or ''),
+                        _aux_title_model_on_route(
+                            supplied_model, resolved_model,
+                            openrouter_route=(
+                                str(resolved_provider or '').strip().lower() == 'openrouter'
+                                or _is_openrouter_url(resolved_base_url)
+                            ),
+                        ),
                         str(resolved_base_url or ''),
                     )
         except Exception:
