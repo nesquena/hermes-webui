@@ -13735,16 +13735,17 @@ def _set_agent_flag(agent, name, value):
 
 
 def _call_bind_session_state(bind, session_db, session_id, bind_kwargs):
-    """Call the hook like the Agent's producers: positionally, then by keyword.
+    """Call the hook the way the Agent's reset path and master do: the first
+    two arguments positional.
 
-    The Agent's reset path binds positionally and ``AIAgent.__init__`` by
-    keyword, so a hook may accept only one convention. Only a TypeError from
-    the first call gets the single keyword retry; anything else propagates.
+    There is deliberately no retry in another calling convention. A TypeError
+    can come from inside a hook after it changed state, and nothing outside the
+    call can tell that apart from a refused call for every kind of callable
+    (decorated, partial, native), so a retry could run the hook twice. A hook
+    that refuses the positional call fails like any other hook: logged, and
+    retried on the next cached turn.
     """
-    try:
-        bind(session_db, session_id, **bind_kwargs)
-    except TypeError:
-        bind(session_db=session_db, session_id=session_id, **bind_kwargs)
+    bind(session_db, session_id, **bind_kwargs)
 
 
 def _rebind_context_engine_session(agent, session_db):

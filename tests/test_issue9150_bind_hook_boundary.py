@@ -3,6 +3,8 @@ Agent's own producers do (#9150): first two arguments positional, ``persistence`
 only when the hook accepts it, and a failing hook never aborts the cached turn.
 """
 
+import functools
+import inspect
 import logging
 from types import SimpleNamespace
 
@@ -124,7 +126,7 @@ class RaisingHook(_Recorder):
 
 
 class KeywordOnlyHook(_Recorder):
-    """Accepts only the keyword convention ``AIAgent.__init__`` uses."""
+    """Refuses the positional call the Agent's reset path makes."""
 
     def bind_session_state(self, *, session_db=None, session_id="", persistence=None):
         self.calls.append((session_db, session_id, {"persistence": persistence}))
@@ -308,23 +310,210 @@ def _adopt_after_closed(hook):
     return agent, fresh
 
 
-def test_keyword_only_hook_gets_one_keyword_retry():
+def test_hook_refusing_the_positional_call_fails_like_any_other_hook():
+    # No retry in another calling convention (it could run a hook twice when a
+    # TypeError follows a state change): the refusal is a failed bind, logged and
+    # retried on the next cached turn, and the turn continues on the new handle.
     hook = KeywordOnlyHook()
     agent, fresh = _adopt_after_closed(hook)
 
     assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
 
-    assert hook.calls == [(fresh, SESSION_ID, {"persistence": fresh._store})]
+    assert hook.calls == []
+    assert getattr(agent, streaming._BIND_FAILED_ATTR, False) is True
+    assert agent._session_db is fresh and streaming._session_db_is_open(fresh)
 
 
-def test_type_error_retries_once_by_keyword_then_gives_up():
+def test_type_error_inside_the_hook_is_not_retried():
+    # The hook accepts the positional call and raises TypeError from its own
+    # body, after it may already have changed state: one call, recorded as a
+    # failed bind for the next-turn retry, never a second call in this rebind.
     hook = TypeErrorHook()
     agent, fresh = _adopt_after_closed(hook)
 
     assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
 
-    assert hook.calls == [(fresh, SESSION_ID, {})] * 2
+    assert hook.calls == [(fresh, SESSION_ID, {})]
+    assert getattr(agent, streaming._BIND_FAILED_ATTR, False) is True
     assert agent._session_db is fresh and streaming._session_db_is_open(fresh)
+
+
+def test_side_effect_before_an_internal_type_error_happens_once():
+    effects = []
+
+    class SideEffectHook(_Recorder):
+        def bind_session_state(self, session_db, session_id):
+            effects.append(session_id)
+            return None + 1  # TypeError from inside the hook body
+
+    agent, fresh = _adopt_after_closed(SideEffectHook())
+
+    assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
+    assert effects == [SESSION_ID]
+
+
+@pytest.mark.parametrize(
+    "hook_cls,calls",
+    [(KeywordOnlyHook, 0), (TypeErrorHook, 1)],
+    ids=["refused-call", "error-inside-hook"],
+)
+def test_no_type_error_is_retried_in_the_same_rebind(hook_cls, calls):
+    hook = hook_cls()
+    agent, fresh = _adopt_after_closed(hook)
+
+    assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
+
+    assert len(hook.calls) == calls
+    assert all(call[:2] == (fresh, SESSION_ID) for call in hook.calls)
+    assert getattr(agent, streaming._BIND_FAILED_ATTR, False) is True
+
+
+def _positional_target(session_db, session_id):
+    return (session_db, session_id)
+
+
+def _keyword_target(*, session_db, session_id):
+    return (session_db, session_id)
+
+
+# Method-shaped targets, as a decorator on an engine method would wrap them: the
+# bound hook's advertised signature (``__wrapped__``, minus ``self``) is theirs.
+def _positional_method_target(self, session_db, session_id):
+    return (session_db, session_id)
+
+
+def _keyword_method_target(self, *, session_db, session_id):
+    return (session_db, session_id)
+
+
+class KeywordWrapperOverPositionalHook(_Recorder):
+    """A decorator whose own signature is keyword-only around a positional function:
+    ``__wrapped__`` advertises a positional signature the call itself refuses."""
+
+    @functools.wraps(_positional_method_target)
+    def bind_session_state(self, *, session_db, session_id):
+        self.calls.append((session_db, session_id, {}))
+
+
+class ForwardingWrapperOverKeywordHook(_Recorder):
+    """A ``*args, **kwargs`` wrapper that changes state, then forwards positionally
+    to a keyword-only function, which raises TypeError inside the wrapper body."""
+
+    @functools.wraps(_keyword_method_target)
+    def bind_session_state(self, *args, **kwargs):
+        self.calls.append(("wrapper ran", None, {}))
+        return _keyword_target(*args, **kwargs)
+
+
+class PositionalOnlyWrapperOverKeywordHook(_Recorder):
+    """A positional-only adapter whose ``__wrapped__`` is keyword-only: its
+    advertised signature refuses the positional call the adapter needs."""
+
+    @functools.wraps(_keyword_method_target)
+    def bind_session_state(self, session_db, session_id, /):
+        self.calls.append((session_db, session_id, {}))
+
+
+class PartialOverPositionalOnlyWrapperHook(PositionalOnlyWrapperOverKeywordHook):
+    def __init__(self):
+        super().__init__()
+        self.bind_session_state = functools.partial(
+            PositionalOnlyWrapperOverKeywordHook.bind_session_state.__get__(self)
+        )
+
+
+class KeywordWrapperRaisingHook(_Recorder):
+    """Its own signature refuses the positional call; its body changes state and
+    then raises TypeError."""
+
+    @functools.wraps(_positional_method_target)
+    def bind_session_state(self, *, session_db, session_id):
+        self.calls.append((session_db, session_id, {}))
+        return None + 1
+
+
+def test_decorated_hook_shapes_advertise_a_different_signature():
+    # Guards the fixtures above: each advertises (via ``__wrapped__``) a
+    # signature that disagrees with what its call accepts.
+    assert str(inspect.signature(KeywordWrapperOverPositionalHook().bind_session_state)) == "(session_db, session_id)"
+    assert str(inspect.signature(PositionalOnlyWrapperOverKeywordHook().bind_session_state)) == "(*, session_db, session_id)"
+    assert str(inspect.signature(PartialOverPositionalOnlyWrapperHook().bind_session_state)) == "(*, session_db, session_id)"
+    assert str(inspect.signature(ForwardingWrapperOverKeywordHook().bind_session_state)) == "(*, session_db, session_id)"
+
+
+@pytest.mark.parametrize(
+    "hook_cls,calls,bound",
+    [
+        # Refuses the positional call: never entered, unbound, as on master.
+        (KeywordWrapperOverPositionalHook, 0, False),
+        # Advertise a keyword-only signature but take the positional call: bind.
+        (PositionalOnlyWrapperOverKeywordHook, 1, True),
+        (PartialOverPositionalOnlyWrapperHook, 1, True),
+        # Forwards positionally to a keyword-only target: fails inside the
+        # wrapper after it ran, so it runs once and stays unbound, as on master.
+        (ForwardingWrapperOverKeywordHook, 1, False),
+        (KeywordWrapperRaisingHook, 0, False),
+    ],
+    ids=[
+        "keyword-wrapper-refuses",
+        "positional-only-wrapper-binds",
+        "partial-positional-only-wrapper-binds",
+        "forwarding-wrapper-runs-once",
+        "raising-keyword-wrapper-refuses",
+    ],
+)
+def test_decorated_hooks_get_one_positional_call(hook_cls, calls, bound):
+    hook = hook_cls()
+    agent, fresh = _adopt_after_closed(hook)
+
+    assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
+
+    assert len(hook.calls) == calls
+    assert (getattr(agent, streaming._BIND_FAILED_ATTR, False) is True) is (not bound)
+
+
+class EitherConventionHook(_Recorder):
+    def bind_session_state(self, *args, **kwargs):
+        self.calls.append((args, sorted(kwargs), {}))
+
+
+def test_hook_accepting_both_conventions_keeps_the_positional_call():
+    # Positional first, as before this change and as the Agent's reset path
+    # calls it: an existing hook that takes either convention sees no change.
+    hook = EitherConventionHook()
+    agent, fresh = _adopt_after_closed(hook)
+
+    assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
+
+    assert len(hook.calls) == 1
+    args, keywords, _ = hook.calls[0]
+    assert args == (fresh, SESSION_ID)
+    assert "session_db" not in keywords and "session_id" not in keywords
+
+
+class _UnreadableSignatureHook:
+    """A callable whose signature metadata raises when read."""
+
+    def __init__(self):
+        self.calls = []
+
+    @property
+    def __signature__(self):
+        raise RuntimeError("unreadable signature metadata")
+
+    def __call__(self, session_db, session_id):
+        self.calls.append((session_db, session_id))
+
+
+def test_hook_whose_signature_metadata_raises_still_binds():
+    bind = _UnreadableSignatureHook()
+    agent, fresh = _adopt_after_closed(SimpleNamespace(bind_session_state=bind))
+
+    assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
+
+    # The persistence check can't read the signature, so persistence isn't offered.
+    assert bind.calls == [(fresh, SESSION_ID)]
+    assert getattr(agent, streaming._BIND_FAILED_ATTR, False) is not True
 
 
 @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
