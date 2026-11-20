@@ -2972,21 +2972,37 @@ def _build_profile_rows_fast() -> list | None:
 
     profiles_root = _get_profiles_root()
     if profiles_root.is_dir():
-        for entry in sorted(profiles_root.iterdir()):
-            if not entry.is_dir():
+        try:
+            entries = sorted(profiles_root.iterdir())
+        except OSError:
+            # An unreadable profiles root cannot contribute named homes, but it
+            # must not erase the default row above.
+            entries = []
+        for entry in entries:
+            # Per-entry isolation: the native liveness helpers read sibling
+            # paths, notably ``profiles/.deleted``. An unreadable entry — a
+            # directory the operator cannot stat, or an unreadable tombstone
+            # store that makes ``named_profile_is_deleted`` raise — must skip
+            # only THAT profile. Letting the error escape takes down the whole
+            # listing, including the default home that the cron aggregator
+            # needs before it can return any job at all.
+            try:
+                if not entry.is_dir():
+                    continue
+                if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
+                    continue
+                # Upstream `_iter_named_profile_dirs()` lists a dir as a profile only when it
+                # carries an identity marker and is not tombstoned. This fast path used to
+                # stop at "is a dir + valid id", so a marker-less shell left behind by a
+                # delete (or by a recovery-artifact mkdir) showed up in the dropdown and was
+                # then read by /api/crons. Match upstream here or the two lists disagree.
+                if not named_profile_has_identity(entry):
+                    continue
+                if named_profile_is_deleted(entry):
+                    continue
+                rows.append(_row(entry, entry.name, False))
+            except OSError:
                 continue
-            if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
-                continue
-            # Upstream `_iter_named_profile_dirs()` lists a dir as a profile only when it
-            # carries an identity marker and is not tombstoned. This fast path used to
-            # stop at "is a dir + valid id", so a marker-less shell left behind by a
-            # delete (or by a recovery-artifact mkdir) showed up in the dropdown and was
-            # then read by /api/crons. Match upstream here or the two lists disagree.
-            if not named_profile_has_identity(entry):
-                continue
-            if named_profile_is_deleted(entry):
-                continue
-            rows.append(_row(entry, entry.name, False))
 
     return rows
 

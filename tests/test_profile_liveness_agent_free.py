@@ -496,3 +496,78 @@ def test_custom_default_home_under_profiles_ancestor_is_readable(stub_agent, stu
     active_jobs, other_jobs = webui_routes._cron_jobs_cross_profile("default")
     assert other_jobs == []
     assert [j["name"] for j in active_jobs] == ["custom-job"], [j["name"] for j in active_jobs]
+
+
+# ── Per-entry isolation: an unreadable tombstone store ───────────────────────
+
+def _install_hermes_cli_profiles_stub(monkeypatch, *, home: Path, profiles: Path, tombstone_exc=None):
+    """Install a ``hermes_cli.profiles`` stand-in the fast path imports from.
+
+    ``_build_profile_rows_fast`` imports its helpers from ``hermes_cli.profiles``
+    at call time, so a stub here exercises the real code path on a machine with
+    no Agent on disk — and lets one helper raise on demand.
+    """
+    profiles_mod = types.ModuleType("hermes_cli.profiles")
+    profiles_mod._get_default_hermes_home = lambda: home
+    profiles_mod._get_profiles_root = lambda: profiles
+    profiles_mod._read_config_model = lambda _home: (None, None)
+    profiles_mod._check_gateway_running = lambda _home: False
+    profiles_mod._PROFILE_ID_RE = _STUB_PROFILE_ID_RE
+    profiles_mod.named_profile_has_identity = _stub_named_profile_has_identity
+    if tombstone_exc is None:
+        profiles_mod.named_profile_is_deleted = _stub_named_profile_is_deleted
+    else:
+        def _tombstone_raises(_home):
+            raise tombstone_exc
+        profiles_mod.named_profile_is_deleted = _tombstone_raises
+
+    pkg = types.ModuleType("hermes_cli")
+    pkg.__path__ = []  # package marker so `from hermes_cli.profiles import ...` resolves
+    pkg.profiles = profiles_mod
+    monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_mod)
+    return profiles_mod
+
+
+def test_tombstone_stub_control_lists_live_named_home(agent_free, monkeypatch, tmp_path):
+    """Control: with a readable tombstone store the same stub lists the live home.
+
+    Without this arm, the regression below would also pass if the stub simply
+    never reached the named-home branch.
+    """
+    from api import profiles as webui_profiles
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    _install_hermes_cli_profiles_stub(monkeypatch, home=home, profiles=profiles)
+    webui_profiles._invalidate_list_profiles_cache()
+
+    rows = webui_profiles._build_profile_rows_fast()
+
+    assert rows is not None
+    assert [row["name"] for row in rows] == ["default", "liveprof"]
+
+
+def test_unreadable_tombstone_store_keeps_the_default_row(agent_free, monkeypatch, tmp_path):
+    """An unreadable ``profiles/.deleted`` must not erase the whole listing.
+
+    The native ``named_profile_is_deleted`` reads the tombstone store beside
+    every named home, so one unreadable store raises for each entry. Unguarded,
+    that takes the entire enumeration with it — including the default row the
+    cron aggregator needs before it can return any job at all. The guard must
+    isolate the failure per entry: the default home survives, and the named
+    entries that cannot be classified are skipped rather than fatal.
+    """
+    from api import profiles as webui_profiles
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    _install_hermes_cli_profiles_stub(
+        monkeypatch, home=home, profiles=profiles,
+        tombstone_exc=PermissionError(13, "Permission denied"),
+    )
+    webui_profiles._invalidate_list_profiles_cache()
+
+    rows = webui_profiles._build_profile_rows_fast()
+
+    assert rows is not None, "the fast path must stay on (the helpers imported fine)"
+    names = [row["name"] for row in rows]
+    assert names == ["default"], names
