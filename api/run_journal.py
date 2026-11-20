@@ -866,6 +866,17 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
                        "lines": [0], "malformed": [], "malformed_bytes": 0, "rows": 0}
             pos = bisect.bisect_right(idx["maxes"], threshold) - 1
             start, line_no = idx["offs"][pos], idx["lines"][pos]
+            segment_start = idx["offs"][pos - 1] if start else 0
+            fh.seek(segment_start)
+            snapshot = fh.read()
+            # BufferedReader.read() may span several raw reads. If the producer
+            # rolls back and regrows between them, this buffer is not a coherent
+            # snapshot even though its segment happens to authenticate. Reject
+            # any observed producer generation change and take the full-reader
+            # fallback rather than splicing an old offset into new rows.
+            if _held_journal_signature(fh.fileno()) != (
+                    st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns):
+                return None
             if start:
                 # A size/ctime pair still cannot distinguish ordinary growth
                 # from rollback followed by larger regrowth. Validate the
@@ -874,22 +885,20 @@ def _read_jsonl_after_seq_indexed(path: Path, after_seq) -> tuple[list[dict], li
                 # digest even when replacement rows preserve its endpoint;
                 # ordinary append-only growth leaves it intact. Coarse ctime
                 # resolution therefore cannot hide the same replay omission.
-                segment_start = idx["offs"][pos - 1]
-                fh.seek(segment_start)
-                segment = fh.read(start - segment_start)
-                if (len(segment) != start - segment_start
-                        or hashlib.sha256(segment).digest() != idx["sigs"][pos]):
+                # Validate and replay from ONE coherent snapshot: a rollback and
+                # regrowth between separate segment and suffix reads could make
+                # an old cached offset point into a later producer generation.
+                segment_end = start - segment_start
+                segment = memoryview(snapshot)[:segment_end]
+                if (len(segment) != segment_end
+                        or hashlib.sha256(segment).digest() != idx["sigs"][pos]
+                        or snapshot[segment_end - 1:segment_end] != b"\n"):
                     return None
-            fh.seek(start)
-            if start:
-                checkpoint = fh.tell()
-                try:
-                    fh.seek(start - 1)
-                    if fh.read(1) != b"\n":
-                        return None
-                finally:
-                    fh.seek(checkpoint)
-            data = fh.read()
+                del segment
+                data = snapshot[segment_end:]
+                del snapshot
+            else:
+                data = snapshot
     except FileNotFoundError:
         return None
     except (OSError, TypeError, ValueError):

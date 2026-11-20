@@ -32,6 +32,14 @@ the same or a larger size. Size-only validation could then skip committed rows.
 The segment digest detects that mismatch and falls back to the complete reader,
 including when timestamp resolution cannot distinguish the writes.
 
+Checkpoint validation and suffix replay use one outer read from the segment
+start through EOF. The digest, checkpoint-ending newline, and returned suffix
+all come from that same byte buffer. Because a buffered outer read may span
+several raw reads, the reader also compares the file's identity, size, mtime,
+and ctime before and after it. Any observed producer change selects the
+complete-reader fallback rather than accepting a buffer spliced across producer
+generations.
+
 The supported lifecycle is ordinary append plus producer rollback of the
 uncommitted suffix. Arbitrary external rewrites of an already committed prefix
 are outside this guarantee. The emit-side append/rollback protocol and

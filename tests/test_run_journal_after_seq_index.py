@@ -2,8 +2,10 @@
 
 import builtins
 import gzip
+import io
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -216,6 +218,156 @@ def test_failed_append_replay_cannot_skip_committed_regrowth(
     got = rj.read_run_events(SID, RID, after_seq=256, max_seq=257, session_dir=tmp_path)
     assert [event["seq"] for event in got["events"]] == [257]
     assert got["events"][0]["payload"]["text"] == "committed 257"
+
+
+@pytest.mark.parametrize("hold_suffix_read", [False, True], ids=["control", "rollback_during_read"])
+def test_checkpoint_and_suffix_come_from_one_coherent_read(
+    tmp_path, monkeypatch, hold_suffix_read,
+):
+    """Checkpoint validation and replay must not straddle producer generations."""
+    monkeypatch.setenv(rj._FSYNC_MODE_ENV, rj._FSYNC_MODE_EAGER)
+    path = rj._run_path(SID, RID, session_dir=tmp_path)
+    for seq in range(1, 256):
+        rj.append_run_event(
+            SID, RID, "token", {"text": f"prefix {seq}", "pad": "x" * 20},
+            session_dir=tmp_path, created_at=0.0,
+        )
+    committed_prefix = path.read_bytes()
+
+    observed = {}
+    suffix_read_waiting = threading.Event()
+    allow_suffix_read = threading.Event()
+    failed_append_parked = threading.Event()
+    release_failed_fsync = threading.Event()
+    replay_result = []
+    thread_errors = []
+    real_fsync = os.fsync
+    real_open = builtins.open
+
+    def replay_after_speculative_checkpoint():
+        try:
+            replay_result.append(
+                rj.read_run_events(SID, RID, after_seq=256, session_dir=tmp_path)
+            )
+        except BaseException as exc:  # surface thread failures in the test body
+            thread_errors.append(exc)
+
+    def fail_fsync_with_reader_at_suffix(fd):
+        if "size" not in observed and os.fstat(fd).st_ino == path.stat().st_ino:
+            speculative = rj.read_run_events(SID, RID, after_seq=0, session_dir=tmp_path)
+            assert speculative["events"][-1]["seq"] == 256
+            observed["size"] = path.stat().st_size
+            assert rj._after_seq_index[str(path)]["offs"][-1] == observed["size"]
+            if hold_suffix_read:
+                observed["replay_armed"] = True
+                reader = threading.Thread(target=replay_after_speculative_checkpoint)
+                reader.start()
+                observed["reader"] = reader
+                assert suffix_read_waiting.wait(20), "reader never reached its suffix read"
+                failed_append_parked.set()
+                assert release_failed_fsync.wait(20), "test did not release failed fsync"
+            raise OSError("injected append failure with a replay at the suffix read")
+        return real_fsync(fd)
+
+    def open_with_suffix_barrier(file, *args, **kwargs):
+        is_journal = os.fspath(file) == os.fspath(path)
+        if not hold_suffix_read or not is_journal or not args or args[0] != "rb":
+            return real_open(file, *args, **kwargs)
+        kwargs = dict(kwargs)
+        kwargs["buffering"] = 0
+        raw = real_open(file, *args, **kwargs)
+
+        class RawSuffixBarrier:
+            def __getattr__(self, name):
+                return getattr(raw, name)
+
+            def _wait_at_old_eof(self):
+                # BufferedReader.read() may issue several raw reads. Let the
+                # coherent-snapshot candidate consume the old segment, then
+                # pause the next raw read at the old EOF. On the old split
+                # reader this is the first raw read of its separate suffix read.
+                if (observed.get("replay_armed")
+                        and not observed.get("raw_barrier_hit")
+                        and raw.tell() == observed.get("size")):
+                    observed["raw_barrier_hit"] = True
+                    suffix_read_waiting.set()
+                    assert allow_suffix_read.wait(20), "test did not release suffix read"
+
+            def read(self, size=-1):
+                self._wait_at_old_eof()
+                return raw.read(size)
+
+            def readall(self):
+                chunks = []
+                while True:
+                    chunk = self.read(1024 * 1024)
+                    if not chunk:
+                        return b"".join(chunks)
+                    chunks.append(chunk)
+
+            def readinto(self, buffer):
+                self._wait_at_old_eof()
+                return raw.readinto(buffer)
+
+        return io.BufferedReader(RawSuffixBarrier())
+
+    monkeypatch.setattr(os, "fsync", fail_fsync_with_reader_at_suffix)
+    monkeypatch.setattr(builtins, "open", open_with_suffix_barrier)
+
+    def failed_append():
+        try:
+            with pytest.raises(OSError, match="injected append failure"):
+                rj.append_run_event(
+                    SID, RID, "token", {"text": "rolled back", "pad": "F" * 20000},
+                    session_dir=tmp_path, created_at=0.0,
+                )
+        except BaseException as exc:
+            thread_errors.append(exc)
+
+    if hold_suffix_read:
+        writer = threading.Thread(target=failed_append)
+        writer.start()
+        assert failed_append_parked.wait(20), (thread_errors, suffix_read_waiting.is_set())
+        release_failed_fsync.set()
+        writer.join(20)
+        assert not writer.is_alive()
+    else:
+        failed_append()
+    assert not thread_errors
+    assert path.read_bytes() == committed_prefix
+
+    rj.append_run_event(
+        SID, RID, "token", {"text": "committed 256", "pad": ""},
+        session_dir=tmp_path, created_at=0.0,
+    )
+    final_without_padding = (
+        len(committed_prefix)
+        + _event_line_len(256, "committed 256")
+        + _event_line_len(257, "committed 257")
+    )
+    padding = observed["size"] - final_without_padding
+    assert padding > 0
+    rj.append_run_event(
+        SID, RID, "token", {"text": "committed 257", "pad": "P" * padding},
+        session_dir=tmp_path, created_at=0.0,
+    )
+    assert path.stat().st_size == observed["size"]
+    rj.append_run_event(
+        SID, RID, "token", {"text": "committed 258", "pad": ""},
+        session_dir=tmp_path, created_at=0.0,
+    )
+    assert [event["seq"] for event in rj._read_jsonl(path)[0]][-3:] == [256, 257, 258]
+
+    if hold_suffix_read:
+        allow_suffix_read.set()
+        observed["reader"].join(20)
+        assert not observed["reader"].is_alive()
+        assert not thread_errors
+        assert len(replay_result) == 1
+        got = replay_result[0]
+    else:
+        got = rj.read_run_events(SID, RID, after_seq=256, session_dir=tmp_path)
+    assert [event["seq"] for event in got["events"]] == [257, 258]
 
 
 def test_oversized_malformed_rows_are_not_cached(tmp_path, monkeypatch):
