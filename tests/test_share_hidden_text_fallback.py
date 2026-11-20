@@ -31,9 +31,23 @@ NODE = shutil.which("node")
 _DRIVER = r"""
 const fs = require('fs'); const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const ctx = {console, document: {addEventListener(){}}, window: {location: {pathname: '/'}}};
+// A tiny DOM for _shareShowPlainText: elements, text nodes, classes, attributes.
+const el = tag => ({nodeType: 1, tagName: tag.toUpperCase(), className: '', children: [], attrs: {}, _text: '',
+  classList: {list: [], add(c){ this.list.push(c); }},
+  setAttribute(k, v){ this.attrs[k] = String(v); },
+  appendChild(c){ this.children.push(c); return c; },
+  set textContent(v){ this.children = []; this._text = String(v); }, get textContent(){ return this._text; }});
+const ctx = {console, window: {location: {pathname: '/'}},
+  document: {addEventListener(){}, createElement: el, createTextNode: d => ({nodeType: 3, data: String(d)})},
+  _isSafeDataImageUri: v => /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(v)};
 vm.createContext(ctx);
 vm.runInContext(src, ctx);
+const dump = n => n.nodeType === 3 ? {text: n.data} :
+  {tag: n.tagName.toLowerCase(), cls: n.className, attrs: n.attrs, alt: n.alt, src: n.src, text: n._text,
+   classes: n.classList.list, children: n.children.map(dump)};
+ctx.__plain = source => { const body = el('div'); ctx._shareShowPlainText(body, source); return dump(body); };
+// Named references stay as written under node (no textarea decoding here).
+ctx.document.createElement = (orig => tag => tag === 'textarea' ? (() => { throw new Error('no dom'); })() : orig(tag))(el);
 const build = n => {
   if (typeof n === 'string') return {nodeType: 3, data: n};
   if (n && n.comment !== undefined) return {nodeType: 8, data: n.comment};
@@ -103,11 +117,26 @@ def test_source_drops_markup_that_never_shows_as_words(call):
     got = call(
         "_shareSourceWords",
         "&amp;lt;b&amp;gt;bold&lt;/b&gt; <br> E=mc<sup>2</sup> MEDIA:https://e.com/a.png\n"
-        "- [x] done\n```python\ncode\n```",
+        "- [x] done\n```mermaid\ngraph\n```\n[f](file:///tmp/r.txt)",
     )
     assert "lt" not in got and "amp" not in got and "b" not in got and "br" not in got and "sup" not in got
-    assert "media" not in got and "x" not in got and "python" not in got
-    assert {"bold", "e", "mc2", "https", "com", "a", "png", "done", "code"} <= set(got)
+    assert "media" not in got and "x" not in got and "mermaid" not in got and "file" not in got
+    assert {"bold", "e", "mc2", "https", "com", "a", "png", "done", "graph", "tmp", "r", "txt"} <= set(got)
+
+
+def test_shown_fence_languages_stay_words_and_hidden_ones_count(call):
+    # renderMd shows a \\w-led one-word language in the block header; others are dropped.
+    assert call("_shareSourceWords", "```python\nx\n```") == {"python": 1, "x": 1}
+    got = call("_shareSourceWords", "```+the-secret-words\ny\n```\n```js two words\nz\n```")
+    assert {"the", "secret", "words", "js", "two"} <= set(got)
+
+
+def test_a_link_labelled_with_its_own_address_counts_it_once(call):
+    assert call("_shareSourceWords", "[https://e.com/d](https://e.com/d)") == {"https": 1, "e": 1, "com": 1, "d": 1}
+    assert call("_shareSourceWords", '<a href="https://e.com/d">https://e.com/d</a>') == {
+        "https": 1, "e": 1, "com": 1, "d": 1}
+    # a different label still counts both
+    assert call("_shareSourceWords", "[docs](https://e.com/docs)")["docs"] == 2
 
 
 def test_source_keeps_words_the_page_cannot_show(call):
@@ -124,6 +153,57 @@ def test_source_keeps_words_the_page_cannot_show(call):
 def test_inline_tags_join_and_block_tags_split(call):
     assert call("_shareSourceWords", "x<b>y</b>z") == {"xyz": 1}
     assert call("_shareSourceWords", "x<br>y") == {"x": 1, "y": 1}
+
+
+def test_numeric_character_references_are_decoded_after_tags(call):
+    # &#65; is "A"; &#60;b&#62; decodes to "<b>" only after tags are handled, so
+    # it stays text, as the browser shows it.
+    assert call("_shareSourceWords", "x&#65;y &#x42;C &#60;b&#62;") == {"xay": 1, "bc": 1, "b": 1}
+    assert call("_shareSourceWords", "&#0; &#xD800; &#99999999;") == {}
+
+
+def test_named_references_stay_as_written_without_a_dom(call):
+    # Under node there is no DOM to decode with; the name is kept (a false alarm
+    # at worst). The browser gate checks real decoding on the share page.
+    assert call("_shareSourceWords", "a&nbsp;b") == {"a": 1, "nbsp": 1, "b": 1}
+
+
+def test_tag_syntax_inside_a_comment_keeps_its_words(call):
+    got = call("_shareSourceWords", "x <!-- <mark> <p title=t> --> <mark>y</mark> <!-- <select>")
+    assert got == {"x": 1, "mark": 1, "p": 1, "title": 1, "t": 1, "y": 1, "select": 1}
+    assert _missing(call, "a <!-- <mark> --> b", ["p", {}, "a ", {"comment": " <mark> "}, " b"]) == ["mark"]
+
+
+def test_markers_inside_a_comment_keep_their_words(call):
+    got = call("_shareSourceWords", "<!-- MEDIA:x\n- [x] y\n```mermaid\n```zq-secret\nfile://f [d](d) -->")
+    assert {"media", "x", "y", "mermaid", "zq", "secret", "file", "f"} <= set(got)
+    assert got["d"] == 2
+
+
+# ── One normalization on both sides ───────────────────────────────────────────
+
+
+def test_a_literal_entity_in_code_cannot_cover_a_hidden_word(call):
+    # The page shows `&copy;` as written inside code; both sides decode it, so it
+    # gives no "copy" credit to the hidden comment.
+    dom = ["p", {}, "Use ", ["code", {}, "&copy;"], " literally; ", {"comment": " copy "}]
+    assert _missing(call, "Use `&copy;` literally; <!-- copy -->", dom) == ["copy"]
+    dom = ["p", {}, "Use ", ["code", {}, "&copy;"], " literally"]
+    assert _missing(call, "Use `&copy;` literally", dom) == []
+
+
+def test_percent_escapes_count_once_in_one_form(call):
+    # A %-escaped address can't credit both its written and its decoded word.
+    dom = ["p", {}, ["a", {"href": "https://e.com/%7Aqsecret"}, "docs"], " ", {"comment": " zqsecret "}]
+    assert _missing(call, "[docs](https://e.com/%7Aqsecret) <!-- zqsecret -->", dom) == ["zqsecret"]
+    dom = ["p", {}, ["a", {"href": "https://e.com/zqsecret/%41"}, "https://e.com/zqsecret/%41"], " ",
+           {"comment": " zqsecret "}]
+    assert _missing(call, "https://e.com/zqsecret/%41 <!-- zqsecret -->", dom) == ["zqsecret"]
+
+
+def test_math_spans_break_words(call):
+    dom = ["p", {}, "这是", ["span", {"class": "katex-inline", "data-katex": "inline"}, "x"], "的值"]
+    assert _missing(call, "这是$x$的值", dom) == []
 
 
 # ── What the rendered message shows ───────────────────────────────────────────
@@ -183,8 +263,10 @@ def test_ordinary_message_has_nothing_missing(call):
 @pytest.mark.parametrize(
     "text",
     ["<a " * 100_000, "<" * 400_000, '<a x="' + "b " * 200_000, "<a b=" * 80_000, "&amp;" * 100_000,
-     "- [x] \n" * 50_000, "```\n" * 100_000],
-    ids=["unclosed_tags", "lt_run", "open_quote", "open_values", "entities", "task_boxes", "fences"],
+     "- [x] \n" * 50_000, "```\n" * 100_000, "&copy;" * 100_000, "&#65;" * 100_000, "<!--" * 100_000,
+     "<!-- <a> -->" * 40_000],
+    ids=["unclosed_tags", "lt_run", "open_quote", "open_values", "entities", "task_boxes", "fences",
+         "named_refs", "numeric_refs", "comment_openers", "comments"],
 )
 def test_source_words_stay_linear(call, text):
     out = call.many([{"fn": "_shareSourceWords", "args": [text]}])[0]
@@ -205,10 +287,39 @@ def test_share_page_checks_each_message_before_highlighting():
     assert render.index(stmt) < render.index("wrap.appendChild(row);") < render.index("highlightCode(wrap)")
 
 
+def test_plain_view_shows_server_embedded_images_as_images(call):
+    b64 = "iVBORw0KGgo" + "A" * 4000
+    embed = f'<img src="data:image/png;base64,{b64}" class="msg-media-img" alt="shot &amp; notes.png" loading="lazy">'
+    other = '<img src="data:image/png;base64,QUJD" class="msg-media-img" alt="x" loading="lazy" title="t">'
+    out = call("__plain", f"before {embed} after <!-- hidden --> {other}")
+    note, pre = out["children"]
+    assert note["attrs"] == {"role": "note"}
+    assert pre["cls"] == "share-plain-text"
+    kinds = [c.get("tag", "text") for c in pre["children"]]
+    assert kinds == ["text", "img", "text"]
+    img = pre["children"][1]
+    assert img["src"] == f"data:image/png;base64,{b64}" and img["alt"] == "shot & notes.png"
+    assert img["cls"] == "msg-media-img share-plain-image"
+    shown = "".join(c.get("text", "") for c in pre["children"] if "tag" not in c)
+    assert b64 not in shown
+    # Everything else, including an embed not in the server's exact form, is shown as text.
+    assert shown == f"before  after <!-- hidden --> {other}"
+
+
+def test_plain_view_keeps_an_unsafe_embed_as_text(call):
+    svg = '<img src="data:image/svg+xml;base64,PHN2Zz4=" class="msg-media-img" alt="a" loading="lazy">'
+    out = call("__plain", svg)
+    pre = out["children"][1]
+    assert [c.get("tag", "text") for c in pre["children"]] == ["text"]
+    assert pre["children"][0]["text"] == svg
+
+
 def test_plain_text_view_is_styled_and_uses_text_content():
     js = SHARE_JS.read_text(encoding="utf-8")
     plain = js[js.index("function _shareShowPlainText"):js.index("function _shareRenderMessages")]
-    assert "pre.textContent=" in plain and "innerHTML" not in plain
+    assert "createTextNode(" in plain and "innerHTML" not in plain
+    assert "note.setAttribute('role','note');" in plain
+    assert "'Shown as plain text because formatting could hide part of this message.'" in plain
     html = SHARE_HTML.read_text(encoding="utf-8")
     assert ".share-plain-note" in html and "pre.share-plain-text" in html
 

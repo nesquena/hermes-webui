@@ -28,9 +28,10 @@ function _shareRoleLabel(role){
 // text is missing, the whole message is shown as plain text instead.
 //
 // Words are counted, not just looked up, so a hidden copy of a word that also
-// appears elsewhere is still caught. The check uses the real renderer's output,
-// so it follows every renderer rule without restating them. A false alarm fails
-// safe: that one message is shown as plain text.
+// appears elsewhere is still caught (the fixed attribute words below are the
+// one exception: each can cover a hidden copy of itself). The check uses the
+// real renderer's output, so it follows the renderer's rules without restating
+// them. A false alarm fails safe: that one message is shown as plain text.
 //
 // What counts as shown: the text of the rendered message, plus link and image
 // addresses, image alt text, and the attribute values the renderer itself
@@ -62,16 +63,41 @@ function _shareAddWords(text,counts){
   return counts;
 }
 
+// The five entities renderMd decodes itself, before it looks at tags.
+function _shareDecode5(s){
+  return String(s).replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+}
+
+// One normalization, applied the same way to both sides: the published text
+// (after its markup is handled) and everything the page shows. Entities and
+// %-escapes are decoded. Applying the same transform to both keeps them
+// comparable wherever the page shows text as written (an entity inside code)
+// and wherever the browser decodes it (prose, link addresses), and it never
+// gives the page an extra copy of a word.
+function _shareNormalize(text){
+  const s=_shareDecodeRefs(_shareDecode5(_shareDecode5(String(text==null?'':text))));
+  return s.replace(/(?:%[0-9A-Fa-f]{2})+/g,run=>{ try{ return decodeURIComponent(run); }catch(_){ return run; } });
+}
+
 // The words a reader is expected to see for a published message: its text with
-// the markup that never shows as words removed (the entities renderMd decodes,
-// standard tag and attribute names, the MEDIA: marker, task-list boxes, and a
-// one-word code-fence language).
+// the markup that never shows as words removed (standard tag and attribute
+// names, the MEDIA: and file:// markers, task-list boxes, and the mermaid
+// fence language).
 function _shareSourceWords(source){
-  const decode=s=>s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
-  let s=decode(decode(String(source==null?'':source).replace(/\r\n?/g,'\n')));
-  s=s.replace(/MEDIA:/g,' ')
+  let s=_shareDecode5(_shareDecode5(String(source==null?'':source).replace(/\r\n?/g,'\n')));
+  // Everything inside an HTML comment is hidden text, including tag syntax, code
+  // marks, list boxes and markers: keep all its words. A browser comment never
+  // ends later than the first "-->", so this can only keep more words than the
+  // page shows (a false alarm), never fewer.
+  s=s.replace(/<!--[\s\S]*?(?:-->|$)/g,c=>' '+c.replace(/[<>[\]`:]/g,' ')+' ');
+  s=s.replace(/MEDIA:|file:\/\//g,' ')
     .replace(/^(\s*[-*+]\s+)\[[ xX]\](?=\s)/gm,'$1')
-    .replace(/^( {0,3}`{3,})[ \t]*[\w+-]+[ \t]*$/gm,'$1');
+    // A mermaid diagram has no language header; every other one-word language
+    // is shown in the block's header, so it stays a word.
+    .replace(/^( {0,3}`{3,})[ \t]*mermaid[ \t]*$/gim,'$1')
+    // A link whose label is its own address shows that address once.
+    .replace(/\[([^[\]\s]+)\]\(\1\)/g,'$1')
+    .replace(/<a\s+href\s*=\s*(["'])([^"'\s<>]+)\1\s*>\2<\/a\s*>/gi,'$2');
   s=s.replace(_SHARE_TAG_RE,(tag,_close,name,attrs)=>{
     const n=name.toLowerCase();
     if(!_SHARE_TAG_NAMES.has(n)) return tag;
@@ -84,19 +110,36 @@ function _shareSourceWords(source){
     const edge=_SHARE_INLINE_TAGS.has(n)?'':' ';
     return edge+kept+edge;
   });
-  return _shareAddWords(s,new Map());
+  return _shareAddWords(_shareNormalize(s),new Map());
 }
 
-// Words of one attribute value, counted in its written and percent-decoded
-// forms (whichever has more of each word), since the renderer may encode an
-// address the message wrote plainly, or the other way round.
-function _shareAttrWords(value){
-  const raw=_shareAddWords(value,new Map());
-  let decoded=raw;
-  try{ decoded=_shareAddWords(decodeURIComponent(value),new Map()); }catch(_){}
-  for(const [w,c] of decoded) if(c>(raw.get(w)||0)) raw.set(w,c);
-  return raw;
+// Decode HTML character references the way the browser does for text: numeric
+// ones directly, named ones through a detached textarea (one reference at a
+// time, so no markup is ever parsed). Without a DOM, a named reference stays as
+// written, which can only cause a false alarm.
+const _shareRefCache=new Map();
+function _shareDecodeRefs(text){
+  return String(text).replace(/&(?:#([0-9]{1,8})|#[xX]([0-9a-fA-F]{1,8})|[A-Za-z][A-Za-z0-9]{1,31});/g,(ref,dec,hex)=>{
+    if(dec!==undefined||hex!==undefined){
+      const cp=dec!==undefined?parseInt(dec,10):parseInt(hex,16);
+      if(!cp||cp>0x10FFFF||(cp>=0xD800&&cp<=0xDFFF)) return '\uFFFD';
+      return String.fromCodePoint(cp);
+    }
+    if(_shareRefCache.has(ref)) return _shareRefCache.get(ref);
+    let out=ref;
+    try{
+      if(typeof document!=='undefined'&&typeof document.createElement==='function'){
+        const ta=document.createElement('textarea');
+        ta.innerHTML=ref;
+        out=ta.value;
+      }
+    }catch(_){ out=ref; }
+    _shareRefCache.set(ref,out);
+    return out;
+  });
 }
+
+function _shareWordsOf(text){ return _shareAddWords(_shareNormalize(text),new Map()); }
 
 // The words the rendered message shows (see the note above).
 function _shareVisibleWords(root){
@@ -108,30 +151,32 @@ function _shareVisibleWords(root){
       if(child.nodeType===3){ text.push(child.data); continue; }
       if(child.nodeType!==1) continue;  // comments are never shown
       const tag=String(child.tagName||'').toLowerCase();
-      const inline=_SHARE_INLINE_TAGS.has(tag);
+      const attrs=Array.from(child.attributes||[]);
+      // A math span stands where "$" or "\(" broke a word in the published text.
+      const math=attrs.some(a=>a.name==='data-katex'||(a.name==='class'&&/\bkatex-(?:inline|block)\b/.test(a.value)));
+      const inline=_SHARE_INLINE_TAGS.has(tag)&&!math;
       if(!inline) text.push(' ');
       const start=text.length;
       walk(child);
       if(!inline) text.push(' ');
       const ownText=text.slice(start).join('');
-      for(const attr of Array.from(child.attributes||[])){
+      for(const attr of attrs){
         const name=String(attr.name||'').toLowerCase();
         let value=String(attr.value||'');
         if(name.startsWith('data-')||name==='download'||name==='style') continue;
         if(name==='class') value=value.split(/\s+/).filter(c=>!/^language-/i.test(c)).join(' ');
         // A bare link shows its own address: count it once, not twice.
-        if(name==='href'&&_shareSameWords(value,ownText)) continue;
-        add(_shareAttrWords(value));
+        if(name==='href'&&_shareSameWords(_shareWordsOf(value),_shareWordsOf(ownText))) continue;
+        add(_shareWordsOf(value));
       }
     }
   };
   walk(root);
-  add(_shareAddWords(text.join(''),new Map()));
+  add(_shareWordsOf(text.join('')));
   return counts;
 }
 
-function _shareSameWords(a,b){
-  const x=_shareAttrWords(a), y=_shareAddWords(b,new Map());
+function _shareSameWords(x,y){
   if(x.size!==y.size) return false;
   for(const [w,c] of x) if(y.get(w)!==c) return false;
   return true;
@@ -145,15 +190,33 @@ function _shareMissingWords(source,root){
   return missing;
 }
 
+// An image the server embedded in a shared message, in exactly the form
+// api/shares.py writes it. The plain-text view shows it as the image rather
+// than as a wall of base64.
+const _SHARE_EMBED_RE=/<img src="(data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+)" class="msg-media-img" alt="([^"<>]*)" loading="lazy">/g;
+
 function _shareShowPlainText(body,source){
   body.textContent='';
   body.classList.add('share-plain');
   const note=document.createElement('div');
   note.className='share-plain-note';
-  note.textContent='Shown as plain text: part of this message would not display with formatting.';
+  note.setAttribute('role','note');
+  note.textContent='Shown as plain text because formatting could hide part of this message.';
   const pre=document.createElement('pre');
   pre.className='share-plain-text';
-  pre.textContent=String(source==null?'':source);
+  const text=String(source==null?'':source);
+  let last=0;
+  for(const m of text.matchAll(_SHARE_EMBED_RE)){
+    if(typeof _isSafeDataImageUri!=='function'||!_isSafeDataImageUri(m[1])) continue;
+    pre.appendChild(document.createTextNode(text.slice(last,m.index)));
+    const img=document.createElement('img');
+    img.className='msg-media-img share-plain-image';
+    img.alt=_shareDecode5(m[2]);
+    img.src=m[1];
+    pre.appendChild(img);
+    last=m.index+m[0].length;
+  }
+  pre.appendChild(document.createTextNode(text.slice(last)));
   body.appendChild(note);
   body.appendChild(pre);
 }

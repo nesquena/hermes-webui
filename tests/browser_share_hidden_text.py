@@ -71,6 +71,19 @@ HIDING = [
     # Free-text attributes the renderer keeps from raw HTML never count as shown.
     f'<div class="mermaid-block" data-mermaid-id="{MARK}">x</div>',
     f'<a href="https://example.com/f" download="{MARK}">file</a>',
+    # Tag syntax inside a comment is hidden text, not markup (only standard names,
+    # so nothing but the comment rule can catch these).
+    "before <!-- <mark> <select> <option> --> after",
+    "before <!-- &#60;mark&#62; --> after",
+    "before <!-- &#122;&#113;&#109;&#97;&#114;&#107; --> after",
+    # A fence language the renderer drops (not a word-led single word) is hidden.
+    f"```+the-{MARK}-is-here\ncode\n```",
+    f"```-wire-{MARK}\ncode\n```",
+    f"<!--\n```{MARK}-pay-now\n-->",
+    # A literal entity or %-escape can't credit a hidden copy of a word.
+    f"Use `&{MARK};` literally; <!-- {MARK} -->",
+    f"[docs](https://example.com/%7A{MARK[1:]}) <!-- {MARK} -->",
+    f"see https://example.com/{MARK}/%41 <!-- {MARK} -->",
 ]
 
 # Realistic content that must keep its formatting.
@@ -93,6 +106,21 @@ ORDINARY = [
     "Shell:\n\n```bash\nexport PATH=\"$HOME/bin:$PATH\"\necho \"done\"\n```",
     # The renderer doesn't support link titles, so this stays visible text.
     '[docs](https://example.com/p "a title")',
+    # Character references the browser decodes as text, in prose and in a table.
+    "Price&nbsp;list &mdash; &copy; 2026 &rarr; 20&#176;C &#8594; &#x41;BC caf&eacute;",
+    "| Item | Note |\n|---|---|\n| a&nbsp;b | &copy;&nbsp;Acme |",
+    # Encoded tags show as text, so they must not be read as markup.
+    "Write &#60;b&#62;bo&#60;/b&#62;ld to show the tags.",
+    # A link labelled with its own address, Markdown and HTML forms.
+    "[https://example.com/docs](https://example.com/docs)",
+    '<a href="https://example.com/docs">https://example.com/docs</a>',
+    # Inline math between CJK characters, and entities next to a link.
+    "这是$x$的值。See [details](https://example.com/math).",
+    "Copyright &copy; 2026. See [manual](https://example.com/manual).",
+    # An entity shown as written inside code; a local file link.
+    "Write `&copy;` to get the symbol.",
+    "Saved to [report.txt](file:///tmp/report.txt) and file:///tmp/notes.txt",
+    "```python\nprint('hi')\n```",
 ]
 
 # Random messages: tokens renderMd treats specially, with numbered marker words.
@@ -105,6 +133,9 @@ FUZZ_TOKENS = [
     "[", "]", "(", ")", "$$", "\\[", "\\]", "$x", "x$", "\n```\n", "\n```py\n", "- [x] ", "\u2028",
     "MEDIA:https://e.com/m.png ", "https://e.com/p ", "<https://e.com/ ", "](https://e.com/l ",
     "\t", "   ", ":", "!", "?", "/", "=", "#",
+    "&nbsp;", "&copy;", "&mdash;", "&#65;", "&#x3c;", "&#60;", "&lt;!--", "<mark>", "<select>",
+    "\n```+a-", "\n```-b", "\n```c#", "%7A", "%41", "%20", "这是", "\\(", "[https://e.com/s](https://e.com/s) ",
+    "file:///tmp/f ", "`&copy;`",
 ]
 
 
@@ -238,8 +269,8 @@ def main():
             for content, row in zip(HIDING, rows, strict=False):
                 if not row["plain"]:
                     failures.append(f"hiding shown formatted: {content!r}")
-                elif MARK not in row["text"]:
-                    failures.append(f"hiding fallback lost the marker: {content!r}")
+                elif content not in row["text"]:
+                    failures.append(f"hiding fallback doesn't show the exact published text: {content!r}")
             print(f"hiding: {sum(r['plain'] for r in rows)}/{len(HIDING)} shown as plain text")
 
             rows, errors = _read_share(browser, tokens[1], len(ORDINARY))
