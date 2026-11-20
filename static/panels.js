@@ -6994,14 +6994,21 @@ async function removeWorkspace(path){
 
 async function promptWorkspacePath(){
   const contextIntent=arguments[0];
+  // A workspace-path action on the blank page owns the pane from click time:
+  // queued behind a held context transition it must not mint a newer claim
+  // later and displace a sidebar conversation picked while it waited (#6423).
+  const paneNavigationGeneration=arguments[1]!=null?arguments[1]
+    :(!contextIntent&&!S.session&&typeof _claimPaneNavigation==='function'?_claimPaneNavigation():null);
   return _runContextTransition('workspace-path',contextIntent,async intent=>{
+    if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
     // Opus review Q6: if called from blank page (no session), auto-create one first.
     if(!S.session){
       const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
       if(!ws)return;
       try{
-        await _ensureBlankPageSession(ws,intent);
+        await _ensureBlankPageSession(ws,intent,paneNavigationGeneration);
       }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
+      if(!_paneNavigationOwnerIsCurrent(paneNavigationGeneration))return;
       if(!S.session)return;
     }
     const value=await showPromptDialog({

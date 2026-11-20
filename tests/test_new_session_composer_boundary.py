@@ -1005,6 +1005,71 @@ def test_queued_workspace_switch_cannot_replace_newer_sidebar_navigation():
     assert result["workspace"] == "/workspace-c"
 
 
+def _run_queued_workspace_path_supersession_harness(*, supersede: bool) -> dict:
+    """A blank-page workspace-path action queued behind a held switch must not
+    mint a session after the user has picked a sidebar conversation."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = textwrap.dedent(
+        f"""
+        {_wait_for_new_session_navigation_function()}
+        {_blank_page_mint_function("promptWorkspacePath")}
+        function deferred(){{let resolve;const promise=new Promise(r=>{{resolve=r;}});return {{promise,resolve}};}}
+        async function spinUntil(predicate){{for(let i=0;i<200;i++){{if(predicate())return;await Promise.resolve();}}throw new Error('timeout');}}
+        const held=_claimContextTransition('held-profile-switch');
+        const S={{session:null,messages:[],activeProfile:'default',_profileDefaultWorkspace:'/workspace-a',busy:false}};
+        const window={{}};
+        let newSessionCalls=0;let promptCalls=0;
+        async function newSession(){{newSessionCalls+=1;S.session={{session_id:'unwanted',workspace:'/workspace-a'}};}}
+        function showPromptDialog(){{promptCalls+=1;return Promise.resolve(null);}}
+        function showToast(){{}} function setStatus(){{}} function t(k){{return k;}}
+        (async()=>{{
+          const action=promptWorkspacePath();
+          for(let i=0;i<5;i++)await Promise.resolve();
+          let sidebarClaim=null;
+          if({str(supersede).lower()}){{
+            // The user picks a sidebar conversation while the held switch is
+            // still running. Its load is still in flight (S.session has not
+            // moved yet), so only the newer pane claim can protect it from a
+            // queued mint that would install a fresh chat over it.
+            sidebarClaim=_claimPaneNavigation();
+          }}
+          held.release();
+          await action;
+          process.stdout.write(JSON.stringify({{
+            pinnedWorkspaceClaim:_paneNavigationGeneration,
+            sidebarClaim,newSessionCalls,promptCalls,
+            activeSid:S.session&&S.session.session_id,
+          }}));
+        }})().catch(error=>{{console.error(error);process.exit(1);}});
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_queued_workspace_path_cannot_replace_newer_sidebar_navigation():
+    result = _run_queued_workspace_path_supersession_harness(supersede=True)
+    assert result["sidebarClaim"] > 0
+    assert result["newSessionCalls"] == 0, (
+        "a queued blank-page workspace action must not mint a session once a "
+        "newer sidebar navigation owns the pane"
+    )
+    assert result["activeSid"] is None
+    assert result["promptCalls"] == 0
+
+
+def test_workspace_path_still_mints_when_nothing_superseded():
+    result = _run_queued_workspace_path_supersession_harness(supersede=False)
+    assert result["newSessionCalls"] == 1, (
+        "the click-time pane claim must not block the blank-page mint when no "
+        "newer navigation happened"
+    )
+    assert result["activeSid"] == "unwanted"
+
+
 
 def _run_double_workspace_context_harness() -> dict:
     node = shutil.which("node")
