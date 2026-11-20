@@ -195,8 +195,9 @@ def test_login_limiter_keys_scoped_forwarded_client_on_socket_peer(path, _failin
 @pytest.fixture
 def _tts_route(monkeypatch):
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: False)
-    if hasattr(routes._handle_tts, "_tts_limiter"):
-        del routes._handle_tts._tts_limiter
+    # A 60-second window instead of the route's 2 seconds, so a slow host
+    # can't let the second request fall outside the window.
+    routes._handle_tts._tts_limiter = routes._TtsRateLimiter(window_seconds=60.0)
     yield
     if hasattr(routes._handle_tts, "_tts_limiter"):
         del routes._handle_tts._tts_limiter

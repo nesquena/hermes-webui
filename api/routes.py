@@ -8509,7 +8509,8 @@ def _login_client_ip(handler) -> str:
     X-Forwarded-For through and the client could pick its bucket. Every field
     of both headers is checked, as the resolver reads them all: fall back to the
     raw peer when they differ, a field is empty, X-Real-IP is repeated with
-    different values, or a value is not an IP address.
+    different values, a value is not an IP address, or the forwarded client
+    carries an IPv6 zone ID ("fe80::1%eth0").
 
     A request with no X-Forwarded-For keys on the raw peer even when X-Real-IP
     is a valid address: X-Real-IP alone may be the client's own value relayed
