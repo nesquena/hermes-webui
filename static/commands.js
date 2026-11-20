@@ -9,32 +9,35 @@ const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
 const COMMANDS=[
   // noEcho:true = action-only commands that don't produce a chat response.
   // Commands without noEcho get a user message echoed to the chat (#840).
+  // arg convention: '<required>' for required, '[optional]' for optional,
+  // omit when the command takes no argument. normalizeArgHint() enforces
+  // the same convention for registry-derived rows (#7675 follow-up #2).
   {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
   {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear,     noEcho:true},
   {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]', noEcho:true},
   {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact, noEcho:true},
-  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
-  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name',           noEcho:true},
+  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'<model_name>', subArgs:'models', noEcho:true},
+  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'<name>',           noEcho:true},
   {name:'terminal',  desc:t('cmd_terminal'),             fn:cmdTerminal,                        noEcho:true},
   {name:'new',       desc:t('cmd_new'),            fn:cmdNew,       noEcho:true},
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
-  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
-  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
-  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
-  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
+  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'<name>',  noEcho:true},
+  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'[name]', subArgs:'personalities'},
+  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'[query]'},
+  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'<skill-name>', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
-  {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
-  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
-  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
-  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
+  {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|<text>]', subArgs:['status','pause','resume','clear']},
+  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'<message>', noEcho:true},
+  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'<message>', noEcho:true},
+  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'<message>', noEcho:true},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
   {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
   {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
-  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'question', noEcho:true},
-  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
+  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'<question>', noEcho:true},
+  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'<prompt>',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'[show|hide|<effort>]', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
@@ -48,7 +51,11 @@ function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
   const name=parts[0].toLowerCase();
-  const args=parts.slice(1).join(' ').trim();
+  if(name!=='goal')return {name,args:parts.slice(1).join(' ').trim()};
+  // Keep line boundaries: /goal reads inline contract fields line by line.
+  const args=text.slice(1).replace(/^\S*/,'').split('\n')
+    .map(line=>line.split(/\s+/).filter(Boolean).join(' '))
+    .filter(Boolean).join('\n');
   return {name,args};
 }
 
@@ -204,6 +211,24 @@ function executeCommand(text){
 // Plugin-category commands are always dispatchable via the plugin exec
 // transport. #6951.
 
+// Normalize an argument hint to one of three shapes: undefined (no hint),
+// '[<optional>]', or '<required>'. Bare hints are wrapped in angle brackets
+// so every autocomplete row renders with the same convention. Previously
+// builtin rows used bare strings or `[optional]` while registry rows used
+// `<required>`, which read as inconsistent in the same dropdown
+// (#7675 follow-up #2).
+function normalizeArgHint(hint){
+  const text=String(hint||'').trim();
+  if(!text) return undefined;
+  // A hint that is ALREADY shaped is passed through untouched. The test is on
+  // the FIRST character, not a full-match pair: a mixed hint like
+  // `<file> [options]` starts with `<` but does not end with `>`, and the old
+  // `/^<.*>$/` test let it fall through to the wrap below, producing
+  // `<<file> [options]>` (#7683).
+  if(text.startsWith('<')||text.startsWith('[')) return text;
+  return `<${text}>`;
+}
+
 function _isWebuiDispatchableAgentCommand(cmd){
   const name=String(cmd&&cmd.name||'').trim().toLowerCase();
   if(_WEBUI_DISPATCHABLE_AGENT_COMMANDS.has(name))return true;
@@ -240,23 +265,43 @@ function _slashCommandNameIncludes(name,q){
   const n=String(name||'').toLowerCase();
   return _slashCommandSlugVariants(q).some(v=>n.includes(v));
 }
-// With the `_` ≡ `-` alias active, a typed prefix can match BOTH spellings of
-// a command registered twice (e.g. plugin-review and plugin_review). Row zero
-// is what an Enter dispatches, so the literal as-typed match must rank ahead
-// of the alias-only match — registry order alone would let /plugin_review
-// dispatch /plugin-review (or vice versa once registration order flips).
-// Stable sort keeps original order within each rank.
-function _rankLiteralPrefixMatchesFirst(matches,q){
+// Row zero is what the dropdown preselects (showCmdDropdown) and what Enter
+// dispatches (selectCmdDropdownItem), so the assembled list has to be ordered
+// by how well each row matches the typed text, not by the order rows were pushed.
+// Skills are substring/description-matched and cached alphabetically, so typing
+// a whole skill name could leave a neighbour whose DESCRIPTION merely mentions
+// it at row zero: `/next` ran context7-mcp ("Next.js docs") instead of the
+// `next` skill (#9035).
+// Bands, best first: 0 exact name, 1 name prefix, 2 name substring, 3
+// description-only. Inside a band the assembled order is kept: sorting equal
+// strength rows by name moves row zero for a short prefix (`/st` accepted
+// `status` instead of `stop`, `/c` a skill instead of the builtin `clear`)
+// without any gain in match quality. The literal as-typed prefix check on top
+// preserves #8203: with both `_` and `-` spellings registered, row zero must be
+// the spelling the user typed, in either registration order.
+function _slashCommandMatchBand(row,q){
+  const needle=String(q||'').toLowerCase();
+  const name=String(row&&row.name||'').toLowerCase();
+  if(name===needle)return 0;
+  if(_slashCommandMatchesPrefix(name,needle))return 1;
+  if(_slashCommandNameIncludes(name,needle))return 2;
+  return 3;
+}
+function _rankSlashCommandMatches(matches,q){
   const needle=String(q||'').toLowerCase();
   if(!needle||matches.length<2)return matches;
-  // Only a separator spelling (`_` vs `-`) needs literal-first ordering; a plain
-  // prefix keeps master's order (skill rows matched by substring/description).
-  if(_slashCommandSlugVariants(needle).length<2)return matches;
-  return matches.slice().sort((a,b)=>{
-    const an=String(a&&a.name||'').toLowerCase();
-    const bn=String(b&&b.name||'').toLowerCase();
-    return (an.startsWith(needle)?0:1)-(bn.startsWith(needle)?0:1);
-  });
+  return matches
+    .map((row,index)=>({row,index}))
+    .sort((a,b)=>{
+      const band=_slashCommandMatchBand(a.row,needle)-_slashCommandMatchBand(b.row,needle);
+      if(band)return band;
+      const an=String(a.row&&a.row.name||'').toLowerCase();
+      const bn=String(b.row&&b.row.name||'').toLowerCase();
+      const literal=(an.startsWith(needle)?0:1)-(bn.startsWith(needle)?0:1);
+      if(literal)return literal;
+      return a.index-b.index;
+    })
+    .map(entry=>entry.row);
 }
 
 function getMatchingCommands(prefix){
@@ -270,11 +315,15 @@ function getMatchingCommands(prefix){
     matches.push({
       name,
       desc:spec.desc,
-      arg:'name',
+      arg:normalizeArgHint('name'),
       source:'subarg-command',
     });
     seen.add(name);
   }
+  // /pet is dispatched by handlePetSlashCommand, but its argument hint comes
+  // from the agent metadata like any other registry command. We still need a
+  // row so the dropdown surfaces an arg hint when the user types `/pet` and
+  // the metadata cache is populated (#7675 follow-up #1).
   if(_slashCommandMatchesPrefix('pet',q)&&!seen.has('pet')){
     const petMeta=Array.isArray(_agentCommandCache)
       ? _agentCommandCache.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()==='pet')
@@ -282,6 +331,7 @@ function getMatchingCommands(prefix){
     matches.push({
       name:'pet',
       desc:String((petMeta&&petMeta.description)||'Desktop Companion command').trim()||'Desktop Companion command',
+      arg:normalizeArgHint(petMeta&&petMeta.args_hint),
       source:'agent',
     });
     seen.add('pet');
@@ -298,12 +348,19 @@ function getMatchingCommands(prefix){
       name,
       desc:String(cmd&&cmd.description||'').trim()||'Agent command',
       // Surface the registry's argument hint on the autocomplete row (#6951).
-      arg:String(cmd&&cmd.args_hint||'').trim()||undefined,
+      // normalizeArgHint wraps bare hints in angle brackets so the row renders
+      // with the same convention as builtin rows (#7675 follow-up #2).
+      arg:normalizeArgHint(cmd&&cmd.args_hint),
       source:cmd.category==='Plugin'?'plugin':'agent',
     });
     seen.add(name);
   }
-  if(_agentCommandCacheReady){
+  // #7683 [SILENT]: bundle rows are gated on the BUNDLE cache's readiness,
+  // not the agent registry's. A registry failure leaves
+  // _agentCommandCacheReady=false while _bundleCommandCache is already
+  // populated, and the old gate then hid successfully loaded bundles from
+  // autocomplete (Chromium: /release-bundle present on master, gone here).
+  if(_bundleCommandCacheReady){
     for(const bundle of _bundleCommandCache){
       if(!_slashCommandMatchesPrefix(bundle.name,q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
       matches.push(bundle);
@@ -313,7 +370,7 @@ function getMatchingCommands(prefix){
   // A same-slug bundle owns dispatch. Hold plain skills until the independent
   // bundle metadata request settles so a slow bundle response cannot briefly
   // expose a selectable, shadowed skill.
-  if(!_bundleCommandCacheReady)return _rankLiteralPrefixMatchesFirst(matches,q);
+  if(!_bundleCommandCacheReady)return _rankSlashCommandMatches(matches,q);
   for(const skill of _skillCommandCache){
     const name=String(skill&&skill.name||'').toLowerCase();
     const description=String(skill&&skill.desc||'').toLowerCase();
@@ -321,7 +378,7 @@ function getMatchingCommands(prefix){
     matches.push(skill);
     seen.add(name);
   }
-  return _rankLiteralPrefixMatchesFirst(matches,q);
+  return _rankSlashCommandMatches(matches,q);
 }
 
 let _forcedSkillDirectivePending=null;
@@ -497,6 +554,12 @@ function _getSlashSubArgOptions(spec){
 }
 
 let _agentCommandCacheReady=false;
+let _agentCommandCacheAvailable=false;
+// #7683 [CORE]: the composer fires this on every input event, so a failing
+// /api/commands must not be refetched per keystroke. After a failure the next
+// attempt waits this long. A successful load resets the window.
+const _AGENT_COMMAND_METADATA_RETRY_COOLDOWN_MS=5000;
+let _agentCommandMetadataRetryAt=0;
 async function loadAgentCommandMetadata(force=false){
   if(_agentCommandCacheReady&&!force)return _agentCommandCache||[];
   if(_agentCommandCachePromise&&!force)return _agentCommandCachePromise;
@@ -504,49 +567,114 @@ async function loadAgentCommandMetadata(force=false){
     try{
       const data=await api('/api/commands');
       _agentCommandCache=Array.isArray(data&&data.commands)?data.commands:[];
-    }catch(_){
-      _agentCommandCache=[];
-    }finally{
+      _agentCommandCacheAvailable=true;
       _agentCommandCacheReady=true;
+      // A successful load clears the cooldown so the next real need (a force
+      // reload, a profile switch) is not throttled by an earlier failure.
+      _agentCommandMetadataRetryAt=0;
+    }catch(_){
+      // A transient registry failure must NOT be cached as an authoritative
+      // empty registry: leave ready=false so the next call retries, and record
+      // the failure so callers can distinguish an unavailable registry from a
+      // genuine unknown command (#7683).
+      _agentCommandCache=null;
+      _agentCommandCacheAvailable=false;
+      _agentCommandCacheReady=false;
+    }finally{
       _agentCommandCachePromise=null;
     }
-    return _agentCommandCache;
+    return _agentCommandCache||[];
   })();
   return _agentCommandCachePromise;
 }
 
 async function getAgentCommandMetadata(name){
   const needle=String(name||'').trim().toLowerCase();
-  if(!needle) return null;
+  if(!needle) return {available:true,command:null};
   const commands=await loadAgentCommandMetadata();
   // Exact native-name match ranks first: when BOTH `_` and `-` spellings are
   // genuinely registered, the literal spelling the user typed must win
   // regardless of registry order (#8203 round 2 re-gate).
   const byName=commands.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()===needle);
-  if(byName) return byName;
+  if(byName) return {available:_agentCommandCacheAvailable,command:byName};
   // Then the EXPLICIT aliases array (registry order preserved).
   const byAlias=commands.find(cmd=>Array.isArray(cmd&&cmd.aliases)&&cmd.aliases.some(a=>String(a||'').toLowerCase()===needle));
-  if(byAlias) return byAlias;
+  if(byAlias) return {available:_agentCommandCacheAvailable,command:byAlias};
   // Finally the same `_` ≡ `-` slug variants the autocomplete matcher
   // advertises: typing the underscore spelling of a hyphenated command (or
   // vice versa) must resolve the registered native name, so the submit path
   // dispatches it instead of falling through to chat (#8143, #8203 round 2).
   const needles=_slashCommandSlugVariants(needle);
-  return commands.find(cmd=>{
+  const command=commands.find(cmd=>{
     const n=String(cmd&&cmd.name||'').toLowerCase();
     return needles.some(v=>n===v);
   })||null;
+  // Preserve metadata availability separately from the lookup result so the
+  // send path can fail closed on a transient registry failure instead of
+  // leaking a known CLI-only command as plain chat text (#7683). Every
+  // return above carries the same {available, command} envelope: the raw
+  // early returns #8203 shipped read as undefined here and dropped known
+  // CLI-only commands (e.g. /browser) into the generic chat path.
+  return {available:_agentCommandCacheAvailable,command};
 }
 
-function cliOnlyCommandResponse(cmdName, meta){
+// Registry commands whose CLI behaviour is "hand the agent this prompt". Typing
+// the same text without the slash asks the agent directly in the WebUI, so the
+// explainer points at that instead of leaving the user at a dead end (#7683
+// review). Extend the set when another prompt-style command joins the registry.
+const PROMPT_STYLE_CLI_ONLY_COMMANDS=new Set(['plan','review','learn']);
+
+function cliOnlyCommandResponse(cmdName, meta, args){
   const name=String((meta&&meta.name)||cmdName||'').trim();
   const desc=String((meta&&meta.description)||'').trim();
-  const detail=desc?`\n\n${desc}`:'';
+  const detail=desc?`\n\nIn the CLI: ${desc}`:'';
   let extra='';
+  if(PROMPT_STYLE_CLI_ONLY_COMMANDS.has(name)){
+    // A bare command leaves the composer empty (promptStyleComposerText), so
+    // only claim a reworded request when there was one; otherwise show how to
+    // ask for the same thing as a normal message (#7683 UX gate r3).
+    const hasRequest=args===undefined||String(args).trim()!=='';
+    const tpl=PROMPT_STYLE_COMPOSER_TEMPLATES[name];
+    extra=hasRequest||!tpl
+      ?'\n\nYour request is in the composer, reworded as a normal message. Edit it if needed, then send it.'
+      :`\n\nAsk for it as a normal message, for example: "${tpl(PROMPT_STYLE_EXAMPLE_REQUESTS[name])}"`;
+  }
+  if(name==='bg'){
+    extra='\n\nWebUI has the same thing: `/background` runs a prompt in a background session.';
+  }
   if(name==='browser'){
     extra='\n\nBrowser tools in WebUI must be configured server-side with the agent/browser environment. Once configured, ask the model to use browser tools directly; `/browser` itself only works in `hermes chat`.';
   }
-  return `\`/${name}\` is a Hermes CLI-only command and cannot run inside the WebUI.${detail}${extra}`;
+  return `\`/${name}\` is only available in the Hermes CLI.${detail}${extra}`;
+}
+
+// True when a CLI-only explainer tells the user their de-slashed text is
+// already in the composer (#7683 review round 3). send() keeps the composer
+// text in that case so the user presses Send instead of retyping.
+function isPromptStyleCliOnlyCommand(name){
+  return PROMPT_STYLE_CLI_ONLY_COMMANDS.has(String(name||'').trim());
+}
+
+// What send() leaves in the composer for a prompt-style command. Dropping only
+// the slash loses the command's intent: "/plan X" means plan X without
+// executing it, but "X" alone asks the agent to do X (with approvals skipped
+// in YOLO mode). Reword the request so it keeps what the CLI command means.
+// A bare command has no request to keep, so the composer is left empty.
+const PROMPT_STYLE_COMPOSER_TEMPLATES={
+  plan:(req)=>`Without executing anything yet, write an implementation plan for: ${req}`,
+  review:(req)=>`Review the work we just discussed, focusing on: ${req}`,
+  learn:(req)=>`Learn a reusable skill from: ${req}`,
+};
+const PROMPT_STYLE_EXAMPLE_REQUESTS={
+  plan:'your task',
+  review:'what to check',
+  learn:'a folder, URL or notes',
+};
+function promptStyleComposerText(name, text){
+  const req=String(text||'').replace(/^\s*\/\S+\s*/,'');
+  if(!req.trim()) return '';
+  const tpl=PROMPT_STYLE_COMPOSER_TEMPLATES[String(name||'').trim()];
+  return tpl?tpl(req):req;
 }
 
 async function executeAgentCommand(text,_meta){
@@ -598,9 +726,14 @@ async function _runAgentCommandTransport(text,_meta){
 async function resolveBundleCommand(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  if(!S.session&&typeof newSession==='function'){
+    await newSession();
+    if(typeof renderSessionList==='function') await renderSessionList();
+  }
+  const sessionId=String(_meta&&(_meta.sessionId||_meta.session_id)||S&&S.session&&S.session.session_id||'').trim();
   return api('/api/commands/bundles/resolve',{
     method:'POST',
-    body:JSON.stringify({command})
+    body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})
   });
 }
 
@@ -709,8 +842,18 @@ function _compressionAnchorMessageKey(m){
 
 function cmdHelp(){
   const lines=COMMANDS.map(c=>{
-    const usage=c.arg ? (String(c.arg).startsWith('[') ? ` ${c.arg}` : ` <${c.arg}>`) : '';
-    return `  /${c.name}${usage} — ${c.desc}`;
+    // The table already stores bracketed hints ('<required>' / '[optional]')
+    // after #7675 follow-up #2, so render it verbatim with one leading
+    // space -- adding another pair here produced `<<model_name>>` (#7683).
+    const usage=c.arg ? ` ${normalizeArgHint(c.arg)}` : '';
+    // Wrap the command + usage in a code span. This text is pushed as an
+    // assistant message, so it goes through renderMd(), and that pipeline
+    // decodes HTML entities FIRST and then drops anything shaped like an
+    // unknown HTML tag -- so bare `<effort>` / `<model_name>` vanish from the
+    // rendered row (`/reasoning [show|hide|]`, `/model `) and escaping them
+    // cannot help (#7683 review round 3). A code span is stashed before every
+    // markdown pass, so the brackets survive.
+    return `  \`/${c.name}${usage}\` — ${c.desc}`;
   });
   const msg={role:'assistant',content:t('available_commands')+'\n'+lines.join('\n')};
   S.messages.push(msg);
@@ -1384,6 +1527,11 @@ async function cmdUse(args){
   _forcedSkillDirectivePending = pending;
   const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
   try{
+    if(!S.session&&typeof newSession==='function'){
+      await newSession();
+      pending.sessionId=S.session&&S.session.session_id||null;
+      if(typeof renderSessionList==='function') await renderSessionList();
+    }
     const data = await api('/api/skills');
     const skills = data.skills || [];
     const match = skills.find(s => (s.name||'').toLowerCase() === args.toLowerCase());
@@ -1396,9 +1544,13 @@ async function cmdUse(args){
       }
       return;
     }
-    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    // Existing canonical request shape: api(`/api/skills/content?name=${encodeURIComponent(match.name)}`)
+    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}${pending.sessionId?`&session_id=${encodeURIComponent(pending.sessionId)}`:''}`);
     const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
+    if(pending.sessionId&&typeof _refreshSessionSkillUsageForOwner==='function'){
+      void _refreshSessionSkillUsageForOwner(pending.sessionId);
+    }
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
     resolve({name:match.name,directive,content:skillContent});
     if(isCurrentSession()){
@@ -1545,7 +1697,11 @@ async function cmdGoal(args){
     attachLiveStream(activeSid,r.stream_id,[]);
     if(typeof renderSessionList==='function')void renderSessionList();
   }catch(e){
-    const err=String((e&&e.message)||e||'Goal command failed');
+    let err=String((e&&e.message)||e||'Goal command failed');
+    // The /goal gate refusal explains itself in `message`; `error` is only its
+    // code. Other failures keep `error`: a failed kickoff's `message` is still
+    // the goal-set text from the step that succeeded.
+    try{const body=JSON.parse((e&&e.body)||'');if(body&&body.error==='unsupported_gate'&&body.message)err=String(body.message);}catch(_){}
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});
     showToast(err,3000);
@@ -2228,6 +2384,8 @@ async function cmdRetry(){
 async function cmdUndo(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
+  // #8523: a session another client owns is read-only here; undo must not cut its WebUI transcript.
+  if(S.session.chat_read_only_reason){showToast(S.session.chat_read_only_reason);return;}
   const activeSid=S.session.session_id;
   try{
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
@@ -2382,17 +2540,22 @@ function cmdReasoning(args){
     return true;
   }
   if(EFFORTS.includes(arg)){
-    // Persist via /api/reasoning → config.yaml agent.reasoning_effort.
-    // Takes effect on the NEXT session/turn (agent re-reads config at
-    // construction time), matching CLI semantics where `/reasoning high`
-    // also forces an agent re-init.
-    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
+    // Persist the profile default and the active session override together.
+    // The next turn rebuilds the cached agent with this session-owned value.
+    // _saveReasoningEffort POSTs {effort:arg} plus the active session context
+    // to /api/reasoning, in pick order, and applies the server-confirmed chip.
+    _saveReasoningEffort(arg)
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
-        showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
-        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff, st||{});
+        const shown=typeof _formatReasoningEffortLabel==='function'?_formatReasoningEffortLabel(eff):eff;
+        showToast(BRAIN+' Reasoning effort set to '+shown+' for this chat and new chats (applies to next turn)');
       })
       .catch(function(e){
+        // A pick during a profile switch is declined by design, not a failure.
+        if(e && e.code==='profile_switch_in_progress'){
+          showToast(BRAIN+' Profile switch in progress. Try /reasoning again in a moment.');
+          return;
+        }
         showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));
       });
     return true;
@@ -2416,10 +2579,17 @@ function cmdVoice(){
 
 // ── YOLO mode toggle ──
 // Session-scoped: skips all approval prompts for the current session.
-// Toggles on/off; state is not persisted across page reloads.
+// /yolo toggles on/off from a fresh server read; the server keeps the flag in
+// memory only. The composer pill does NOT toggle: see disableYoloFromPill().
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
+  // One /yolo per session at a time: an overlapping call would read the same
+  // pre-toggle state (or the first's half-applied one) and post a duplicate or
+  // reverse. Another session's /yolo is independent and still runs.
+  if(!S._yoloCommandsInFlight)S._yoloCommandsInFlight=new Set();
+  if(S._yoloCommandsInFlight.has(sid))return;
+  S._yoloCommandsInFlight.add(sid);
   const generation=_loadSessionGeneration;
   const viewIsCurrent=()=>!!(
     S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
@@ -2429,6 +2599,9 @@ async function cmdYolo(){
     // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
     if(!viewIsCurrent())return;
+    // Same boolean rule as the pill's own read: a malformed answer is never
+    // inverted into a toggle (it would post enabled:true for {} or null).
+    if(!status||typeof status.yolo_enabled!=='boolean')throw new Error('unexpected answer from the server');
     const enable=!status.yolo_enabled;
     // A visible approval must belong to this exact session load before any
     // command handler may POST through it. Otherwise fail closed.
@@ -2449,8 +2622,7 @@ async function cmdYolo(){
     });
     if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
     const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
-    _yoloEnabled=settled;
-    _updateYoloPill();
+    _applyYoloState(sid,settled,{gen:generation});
     showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
   }catch(e){
     if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
@@ -2459,10 +2631,45 @@ async function cmdYolo(){
       try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
     if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
-      _yoloEnabled=errorPayload.yolo_enabled;
-      _updateYoloPill();
+      _applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation});
     }
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }finally{
+    S._yoloCommandsInFlight.delete(sid);
+  }
+}
+
+// #9101: the composer pill is shown only while this tab's YOLO view says the
+// open session is ON, and it is labelled "click to disable". Its click carries
+// exactly that intent: disable YOLO for the session the pill was painted for
+// (data-yolo-session). Unlike /yolo it never re-reads the server to compute a
+// toggle, so a stale pill (another tab, a server restart, a late read) can
+// never turn YOLO on, and it never goes through the approval card, whose YOLO
+// action approves the displayed command.
+async function disableYoloFromPill(){
+  const pill=$('yoloPill');
+  const sid=pill&&pill.getAttribute('data-yolo-session');
+  if(!sid){_updateYoloPill();return;}
+  const generation=_loadSessionGeneration;
+  try{
+    const result=await api('/api/session/yolo',{
+      method:'POST',
+      body:JSON.stringify({session_id:sid,enabled:false}),
+    });
+    const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:false;
+    // Dropped when the pill's session is no longer the open one: re-render so
+    // a pill painted for it disappears.
+    if(!_applyYoloState(sid,settled,{gen:generation}))_updateYoloPill();
+    showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
+  }catch(e){
+    let errorPayload=null;
+    if(e&&typeof e.body==='string'){
+      try{errorPayload=JSON.parse(e.body);}catch(_){}
+    }
+    const applied=!!(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'
+      &&_applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation}));
+    if(!applied)_updateYoloPill();
+    showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||(e&&e.message)||''));
   }
 }
 
@@ -2708,14 +2915,28 @@ function refreshSlashCommandDropdown(){
 }
 function ensureSkillCommandsLoadedForAutocomplete(){
   if(!_skillCommandCacheReady&&!_skillCommandLoadPromise){
-    loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+    loadSkillCommands().then(()=>{
+      if(_skillCommandCacheReady)refreshSlashCommandDropdown();
+    });
   }
   if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise){
-    loadBundleCommands().then(()=>{refreshSlashCommandDropdown();});
+    loadBundleCommands().then(()=>{
+      if(_bundleCommandCacheReady)refreshSlashCommandDropdown();
+    });
   }
-  // Also preload agent/plugin command metadata for autocomplete
+  // Also preload agent/plugin command metadata for autocomplete.
+  // #7683 [CORE]: refresh ONLY when the metadata actually loaded. A failed
+  // fetch used to refresh anyway, which reopened a dropdown the user had
+  // already dismissed and swallowed the Enter that /new's handler was waiting
+  // for. The call is also rate-limited by a cooldown below, because this runs
+  // on every composer input event — an endpoint that is down would otherwise be
+  // hit once per keystroke (3 fetches vs master's 1 in the reviewer's probe).
   if(!_agentCommandCacheReady&&!_agentCommandCachePromise){
-    loadAgentCommandMetadata().then(()=>{refreshSlashCommandDropdown();});
+    if(_agentCommandMetadataRetryAt>Date.now())return;
+    _agentCommandMetadataRetryAt=Date.now()+_AGENT_COMMAND_METADATA_RETRY_COOLDOWN_MS;
+    loadAgentCommandMetadata().then(()=>{
+      if(_agentCommandCacheAvailable)refreshSlashCommandDropdown();
+    });
   }
 }
 

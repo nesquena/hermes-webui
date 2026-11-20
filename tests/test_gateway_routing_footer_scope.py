@@ -20,8 +20,10 @@ a turn where interim and final both carry ``_gatewayRouting`` must keep
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -485,6 +487,7 @@ def _run_footer_scenario() -> dict:
     node = shutil.which("node")
     if not node:
         pytest.skip("node executable is required for JavaScript behavior checks")
+    node = str(node)
     script = (
         _SCRIPT.replace("/*RAW_TURN_BOUNDARY*/", _function_source("_rawTurnBoundaryByRawIdx"))
         .replace("/*INSERT_SEGMENT_BLOCK*/", _function_source("_insertSegmentBlock"))
@@ -494,13 +497,28 @@ def _run_footer_scenario() -> dict:
         )
         .replace("/*RENDER_MESSAGES*/", _function_source("renderMessages"))
     )
-    proc = subprocess.run(
-        [node, "-e", script],
-        cwd=str(REPO),
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    # The harness embeds renderMessages(), which is ~110 KB of source. Passing
+    # it as `node -e <script>` puts the whole script in ONE argv entry, and
+    # execve caps a single argument at MAX_ARG_STRLEN (128 KB on Linux). So a
+    # routine change to renderMessages() tips this file over that edge and the
+    # test dies with OSError(E2BIG) -- "Argument list too long" -- instead of
+    # reporting a test failure. Write the script to a file and run
+    # `node <file>` instead: no argv budget, and exactly the same code runs.
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".js", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write(script)
+        script_path = fh.name
+    try:
+        proc = subprocess.run(
+            [node, script_path],
+            cwd=str(REPO),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        os.unlink(script_path)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
     return json.loads(proc.stdout)
 
