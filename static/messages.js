@@ -8070,23 +8070,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // previousMessageCount - residentOrigin — the same quantity #7925's
     // widening re-fetch uses (`message_count - _oldestIdx`) — and the width
     // keeps all of it. Authority means: an integer origin strictly inside
-    // (0, previousMessageCount), safe counts that did not shrink, the same
+    // (0, previousMessageCount), safe counts that did not shrink, and the same
     // transcript_generation on both sides (rotation/compaction renumbers the
-    // raw space, so an old origin must not be carried across it), and a
-    // pre-settle _messages_offset that agrees with the origin when present.
-    // Anything less trustworthy keeps the resident cardinality, which is all
-    // an unverifiable coordinate may claim.
+    // raw space, so an old origin must not be carried across it).
+    // `_oldestIdx` is the coordinate authority. The session's
+    // `_messages_offset` snapshots the last SAVED page, not the live pager
+    // position: Load earlier lowers `_oldestIdx` without rewriting it, so
+    // requiring the two to agree rejected a legitimately widened window and
+    // shrank the width back to the resident cardinality — evicting ordinary
+    // rows that never left the array. A stale offset may only ever WIDEN the
+    // window, never veto it, so it is not consulted here at all. Anything
+    // less trustworthy keeps the resident cardinality, which is all an
+    // unverifiable coordinate may claim.
     let trustedRawSpan=0;
     const preGeneration=preSettleSession?preSettleSession.transcript_generation:null;
-    const preSettleOffsetRaw=preSettleSession?preSettleSession._messages_offset:null;
     if(
       typeof preSettleOldestIdx==='number'&&Number.isSafeInteger(preSettleOldestIdx)&&
       preSettleOldestIdx>0&&preSettleOldestIdx<previousMessageCount&&
       Number.isSafeInteger(previousMessageCount)&&Number.isSafeInteger(currentMessageCount)&&
       currentMessageCount>=previousMessageCount&&
       Number.isSafeInteger(preGeneration)&&Number.isSafeInteger(dSession.transcript_generation)&&
-      preGeneration===dSession.transcript_generation&&
-      (preSettleOffsetRaw==null||(Number.isFinite(Number(preSettleOffsetRaw))&&Number(preSettleOffsetRaw)===preSettleOldestIdx))
+      preGeneration===dSession.transcript_generation
     ){
       trustedRawSpan=previousMessageCount-preSettleOldestIdx;
     }

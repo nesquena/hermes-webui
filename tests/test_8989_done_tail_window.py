@@ -561,6 +561,141 @@ def test_generation_change_between_settlements_keeps_the_guard() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# #8994 coordinate authority: a stale session offset must not veto _oldestIdx.
+# --------------------------------------------------------------------------- #
+def _settle_after_widened_page(
+    *,
+    full_total: int = 200,
+    stale_offset: int = 147,
+    loaded_oldest_idx: int = 117,
+    recovery_raw_indices: tuple[int, ...] = (180, 181),
+) -> dict:
+    """One settle after Load earlier widened the window, session offset stale.
+
+    The maintainer's replay: a bounded session was SAVED at offset 147, then a
+    real older-page load lowered `_oldestIdx` to 117. `_loadOlderMessages()`
+    only moves `_oldestIdx`; it never rewrites the saved
+    `session._messages_offset`, so the two disagree for the rest of the tab's
+    life. Meanwhile the supported legacy recovery rows inside the widened span
+    are dropped by the consume filter, so the resident array is shorter than
+    the raw span its origin points into.
+
+    Requiring the stale offset to agree with `_oldestIdx` therefore zeroed the
+    trusted span and shrank the width back to the filtered resident
+    cardinality, evicting ordinary rows at the front of the window that the
+    reader still had.
+    """
+    full = _transcript(full_total)
+    for idx in recovery_raw_indices:
+        row = dict(full[idx])
+        row["content"] = _LEGACY_RECOVERY_TEXT
+        full[idx] = row
+
+    resident = [
+        row for idx, row in enumerate(full[loaded_oldest_idx:], start=loaded_oldest_idx)
+        if idx not in recovery_raw_indices
+    ]
+    turn = _new_turn()
+    settled = full + turn
+
+    resident_session = {
+        "session_id": "A",
+        "title": "long session",
+        "message_count": full_total,
+        "transcript_generation": 5,
+        "tool_calls": [],
+        # Stale by construction: this is the page the session was saved with,
+        # not the pager's current position.
+        "_messages_offset": stale_offset,
+    }
+    done_session = {
+        "session_id": "A",
+        "title": "long session",
+        "messages": settled,
+        "message_count": len(settled),
+        "transcript_generation": 5,
+        "tool_calls": [],
+    }
+
+    case = "\n".join(
+        [
+            *_RUNTIME_STUBS,
+            "const olderResponse=null;",
+            "const residentSession=" + json.dumps(resident_session) + ";",
+            "const residentMessages=" + json.dumps(resident) + ";",
+            "const S={session:residentSession,messages:residentMessages,activeStreamId:'stream-one'};",
+            "const d={session:" + json.dumps(done_session) + ",stream_id:'stream-one'};",
+            "const activeSid='A',completedSid='A';",
+            "const _settledStreamId='stream-one';",
+            "const _pendingTitleUpdates=new Map();",
+            "const _pendingTitleExpectedCurrent=new Map();",
+            "function applySessionTitleUpdate(){}",
+            "let _oldestIdx=" + json.dumps(loaded_oldest_idx) + ";",
+            "let _messagesTruncated=true;",
+            "const _streamDisplay=()=>" + json.dumps(STREAMED_ANSWER) + ";",
+            _done_listener_statements(),
+            "console.log(JSON.stringify({",
+            "  count:S.messages.length,",
+            "  oldestIdx:_oldestIdx,",
+            "  messagesTruncated:_messagesTruncated,",
+            "  ts:S.messages.map(m=>String(m._ts)),",
+            "  answerInTranscript:S.messages.some(m=>m.role==='assistant'&&m.content==="
+            + json.dumps(STREAMED_ANSWER)
+            + "),",
+            "}));",
+        ]
+    )
+    return {"resident": resident, "run": _run_node(case)}
+
+
+def test_widened_page_with_a_stale_offset_keeps_every_resident_row() -> None:
+    """#8994 — `_oldestIdx` is the coordinate authority, not the saved offset.
+
+    After Load earlier widens a bounded window, the saved `_messages_offset`
+    can never lower again while `_oldestIdx` has. If the settle demands they
+    agree it discards the widened span, rebuilds the width from the filtered
+    resident cardinality, and the front of the window falls out of
+    `S.messages` even though the reader still had it.
+    """
+    harness = _settle_after_widened_page()
+    run = harness["run"]
+    resident_ts = [str(row["_ts"]) for row in harness["resident"]]
+    missing = [ts for ts in resident_ts if ts not in set(run["ts"])]
+
+    assert not missing, (
+        "settle evicted resident rows the reader still held — a stale "
+        f"_messages_offset must not veto the _oldestIdx span: {missing}"
+    )
+    # Coordinates stay honest: the kept prefix starts exactly at the loaded
+    # origin, and the window is still bounded (never the full transcript).
+    assert run["oldestIdx"] == 117, run
+    assert run["count"] < 200 + 4, run
+    assert run["messagesTruncated"] is True, run
+    assert run["answerInTranscript"] is True, run
+
+
+def test_stale_offset_control_without_a_widened_page_is_unchanged() -> None:
+    """Control: no widening, offset still equal — the window is identical.
+
+    Proves the authority change only affects the disagreement case; when the
+    saved offset and `_oldestIdx` still agree the trusted span resolves to the
+    same value as before.
+    """
+    harness = _settle_after_widened_page(
+        stale_offset=147, loaded_oldest_idx=147, recovery_raw_indices=(),
+    )
+    run = harness["run"]
+    resident_ts = [str(row["_ts"]) for row in harness["resident"]]
+    missing = [ts for ts in resident_ts if ts not in set(run["ts"])]
+
+    assert not missing, missing
+    assert run["oldestIdx"] == 147, run
+    assert run["count"] == 200 - 147 + 4, run
+    assert run["messagesTruncated"] is True, run
+    assert run["answerInTranscript"] is True, run
+
+
+# --------------------------------------------------------------------------- #
 # Adjacent faces: the existing settle behaviours must be untouched.
 # --------------------------------------------------------------------------- #
 def _bare_listener(resident: list[dict], done_session: dict, *, oldest_idx: int, truncated: bool, answer: str) -> dict:
