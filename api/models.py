@@ -11131,7 +11131,12 @@ def _all_profiles_cli_cache_key(contexts, context_cache_key, source_filter, incl
     # cache and re-run every profile's heavy projection.
     _streaming_marker = _cli_sessions_streaming_freeze_marker()
     if _streaming_marker is not None:
-        context_cache_key = ('streaming-frozen', _streaming_marker)
+        # Freeze the volatile per-profile state.db component, but NOT the roster
+        # completeness marker: "I saw every profile" vs "I only saw some" is not
+        # a streaming-volatile fact, and folding it away made a partial roster
+        # indistinguishable from a complete one while any turn streamed (#8694).
+        _roster_incomplete = ALL_PROFILES_ROSTER_INCOMPLETE in (context_cache_key or ())
+        context_cache_key = ('streaming-frozen', _streaming_marker, _roster_incomplete)
     return (
         'all_profiles',
         source_filter or '',
