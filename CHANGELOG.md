@@ -41,6 +41,8 @@
 
 ### Fixed
 
+- **The transcript's Today and Yesterday day separators follow the interface language (#8627).** They were always in English. They now use the same words the sidebar already shows for those days, so every language gets them with no new strings; English is unchanged. Thanks @solarmaster961.
+
 - **Newer Agents: a cached conversation's next turn no longer fails with "persistence handle used after close" (#9150, closes #9149).** WebUI reuses a cached agent between turns. On newer Agent builds it read the agent's live storage handle as closed and closed it, so every turn after the first failed. WebUI now recognises the newer handles, keeps a live handle while the agent still uses it, and still releases unused per-request handles. When it does replace a handle that really is closed, it calls the compressor's rebind hook the way the Agent does, and a hook that fails no longer stops the turn. Older Agents behave as before. Maintainer fold co-authored with @Mason10198.
 
 - **The YOLO pill stays visible while YOLO is on (#9193, refs #9101).** With the composer setting that hides YOLO turned on, the pill now shrinks to its ⚡ icon instead of disappearing. On phones it shows ⚡ only, so the settings button keeps its room. `POST /api/session/yolo` now requires an explicit `enabled` of true or false (400 otherwise). Its answers also carry a revision, so a client can make a toggle conditional (409 `yolo_changed`).
