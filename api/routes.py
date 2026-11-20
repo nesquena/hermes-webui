@@ -8543,7 +8543,11 @@ def _login_client_ip(handler) -> str:
                     _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip=False)
                 )
                 real_ips = {ipaddress.ip_address(v.strip()) for v in _fields("X-Real-IP")}
-                if real_ips <= {client}:
+                # An IPv6 zone ID ("fe80::1%eth0") is free-form header text
+                # that ipaddress keeps verbatim (control characters included)
+                # and that means nothing off-host. Treat a scoped forwarded
+                # client as unusable, as the request log does. IPv4 has none.
+                if getattr(client, "scope_id", None) is None and real_ips <= {client}:
                     return str(client)
         except ValueError:
             pass
