@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pytest
 
-from api import idempotency as idem
 from api.idempotency import (
     IdempotencyRecord,
     IdempotencyStore,
