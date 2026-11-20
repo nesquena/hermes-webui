@@ -13777,21 +13777,21 @@ _SIDEBAR_RECONCILE_MEMO: contextvars.ContextVar[dict | None] = contextvars.Conte
 # byte of the message store that the merge reads), so all of it travels in the
 # key:
 #
-#   key   ``(session_id, sidecar stat signature, state.db message count,
-#           store generation)``
+#   key   ``(session_id, sidecar stat signature, store generation)``
 #   value ``(visible, hidden_excluded)``
 #
 # A sidecar write -- atomic rename or in-place -- changes the stat signature
-# (:func:`_sidecar_stat_signature`), and an append to state.db changes the
-# count. The count alone is NOT a revision of the transcript, though: the
-# native row-addressed writer (``set_message_api_content``, reached from the
-# turn prologue) rewrites a row's payload without changing either the total or
-# the active count, and that payload is part of the merge identity. So the key
-# also carries :func:`_sidebar_reconcile_store_generation` -- the stat signature
-# of the resolved ``state.db`` and of its ``-wal``/``-journal`` companions. Any
-# commit to the store goes through one of those files, so a same-count write
-# invalidates the entry exactly like an append does, and switching the state
-# dir or the profile cannot alias one store's answer onto another's.
+# (:func:`_sidecar_stat_signature`). The state.db message count is NOT a
+# revision of the transcript: the native row-addressed writer
+# (``set_message_api_content``, reached from the turn prologue) rewrites a
+# row's payload without changing either the total or the active count, and
+# that payload is part of the merge identity. So the key carries
+# :func:`_sidebar_reconcile_store_generation` instead of a count -- the stat
+# signature of the database file the reader opens (``state.db`` with any
+# symlink resolved) and of that file's ``-wal``/``-journal`` companions. Any
+# commit to the store goes through one of those files, so an append and a
+# same-count write both invalidate the entry, and switching the state dir or
+# the profile cannot alias one store's answer onto another's.
 #
 # The generation is store-wide, so unrelated writes to the same store invalidate
 # it too (a false miss, never a false hit): correctness first, and a settled
@@ -13859,6 +13859,16 @@ def _sidebar_reconcile_store_generation(*, profile=None):
     except Exception:
         return None
     if db_path is None:
+        return None
+    # Fingerprint the file the reader actually opens. ``open_state_db_readonly``
+    # connects to ``db_path.resolve()``, and SQLite keeps ``-wal``/``-journal``
+    # beside that resolved file, not beside a symlink pointing at it. Deriving
+    # the companions from an alias name would stat files no commit ever touches,
+    # so a same-count commit to the target's WAL would look like no commit at
+    # all. A path that cannot be resolved leaves the generation unproved.
+    try:
+        db_path = Path(db_path).resolve()
+    except Exception:
         return None
     main = _state_file_signature(db_path)
     if main is None or main == _UNREADABLE_STATE_FILE:
