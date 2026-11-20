@@ -74,6 +74,44 @@ class PositionalOnlyPersistenceHook(_Recorder):
         self.calls.append((session_db, session_id, {"persistence": persistence}))
 
 
+class PositionalOnlyPersistenceParamHook(_Recorder):
+    def bind_session_state(self, session_db, session_id, persistence=None, /):
+        self.calls.append((session_db, session_id, {"positional_persistence": persistence}))
+
+
+class _Uninspectable:
+    __signature__ = "not a signature"  # inspect.signature() raises TypeError
+
+    def __call__(self, *args, **kwargs):
+        pass
+
+
+def _keyword_contract_cases():
+    def positional_only(persistence=None, /):
+        pass
+
+    def positional_or_keyword(persistence=None):
+        pass
+
+    def keyword_only(*, persistence=None):
+        pass
+
+    def var_keyword(**kwargs):
+        pass
+
+    def other_name(session_db=None):
+        pass
+
+    return [
+        (positional_only, False),
+        (positional_or_keyword, True),
+        (keyword_only, True),
+        (var_keyword, True),
+        (other_name, False),
+        (_Uninspectable(), False),
+    ]
+
+
 class RaisingHook(_Recorder):
     def __init__(self):
         super().__init__()
@@ -97,17 +135,39 @@ def _closed_legacy():
     return handle
 
 
-@pytest.mark.parametrize("hook_type", [PositionalOnlyHook, PositionalOnlyPersistenceHook])
-def test_positional_only_hook_receives_new_handle(hook_type):
+@pytest.mark.parametrize("hook_type, forwarded", [
+    (PositionalOnlyHook, lambda fresh: {}),
+    (PositionalOnlyPersistenceHook, lambda fresh: {"persistence": fresh._store}),
+    # A positional-only ``persistence`` cannot take the keyword (#9150 follow-up).
+    (PositionalOnlyPersistenceParamHook, lambda fresh: {"positional_persistence": None}),
+])
+def test_positional_only_hook_receives_new_handle(hook_type, forwarded):
     hook = hook_type()
-    old, fresh = _closed_legacy(), LegacyHandle()
-    agent = _agent(old, hook)
+    old, fresh = ShimHandle(), ShimHandle()
+    old.close()
+    agent = _agent(old, hook, persistence=None)
 
     assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
 
     assert agent._session_db is fresh
+    assert agent.persistence is fresh._store
     assert fresh.close_calls == 0
-    assert [call[:2] for call in hook.calls] == [(fresh, SESSION_ID)]
+    assert hook.calls == [(fresh, SESSION_ID, forwarded(fresh))]
+
+
+@pytest.mark.parametrize("func, expected", _keyword_contract_cases())
+def test_supports_kwarg_matches_agent_keyword_contract(func, expected):
+    assert streaming._supports_kwarg(func, "persistence") is expected
+
+
+@pytest.mark.parametrize("func, expected", _keyword_contract_cases())
+def test_local_keyword_helper_matches_agent_helper(func, expected):
+    assert streaming._local_accepts_keyword_argument(func, "persistence") is expected
+    try:
+        from agent.context_compressor_summary import accepts_keyword_argument
+    except Exception:
+        pytest.skip("selected Agent tree has no accepts_keyword_argument helper")
+    assert accepts_keyword_argument(func, "persistence") is expected
 
 
 def test_raising_hook_does_not_abort_adoption(caplog):

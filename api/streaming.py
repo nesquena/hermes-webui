@@ -743,16 +743,47 @@ def _wrap_streaming_cronjob_tool_entries() -> bool:
     return installed
 
 
-def _supports_kwarg(func, kwarg_name: str) -> bool:
-    """Return True if callable `func` accepts `kwarg_name` (explicitly or via **kwargs)."""
+def _local_accepts_keyword_argument(callable_obj, name: str) -> bool:
+    """Copy of the Agent's ``accepts_keyword_argument`` for Agents without it."""
     try:
-        sig = inspect.signature(func)
-        for param in sig.parameters.values():
-            if param.kind == param.VAR_KEYWORD or param.name == kwarg_name:
-                return True
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
         return False
-    except Exception:
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
         return True
+    parameter = parameters.get(name)
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+_accepts_keyword_argument = None  # resolved on first use: Agent helper, else the local copy
+
+
+def _supports_kwarg(func, kwarg_name: str) -> bool:
+    """Return True if callable `func` accepts `kwarg_name` as a keyword argument.
+
+    Same answer as the Agent's ``agent.context_compressor_summary.
+    accepts_keyword_argument`` (used when importable): a positional-or-keyword
+    or keyword-only parameter of that name, or ``**kwargs``. A positional-only
+    parameter of that name does not count, and a callable whose signature
+    cannot be inspected is not offered the optional keyword.
+    """
+    global _accepts_keyword_argument
+    helper = _accepts_keyword_argument
+    if helper is None:
+        try:
+            from agent.context_compressor_summary import accepts_keyword_argument as helper
+        except Exception:
+            helper = None
+        if not inspect.isfunction(helper):  # absent, or a test stub module
+            helper = _local_accepts_keyword_argument
+        _accepts_keyword_argument = helper
+    try:
+        return bool(helper(func, kwarg_name))
+    except Exception:
+        return False
 
 
 
