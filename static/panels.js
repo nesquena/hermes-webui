@@ -7604,9 +7604,9 @@ async function switchToProfile(name) {
     if (typeof applyBotName === 'function') applyBotName();
     if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
     const _switchedChipLabel = $('profileChipLabel');
-    if (_switchedChipLabel) _switchedChipLabel.textContent = profileChipDisplayLabel();
+    if (_switchedChipLabel && typeof profileChipDisplayLabel === 'function') _switchedChipLabel.textContent = profileChipDisplayLabel();
     const _switchedTitleLabel = $('titlebarProfileLabel');
-    if (_switchedTitleLabel) _switchedTitleLabel.textContent = profileChipDisplayLabel();
+    if (_switchedTitleLabel && typeof profileChipDisplayLabel === 'function') _switchedTitleLabel.textContent = profileChipDisplayLabel();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7818,15 +7818,15 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && !_switchCommitted) {
       S.activeProfileDisplayName = _prevProfileDisplayName;
       S.activeProfileIsDefault = _prevProfileIsDefault;
-      if (_chipLabel) _chipLabel.textContent = profileChipDisplayLabel();
-      if (_titlebarLabel) _titlebarLabel.textContent = profileChipDisplayLabel();
+      if (_chipLabel && typeof profileChipDisplayLabel === 'function') _chipLabel.textContent = profileChipDisplayLabel();
+      if (_titlebarLabel && typeof profileChipDisplayLabel === 'function') _titlebarLabel.textContent = profileChipDisplayLabel();
       if (typeof applyBotName === 'function') applyBotName();
     } else if (_switchGen === _profileSwitchGeneration && _switchCommitted) {
       // The switch already committed server-side; an ancillary error after it
       // must not revert the labels to the previous profile — keep the
       // committed target's resolved label.
-      if (_chipLabel) _chipLabel.textContent = profileChipDisplayLabel();
-      if (_titlebarLabel) _titlebarLabel.textContent = profileChipDisplayLabel();
+      if (_chipLabel && typeof profileChipDisplayLabel === 'function') _chipLabel.textContent = profileChipDisplayLabel();
+      if (_titlebarLabel && typeof profileChipDisplayLabel === 'function') _titlebarLabel.textContent = profileChipDisplayLabel();
       // …but the ancillary failure (e.g. /api/session/new inside newSession())
       // ALSO stranded the up-front skeletons: the restore below is gated on
       // !_switchCommitted, so a committed switch's late error used to leave the
