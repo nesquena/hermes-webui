@@ -3291,6 +3291,43 @@ def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
     return out
 
 
+# Content-bearing argument keys the legacy producer keeps at its longer cap.
+# Mirrors ``api.streaming._TOOL_ARG_CONTENT_KEYS`` / ``_TOOL_ARG_CONTENT_CAP``:
+# a completion's ``args`` snapshot preserves these at 4000 chars while
+# ``_truncate_journal_tool_args`` shortens every value to 120 for display.
+# Matching must use the producer-shaped snapshot, not the display copy, or a
+# command longer than 120 characters can never match even its only card
+# (#7167 review 2026-11-19).
+_JOURNAL_MATCH_ARG_CONTENT_KEYS = frozenset({
+    'command', 'cmd', 'script', 'code', 'patch', 'diff',
+    'old_string', 'new_string', 'content', 'path', 'file_path',
+})
+_JOURNAL_MATCH_ARG_CONTENT_CAP = 4000
+
+
+def _journal_tool_match_args_snapshot(args) -> dict:
+    """Return the producer-shaped args snapshot kept for ownership matching.
+
+    ``_truncate_journal_tool_args`` is the DISPLAY copy (120 chars/value).
+    An id-less legacy completion carries the producer's own snapshot, whose
+    content keys stay at 4000 chars, so equality against the display copy is
+    impossible for long commands. This keeps that matching snapshot on the
+    card separately from the shortened display copy.
+    """
+    if not isinstance(args, dict):
+        return {}
+    out = {}
+    for key, value in list(args.items())[:4]:
+        text = str(value)
+        cap = (
+            _JOURNAL_MATCH_ARG_CONTENT_CAP
+            if str(key).lower() in _JOURNAL_MATCH_ARG_CONTENT_KEYS
+            else 120
+        )
+        out[str(key)] = text[:cap] + ('...' if len(text) > cap else '')
+    return out
+
+
 def _journal_tool_args_equal(left, right) -> bool:
     """True when two journaled tool-argument snapshots name the same call.
 
@@ -5149,7 +5186,19 @@ def _append_journaled_partial_output(
                 # result-less forever, because the completion handler only
                 # walked ``recovered_tool_calls``.
                 if isinstance(session.tool_calls, list) and 0 <= tool_match_idx < len(session.tool_calls):
-                    journaled_tool_cards.append(session.tool_calls[tool_match_idx])
+                    _reused_card = session.tool_calls[tool_match_idx]
+                    # A card persisted before this round carries only the
+                    # shortened display copy, which cannot match a long-command
+                    # completion. Adopt the start event's producer-shaped
+                    # snapshot so the replay can complete it; an existing
+                    # snapshot is never overwritten.
+                    if isinstance(_reused_card, dict) and '_journal_match_args' not in _reused_card:
+                        _match_args = _journal_tool_match_args_snapshot(
+                            payload.get('args') or {}
+                        )
+                        if _match_args:
+                            _reused_card['_journal_match_args'] = _match_args
+                    journaled_tool_cards.append(_reused_card)
                 continue
             if anchor_idx is None:
                 anchor_idx = ensure_assistant_anchor(created_at)
@@ -5164,6 +5213,9 @@ def _append_journaled_partial_output(
                 '_journal_synthetic_tid': not bool(tool_id),
                 'assistant_msg_idx': anchor_idx,
                 'args': _truncate_journal_tool_args(payload.get('args') or {}),
+                '_journal_match_args': _journal_tool_match_args_snapshot(
+                    payload.get('args') or {}
+                ),
                 'done': False,
                 '_recovered_from_run_journal': True,
                 '_recovered_stream_id': stream_id,
@@ -5234,10 +5286,27 @@ def _append_journaled_partial_output(
                     for idx, call in _candidates:
                         if name and call.get('name') != name:
                             continue
-                        if _journal_tool_args_equal(call.get('args'), completion_args):
+                        # Compare against the producer-shaped snapshot kept
+                        # when the card was created/reused. Falling back to
+                        # ``args`` covers cards persisted before that snapshot
+                        # existed; those still hold only the 120-char display
+                        # copy, which is all the durability available there.
+                        card_match_args = call.get('_journal_match_args')
+                        if not isinstance(card_match_args, dict) or not card_match_args:
+                            card_match_args = call.get('args')
+                        if _journal_tool_args_equal(card_match_args, completion_args):
                             args_scoped.append((idx, call))
                 if len(args_scoped) == 1:
                     matched_idx, matched_tool = args_scoped[0]
+                elif len(args_scoped) > 1:
+                    # Identical arguments on two or more starts: every one of
+                    # them is an equally valid target for this completion, and
+                    # arguments alone cannot disambiguate. The legacy producer
+                    # settles its live cards NEWEST-FIRST, so consume the
+                    # newest unconsumed card. Rejecting every match would drop
+                    # all results for a repeated command such as two ``pwd``
+                    # calls (#7167 review 2026-11-19).
+                    matched_idx, matched_tool = args_scoped[-1]
                 elif not (isinstance(completion_args, dict) and completion_args):
                     for idx, call in _candidates:
                         if not name or call.get('name') == name:
