@@ -594,3 +594,152 @@ def test_the_busy_pill_collapses_to_an_icon_when_the_left_group_overflows():
         "style.css must carry the .cf-action-icon rule that folds the "
         "label/button geometry into the icon footprint"
     )
+
+
+# ── 5. The 10-18 re-gate: six consecutive busy fits must not oscillate ──
+#
+# The fixture above ships hand-picked CSS rules; the 10-18 review found that
+# this hid the bug, because the selected rules omitted
+# `.send-btn.cf-action-icon` and the label-collapse rule that the fit pass
+# itself relies on. These two tests load the COMPLETE production stylesheet
+# and run the real `_fitComposerFooter()` six times back-to-back on a busy
+# button, without resetting any state between passes.
+
+_COMPLETE_CSS_FIXTURE = (
+    "<!doctype html><html><head><meta charset='utf-8'><style>"
+    + _REPO_STYLE_CSS
+    + "</style></head>"
+    "<body style='margin:0;padding:0;background:#0c0c1a;'>"
+    "<div class='composer-footer' id='composerFooter' style='width:__FOOTER_WIDTH__px;'>"
+    "  <div class='composer-left' id='composerLeft'>"
+    "    <button class='icon-btn' id='btnSavedPrompts' type='button'"
+    "      data-tooltip='Saved prompts' aria-label='Saved prompts'"
+    "      style='flex:0 0 44px;width:44px;'>S</button>"
+    "    <button class='composer-ws-chip' type='button'"
+    "      style='flex:0 0 __BUDGET__px;width:__BUDGET__px;min-width:0;'>Workspace</button>"
+    "    <button class='composer-model-chip' type='button'"
+    "      style='flex:0 0 148px;width:148px;min-width:0;'>model-x</button>"
+    "  </div>"
+    "  <div class='composer-right' style='display:flex;align-items:center;gap:8px;flex-shrink:0;'>"
+    "    <button class='send-btn' id='btnSend' data-action='send'>"
+    "      <span class='send-btn-label' id='btnSendLabel'></span>"
+    "    </button>"
+    "  </div>"
+    "</div>"
+    "<script>" + _HELPER_JS + "</script>"
+    "</body></html>"
+)
+
+_SIX_FIT_DRIVER = """
+(action) => {
+  const btn = document.getElementById('btnSend');
+  const footer = document.getElementById('composerFooter');
+  const left = document.getElementById('composerLeft');
+  const saved = document.getElementById('btnSavedPrompts');
+  // Enter the busy state ONCE. Every pass below runs the production fitter on
+  // whatever geometry the previous pass left behind — which is exactly where
+  // the stale-class oscillation lived.
+  btn.dataset.action = action;
+  window._setComposerPrimaryButtonIcon(btn, action);
+  const lbl = btn.querySelector('.send-btn-label');
+  if (lbl) lbl.textContent = ({stop:'Stop',queue:'Queue',interrupt:'Interrupt',steer:'Steer'})[action] || '';
+  const out = [];
+  for (let i = 0; i < 6; i++) {
+    window._fitComposerFooter();
+    out.push({
+      stage: Array.from(footer.classList).filter(c => c.startsWith('cf-')).join(' '),
+      width: +btn.getBoundingClientRect().width.toFixed(2),
+      collapsed: btn.classList.contains('cf-action-icon'),
+      leftOverflowPx: Math.max(0, left.scrollWidth - left.clientWidth),
+      savedVisible: saved.getBoundingClientRect().width > 0,
+    });
+  }
+  return out;
+}
+"""
+
+
+def _six_complete_css_fits(page, *, footer_width: int, budget: int, action: str = "interrupt"):
+    """Drive six consecutive fits on an already-open page.
+
+    Reuses the page from the module-scoped `footer_page` fixture instead of
+    launching a second browser: pytest-asyncio owns a loop in this process, and
+    a fresh `sync_playwright()` cannot start inside it.
+    """
+    html = (
+        _COMPLETE_CSS_FIXTURE
+        .replace("__FOOTER_WIDTH__", str(footer_width))
+        .replace("__BUDGET__", str(budget))
+    )
+    page.set_content(html)
+    page.wait_for_timeout(120)
+    return page.evaluate(_SIX_FIT_DRIVER, action)
+
+
+def test_six_consecutive_busy_fits_are_stable_at_the_critical_budget(footer_page):
+    """#7686 re-gate 10-18 — six passes must not alternate collapsed/expanded.
+
+    The review's replay: a 480px footer with a ~400px existing-controls budget
+    and the Interrupt action. There the collapsed 34px icon fits, the restored
+    107px pill does not, so probing the PREVIOUS pass's class alternated
+
+        34px / 0px clipping -> 107.75px / 58px clipping -> 34px / 0px -> ...
+
+    across six consecutive fits in three independent browser runs. With the
+    complete production stylesheet and the real fitter, all six passes must
+    resolve to one geometry with zero clipping and a still-visible Saved
+    prompts control.
+    """
+    page, context = footer_page(900)
+    try:
+        rows = _six_complete_css_fits(page, footer_width=480, budget=200)
+    finally:
+        context.close()
+
+    stages = {r["stage"] for r in rows}
+    widths = {r["width"] for r in rows}
+    assert len(stages) == 1, f"the footer stage oscillated across six fits: {rows}"
+    assert len(widths) == 1, f"the button geometry oscillated across six fits: {rows}"
+    assert all(r["collapsed"] for r in rows), (
+        "at this budget the busy pill cannot fit, so every pass must keep the "
+        f"icon collapse: {rows}"
+    )
+    assert all(r["leftOverflowPx"] == 0 for r in rows), (
+        f"a fit pass left .composer-left clipped: {rows}"
+    )
+    assert all(r["savedVisible"] for r in rows), (
+        f"the Saved prompts control must stay visible across passes: {rows}"
+    )
+
+
+def test_six_consecutive_busy_fits_keep_the_wide_label_when_it_fits(footer_page):
+    """#7686 re-gate — the collapse stays CONDITIONAL on a real overflow.
+
+    Same six-pass loop on a footer wide enough for the busy pill: the label
+    must survive (button wider than the 34px icon floor), with no clipping and
+    a stable stage. This is the "retain wide-label" arm: a fitter that always
+    collapses would pass the boundary test while silently deleting the pill
+    affordance everywhere.
+    """
+    page, context = footer_page(1400)
+    try:
+        rows = _six_complete_css_fits(page, footer_width=1200, budget=200)
+    finally:
+        context.close()
+
+    stages = {r["stage"] for r in rows}
+    widths = {r["width"] for r in rows}
+    assert len(stages) == 1, f"the footer stage oscillated across six fits: {rows}"
+    assert len(widths) == 1, f"the button geometry oscillated across six fits: {rows}"
+    assert all(not r["collapsed"] for r in rows), (
+        f"the pill fits here, so no pass may collapse it: {rows}"
+    )
+    assert all(r["width"] > 34 for r in rows), (
+        f"the wide label must survive where the pill fits: {rows}"
+    )
+    assert all(r["leftOverflowPx"] == 0 for r in rows), (
+        f"a fit pass left .composer-left clipped: {rows}"
+    )
+    assert all(r["savedVisible"] for r in rows), (
+        f"the Saved prompts control must stay visible across passes: {rows}"
+    )
