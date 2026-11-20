@@ -316,6 +316,11 @@ def compute_request_fingerprint(body: dict[str, Any], profile: str = "default") 
         "keep_count",
         "prompt",
         "prompt_index",
+        # #7782 review 2026-11-18: this field changes whether a start
+        # consumes a pending goal continuation, so two requests that differ
+        # only here ask for different work. The ``in body`` test below keeps
+        # an OMITTED field distinct from an explicit empty value.
+        "goal_continuation_id",
     )
     normalized: dict[str, Any] = {
         "__profile": _canonical_profile_namespace(profile) or "default"
@@ -586,6 +591,13 @@ class IdempotencyStore:
         self._wal_lines = 0
         self._wal_compaction_baseline = 0
         self._loaded = False
+        # #7782 review 2026-11-18: a failed append whose rollback ALSO failed
+        # leaves an unfinished line on disk. Continuing to append would join
+        # that line, so the next write looks acknowledged while the durable
+        # framing is already broken, and a restart can then discard an
+        # acknowledged op (or fail to read the store at all). While set, every
+        # append fails closed; a durable repair (load/compaction) clears it.
+        self._wal_broken: str | None = None
 
     @property
     def _wal_path(self) -> Path:
@@ -611,6 +623,9 @@ class IdempotencyStore:
         """
         self._records.clear()
         self._expired_keys.clear()
+        # A load is a repair attempt: it re-derives the WAL state from disk,
+        # so a previous round's failed-rollback latch must not survive it.
+        self._wal_broken = None
         # The in-memory sequence must reset too: a reload/build must not
         # skip WAL ops because the previous in-memory generation had already
         # consumed their seq values.
@@ -702,6 +717,19 @@ class IdempotencyStore:
         wal = self._wal_path
         if wal.exists():
             self._replay_wal_locked(wal)
+        # #7782 review 2026-11-18: a tombstone is stale once the same key has
+        # a live record. That combination appears when the in-memory tombstone
+        # was LRU-evicted (making the key re-admittable), a new claim was
+        # accepted, and the restart happens before the next snapshot — the
+        # saved expiry outlives the eviction and ``claim()`` checks it first,
+        # answering 410 for a record it also just loaded. The live record is
+        # the later, authoritative fact.
+        for key in list(self._records):
+            self._expired_keys.pop(key, None)
+        # Enforce the same bound the in-memory tombstone set obeys: a snapshot
+        # written before the bound was reached must not load unbounded.
+        while len(self._expired_keys) > self._tombstone_max_records:
+            self._expired_keys.popitem(last=False)
         self._wal_compaction_baseline = len(self._records) + len(self._expired_keys)
         self._loaded = True
 
@@ -815,11 +843,37 @@ class IdempotencyStore:
         """
         try:
             data = path.read_bytes()
+        except OSError as exc:
+            self._loaded = False
+            raise IdempotencyStoreUnavailable(
+                f"could not read idempotency WAL {path}: {exc}"
+            ) from exc
+        # Uncommitted suffix: everything after the last newline BYTE. Drop it
+        # on the RAW BYTES before any decode: a crash can tear a multi-byte
+        # UTF-8 character, and decoding first raised UnicodeDecodeError
+        # before recovery could remove the unacknowledged tail, turning one
+        # torn write into a permanent 503 (#7782 review 2026-11-18). A 0x0A
+        # byte never occurs inside a multi-byte UTF-8 sequence, so this byte
+        # offset is a safe line boundary.
+        boundary = data.rfind(b"\n") + 1
+        if boundary < len(data):
+            dropped = len(data) - boundary
+            self._repair_wal_locked(
+                path, boundary, "uncommitted tail after the last newline"
+            )
+            logger.warning(
+                "idempotency: dropped %d uncommitted WAL bytes at %s "
+                "(the append was never acknowledged)",
+                dropped,
+                path,
+            )
+            data = data[:boundary]
+        try:
             # Decode the ON-DISK bytes verbatim — NO universal-newline
             # translation. ``_append_wal_locked`` opens the WAL in
             # ordinary text append mode without explicit newline control,
             # so its "\n" is CRLF on Windows, and both repair boundaries
-            # below are computed as byte lengths of this string. Reading
+            # below are computed as byte lengths of these bytes. Reading
             # through ``Path.read_text`` (or any newline-translating read)
             # would turn every CRLF into one shorter LF line and hand
             # ``os.ftruncate`` a boundary INSIDE the acknowledged prefix
@@ -827,36 +881,15 @@ class IdempotencyStore:
             # terminator, the next cold load dropped it as an
             # uncommitted suffix, and a same-key retry answered 409
             # ``idempotency_outcome_unknown`` instead of replaying the
-            # accepted 200 identity. Keeping the bytes verbatim also
-            # makes the torn-line offset reconstruction below
-            # byte-exact, since a decoded CRLF line still carries its
-            # "\r" and rejoining with "\n" reproduces the original bytes.
+            # accepted 200 identity.
             raw = data.decode("utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+        except UnicodeDecodeError as exc:
             self._loaded = False
             raise IdempotencyStoreUnavailable(
-                f"could not read idempotency WAL {path}: {exc}"
+                f"could not decode idempotency WAL {path}: {exc}"
             ) from exc
         if not raw.strip():
             return
-        # Uncommitted suffix: everything after the last newline. Drop it
-        # before anything else touches the WAL, so no later append can
-        # concatenate onto an un-terminated line (#7782 review round 2).
-        boundary = raw.rfind("\n") + 1
-        if boundary < len(raw):
-            prefix_bytes = len(raw[:boundary].encode("utf-8"))
-            self._repair_wal_locked(
-                path, prefix_bytes, "uncommitted tail after the last newline"
-            )
-            logger.warning(
-                "idempotency: dropped %d uncommitted WAL bytes at %s "
-                "(the append was never acknowledged)",
-                len(raw.encode("utf-8")) - prefix_bytes,
-                path,
-            )
-            raw = raw[:boundary]
-            if not raw.strip():
-                return
         lines = raw.split("\n")
         entries: list[dict] = []
         invalid_index: int | None = None
@@ -1158,6 +1191,7 @@ class IdempotencyStore:
         # here is NOT fatal — the seq watermark turns the leftover WAL into
         # a sequence of no-ops on load — so compaction never fails an
         # already-durable operation on account of bookkeeping.
+        wal_truncated = True
         try:
             with open(self._wal_path, "w", encoding="utf-8") as fh:
                 fh.flush()
@@ -1167,9 +1201,15 @@ class IdempotencyStore:
                     if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
                         raise
         except OSError as exc:
+            wal_truncated = False
             logger.warning(
                 "idempotency: could not truncate WAL after compaction: %s", exc
             )
+        if wal_truncated:
+            # The snapshot is durable and the WAL is empty: the unfinished
+            # line a failed rollback left behind is gone, so append may
+            # resume. A failed truncate keeps the latch.
+            self._wal_broken = None
         self._wal_lines = 0
         self._wal_compaction_baseline = len(self._records) + len(self._expired_keys)
 
@@ -1190,6 +1230,15 @@ class IdempotencyStore:
         """
         if not ops:
             return
+        if self._wal_broken:
+            # A previous append failed AND its rollback failed, so disk may
+            # still hold an unfinished line. Appending now would join it and
+            # report success on broken framing; fail closed until a load or
+            # compaction repairs the log.
+            raise IdempotencyStoreUnavailable(
+                f"idempotency WAL {self._wal_path} is unusable until repaired: "
+                f"{self._wal_broken}"
+            )
         path = self._wal_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1234,13 +1283,30 @@ class IdempotencyStore:
             # (the data may already be in the page cache even though the
             # fsync never acknowledged it — truncate regardless of whether
             # the file was empty before).
+            #
+            # #7782 review 2026-11-18: when the rollback itself fails, that
+            # silence is the bug. The unfinished line stays on disk, the
+            # store remains loaded, and a later append would concatenate onto
+            # it and report success; on restart the joined lines can make the
+            # store unreadable or cause recovery to discard an acknowledged
+            # operation. Latch the WAL unusable and keep failing closed.
+            rollback_error = None
             try:
                 if created:
                     path.unlink()
                 else:
                     os.truncate(path, start_size)
-            except OSError:
-                pass
+            except OSError as rollback_exc:
+                rollback_error = rollback_exc
+            if rollback_error is not None:
+                self._wal_broken = (
+                    "rollback after a failed append could not restore the "
+                    f"pre-append length ({rollback_error}); the WAL must be "
+                    "repaired before it can accept more appends"
+                )
+                logger.error(
+                    "idempotency: %s", self._wal_broken, exc_info=True
+                )
             raise IdempotencyStoreUnavailable(
                 f"failed to append to idempotency store {path}: {exc}"
             ) from exc
