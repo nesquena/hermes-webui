@@ -4672,6 +4672,50 @@ def test_queue_drain_stays_paused_when_session_and_profile_disagree():
     assert "function _queueDrainBlockedByProfileMismatch()" in UI_JS
 
 
+def test_queue_drain_uses_root_alias_when_comparing_profiles():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    match_helper = _function(
+        SESSIONS_JS, "_profileMatchesActiveProfile", "\n\nfunction _sessionEventProfilesMatch"
+    )
+    start = UI_JS.index("function setBusy(v){")
+    end = UI_JS.index("\n\n// ── Queue chip display", start)
+    queue_settlement = UI_JS[start:end]
+    script = textwrap.dedent(
+        f"""
+        const msg={{value:''}};
+        const S={{
+          busy:false,
+          session:{{session_id:'source',profile:'default'}},
+          activeProfile:'renamed-root',activeProfileIsDefault:true,pendingFiles:[]
+        }};
+        function $(id){{return id==='msg'?msg:null;}}
+        {match_helper}
+        {queue_settlement}
+        const renamedRootBlocked=_queueDrainBlockedByProfileMismatch();
+        S.session.profile='other-profile';
+        const otherProfileBlocked=_queueDrainBlockedByProfileMismatch();
+        S.session.profile='default';
+        S.activeProfileIsDefault=false;
+        const staleDefaultBlocked=_queueDrainBlockedByProfileMismatch();
+        process.stdout.write(JSON.stringify({{
+          renamedRootBlocked,otherProfileBlocked,staleDefaultBlocked
+        }}));
+        """
+    )
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        # 'default' and a renamed root are the same profile: keep draining.
+        "renamedRootBlocked": False,
+        # A genuinely different profile still pauses the queue.
+        "otherProfileBlocked": True,
+        # A literal 'default' session is only the root while the root flag says so.
+        "staleDefaultBlocked": True,
+    }
+
+
 def test_queue_drain_requeues_if_profile_switch_starts_during_settle_window():
     node = shutil.which("node")
     if not node:

@@ -12586,12 +12586,18 @@ function _queueDrainBlockedByProfileSwitch(){
 // send() builds /api/chat/start with S.activeProfile, so a queued turn whose
 // session still belongs to another profile would be rejected as a mismatch.
 // A failed profile rollback can leave exactly that state (target profile
-// committed, source session still visible). Only block when both sides are
-// known; a session without profile metadata keeps its previous drain behavior.
+// committed, source session still visible). Compare through the shared
+// profile-matching rule: after the root profile is renamed, old conversations
+// still tagged 'default' are the same profile as the renamed root. Only block
+// when both sides are known; a session without profile metadata keeps its
+// previous drain behavior.
 function _queueDrainBlockedByProfileMismatch(){
   const sessionProfile=String((S.session&&S.session.profile)||'').trim();
   const activeProfile=String(S.activeProfile||'').trim();
   if(!sessionProfile||!activeProfile)return false;
+  if(typeof _profileMatchesActiveProfile==='function'){
+    return !_profileMatchesActiveProfile(sessionProfile,activeProfile);
+  }
   return sessionProfile!==activeProfile;
 }
 function _resumeQueuedSessionMessageIfComposerEmpty(){
