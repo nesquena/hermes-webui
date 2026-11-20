@@ -159,16 +159,22 @@ def test_signed_in_oauth_plugin_reports_oauth(monkeypatch, tmp_path, pool_rows, 
     assert card["configurable"] is False
 
 
-def test_signed_in_oauth_plugin_without_pool_view_reports_oauth(monkeypatch, tmp_path, pool_rows):
-    """WebUI's pool view is empty (stale cache), the Agent's status says signed in."""
+def test_signed_in_oauth_plugin_without_a_counted_oauth_row_keeps_the_current_card(monkeypatch, tmp_path, pool_rows):
+    """WebUI's pool view is empty (stale cache), the Agent's status says signed in.
+
+    The OAuth card needs a counted OAuth row; the status alone does not make one.
+    """
     card = _card(monkeypatch, tmp_path, status=SIGNED_IN_STATUS)
     assert card is not None
     assert card["has_key"] is True
-    assert card["key_source"] == "oauth"
-    assert card["is_oauth"] is True
+    assert card["key_source"] == "config_yaml"
+    assert card["is_oauth"] is False
 
 
 def test_expired_but_refreshable_oauth_plugin_reports_oauth(monkeypatch, tmp_path, pool_rows):
+    # The Agent reports needs_refresh only for a plugin that ships ``refresh_credential``;
+    # the stubbed profile has none, so state that the hook exists.
+    monkeypatch.setattr("api.providers.plugin_model_provider_can_refresh", lambda pid: True)
     pool_rows.append(_row(expires_at_ms=_ms_from_now(-3_600_000), refresh_token="refresh-token-1"))
     card = _card(monkeypatch, tmp_path, status=REFRESHABLE_STATUS)
     assert card is not None

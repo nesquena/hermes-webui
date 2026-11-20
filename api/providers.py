@@ -1405,22 +1405,40 @@ def _stored_row_expired(row: dict[str, Any], now: float) -> bool:
     return parsed.timestamp() <= now
 
 
+def _pool_row_is_oauth(row: dict[str, Any]) -> bool:
+    """True for a pool row whose ``auth_type`` is ``oauth``.
+
+    The Agent defaults a row without ``auth_type`` to ``api_key``
+    (``PooledCredential.from_dict``), so anything that is not ``oauth`` is an
+    API-key row, whether or not WebUI can see its token.
+    """
+    return str(row.get("auth_type") or "").strip().lower() == "oauth"
+
+
+def _pool_row_token(row: dict[str, Any]) -> str:
+    """The usable secret on a pool row, or ``""`` when WebUI sees none.
+
+    ``access_token`` / ``agent_key`` are what the Agent's status counts. The pool
+    serializer (``_pool_entry_payloads``) also exposes the live in-memory secret as
+    ``runtime_api_key``, because the Agent drops the stored secret of a row seeded
+    from a borrowed source and keeps only a ``secret_fingerprint`` on disk. A
+    fingerprint alone is not a usable credential.
+    """
+    return str(row.get("access_token") or row.get("agent_key") or row.get("runtime_api_key") or "").strip()
+
+
 def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, Any]], int]:
     """Apply the Agent's usability rules to an OAuth plugin's pool rows.
 
     Same rules as ``get_plugin_oauth_auth_status()`` (Agent), without its
-    credential-pool loader: a row counts only when it carries an access token or
-    agent key; an unexpired one is signed in, and when none is unexpired a row
-    with a refresh token is needs-refresh, but only for a plugin that ships a
-    ``refresh_credential`` hook. Returns ``(state, counted_rows, accounts)``, where
-    state is ``"signed_in"``, ``"needs_refresh"`` or ``""`` (no usable account) and
-    ``accounts`` is the number of rows that carry a token.
+    credential-pool loader: a row counts only when it carries a token (see
+    ``_pool_row_token()``); an unexpired one is signed in, and when none is
+    unexpired a row with a refresh token is needs-refresh, but only for a plugin
+    that ships a ``refresh_credential`` hook. Returns ``(state, counted_rows,
+    accounts)``, where state is ``"signed_in"``, ``"needs_refresh"`` or ``""`` (no
+    usable account) and ``accounts`` is the number of rows that carry a token.
     """
-    rows = [
-        row
-        for row in _pool_entry_payloads(provider_id)
-        if str(row.get("access_token") or row.get("agent_key") or "").strip()
-    ]
+    rows = [row for row in _pool_entry_payloads(provider_id) if _pool_row_token(row)]
     now = time.time()
     live = [row for row in rows if not _stored_row_expired(row, now)]
     if live:
@@ -1430,6 +1448,17 @@ def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, An
         if refreshable:
             return "needs_refresh", refreshable, len(rows)
     return "", [], len(rows)
+
+
+def _plugin_pool_has_api_key_row(provider_id: str) -> bool:
+    """True when the pool holds a row that is evidently an API-key row.
+
+    ``hermes auth add <plugin> --type api-key`` stores one, and a plugin's
+    ``seed_pool_credentials`` hook seeds one (``auth_type: api_key``) from an
+    env or ambient key. A seeded row keeps no token on disk, only a
+    ``secret_fingerprint``, so it is recognised by its type, not by a token.
+    """
+    return any(not _pool_row_is_oauth(row) for row in _pool_entry_payloads(provider_id))
 
 
 def _pool_view_is_stored_rows() -> bool:
@@ -1442,15 +1471,18 @@ def _pool_view_is_stored_rows() -> bool:
 
 
 def _plugin_oauth_account_is_oauth_row(provider_id: str) -> bool:
-    """True unless a counted pool row is an API-key row (``auth_type`` other than ``oauth``).
+    """True when the pool holds a counted OAuth account and no API-key row.
 
-    ``hermes auth add <plugin> --type api-key`` stores an ``auth_type: api_key``
-    row; that account keeps its API-key card (#9143). When WebUI's pool view holds
-    no counted row at all (a stale cache while the Agent reports a signed-in
-    account) there is no API-key row to contradict the Agent's OAuth status.
+    An API-key row (``hermes auth add <plugin> --type api-key``, or one a plugin
+    seeded from an env key) keeps the API-key card (#9143), even next to an OAuth
+    row and even when WebUI cannot see its token. The OAuth card needs at least
+    one counted OAuth row: with none (every row expired, token-less or
+    fingerprint-only, or an empty pool view) the current card stays.
     """
+    if _plugin_pool_has_api_key_row(provider_id):
+        return False
     _state, counted, _accounts = _plugin_oauth_pool_account(provider_id)
-    return all(str(row.get("auth_type") or "").strip().lower() == "oauth" for row in counted)
+    return bool(counted)
 
 
 def _provider_has_key(provider_id: str) -> bool:
@@ -3113,6 +3145,10 @@ def get_providers() -> dict[str, Any]:
                     "needs_refresh": _stored_state == "needs_refresh",
                     "accounts": _stored_accounts,
                 }
+            elif _plugin_pool_has_api_key_row(pid):
+                # A seeded API-key row keeps no token in auth.json; as on master
+                # the row itself is the account (the card stays an API-key card).
+                has_key = True
         elif not has_key and is_plugin_model_provider(pid):
             try:
                 from hermes_cli.auth import get_auth_status as _gas_plugin

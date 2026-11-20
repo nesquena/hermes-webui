@@ -13,7 +13,12 @@ Unlike ``test_issue9143_plugin_oauth_stale_state.py`` these tests do not replace
   ``seed_pool_credentials`` hook, adds the rows the hook returns, prunes seeded
   rows the hook no longer produces, and saves the result back to ``auth.json``
   (the extension point the maintainers reproduced the write with). The status
-  follows ``get_plugin_oauth_auth_status()``.
+  follows ``get_plugin_oauth_auth_status()``. Like the Agent's
+  ``write_credential_pool()``, it keeps no secret on disk for a row seeded from a
+  borrowed source (only a ``secret_fingerprint``), and its pool entries serialize
+  like ``PooledCredential.to_dict()`` plus the live ``runtime_api_key``.
+* ``hermes_cli.auth_plugin_providers.plugin_refresh_hook`` is owned by the fixture,
+  so the result does not depend on whether a real Agent is installed.
 
 Rows that must read as unexpired expire a year from now: parametrized rows are
 built when the module is collected, and a full run takes over an hour.
@@ -79,6 +84,49 @@ def _api_key_row(**overrides):
     return row
 
 
+def _seeded_api_key_row(**overrides):
+    """A row a plugin seeded from an env key, as it is stored: no secret, only a fingerprint."""
+    row = {
+        "id": "row-seeded",
+        "label": SEED_SOURCE,
+        "auth_type": "api_key",
+        "priority": 1,
+        "source": SEED_SOURCE,
+        "base_url": "",
+        "secret_fingerprint": "sha256:0123456789abcdef",
+    }
+    row.update(overrides)
+    return row
+
+
+_SECRET_KEYS = ("access_token", "refresh_token", "agent_key")
+
+
+def _is_borrowed_source(source) -> bool:
+    source = str(source or "").strip().lower()
+    return bool(source) and source != "manual" and not source.startswith("manual:")
+
+
+def _disk_safe(row):
+    """What the Agent's ``sanitize_borrowed_credential_payload()`` leaves of a row."""
+    if not _is_borrowed_source(row.get("source")):
+        return dict(row)
+    safe = {k: v for k, v in row.items() if k not in _SECRET_KEYS}
+    safe.setdefault("secret_fingerprint", "sha256:0123456789abcdef")
+    return safe
+
+
+class _FakePoolEntry(SimpleNamespace):
+    """A loaded pool entry: ``to_dict()`` is disk-safe, ``runtime_api_key`` is the live secret."""
+
+    def to_dict(self):
+        return _disk_safe(vars(self))
+
+    @property
+    def runtime_api_key(self):
+        return str(getattr(self, "access_token", "") or "")
+
+
 def _iso_from_now(delta_s: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + delta_s))
 
@@ -118,8 +166,8 @@ class _FakeAgent:
         self.loader_calls.append(provider_id)
         rows = self._read_pool(self.home)
         seeded = list(self.seeded_rows())
-        seeded_sources = {row["source"] for row in seeded}
-        rows = [r for r in rows if not str(r.get("source", "")).startswith("seed:") or r["source"] in seeded_sources]
+        seeded_by_source = {row["source"]: row for row in seeded}
+        rows = [r for r in rows if not str(r.get("source", "")).startswith("seed:") or r["source"] in seeded_by_source]
         have = {r.get("source") for r in rows}
         for row in seeded:
             if row["source"] not in have:
@@ -135,7 +183,14 @@ class _FakeAgent:
                     "expires_at": None,
                     "expires_at_ms": None,
                 })
-        self.write_pool(self.home, rows)
+        # The seeder hydrates the secret of a row whose disk copy kept none.
+        rows = [
+            {**r, "access_token": seeded_by_source[r["source"]]["access_token"]}
+            if r.get("source") in seeded_by_source and not r.get("access_token")
+            else r
+            for r in rows
+        ]
+        self.write_pool(self.home, [_disk_safe(r) for r in rows])
         return rows
 
     def get_auth_status(self, provider_id):
@@ -210,9 +265,17 @@ def named_profile(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+    # The Agent's refresh-hook lookup is a pure profile lookup; own it so an installed
+    # Agent's module (already in sys.modules, with no hook for this fake plugin) cannot
+    # change the result.
+    fake_app = types.ModuleType("hermes_cli.auth_plugin_providers")
+    fake_app.plugin_refresh_hook = (
+        lambda pid: (lambda entry: None) if pid == "solstice" and state["refresh"] else None
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth_plugin_providers", fake_app)
 
     fake_cp = types.ModuleType("agent.credential_pool")
-    fake_cp.load_pool = lambda pid: SimpleNamespace(entries=lambda: [SimpleNamespace(**r) for r in agent.load_pool_entries(pid)])
+    fake_cp.load_pool = lambda pid: SimpleNamespace(entries=lambda: [_FakePoolEntry(**r) for r in agent.load_pool_entries(pid)])
     fake_agent_pkg = types.ModuleType("agent")
     fake_agent_pkg.__path__ = []
     fake_agent_pkg.credential_pool = fake_cp
@@ -463,3 +526,144 @@ def test_read_only_scope_asks_the_agent_for_the_refresh_hook_first(named_profile
     assert card is not None
     assert card["has_key"] is True
     assert card["is_oauth"] is True
+
+
+def test_read_only_scope_falls_back_to_the_cached_profile_without_an_agent_lookup(named_profile, monkeypatch):
+    """Without ``hermes_cli.auth_plugin_providers`` (older Agent, no Agent) WebUI's profile list answers."""
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth_plugin_providers", None)  # import raises ImportError
+    agent = named_profile["agent"]
+    agent.write_pool(
+        agent.named, [_oauth_row(expires_at_ms=_ms_from_now(-3_600_000), refresh_token="refresh-token-1")]
+    )
+
+    card = _card(named_profile)
+
+    assert agent.loader_calls == []
+    assert card is not None
+    assert card["has_key"] is True
+    assert card["is_oauth"] is True
+
+
+# --- seeded API-key rows keep the API-key card --------------------------------
+#
+# A plugin's ``seed_pool_credentials`` seeds ``auth_type: api_key`` rows from an env
+# or ambient key. The Agent keeps no secret for such a row on disk (borrowed source:
+# only ``secret_fingerprint``), so WebUI sees it in one of two shapes:
+#
+# * outside the read-only scope the pool serializer (``to_dict()`` plus the live
+#   ``runtime_api_key``) gives ``auth_type: api_key``, ``runtime_api_key`` and no
+#   ``access_token``;
+# * in the read-only scope the raw stored row has only the type and the fingerprint.
+#
+# Both are API-key rows that must not vanish from the pool view, with or without an
+# OAuth row next to them.
+
+SEEDED_SHAPES = [
+    pytest.param(False, "loader-seeds-the-row", id="normal-serializer-shape"),
+    pytest.param(False, "stored-row-rehydrated", id="normal-stored-row-rehydrated"),
+    pytest.param(True, "stored", id="read-only-stored-row"),
+    pytest.param(True, "runtime-api-key", id="read-only-runtime-api-key-row"),
+]
+
+
+def _arrange_seeded_pool(named_profile, shape, *, with_oauth_row):
+    named_profile["env_vars"] = ("SOLSTICE_API_KEY",)
+    agent = named_profile["agent"]
+    rows = [_oauth_row()] if with_oauth_row else []
+    if shape == "stored" or shape == "stored-row-rehydrated":
+        rows.append(_seeded_api_key_row())
+    elif shape == "runtime-api-key":
+        rows.append(_seeded_api_key_row(runtime_api_key="seeded-token"))
+    agent.write_pool(agent.named, rows)
+    return agent
+
+
+def _assert_api_key_card(card, *, has_key=True):
+    assert card is not None
+    assert card["has_key"] is has_key
+    assert card["key_source"] == "config_yaml"
+    assert card["is_oauth"] is False
+    assert card["configurable"] is True
+
+
+@pytest.mark.parametrize(("readonly", "shape"), SEEDED_SHAPES)
+def test_pool_with_only_a_seeded_api_key_row_keeps_the_api_key_card(named_profile, readonly, shape):
+    agent = _arrange_seeded_pool(named_profile, shape, with_oauth_row=False)
+    before = _auth_bytes(agent)
+
+    card = _card(named_profile, readonly=readonly)
+
+    if readonly:
+        assert agent.loader_calls == []
+        assert _auth_bytes(agent) == before
+    _assert_api_key_card(card)
+
+
+@pytest.mark.parametrize(("readonly", "shape"), SEEDED_SHAPES)
+def test_mixed_oauth_and_seeded_api_key_pool_keeps_the_api_key_card(named_profile, readonly, shape):
+    agent = _arrange_seeded_pool(named_profile, shape, with_oauth_row=True)
+    before = _auth_bytes(agent)
+
+    card = _card(named_profile, readonly=readonly)
+
+    if readonly:
+        assert agent.loader_calls == []
+        assert _auth_bytes(agent) == before
+    _assert_api_key_card(card)
+
+
+def test_serializer_shape_of_a_seeded_row_has_a_runtime_key_and_no_token(named_profile):
+    """Guards the fake: the normal-scope tests above rely on the Agent's serializer shape."""
+    from api.config import _pool_entry_payloads
+
+    _arrange_seeded_pool(named_profile, "loader-seeds-the-row", with_oauth_row=False)
+
+    (row,) = _pool_entry_payloads("solstice")
+
+    assert row["auth_type"] == "api_key"
+    assert row["runtime_api_key"] == "seeded-token"
+    assert "access_token" not in row
+    assert row["secret_fingerprint"].startswith("sha256:")
+
+
+# --- the OAuth card needs a counted OAuth row ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param([], id="empty-pool-view"),
+        pytest.param([_oauth_row(access_token="", secret_fingerprint="sha256:0123456789abcdef")], id="fingerprint-only-oauth-row"),
+        pytest.param([_oauth_row(expires_at_ms=_ms_from_now(-3_600_000))], id="expired-oauth-row-no-refresh-token"),
+    ],
+)
+def test_no_counted_oauth_row_keeps_the_current_card_even_if_the_agent_says_signed_in(named_profile, monkeypatch, rows):
+    """The Agent's status (a stale cache, say) alone does not make an OAuth card."""
+    named_profile["env_vars"] = ("SOLSTICE_API_KEY",)
+    named_profile["seeded"] = []
+    agent = named_profile["agent"]
+    agent.write_pool(agent.named, rows)
+    monkeypatch.setattr(
+        sys.modules["hermes_cli.auth"],
+        "get_auth_status",
+        lambda pid: {"configured": True, "provider": pid, "logged_in": True, "needs_refresh": False, "accounts": 1},
+    )
+
+    card = _card(named_profile, readonly=False)
+
+    _assert_api_key_card(card)
+
+
+def test_read_only_scope_fingerprint_only_oauth_row_is_not_a_connected_account(named_profile):
+    agent = named_profile["agent"]
+    agent.write_pool(agent.named, [_oauth_row(access_token="", secret_fingerprint="sha256:0123456789abcdef")])
+    before = _auth_bytes(agent)
+
+    card = _card(named_profile)
+
+    assert _auth_bytes(agent) == before
+    assert agent.loader_calls == []
+    assert card is not None
+    assert card["has_key"] is False
+    assert card["key_source"] == "none"
+    assert card["is_oauth"] is False
