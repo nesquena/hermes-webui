@@ -20,6 +20,7 @@ Contract verified here:
      the redactor does not know yet, register a runtime pattern for it, and
      the NEXT ``redact_session_data`` response is redacted.
 """
+import inspect
 import sys
 from pathlib import Path
 
@@ -106,8 +107,26 @@ def agent_registry():
     redact = pytest.importorskip("agent.redact", reason="hermes-agent not installed")
     if not hasattr(redact, "register_redaction_patterns"):
         pytest.skip("installed agent.redact has no runtime pattern registry")
-    if helpers._redact_fn_uncached.__name__ != "_combined_redact":
-        pytest.skip("api.helpers was built without the agent redactor")
+    # The regression is only meaningful when api.helpers redacts through the
+    # SAME agent.redact module the registry lives in. A test that reloads
+    # api.helpers under a stub agent.redact and never rebuilds it against the
+    # real module breaks that for the rest of the session (as the agent
+    # redactor or as fallback-only); report the cause here instead of an
+    # opaque output diff after registration or a silent skip.
+    bound = inspect.getclosurevars(helpers._redact_fn_uncached).nonlocals.get(
+        "redact_sensitive_text"
+    )
+    if bound is not redact.redact_sensitive_text:
+        where = (
+            f"{bound.__module__}.{bound.__qualname__}"
+            if callable(bound)
+            else f"{helpers._redact_fn_uncached.__name__} (no agent redactor)"
+        )
+        pytest.fail(
+            f"api.helpers redacts through {where}, not the live "
+            "agent.redact.redact_sensitive_text: an earlier test left "
+            "api.helpers bound to a stub agent.redact"
+        )
     reset = getattr(redact, "_reset_plugin_redaction_patterns", None)
     if reset is None:
         pytest.skip("installed agent.redact has no registry reset seam")

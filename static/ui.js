@@ -2247,17 +2247,51 @@ function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx){
   return `<button class="msg-question-jump-btn session-jump-btn session-jump-btn--inline" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx},${aIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
 }
 
+// Pick the scroll behavior for a jump to `el` inside `container`. A smooth scroll across a long transcript runs
+// for seconds (86k px took ~1.5 s for a search hit at message 0 of 240) and the highlight, which starts with the
+// scroll, has faded before the row arrives. Far targets (more than two screens away) and reduced-motion users jump
+// instantly so the highlight plays where the user can see it; near targets keep the smooth scroll.
+function _messageJumpScrollBehavior(container, el){
+  try{
+    if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'auto';
+    if(!container||!el) return 'smooth';
+    const distance=Math.abs(el.getBoundingClientRect().top-container.getBoundingClientRect().top);
+    return distance>Math.max(1,container.clientHeight)*2?'auto':'smooth';
+  }catch(_){ return 'smooth'; }
+}
+// Start the pulse on the next frame. A far jump renders and lays out the whole transcript in the same task as the
+// scroll, and an animation started inside that task takes its clock from the frame that began before it: on a
+// 240-message session the first painted frame was already 0.4-0.6 s into the 1.6 s pulse, so the ring appeared at
+// full strength and faded early. One frame later the pulse starts from zero where the user can see it.
 function _highlightQuestionRow(row){
-  if(!row) return;
+  // Cosmetic: never let the landing cue throw inside a jump that owns the scroll.
+  if(!row||!row.classList) return;
   row.classList.remove('msg-question-highlight');
-  void row.offsetWidth;
-  row.classList.add('msg-question-highlight');
-  window.setTimeout(()=>row.classList.remove('msg-question-highlight'),1800);
+  if(row._questionHighlightTimer) window.clearTimeout(row._questionHighlightTimer);
+  const start=()=>{
+    void row.offsetWidth;
+    row.classList.add('msg-question-highlight');
+    row._questionHighlightTimer=window.setTimeout(()=>{
+      row._questionHighlightTimer=0;
+      row.classList.remove('msg-question-highlight');
+    },1800);
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(start);
+  else start();
 }
 
-async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
+async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx, opts){
   const container=$('messages');
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  // The frames scheduled below run after this call returns. A session switch in between, or a caller that
+  // cancelled the jump (opts.isValid, e.g. a superseded search hit), must not scroll, re-render or flash the
+  // transcript that is on screen by then (#5106).
+  const currentJumpSid=()=>(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+  const jumpSid=currentJumpSid();
+  const stillValid=()=>{
+    if(currentJumpSid()!==jumpSid) return false;
+    return !(opts&&typeof opts.isValid==='function')||!!opts.isValid();
+  };
   const clampTargetScrollTop=(scrollTop)=>{
     const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
     const n=Number(scrollTop);
@@ -2274,14 +2308,17 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
       const segs=container.querySelectorAll('[data-msg-idx="'+assistantRawIdx+'"]');
       for(const seg of segs){
         if(seg.getClientRects().length>0){
-          seg.scrollIntoView({block:'start',behavior:'smooth'});
+          seg.scrollIntoView({block:'start',behavior:_messageJumpScrollBehavior(container,seg)});
+          // Assistant targets (search hits in a reply, jump to the start of a response) get the same landing
+          // cue as question rows; without it half of all content hits landed silently (#5106 Fable r3).
+          _highlightQuestionRow(seg);
           return true;
         }
       }
     }
     const row=document.getElementById(_userMessageDomId(questionRawIdx));
     if(!row) return false;
-    row.scrollIntoView({block:'center',behavior:'smooth'});
+    row.scrollIntoView({block:'center',behavior:_messageJumpScrollBehavior(container,row)});
     _highlightQuestionRow(row);
     return true;
   };
@@ -2300,11 +2337,11 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(()=>{
-      if(!scrollToTarget()&&_messageHiddenBeforeCount()>0){
+      if(stillValid()&&!scrollToTarget()&&_messageHiddenBeforeCount()>0){
         _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
         _messageVirtualWindowKey='';
         renderMessages({ preserveScroll:true });
-        requestAnimationFrame(scrollToTarget);
+        requestAnimationFrame(()=>{ if(stillValid()) scrollToTarget(); });
       }
       _deferClearProgrammaticScroll();
     });
@@ -2314,7 +2351,7 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
-    requestAnimationFrame(scrollToTarget);
+    requestAnimationFrame(()=>{ if(stillValid()) scrollToTarget(); });
   }
 }
 
@@ -4352,6 +4389,7 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
       catch(__){ref=ref.replace(/^file:\/\//i,'');}
     }
   }
+  if(/\x00/.test(String(ref))) return '';
   if(/^https?:\/\//i.test(ref)){
     let src=ref;
     if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
@@ -4474,6 +4512,7 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
+let _providerQuotaLastStatus=null;
 // A provider switch can complete before an older account-quota request returns.
 // Only the newest request may update the composer; otherwise an old Codex result
 // can reappear while the active conversation uses another provider.
@@ -4486,26 +4525,105 @@ function _providerQuotaProfileKey(){
   return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
 }
 
+// Number(null), Number('') and Number(false) are 0: a missing or rejected
+// measurement must hide, not render as $0.00 / 0%.
+function _isQuotaMeasurement(value){
+  return (typeof value==='number'||(typeof value==='string'&&value.trim()!==''))&&Number.isFinite(Number(value));
+}
 function _formatQuotaMoneyShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   if(Math.abs(n)>=100) return '$'+n.toFixed(0);
   if(Math.abs(n)>=10) return '$'+n.toFixed(1);
   return '$'+n.toFixed(2);
 }
 function _formatQuotaPercentShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+// Which account window the chip shows (Settings: quota_chip_window). The fixed modes pick by
+// the window's limit_window_seconds, never by list position: providers do not order windows.
+function _normalizeQuotaChipWindow(value){
+  return value==='shortest'||value==='longest'?value:'most_constrained';
+}
+function _quotaWindowSeconds(x){
+  return x&&_isQuotaMeasurement(x.limit_window_seconds)&&Number(x.limit_window_seconds)>0?Number(x.limit_window_seconds):null;
+}
+function _isAccountQuotaWindow(x){
+  const scope=typeof x.scope==='string'?x.scope.trim().toLowerCase():'';
+  return !scope||scope==='account';
+}
+function _selectQuotaChipWindow(windows){
+  const measured=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
+  if(!measured.length) return null;
+  // A model-only window (e.g. one model family's weekly cap) doesn't limit the
+  // account, so choose among account windows whenever there is one. The hover
+  // text still lists every window.
+  const account=measured.filter(_isAccountQuotaWindow);
+  const valid=account.length?account:measured;
+  const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
+  // Pick by duration only when every candidate window reports one. An untimed
+  // window can't be ordered, and skipping it could hide the depleted limit, so
+  // any gap falls back to the most constrained window.
+  if((mode==='shortest'||mode==='longest')&&valid.every(x=>_quotaWindowSeconds(x)!==null)){
+    return valid.reduce((best,x)=>{
+      const a=_quotaWindowSeconds(x),b=_quotaWindowSeconds(best);
+      return (mode==='shortest'?a<b:a>b)?x:best;
+    });
+  }
+  return valid.reduce((min,x)=>Number(x.remaining_percent)<Number(min.remaining_percent)?x:min);
+}
+// Time left until a window resets, e.g. "2h 14m" / "3d 5h"; '' when unknown or past.
+function _formatQuotaResetIn(value,now){
+  if(!value) return '';
+  const ms=new Date(value).getTime();
+  if(!Number.isFinite(ms)) return '';
+  const s=Math.round((ms-(typeof now==='number'?now:Date.now()))/1000);
+  if(s<=0) return '';
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d>0) return d+'d'+(h?' '+h+'h':'');
+  if(h>0) return h+'h'+(m?' '+m+'m':'');
+  return Math.max(1,m)+'m';
+}
+// Hover text: one line per account window (all periods), each with its remaining
+// share and time to reset when the provider reports one, then any detail lines.
+// With several windows, "▸ " marks the one the chip shows (`chosen`) and the other
+// window lines are indented to match.
+function _providerQuotaWindowLines(accountLimits,now,chosen){
+  const windows=accountLimits&&Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+  const shown=windows.filter(w=>w&&_isQuotaMeasurement(w.remaining_percent));
+  const mark=chosen&&shown.length>1&&shown.includes(chosen);
+  const lines=[];
+  for(const w of shown){
+    const name=typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    const reset=_formatQuotaResetIn(w.reset_at,now);
+    const prefix=mark?(w===chosen?'\u25B8 ':'\u2002 '):'';
+    lines.push(prefix+name+_formatQuotaPercentShort(w.remaining_percent)+' remaining'+(reset?' · resets in '+reset:''));
+  }
+  const details=accountLimits&&Array.isArray(accountLimits.details)?accountLimits.details:[];
+  for(const detail of details){
+    if(typeof detail==='string'&&detail.trim()) lines.push(detail.trim());
+  }
+  return lines;
 }
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
-    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    // Multi-window providers (rolling/5-hour, weekly, monthly): by default the most
+    // constrained window, since the lowest remaining share is the limit hit first.
+    const w=_selectQuotaChipWindow(accountLimits.windows);
+    const remaining=w?_formatQuotaPercentShort(w.remaining_percent):'';
+    const windowLabel=w&&typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    if(remaining){
+      const lines=_providerQuotaWindowLines(accountLimits,undefined,w);
+      const head=provider+' — '+(status.message||'Provider usage loaded');
+      // One window keeps the single-line form; several list every period on its own line.
+      if(lines.length<=1) return {label:remaining, title:head+' — '+(lines[0]||windowLabel+remaining+' remaining')};
+      return {label:remaining, title:head+'\n'+lines.join('\n')};
+    }
   }
   const quota=status.quota||null;
   if(quota){
@@ -4552,6 +4670,8 @@ function renderProviderQuotaIndicator(status){
     clearProviderQuotaIndicator();
     return;
   }
+  _providerQuotaLastStatus=status;
+  _initProviderQuotaTitleRefresh();
   label.textContent=text.label;
   chip.title=text.title;
   if(mobileLabel) mobileLabel.textContent=text.label;
@@ -4621,6 +4741,40 @@ window.addEventListener('visibilitychange',()=>{
     void refreshProviderQuotaIndicator(_currentQuotaProvider());
   }
 });
+// Reset countdowns are computed when the title is built; rebuild it on hover/focus
+// so "resets in" is current without waiting for the next quota fetch.
+function _refreshProviderQuotaTitle(){
+  const chip=$('providerQuotaChip');
+  if(!chip||chip.hidden||!_providerQuotaLastStatus) return;
+  const text=_providerQuotaIndicatorText(_providerQuotaLastStatus);
+  if(!text) return;
+  chip.title=text.title;
+  const mobileAction=$('composerMobileQuotaAction');
+  if(mobileAction) mobileAction.title=text.title;
+}
+// Bound lazily from renderProviderQuotaIndicator (hover only matters once the chip has drawn),
+// so this block runs no top-level DOM code. Both the desktop chip and the compact composer's
+// quota button refresh on hover / focus (CSS hides the chip in the compact layout).
+let _providerQuotaTitleRefreshBound=false;
+let _providerQuotaMobileTitleRefreshBound=false;
+function _initProviderQuotaTitleRefresh(){
+  if(!_providerQuotaTitleRefreshBound){
+    const chip=$('providerQuotaChip');
+    if(chip&&typeof chip.addEventListener==='function'){
+      chip.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      chip.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaTitleRefreshBound=true;
+    }
+  }
+  if(!_providerQuotaMobileTitleRefreshBound){
+    const mobileAction=$('composerMobileQuotaAction');
+    if(mobileAction&&typeof mobileAction.addEventListener==='function'){
+      mobileAction.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      mobileAction.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaMobileTitleRefreshBound=true;
+    }
+  }
+}
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -6018,6 +6172,25 @@ function _normalizeConfiguredModelKey(modelId){
   return s.replace(/-/g,'.');
 }
 
+// The one identity the configured badge lookup, the configured-row dedup and
+// the Configured section key share, so they cannot disagree (#8756).
+function _configuredModelIdentity(modelId,providerId){
+  const provider=String(providerId||'').trim().toLowerCase();
+  // Callers pass the provider owning the row or badge. With none, nothing
+  // marks a leading segment as routing syntax: keep the legacy key.
+  if(!provider) return _normalizeConfiguredModelKey(modelId);
+  let s=String(modelId||'').trim().toLowerCase();
+  // Strip only this provider's routing wrappers. Live enrichment composes
+  // them (`@openai:` + `openai/gpt-x`), so peel `@provider:` and then
+  // `provider/`. Any other leading segment is a vendor namespace and stays
+  // part of the identity (#8725).
+  const atPrefix=`@${provider}:`;
+  const slashPrefix=`${provider}/`;
+  if(s.startsWith(atPrefix)) s=s.slice(atPrefix.length)||s;
+  if(s.startsWith(slashPrefix)) s=s.slice(slashPrefix.length)||s;
+  return s.replace(/-/g,'.');
+}
+
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
@@ -6079,10 +6252,15 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   const provider=String(providerId||'').toLowerCase();
   const exact=map[modelId];
   if(exact && (!provider || !exact.provider || String(exact.provider).toLowerCase()===provider)) return exact;
-  const targetNorm=_normalizeConfiguredModelKey(modelId);
   const matches=[];
   for(const [candidate,badge] of Object.entries(map)){
-    if(_normalizeConfiguredModelKey(candidate)===targetNorm) matches.push(badge);
+    const badgeProvider=String(badge&&badge.provider||'').toLowerCase();
+    if(provider&&badgeProvider&&badgeProvider!==provider) continue;
+    // Strip the same provider wrapper from both sides. A typed custom id such
+    // as 'openai/gpt-4o' reaches here with no row provider, so the badge's
+    // provider decides which wrapper is routing syntax.
+    const identityProvider=provider||badgeProvider;
+    if(_configuredModelIdentity(candidate,identityProvider)===_configuredModelIdentity(modelId,identityProvider)) matches.push(badge);
   }
   if(!matches.length) return null;
   if(provider){
@@ -6769,6 +6947,24 @@ function renderModelDropdown(){
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
+  // #9074: the backend's badge label is English ("Primary", "Fallback 2"), so
+  // every renderer translates the role here. t() returns the key itself when
+  // no locale has it, which falls back to the English text.
+  const _badgeText=(key,english,...args)=>{
+    const value=t(key,...args);
+    return value&&value!==key?String(value):english;
+  };
+  const _modelBadgeLabel=(badge)=>{
+    if(!badge) return '';
+    const role=String(badge.role||'');
+    const label=String(badge.label||'');
+    if(role==='primary') return _badgeText('model_badge_primary','Primary');
+    if(role==='fallback'){
+      const index=(label.match(/(\d+)\s*$/)||[])[1]||'';
+      return _badgeText('model_badge_fallback',`Fallback ${index}`.trim(),index).trim();
+    }
+    return label&&!label.includes('@')?label:_badgeText('model_group_configured','Configured');
+  };
   const _renderProviderEndpointHint=(entry,parent)=>{
     if(!entry||!entry.label||!entry.modelsEndpointError) return;
     const hint=document.createElement('div');
@@ -6781,7 +6977,7 @@ function renderModelDropdown(){
   const _buildModelRow=(m,withProviderChip)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
-    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(_modelBadgeLabel(m.badge))}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
     row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
@@ -6955,7 +7151,7 @@ function renderModelDropdown(){
   const _makeModelRow=(m,shouldRenderHeading)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
-    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(_modelBadgeLabel(m.badge))}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
@@ -6997,8 +7193,17 @@ function renderModelDropdown(){
     const configuredCandidates=_modelData
       .filter(m=>m.badge&&matches(m));
     const configuredBySemanticKey=new Map();
+    const semanticKeyByEntry=new Map();
     const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
-    const _configuredModelKey=(m)=>_normalizeConfiguredModelKey(m&&m.value||'');
+    const _configuredModelKey=(m)=>_configuredModelIdentity(m&&m.value||'',_configuredProviderKey(m));
+    const _sendsProviderAlias=(m)=>{
+      const p=_configuredProviderKey(m);
+      if(!p) return false;
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      const w=(s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');
+      return w.startsWith(`${p.replace(/-/g,'.')}/`);
+    };
     const _configuredDisplayPriority=(m)=>{
       // Prefer plain IDs over provider-qualified aliases for readability.
       const v=String((m&&m.value)||'');
@@ -7007,15 +7212,36 @@ function renderModelDropdown(){
       return 2;
     };
     for(const candidate of configuredCandidates){
-      const semanticKey=`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      // One configured entry (Primary, Fallback N) is one Configured row. The
+      // backend also badges spellings it linked across a vendor namespace
+      // (`qwen3` and `Qwen/qwen3`, via _norm_model_id), which the identity
+      // keeps apart, so a later row showing an entry already placed joins
+      // that row's key (#8756). The badge names the entry, so its own provider
+      // (none for a providerless badge) keys it, not the row's routing prefix.
+      const entryKey=candidate.badge.label?`${String(candidate.badge.provider||'').toLowerCase()}::${candidate.badge.role||''}::${candidate.badge.label}`:'';
+      const semanticKey=(entryKey&&semanticKeyByEntry.get(entryKey))||`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      if(entryKey&&!semanticKeyByEntry.has(entryKey)) semanticKeyByEntry.set(entryKey,semanticKey);
       const existing=configuredBySemanticKey.get(semanticKey);
       if(!existing){
         configuredBySemanticKey.set(semanticKey,candidate);
         continue;
       }
+      // A row that sends `<provider>/<model>` is an alias of the configured id;
+      // a row that sends the configured id itself always wins the Configured slot.
+      const candidateAlias=_sendsProviderAlias(candidate);
+      const existingAlias=_sendsProviderAlias(existing);
+      if(candidateAlias!==existingAlias){
+        if(!candidateAlias) configuredBySemanticKey.set(semanticKey,candidate);
+        continue;
+      }
       const candidatePriority=_configuredDisplayPriority(candidate);
       const existingPriority=_configuredDisplayPriority(existing);
-      if(candidatePriority>existingPriority){
+      // Same model, same priority: the shorter spelling carries fewer routing
+      // wrappers, so it is the native configured id rather than a typed alias.
+      const sameIdentityShorter=candidatePriority===existingPriority
+        &&_configuredModelKey(candidate)===_configuredModelKey(existing)
+        &&String(candidate.value||'').length<String(existing.value||'').length;
+      if(candidatePriority>existingPriority||sameIdentityShorter){
         configuredBySemanticKey.set(semanticKey,candidate);
       }
     }
@@ -7027,11 +7253,21 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    // A hidden row stays out of the Show-more count only when a Configured row
+    // already sends its wire id (provider plus value less `@provider:`,
+    // dash-folded); a row that sends `<provider>/<model>`, or the same bare id
+    // to another provider, is a different route and stays reachable.
+    const _configuredWireKey=(m)=>{
+      const p=_configuredProviderKey(m);
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      return `${p}::${(p&&s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.')}`;
+    };
+    const configuredWireKeys=new Set(configuredModels.map(_configuredWireKey));
     const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
       m.groupKey===groupKey
       && m.hiddenByDefault
-      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+      && !configuredWireKeys.has(_configuredWireKey(m))
     ).length;
     dd.innerHTML='';
     dd.appendChild(_scopeNote);
@@ -7052,17 +7288,44 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
         let badgeLabel = '';
+        let badgeTitle = '';
         if (m.badge) {
-          // 直接用badge的原始key（即config.yaml里的ID）
+          // #8733: the chip shows the readable role the group rows already use
+          // ("Primary", "Fallback 2") instead of the matched config key. That key
+          // can be an '@provider:model' routing spelling, which wraps the chip onto
+          // its own line on desktop and breaks mid-string on ~320px phones. The key
+          // stays reachable on the row subtitle, and the chip's title keeps master's
+          // full "key (provider)" text, so the provider the chip used to name isn't lost.
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
-          badgeLabel = rawId;
+          badgeLabel = _modelBadgeLabel(m.badge);
+          badgeTitle = rawId;
           if(m.badge.provider){
-            const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
-            badgeLabel += ` (${providerName})`;
+            const providerName=String(m.badge.provider).replace(/^custom:/,'').split('/')[0];
+            badgeTitle += ` (${providerName})`;
           }
         }
-        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        const badgeAttrs = badgeTitle ? ` title="${esc(badgeTitle)}"` : '';
+        const badgeHtml=m.badge?`<span${badgeAttrs} class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
+        // #9074: a title is out of reach on touch and keyboard, so the provider
+        // the chip used to name gets the muted pill the group rows use. It sits
+        // beside the chip rather than inside it, and ellipsizes on narrow phones.
+        // It names the provider the click selects, from that provider's own group:
+        // m.group can be the backend's injected "Default" group, or empty.
+        const providerId=String((m.badge&&m.badge.provider)||m.providerId||'');
+        const providerMeta=_groupMeta.get(providerId);
+        const providerLabel=providerMeta?String(providerMeta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
+        const providerName=(providerLabel&&providerLabel!=='Default')?providerLabel
+          :providerId.replace(/^custom:/,'').split('/')[0];
+        // A short name keeps its full width and wraps whole: an ellipsis on it
+        // leaves a stub ("Ope…") that can't tell OpenAI from OpenRouter.
+        const providerFit=providerName.length<=14?' model-opt-provider--fit':'';
+        const providerChip=providerName
+          ?`<span class="model-opt-provider model-opt-provider--configured${providerFit}" title="${esc(providerName)}">${esc(providerName)}</span>`
+          :'';
+        // #8733: the chip no longer carries the routing key, so the matched key
+        // rides on the chip's title. The subtitle stays the option id, which the
+        // Configured section has always shown.
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
@@ -10618,7 +10881,9 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
 }
 
 function renderMd(raw){
-  let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  // Raw NULs become U+FFFD (what a browser shows for a NUL in text) before any
+  // stash token is generated, so input text can never spell a token.
+  let s=(raw||'').replace(/\x00/g,'\uFFFD').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
@@ -10751,9 +11016,15 @@ function renderMd(raw){
       // For JSON/YAML blocks, add tree-view placeholder with raw data
       } else if(lang==='json'||lang==='yaml'){
         const rawCode=esc(code.replace(/\n$/,''));
+        // data-raw holds the fence's source text. MEDIA references were stashed
+        // before this pass, so put their source text back here (the stash is
+        // restored after this attribute is built) and drop any other stash token.
+        const rawSrc=code.replace(/\n$/,'')
+          .replace(/\x00D(\d+)\x00/g,(_,i)=>decode('MEDIA:'+media_stash[+i]))
+          .replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'');
         // Encode newlines as &#10; to prevent HTML attribute normalization
         // (browsers collapse \n to spaces inside attribute values).
-        const rawAttr=rawCode.replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
+        const rawAttr=esc(rawSrc).replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
         const blockId='tree-'+Math.random().toString(36).slice(2,10);
         _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawAttr}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
       // CSV blocks → render as styled table
@@ -10994,7 +11265,56 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    // Autolink only the text between tags, as the block pass below does: set
+    // aside complete links, images and pre blocks and every other tag, then
+    // turn a raw tag left without its closing ">" on its line into text by
+    // escaping its "<" (the block pass escapes those too), so a URL in an
+    // attribute value stays as written.
+    // - A bracketed address such as <https://example.com> or <mailto:a@b.c>
+    //   (any scheme, any case) is not a tag: it stays in place, so the URL in
+    //   it is linked as before. A name holding ":" is never an allowed tag.
+    // - Only the "<" of an unclosed tag is escaped; the rest stays plain text,
+    //   so a URL after it is linked with its "&" and quotes left as written.
+    //   The escaped "<" is set aside too, so it still ends a URL before it.
+    //   Each line is scanned once: a "<" before a letter is escaped when no
+    //   ">" follows it on its line.
+    // - Restoring scans every stash token in one left-to-right pass, so a run
+    //   of text between two tokens is never read as a token.
+    // - Setting tags aside is one forward scan that remembers where the next
+    //   ">", "</a>" and "</pre>" are (or that there is none), so a long line
+    //   of "<" without a close is read once, not once per "<".
+    const _tag_stash=[];
+    t=(()=>{
+      const out=[];
+      const head=/<(?![a-zA-Z][a-zA-Z0-9+.-]*:)\/?[a-zA-Z]/y;
+      let at=0,emitted=0,gt=-1,aClose=-2,preClose=-2;
+      while((at=t.indexOf('<',at))!==-1){
+        if(gt<at) gt=t.indexOf('>',at+1);
+        if(gt<0) break;
+        let end=-1;
+        if(t.startsWith('<a',at)&&!/\w/.test(t[at+2]||'')){
+          if(aClose===-2||(aClose>=0&&aClose<=gt)) aClose=t.indexOf('</a>',gt+1);
+          if(aClose>=0) end=aClose+4;
+        }
+        if(end<0&&t.startsWith('<img',at)&&!/\w/.test(t[at+4]||'')) end=gt+1;
+        if(end<0&&t.startsWith('<pre',at)&&!/\w/.test(t[at+4]||'')){
+          if(preClose===-2||(preClose>=0&&preClose<=gt)) preClose=t.indexOf('</pre>',gt+1);
+          if(preClose>=0) end=preClose+6;
+        }
+        if(end<0){head.lastIndex=at;if(head.test(t)) end=gt+1;}
+        if(end<0){at++;continue;}
+        out.push(t.slice(emitted,at));
+        _tag_stash.push(t.slice(at,end));
+        out.push(`\x00T${_tag_stash.length-1}\x00`);
+        emitted=end;
+        at=end;
+      }
+      out.push(t.slice(emitted));
+      return out.join('');
+    })();
+    t=t.split(/([\r\n\u2028\u2029])/).map(line=>{const at=line.lastIndexOf('>')+1;return line.slice(0,at)+line.slice(at).replace(/<(?=[a-zA-Z])/g,()=>{_tag_stash.push('&lt;');return `\x00T${_tag_stash.length-1}\x00`;});}).join('');
     t=_autolinkBareText(t);
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='T'?_tag_stash[+i]:m);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -11195,7 +11515,11 @@ function renderMd(raw){
   // Tests verify this list is complete; _tag() enforces it.
   const SAFE_TAGS=/^<\/?(?:strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span|img)([\s>]|$)/i;
   function _safeAttrValue(v){
-    return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
+    // Stash tokens (\x00Q0\x00, math, code ...) are restored after this sanitizer runs,
+    // so a token left inside an attribute value would be replaced by rendered HTML
+    // there. No attribute legitimately carries one: drop them, and any stray \x00.
+    return String(v||'').replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'')
+      .replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
   }
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
@@ -11320,7 +11644,10 @@ function renderMd(raw){
     }
     if(name==='div'){
       const cls=_cls(a.class,['pre-header','mermaid-block','katex-block']);
-      const mermaid=a['data-mermaid-id']?` data-mermaid-id="${esc(a['data-mermaid-id'])}"`:'';
+      // Generated ids are word characters; anything else (a URL the autolink pass
+      // would rewrite, a stash token) must not reach this free-text attribute.
+      const mermaidId=_safeAttrValue(a['data-mermaid-id']);
+      const mermaid=/^[\w-]{1,64}$/.test(mermaidId)?` data-mermaid-id="${esc(mermaidId)}"`:'';
       const katex=a['data-katex']==='display'?' data-katex="display"':'';
       return `<div${cls}${mermaid}${katex}>`;
     }
@@ -11329,7 +11656,7 @@ function renderMd(raw){
       const target=a.target==='_blank'?' target="_blank"':'';
       const rel=a.rel==='noopener'?' rel="noopener"':'';
       const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back','session-link']);
-      const download=a.download?` download="${esc(a.download)}"`:'';
+      const download=a.download?` download="${esc(_safeAttrValue(a.download))}"`:'';
       // #7941: keep the blocked-remote-image tooltip only on a media chip whose
       // href really is a non-allowlisted remote image AND whose title begins with
       // the reason computed from that same href, so model-authored anchors cannot
@@ -11359,7 +11686,18 @@ function renderMd(raw){
     }
     return '';
   }
-  s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>_tag(tag));
+  // One pass over every "<": a tag goes through _tag(), and any other "<"
+  // becomes "&lt;". _tag() returns "" for a tag it removes, and a replace never
+  // scans its own output again, so a "<" left as is just before a removed tag
+  // would join the text after it into a new tag that was never checked.
+  // Consuming every "<" here means each "<" left in the result came from
+  // _tag() or starts an HTML comment written as "<!--" in the message (kept
+  // as before; a removal cannot form one, as its "<" would be escaped), so a
+  // removal can never join the text around it into a tag.
+  // That "&lt;" is held in the autolink stash below until autolinking is done,
+  // so it still ends a URL written just before it, as the raw "<" did.
+  const _al_stash=[];
+  s=s.replace(/<\/?[a-z][^>]*>|<(?!!--)/gi,m=>m==='<'?(_al_stash.push('&lt;'),`\x00B${_al_stash.length-1}\x00`):_tag(m));
   // Incomplete raw tags must not survive until paragraph wrapping, where the
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
@@ -11370,18 +11708,28 @@ function renderMd(raw){
     return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>`;
   }
   function _autolinkBareText(text){
+    // A stash token ends the URL: its content is restored after this pass and
+    // belongs after the link, not inside the rebuilt href.
     return String(text||'').replace(
-      /(https?:\/\/[^\s<>"')\]\uFF09]+)/g,
+      /(https?:\/\/[^\s<>"')\]\uFF09\x00]+)/g,
       run=>_autolinkBareRun(run),
     );
   }
-  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
-  const _al_stash=[];
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
+  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them, and
+  // every other tag (an opening <a> without its </a>, for one) so autolink
+  // never rewrites text inside a tag. The sanitizer pass above set aside every
+  // "<" it did not hand to _tag() as "&lt;", so every tag here was written
+  // by _tag(), with escaped, double-quoted attribute values, and ends at its
+  // first ">".
+  // Restoring scans every stash token (\x00, capital letters, digits, \x00) in
+  // one left-to-right pass and puts back only these entries, so a run of text
+  // between two tokens (math, code block, media) is never read as a token.
+  const _alRestore=t=>t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='B'?_al_stash[+i]:m);
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<\/?[a-zA-Z][^>]*>)/g,m=>{_al_stash.push(_alRestore(m));return `\x00B${_al_stash.length-1}\x00`;});
   // Split high-confidence sentence boundaries while preserving valid CJK IRI
   // content, then rescan each plain-text trail so adjacent URLs all link.
   s=_autolinkBareText(s);
-  s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
+  s=_alRestore(s);
   // Restore math stash → katex placeholder spans/divs
   // These will be rendered by renderKatexBlocks() after DOM insertion
   s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{
@@ -11554,6 +11902,9 @@ function _getExplicitBusyCommandAction(text){
 }
 
 function getComposerPrimaryAction(){
+  if(S.session&&S.session.chat_read_only_reason){
+    return S.busy&&S.activeStreamId?'stop':'disabled';
+  }
   const msg=$('msg');
   const hasContent=_composerHasContent();
   const locked=!!(msg&&msg.disabled);
@@ -11583,6 +11934,15 @@ function getComposerPrimaryAction(){
 function _applyBusyComposerPlaceholder(){
   const input=$('msg');
   if(!input) return;
+  if(S.session&&S.session.chat_read_only_reason){
+    input.placeholder=typeof t==='function' ? t('composer_placeholder_read_only') : 'Read-only in WebUI';
+    input.dataset.readOnlyPlaceholder='true';
+    return;
+  }
+  if(input.dataset.readOnlyPlaceholder){
+    input.placeholder='Message '+assistantDisplayName()+'\u2026';
+    delete input.dataset.readOnlyPlaceholder;
+  }
   if(_compressionPlaceholderSaved!==null) return;
   if(input.disabled) return;
   if(_composerHasContent()) return;
@@ -11646,6 +12006,28 @@ function _setComposerPrimaryButtonIcon(btn,action){
 }
 
 function updateSendBtn(){
+  const chatReadOnlyReason=(S.session&&S.session.chat_read_only_reason)||'';
+  const chatReadOnlyNoticeText=chatReadOnlyReason.replace(/^Read-only in WebUI\.\s*/, '');
+  const showChatReadOnlyHelp=!!(chatReadOnlyReason&&S.session.chat_read_only_can_connect);
+  const chatReadOnlyNotice=$('composerChatReadOnlyNotice');
+  const chatReadOnlyText=$('composerChatReadOnlyReason');
+  const chatReadOnlyHelp=$('composerChatReadOnlyHelp');
+  if(chatReadOnlyText&&chatReadOnlyText.textContent!==chatReadOnlyNoticeText){
+    chatReadOnlyText.textContent=chatReadOnlyNoticeText;
+  }
+  if(chatReadOnlyHelp) chatReadOnlyHelp.hidden=!showChatReadOnlyHelp;
+  if(chatReadOnlyNotice){
+    chatReadOnlyNotice.hidden=!(chatReadOnlyNoticeText||showChatReadOnlyHelp);
+  }
+  const chatInput=$('msg');
+  if(chatInput){
+    chatInput.readOnly=!!chatReadOnlyReason;
+    const descriptionIds=new Set((chatInput.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
+    if(chatReadOnlyNoticeText) descriptionIds.add('composerChatReadOnlyReason');
+    else descriptionIds.delete('composerChatReadOnlyReason');
+    if(descriptionIds.size) chatInput.setAttribute('aria-describedby',[...descriptionIds].join(' '));
+    else chatInput.removeAttribute('aria-describedby');
+  }
   const btn=$('btnSend');
   if(!btn){
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
@@ -11661,7 +12043,8 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(chatReadOnlyReason) _btnTitle=chatReadOnlyReason;
+    else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
@@ -12383,8 +12766,42 @@ let _ttsGeneration=0;
 // replacement — and stopTTS() — invalidates all prior tokens, and every
 // asynchronous callback must verify ownership before mutating shared state.
 // `_ttsSpeaking` alone cannot distinguish playback A from playback B.
-function _beginTtsPlayback(){ _ttsSpeaking=true; return ++_ttsGeneration; }
+// A generation bump also aborts the requests the dead generation still has in
+// flight: the token only keeps stale responses out of the AudioContext, while
+// the AbortController below stops the browser downloading and decoding the
+// abandoned response. The server still finishes that provider call.
+function _beginTtsPlayback(){
+  _ttsSpeaking=true;
+  // Bump BEFORE aborting: the abort handlers are microtasks, but the token must
+  // already be dead when they run so none of them can claim the new playback.
+  const gen=++_ttsGeneration;
+  _abortPendingTtsRequests();
+  return gen;
+}
 function _ownsTtsPlayback(gen){ return gen===_ttsGeneration; }
+// In-flight /api/tts requests, one AbortController per request. Cancelling on
+// stop/replacement matters even though every callback is generation-guarded:
+// the server keeps synthesizing, the response is downloaded and thrown away,
+// and the request still occupies the per-client TTS rate window that the next
+// playback has to wait out.
+let _ttsPendingAborts=null;
+function _newTtsAbortController(){
+  if(typeof AbortController!=='function') return null;
+  try{ return new AbortController(); }catch(_){ return null; }
+}
+function _trackTtsAbort(ctl){
+  if(!ctl) return null;
+  if(!_ttsPendingAborts) _ttsPendingAborts=new Set();
+  _ttsPendingAborts.add(ctl);
+  return ctl;
+}
+function _releaseTtsAbort(ctl){ if(ctl&&_ttsPendingAborts) _ttsPendingAborts.delete(ctl); }
+function _abortPendingTtsRequests(){
+  if(!_ttsPendingAborts||!_ttsPendingAborts.size) return;
+  const pending=Array.from(_ttsPendingAborts);
+  _ttsPendingAborts.clear();
+  pending.forEach(function(ctl){ try{ ctl.abort(); }catch(_){} });
+}
 // Minimum gap between consecutive /api/tts synthesis requests, matching the
 // server-side per-client window in api/routes.py (_TtsRateLimiter, 2 s).
 // Shared by every engine and generation — the server limiter is per-client
@@ -12429,11 +12846,18 @@ function _sendTtsRequest(init, owner){
   let attempt=0;
   function _dispatch(){
     return _acquireTtsRequestSlot(owner).then(function(reserved){
-      if(!reserved) return {ok:false, err:new Error('aborted')};
-      return fetch(new URL('api/tts', document.baseURI || location.href).href, init)
+      if(!reserved) return {ok:false, err:new Error('aborted'), aborted:true};
+      // One AbortController per request: stopTTS()/a replacement aborts it, so
+      // the browser drops an abandoned response at once instead of downloading
+      // it into a generation-guarded no-op. The server-side synthesis and the
+      // request-rate window are not refunded.
+      const ctl=_trackTtsAbort(_newTtsAbortController());
+      const opts=ctl?Object.assign({}, init, {signal:ctl.signal}):init;
+      return fetch(new URL('api/tts', document.baseURI || location.href).href, opts)
       .then(function(r){
         if(r.status===429&&attempt<3){
           attempt++;
+          _releaseTtsAbort(ctl);
           return _dispatch();
         }
         if(!r.ok){
@@ -12458,8 +12882,15 @@ function _sendTtsRequest(init, owner){
           if(res&&typeof res==='object'&&('ok' in res)) return res;
           return {ok:true, buf:res};
         },
-        function(err){ return {ok:false, err:err}; }
-      );
+        function(err){
+          // A cancellation is not a failure: report it as such so no caller
+          // turns the user's own stop into an error toast.
+          return {ok:false, err:err, aborted:!!(ctl&&ctl.signal.aborted)};
+        }
+      )
+      // The request is settled (or abandoned): drop the controller so a later
+      // stop cannot abort a request that already delivered its audio.
+      .then(function(res){ _releaseTtsAbort(ctl); return res; });
     });
   }
   return _dispatch();
@@ -12572,7 +13003,7 @@ function _playEdgeTtsChunked(text, btn){
     }, _owns)
     .then(function(res){
       if(!_owns()) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
       const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
@@ -12695,7 +13126,7 @@ function _playElevenLabsTts(text, btn){
   }, _owns)
   .then(function(res){
     if(!_owns()) return;
-    if(!res.ok){ _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
+    if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
     return _playAudioBuf(res.buf, btn, 'ElevenLabs TTS', gen);
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
@@ -12720,9 +13151,11 @@ function _playOpenaiTts(text, btn){
   const _fail=function(msg){
     // Terminal failure: invalidate every scheduled/pending callback of this
     // playback (paced prefetch timers, in-flight fetch then-chains) so no
-    // follow-on request can fire after a terminal error, and stop/disconnect
-    // any partially constructed source before dropping the handle.
+    // follow-on request can fire after a terminal error, stop/disconnect
+    // any partially constructed source before dropping the handle, and cancel
+    // whatever this playback still has in flight.
     _ttsGeneration++;
+    _abortPendingTtsRequests();
     _ttsSpeaking=false;
     _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
@@ -12771,7 +13204,7 @@ function _playOpenaiTts(text, btn){
     bufPromise
     .then(function(res){
       if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
       var ctx=_getTtsAudioCtx();
       if(!ctx){ _fail('Web Audio API not available'); return; }
       var buf;
@@ -12948,8 +13381,11 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
 function stopTTS(){
   // Invalidate every in-flight generation (all engines, all chains) before
   // clearing state, so a late fetch/onended/decode callback can neither
-  // resume a stopped chain nor clobber a later playback.
+  // resume a stopped chain nor clobber a later playback. Then cancel the
+  // requests those generations still have on the wire, so stopping releases
+  // the browser's side of each request instead of only ignoring its response.
   _ttsGeneration++;
+  _abortPendingTtsRequests();
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
@@ -14415,6 +14851,9 @@ async function refreshSession() {
     _mergePendingSessionMessage(data.session, S.messages);
     S.activeStreamId = data.session.active_stream_id || null;
 
+    // #8523: the refreshed session can have turned read-only (or writable); redraw the composer's lock, notice
+    // and placeholder from it before the same-frame scroll-snapshot render (#3479).
+    if(typeof updateSendBtn==='function') updateSendBtn();
     syncTopbar(); _renderMessagesWithScrollSnapshot();
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
@@ -14856,7 +15295,7 @@ async function applyUpdates(opts){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       if(forceActiveRuns) _applyBody.force_active_runs=true;
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:300000});
       if(!res.ok){
         _showUpdateError(target,res);
         if(res.restart_blocked&&res.force_available){
@@ -14991,7 +15430,7 @@ async function applyClearUpdateLock(btn,opts){
   try{
     const _clearBody={target};
     if(forceActiveRuns) _clearBody.force_active_runs=true;
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:60000});
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:300000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
@@ -15145,7 +15584,7 @@ async function forceUpdate(btn,opts){
     const _ch=window._updateData?.[target]?.channel;
     if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
     if(forceActiveRuns) _forceBody.force_active_runs=true;
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
@@ -15553,7 +15992,7 @@ function syncTopbar(){
     if(sourceLabel){
       const badge=document.createElement('span');
       badge.className='topbar-source-badge';
-      badge.textContent=sourceLabel+(S.session.read_only?' · read-only':'');
+      badge.textContent=sourceLabel+((S.session.read_only||S.session.chat_read_only_reason)?' · read-only':'');
       _topbarMeta.appendChild(document.createTextNode(' '));
       _topbarMeta.appendChild(badge);
     }
@@ -25136,7 +25575,7 @@ function editMessage(btn) {
   bar.querySelector('.msg-edit-cancel').onclick = () => cancelEdit(row, originalText, body);
 
   ta.addEventListener('keydown', e => {
-    if(e.key==='Enter' && !e.shiftKey) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
+    if(window._composerShouldSendOnKey?window._composerShouldSendOnKey(e):(e.key==='Enter'&&!e.shiftKey)) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
     if(e.key==='Escape') { e.preventDefault(); cancelEdit(row, originalText, body); }
   });
 }
@@ -25178,6 +25617,9 @@ function autoResizeTextarea(ta) {
 let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy || _submitEditInFlight) return;
+  // #8523: a session another client owns is read-only here. send() refuses it, so stop before the
+  // truncate: the edit must not cut the transcript and then end with no message.
+  if(S.session.chat_read_only_reason){ setStatus(S.session.chat_read_only_reason); return; }
   _submitEditInFlight = true;
   try {
     const initialSid = S.session.session_id;
@@ -25217,6 +25659,8 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
+  // #8523: a read-only session refuses the turn server-side; say why before touching the transcript.
+  if(S.session.chat_read_only_reason){ setStatus(S.session.chat_read_only_reason); return; }
   const row=btn&&btn.closest&&btn.closest('[data-msg-idx]');
   if(!row)return;
   const clickedRowIdx=parseInt(row.dataset.msgIdx,10);
@@ -27516,7 +27960,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -27549,7 +27993,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
