@@ -5,6 +5,7 @@ from pathlib import Path
 
 import api.config as config
 import api.routes as routes
+import api.run_drain as run_drain
 
 REPO = Path(__file__).resolve().parents[1]
 ROUTES_SRC = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
@@ -48,7 +49,7 @@ class _FakeSession:
 
 
 def test_stale_stream_cleanup_helper_exists():
-    assert "def _clear_stale_stream_state(session)" in ROUTES_SRC
+    assert "def _clear_stale_stream_state(session, *, wait_for_writer: bool = False)" in ROUTES_SRC
     assert "stream_id in STREAMS" in ROUTES_SRC
     assert "session.active_stream_id = None" in ROUTES_SRC
     assert "session.pending_user_message = None" in ROUTES_SRC
@@ -117,7 +118,16 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
         def __enter__(self):
             session.active_stream_id = existing_stream_id
             session.pending_user_message = "prompt already claimed by another start"
-            session.pending_started_at = 123.0
+            # Fresh timestamp on purpose: this models the REGISTRATION WINDOW — a
+            # start that published its stream and its pending turn microseconds
+            # ago. A pending turn past the grace window is what a CRASHED turn
+            # leaves behind, and that is an orphan the guard must clear (#7302).
+            # Pinning an epoch-1970 timestamp here modelled the bug (a stale
+            # stream blocking forever) instead of the race this test protects;
+            # with the orphan reaper in place it also spins the caller's
+            # while-loop, because this fake lock re-mutates the session on every
+            # entry while the reaper clears it every pass.
+            session.pending_started_at = time.time()
             routes.STREAMS[existing_stream_id] = queue.Queue()
             return self
 
@@ -414,10 +424,19 @@ def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch
 
     cleanup_thread = threading.Thread(target=cleanup_stale_stream)
     writer_thread = threading.Thread(target=start_new_stream)
-    cleanup_thread.start()
-    writer_thread.start()
-    cleanup_thread.join(2)
-    writer_thread.join(2)
+    # #8904: nothing ever unregisters the stream the stand-in writer registers.
+    streams_before = set(config.STREAMS)
+    try:
+        cleanup_thread.start()
+        writer_thread.start()
+        cleanup_thread.join(2)
+        writer_thread.join(2)
+    finally:
+        added_streams = set(config.STREAMS) - streams_before
+        for stream_id in added_streams:
+            for registry in vars(config).values():
+                if isinstance(registry, dict):
+                    registry.pop(stream_id, None)
 
     assert not cleanup_thread.is_alive()
     assert not writer_thread.is_alive()
@@ -426,6 +445,7 @@ def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch
     assert session.pending_user_message == "new prompt"
     assert session.pending_attachments == ["new.txt"]
     assert session.pending_started_at == 456
+    assert not added_streams & {run["stream_id"] for run in run_drain.all_active_runs()}
 
 
 def test_frontend_drops_inflight_cache_when_server_session_is_idle():

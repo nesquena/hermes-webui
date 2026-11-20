@@ -131,14 +131,14 @@ def test_session_db_close_is_idempotent():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpd:
-        db_path = Path(tmpd) / "test.db"
+        db_path = Path(tmpd) / "state.db"
         db = SessionDB(db_path=db_path)
-        with db._lock:
-            db._conn.execute("SELECT 1")
+        _is_open, _adopt = _import_adopt_helpers()
+        assert _is_open(db)
         db.close()
-        assert db._conn is None
+        assert not _is_open(db)
         db.close()
-        assert db._conn is None
+        assert not _is_open(db)
         db.close()
 
 

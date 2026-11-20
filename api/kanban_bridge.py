@@ -9,10 +9,17 @@ Supported operations:
 - Task dependency links (create, delete)
 - SSE live event stream for real-time updates
 - Comments and worker dispatch integration
+
+Status transitions are routed through the Agent's own verbs (``complete_task``,
+``block_task``, ``archive_task``, ``schedule_task``, ``request_review``,
+``unblock_task``). The full column/status flow — including how tasks enter and
+leave ``scheduled``, how they enter ``review``, and the parent re-gating on the
+way back to ``ready`` — is documented in ``docs/kanban.md``.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 from api.sse_chunked import end_sse_headers
 import time
@@ -23,7 +30,7 @@ from api.agent_compat import agent_attr
 from api.helpers import bad, j
 from api.workspace import resolve_trusted_workspace
 
-BOARD_COLUMNS = ["triage", "todo", "ready", "running", "blocked", "done"]
+BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
 
 
@@ -371,12 +378,25 @@ def _create_task_payload(body: dict, *, board=None):
         return {"task": _task_dict(kb.get_task(conn, task_id)), "read_only": False}
 
 
+_REVIEW_RAW_EXITS = ("ready", "todo", "triage")
+
+
 def _patch_task(conn, task_id: str, body: dict):
     """Apply a partial update to a task, routing status transitions through structured verbs (complete, block, archive)."""
     kb = _kb()
     task = kb.get_task(conn, task_id)
     if not task:
         raise LookupError("task not found")
+    # A card in Review leaves it through the review verbs: Done approves it here,
+    # and changes are requested from the reviewer's flow. Ready/Todo/Triage would be
+    # a raw status write that keeps the reviewer as assignee, so the requested work
+    # would run in the reviewer's lane. Refuse those before any write (title, body,
+    # assignee included), so the edit dialog's combined save changes nothing either.
+    if task.status == "review" and str(body.get("status") or "").strip().lower() in _REVIEW_RAW_EXITS:
+        raise ValueError(
+            "this card is in review: send it back for changes from the reviewer's flow, "
+            "or approve it (Done) here"
+        )
 
     updates = {}
     if "title" in body:
@@ -406,7 +426,16 @@ def _patch_task(conn, task_id: str, body: dict):
         if hasattr(kb, "_append_event"):
             kb._append_event(conn, task_id, "updated", {"fields": list(updates), "source": "webui"})
 
-    if "assignee" in body:
+    # A combined assignee+review patch must capture the current implementer
+    # before request_review reassigns the card to the reviewer. Defer the
+    # assignee write until after the verb runs (dashboard plugin parity).
+    # Key presence, not value, decides deferral: an omitted assignee means
+    # "leave the card alone", while an explicit null/"" means "clear after
+    # the handoff" and must not erase the implementer before request_review
+    # records it.
+    requested_status = str(body.get("status") or "").strip().lower()
+    review_assignee_deferred = requested_status == "review" and "assignee" in body
+    if "assignee" in body and not review_assignee_deferred:
         if not kb.assign_task(conn, task_id, body.get("assignee") or None):
             raise LookupError("task not found")
 
@@ -435,19 +464,93 @@ def _patch_task(conn, task_id: str, body: dict):
             "Cannot set status to 'running' directly; use the dispatcher/claim path"
         )
     elif status == "ready":
-        # If the task is currently 'blocked', use the structured unblock
-        # verb so the unblocked event fires. Otherwise it's a legitimate
+        # If the task is currently 'blocked' or 'scheduled', use the structured unblock
+        # verb so parent re-gating and events fire correctly. Otherwise it's a legitimate
         # drag-drop or click move (e.g. todo → ready, running → ready when
         # the user yanks a stuck worker back to the queue) and we use the
         # claim-aware direct status write.
         current = kb.get_task(conn, task_id)
         if not current:
             raise LookupError("task not found")
-        if current.status == "blocked":
+        if current.status in ("blocked", "scheduled"):
             if not kb.unblock_task(conn, task_id):
                 raise LookupError("task not found")
         else:
             if not _set_status_direct(conn, task_id, "ready"):
+                raise LookupError("task not found")
+    elif status == "scheduled":
+        current = kb.get_task(conn, task_id)
+        if not current:
+            raise LookupError("task not found")
+        if not hasattr(kb, "schedule_task"):
+            raise RuntimeError("scheduling requires a newer Hermes Agent")
+        reason = body.get("reason") or None
+        if not kb.schedule_task(conn, task_id, reason=reason):
+            raise ValueError(f"cannot schedule task from status: {current.status}")
+    elif status == "review":
+        # Review is a handoff, not a plain status flip: request_review records
+        # the implementer/reviewer provenance and emits review_requested.
+        # Accepts running/ready only; anything else is refused with a 400.
+        if not hasattr(kb, "request_review"):
+            raise RuntimeError("review requires a newer Hermes Agent")
+        # A Running card claimed FROM Review is a reviewer run. Handing it to
+        # request_review would record the reviewer as the implementer, and the
+        # next request_changes would route the implementation work to the
+        # reviewer instead of the original implementer. Refuse it, as master
+        # refused every Review move, and leave the card untouched: the
+        # reviewer finishes through the review verbs (approve/request changes),
+        # and an operator reclaim still returns the run to Review natively.
+        retry_status = getattr(kb, "_retry_status_for_run", None)
+        if task.status == "review" or (
+            task.status == "running" and callable(retry_status) and retry_status(conn, task_id) == "review"
+        ):
+            raise ValueError(
+                "this card is already being reviewed; a review run cannot be sent for review again"
+            )
+        reviewer = body.get("assignee") or None
+        try:
+            review_params = inspect.signature(kb.request_review).parameters
+        except (TypeError, ValueError):
+            review_params = {}
+        use_reason = "with_reason" in review_params
+        review_kwargs = {
+            "summary": body.get("summary"),
+            "metadata": body.get("metadata"),
+            "reviewer": reviewer,
+        }
+        if "expected_run_id" in review_params or any(
+            param.kind is inspect.Parameter.VAR_KEYWORD for param in review_params.values()
+        ):
+            # Bind the handoff to the card this request read, inside the native
+            # transaction, instead of force=True: a Running card hands off only
+            # the run it was read with (native adds ``AND current_run_id = ?``,
+            # so a run that finished and was claimed for review in between is
+            # refused, not re-handed); a card read without a run goes through
+            # the native live-claim fence, so a worker that claimed it in
+            # between is not cut off. Ready -> Review keeps working.
+            review_kwargs["expected_run_id"] = (
+                getattr(task, "current_run_id", None) if task.status == "running" else None
+            )
+        else:
+            review_kwargs["force"] = True  # older Agents: no ownership proof to give
+        if use_reason:
+            review_kwargs["with_reason"] = True
+        result = kb.request_review(conn, task_id, **review_kwargs)
+        ok, reason = result if use_reason else (bool(result), None)
+        if not ok:
+            current = kb.get_task(conn, task_id)
+            now = current.status if current else "missing"
+            if now not in ("running", "ready"):
+                raise ValueError(
+                    f"cannot request review from status: {now}"
+                )
+            if reason:
+                raise ValueError(str(reason))
+            raise ValueError(f"review request refused for a {now} task")
+        if review_assignee_deferred and not reviewer:
+            # Explicit clear (assignee: null or "") while requesting review:
+            # unassign after the handoff has captured the implementer.
+            if not kb.assign_task(conn, task_id, None):
                 raise LookupError("task not found")
     elif status in ("triage", "todo"):
         # Direct status write for drag-drop moves between non-running,
@@ -606,7 +709,8 @@ def _update_config_payload(body):
 
     config_path = config._get_config_path()
     with config._cfg_lock:
-        config_data = config._load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): never persist env-expanded values.
+        config_data = config._load_yaml_config_file_raw(config_path)
         dashboard_cfg = config_data.get("dashboard")
         if not isinstance(dashboard_cfg, dict):
             dashboard_cfg = {}
@@ -689,6 +793,15 @@ def _bulk_tasks_payload(body: dict, *, board=None):
         raise ValueError("ids is required")
     results = []
     kb = _kb()
+    has_assignee = "assignee" in body
+    # Only the Review handoff needs the combined assignee+status payload:
+    # _patch_task defers that write until request_review captures the
+    # implementer. Every other status keeps the long-standing bulk ordering
+    # (status transition first, assign afterwards) so a rejected status never
+    # reassigns the card and a claimed running card is released before the
+    # assignee write hits the native claim fence.
+    requested_status = str(body.get("status") or "").strip().lower()
+    review_assignee_in_patch = has_assignee and requested_status == "review"
     with _conn(board=board) as conn:
         for task_id in ids:
             entry = {"id": task_id, "ok": True}
@@ -697,12 +810,23 @@ def _bulk_tasks_payload(body: dict, *, board=None):
                     entry.update(ok=False, error="not found")
                     results.append(entry)
                     continue
+                assignee_in_patch = False
                 if body.get("archive"):
                     if not kb.archive_task(conn, task_id):
                         entry.update(ok=False, error="archive refused")
                 elif body.get("status") is not None:
-                    _patch_task(conn, task_id, {"status": body.get("status")})
-                if body.get("assignee") is not None:
+                    # Carry the assignee through the status transition so bulk
+                    # and single PATCH share one handoff path. Review needs
+                    # this: _patch_task defers the assignee write until after
+                    # request_review captures the implementer, which a
+                    # separate assign_task call cannot reproduce. Other
+                    # statuses must not combine the fields (see above).
+                    patch_body = {"status": body.get("status")}
+                    if review_assignee_in_patch:
+                        patch_body["assignee"] = body.get("assignee")
+                        assignee_in_patch = True
+                    _patch_task(conn, task_id, patch_body)
+                if body.get("assignee") is not None and not assignee_in_patch:
                     if not kb.assign_task(conn, task_id, body.get("assignee") or None):
                         entry.update(ok=False, error="assign refused")
                 if body.get("priority") is not None:
@@ -1180,6 +1304,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
     to distinguish unmatched paths from already-responded paths (#1843).
     """
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Multi-board management endpoints — these do NOT take a board arg
         # because they operate on the on-disk board collection itself, not
@@ -1199,7 +1324,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
         if path == "/api/kanban/events/stream":
             return _handle_events_sse_stream(handler, parsed)
         if path.startswith(_TASK_PREFIX) and path.endswith("/log"):
-            task_id = unquote(path[len(_TASK_PREFIX):-len("/log")]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):-len("/log")]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             payload = _task_log_payload(parsed, task_id)
@@ -1207,7 +1332,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
                 return bad(handler, "task not found", status=404)
             return j(handler, payload) or True
         if path.startswith(_TASK_PREFIX):
-            task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             payload = _task_detail_payload(task_id, board=_resolve_board(parsed))
@@ -1232,6 +1357,7 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban POST. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Multi-board management endpoints — `_create_board_payload` and
         # `_switch_board_payload` operate on the on-disk board collection,
@@ -1241,7 +1367,7 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
         # POST /api/kanban/boards/<slug>/switch — set active board
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX) and path.endswith("/switch"):
-            slug = unquote(path[len(_BOARDS_PREFIX):-len("/switch")]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):-len("/switch")]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _switch_board_payload(slug)) or True
@@ -1261,14 +1387,14 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
         if path == "/api/kanban/links/delete":
             return j(handler, _link_tasks_payload(body, unlink=True, board=board)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/comments"):
-            task_id = path[len(_TASK_PREFIX):-len("/comments")].strip("/")
+            task_id = raw_path[len(_TASK_PREFIX):-len("/comments")].strip("/")
             return j(handler, _comment_payload(task_id, body, board=board)) or True
         for suffix, action in (("/block", "block"), ("/unblock", "unblock")):
             if path.startswith(_TASK_PREFIX) and path.endswith(suffix):
-                task_id = path[len(_TASK_PREFIX):-len(suffix)].strip("/")
+                task_id = raw_path[len(_TASK_PREFIX):-len(suffix)].strip("/")
                 return j(handler, _task_action_payload(task_id, body, action, board=board)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/patch"):
-            task_id = path[len(_TASK_PREFIX):-len("/patch")].strip("/")
+            task_id = raw_path[len(_TASK_PREFIX):-len("/patch")].strip("/")
             return j(handler, _patch_task_payload(task_id, body, board=board)) or True
     except ImportError as exc:
         return bad(handler, f"kanban unavailable: {exc}", status=503)
@@ -1285,6 +1411,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban PATCH. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         if path == "/api/kanban/config":
             return j(handler, _update_config_payload(body)) or True
@@ -1296,7 +1423,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
         # by Opus advisor.)
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX):
-            slug = unquote(path[len(_BOARDS_PREFIX):]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _update_board_payload(slug, body)) or True
@@ -1306,7 +1433,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
         board_b = _resolve_board_from_body(body)
         board = board_q if board_q is not None else board_b
         if path.startswith(_TASK_PREFIX):
-            task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             return j(handler, _patch_task_payload(task_id, body, board=board)) or True
@@ -1325,12 +1452,13 @@ def handle_kanban_delete(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban DELETE. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Same routing reorder as PATCH: /boards/<slug> path-routed first,
         # so a stray ?board=ghost can't 404 a legitimate board archive.
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX):
-            slug = unquote(path[len(_BOARDS_PREFIX):]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _delete_board_payload(slug, parsed)) or True

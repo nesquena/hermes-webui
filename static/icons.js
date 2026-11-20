@@ -31,6 +31,8 @@ const LI_PATHS = {
   'check':           '<polyline points="20 6 9 17 4 12"/>',
   'lock':            '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   'star':            '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  'pin':             '<path d="M12 17v5"/><path d="M5 17h14"/><path d="m6 3 1 7-3 2v2h16v-2l-3-2 1-7z"/>',
+  'bookmark':        '<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>',
   'x':               '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   'square':          '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>',
   'plus':            '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',

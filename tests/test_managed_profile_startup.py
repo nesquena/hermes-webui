@@ -66,12 +66,38 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
             import importlib, importlib.util, json, os, sys, sysconfig, threading, types
             from pathlib import Path
 
+            def _read_only_git(command):
+                # Read-only Agent/WebUI version metadata, never an installer.
+                # hermes_cli/version_info.py also asks for the branch, commit date,
+                # tags and distance, and runs `git --no-optional-locks status`.
+                # Only the two global options those calls use: `-c key=value` can make a
+                # read run a command (core.fsmonitor), and `--output` makes one write a file.
+                rest = [str(part) for part in command[1:]]
+                while rest and rest[0].startswith("-"):  # global options
+                    option = rest.pop(0)
+                    if option == "-C" and rest:
+                        rest.pop(0)
+                    elif option != "--no-optional-locks":
+                        return False
+                if not rest:
+                    return False
+                subcommand, options = rest[0], rest[1:]
+                if any(o.startswith("--output") for o in options):
+                    return False
+                if subcommand == "branch":
+                    return options == ["--show-current"]
+                if subcommand == "tag":
+                    return "--list" in options or "-l" in options
+                return subcommand in {
+                    "rev-parse", "describe", "status", "diff-index", "diff",
+                    "log", "show", "rev-list"}
+
             def deny_external_effects(event, args):
                 if event == "subprocess.Popen":
                     command = args[1]
                     if (isinstance(command, list) and Path(command[0]).name == "git"
-                            and command[1] in {"rev-parse", "describe", "status", "diff-index", "diff"}):
-                        return  # Agent/WebUI version metadata, never an installer.
+                            and _read_only_git(command)):
+                        return
                 if event in {"socket.connect", "socket.bind", "subprocess.Popen", "os.system", "os.exec"}:
                     raise RuntimeError("startup probe forbids external effects: " + event)
             sys.addaudithook(deny_external_effects)
@@ -119,7 +145,14 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
             assert os.environ["HERMES_HOME"] == str(home)
             assert skills.SKILLS_DIR == skills._SKILLS_DIR_AT_IMPORT == home / "skills", (
                 "Agent skills were imported before WebUI selected the named profile")
-            assert manager.SKILLS_DIR == manager._SKILLS_DIR_AT_IMPORT == home / "skills"
+            if hasattr(manager, "SKILLS_DIR"):
+                assert manager.SKILLS_DIR == manager._SKILLS_DIR_AT_IMPORT == home / "skills"
+                manager_shape = "own SKILLS_DIR"
+            else:
+                # Agents with 17b953d8b7cd: the manager resolves through skills_tool.
+                assert manager._skills_dir is skills._skills_dir
+                assert not any(hasattr(manager, a) for a in ("HERMES_HOME", "_SKILLS_DIR_AT_IMPORT"))
+                manager_shape = "shared skills_tool resolver"
             assert profiles._skill_modules_support_profile_home(home), "startup disabled dynamic skill resolution"
 
             from api import streaming
@@ -171,9 +204,12 @@ def test_real_managed_bootstrap_preserves_named_profile_concurrency(tmp_path):
             assert not any(thread.is_alive() for thread in threads), "same-profile scopes stalled"
             assert not errors, errors
             assert hc.get_hermes_home_override() is None
+            assert hasattr(manager, "SKILLS_DIR") == (manager_shape == "own SKILLS_DIR"), "scopes changed manager globals"
+            print("manager shape:", manager_shape)
             print("real PM activation; named-profile skills; two turn scopes + catalog progressed")
         '''), sysconfig.get_path("purelib")],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "two turn scopes + catalog progressed" in result.stdout
+    print(result.stdout)
