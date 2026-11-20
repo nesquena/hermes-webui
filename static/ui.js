@@ -12034,6 +12034,7 @@ function updateSendBtn(){
     return;
   }
   const action=getComposerPrimaryAction();
+  const _prevAction=btn.dataset.action;
   btn.dataset.action=action;
   btn.classList.toggle('stop',action==='stop');
   btn.classList.toggle('queue',action==='queue');
@@ -12063,6 +12064,18 @@ function updateSendBtn(){
   // the screen-reader label stay in sync with the action.
   btn.setAttribute('data-tooltip',_btnTitle);
   _setComposerPrimaryButtonIcon(btn,action);
+  // #7686 review 2026-11-18: the fitter may have collapsed this button to its
+  // icon stage because a longer busy label (Interrupt) did not fit. When the
+  // action later changes to a SHORTER one (Stop), the collapsed 34px button
+  // does not change .composer-left's width, so the ResizeObserver never
+  // rechecks and the label stays hidden. Drop the collapse and schedule one
+  // fit for the new label; an unchanged action leaves everything untouched.
+  if(_prevAction&&_prevAction!==action){
+    if(btn.classList&&btn.classList.contains('cf-action-icon')){
+      btn.classList.remove('cf-action-icon');
+    }
+    if(typeof _scheduleComposerFit==='function') _scheduleComposerFit();
+  }
   if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   // Single primary action button: while busy/no-draft it becomes the red Stop
   // action; while busy with a draft it reflects queue/interrupt/steer.
