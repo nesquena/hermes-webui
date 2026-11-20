@@ -253,7 +253,10 @@ def _agent(tmp_path: Path, name: str, *, reqs: bool = True, mode: int = 0o755) -
 def _publish_stage(source: Path, stage: Path) -> None:
     """The manifest docker_init.bash publishes for a stage copied from ``source``."""
     lines = [f"source={source.resolve()}"]
-    for name in ("pyproject.toml", "requirements.txt"):
+    # setup.py is recorded too: the restart repair makes a staged copy private
+    # without comparing its contents, so an edited copy must be detectable
+    # (#8501).
+    for name in ("pyproject.toml", "requirements.txt", "setup.py"):
         path = source / name
         digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "-"
         lines.append(f"{name}={digest}")
@@ -823,6 +826,36 @@ def test_auto_install_accepts_a_stage_with_a_private_setup_py(tmp_path, ambient_
     staged = _staged_copy(tmp_path, mount)
     with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
         assert _agent_install_dir(mount.resolve()) == staged.resolve()
+
+
+def test_an_edited_setup_py_is_not_trusted_after_the_restart_repair(tmp_path, ambient_umask):
+    """#8501: the repair only removes write bits — an edited copy stays rejected.
+
+    A peer user can edit a staged setup.py while it is still group/world
+    writable. The fast-restart repair then makes it private, and before this
+    change ``_stage_matches_agent`` accepted it because setup.py was not in the
+    recorded manifest: the recovery install would have run the edited code.
+    """
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent", reqs=False)
+    (mount / "setup.py").write_text(
+        "from setuptools import setup\nsetup()\n", encoding="utf-8"
+    )
+    staged = _staged_copy(tmp_path, mount)
+
+    # Edited after the copy, before the repair strips the write bits.
+    (staged / "setup.py").write_text(
+        "from setuptools import setup\nimport os\nos.system('id')\nsetup()\n",
+        encoding="utf-8",
+    )
+    (staged / "setup.py").chmod(0o644)
+
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve(), (
+            "a setup.py that no longer matches the authorized Agent must fall "
+            "back to the read-only mount"
+        )
 
 
 def test_auto_install_names_a_stage_rejected_for_an_unsafe_input(tmp_path, capsys):

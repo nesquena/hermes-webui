@@ -337,7 +337,7 @@ def _trusted_agent_dir(agent_dir: Path) -> bool:
 # staged copy. It names the Agent the stage was copied from (resolved path) and
 # the sha256 of that Agent's install inputs at copy time ('-' when absent).
 _STAGE_MANIFEST = '.hermes-webui-stage-source'
-_STAGE_INPUTS = ('pyproject.toml', 'requirements.txt')
+_STAGE_INPUTS = ('pyproject.toml', 'requirements.txt', 'setup.py')
 # `setup.py` is a build input only on the `pip install <dir>` path (setuptools
 # executes it when present), so it gets the same private-file bar exactly
 # there — but it stays out of `_STAGE_INPUTS`, which also feeds the published
@@ -346,7 +346,14 @@ _BUILD_PATH_INPUTS = ('setup.py',)
 
 
 def _install_inputs(directory: Path) -> dict[str, str]:
-    """sha256 of each file auto-install reads from ``directory``, '-' when absent."""
+    """sha256 of each file auto-install reads from ``directory``, '-' when absent.
+
+    ``setup.py`` is included: the restart repair makes a staged copy private
+    without comparing its contents (#8501), so a peer-writable setup.py that
+    was edited in the old stage would otherwise be trusted by
+    ``_stage_matches_agent``. Recording its digest makes an edited copy
+    detectable exactly like the other install inputs.
+    """
     digests = {}
     for name in _STAGE_INPUTS:
         path = directory / name

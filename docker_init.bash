@@ -515,7 +515,7 @@ write_agent_stage_manifest() {
   rm -f "$_stage/.hermes-webui-stage-source" || return 1
   {
     printf 'source=%s\n' "$_real"
-    for _name in pyproject.toml requirements.txt; do
+    for _name in pyproject.toml requirements.txt setup.py; do
       if [ -f "$_src/$_name" ]; then
         _sum="$(sha256sum < "$_src/$_name")" || return 1
         printf '%s=%s\n' "$_name" "${_sum%% *}"
@@ -539,6 +539,9 @@ write_agent_stage_manifest() {
 # may still carry writable inputs).
 secure_stage_install_inputs() {
   local _stage="$1" _f
+  # The manifest above records setup.py's digest too, so a copy edited while it
+  # was peer-writable is rejected by `_stage_matches_agent` instead of silently
+  # trusted once this makes it private (#8501).
   for _f in pyproject.toml requirements.txt setup.py; do
     if [ -f "$_stage/$_f" ]; then
       chmod go-w "$_stage/$_f" || return 1
