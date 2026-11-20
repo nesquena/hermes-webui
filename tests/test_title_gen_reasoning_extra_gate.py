@@ -21,9 +21,18 @@ try:
 except (ImportError, ValueError):
     _AGENT_IMPORT_SPEC_BEFORE_COLLECTION = None
 
-from api.streaming import _route_accepts_reasoning_extra, generate_title_raw_via_aux
+from api.streaming import (
+    _TITLE_RESPONSE_FORMAT,
+    _route_accepts_reasoning_extra,
+    generate_title_raw_via_aux,
+)
 
 _AGENT_AFTER_COLLECTION = sys.modules.get("agent", _MISSING)
+
+
+def _title_extra_body(controls=None):
+    """An auxiliary title request's extra_body: the route's controls plus the title schema."""
+    return {**(controls or {}), 'response_format': _TITLE_RESPONSE_FORMAT}
 
 
 def test_collection_preserves_the_real_agent_package():
@@ -136,7 +145,7 @@ class TestAuxReasoningExtraRouteContract:
             'google/gemini-3-flash',
             None,
         )
-        assert request['extra_body'] == {'reasoning': {'enabled': False}}
+        assert request['extra_body'] == _title_extra_body({'reasoning': {'enabled': False}})
 
     @pytest.mark.parametrize(
         ("provider", "model", "base_url"),
@@ -274,7 +283,7 @@ class TestAuxReasoningExtraRouteContract:
                 assert request['main_runtime']['model'] == default_model
             else:
                 assert (request['provider'], request['model'], request['base_url']) == expected_route
-            assert request['extra_body'] == expected_extra
+            assert request['extra_body'] == _title_extra_body(expected_extra)
 
     def test_explicit_blank_model_uses_its_own_default_not_the_main_route(self):
         captured = []
@@ -302,7 +311,7 @@ class TestAuxReasoningExtraRouteContract:
         assert request['provider'] == 'deepseek'
         assert request['model'] == 'deepseek-v4-flash'
         assert request['base_url'] is None
-        assert request['extra_body'] == {'reasoning': {'enabled': False}}
+        assert request['extra_body'] == _title_extra_body({'reasoning': {'enabled': False}})
 
     def test_explicit_blank_model_with_custom_url_uses_its_own_default(self):
         """A custom endpoint must not bypass an explicit provider's default."""
@@ -330,7 +339,7 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             'deepseek', 'deepseek-chat', 'https://deepseek.example.test/v1',
         )
-        assert request['extra_body'] == {'reasoning': {'enabled': False}}
+        assert request['extra_body'] == _title_extra_body({'reasoning': {'enabled': False}})
 
     def test_explicit_blank_model_without_a_provider_default_fails_closed(self):
         captured = []
@@ -354,7 +363,7 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             'custom:unconfigured', None, 'https://relay.example/v1',
         )
-        assert request['extra_body'] is None
+        assert request['extra_body'] == _title_extra_body()
 
     def test_unresolved_minimax_endpoint_keeps_only_minimax_transport_control(self):
         """MiniMax transport control is independent of generic reasoning suppression."""
@@ -379,7 +388,7 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             'custom:unconfigured', None, 'https://api.minimaxi.com/v1',
         )
-        assert request['extra_body'] == {'reasoning_split': True}
+        assert request['extra_body'] == _title_extra_body({'reasoning_split': True})
 
     @pytest.mark.parametrize('provider', (
         'minimax-oauth',
@@ -417,10 +426,10 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             provider, 'MiniMax-M2.7', None,
         )
-        assert request['extra_body'] == {
+        assert request['extra_body'] == _title_extra_body({
             'reasoning': {'enabled': False},
             'reasoning_split': True,
-        }
+        })
 
     @pytest.mark.parametrize(('provider', 'model', 'url'), (
         ('custom:relay', 'MiniMax-M3', 'https://relay.example/v1'),
@@ -439,7 +448,7 @@ class TestAuxReasoningExtraRouteContract:
         }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
             generate_title_raw_via_aux('question', 'answer')
 
-        assert captured[-1]['extra_body'] is None
+        assert captured[-1]['extra_body'] == _title_extra_body()
 
     @staticmethod
     def _agent_auto_title_request(title_config, main_config):
@@ -606,7 +615,7 @@ class TestAuxReasoningExtraRouteContract:
         request = requests[-1]
         assert (request['provider'], request['model'], request['base_url']) == expected_request
         assert 'main_runtime' not in request
-        assert request['extra_body'] == expected_extra
+        assert request['extra_body'] == _title_extra_body(expected_extra)
 
     @pytest.mark.parametrize('agent_shape', ('candidate_only', 'resolver_import_error'))
     @pytest.mark.parametrize(
@@ -681,10 +690,10 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             None, 'MiniMax-M3', 'https://api.minimax.io/v1',
         )
-        assert request['extra_body'] == {
+        assert request['extra_body'] == _title_extra_body({
             'reasoning': {'enabled': False},
             'reasoning_split': True,
-        }
+        })
 
     @pytest.mark.parametrize(
         ('main_provider', 'main_model', 'main_base_url'),
@@ -720,7 +729,7 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             None, 'gemma-4-31b-it', 'https://relay.example.test/v1',
         )
-        assert request['extra_body'] is None
+        assert request['extra_body'] == _title_extra_body()
 
     def test_base_url_only_route_is_custom_not_the_anthropic_main_route(self):
         """A URL alone is an auxiliary custom-route contract."""
@@ -745,7 +754,7 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             'custom', None, 'https://relay.example.test/v1',
         )
-        assert request['extra_body'] is None
+        assert request['extra_body'] == _title_extra_body()
 
     def test_legacy_local_base_url_route_is_custom_not_the_codex_main_route(self):
         """The legacy local spelling must use the custom auxiliary client path."""
@@ -770,7 +779,7 @@ class TestAuxReasoningExtraRouteContract:
         assert (request['provider'], request['model'], request['base_url']) == (
             'custom', None, 'https://relay.example.test/v1',
         )
-        assert request['extra_body'] is None
+        assert request['extra_body'] == _title_extra_body()
 
     @pytest.mark.parametrize('model', (
         '@openai:gpt-5.5',
@@ -788,7 +797,7 @@ class TestAuxReasoningExtraRouteContract:
         }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
             generate_title_raw_via_aux('question', 'answer')
 
-        assert captured[-1]['extra_body'] is None
+        assert captured[-1]['extra_body'] == _title_extra_body()
 
     @pytest.mark.parametrize('url', (
         '(https://USER MARKER:PASSWORD MARKER@relay.example/v1)?api_key=(KEY MARKER)&token=[TOKEN MARKER]',

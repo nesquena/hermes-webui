@@ -4,10 +4,13 @@ import json
 import logging
 import os
 import shlex
+import signal
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, SimpleHTTPRequestHandler
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +28,116 @@ def _git(repo, *args):
         ['git', *args], cwd=str(repo), check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+
+
+@pytest.mark.parametrize('operation', ['fetch', 'pull'])
+def test_update_network_command_skips_automatic_maintenance(tmp_path, monkeypatch, operation):
+    """Use Git's trace as the oracle, with maintenance explicitly enabled locally."""
+    origin = tmp_path / 'origin.git'
+    _git(tmp_path, 'init', '--bare', '-q', str(origin))
+    repo = tmp_path / 'repo'
+    _git(tmp_path, 'clone', '-q', str(origin), str(repo))
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'seed')
+    _git(repo, 'push', '-qu', 'origin', 'HEAD')
+    _git(repo, 'config', 'maintenance.auto', 'true')
+    _git(repo, 'config', 'gc.auto', '1')
+    trace = tmp_path / 'trace.jsonl'
+    monkeypatch.setenv('GIT_TRACE2_EVENT', str(trace))
+    config_before = (repo / '.git' / 'config').read_bytes()
+
+    output, ok = updates._run_git([operation, 'origin'], repo)
+
+    assert ok, output
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    children = [event['argv'] for event in events if event['event'] == 'child_start']
+    assert children, 'Git trace did not record any child process'
+    assert not any('maintenance' in cmd or 'gc' in cmd for cmd in children), children
+    assert (repo / '.git' / 'config').read_bytes() == config_before
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX process-group integration')
+@pytest.mark.parametrize('parent_exits', [False, True])
+def test_update_timeout_stops_descendants(tmp_path, monkeypatch, parent_exits):
+    """A child holding the pipes must stop even if its parent already exited."""
+    wrapper = tmp_path / 'git-wrapper'
+    marker = tmp_path / 'child-survived'
+    pidfile = tmp_path / 'child.pid'
+    child = (
+        'import pathlib,time; time.sleep(1); '
+        f'pathlib.Path({str(marker)!r}).touch(); time.sleep(20)'
+    )
+    wrapper.write_text(
+        f'#!{sys.executable}\n'
+        'import pathlib,subprocess,sys,time\n'
+        'if "config" in sys.argv or "ls-remote" in sys.argv: sys.exit(1)\n'
+        f'p = subprocess.Popen([sys.executable, "-c", {child!r}])\n'
+        f'pathlib.Path({str(pidfile)!r}).write_text(str(p.pid))\n'
+        'print("remote: partial output", flush=True)\n'
+        + ('sys.exit(0)\n' if parent_exits else 'time.sleep(20)\n'),
+        encoding='utf-8',
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(updates, '_resolve_git_executable', lambda: str(wrapper))
+    started = time.monotonic()
+    try:
+        output, ok = updates._run_git(['fetch', 'origin'], tmp_path, timeout=0.5)
+        assert not ok
+        assert time.monotonic() - started < 10
+        assert 'partial output' in output
+        time.sleep(1.5)
+        assert not marker.exists(), 'a descendant kept running after cancellation'
+        assert 'timed out after 0.5s' in output
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_update_windows_network_git_delegates_to_job_runner(tmp_path, monkeypatch):
+    """On Windows, tree ownership moves to the shared Job runner; POSIX keeps killpg."""
+    routed = {}
+
+    def fake_windows_runner(argv, *, cwd, env, timeout):
+        routed.update(argv=list(argv), cwd=cwd, env=env, timeout=timeout)
+        return 'sentinel-completed'
+
+    # Replace updates' module-level `os` reference instead of patching the
+    # shared os module: pathlib and pytest internals read os.name live.
+    monkeypatch.setattr(updates, 'os', SimpleNamespace(name='nt'))
+    # updates.py binds the runner by name at import time; patch that binding.
+    monkeypatch.setattr(updates, 'run_network_command_windows', fake_windows_runner)
+    result = updates._run_network_git(['git', 'fetch'], cwd=tmp_path, env={'K': 'V'}, timeout=7)
+    assert result == 'sentinel-completed'
+    assert routed == {'argv': ['git', 'fetch'], 'cwd': tmp_path, 'env': {'K': 'V'}, 'timeout': 7}
+
+
+@pytest.mark.parametrize('operation', ['check', 'branch', 'apply', 'force'])
+def test_update_entry_points_allow_slow_fetch(tmp_path, monkeypatch, operation):
+    """Check/apply/force must all use the same network budget before mutating."""
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+    seen = []
+
+    def failed_fetch(args, cwd, timeout=10):
+        if args[0] == 'fetch':
+            seen.append(timeout)
+            return f"git {' '.join(args)} timed out after {timeout}s", False
+        return '', False
+
+    monkeypatch.setattr(updates, '_run_git', failed_fetch)
+    if operation == 'check':
+        updates._check_repo(tmp_path, 'webui')
+    elif operation == 'branch':
+        updates._check_repo_branch(tmp_path, 'webui')
+    elif operation == 'apply':
+        updates.apply_update('webui')
+    else:
+        updates.apply_force_update('webui')
+    assert seen == [60]
 
 
 def _dirty_stable_repo(tmp_path):
@@ -669,7 +782,7 @@ def test_force_update_dirty_probe_timeout_keeps_stable_no_ref_as_an_exact_noop(
         'channel': 'stable',
     }
     assert calls == [
-        (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
+        (['fetch', 'origin', '--quiet', '--tags', '--force'], updates._GIT_NETWORK_TIMEOUT),
         (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
     ]
     assert 'working-tree state as unknown' in caplog.text
@@ -714,7 +827,7 @@ def test_force_update_dirty_probe_non_dirty_status_keeps_stable_no_ref_as_an_exa
         'channel': 'stable',
     }
     assert calls == [
-        (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
+        (['fetch', 'origin', '--quiet', '--tags', '--force'], updates._GIT_NETWORK_TIMEOUT),
         (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
     ]
     assert 'working-tree state as unknown' in caplog.text
@@ -976,6 +1089,7 @@ def test_run_git_ref_recovery_is_bounded_and_preserves_errors(
         return real_run(cmd, **kwargs)
 
     monkeypatch.setattr(subprocess, 'run', failed_network_command)
+    monkeypatch.setattr(updates, '_run_network_git', failed_network_command)
     assert updates._run_git(args, tmp_path) == (diagnostic, False)
     assert len(attempts) == expected_attempts
 
@@ -1015,7 +1129,8 @@ def test_run_git_ref_recovery_preserves_custom_refspec_destinations(tmp_path, ex
 def test_run_git_returns_stderr_on_failure(tmp_path):
     """When a git command fails, _run_git should return stderr (not empty string)."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
-         patch('subprocess.run') as mock_run:
+         patch('subprocess.run') as mock_run, \
+         patch.object(updates, '_run_network_git', mock_run):
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout='',
@@ -1030,7 +1145,8 @@ def test_run_git_returns_stderr_on_failure(tmp_path):
 def test_run_git_returns_stdout_when_no_stderr(tmp_path):
     """If stderr is empty on failure, fall back to stdout."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
-         patch('subprocess.run') as mock_run:
+         patch('subprocess.run') as mock_run, \
+         patch.object(updates, '_run_network_git', mock_run):
         mock_run.return_value = MagicMock(
             returncode=128,
             stdout='Already up to date.',
@@ -2703,7 +2819,8 @@ def test_run_git_decodes_timeout_output_bytes(tmp_path):
     back as bytes. Returning them unchanged crashed every str-based caller
     (e.g. the pull-failure diagnosis in apply_update) with TypeError.
     """
-    with patch('subprocess.run') as mock_run:
+    with patch('subprocess.run') as mock_run, \
+         patch.object(updates, '_run_network_git', mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(
             cmd=['git', 'pull', '--ff-only'], timeout=30,
             output=b'remote: Counting objects:  50% (1/2)\r',
@@ -2717,7 +2834,8 @@ def test_run_git_decodes_timeout_output_bytes(tmp_path):
 
 def test_run_git_timeout_without_output_reports_duration(tmp_path):
     """Timeout with empty output still yields a readable str message."""
-    with patch('subprocess.run') as mock_run:
+    with patch('subprocess.run') as mock_run, \
+         patch.object(updates, '_run_network_git', mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(
             cmd=['git', 'pull'], timeout=7,
         )
@@ -2766,6 +2884,7 @@ def test_apply_update_pull_timeout_returns_error_not_typeerror(tmp_path):
         raise AssertionError(f'unexpected git cmd: {cmd!r}')
 
     with patch('subprocess.run', side_effect=fake_run), \
+         patch.object(updates, '_run_network_git', side_effect=fake_run), \
          patch.object(updates, 'REPO_ROOT', repo), \
          patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'):
         result = updates.apply_update('webui')
@@ -2812,6 +2931,7 @@ def test_apply_update_pull_timeout_does_not_leak_remote_token(tmp_path):
         raise AssertionError(f'unexpected git cmd: {cmd!r}')
 
     with patch('subprocess.run', side_effect=fake_run), \
+         patch.object(updates, '_run_network_git', side_effect=fake_run), \
          patch.object(updates, 'REPO_ROOT', repo), \
          patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'):
         result = updates.apply_update('webui')

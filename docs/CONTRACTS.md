@@ -145,6 +145,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   (`STREAMS_LOCK → ACTIVE_RUNS_LOCK`). Start here before changing subscriber liveness, channel
   collection, stream registration, or orphan reclaim (#7302).
 
+- [`docs/architecture/async-delegation-ledger-owner.md`](architecture/async-delegation-ledger-owner.md):
+  owner-ledger resolution and the claim-bound ACK/release/retry/replay scope for
+  async-delegation completions (#7214).
+
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,
 read the relevant RFC before editing. In the PR description, name the state layer
@@ -272,6 +276,10 @@ must consume that same resolved route.
   resolved model omit it (fail closed). MiniMax `reasoning_split` remains a
   separate transport control keyed to the effective MiniMax route, not to the
   generic reasoning-suppression capability.
+- The title JSON schema (`response_format`) is not route-gated: every
+  auxiliary title request asks for it on the same request route, beside any
+  reasoning controls, and is resent once without it only when the endpoint
+  refuses the schema (`docs/advanced-chat-setup.md`).
 
 Release batches should list included contract-affecting PRs explicitly so
 reviewers can distinguish ordinary green-CI fixes from changes that update the
