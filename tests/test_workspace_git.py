@@ -360,6 +360,28 @@ def test_git_diff_generates_untracked_text_diff_and_blocks_escape(tmp_path):
         git_diff(repo, "../outside.txt", "unstaged")
 
 
+def test_diff_stats_counts_dash_prefixed_hunk_content_but_not_file_headers():
+    from api.workspace_git import _diff_stats
+
+    diff_text = (
+        "diff --git a/a.sql b/a.sql\n"
+        "--- a/a.sql\n"
+        "+++ b/a.sql\n"
+        "@@ -1 +0,0 @@\n"
+        "--- note\n"
+        "diff --git a/b.yml b/b.yml\n"
+        "--- a/b.yml\n"
+        "+++ b/b.yml\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+---\n"
+        "+++x\n"
+    )
+
+    additions, deletions = _diff_stats(diff_text)
+    assert additions == 2
+    assert deletions == 1
+
+
 def test_git_diff_skips_repo_local_textconv(tmp_path):
     import os
     import sys
