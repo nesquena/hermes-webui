@@ -227,6 +227,63 @@ def test_an_explicit_pick_of_the_same_url_row_still_carries_its_own_key(monkeypa
     assert bundle["api_key"] == "synthetic-native"
 
 
+DISPLAY_LABEL_URL = NATIVE_URL
+
+
+def _display_label_config(provider_url=DISPLAY_LABEL_URL) -> dict:
+    """The round-17 reproduction: a bare key whose LABEL spells the identity.
+
+    Master's native-view producer mints an identity from the mapping KEY alone, so
+    a bare ``晨光`` key produced no identity at all however its ``name`` was
+    spelled. The label is editable metadata, not provenance.
+    """
+    data = _oracle_config()
+    data["model"]["api_key"] = "model-key"
+    data["providers"] = {
+        NATIVE_KEY: {
+            "name": PID,
+            "base_url": provider_url,
+            "api_key": "native-key",
+            "model": MODEL,
+        },
+    }
+    return data
+
+
+def test_a_display_label_on_a_bare_key_does_not_take_the_default(monkeypatch):
+    """A label alone is not a route master had, so it must not own the default.
+
+    Red on the round-16 head: ``_native_fallback_identities`` subtracted the
+    record's qualified display name from the fallback set, so ``custom:晨光`` read
+    as an identity the KEY minted before the change. It did not, so the bare
+    ``chat-model`` was promoted to the row and the constructor bundle replaced
+    ``model-key`` with the row's own credential.
+    """
+    data = _display_label_config()
+    _bind(monkeypatch, data)
+    _assert_default_keeps_its_own_connection(_display_label_config())
+
+
+def test_a_display_label_on_a_shared_endpoint_does_not_take_the_default(monkeypatch):
+    """The equal-endpoint shape, where the URL promotion cannot tell them apart."""
+    data = _display_label_config(DEFAULT_URL)
+    _bind(monkeypatch, data)
+    _assert_default_keeps_its_own_connection(_display_label_config(DEFAULT_URL))
+
+
+def test_an_explicit_pick_of_a_display_labelled_row_still_reaches_it(monkeypatch):
+    """Control: the row stays in the picker and its qualified form still serves it."""
+    _bind(monkeypatch, _display_label_config())
+    assert [card["id"] for card in _cards()] == [PID]
+    assert config.resolve_model_provider(
+        f"@{PID}:{MODEL}", explicitly_picked=True
+    ) == (MODEL, PID, NATIVE_URL)
+    bundle = config.merge_custom_provider_runtime_bundle(
+        PID, "model-key", NATIVE_URL, None
+    )
+    assert bundle["api_key"] == "native-key"
+
+
 def test_a_configured_native_identity_still_routes_to_its_own_record(monkeypatch):
     """Control: naming the native record in ``model.provider`` is an explicit claim."""
     data = _oracle_config()

@@ -1759,38 +1759,41 @@ def _native_fallback_identities(providers_cfg: object) -> set[str]:
     explicitly instead (``@custom:<name>:<model>``), which still routes to the
     record's own endpoint and credential.
 
-    Provenance is per IDENTITY: an identity is new only when the fallback is its
-    SOLE producer. An explicit key (``custom:晨光``) or a record whose own display
-    name already spells the identity mints it on master too, so excluding it would
-    drop a route an existing owner answers. That is the r15 P1: a disabled or
-    empty bare key beside a complete ``custom:晨光`` record put ``custom:晨光`` in
-    this set, both exclusions skipped the explicit record, and the model fell to
-    the generic ``model:`` route with the model block's credential, where master
-    kept the record's endpoint and key. Whether the explicit minter can SERVE the
-    identity is decided downstream, by the view's own disabled/inert verdict, not
-    here: ``providers: {custom:晨光: {}, 晨光: <complete>}`` still answers from the
-    bare record, exactly as master did through the keyed alias.
+    Provenance is per IDENTITY, and it comes from the MAPPING KEY alone: that is
+    the field master's producer minted from (``_custom_provider_entries`` slugs
+    ``key``). An explicit key (``custom:晨光``) mints on master too, so excluding
+    it would drop a route an existing owner answers. That is the r15 P1: a
+    disabled or empty bare key beside a complete ``custom:晨光`` record put
+    ``custom:晨光`` in this set, both exclusions skipped the explicit record, and
+    the model fell to the generic ``model:`` route with the model block's
+    credential, where master kept the record's endpoint and key. Whether the
+    explicit minter can SERVE the identity is decided downstream, by the view's
+    own disabled/inert verdict, not here: ``providers: {custom:晨光: {},
+    晨光: <complete>}`` still answers from the bare record, exactly as master did
+    through the keyed alias.
+
+    An editable ``name`` is NOT provenance (r17 P1). Counting it let
+    ``providers: {晨光: {name: custom:晨光, ...}}`` subtract its own identity from
+    this set, so a bare ``chat-model`` was promoted to the row and the bundle
+    replaced the default's ``api_key`` with the row's own. Master minted from the
+    key, and a bare ``晨光`` key minted nothing, so that label never made the
+    record a by-name route; the picker's qualified ``@custom:<name>:<model>`` form
+    reaches it instead.
     """
     if not isinstance(providers_cfg, dict):
         return set()
     fallback_identities: set[str] = set()
     explicit_identities: set[str] = set()
-    for key, record in providers_cfg.items():
+    for key in providers_cfg:
         if not _is_native_custom_provider_key(key):
             continue
-        values = [key]
-        if isinstance(record, dict):
-            name = record.get("name")
-            if str(name or "").strip():
-                values.append(name)
-        for value in values:
-            identity = _custom_provider_slug_from_name(value)
-            if not identity:
-                continue
-            if _custom_provider_slug_is_fallback(value):
-                fallback_identities.add(identity)
-            else:
-                explicit_identities.add(identity)
+        identity = _custom_provider_slug_from_name(key)
+        if not identity:
+            continue
+        if _custom_provider_slug_is_fallback(key):
+            fallback_identities.add(identity)
+        else:
+            explicit_identities.add(identity)
     return fallback_identities - explicit_identities
 
 
