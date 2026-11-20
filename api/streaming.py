@@ -13667,6 +13667,10 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
                 "Failed to close unused session_db handle in adopt helper",
                 exc_info=True,
             )
+        if getattr(agent, _BIND_FAILED_ATTR, False) is True:
+            # The last rebind failed while this handle stayed open: retry it,
+            # or the context engine stays on the replaced, closed handle.
+            _rebind_context_engine_session(agent, existing)
         return existing
     if existing is not None:
         try:
@@ -13684,23 +13688,72 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
             new_session_db if hasattr(new_session_db, "_release")
             else getattr(new_session_db, "_store", None)
         )
+    # The Agent handles above already point at the live adopted handle.
+    _rebind_context_engine_session(agent, new_session_db)
+    return new_session_db
+
+
+# Set on a cached agent whose context-engine rebind failed, so a later turn
+# that keeps the (still open) adopted handle retries the hook (#9150).
+_BIND_FAILED_ATTR = "_webui_context_engine_bind_failed"
+_BIND_WARNED_ATTR = "_webui_context_engine_bind_warned"
+
+
+def _set_agent_flag(agent, name, value):
+    try:
+        setattr(agent, name, value)
+    except Exception:
+        pass  # best-effort bookkeeping; never fail the turn over it
+
+
+def _call_bind_session_state(bind, session_db, session_id, bind_kwargs):
+    """Call the hook like the Agent's producers: positionally, then by keyword.
+
+    The Agent's reset path binds positionally and ``AIAgent.__init__`` by
+    keyword, so a hook may accept only one convention. Only a TypeError from
+    the first call gets the single keyword retry; anything else propagates.
+    """
+    try:
+        bind(session_db, session_id, **bind_kwargs)
+    except TypeError:
+        bind(session_db=session_db, session_id=session_id, **bind_kwargs)
+
+
+def _rebind_context_engine_session(agent, session_db):
+    """Best-effort ``bind_session_state`` of a cached agent's context engine.
+
+    ``persistence`` is forwarded only to hooks that accept it. A failure
+    (``Exception`` only) is logged and the turn continues; it is remembered
+    on the agent so the next cached turn retries even when it keeps the open
+    handle, and the first failure per agent is logged once at WARNING.
+    """
     compressor = getattr(agent, "context_compressor", None)
     bind = getattr(compressor, "bind_session_state", None)
     if callable(bind):
-        # Call the hook like the Agent's producers: first two arguments
-        # positional, persistence only when accepted, failures best-effort.
-        # The Agent handles above already point at the live adopted handle.
-        bind_kwargs = {}
-        if _supports_kwarg(bind, "persistence"):
-            bind_kwargs["persistence"] = getattr(agent, "persistence", None)
         try:
-            bind(new_session_db, getattr(agent, "session_id", ""), **bind_kwargs)
-        except Exception:
+            bind_kwargs = {}
+            if _supports_kwarg(bind, "persistence"):
+                bind_kwargs["persistence"] = getattr(agent, "persistence", None)
+            _call_bind_session_state(
+                bind, session_db, getattr(agent, "session_id", ""), bind_kwargs
+            )
+        except Exception as exc:
+            if getattr(agent, _BIND_WARNED_ATTR, False) is not True:
+                _set_agent_flag(agent, _BIND_WARNED_ATTR, True)
+                logger.warning(
+                    "context engine bind_session_state during cached adoption "
+                    "failed (%s); retrying on the next cached turn",
+                    type(exc).__name__,
+                )
             logger.debug(
                 "context engine bind_session_state during cached adoption failed",
                 exc_info=True,
             )
-    return new_session_db
+            _set_agent_flag(agent, _BIND_FAILED_ATTR, True)
+            return False
+    if getattr(agent, _BIND_FAILED_ATTR, False) is True:
+        _set_agent_flag(agent, _BIND_FAILED_ATTR, False)
+    return True
 
 
 def _build_session_db_for_stream(state_db_path):

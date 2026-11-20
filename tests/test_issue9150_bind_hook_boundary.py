@@ -123,6 +123,32 @@ class RaisingHook(_Recorder):
             raise RuntimeError("controlled hook failure")
 
 
+class KeywordOnlyHook(_Recorder):
+    """Accepts only the keyword convention ``AIAgent.__init__`` uses."""
+
+    def bind_session_state(self, *, session_db=None, session_id="", persistence=None):
+        self.calls.append((session_db, session_id, {"persistence": persistence}))
+
+
+class TypeErrorHook(_Recorder):
+    def bind_session_state(self, session_db=None, session_id=""):
+        self.calls.append((session_db, session_id, {}))
+        raise TypeError("controlled hook type error")
+
+
+class BaseExceptionHook(_Recorder):
+    def __init__(self, exc_type):
+        super().__init__()
+        self.exc_type = exc_type
+        self.armed = False
+
+    def bind_session_state(self, session_db, session_id):
+        self.calls.append((session_db, session_id, {}))
+        if self.armed:
+            raise self.exc_type()
+        raise RuntimeError("controlled hook failure")
+
+
 def _agent(existing, hook, **extra):
     return SimpleNamespace(
         _session_db=existing, session_id=SESSION_ID, context_compressor=hook, **extra
@@ -273,3 +299,82 @@ def test_real_session_db_adoption_hook_boundary(kind, tmp_path):
     finally:
         old.close()
         fresh.close()
+
+
+def _adopt_after_closed(hook):
+    old, fresh = ShimHandle(), ShimHandle()
+    old.close()
+    agent = _agent(old, hook, persistence=None)
+    return agent, fresh
+
+
+def test_keyword_only_hook_gets_one_keyword_retry():
+    hook = KeywordOnlyHook()
+    agent, fresh = _adopt_after_closed(hook)
+
+    assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
+
+    assert hook.calls == [(fresh, SESSION_ID, {"persistence": fresh._store})]
+
+
+def test_type_error_retries_once_by_keyword_then_gives_up():
+    hook = TypeErrorHook()
+    agent, fresh = _adopt_after_closed(hook)
+
+    assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
+
+    assert hook.calls == [(fresh, SESSION_ID, {})] * 2
+    assert agent._session_db is fresh and streaming._session_db_is_open(fresh)
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_base_exceptions_from_hook_propagate(exc_type):
+    # Only Exception is best-effort; an interrupt or exit must not be swallowed
+    # (nor retried) on adoption or on the later-turn rebind retry.
+    hook = BaseExceptionHook(exc_type)
+    hook.armed = True
+    agent, fresh = _adopt_after_closed(hook)
+    with pytest.raises(exc_type):
+        streaming._adopt_session_db_for_cached_agent(agent, fresh)
+    assert hook.calls == [(fresh, SESSION_ID, {})]
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_base_exceptions_from_rebind_retry_propagate(exc_type):
+    hook = BaseExceptionHook(exc_type)
+    agent, fresh = _adopt_after_closed(hook)
+    assert streaming._adopt_session_db_for_cached_agent(agent, fresh) is fresh
+    hook.armed = True
+    unused = ShimHandle()
+    with pytest.raises(exc_type):
+        streaming._adopt_session_db_for_cached_agent(agent, unused)
+    assert hook.calls == [(fresh, SESSION_ID, {})] * 2
+
+
+def test_failed_rebind_is_retried_on_later_turn_that_keeps_open_handle(caplog):
+    caplog.set_level(logging.DEBUG, logger=streaming.logger.name)
+    hook = RaisingHook()
+    agent, first = _adopt_after_closed(hook)
+
+    assert streaming._adopt_session_db_for_cached_agent(agent, first) is first
+    for _ in range(2):  # the adopted handle stays open; the hook keeps failing
+        unused = ShimHandle()
+        assert streaming._adopt_session_db_for_cached_agent(agent, unused) is first
+        assert unused.close_calls == 1
+    assert hook.calls == [(first, SESSION_ID, {})] * 3
+
+    hook.fail = False
+    assert streaming._adopt_session_db_for_cached_agent(agent, ShimHandle()) is first
+    assert hook.calls == [(first, SESSION_ID, {})] * 4
+    # Recovered: later turns keep the live handle without calling the hook.
+    assert streaming._adopt_session_db_for_cached_agent(agent, ShimHandle()) is first
+    assert len(hook.calls) == 4
+    assert first.close_calls == 0
+
+    warnings = [
+        record for record in caplog.records
+        if record.levelno == logging.WARNING and "bind_session_state" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "controlled hook failure" not in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
