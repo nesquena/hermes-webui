@@ -153,6 +153,39 @@ class TestDeleteFlowSource:
         )
 
 
+class TestSendAfterSupersededDelete:
+    """A Send that joined a delete-owned New Chat must not follow the POST into
+    whichever conversation the user opened while that POST was still settling."""
+
+    def _send_source(self):
+        src = read('static/messages.js')
+        start = src.find('async function send(){')
+        assert start != -1, 'send() not found in static/messages.js'
+        end = src.find('\nasync function ', start + 1)
+        return src[start:end if end != -1 else len(src)]
+
+    def test_superseded_replacement_aborts_the_send(self):
+        fn = self._send_source()
+        marker = ('const _bootstrappedNewSession=await newSession(false,'
+                  '{pickerClaimEpoch:_sendProjectPickerClaim});')
+        assert marker in fn, (
+            'send() must keep the newSession() result so a superseded replacement '
+            'can be detected instead of ignored'
+        )
+        tail = fn[fn.find(marker):]
+        guard = 'if(_bootstrappedNewSession&&_bootstrappedNewSession.superseded) return;'
+        assert guard in tail, (
+            'a superseded delete-owned replacement must abort this send instead of '
+            'delivering the captured prompt to the conversation the user opened'
+        )
+        clear_at = tail.find('const _submittedDraftTextForClear')
+        assert clear_at != -1
+        assert tail.find(guard) < clear_at, (
+            'the superseded guard must run before the composer capture/clear, so the '
+            'newly opened conversation keeps its draft'
+        )
+
+
 _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
