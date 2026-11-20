@@ -176,7 +176,12 @@ IMPORT_AND_LOAD_JS = """async ({messages, finalText}) => {
   if (!response.ok || !data.session || !data.session.session_id) {
     throw new Error(`session import failed: ${JSON.stringify(data)}`);
   }
-  await loadSession(data.session.session_id);
+  // The import response seeds S.messages, so a plain loadSession treats the
+  // transcript as already resident and asks the stream for known_count=N
+  // (which never replays). Drop the local copy so the load renders it.
+  S.session = null;
+  S.messages = [];
+  await loadSession(data.session.session_id, {force: true});
   await new Promise((resolve, reject) => {
     const deadline = Date.now() + 15000;
     const check = () => {
@@ -705,10 +710,22 @@ def main() -> int:
                 },
             )
 
+            def _fulfill(route, **kwargs):
+                # Session-list refreshes fan out several concurrent requests;
+                # Playwright can hand the same route object to the handler
+                # twice and the second fulfill raises "already handled". That
+                # is a transport race, not a product failure.
+                try:
+                    route.fulfill(**kwargs)
+                except Exception as error:  # noqa: BLE001
+                    if "already handled" not in str(error):
+                        raise
+
             def _route_apperror_boundary(route):
                 url = route.request.url
                 if "/api/chat/start" in url:
-                    route.fulfill(
+                    _fulfill(
+                        route,
                         status=200,
                         content_type="application/json",
                         body=json.dumps({
@@ -718,7 +735,8 @@ def main() -> int:
                     )
                     return
                 if "/api/chat/stream" in url:
-                    route.fulfill(
+                    _fulfill(
+                        route,
                         status=200,
                         content_type="text/event-stream",
                         body="event: apperror\ndata: "
@@ -734,13 +752,14 @@ def main() -> int:
                     try:
                         payload = response.json()
                     except Exception:
-                        route.fulfill(response=response)
+                        _fulfill(route, response=response)
                         return
                     for row in (payload.get("sessions") or []):
                         if str(row.get("session_id") or "") == str(apperror_sid):
                             row["active_stream_id"] = "probe-apperror-stream"
                             row["running"] = True
-                    route.fulfill(
+                    _fulfill(
+                        route,
                         status=response.status,
                         headers={**response.headers, "content-type": "application/json"},
                         body=json.dumps(payload),
