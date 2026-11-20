@@ -1,3 +1,4 @@
+import ast
 import json
 import shutil
 import subprocess
@@ -37,11 +38,15 @@ def test_all_terminal_payloads_carry_fresh_revision():
 
 
 def test_get_revision_consumer_delegates_imported_ownership_to_shared_authority():
-    from pathlib import Path
-
     source = (Path(__file__).parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
-    get_start = source.index("imported_turn_marker = any(")
-    body = source[get_start:get_start + 900]
+    get_handler = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_handle_session_get"
+    )
+    body = ast.get_source_segment(source, get_handler)
+    assert body is not None
     assert "regeneration_authority(" in body
     assert "imported_turn_marker" in body
 

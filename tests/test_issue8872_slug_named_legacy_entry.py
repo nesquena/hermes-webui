@@ -28,9 +28,15 @@ def test_a_legacy_entry_that_only_slugs_to_a_builtin_lends_it_no_key(monkeypatch
     assert got.base_url == ""
 
 
+@pytest.mark.parametrize("follows_url", [False, True])
 @pytest.mark.parametrize("name", ["openai-codex", "OPENAI-CODEX"])
-def test_a_legacy_entry_named_as_the_builtin_still_claims_it(monkeypatch, name):
+def test_a_legacy_entry_named_as_the_builtin_still_claims_it(monkeypatch, name, follows_url):
+    """It still claims the session: its URL and the provider. Its key goes only where the entry owns every host
+    the Agent contacts (#8822): an Agent whose Codex catalog ignores the URL also sends it to chatgpt.com, so with
+    such an Agent (or none to ask) the key is dropped."""
+    monkeypatch.setattr(routes, "_agent_codex_catalog_follows_url", lambda: follows_url)
     data = {"custom_providers": [{"name": name, "base_url": _GW, "api_key": "synthetic-proxy"}]}
     _use(monkeypatch, data)
     got = routes._context_length_lookup_inputs_for_model("gpt-5.5", "openai-codex", cfg=data)
-    assert (got.base_url, got.api_key, got.provider) == (_GW, "synthetic-proxy", "openai-codex")
+    assert (got.base_url, got.provider) == (_GW, "openai-codex")
+    assert got.api_key == ("synthetic-proxy" if follows_url else "")
