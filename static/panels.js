@@ -5531,6 +5531,10 @@ function renderSkills(skills) {
     cats[cat].push(s);
   }
   const box = $('skillsList');
+  // #9077: these rows belong to the profile this list was served for. The
+  // toggles carry that owner, so a click on rows still shown while the cached
+  // list is cleared (profile switch, reload after a refusal) can't send none.
+  const owner = skills ? skills.profile : undefined;
   box.innerHTML = '';
   if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
   for (const [cat, items] of Object.entries(cats).sort()) {
@@ -5553,7 +5557,7 @@ function renderSkills(skills) {
       toggle.title = isDisabled ? t('skill_disabled') : t('skill_enabled');
       toggle.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        toggleSkill(skill.name, !isDisabled);
+        toggleSkill(skill.name, !isDisabled, owner);
       });
       const nameEl = document.createElement('span');
       nameEl.className = 'skill-name';
@@ -5574,12 +5578,12 @@ function filterSkills() {
 }
 
 
-async function toggleSkill(name, currentlyEnabled) {
+async function toggleSkill(name, currentlyEnabled, owner) {
   const newEnabled = !currentlyEnabled;
   try {
     const result = await api('/api/skills/toggle', {
       method: 'POST',
-      body: JSON.stringify({ name, enabled: newEnabled, expected_profile: _skillsData ? _skillsData.profile : undefined })
+      body: JSON.stringify({ name, enabled: newEnabled, expected_profile: owner })
     });
     if (result && result.ok) {
       if (_skillsData) {

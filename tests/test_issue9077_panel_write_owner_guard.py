@@ -151,6 +151,30 @@ def test_matching_or_absent_expected_profile_writes_as_before(beta, label, route
     assert _snapshot(beta) != before, f"{label}: the write did not land"
 
 
+MALFORMED = ["", "   ", False, 0, [], {}, 123, True, ["beta"]]
+
+
+@pytest.mark.parametrize("value", MALFORMED, ids=[repr(v) for v in MALFORMED])
+@pytest.mark.parametrize("label,route,body", WRITES, ids=[w[0] for w in WRITES])
+def test_malformed_expected_profile_is_refused_and_writes_nothing(beta, label, route, body, value):
+    """Only an omitted field or JSON null means 'no owner'; anything else must be a
+    non-blank string. Blank or non-string values are refused, never read as
+    absent (which would skip the check) or coerced with str()."""
+    before = _snapshot(beta)
+    status, payload = _call(_route(route), {**body, "expected_profile": value})
+    assert status == 400, payload
+    assert payload["error"] == "expected_profile must be a non-empty string"
+    assert _snapshot(beta) == before, f"{label}: beta files changed despite the refusal"
+
+
+@pytest.mark.parametrize("label,route,body", WRITES, ids=[w[0] for w in WRITES])
+def test_json_null_expected_profile_counts_as_absent(beta, label, route, body):
+    before = _snapshot(beta)
+    status, payload = _call(_route(route), {**body, "expected_profile": None})
+    assert status == 200 and payload.get("ok") is True, payload
+    assert _snapshot(beta) != before
+
+
 def test_root_alias_counts_as_the_same_profile(beta, monkeypatch):
     """A renamed root ('kinni') and its 'default' alias are one owner."""
     import api.routes as routes
@@ -246,11 +270,31 @@ def _extract_function(src: str, name: str) -> str:
 
 _HARNESS = r"""
 'use strict';
-function makeEl(){ return { textContent:'', innerHTML:'', value:'', style:{ display:'' }, dataset:{},
-  focus(){}, scrollIntoView(o){ this.scrolled = o; },
-  classList:{ add(){}, remove(){}, toggle(){}, contains(){ return false; } } }; }
-const els = { skillsList: makeEl(), memoryDetailTitle: makeEl(), memoryDetailBody: makeEl(),
+function makeEl(){
+  const el = { textContent:'', value:'', style:{ display:'' }, dataset:{},
+    children:[], listeners:{}, className:'', _html:'',
+    addEventListener(type, fn){ this.listeners[type] = fn; },
+    append(...kids){ this.children.push(...kids); }, appendChild(kid){ this.children.push(kid); },
+    focus(){}, scrollIntoView(o){ this.scrolled = o; },
+    classList:{ add(){}, remove(){}, toggle(){}, contains(){ return false; } } };
+  // Like the DOM: assigning innerHTML replaces the element's children.
+  Object.defineProperty(el, 'innerHTML', { get(){ return this._html; }, set(v){ this._html = v; this.children = []; } });
+  return el;
+}
+const document = { createElement(){ return makeEl(); } };
+function li(){ return ''; }
+const els = { skillsList: makeEl(), skillsSearch: makeEl(), memoryDetailTitle: makeEl(), memoryDetailBody: makeEl(),
   memoryDetailEmpty: makeEl(), memoryPanel: null };
+// The toggle buttons renderSkills has mounted in #skillsList right now.
+function mountedToggles(){
+  const out = [];
+  (function walk(el){ for (const kid of (el.children || [])) {
+    if (String(kid.className).startsWith('skill-toggle')) out.push(kid); walk(kid); } })(els.skillsList);
+  return out;
+}
+function clickToggle(el){ el.listeners.click({ stopPropagation(){} }); }
+// The click handler doesn't return toggleSkill's promise; let its awaits (and any reload) run.
+async function settle(){ for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); }
 let editor = null;
 function $(id){
   if (id === 'memEditContent') {
@@ -276,6 +320,7 @@ async function api(path, opts){
   calls.api.push({ path, body: opts && opts.body ? JSON.parse(opts.body) : null });
   const r = typeof replies[path] === 'function' ? replies[path]() : replies[path];
   if (r instanceof Error) throw r;
+  if (r && typeof r.then === 'function') return r;  // a reply still in flight
   return JSON.parse(JSON.stringify(r));
 }
 function conflict(){
@@ -286,7 +331,6 @@ function t(k){ return k === 'error_prefix' ? 'Error: ' : k; }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
 function setStatus(m){ calls.status.push(m); }
 function showToast(...args){ calls.toasts.push(args); }
-function renderSkills(){}
 function _setMemoryHeaderButtons(){}
 function _memorySectionMeta(k){ return { key:k, readOnly:false }; }
 function _memorySectionLabel(){ return 'label'; }
@@ -304,7 +348,7 @@ __BODY__
 })().catch(e => { console.error(e && e.stack || e); process.exit(1); });
 """
 
-_CLIENT_FUNCS = ("loadSkills", "toggleSkill", "_renderMemoryEdit", "submitMemorySave", "loadMemory")
+_CLIENT_FUNCS = ("loadSkills", "renderSkills", "toggleSkill", "_renderMemoryEdit", "submitMemorySave", "loadMemory")
 
 
 def _run_client(body: str, *, stub_load_memory: bool = False) -> dict:
@@ -333,11 +377,12 @@ def test_toggle_sends_the_server_reported_owner_and_reloads_on_409():
 // The list was served for 'default' although this tab thinks 'beta' is active.
 replies['/api/skills'] = { skills:[{ name:'race-skill', disabled:false }], profile:'default' };
 await loadSkills();
+const staleRow = mountedToggles()[0];
 replies['/api/skills/toggle'] = conflict;
 replies['/api/skills'] = { skills:[{ name:'race-skill', disabled:false }], profile:'beta' };
-await toggleSkill('race-skill', true);
+clickToggle(staleRow); await settle();
 const toggle = calls.api.find(c => c.path === '/api/skills/toggle');
-await toggleSkill('race-skill', true);
+clickToggle(mountedToggles()[0]); await settle();
 const second = calls.api.filter(c => c.path === '/api/skills/toggle')[1];
 console.log(JSON.stringify({ sent: toggle.body, status: calls.status, toasts: calls.toasts,
   skillsGets: calls.api.filter(c => c.path === '/api/skills').length,
@@ -354,6 +399,24 @@ console.log(JSON.stringify({ sent: toggle.body, status: calls.status, toasts: ca
     assert out["second"]["expected_profile"] == "beta"
 
 
+def test_rows_still_shown_after_the_cached_list_is_cleared_keep_their_owner():
+    """A profile switch clears the cached list before the replacement loads, and
+    the reload after a refusal does the same. A click on the rows still on screen
+    in that window must carry the owner those rows were rendered for."""
+    out = _run_client(r"""
+replies['/api/skills'] = { skills:[{ name:'race-skill', disabled:false }], profile:'default' };
+await loadSkills();
+const row = mountedToggles()[0];
+_skillsData = null;  // what switchToProfile does before the new list arrives
+replies['/api/skills/toggle'] = conflict;
+replies['/api/skills'] = () => new Promise(() => {});  // the replacement list never lands
+clickToggle(row); await settle();   // first click: refused, its reload stays pending
+clickToggle(row); await settle();   // second click on the same stale row while the reload is pending
+console.log(JSON.stringify({ sent: calls.api.filter(c => c.path === '/api/skills/toggle').map(c => c.body) }));
+""")
+    assert out["sent"] == [{"name": "race-skill", "enabled": False, "expected_profile": "default"}] * 2
+
+
 def test_absent_profile_in_the_skills_reply_omits_expected_profile():
     """An older server (no ``profile`` field): the write carries no owner, so the
     route keeps today's behaviour instead of refusing on a guessed owner."""
@@ -361,7 +424,7 @@ def test_absent_profile_in_the_skills_reply_omits_expected_profile():
 replies['/api/skills'] = { skills:[{ name:'race-skill' }] };
 await loadSkills();
 replies['/api/skills/toggle'] = { ok:true };
-await toggleSkill('race-skill', true);
+clickToggle(mountedToggles()[0]); await settle();
 console.log(JSON.stringify({ sent: calls.api.find(c => c.path === '/api/skills/toggle').body }));
 """)
     assert out["sent"] == {"name": "race-skill", "enabled": False}

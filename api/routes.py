@@ -37193,19 +37193,24 @@ def _refuse_stale_profile_write(handler, body, surface: str) -> bool:
     The panel echoes the ``profile`` its GET reply was served for as
     ``expected_profile``. The active profile is a shared cookie, so it can move
     under a tab (another tab, a late reply, a session-load switch); a mismatch
-    would write that profile's stale view here. Absent field: unchanged behaviour.
+    would write that profile's stale view here. An absent field (or JSON null)
+    keeps today's behaviour; any other value must be a non-blank string, and a
+    malformed one is refused (400) rather than read as absent or coerced.
     """
-    expected = body.get("expected_profile") if isinstance(body, dict) else None
-    if not expected:
+    if not isinstance(body, dict) or body.get("expected_profile") is None:
         return False
+    expected = body["expected_profile"]
+    if not isinstance(expected, str) or not expected.strip():
+        bad(handler, "expected_profile must be a non-empty string", 400)
+        return True
     active = _get_active_profile_name()
-    if _profiles_match(str(expected), active):
+    if _profiles_match(expected, active):
         return False
 
     def shown(name):  # the root's aliases display as 'default'
         return "default" if _is_root_profile(name) else name
 
-    message = _STALE_PROFILE_WRITE_TEXT[surface].format(expected=shown(str(expected)), active=shown(active))
+    message = _STALE_PROFILE_WRITE_TEXT[surface].format(expected=shown(expected), active=shown(active))
     j(handler, {"error": message, "code": "profile_mismatch"}, status=409)
     return True
 
