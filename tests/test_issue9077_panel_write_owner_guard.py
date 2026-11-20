@@ -173,6 +173,19 @@ def test_memory_read_reports_the_profile_it_was_served_for(beta):
     assert payload["memory"] == "BETA MEMORY ORIGINAL\n"
 
 
+def test_skills_list_reports_the_profile_it_was_served_for(beta, monkeypatch):
+    """Agent-free pin of the GET /api/skills owner (the live check below needs the Agent's skill tools)."""
+    import api.routes as routes
+    from urllib.parse import urlparse
+
+    monkeypatch.setattr(routes, "_skills_list_from_dir", lambda *a, **k: {"skills": [{"name": "race-skill"}]})
+    handler = MagicMock()
+    handler.headers = {}
+    routes.handle_get(handler, urlparse("/api/skills"))
+    payload = json.loads(handler.wfile.write.call_args[0][0])
+    assert payload == {"skills": [{"name": "race-skill"}], "profile": "beta"}
+
+
 # ── server: the real dispatcher on the test server ───────────────────────────
 
 def _http(path, body=None):
@@ -189,8 +202,12 @@ def _http(path, body=None):
 def test_live_get_replies_name_the_profile_like_the_active_profile_api():
     active, _ = _http("/api/profile/active")
     memory, _ = _http("/api/memory")
-    skills, _ = _http("/api/skills")
     assert memory["profile"] == active["name"]
+    skills, status = _http("/api/skills")
+    if status != 200:
+        # Without the Agent the skills listing itself fails before any reply is
+        # built; the Agent-free unit test above pins the owner field instead.
+        pytest.skip(f"GET /api/skills is unavailable on this server ({status})")
     assert skills["profile"] == active["name"]
 
 
