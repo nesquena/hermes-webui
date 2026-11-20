@@ -109,6 +109,61 @@ probe is unavailable; with no allowlist, the configured ids (singular +
 plural) are served. A discovered catalog therefore still serves its saved
 models on a transient probe failure instead of emptying the picker.
 
+## Membership authority: `authoritative` and `complete`
+
+The endpoint's `models` array is not always the provider's complete catalog,
+and a browser must not read an omission as a removal. Two flags travel with
+every response:
+
+| Field | Meaning |
+|---|---|
+| `authoritative` | `true` only when `models` is a real membership answer for the provider: a live probe returned a well-formed model list, or the producer's own static catalog is the complete set for a built-in provider. `false` when the rows came from a config/static fallback after a failed probe, when a partially malformed catalog was filtered down to its usable rows, or when the provider's resolver returned a curated placeholder rather than the account's catalog. |
+| `complete` | `false` when `models` is a DISPLAY slice rather than the full membership: the Nous featured set, or any catalog truncated to `_MODEL_PICKER_VISIBLE_TARGET`. Absence from a capped window is not evidence that the provider removed the model. |
+
+A discovered catalog that genuinely returns zero models is an **authoritative
+empty** answer (`models: []`, `authoritative: true`, `complete: true`, no
+`error`). A discovery failure is published in the existing failure shape
+(`error: "no_models_discovered"`, `authoritative: false`) and says nothing
+about what the provider offers.
+
+### When Settings may remove options
+
+Only the Settings picker reconciles removals; the composer dropdown only
+appends. `_addLiveModelsToSelect()` prunes when the caller passed
+`pruneAuthorized`, which `_fetchLiveModels()` derives as
+`data.authoritative !== false && data.complete !== false` for a non-empty
+list, and `data.authoritative !== false && !data.error` for an authoritative
+empty one. Payloads without the flags keep the previous behaviour.
+
+The pruner (`_dropStaleLiveModelOptions`) never removes:
+
+- the currently selected option;
+- a static catalog row, including a live replacement marked
+  `catalogOrigin: "1"` for a deduplicated catalog entry;
+- an option belonging to another provider.
+
+Live-only options are matched against the fresh set by their normalized
+identity, so a fresh `vendor/model` keeps an existing `vendor/Model`.
+
+## Refresh cache layers
+
+"Refresh Models" clears three independent layers, in order:
+
+1. **The Agent's provider-model catalog cache** — `invalidate_provider_models_cache(provider_id)`
+   in the `POST /api/models/refresh` handler.
+2. **The WebUI live-models cache** — `_LIVE_MODELS_CACHE`, keyed by
+   `(active profile, resolved provider alias)`, 60-second TTL, deep-copied on
+   read and write. The handler also advances `_LIVE_MODELS_CACHE_GENERATION`
+   in the same critical section (`_invalidate_live_models_cache_and_bump`), so
+   a response that started before the refresh cannot publish its pre-refresh
+   payload back into the cache (`_publish_live_models()` compares the captured
+   generation under the same lock).
+3. **The browser caches** — `_liveModelCache` / `_liveModelMembership` are
+   cleared and `_liveModelInvalidationEpoch` advances, which revokes any
+   in-flight `_fetchLiveModels()` response and re-arms both the Settings
+   picker and the composer dropdown. The membership flags are dropped with
+   the list so the next payload is judged on its own flags.
+
 ## Tests
 
 - `tests/test_issue3718_live_models_custom_probe.py` — real-handler

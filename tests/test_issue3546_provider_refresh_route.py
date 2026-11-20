@@ -661,6 +661,11 @@ const console={debug(){},log(){},warn(){},error(){}};
 def _replay_empty_membership(scenario: str) -> dict:
     """Replay the complete fetch → invalidate → add → prune chain with the
     REAL production functions from static/ui.js."""
+    if NODE is None:
+        # The shared runner for every picker test in this file: a missing Node
+        # must skip the optional check, not raise TypeError from
+        # ``subprocess.run([None, ...])`` (#6919 review 2026-11-11).
+        pytest.skip("node not on PATH")
     ui = _read_static("ui.js")
     parts = [
         _extract_function_body(ui, "function _modelPickerOptionIdentity("),
