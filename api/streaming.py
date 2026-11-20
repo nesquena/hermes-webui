@@ -13706,6 +13706,21 @@ def _adopt_session_db_for_cached_agent(agent, new_session_db):
     return new_session_db
 
 
+def _reuse_cached_agent_session_db(agent, session_db, agent_kwargs):
+    """Cached-agent reuse step of the stream: adopt this turn's SessionDB.
+
+    Returns the handle the agent keeps (see
+    ``_adopt_session_db_for_cached_agent``) and points the retained
+    constructor kwargs at it, so the credential self-heal never rebuilds from
+    the unused handle the adoption helper just closed.
+    """
+    session_db = _adopt_session_db_for_cached_agent(agent, session_db)
+    agent._session_db = session_db
+    if 'session_db' in agent_kwargs:
+        agent_kwargs['session_db'] = session_db
+    return session_db
+
+
 # Set on a cached agent whose context-engine rebind failed, so a later turn
 # that keeps the (still open) adopted handle retries the hook (#9150).
 _BIND_FAILED_ATTR = "_webui_context_engine_bind_failed"
@@ -16588,15 +16603,11 @@ def _run_agent_streaming(
                         # When the existing handle is already closed/missing,
                         # adopt the fresh per-request SessionDB (and close the
                         # dead one) so we still avoid the EMFILE FD-leak from
-                        # PR #1421.
-                        _session_db = _adopt_session_db_for_cached_agent(
-                            agent, _session_db
+                        # PR #1421. The retained constructor kwargs follow
+                        # the adopted handle (credential self-heal).
+                        _session_db = _reuse_cached_agent_session_db(
+                            agent, _session_db, _agent_kwargs
                         )
-                        agent._session_db = _session_db
-                        if 'session_db' in _agent_kwargs:
-                            # Self-heal must not rebuild from the unused handle
-                            # the adoption helper just closed.
-                            _agent_kwargs['session_db'] = _session_db
                     if hasattr(agent, '_api_call_count'):
                         agent._api_call_count = 0
                     # Reset interrupt state from a prior cancel so the reused

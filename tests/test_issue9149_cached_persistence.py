@@ -184,22 +184,12 @@ def test_cached_agent_replaces_shim_whose_store_was_released():
 
 @pytest.mark.parametrize("accepts_session_db", [False, True])
 def test_cached_reuse_keeps_constructor_kwargs_on_adopted_handle(monkeypatch, accepts_session_db):
-    # Execute the unmodified production reuse statement, not a handwritten
-    # mirror: the later credential self-heal consumes these constructor kwargs.
-    tree = ast.parse(Path(streaming.__file__).read_text(encoding="utf-8"))
-    reuse = next(node for node in ast.walk(tree) if (
-        isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
-        and isinstance(node.test.left, ast.Name) and node.test.left.id == "_session_db"
-        and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                and call.func.id == "_adopt_session_db_for_cached_agent"
-                for call in ast.walk(node))
-    ))
+    # The stream's reuse statement is _reuse_cached_agent_session_db (wiring
+    # pinned below); the later credential self-heal consumes these kwargs.
     old, fresh = SessionDB(), SessionDB()
     agent = agent_for(old)
     kwargs = {"session_db": fresh} if accepts_session_db else {}
-    namespace = {"agent": agent, "_session_db": fresh, "_agent_kwargs": kwargs,
-                 "_adopt_session_db_for_cached_agent": streaming._adopt_session_db_for_cached_agent}
-    exec(compile(ast.Module(body=[reuse], type_ignores=[]), streaming.__file__, "exec"), namespace)
+    assert streaming._reuse_cached_agent_session_db(agent, fresh, kwargs) is old
     assert agent._session_db is old
     assert fresh.close_calls == 1
     if accepts_session_db:
@@ -209,6 +199,56 @@ def test_cached_reuse_keeps_constructor_kwargs_on_adopted_handle(monkeypatch, ac
         assert agent.persistence.coordination is agent.persistence
     else:
         assert "session_db" not in kwargs
+
+
+@pytest.mark.parametrize("accepts_session_db", [False, True])
+def test_cached_reuse_moves_constructor_kwargs_to_replacement(monkeypatch, accepts_session_db):
+    old, fresh = SessionDB(), SessionDB()
+    agent = agent_for(old)
+    old.close()
+    kwargs = {"session_db": old} if accepts_session_db else {}
+    assert streaming._reuse_cached_agent_session_db(agent, fresh, kwargs) is fresh
+    assert agent._session_db is fresh and agent.persistence is fresh._store
+    assert agent.context_compressor.session_db is fresh
+    assert agent.context_compressor.persistence is fresh._store
+    assert fresh.close_calls == 0
+    if accepts_session_db:
+        assert kwargs["session_db"] is fresh
+        monkeypatch.setattr(streaming, "_build_session_db_for_stream", lambda _path: None)
+        assert streaming._replace_session_db_in_kwargs(kwargs, "unused") is fresh
+    else:
+        assert "session_db" not in kwargs
+
+
+def test_stream_reuse_path_goes_through_reuse_helper():
+    # Static wiring check only (nothing from the module is executed): the
+    # stream assigns the helper's result for this turn's handle, and the helper
+    # is the only production caller of the adoption policy.
+    tree = ast.parse(Path(streaming.__file__).read_text(encoding="utf-8"))
+
+    def called(node, name):
+        return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+
+    guards = [node for node in ast.walk(tree) if (
+        isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name) and node.test.left.id == "_session_db"
+        and isinstance(node.test.ops[0], ast.IsNot)
+        and any(called(call, "_reuse_cached_agent_session_db") for call in ast.walk(node))
+    )]
+    assert len(guards) == 1
+    assigns = [node for node in ast.walk(guards[0]) if (
+        isinstance(node, ast.Assign) and called(node.value, "_reuse_cached_agent_session_db")
+    )]
+    assert len(assigns) == 1
+    assert [target.id for target in assigns[0].targets] == ["_session_db"]
+    assert [arg.id for arg in assigns[0].value.args] == ["agent", "_session_db", "_agent_kwargs"]
+
+    callers = {
+        func.name for func in ast.walk(tree)
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for node in ast.walk(func) if called(node, "_adopt_session_db_for_cached_agent")
+    }
+    assert callers == {"_reuse_cached_agent_session_db"}
 
 
 def test_real_lazy_handle_liveness_does_not_open_backend(tmp_path):
