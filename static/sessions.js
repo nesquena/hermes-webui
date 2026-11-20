@@ -4800,7 +4800,7 @@ function _hasInflightTailUserDuplicate(messages,candidate){
       // equality alone would reclassify the previous turn's settled answer as
       // the current turn and hide the current live reply. Require a stable
       // shared ID, or a precision-matched timestamp + normalized prompt.
-      const _aTs=(msg.timestamp||msg._ts||0), _bTs=(candidate.timestamp||candidate._ts||0);
+      const _aTs=(msg._server_start_ts||msg.timestamp||msg._ts||0), _bTs=(candidate._server_start_ts||candidate.timestamp||candidate._ts||0);
       const _aId=msg.id||msg._id, _bId=candidate.id||candidate._id;
       const _sameText=(x,y)=>_messageComparableText(x)===_messageComparableText(y)
         ||_normalizeUserTranscriptText(_messageComparableText(x))===_normalizeUserTranscriptText(_messageComparableText(y));
@@ -5425,8 +5425,10 @@ function _adoptServerStartStampForRecoveryUser(session,inflightMessages,firstLiv
     if(String(row.role||'')!=='user') return false;
     if(row._pending!==true||row._active_turn_user===true||row.id||row._id) return false;
     if(_normalizeUserTranscriptText(_messageComparableText(row))!==pendingText) return false;
-    row._ts=started;
-    if(row.timestamp!==undefined) row.timestamp=started;
+    // #8701 keeps the client clock on `_ts` for display; the server start is
+    // the authority for ownership, so store it separately and let the dedup
+    // comparison prefer it.
+    row._server_start_ts=started;
     return true;
   }
   return false;
@@ -5478,6 +5480,41 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
   if(!live) return false;
   const liveText=_messageComparableText(live);
   const persistedText=_currentTurnAssistantText(baseMessages);
+  // #8701 stale-snapshot recovery. When the INFLIGHT snapshot names a DIFFERENT
+  // stream than the session's active one and the server supplies this turn's
+  // pending prompt, the base's current-turn rows are the running turn's own
+  // activity, not a deferred save of a previous answer. Ownership cannot be
+  // proven from that snapshot's rows, so this path keeps the pre-ownership
+  // reconciliation: only prefix/extension cases rewrite the live text and the
+  // settled copy may be dropped afterwards. Resolved here (not from the caller)
+  // so the loadSession call site keeps its canonical text shape.
+  let promptFromOtherStream=false;
+  try{
+    const _sid=String((session&&session.session_id)||'').trim();
+    const _entry=(_sid&&typeof INFLIGHT==='object'&&INFLIGHT)?INFLIGHT[_sid]:null;
+    const _active=String((session&&session.active_stream_id)||'').trim();
+    promptFromOtherStream=!!(_entry&&_active
+      &&typeof _inflightNamesOtherStream==='function'
+      &&_inflightNamesOtherStream(_entry,_active)
+      &&!!String(session.pending_user_message||'').trim());
+  }catch(_e){ promptFromOtherStream=false; }
+  if(promptFromOtherStream){
+    if(persistedText){
+      const compactPersisted=_compactTranscriptText(persistedText);
+      const compactLive=_compactTranscriptText(liveText);
+      if(!liveText || persistedText.startsWith(liveText)){
+        live.content=persistedText;
+      }else if(liveText.startsWith(persistedText)){
+        const extra=liveText.slice(persistedText.length).trim();
+        if(extra&&compactPersisted.includes(_compactTranscriptText(extra))){
+          live.content=persistedText;
+        }
+      }else if(compactPersisted===compactLive){
+        live.content=persistedText;
+      }
+    }
+    return !!_messageComparableText(live);
+  }
   // The persisted tail is only authoritative for the CURRENT turn when the
   // base transcript also carries the current turn's user. In deferred
   // session-save mode the base can end with the PREVIOUS turn's settled
