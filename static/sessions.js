@@ -4755,8 +4755,21 @@ function _markRecoveredPromptRow(row){
 function _recoveredPromptIdentityMatch(canonicalRow,recoveredRow){
   if(!canonicalRow||!recoveredRow) return false;
   if(canonicalRow._active_turn_user===true) return true;
-  const canonicalTs=_messageTimestampValue(canonicalRow);
-  const recoveredTs=_messageTimestampValue(recoveredRow);
+  // #6649 (greptile P1, 2026-11-20): the recovered copy keeps the CLIENT `_ts`
+  // for display, so a later reconcile against the persisted row must compare the
+  // turn identity it was recovered FOR, not the display clock. Without this the
+  // persisted row and the display copy carry different timestamps and both
+  // survive, so the prompt reappears after loading older messages.
+  const _promptIdentityTs=(row)=>{
+    if(!row) return null;
+    const recoveredTurn=Number(row._recoveredTurnStart);
+    if(Number.isFinite(recoveredTurn)&&recoveredTurn>0) return recoveredTurn;
+    const serverStart=Number(row._server_start_ts);
+    if(Number.isFinite(serverStart)&&serverStart>0) return serverStart;
+    return _messageTimestampValue(row);
+  };
+  const canonicalTs=_promptIdentityTs(canonicalRow);
+  const recoveredTs=_promptIdentityTs(recoveredRow);
   if(canonicalTs!==null&&recoveredTs!==null&&Math.abs(canonicalTs-recoveredTs)<=_RECOVERED_PROMPT_TS_EPSILON){
     return true;
   }
