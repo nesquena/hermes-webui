@@ -4017,6 +4017,9 @@ function _applyComposerFooterVisibilitySettings(){
     // when buttons are visible (Greptile feedback).
     _divider.classList.toggle('composer-control-hidden',_allLeftHidden);
   }
+  // #9101: hide_composer_yolo hides the YOLO pill only while YOLO is off
+  // (while it is on, the pill shrinks to its ⚡ icon).
+  if(typeof _updateYoloPill==='function') _updateYoloPill();
 }
 window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
 
@@ -4112,6 +4115,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
+    window._quotaChipWindow=_normalizeQuotaChipWindow(s.quota_chip_window);
     window._showConversationOutline=s.show_conversation_outline===true;
     document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
@@ -4285,6 +4289,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._quotaChipWindow='most_constrained';
     window._showConversationOutline=false;
     document.documentElement.dataset.conversationOutline='disabled';
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();

@@ -1872,6 +1872,15 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                   runtime_ledger_unavailable); files and rows are kept.
                                -> 500 {"ok": false, "error": "state_db_cleanup_failed"}
                                   when the state.db delete fails; files are kept.
+                               -> 500 {"ok": false, "error": "delete_tombstone_failed",
+                                  "action": "session_delete", "tombstone_persist_failed": true}
+                                  when the durable "this WebUI session was deleted" marker
+                                  cannot be written. Every other step of that delete has already
+                                  run at that point (sidecar, state.db rows, attachments,
+                                  journals), so the error does not mean the transcript was left
+                                  intact — it means the marker that keeps the id from coming
+                                  back as a recoverable foreign session is missing; retrying
+                                  the same delete records the marker and answers {"ok": true}.
     /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}

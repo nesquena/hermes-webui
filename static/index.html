@@ -243,7 +243,7 @@
         <label class="kanban-check"><input id="kanbanOnlyMine" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_only_mine">Only mine</span></label>
         <div id="kanbanStats" class="kanban-stats" aria-live="polite"></div>
         <div id="kanbanBulkBar" class="kanban-bulk-bar">
-          <select id="kanbanBulkStatus" aria-label="Bulk status" data-i18n-aria-label="kanban_bulk_status_aria"><option value="" data-i18n="kanban_status">Status</option><option value="scheduled" data-i18n="kanban_status_scheduled">Scheduled</option><option value="ready" data-i18n="kanban_status_ready">Ready</option><option value="blocked" data-i18n="kanban_status_blocked">Blocked</option><option value="done" data-i18n="kanban_status_done">Done</option><option value="archived" data-i18n="kanban_status_archived">Archived</option></select>
+          <select id="kanbanBulkStatus" aria-label="Bulk status" data-i18n-aria-label="kanban_bulk_status_aria"><option value="" data-i18n="kanban_status">Status</option><option value="scheduled" data-i18n="kanban_status_scheduled">Scheduled</option><option value="ready" data-i18n="kanban_status_ready">Ready</option><option value="blocked" data-i18n="kanban_status_blocked">Blocked</option><option value="review" data-i18n="kanban_status_review">Review</option><option value="done" data-i18n="kanban_status_done">Done</option><option value="archived" data-i18n="kanban_status_archived">Archived</option></select>
           <button class="btn secondary" onclick="bulkUpdateKanban()" data-i18n="kanban_bulk_action">Bulk action</button>
           <button class="btn secondary kanban-nudge-dispatch-btn" onclick="nudgeKanbanDispatcher()" data-i18n="kanban_nudge_dispatcher" title="Dry-run: shows what would be claimed without spawning workers">Preview</button>
           <button class="btn primary kanban-run-dispatch-btn" onclick="runKanbanDispatcher()" data-i18n="kanban_run_dispatcher" title="Claims Ready tasks and spawns worker subprocesses">Run dispatcher</button>
@@ -673,7 +673,7 @@
               </svg>
             </button>
             <div class="composer-divider" aria-hidden="true"></div>
-            <button class="yolo-pill" id="yoloPill" type="button" onclick="cmdYolo()" style="display:none" title="YOLO mode — click to disable" data-i18n-title="yolo_pill_title_active">
+            <button class="yolo-pill" id="yoloPill" type="button" onclick="disableYoloFromPill()" style="display:none" title="YOLO mode — click to disable" data-i18n-title="yolo_pill_title_active">
               <span class="yolo-pill-icon" aria-hidden="true">⚡</span>
               <span class="yolo-pill-label" data-i18n="yolo_pill_label">YOLO</span>
             </button>
@@ -1206,7 +1206,7 @@
             <div class="settings-field">
               <label id="composerSituationalControlsLabel" data-i18n="settings_label_composer_situational_controls">Situational footer controls</label>
               <div id="composerSituationalControlsChips" class="tab-visibility-chips" role="group" aria-labelledby="composerSituationalControlsLabel"></div>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_composer_situational_controls">These controls do not always appear, depending on viewport, mode, or runtime state. You can still toggle them off if needed.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_composer_situational_controls">These controls do not always appear, depending on viewport, mode, or runtime state. You can still toggle them off if needed. YOLO can't be hidden while it's on; turning its chip off here shrinks it to ⚡.</div>
             </div>
             <div id="settingsAppearanceAutosaveStatus" class="settings-autosave-status" aria-live="polite"></div>
           </div>
@@ -1371,6 +1371,15 @@
                 <span data-i18n="settings_label_quota_chip">Show provider quota chip in composer</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_quota_chip">Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default off. Only visible on wide displays (≥1400px) when enabled, to keep the composer uncluttered on laptop and standard desktop widths.</div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsQuotaChipWindow" data-i18n="settings_label_quota_chip_window">Quota chip shows</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_quota_chip_window">For providers with several limits (e.g. 5-hour, weekly), which one the chip shows. Hover the chip or open Settings → Providers to see all of them. If a provider doesn't report limit lengths, the chip shows the lowest remaining.</div>
+              <select id="settingsQuotaChipWindow" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="most_constrained" data-i18n="settings_quota_chip_window_most_constrained">Most constrained (lowest remaining)</option>
+                <option value="shortest" data-i18n="settings_quota_chip_window_shortest">Shortest window (e.g. 5-hour / rolling)</option>
+                <option value="longest" data-i18n="settings_quota_chip_window_longest">Longest window (e.g. weekly / monthly)</option>
+              </select>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
