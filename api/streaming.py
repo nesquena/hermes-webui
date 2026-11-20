@@ -3966,6 +3966,19 @@ def _backfill_turn_gateway_routing(messages, *, routing, active_turn_identity):
             msg['_gatewayRouting'] = routing
 
 
+def _resolve_turn_profile_name(session) -> str | None:
+    """Return the profile name THIS turn owns, or None for the root profile.
+
+    The session's stamped ``profile`` is the same owner that resolves its
+    ``HERMES_HOME``. A saved chat with no profile belongs to the root profile,
+    so it resolves None — never the process-wide active profile, which belongs
+    to whichever tab last set it (#8452 review 2026-11-18). The caller still
+    layers the profile home's own ``.env`` value underneath.
+    """
+    name = getattr(session, "profile", None)
+    return str(name) if name else None
+
+
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str, profile_name: str | None = None) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -15058,13 +15071,15 @@ def _run_agent_streaming(
         # threading.Thread and does not inherit TLS. At compression time,
         # get_active_profile_name() would fall back to the process-global
         # _active_profile, which may belong to a different concurrent tab.
-        _resolved_profile_name = getattr(s, 'profile', None)
-        if not _resolved_profile_name:
-            try:
-                from api.profiles import get_active_profile_name
-                _resolved_profile_name = get_active_profile_name()
-            except Exception:
-                _resolved_profile_name = None
+        # #8452 review 2026-11-18: a saved chat without a profile belongs to
+        # the ROOT profile — its config/home already came from
+        # ``get_hermes_home_for_profile(None)``. Falling back to the worker
+        # thread's process-wide active profile made such a legacy chat run
+        # under another tab's named profile (and its Docker container) even
+        # though its config is the root one. The turn identity must come from
+        # the same owner as ``_profile_home``. The profile .env fallback
+        # below still supplies the root home's own value when it sets one.
+        _resolved_profile_name = _resolve_turn_profile_name(s)
 
         # Bind THIS turn's session identity to the worker thread/context BEFORE
         # any agent work (so every mid-turn notify_on_complete background spawn
