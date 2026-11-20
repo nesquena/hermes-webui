@@ -365,6 +365,15 @@ def test_toggle_accepts_plugin_registered_skill(tmp_path, monkeypatch):
         "api.routes._get_plugin_manager_for_visibility",
         lambda: _FakePluginSkillManager({"demo:skill": plugin_md}),
     )
+    # The route binds the request's Hermes home around plugin-manager calls
+    # and fails closed when it cannot (2026-11-18 review). This test exercises
+    # the toggle wiring, not profile scoping, so bind a null scope explicitly.
+    import contextlib
+
+    monkeypatch.setattr(
+        "api.routes._plugin_manager_home_context",
+        lambda: contextlib.nullcontext(),
+    )
 
     handler = MagicMock()
     _handle_skill_toggle(handler, {"name": "demo:skill", "enabled": False})
@@ -429,6 +438,14 @@ def test_toggle_cold_registry_discovers_before_lookup(tmp_path, monkeypatch):
     plugin_md.write_text("---\nname: reviewdemo:skill\n---\nPlugin body", encoding="utf-8")
     manager = _ColdRegistryPluginSkillManager({"reviewdemo:skill": plugin_md})
     monkeypatch.setattr("api.routes._get_plugin_manager_for_visibility", lambda: manager)
+    # Scope binding is covered by tests/test_7781_round11_findings.py; this
+    # test pins the discovery-before-lookup contract.
+    import contextlib
+
+    monkeypatch.setattr(
+        "api.routes._plugin_manager_home_context",
+        lambda: contextlib.nullcontext(),
+    )
 
     handler = MagicMock()
     _handle_skill_toggle(handler, {"name": "reviewdemo:skill", "enabled": False})
