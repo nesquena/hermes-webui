@@ -908,7 +908,12 @@ class TestResolvedAutoTitleTransportAndFallback:
         assert captured[-1]["model"] == (title_model or None)
         assert captured[-1]["base_url"] is None
 
-    def test_auto_title_selects_working_fallback_instead_of_unavailable_main(self):
+    def test_auto_title_selected_fallback_stays_an_automatic_request(self):
+        """Preflight's fallback classifies the request; the Agent still routes it.
+
+        An explicit provider/endpoint/key request would lose the Agent's
+        HTTP-failure recovery to the next configured fallback.
+        """
         captured = []
 
         def call_llm(**kwargs):
@@ -935,25 +940,31 @@ class TestResolvedAutoTitleTransportAndFallback:
             "agent.auxiliary_client._effective_provider_for_client",
             side_effect=lambda client, provider: provider,
             create=True,
-        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+        ), patch(
+            "api.streaming._route_accepts_reasoning_extra",
+            wraps=_route_accepts_reasoning_extra,
+        ) as gate, patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
             title, status = generate_title_raw_via_aux("question", "answer")
 
         assert (title, status) == ("Fallback title", "llm_aux")
-        assert captured[-1]["provider"] == "custom"
-        assert captured[-1]["model"] == "fallback-model"
-        assert captured[-1]["base_url"] == "https://fallback.example/v1"
-        assert captured[-1]["api_key"] == "fallback-key"
-        assert captured[-1]["api_mode"] is None  # Do not leak the failed main transport.
+        assert gate.call_args.args == ("custom", "fallback-model", "https://fallback.example/v1")
+        request = captured[-1]
+        assert (
+            request["provider"], request["model"], request["base_url"],
+            request["api_key"], request["api_mode"],
+        ) == ("auto", None, None, None, None)
+        assert request["main_runtime"]["provider"] == "custom:unavailable"
+        assert "fallback-key" not in repr(request)
 
 
     @pytest.mark.parametrize("configured_overrides", (
         {},
         {"api_key": "primary-dummy", "api_mode": "codex_responses"},
     ))
-    def test_named_fallback_retains_selected_endpoint_key_and_transport(
+    def test_named_fallback_is_classified_on_its_override_and_left_to_the_agent(
         self, configured_overrides,
     ):
-        """Named fallback overrides are authoritative, not its registered defaults."""
+        """The gate sees the override endpoint; the Agent sends to it with its own key."""
         captured = []
 
         def call_llm(**kwargs):
@@ -985,20 +996,29 @@ class TestResolvedAutoTitleTransportAndFallback:
             side_effect=lambda client, provider: provider,
             create=True,
         ), patch(
+            "api.streaming._route_accepts_reasoning_extra",
+            wraps=_route_accepts_reasoning_extra,
+        ) as gate, patch(
             "agent.auxiliary_client.call_llm", side_effect=call_llm, create=True,
         ):
             title, status = generate_title_raw_via_aux("question", "answer")
 
         assert (title, status) == ("Fallback title", "llm_aux")
+        # Classified on the named fallback's override, not its registered default.
+        assert gate.call_args.args == (
+            "custom:relay", "fallback-model", "https://relay.example/override/v1",
+        )
         request = captured[-1]
-        assert request["provider"] == "custom:relay"
-        assert request["model"] == "fallback-model"
-        assert request["base_url"] == "https://relay.example/override/v1"
-        assert request["api_key"] == "fallback-dummy"
-        assert request["api_mode"] == "anthropic_messages"
+        assert (
+            request["provider"], request["model"], request["base_url"],
+            request["api_key"], request["api_mode"],
+        ) == ("auto", None, None, None, None)
+        # The title task's own key and transport stay on the primary route.
+        assert request["main_runtime"]["api_key"] == configured_overrides.get("api_key", "")
+        assert "fallback-dummy" not in repr(request)
 
-    def test_anonymous_fallback_ignores_primary_task_credentials_and_transport(self):
-        """The title primary's Anthropic key/mode must not hijack a chat fallback."""
+    def test_anonymous_fallback_leaves_primary_task_credentials_to_the_primary(self):
+        """The title primary's Anthropic key/mode travel only in the main runtime."""
         captured = []
 
         def call_llm(**kwargs):
@@ -1027,14 +1047,26 @@ class TestResolvedAutoTitleTransportAndFallback:
             side_effect=lambda client, provider: provider,
             create=True,
         ), patch(
+            "api.streaming._route_accepts_reasoning_extra",
+            wraps=_route_accepts_reasoning_extra,
+        ) as gate, patch(
             "agent.auxiliary_client.call_llm", side_effect=call_llm, create=True,
         ):
             title, status = generate_title_raw_via_aux("question", "answer")
 
         assert (title, status) == ("Fallback title", "llm_aux")
-        assert captured[-1]["base_url"] == "https://relay.example/fallback/v1"
-        assert captured[-1]["api_key"] == "fallback-dummy"
-        assert captured[-1]["api_mode"] is None
+        assert gate.call_args.args == (
+            "custom", "fallback-model", "https://relay.example/fallback/v1",
+        )
+        request = captured[-1]
+        assert (request["base_url"], request["api_key"], request["api_mode"]) == (
+            None, None, None,
+        )
+        assert request["provider"] == "auto"
+        assert (
+            request["main_runtime"]["api_key"], request["main_runtime"]["api_mode"],
+        ) == ("primary-dummy", "anthropic_messages")
+        assert "fallback-dummy" not in repr(request)
 
     @pytest.mark.parametrize(
         ("title_model", "fallback_model", "fallback_url", "expected_model"),
@@ -1062,7 +1094,11 @@ class TestResolvedAutoTitleTransportAndFallback:
     def test_selected_fallback_takes_the_title_model_as_the_agent_does(
         self, title_model, fallback_model, fallback_url, expected_model,
     ):
-        """A selected fallback keeps its endpoint and key; its model follows the Agent."""
+        """The gate classifies the model the Agent sends to the selected fallback.
+
+        The request itself leaves the route, endpoint and key to the Agent and
+        carries only the title-model override, as the Agent's own title call does.
+        """
         captured = []
 
         def call_llm(**kwargs):
@@ -1087,15 +1123,19 @@ class TestResolvedAutoTitleTransportAndFallback:
             "agent.auxiliary_client._effective_provider_for_client",
             side_effect=lambda client, provider: provider,
             create=True,
-        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+        ), patch(
+            "api.streaming._route_accepts_reasoning_extra",
+            wraps=_route_accepts_reasoning_extra,
+        ) as gate, patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
             title, status = generate_title_raw_via_aux("question", "answer")
 
         assert (title, status) == ("Fallback title", "llm_aux")
+        assert gate.call_args.args == ("custom", expected_model, fallback_url)
         request = captured[-1]
         assert (
             request["provider"], request["model"], request["base_url"], request["api_key"],
-        ) == ("custom", expected_model, fallback_url, "fallback-key")
-        assert "main_runtime" not in request
+        ) == ("auto", title_model or None, None, None)
+        assert request["main_runtime"]["provider"] == "custom:unavailable"
 
     @pytest.mark.parametrize(("title_model", "expected_gate_model"), (
         ("title-model", "title-model"),
@@ -1130,7 +1170,7 @@ class TestResolvedAutoTitleTransportAndFallback:
             )
 
         assert route == ("custom", expected_gate_model, "https://main.example/v1")
-        assert credentials["automatic_main"] is True
+        assert credentials["automatic_request"] is True
         assert credentials["title_model_override"] == title_model
 
     def test_named_profile_main_route_does_not_use_root_config(self):
@@ -1580,6 +1620,104 @@ class TestRealAgentTitleRouteOverHttp:
         assert [r for r in sent if r not in primary] == [
             ('/fallback/v1/chat/completions', 'fallback-key', 'fallback-model'),
         ]
+
+    @pytest.mark.parametrize('first_status', (None, 401, 402))
+    def test_unavailable_main_first_fallback_failure_reaches_the_second(
+        self, real_agent_wire, monkeypatch, first_status,
+    ):
+        """A fallback that preflight selects keeps the Agent's HTTP-failure recovery."""
+        wire = real_agent_wire.wire
+        monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+        monkeypatch.setenv('DEEPSEEK_BASE_URL', wire.url + '/deepseek/v1')
+        if first_status:
+            wire.fail['/first/'] = first_status
+        real_agent_wire.write_config({
+            # A main provider with no key: the Agent's preflight selects the
+            # first configured fallback.
+            'model': {'provider': 'deepseek', 'default': 'deepseek-chat'},
+            'fallback_providers': [
+                {
+                    'provider': 'custom', 'model': 'first-model',
+                    'base_url': wire.url + '/first/v1', 'api_key': 'first-key',
+                },
+                {
+                    'provider': 'custom', 'model': 'second-model',
+                    'base_url': wire.url + '/second/v1', 'api_key': 'second-key',
+                },
+            ],
+            'auxiliary': {'title_generation': {'provider': 'auto'}},
+        })
+
+        assert generate_title_raw_via_aux('question', 'answer') == ('Wire Title', 'llm_aux')
+
+        sent = [(r['path'], _sent_key(r), r['model']) for r in wire.requests]
+        first = ('/first/v1/chat/completions', 'first-key', 'first-model')
+        second = ('/second/v1/chat/completions', 'second-key', 'second-model')
+        if first_status is None:
+            # Healthy-first control: the first fallback answers, alone.
+            assert sent == [first]
+            return
+        assert sent[0] == first
+        assert set(r for r in sent if r[0].startswith('/first/')) == {first}
+        assert [r for r in sent if not r[0].startswith('/first/')] == [second]
+
+    @pytest.mark.parametrize(('config', 'task_overrides', 'expected'), (
+        (
+            # A named fallback's own endpoint and transport overrides win over
+            # the registered provider's defaults.
+            lambda url: {
+                'custom_providers': [{
+                    'name': 'relay', 'base_url': url + '/default/v1',
+                    'api_key': 'default-key',
+                }],
+                'fallback_providers': [{
+                    'provider': 'custom:relay', 'model': 'fallback-model',
+                    'base_url': url + '/override/v1', 'api_key': 'fallback-key',
+                    'api_mode': 'anthropic_messages',
+                }],
+            },
+            {},
+            ('/override/v1/messages', 'fallback-key', 'fallback-model'),
+        ),
+        (
+            # The same with only an endpoint override.
+            lambda url: {
+                'custom_providers': [{
+                    'name': 'relay', 'base_url': url + '/default/v1',
+                    'api_key': 'default-key',
+                }],
+                'fallback_providers': [{
+                    'provider': 'custom:relay', 'model': 'fallback-model',
+                    'base_url': url + '/override/v1', 'api_key': 'fallback-key',
+                }],
+            },
+            {},
+            ('/override/v1/chat/completions', 'fallback-key', 'fallback-model'),
+        ),
+        (
+            # The title task's key and transport belong to its primary route,
+            # never to the fallback that preflight selects.
+            lambda url: {'fallback_providers': [{
+                'provider': 'custom', 'model': 'fallback-model',
+                'base_url': url + '/fallback/v1', 'api_key': 'fallback-key',
+            }]},
+            {'api_key': 'primary-task-key', 'api_mode': 'anthropic_messages'},
+            ('/fallback/v1/chat/completions', 'fallback-key', 'fallback-model'),
+        ),
+    ))
+    def test_preflight_selected_fallback_keeps_its_own_route(
+        self, real_agent_wire, config, task_overrides, expected,
+    ):
+        wire = real_agent_wire.wire
+        real_agent_wire.write_config({
+            'model': {'provider': 'custom:unavailable', 'default': 'dead-model'},
+            **config(wire.url),
+            'auxiliary': {'title_generation': {'provider': 'auto', **task_overrides}},
+        })
+
+        assert generate_title_raw_via_aux('question', 'answer') == ('Wire Title', 'llm_aux')
+
+        assert [(r['path'], _sent_key(r), r['model']) for r in wire.requests] == [expected]
 
     @pytest.mark.parametrize(('title_model', 'fallback_model', 'expected_model'), (
         ('', 'fallback-model', 'fallback-model'),

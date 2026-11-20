@@ -249,19 +249,24 @@ must consume that same resolved route.
   not substitute the WebUI picker catalog or the main route.
 - A blank implicit/auto route is resolved using the Agent's full
   `title_generation` availability and fallback policy before WebUI injects
-  request controls. The Agent-selected provider/model/endpoint must be used
-  for the request rather than freezing an unavailable main route. This also
-  includes `auxiliary.title_generation.prefer_fast_model`. A selected main
-  route stays `provider: auto` with the profile's main runtime, so the Agent
-  keeps its HTTP-failure fallback. If only the Agent's main-route candidate is
-  available (its full resolver is missing or raises ImportError), the request
-  is that candidate's provider, endpoint, key and transport, without that
-  fallback; a title-model override changes only the model. On each of these
-  routes, a selected fallback included, the override applies as on the Agent's
-  own automatic route: an OpenRouter-format `vendor/model` override gives way
-  to the route's own model when that model has no `/` and OpenRouter does not
-  serve the route. If the Agent cannot resolve the route at all, the request
-  stays implicit; WebUI's own guess only classifies request controls.
+  request controls. The Agent-selected provider/model/endpoint classifies
+  those controls rather than an unavailable main route. This also includes
+  `auxiliary.title_generation.prefer_fast_model`. Whichever route the Agent's
+  preflight selects, the main route or a configured fallback, the request
+  stays `provider: auto` with the profile's main runtime and only the title
+  task's model override, never that route's explicit provider, endpoint or
+  key. The Agent then selects the route itself, with its own credentials and
+  transport, and keeps its HTTP-failure recovery: a 401 or 402 from the
+  selected route moves on to the next configured fallback. If only the
+  Agent's main-route candidate is available (its full resolver is missing or
+  raises ImportError), the request is that candidate's provider, endpoint,
+  key and transport, without that fallback; a title-model override changes
+  only the model. On each of these routes, a selected fallback included, the
+  override applies as on the Agent's own automatic route: an
+  OpenRouter-format `vendor/model` override gives way to the route's own model
+  when that model has no `/` and OpenRouter does not serve the route. If the
+  Agent cannot resolve the route at all, the request stays implicit; WebUI's
+  own guess only classifies request controls.
 - An inherited main route retains the main model's resolved transport
   (`api_mode`, including `anthropic_messages`), even when title_generation
   specifies only a model override. An explicit title-task `api_key` or
@@ -269,8 +274,10 @@ must consume that same resolved route.
   runtime, the only input the Agent's automatic route reads; a registered
   named custom main provider still takes its key from its own entry.
 - A fallback provider retains its own selected endpoint, API key and transport
-  (including named-custom fallback overrides). Title-task `api_key` and
-  `api_mode` belong to the primary route; they cannot override the fallback.
+  (including named-custom fallback overrides), as the Agent builds it; WebUI
+  never copies a fallback's credentials into the request. Title-task `api_key`
+  and `api_mode` belong to the primary route; they cannot override the
+  fallback.
   A fallback with no key of its own on the primary's origin borrows the
   primary's key by the Agent's same-origin rule, which for a title with a task
   key is that task key.

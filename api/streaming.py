@@ -7030,42 +7030,30 @@ def _effective_aux_title_route(
                                 getattr(destination, 'base_url', '')
                                 or getattr(auto_client, 'base_url', '') or ''
                             )
-                            # Never discard a named fallback's endpoint override
-                            # and let its registered default take over the call.
+                            # Classify a named fallback on its endpoint override,
+                            # not on its registered default.
                             auto_url = (
                                 str(resolved_base_url or '') if is_main_route
                                 else selected_url
                             )
                             if resolved_credentials is not None:
-                                resolved_credentials['fallback_selected'] = not is_main_route
-                                if is_main_route:
-                                    # Keep the Agent's HTTP failure recovery
-                                    # instead of pinning preflight's main route.
-                                    resolved_credentials['automatic_main'] = True
-                                    resolved_credentials['main_runtime'] = runtime
-                                    resolved_credentials['title_model_override'] = supplied_model
-                                resolved_credentials['api_key'] = (
-                                    (_resolved_api_key if is_main_route
-                                     else getattr(auto_client, 'api_key', '')) or ''
-                                )
-                                if is_main_route:
-                                    selected_mode = str(_resolved_api_mode or '')
-                                else:
-                                    selected_mode = str(
-                                        getattr(destination, 'api_mode', '') or ''
-                                    )
-                                    if (
-                                        not selected_mode
-                                        and type(auto_client).__name__ == 'AnthropicAuxiliaryClient'
-                                    ):
-                                        selected_mode = 'anthropic_messages'
-                                resolved_credentials['api_mode'] = selected_mode
+                                # Whichever route preflight selected, main or a
+                                # fallback, the request stays the Agent's
+                                # automatic one. call_llm() selects that route
+                                # again with its own endpoint, key and transport,
+                                # and keeps its HTTP-failure recovery to the next
+                                # configured fallback, which an explicit
+                                # provider/endpoint/key request would lose. The
+                                # route returned here only classifies controls.
+                                resolved_credentials['automatic_request'] = True
+                                resolved_credentials['main_runtime'] = runtime
+                                resolved_credentials['title_model_override'] = supplied_model
                             # A title-model override changes only the model,
                             # not the endpoint, key, or wire protocol, and
                             # applies to a selected fallback too, as on the
-                            # Agent's own automatic route. A main route's
-                            # request leaves the model to the Agent, so there
-                            # this model feeds only the compatibility gate.
+                            # Agent's own automatic route. The request leaves
+                            # the model to the Agent, so this model feeds only
+                            # the compatibility gate.
                             openrouter_route = any(
                                 _is_openrouter_url(getattr(obj, 'base_url', ''))
                                 for obj in (
@@ -7465,21 +7453,16 @@ def generate_title_raw_via_aux(
         task_api_key=api_key,
         task_api_mode=str(configured.get('api_mode') or '').strip(),
     )
-    fallback_selected = bool(route_credentials.get('fallback_selected'))
-    if fallback_selected:
-        # Primary title-task credentials/transport must not override those of
-        # the actual fallback selected by the Agent.
+    if not api_key:
         api_key = route_credentials.get('api_key', '')
-        api_mode = str(route_credentials.get('api_mode') or '').strip()
-    else:
-        if not api_key:
-            api_key = route_credentials.get('api_key', '')
-        api_mode = str(
-            configured.get('api_mode') or route_credentials.get('api_mode') or ''
-        ).strip()
-    if route_credentials.get('automatic_main'):
-        # Keep the Agent's automatic route and its HTTP-failure fallback. The
-        # main runtime already carries the title task's key and transport.
+    api_mode = str(
+        configured.get('api_mode') or route_credentials.get('api_mode') or ''
+    ).strip()
+    if route_credentials.get('automatic_request'):
+        # Keep the Agent's automatic route and its HTTP-failure fallback,
+        # whether preflight selected the main route or a configured fallback.
+        # The main runtime carries the title task's key and transport for the
+        # primary route; a fallback keeps its own, as the Agent builds it.
         request_route = {
             'provider': 'auto',
             'model': route_credentials.get('title_model_override') or None,
