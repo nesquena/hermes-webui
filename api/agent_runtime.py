@@ -482,6 +482,12 @@ def _legacy_profile_homes(base: Path) -> tuple[Path, ...]:
             if not entry.is_dir():
                 continue
         except OSError:
+            # Fail closed, not silent. We cannot tell whether this sibling is a
+            # profile home, and its marker might be live while an update runs.
+            # Keeping it as a home makes the downstream marker read classify it
+            # ``unknown`` -- which the unsafe-state gate refuses -- instead of
+            # skipping it and letting the restart proceed on missing proof.
+            homes.append(entry)
             continue
         homes.append(entry)
     return tuple(homes)
