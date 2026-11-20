@@ -2524,6 +2524,10 @@ async function newSession(flash, options={}){
     // restore and the busy-flag cleanup can no longer mutate the new pane.
     _loadingSessionId = null;
     _loadSessionGeneration++;
+    // #9101: New Chat installs a session without loadSession(); key the YOLO
+    // view to it so the previous session's pill does not stay on screen. A
+    // brand-new session has no server-side YOLO flag.
+    if(typeof _applyYoloState==='function') _applyYoloState(S.session.session_id,false,{reset:true});
     // #7855: a brand-new session starts with no restored-continuation draft.
     if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
     S._pendingSessionToolsets=null;
@@ -2858,7 +2862,10 @@ async function loadSession(sid){
   }
   stopApprovalPolling();hideApprovalCard(forceReload);
   if(typeof stopSessionStream==='function') stopSessionStream();
-  _yoloEnabled=false;_updateYoloPill();
+  // #9101: the YOLO view is keyed by session. A switch drops the previous
+  // session's view (pill hidden until this load's own read answers); a
+  // same-session refresh keeps it and re-reads after install.
+  if(typeof _applyYoloState==='function') _applyYoloState(sid,false,{reset:true});
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
   // #6572: clear stale compression state when switching sessions.
@@ -3134,6 +3141,12 @@ async function loadSession(sid){
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
     }
+    // #9101: the load reset the YOLO view to the target; the previous session
+    // stays open, so read its flag back (guarded like every other read).
+    if (_loadingSessionId === null && S.session && S.session.session_id === currentSid
+        && typeof _fetchYoloState === 'function') {
+      _fetchYoloState(currentSid);
+    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
@@ -3176,6 +3189,9 @@ async function loadSession(sid){
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #9101: key the YOLO view to the installed session, dropping any pill an
+  // explicit write for the departing session restored while this load ran.
+  if(typeof _applyYoloState==='function') _applyYoloState(sid,false,{reset:true});
   // #7855: a session switch is a hard context boundary — drop any restored
   // goal-continuation draft left over from the previous session (restored but
   // never sent, or abandoned mid-settle) so it cannot attach to the next send.
@@ -3446,7 +3462,7 @@ async function loadSession(sid){
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-    if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+    if(typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -3470,7 +3486,11 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
-      if (_isCurrentLoad()) _loadingSessionId = null;
+      if (_isCurrentLoad()) {
+        // #9101: this exit skips the idle read below; read the flag here.
+        if (typeof _fetchYoloState === 'function') _fetchYoloState(sid, {gen: _loadGeneration});
+        _loadingSessionId = null;
+      }
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
@@ -3556,7 +3576,7 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+      if(typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
     }else{
       S.busy=false;
       S.activeStreamId=null;
@@ -3566,6 +3586,9 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       startApprovalPolling(sid);
+      // #9101: idle installs (switch, boot restore, reload, same-session
+      // refresh) read the YOLO flag too, not only streaming ones. Not awaited.
+      if(_isCurrentLoad()&&typeof _fetchYoloState==='function') _fetchYoloState(sid,{gen:_loadGeneration});
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
@@ -9342,6 +9365,14 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
+function _isResetSuccessor(s){
+  return !!(s&&s.relationship_type==='reset_successor');
+}
+
+function _showsForkOrBranchIndicator(s){
+  return !!(s&&s.parent_session_id&&!_isResetSuccessor(s));
+}
+
 function _isForkWithResolvableParent(s, sessionIdsInList){
   return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
 }
@@ -9406,7 +9437,7 @@ function _resolveSessionIdFromSidebarLineage(sid){
     );
     if(!lineageLike) continue;
     const key=_sidebarLineageKeyForRow(row);
-    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
+    if(key===sid||(!_isResetSuccessor(row)&&row.parent_session_id===sid)||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
       candidates.push(row);
     }
   }
@@ -11395,8 +11426,11 @@ function renderSessionListFromCache(){
       wtInd.title=`${wtLabel}: ${s.worktree_branch||s.worktree_path}`;
       titleRow.appendChild(wtInd);
     }
-    // Parent session indicator for forked/branched sessions (#465)
-    if(s.parent_session_id){
+    // Reset successors retain parent_session_id as durable lineage but are
+    // independent top-level conversations. Suppress the historical parent-linked
+    // branch indicator only for a positively classified reset successor so legacy
+    // /branch rows without modern fork metadata keep their provenance (#7178).
+    if(_showsForkOrBranchIndicator(s)){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';
       branchInd.innerHTML=li('git-branch',12);

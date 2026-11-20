@@ -7068,6 +7068,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
+          // #9101: a rotation installs another session id; hide a pill painted
+          // for the old one and read the new one's flag.
+          if(_preSettleSession&&_preSettleSession.session_id!==d.session.session_id){if(typeof _updateYoloPill==='function')_updateYoloPill();if(typeof _fetchYoloState==='function')_fetchYoloState(d.session.session_id);}
           if(
             window._compressionUi&&window._compressionUi.automatic&&
             window._compressionUi.sessionId===activeSid&&
@@ -7502,6 +7505,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
+            // #9101: a compression rotation installs the continuation (an
+            // existing session): drop the old id's YOLO view, read the new one.
+            if(d.session.session_id&&d.session.session_id!==currentSid&&typeof _applyYoloState==='function'){_applyYoloState(d.session.session_id,false,{reset:true});_fetchYoloState(d.session.session_id);}
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
             // Same persist-before-offset trap as settle/cancel: refresh paging
@@ -8451,31 +8457,109 @@ function scheduleComposerAutoResize(){
 
 
 // ── YOLO mode state ──
-// Session-scoped; stored server-side in memory (tools/approval.py).
-// Lifecycle:
-//   • Page reload: state PERSISTS — _fetchYoloState() re-syncs from backend.
-//   • Cross-tab: state is SHARED — enabling YOLO in Tab A affects Tab B for
-//     the same session (both poll the same server-side flag).
-//   • Server restart: state is LOST — in-memory only, not persisted to disk.
-//   • Session switch: state resets — loadSession() clears _yoloEnabled and
-//     fetches the new session's state.
+// Authority: the server's per-session flag (tools.approval._session_yolo),
+// keyed by WebUI session_id, in memory only (a server restart clears it).
+// This tab keeps ONE cached answer for it, keyed by the session it belongs to
+// (#9101):
+//   _yoloView = {sid, enabled, gen, seq}
+//     sid     — the session this answer is about
+//     enabled — the server's answer for that session
+//     gen     — the _loadSessionGeneration it was applied under
+//     seq     — monotonic count of applied explicit writes (/yolo, the pill,
+//               the approval card); a read issued before a write is stale
+// Every writer goes through _applyYoloState(); the pill renders only when the
+// view is about the open session. Lifecycle:
+//   • Session install (any loadSession branch, boot restore, reload, refresh):
+//     the view is re-read from the server after install.
+//   • Session switch / New Chat: another session's view is dropped at once.
+//   • Same-session refresh: the view is kept and re-read, not reset to off.
+//   • Cross-tab: NOT synced. Another tab's change shows here on the next read
+//     (install, send, /goal, /yolo). The pill only ever disables, so a stale
+//     pill cannot turn YOLO on.
+let _yoloView = {sid: null, enabled: false, gen: 0, seq: 0};
+// Compatibility mirror of _yoloView.enabled for the session the view is about
+// (read by the approval toast and by tests). Written only by _applyYoloState.
 let _yoloEnabled = false;
 
-async function _fetchYoloState(sid) {
-  try {
-    const data = await api('/api/session/yolo?session_id=' + encodeURIComponent(sid));
-    _yoloEnabled = !!data.yolo_enabled;
+// The single writer of the YOLO view. `meta`:
+//   reset:true — loadSession()/newSession() is installing `sid`. A view about
+//     another session is replaced by {sid, enabled:false}; a view already
+//     about `sid` (same-session refresh) is kept until the install re-reads.
+//   gen        — the _loadSessionGeneration the answer was requested under.
+//   readSeq    — set for GET reads: _yoloView.seq when the read was issued.
+// A non-reset answer is dropped when it is not for the open session, when a
+// newer load started since it was requested (or a load for another session
+// is in flight), or — for reads — when an explicit write was applied after
+// the read was issued. Returns true when the view was updated.
+function _applyYoloState(sid, enabled, meta) {
+  const m = meta || {};
+  if (!sid || typeof enabled !== 'boolean') return false;
+  if (m.reset) {
+    if (_yoloView.sid !== sid) {
+      _yoloView = {sid, enabled, gen: _loadSessionGeneration, seq: _yoloView.seq};
+      _yoloEnabled = enabled;
+    }
     _updateYoloPill();
-  } catch (_) { /* ignore */ }
+    return true;
+  }
+  if (!S.session || S.session.session_id !== sid) return false;
+  const gen = typeof m.gen === 'number' ? m.gen : _loadSessionGeneration;
+  if (gen !== _loadSessionGeneration) return false;
+  const isRead = typeof m.readSeq === 'number';
+  // A read for the open session is stale once another session starts loading;
+  // an explicit write's answer is not: the open session really changed.
+  if (isRead && _loadingSessionId && _loadingSessionId !== sid) return false;
+  if (isRead && m.readSeq !== _yoloView.seq) return false;
+  _yoloView = {sid, enabled, gen, seq: _yoloView.seq + (isRead ? 0 : 1)};
+  _yoloEnabled = enabled;
+  _updateYoloPill();
+  return true;
+}
+
+// Fire-and-forget read of the server flag for `sid`. Never awaited by
+// loadSession(); the answer is applied only if it still belongs to the open
+// session and load (opts.gen, default: the generation at call time) and no
+// explicit write landed meanwhile.
+async function _fetchYoloState(sid, opts) {
+  if (!sid) return;
+  try {
+    // Captured before the request is sent (callers do not await this).
+    const meta = {
+      gen: opts && typeof opts.gen === 'number' ? opts.gen : _loadSessionGeneration,
+      readSeq: _yoloView.seq,
+    };
+    const data = await api('/api/session/yolo?session_id=' + encodeURIComponent(sid));
+    // A malformed answer leaves the view unchanged (as the POST paths do).
+    if (data && typeof data.yolo_enabled === 'boolean') _applyYoloState(sid, data.yolo_enabled, meta);
+  } catch (_) { /* ignore: fire-and-forget, must never reject */ }
 }
 
 function _updateYoloPill() {
   const pill = $('yoloPill');
   if (!pill) return;
-  pill.style.display = _yoloEnabled ? '' : 'none';
-  if (_yoloEnabled) {
+  const openSid = (S.session && S.session.session_id) || null;
+  const on = !!(openSid && _yoloView.sid === openSid && _yoloView.enabled);
+  pill.style.display = on ? '' : 'none';
+  // #9101: the "hide YOLO" composer setting hides the pill only while YOLO is
+  // off; while it is on, this pill is the only sign that approvals are
+  // skipped, so the setting shrinks it to its ⚡ icon instead.
+  const vis = typeof window !== 'undefined' ? window._composerControlVisibility : null;
+  const hidePref = !!(vis && vis.hide_composer_yolo);
+  const hideByPref = hidePref && !on;
+  pill.classList.toggle('composer-control-hidden', hideByPref);
+  pill.classList.toggle('yolo-pill-compact', hidePref && on);
+  if (hideByPref) pill.setAttribute('aria-hidden', 'true');
+  else pill.removeAttribute('aria-hidden');
+  if (on) {
+    // The pill's click disables exactly the session it was painted for.
+    pill.setAttribute('data-yolo-session', openSid);
     pill.title = t('yolo_pill_title_active');
     pill.setAttribute('data-i18n-title', 'yolo_pill_title_active');
+    // Its own name: the ⚡-only pill has no visible label text.
+    pill.setAttribute('aria-label', t('yolo_pill_title_active'));
+    pill.setAttribute('data-i18n-aria-label', 'yolo_pill_title_active');
+  } else {
+    pill.removeAttribute('data-yolo-session');
   }
   if (typeof applyLocaleToDOM === 'function') applyLocaleToDOM();
 }
@@ -9052,10 +9136,10 @@ async function _handleGatewayUnavailable(owner, errMsg) {
   return false;
 }
 
-function _applyApprovalYoloProjection(result) {
+function _applyApprovalYoloProjection(result, owner) {
   if (!result || typeof result.yolo_enabled !== "boolean") return;
-  _yoloEnabled = result.yolo_enabled;
-  _updateYoloPill();
+  if (!owner || !owner.sid) return;
+  _applyYoloState(owner.sid, result.yolo_enabled, {gen: owner.generation});
 }
 
 function toggleApprovalCardCollapsed(forceCollapsed) {
@@ -9121,7 +9205,7 @@ async function respondApproval(choice, options = {}) {
     }
     if (result && result.ok) {
       _releaseApprovalResponseOwner(owner);
-      if (options.yolo) _applyApprovalYoloProjection(result);
+      if (options.yolo) _applyApprovalYoloProjection(result, owner);
       const pendingEntry = _approvalPendingBySession.get(sid);
       const pendingOwner = _approvalMirrorOwnerFor(sid, approvalId);
       const samePending = !!(
@@ -9173,7 +9257,7 @@ async function respondApproval(choice, options = {}) {
       _releaseApprovalResponseOwner(owner);
       return false;
     }
-    if (options.yolo) _applyApprovalYoloProjection(errorPayload);
+    if (options.yolo) _applyApprovalYoloProjection(errorPayload, owner);
     // A retired gateway run cannot be answered; re-sync to the head so a live
     // successor stays actionable and only a true orphan is cleared.
     if (_isGatewayUnavailableOrphan(owner, errorPayload)) {

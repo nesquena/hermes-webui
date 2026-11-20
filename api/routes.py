@@ -73,6 +73,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import (
+    ShareLinkOwnedElsewhere,
     build_share_snapshot,
     load_share,
     revoke_share,
@@ -108,8 +109,13 @@ def _publish_session_list_changed(
         publish_session_list_changed(reason)
 
 
-def _sync_session_title_to_insights(session) -> None:
-    """Write title-only session metadata updates through to state.db when enabled."""
+def _sync_session_title_to_insights(session, *, rename: bool = False) -> None:
+    """Write title-only session metadata updates through to state.db when enabled.
+
+    ``rename=True`` only from /api/session/rename: an explicit user rename,
+    including clearing it back to an automatic label. Other callers sync
+    passively (``api.state_sync.sync_session_usage``).
+    """
     try:
         if not load_settings().get("sync_to_insights"):
             return
@@ -127,6 +133,7 @@ def _sync_session_title_to_insights(session) -> None:
             profile=getattr(session, "profile", None),
             cache_read_tokens=getattr(session, "cache_read_tokens", None) or 0,
             cache_write_tokens=getattr(session, "cache_write_tokens", None) or 0,
+            rename=rename,
         )
     except Exception:
         logger.debug("Failed to update session title in state.db", exc_info=True)
@@ -12668,7 +12675,37 @@ def _display_rebased_tool_calls(tool_calls, owner_positions):
     return projected
 
 
-def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None):
+def _display_merge_summary(messages):
+    """Full-transcript values GET /api/session derives from the merged rows.
+
+    Computed once when a merge is memoized so a cache hit can answer the
+    todo/visible-count/last-timestamp/turn-token post-passes without
+    rescanning every row. Each value uses the exact expression the handler
+    uses on the uncached path, so responses stay byte-identical.
+    """
+    try:
+        last_ts = max(
+            (float((m or {}).get("timestamp") or 0) for m in messages if isinstance(m, dict)),
+            default=0,
+        )
+    except (TypeError, ValueError):
+        last_ts = 0
+    try:
+        todo_state = derive_todo_state(messages) if messages else None
+    except Exception:
+        logger.debug("todo_state summary failed", exc_info=True)
+        todo_state = None
+    return {
+        "last_ts": last_ts,
+        "todo_state": todo_state,
+        "visible_count": sum(
+            1 for m in messages if isinstance(m, dict) and not is_hidden_transcript_row(m)
+        ),
+        "turn_token": any(isinstance(m, dict) and m.get("_active_turn_token") for m in messages),
+    }
+
+
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None, summary_out=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
     Lets GET /api/session skip loading the state.db rows entirely on a hit. That
@@ -12714,6 +12751,12 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
             owner_positions.clear()
             owner_positions.update(entry["owner_positions"])
         _display_merge_cache.move_to_end(sid, last=True)
+        if summary_out is not None and isinstance(entry.get("summary"), dict):
+            # Window-only contract: hand back the cached list itself (READ-ONLY)
+            # and let the caller copy just the rows it returns.
+            summary_out.clear()
+            summary_out.update(entry["summary"])
+            return entry["messages"]
         return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
 
 
@@ -12855,11 +12898,15 @@ def _limited_webui_messages_for_display_with_sidecar(
             cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
+        # The summary walks every row (todo state, visible count), so derive it
+        # before taking the process-wide cache lock; `merged` is not shared yet.
+        summary = _display_merge_summary(merged)
         with _display_merge_cache_lock:
             _display_merge_cache[sid] = {
                 "key": cache_key,
                 "messages": merged,
                 "owner_positions": projected_owners,
+                "summary": summary,
                 "stored_at": time.monotonic(),
             }
             _display_merge_cache.move_to_end(sid, last=True)
@@ -14792,7 +14839,7 @@ from api.run_journal import (
     terminal_settled_prompt_events,
     SSE_RELAY_CLOSE_EVENTS,
 )
-from api.todo_state import attach_todo_state
+from api.todo_state import attach_todo_state, derive_todo_state
 from api.providers import (
     get_providers,
     get_provider_quota,
@@ -14816,11 +14863,12 @@ from api.oauth import (
 # Approval system -- state and helpers live in api.route_approvals; imported
 # here for backward compatibility so existing call sites continue to resolve.
 from api.route_approvals import (  # noqa: F401 — re-exports for backward compat
-    _submit_pending_raw,
+    APPROVAL_BRIDGE,
+    approval_bridge_failure,
     approve_session,
     approve_permanent,
+    persist_grant_choice,
     save_permanent_allowlist,
-    is_approved,
     _pending,
     _lock,
     _permanent_approved,
@@ -14854,6 +14902,8 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     resolve_gateway_pending_local_all,
     resolve_gateway_pending_local_no_run_mirror,
     set_session_yolo_enabled,
+    session_yolo_state,
+    yolo_revision_conflict,
     submit_gateway_pending_mirror,
     submit_pending,
 )
@@ -17592,6 +17642,9 @@ def _handle_session_get(handler, parsed) -> bool:
         # reused without loading the state.db rows; must exist for every
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
+        # Set by a window-only merge-cache hit: _all_msgs is then the cached
+        # list itself (never mutate it) and this carries its O(N) summaries.
+        _display_cache_summary = {}
         _display_state_db_signature = None
         _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
             getattr(s, "messages", None) or [], include_live_partial=True
@@ -17646,6 +17699,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     limited_sidecar_messages,
                     msg_before=msg_before,
                     owner_positions=_display_owner_positions,
+                    summary_out=_display_cache_summary,
                 )
             if _display_cache_hit is not None:
                 state_db_messages = []
@@ -17800,6 +17854,8 @@ def _handle_session_get(handler, parsed) -> bool:
                 msg_before=msg_before,
                 expand_renderable=expand_renderable,
             )
+            if _display_cache_summary:
+                _truncated_msgs = [dict(m) if isinstance(m, dict) else m for m in _truncated_msgs]
             if msg_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
@@ -17893,7 +17949,9 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
         _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
-        if _summary_last_message_at is None and _all_msgs:
+        if _summary_last_message_at is None and _all_msgs and _display_cache_summary:
+            _merged_last_message_at = _display_cache_summary["last_ts"]
+        elif _summary_last_message_at is None and _all_msgs:
             try:
                 _merged_last_message_at = max(
                     float((m or {}).get("timestamp") or 0)
@@ -17953,7 +18011,10 @@ def _handle_session_get(handler, parsed) -> bool:
         # tool result is outside msg_limit, and treats an explicit empty
         # todo list as the current state instead of falling through to an
         # older non-empty write.
-        if load_messages and _all_msgs:
+        if load_messages and _all_msgs and _display_cache_summary:
+            if _display_cache_summary["todo_state"] is not None:
+                raw["todo_state"] = copy.deepcopy(_display_cache_summary["todo_state"])
+        elif load_messages and _all_msgs:
             attach_todo_state(raw, _all_msgs)
         if _merged_last_message_at:
             raw["last_message_at"] = max(
@@ -17986,9 +18047,11 @@ def _handle_session_get(handler, parsed) -> bool:
             # (it trusts the sidecar prefix / metadata counts). On message
             # loads the merged display transcript is the authority — derive
             # the visible total from it.
-            raw["visible_message_count"] = sum(
-                1 for m in _all_msgs
-                if isinstance(m, dict) and not is_hidden_transcript_row(m)
+            raw["visible_message_count"] = (
+                _display_cache_summary["visible_count"] if _display_cache_summary else sum(
+                    1 for m in _all_msgs
+                    if isinstance(m, dict) and not is_hidden_transcript_row(m)
+                )
             )
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
@@ -18022,9 +18085,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 logger.debug("[webui] #8517: memory status unavailable for session %s", sid, exc_info=True)
             if _memory_status:
                 raw["memory_status"] = _memory_status
-        imported_turn_marker = any(
-            isinstance(row, dict) and row.get("_active_turn_token")
-            for row in _all_msgs
+        imported_turn_marker = (
+            _display_cache_summary["turn_token"] if _display_cache_summary else any(
+                isinstance(row, dict) and row.get("_active_turn_token")
+                for row in _all_msgs
+            )
         )
         if (
             load_messages
@@ -18618,6 +18683,7 @@ def handle_get(handler, parsed) -> bool:
         payload = build_agent_health_payload()
         payload["gateway_chat"] = gateway_chat_config_status()
         payload["gateway_lifecycle"] = gateway_lifecycle_capability()
+        payload["approval_bridge"] = dict(APPROVAL_BRIDGE)
         j(handler, payload)
         return True
 
@@ -18897,7 +18963,10 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
-        return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
+        return j(handler, session_yolo_state(sid))
 
     if parsed.path == "/api/session/usage":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -20201,7 +20270,12 @@ def handle_post(handler, parsed) -> bool:
             # Re-read inside the lock: saving the object resolved before the wait
             # would revert a title rename or an appended message that landed while
             # this request was blocked.
-            persisted_session = _reload_session_for_share(sid) or stored_session
+            # Never the resident object itself: the pre-save mirror skips its
+            # source, so a pair set here would be the resident's own change
+            # until the commit, and an eviction before it keeps it (#8735).
+            persisted_session = _reload_session_for_share(sid) or (
+                copy.copy(stored_session) if stored_session is not None else None
+            )
             if persisted_session is None:
                 persisted_session = _build_share_metadata_sidecar(
                     sid,
@@ -20254,11 +20328,14 @@ def handle_post(handler, parsed) -> bool:
             # it is live before the snapshot writer may keep it.
             if durable_token and load_share(durable_token) is None:
                 durable_token = ""
-            share_meta = write_share_snapshot(
-                snapshot,
-                token=durable_token,
-                source_session_id=sid,
-            )
+            try:
+                share_meta = write_share_snapshot(
+                    snapshot,
+                    token=durable_token,
+                    source_session_id=sid,
+                )
+            except ShareLinkOwnedElsewhere as exc:
+                return bad(handler, str(exc), 409)  # #8734: nothing was written
             persisted_session.share_token = share_meta["share_token"]
             persisted_session.share_created_at = share_meta["share_created_at"]
             # Update the live cached copy BEFORE the durable save (#8255 review,
@@ -20344,7 +20421,10 @@ def handle_post(handler, parsed) -> bool:
         if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
             return bad(handler, "Session busy, try again", 503)
         try:
-            target_session = _reload_session_for_share(sid) or stored_session
+            # Never the resident object itself (#8735, as in create).
+            target_session = _reload_session_for_share(sid) or (
+                copy.copy(stored_session) if stored_session is not None else None
+            )
             if target_session is None:
                 token = str(getattr(snapshot_session, "share_token", "") or "").strip()
                 if not token:
@@ -20366,7 +20446,10 @@ def handle_post(handler, parsed) -> bool:
                 # revoke_share() locates the published snapshot through the
                 # session's token field, so hand it the resolved authority.
                 target_session.share_token = token
-                revoke_share(target_session)
+                try:
+                    revoke_share(target_session)
+                except ShareLinkOwnedElsewhere as exc:
+                    return bad(handler, str(exc), 409)  # #8734: the link and both pairs are untouched
                 if load_share(token) is not None:
                     return bad(handler, "Share link could not be revoked", 500)
             # A writer may have saved while the revoke was reading the snapshot
@@ -21019,7 +21102,7 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-        _sync_session_title_to_insights(s)
+        _sync_session_title_to_insights(s, rename=True)
         publish_session_list_changed(
             "session_rename",
             profile=getattr(s, "profile", None),
@@ -21577,6 +21660,7 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
+        tombstone_persist_failed = False
         try:
             # #8837: revoke its link first; a revoke that fails refuses the delete.
             if not _revoke_owned_shares_before_delete(sid, p):
@@ -21735,7 +21819,8 @@ def handle_post(handler, parsed) -> bool:
                 try:
                     _record_webui_deleted_session_tombstone(sid)
                 except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    logger.error("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    tombstone_persist_failed = True
         finally:
             session_lock.release()
         try:
@@ -21768,6 +21853,16 @@ def handle_post(handler, parsed) -> bool:
             "state_db_cleanup_failed": state_db_cleanup_failed,
             **worktree_retained,
         }
+        if tombstone_persist_failed:
+            response["tombstone_persist_failed"] = True
+            response.update(
+                {
+                    "ok": False,
+                    "error": "delete_tombstone_failed",
+                    "action": "session_delete",
+                }
+            )
+            return j(handler, response, status=500)
         if draft_delete_failed:
             response["draft_delete_failed"] = True
             response.update(
@@ -22067,7 +22162,7 @@ def handle_post(handler, parsed) -> bool:
             reasoning_effort=getattr(source, "reasoning_effort", None),
             profile=getattr(source, "profile", None),
             title=branch_title,
-            messages=forked_messages,
+            messages=copy.deepcopy(forked_messages),  # detached: child settlement must not edit source rows
             project_id=getattr(source, "project_id", None),
             personality=getattr(source, "personality", None),
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
@@ -22156,20 +22251,46 @@ def handle_post(handler, parsed) -> bool:
     #   • Cross-tab: state is SHARED (same server-side flag per session)
     #   • Server restart: state is LOST (in-memory only)
     #   • Cross-session: isolated (each session has its own flag)
-    # Fixes #467
+    #   • Compression rotation: not yet carried to the continuation session
+    #     (a separate #9101 follow-up)
+    # Fixes #467. #9101: ``enabled`` must be a boolean (a missing value used to
+    # enable). ``expected_revision``/``expected_epoch`` (from a GET) make the
+    # write conditional: if the session's YOLO moved since, nothing changes.
     if parsed.path == "/api/session/yolo":
         try:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
         sid = str(body["session_id"] or "").strip()
-        enabled = bool(body.get("enabled", True))
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return bad(handler, "enabled is required and must be true or false")
+        expected = None
+        if body.get("expected_revision") is not None:
+            expected_revision = body.get("expected_revision")
+            expected_epoch = body.get("expected_epoch")
+            if (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+                or expected_revision < 0
+                or not (expected_epoch is None or isinstance(expected_epoch, str))
+            ):
+                return bad(handler, "expected_revision must be a non-negative integer")
+            expected = (expected_revision, expected_epoch)
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         if not enabled:
             with gateway_yolo_handoff(sid):
+                conflict = yolo_revision_conflict(sid, expected)
+                if conflict is not None:
+                    return j(handler, conflict, status=409)
                 set_session_yolo_enabled(sid, False)
-                return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
+                return j(handler, {"ok": True, **session_yolo_state(sid)})
 
-        payload, status = _enable_session_yolo_and_release_pending(sid, choice="once")
+        payload, status = _enable_session_yolo_and_release_pending(
+            sid, choice="once", expected=expected
+        )
         return j(handler, payload, status=status)
 
     if parsed.path == "/api/btw":
@@ -23758,6 +23879,14 @@ def handle_post(handler, parsed) -> bool:
         return _handle_session_import(handler, body)
 
     # ── Self-update (POST) ──
+    if parsed.path in ("/api/updates/apply", "/api/updates/force", "/api/updates/clear_lock"):
+        from api.updates import confirmed_gateway_impact
+
+        try:  # #8746: a confirmation field of the wrong type is a bad request
+            confirmed_gateway_impact(body)
+        except ValueError as exc:
+            return bad(handler, str(exc))
+
     if parsed.path == "/api/updates/apply":
         target = body.get("target", "")
         if target not in ("webui", "agent"):
@@ -23769,12 +23898,15 @@ def handle_post(handler, parsed) -> bool:
         _apply_channel = body.get("channel") if isinstance(body, dict) else None
         if _apply_channel not in ("stable", "experimental"):
             _apply_channel = None
-        from api.updates import apply_update
+        from api.updates import apply_update, confirmed_gateway_impact
 
         # #7293: an update refuses while WebUI-owned runs are active unless the
         # client re-sends it with an explicit, user-confirmed force.
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True
-        return j(handler, apply_update(target, _apply_channel, force_active_runs=_force_active_runs))
+        return j(handler, apply_update(
+            target, _apply_channel, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/force":
         target = body.get("target", "")
@@ -23783,10 +23915,13 @@ def handle_post(handler, parsed) -> bool:
         _force_channel = body.get("channel") if isinstance(body, dict) else None
         if _force_channel not in ("stable", "experimental"):
             _force_channel = None
-        from api.updates import apply_force_update
+        from api.updates import apply_force_update, confirmed_gateway_impact
 
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True  # #7293
-        return j(handler, apply_force_update(target, _force_channel, force_active_runs=_force_active_runs))
+        return j(handler, apply_force_update(
+            target, _force_channel, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/clear_lock":
         # Manual-instruction recovery for the .git/index.lock case. The
@@ -23799,10 +23934,13 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target", "")
         if target not in ("webui", "agent"):
             return bad(handler, 'target must be "webui" or "agent"')
-        from api.updates import apply_clear_lock
+        from api.updates import apply_clear_lock, confirmed_gateway_impact
 
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True  # #7293
-        return j(handler, apply_clear_lock(target, force_active_runs=_force_active_runs))
+        return j(handler, apply_clear_lock(
+            target, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload
@@ -26471,6 +26609,45 @@ def _default_edge_voice(text: str = "") -> str:
     return "it-IT-ElsaNeural"
 
 
+class _TtsRateLimiter:
+    """Per-client 2 s throttle for the TTS endpoint.
+
+    Keys on the same client identity the login limiter uses
+    (``_login_client_ip``). See ``_get_client_key`` for the trust model.
+    """
+
+    def __init__(self, window_seconds=2.0, prune_interval=50):
+        self.window = window_seconds
+        self.prune_interval = prune_interval
+        self._hits = {}
+        self._lock = threading.Lock()
+        self._checks = 0
+
+    def _get_client_key(self, h):
+        # #8610: parity with the login limiter — the raw socket peer unless
+        # per-client buckets are opted in AND the peer is a listed trusted
+        # proxy (HERMES_WEBUI_TRUSTED_PROXY_CIDRS). The old path trusted ANY
+        # peer's forwarded headers once HERMES_WEBUI_TRUST_FORWARDED_FOR was
+        # set, so a client could pick a fresh bucket (and a log identity) on
+        # every request.
+        return _login_client_ip(h)
+
+    def check(self, handler, session_cookie=None):
+        key = self._get_client_key(handler)
+        if session_cookie and "." in str(session_cookie):
+            key = str(session_cookie).split(".", 1)[0]
+        now = time.time()
+        with self._lock:
+            self._checks += 1
+            if self._checks % self.prune_interval == 0:
+                cutoff = now - (self.window * 10)
+                self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
+            last = self._hits.get(key, 0)
+            if now - last < self.window:
+                return False
+            self._hits[key] = now
+            return True
+
 
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
@@ -26575,42 +26752,6 @@ def _handle_tts(handler, parsed):
 
     # High-quality per-client rate limiting for TTS.
     if not hasattr(_handle_tts, "_tts_limiter"):
-        import time as _time, threading as _threading
-        class _TtsRateLimiter:
-            def __init__(self, window_seconds=2.0, prune_interval=50):
-                self.window = window_seconds
-                self.prune_interval = prune_interval
-                self._hits = {}
-                self._lock = _threading.Lock()
-                self._checks = 0
-
-            def _get_client_key(self, h):
-                trust_proxy = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "").strip().lower()
-                if trust_proxy in ("1", "true", "yes", "on"):
-                    for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
-                        val = h.headers.get(hdr)
-                        if val:
-                            ip = val.split(",")[0].strip().split(";")[0].strip()
-                            if ip:
-                                return ip
-                return getattr(h, "client_address", ("unknown",))[0]
-
-            def check(self, handler, session_cookie=None):
-                key = self._get_client_key(handler)
-                if session_cookie and "." in str(session_cookie):
-                    key = str(session_cookie).split(".", 1)[0]
-                now = _time.time()
-                with self._lock:
-                    self._checks += 1
-                    if self._checks % self.prune_interval == 0:
-                        cutoff = now - (self.window * 10)
-                        self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
-                    last = self._hits.get(key, 0)
-                    if now - last < self.window:
-                        return False
-                    self._hits[key] = now
-                    return True
-
         _handle_tts._tts_limiter = _TtsRateLimiter(window_seconds=2.0)
 
     limiter = _handle_tts._tts_limiter
@@ -34642,6 +34783,58 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
+def _scope_offered_by_entry(entry: dict | None, choice: str) -> str:
+    """Narrow a session/always answer to the scopes this approval offered.
+
+    Missing flags keep the answer as given (entries from older producers).
+    """
+    if choice not in ("session", "always") or not isinstance(entry, dict):
+        return choice
+    if entry.get("allow_session") is False or entry.get("smart_denied"):
+        return "once"
+    if choice == "always" and entry.get("allow_permanent") is False:
+        return "session"
+    return choice
+
+
+@contextlib.contextmanager
+def _session_profile_grant_scope(sid: str):
+    """Yield True with the Agent's Hermes home bound to ``sid``'s own profile.
+
+    Yields False (save nothing) when that profile home or the context-local
+    override can't be established. Agent-less mode yields True unscoped.
+    """
+    if not APPROVAL_BRIDGE["agent"]:
+        yield True
+        return
+    from api.memory_profile_scope import session_owner_profile_home
+    from api.profiles import _resolve_hermes_home_override
+
+    home = session_owner_profile_home(sid)
+    home_mod = _resolve_hermes_home_override() if home else None
+    if home_mod is None:
+        logger.warning("approval grant for session %s not saved: its profile home is unknown", sid)
+        yield False
+        return
+    try:
+        # Can raise, e.g. ScopeSwitchRefused while a hosted scope is bound.
+        token = home_mod.set_hermes_home_override(home)
+    except Exception as exc:
+        logger.warning(
+            "approval grant for session %s not saved: its profile home could not be bound (%s)", sid, exc
+        )
+        bound = False
+    else:
+        bound = True
+    if not bound:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        home_mod.reset_hermes_home_override(token)
+
+
 def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: str = "") -> bool:
     """Resolve an approval through the existing callback path.
 
@@ -34712,11 +34905,9 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 # .data dict carries command, pattern_key, pattern_keys.
                 gw_data = getattr(gw_entry, 'data', None) or {}
                 gateway_keys = gw_data.get("pattern_keys") or [gw_data.get("pattern_key", "")]
-                # Peek is not strict — a concurrent resolver may pop a
-                # different gateway entry before we reach
-                # resolve_gateway_approval below, but approve_session is
-                # idempotent over the session key set so the outcome is
-                # the same regardless of which entry wins the race.
+                # resolve_gateway_approval() below hands the choice to the
+                # Agent waiting on the oldest entry; that Agent saves any
+                # session/always grant itself.
                 found_target = True
         elif approval_id:
             gw_queue = _gateway_queues.get(sid)
@@ -34748,6 +34939,14 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                     if matched_data is not None:
                         matched_data["approval_id"] = approval_id
                         local_gateway_approval_id = approval_id
+        # Gateway-held: a relayed run approval, the exact local producer, the
+        # no-id head, or any gateway mirror (live, or orphaned: never used).
+        agent_held = bool(
+            run_id
+            or local_gateway_approval_id
+            or gateway_keys
+            or (pending and pending.get(_GATEWAY_MIRROR_FLAG))
+        )
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -34760,17 +34959,38 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
             else:
                 _approval_sse_notify_locked(sid, None, 0)
 
-    # Collect keys from both _pending and _gateway_queues
+    # The Agent saves a session/always answer once its wait returns, applying its
+    # per-approval scope rule (a one-operation finding saves nothing) in the
+    # session's own profile. WebUI saves only raw entries no Agent waits on, never
+    # a gateway mirror (a mirror whose producer is gone was never used), only
+    # within the scope that entry offered, and only in the session's own profile.
+    scope = "once" if agent_held else _scope_offered_by_entry(pending, choice)
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
-    all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
-    if choice == "session":
-        for k in all_keys:
-            approve_session(sid, k)
-    elif choice == "always":
-        for k in all_keys:
-            approve_session(sid, k)
-            approve_permanent(k)
-        save_permanent_allowlist(_permanent_approved)
+    all_keys = [k for k in keys_from_pending if k]
+    if scope in ("session", "always") and all_keys:
+        with _session_profile_grant_scope(sid) as in_profile:
+            if in_profile and persist_grant_choice is not None and scope == "session":
+                # A session answer uses the Agent's own grant.
+                persist_grant_choice(sid, scope, all_keys)
+            elif in_profile and APPROVAL_BRIDGE["agent"]:
+                # With an Agent bound, a WebUI-held "always" is granted for this session
+                # only: a WebUI-side save can't be combined safely with the Agent's own
+                # save of command_allowlist. It is asked again in a later session.
+                for k in all_keys:
+                    approve_session(sid, k)
+            elif in_profile:
+                # Agent-less: no profile-scoped grant store, so the answer is saved as given.
+                saved = set()
+                for k in all_keys:
+                    approve_session(sid, k)
+                    # Content-scanner (tirith) findings stay session-only, as in the
+                    # Agent's own _persist_choice; a raw entry carries no flag for them.
+                    if scope == "always" and not str(k).startswith("tirith:"):
+                        approve_permanent(k)
+                        saved.add(k)
+                if saved:
+                    # Only the keys granted now: never another profile's in-memory grants.
+                    save_permanent_allowlist(saved)
     # choice == "once": no persistence — approval lasts this single call only.
     # resolve_gateway_approval() below unblocks the parked agent thread for
     # every choice, so "once" still lets the current tool run; we just must not
@@ -34828,7 +35048,7 @@ def _gateway_approval_failure(
         "error": error,
     }
     if enable_yolo:
-        payload["yolo_enabled"] = bool(is_session_yolo_enabled(sid))
+        payload.update(session_yolo_state(sid))
     return payload, status
 
 
@@ -35112,7 +35332,7 @@ def _relay_gateway_run_approval(
             "relayed": True,
             **({"already_resolved": True} if already_resolved else {}),
             **(
-                {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                session_yolo_state(sid)
                 if enable_yolo
                 else {}
             ),
@@ -35160,8 +35380,13 @@ def _enable_session_yolo_and_release_pending(
     run_id: str = "",
     mirror_token: str = "",
     include_choice: bool = False,
+    expected: tuple[int, str | None] | None = None,
 ) -> tuple[dict, int]:
-    """Relay every parked remote approval, drain local waiters, then commit YOLO."""
+    """Relay every parked remote approval, drain local waiters, then commit YOLO.
+
+    ``expected`` (a ``(revision, epoch)`` the caller read) refuses the enable
+    with 409 when the session's YOLO moved since that read (#9101).
+    """
     approval_id = str(approval_id or "").strip()
     run_id = str(run_id or "").strip()
     mirror_token = str(mirror_token or "").strip()
@@ -35179,6 +35404,9 @@ def _enable_session_yolo_and_release_pending(
     yolo_transition = None
     try:
         with gateway_yolo_handoff(sid):
+            conflict = yolo_revision_conflict(sid, expected)
+            if conflict is not None:
+                return conflict, 409
             yolo_transition = begin_session_yolo_transition(sid)
             stale_cleared = False
             if approval_id:
@@ -35217,7 +35445,7 @@ def _enable_session_yolo_and_release_pending(
                     yolo_transition = None
                     return {
                         **relay_payload,
-                        "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                        **session_yolo_state(sid),
                     }, relay_status
                 relayed += 1
 
@@ -35229,7 +35457,7 @@ def _enable_session_yolo_and_release_pending(
             yolo_transition = None
             return {
                 "ok": True,
-                "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                **session_yolo_state(sid),
                 **({"choice": choice} if include_choice or relayed else {}),
                 **({"relayed": True} if relayed else {}),
                 **({"stale_cleared": True} if stale_cleared else {}),
@@ -35293,6 +35521,9 @@ def _handle_approval_respond(handler, body):
     requested_mirror_token = str(body.get("mirror_token") or "").strip()
 
     if enable_yolo:
+        bridge_failure = approval_bridge_failure(yolo=True)
+        if bridge_failure is not None:
+            return j(handler, bridge_failure[0], status=bridge_failure[1])
         payload, status = _enable_session_yolo_and_release_pending(
             sid,
             choice=choice,
@@ -35504,7 +35735,7 @@ def _handle_approval_respond(handler, body):
                     "choice": choice,
                     "local_retired": True,
                     **(
-                        {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                        session_yolo_state(sid)
                         if enable_yolo
                         else {}
                     ),
@@ -35521,6 +35752,13 @@ def _handle_approval_respond(handler, body):
                 return j(handler, relay_payload, status=relay_status)
     except Exception:
         pass  # fall through to local approval path
+
+    # The local path settles the Agent's in-process approval. When the Agent
+    # lacks the names it needs (#9119), refuse instead of reporting ok while the
+    # Agent thread stays parked until its timeout.
+    bridge_failure = approval_bridge_failure(choice=choice)
+    if bridge_failure is not None:
+        return j(handler, bridge_failure[0], status=bridge_failure[1])
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
@@ -35557,7 +35795,7 @@ def _handle_approval_respond(handler, body):
             "choice": choice,
             "stale_cleared": True,
             **(
-                {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                session_yolo_state(sid)
                 if enable_yolo
                 else {}
             ),
@@ -35568,7 +35806,7 @@ def _handle_approval_respond(handler, body):
         "ok": ok,
         "choice": choice,
         **(
-            {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+            session_yolo_state(sid)
             if ok and enable_yolo
             else {}
         ),
