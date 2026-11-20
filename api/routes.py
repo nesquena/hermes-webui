@@ -14902,6 +14902,8 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     resolve_gateway_pending_local_all,
     resolve_gateway_pending_local_no_run_mirror,
     set_session_yolo_enabled,
+    session_yolo_state,
+    yolo_revision_conflict,
     submit_gateway_pending_mirror,
     submit_pending,
 )
@@ -18964,7 +18966,7 @@ def handle_get(handler, parsed) -> bool:
         bridge_failure = approval_bridge_failure(yolo=True)
         if bridge_failure is not None:
             return j(handler, bridge_failure[0], status=bridge_failure[1])
-        return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
+        return j(handler, session_yolo_state(sid))
 
     if parsed.path == "/api/session/usage":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -22249,23 +22251,46 @@ def handle_post(handler, parsed) -> bool:
     #   • Cross-tab: state is SHARED (same server-side flag per session)
     #   • Server restart: state is LOST (in-memory only)
     #   • Cross-session: isolated (each session has its own flag)
-    # Fixes #467
+    #   • Compression rotation: not yet carried to the continuation session
+    #     (a separate #9101 follow-up)
+    # Fixes #467. #9101: ``enabled`` must be a boolean (a missing value used to
+    # enable). ``expected_revision``/``expected_epoch`` (from a GET) make the
+    # write conditional: if the session's YOLO moved since, nothing changes.
     if parsed.path == "/api/session/yolo":
         try:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
         sid = str(body["session_id"] or "").strip()
-        enabled = bool(body.get("enabled", True))
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return bad(handler, "enabled is required and must be true or false")
+        expected = None
+        if body.get("expected_revision") is not None:
+            expected_revision = body.get("expected_revision")
+            expected_epoch = body.get("expected_epoch")
+            if (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+                or expected_revision < 0
+                or not (expected_epoch is None or isinstance(expected_epoch, str))
+            ):
+                return bad(handler, "expected_revision must be a non-negative integer")
+            expected = (expected_revision, expected_epoch)
         bridge_failure = approval_bridge_failure(yolo=True)
         if bridge_failure is not None:
             return j(handler, bridge_failure[0], status=bridge_failure[1])
         if not enabled:
             with gateway_yolo_handoff(sid):
+                conflict = yolo_revision_conflict(sid, expected)
+                if conflict is not None:
+                    return j(handler, conflict, status=409)
                 set_session_yolo_enabled(sid, False)
-                return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
+                return j(handler, {"ok": True, **session_yolo_state(sid)})
 
-        payload, status = _enable_session_yolo_and_release_pending(sid, choice="once")
+        payload, status = _enable_session_yolo_and_release_pending(
+            sid, choice="once", expected=expected
+        )
         return j(handler, payload, status=status)
 
     if parsed.path == "/api/btw":
@@ -34995,7 +35020,7 @@ def _gateway_approval_failure(
         "error": error,
     }
     if enable_yolo:
-        payload["yolo_enabled"] = bool(is_session_yolo_enabled(sid))
+        payload.update(session_yolo_state(sid))
     return payload, status
 
 
@@ -35279,7 +35304,7 @@ def _relay_gateway_run_approval(
             "relayed": True,
             **({"already_resolved": True} if already_resolved else {}),
             **(
-                {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                session_yolo_state(sid)
                 if enable_yolo
                 else {}
             ),
@@ -35327,8 +35352,13 @@ def _enable_session_yolo_and_release_pending(
     run_id: str = "",
     mirror_token: str = "",
     include_choice: bool = False,
+    expected: tuple[int, str | None] | None = None,
 ) -> tuple[dict, int]:
-    """Relay every parked remote approval, drain local waiters, then commit YOLO."""
+    """Relay every parked remote approval, drain local waiters, then commit YOLO.
+
+    ``expected`` (a ``(revision, epoch)`` the caller read) refuses the enable
+    with 409 when the session's YOLO moved since that read (#9101).
+    """
     approval_id = str(approval_id or "").strip()
     run_id = str(run_id or "").strip()
     mirror_token = str(mirror_token or "").strip()
@@ -35346,6 +35376,9 @@ def _enable_session_yolo_and_release_pending(
     yolo_transition = None
     try:
         with gateway_yolo_handoff(sid):
+            conflict = yolo_revision_conflict(sid, expected)
+            if conflict is not None:
+                return conflict, 409
             yolo_transition = begin_session_yolo_transition(sid)
             stale_cleared = False
             if approval_id:
@@ -35384,7 +35417,7 @@ def _enable_session_yolo_and_release_pending(
                     yolo_transition = None
                     return {
                         **relay_payload,
-                        "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                        **session_yolo_state(sid),
                     }, relay_status
                 relayed += 1
 
@@ -35396,7 +35429,7 @@ def _enable_session_yolo_and_release_pending(
             yolo_transition = None
             return {
                 "ok": True,
-                "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                **session_yolo_state(sid),
                 **({"choice": choice} if include_choice or relayed else {}),
                 **({"relayed": True} if relayed else {}),
                 **({"stale_cleared": True} if stale_cleared else {}),
@@ -35674,7 +35707,7 @@ def _handle_approval_respond(handler, body):
                     "choice": choice,
                     "local_retired": True,
                     **(
-                        {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                        session_yolo_state(sid)
                         if enable_yolo
                         else {}
                     ),
@@ -35734,7 +35767,7 @@ def _handle_approval_respond(handler, body):
             "choice": choice,
             "stale_cleared": True,
             **(
-                {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                session_yolo_state(sid)
                 if enable_yolo
                 else {}
             ),
@@ -35745,7 +35778,7 @@ def _handle_approval_respond(handler, body):
         "ok": ok,
         "choice": choice,
         **(
-            {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+            session_yolo_state(sid)
             if ok and enable_yolo
             else {}
         ),
