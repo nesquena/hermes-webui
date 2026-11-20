@@ -827,13 +827,27 @@ def _index_entry_logically_newer(candidate: dict, current: dict) -> bool:
     return False
 
 
-def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
+def _write_session_index(
+    updates=None,
+    *,
+    session_dir: Path | None = None,
+    session_index_file: Path | None = None,
+    allow_rebuild: bool = True,
+):
     """Update the session index file.
 
     When *updates* is provided (a list of Session objects whose compact
     entries should be refreshed), this does a targeted in-place update of
-    the existing index — O(1) for single-session changes.  When *updates*
-    is None, a full rebuild is performed (used on startup / first call).
+    the existing index — O(1) for single-session changes.  When *updates* is
+    None, a full rebuild is performed (used on startup / first call).
+
+    ``allow_rebuild=False`` (#8603 review 2026-11-18): a caller that already
+    holds ``_INDEX_WRITE_LOCK`` (``Session.save()`` publishes the sidecar and
+    the index under one hold) must not trigger the rebuild here — the rebuild
+    loads every sidecar and opens state.db, and the caller's outer lock would
+    still serialize that read against every other index writer.  The call
+    reports whether the targeted patch landed; the caller rebuilds after it
+    releases the lock.
 
     LOCK protects only in-memory session snapshots.  JSON parsing, payload
     construction, and disk I/O run outside LOCK so active-stream saves do
@@ -861,6 +875,10 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
         pre_rebuild_sig = _session_index_stat_signature(session_index_file)
 
     if full_rebuild:
+        if not allow_rebuild:
+            # The caller holds _INDEX_WRITE_LOCK and must not trigger the
+            # sidecar/state.db loads here; it rebuilds after releasing it.
+            return False
         # Load every sidecar OUTSIDE the index lock: only the index file's
         # read-modify-write is serialized, never the (state.db-touching) loads.
         entries = _collect_session_index_entries(session_dir)
@@ -878,7 +896,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                         _merge_rebuilt_index_entries(
                             entries, session_index_file, _tmp,
                         )
-                        return
+                        return True
                     except Exception:
                         logger.debug(
                             "Session index merge after a concurrent rebuild "
@@ -891,7 +909,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 _patch_session_index_in_place(
                     updates, session_index_file, _tmp,
                 )
-                return
+                return True
             _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
             with LOCK:
                 known_ids = {e.get('session_id') for e in entries}
@@ -917,7 +935,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 except Exception:
                     pass
                 raise
-        return
+        return True
 
     # Fast path: patch existing index with updated sessions.
     # This avoids loading every session file on every single save().
@@ -932,7 +950,13 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             updates, session_index_file, _tmp,
         )
     if not patched:
-        # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock).
+        # Corrupt or missing index — fall back to full rebuild.
+        # A caller that already holds _INDEX_WRITE_LOCK (Session.save()) asks
+        # for allow_rebuild=False: the rebuild's sidecar/state.db loads must
+        # run outside that outer lock, so it reports "not published" and the
+        # caller rebuilds after releasing the lock (#8603 review 2026-11-18).
+        if not allow_rebuild:
+            return False
         # Propagate the resolved target so a rebuild scoped to a specific session dir
         # (the background rebuild thread) falls back to rebuilding THAT dir's index,
         # not the global SESSION_DIR (Opus advisor, stage-344 — defensive; today the
@@ -942,6 +966,8 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             session_dir=session_dir,
             session_index_file=session_index_file,
         )
+        return True
+    return True
 
 
 def prune_session_from_index(session_id: str) -> None:
@@ -2710,7 +2736,18 @@ class Session:
                     persisted_index_session = copy.copy(self)
                     persisted_index_session.messages = guarded_messages
                     persisted_index_session._metadata_message_count = len(guarded_messages)
-                    _write_session_index(updates=[persisted_index_session])
+                    # #8603 review 2026-11-18: the targeted patch must not
+                    # fall back to a rebuild while this outer lock is held —
+                    # a rebuild loads every sidecar and reads state.db, which
+                    # would park every unrelated save behind a busy database.
+                    # The flag reports whether the index was published; the
+                    # rebuild runs below, after the lock is released.
+                    _index_published = _write_session_index(
+                        updates=[persisted_index_session],
+                        allow_rebuild=False,
+                    )
+                if not _index_published:
+                    _write_session_index(updates=None)
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
@@ -15066,6 +15103,24 @@ _STATE_DB_FAILURE_BUSY_TIMEOUT_MS = 50
 # Bound the IN (...) list per statement so the SQL stays portable across
 # SQLite builds with small host-parameter limits.
 _STATE_DB_FAILURE_SID_CHUNK = 400
+# #8603 review 2026-11-18: the content fingerprint is built from MAX(rowid),
+# which does NOT move on an Agent rewind (removed rows are marked
+# ``active = 0`` in place, no INSERT). A cached verdict would then outlive its
+# turn forever. Even when the fingerprint matches, re-read the outcome after
+# this long so a rewind becomes visible within a bounded delay instead of
+# surviving until the process restarts.
+_SESSION_FAILURE_SUMMARY_REVALIDATE_SECONDS = 2.0
+
+
+def _failure_summary_cache_fresh(entry, fingerprint, now) -> bool:
+    """True when a cached failure verdict is still safe to serve."""
+    return (
+        entry is not None
+        and len(entry) > 3
+        and fingerprint is not None
+        and entry[0] == fingerprint
+        and now - entry[3] < _SESSION_FAILURE_SUMMARY_REVALIDATE_SECONDS
+    )
 
 
 def _state_db_failure_fingerprint(db_path) -> tuple | None:
@@ -15292,6 +15347,25 @@ def _read_state_db_failure_tail(
                     (sid, *truncation_params, window),
                 )
                 rows = cur.fetchall()
+                if not rows:
+                    if truncation is not None:
+                        # A truncation window that yields no row keeps the
+                        # historical "database cannot speak" answer: the kept
+                        # prefix is not provably empty.
+                        return None, None, False
+                    # #8603 review 2026-11-18: no ACTIVE row. Distinguish an
+                    # Agent rewind (rows exist, marked ``active = 0`` in place;
+                    # MAX(rowid) never moves, so the cache fingerprint cannot
+                    # see it) from a session the database genuinely cannot
+                    # speak for. A rewound session is decisively healthy; a
+                    # session with no row at all stays unanswered.
+                    cur.execute(
+                        "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                        (sid,),
+                    )
+                    if cur.fetchone() is not None:
+                        return None, None, True
+                    return None, None, False
                 state, revision, decisive = _state_db_failure_tail_verdict(rows, cols, order_col)
                 if state is not _FAILURE_STATE_UNDECIDED:
                     return state, revision, decisive
@@ -15405,6 +15479,7 @@ def _session_failure_summaries_from_state_db(sids, db_path, truncations=None) ->
         str(sid): window for sid, window in (truncations or {}).items() if sid
     }
     fingerprint = _state_db_failure_fingerprint(db_path)
+    now = time.monotonic()
     cached: list = []   # (sid, revision)
     pending: list = []  # needs the bounded tail read
     cached_map: dict = {}
@@ -15418,8 +15493,13 @@ def _session_failure_summaries_from_state_db(sids, db_path, truncations=None) ->
             entry = _SESSION_FAILURE_SUMMARY_CACHE.get((db_key, sid))
             if entry is None:
                 pending.append(sid)
-            elif fingerprint is not None and entry[0] == fingerprint:
+            elif _failure_summary_cache_fresh(entry, fingerprint, now):
                 resolved[sid] = entry[2]
+            elif fingerprint is not None and entry[0] == fingerprint:
+                # Same fingerprint, but the verdict has outlived the recheck
+                # interval: a rewind marks rows inactive without moving
+                # MAX(rowid), so only a fresh tail read can see it.
+                pending.append(sid)
             elif entry[1] is not None:
                 cached.append((sid, entry[1]))
                 cached_map[sid] = entry[2]
@@ -15503,13 +15583,29 @@ def _session_failure_summaries_from_state_db(sids, db_path, truncations=None) ->
                     if held_revision is not None and fingerprint is not None:
                         with _SESSION_FAILURE_SUMMARY_LOCK:
                             _SESSION_FAILURE_SUMMARY_CACHE[(db_key, sid)] = (
-                                fingerprint, held_revision, summary,
+                                fingerprint, held_revision, summary, time.monotonic(),
                             )
                             _SESSION_FAILURE_SUMMARY_CACHE.move_to_end((db_key, sid))
                 for sid in chunk:
                     if sid in decided_from_cache:
                         continue
                     rows = wide.get(sid) or narrow.get(sid) or []
+                    if not rows:
+                        if sid in truncations:
+                            # A truncation window with no kept row keeps the
+                            # historical "cannot speak" omission.
+                            continue
+                        # #8603 review 2026-11-18: no ACTIVE row. A session
+                        # whose rows were all rewound (``active = 0``) is
+                        # decisively healthy; only a session with no row at
+                        # all cannot answer.
+                        cur.execute(
+                            "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                            (sid,),
+                        )
+                        if cur.fetchone() is not None:
+                            resolved[sid] = None
+                        continue
                     state, revision, decisive = _state_db_failure_tail_decision(
                         rows, cols, order_col
                     )
@@ -15525,7 +15621,7 @@ def _session_failure_summaries_from_state_db(sids, db_path, truncations=None) ->
                     ):
                         with _SESSION_FAILURE_SUMMARY_LOCK:
                             _SESSION_FAILURE_SUMMARY_CACHE[(db_key, sid)] = (
-                                fingerprint, revision, state,
+                                fingerprint, revision, state, time.monotonic(),
                             )
                             _SESSION_FAILURE_SUMMARY_CACHE.move_to_end((db_key, sid))
                             while len(_SESSION_FAILURE_SUMMARY_CACHE) > _SESSION_FAILURE_SUMMARY_CACHE_MAX:
@@ -15575,7 +15671,9 @@ def _session_failure_state_from_state_db(
     if truncation is None and fingerprint is not None:
         with _SESSION_FAILURE_SUMMARY_LOCK:
             entry = _SESSION_FAILURE_SUMMARY_CACHE.get(cache_key)
-            if entry is not None and entry[0] == fingerprint:
+            if entry is not None and _failure_summary_cache_fresh(
+                entry, fingerprint, time.monotonic()
+            ):
                 _SESSION_FAILURE_SUMMARY_CACHE.move_to_end(cache_key)
                 return entry[2], entry[1], True
     summary, revision, decisive = _read_state_db_failure_tail(
@@ -15590,7 +15688,7 @@ def _session_failure_state_from_state_db(
     if truncation is None and revision is not None and fingerprint is not None:
         with _SESSION_FAILURE_SUMMARY_LOCK:
             _SESSION_FAILURE_SUMMARY_CACHE[cache_key] = (
-                fingerprint, revision, summary,
+                fingerprint, revision, summary, time.monotonic(),
             )
             _SESSION_FAILURE_SUMMARY_CACHE.move_to_end(cache_key)
             while len(_SESSION_FAILURE_SUMMARY_CACHE) > _SESSION_FAILURE_SUMMARY_CACHE_MAX:
