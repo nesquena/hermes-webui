@@ -144,6 +144,23 @@ function runCase(name){
     };
   }
 
+  if(name === 'reloaded_compact'){
+    const {message, text} = __RELOADED__;
+    const scene = message._anchor_activity_scene;
+    eval(extractFn(uiSrc, 'msgContent'));
+    eval(extractFn(uiSrc, '_anchorSceneProseMatchesFinalAnswer'));
+    eval(extractFn(uiSrc, '_anchorSceneProseDuplicatesFinalAnswer'));
+    const rows = _anchorSceneRowsForRendering(scene, {settled:true});
+    const matchingProse = (items)=>items.filter(row=>row.role === 'prose' && row.text.trim() === text).length;
+    const inline = msgContent(message);
+    return {
+      hydratedCopies: matchingProse(scene.activity_rows),
+      railCopies: matchingProse(rows),
+      inlineCopy: inline.includes(text),
+      finalInline: inline.includes('The document is ready.'),
+      toolCopies: rows.filter(row=>row.role === 'tool').length,
+    };
+  }
   throw new Error('unknown case: ' + name);
 }
 
@@ -152,13 +169,14 @@ console.log(JSON.stringify(output));
 """
 
 
-def _run_scenario(case_name: str) -> dict:
+def _run_scenario(case_name: str, reloaded: dict | None = None) -> dict:
     assert NODE is not None, "node is required for the substantive interim prose driver"
     script = (
         HARNESS_JS_TEMPLATE
         .replace("__UI_SRC__", json.dumps(str(ROOT / "static" / "ui.js")))
         .replace("__EXTRACT_FN_JS__", EXTRACT_FN_JS)
         .replace("__CASE__", str(case_name))
+        .replace("__RELOADED__", json.dumps(reloaded))
     )
     env = dict(os.environ)
     env.pop("NODE_CHANNEL_FD", None)  # node SIGABRTs on exit when this leaks into the child
@@ -229,6 +247,45 @@ def test_settled_compact_keeps_prose_with_no_inline_copy():
     data = _run_scenario("rows_settled_compact")
     assert data["bareStringProseKept"] is True
     assert data["substantiveProseKept"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
+@pytest.mark.parametrize("part_type", [None, "input_text", "output_text", "text"])
+@pytest.mark.parametrize("saved_prose", [False, True])
+def test_reloaded_compact_worklog_keeps_the_only_copy_of_long_prose(part_type, saved_prose):
+    from api import routes
+
+    text = "The inspection recorded which document entries were complete and which still needed work. " * 4
+    text = text.strip()
+    part = {"type": part_type, "text": text} if part_type is not None else text
+    message = {
+        "role": "assistant",
+        "content": [part, {"type": "tool_use", "id": "read-1", "name": "read_file", "input": {}},
+                    {"type": "text", "text": "The document is ready."}],
+    }
+    messages = [{"role": "user", "content": "Inspect the example document."}, message]
+    ref = routes._assistant_anchor_scene_message_ref(message)
+    rows = [
+        {"role": "prose", "kind": "process_prose", "row_id": "recorded-prose", "text": text},
+    ] if saved_prose else []
+    records = {
+        ref: {
+            "message_ref": ref,
+            "message_index": 1,
+            "stream_id": "example-stream",
+            "scene": {"version": "activity_scene_v1", "mode": "compact_worklog", "activity_rows": rows},
+        },
+    }
+    reloaded = routes._hydrate_anchor_activity_scenes(messages, records)[1]
+    output = _run_scenario("reloaded_compact", {"message": reloaded, "text": text})
+    assert output["hydratedCopies"] == 1
+    assert output["finalInline"] is True
+    assert output["toolCopies"] == 1
+    # Only the actual text part is visible inline; all other variants must be
+    # present in the server-hydrated Worklog after the frontend filters it.
+    inline = part_type == "text"
+    assert output["inlineCopy"] is inline
+    assert output["railCopies"] == (0 if inline else 1)
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for the substantive interim prose driver")
