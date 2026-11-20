@@ -110,8 +110,14 @@ def test_regenerate_reuses_the_existing_turn_final_predicate():
     ), "Undo must stay on the row it had, not move with the turn-final rule"
 
 
-def test_busy_turn_paints_no_dead_action_buttons():
-    """The real page, with a real running turn's rows on screen."""
+@pytest.fixture(scope="module")
+def driver_result():
+    """Run the browser gate ONCE for both DOM-outcome tests.
+
+    The driver starts a real WebUI server, launches Chromium and runs every
+    scenario; calling it per test repeated the whole suite (#8668 review
+    2026-11-18).
+    """
     try:
         import playwright  # noqa: F401
     except ImportError:
@@ -119,6 +125,12 @@ def test_busy_turn_paints_no_dead_action_buttons():
     result = _run_driver()
     if result.returncode == 2:
         pytest.skip(f"browser gate could not run: {result.stderr.strip()[-500:]}")
+    return result
+
+
+def test_busy_turn_paints_no_dead_action_buttons(driver_result):
+    """The real page, with a real running turn's rows on screen."""
+    result = driver_result
     assert result.returncode == 0, (
         f"driver failed ({result.returncode})\n"
         f"---- stdout ----\n{result.stdout}\n---- stderr ----\n{result.stderr}"
@@ -132,7 +144,7 @@ def test_busy_turn_paints_no_dead_action_buttons():
         assert f"OK  {line}" in result.stdout, line
 
 
-def test_rejected_regeneration_restores_the_action_buttons():
+def test_rejected_regeneration_restores_the_action_buttons(driver_result):
     """A regeneration refused at /api/chat/start must leave the idle action bar.
 
     The review reproduction: the production ``startRegeneration()`` restores the
@@ -145,13 +157,7 @@ def test_rejected_regeneration_restores_the_action_buttons():
     API-adapter boundary; everything else is the real page and the real
     production function.
     """
-    try:
-        import playwright  # noqa: F401
-    except ImportError:
-        pytest.skip("playwright is not installed")
-    result = _run_driver()
-    if result.returncode == 2:
-        pytest.skip(f"browser gate could not run: {result.stderr.strip()[-500:]}")
+    result = driver_result
     assert result.returncode == 0, (
         f"driver failed ({result.returncode})\n"
         f"---- stdout ----\n{result.stdout}\n---- stderr ----\n{result.stderr}"

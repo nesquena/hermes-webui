@@ -7940,6 +7940,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
           _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
         }
+        // #8668 review 2026-11-18: paint the recovered transcript from the
+        // IDLE state. S.busy is still true here — the idle clear below runs
+        // AFTER this render — and renderMessages derives Edit/Regenerate from
+        // it, so the successful recovery painted a button-less footer that
+        // the later composer-only clear never repaired. This clears ONLY the
+        // flag: the queue drain stays with _setActivePaneIdleIfOwner() below.
+        S.busy=false;
         syncTopbar();renderMessages({preserveScroll:true});
         if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);

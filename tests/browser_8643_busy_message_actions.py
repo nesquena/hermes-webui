@@ -368,9 +368,10 @@ APPERROR_SCENARIO_JS = """async ({sid, revision, frame, previousMarker}) => {
   // it appends to land in the transcript before reading the action bar.
   const deadline = Date.now() + 20000;
   let afterError = probe();
+  let errorFrameSeen = false;
   while (Date.now() < deadline) {
     afterError = probe();
-    if (afterError.text.indexOf(frame.message) !== -1) break;
+    if (afterError.text.indexOf(frame.message) !== -1) { errorFrameSeen = true; break; }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   // The other direction: paint the settled transcript again while the turn is
@@ -384,7 +385,11 @@ APPERROR_SCENARIO_JS = """async ({sid, revision, frame, previousMarker}) => {
   renderMessages();
   const restored = probe();
   window.renderMessages = realRender;
-  return {threw, renderBusy, afterError, busyRender, restored};
+  return {
+    threw, renderBusy, afterError, busyRender, restored,
+    errorFrameSeen,
+    previousMarkerPresent: afterError.text.indexOf(previousMarker) !== -1,
+  };
 }
 """ % APPERROR_PROBE_JS
 
@@ -416,6 +421,16 @@ def _failures_apperror_terminal(result):
     # The settled transcript must actually carry the error row and the previous
     # answer: otherwise the frame was swallowed and every button assertion
     # below is meaningless.
+    if not result.get("errorFrameSeen"):
+        problems.append(
+            "the apperror frame never appeared in the settled transcript — the"
+            " error-message wait expired, so this section cannot speak"
+        )
+    if not result.get("previousMarkerPresent"):
+        problems.append(
+            "the previous answer is gone from the settled transcript — losing"
+            " it must fail the section, not pass silently"
+        )
     if not after_error.get("text"):
         problems.append("the settled transcript rendered no text at all")
     if not after_error.get("copyCount"):
@@ -593,9 +608,30 @@ def main() -> int:
     try:
         proc, log, log_path, base_url = _start_webui_server(repo_root, env, state_dir)
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
-            )
+            try:
+                browser = playwright.chromium.launch(
+                    headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+                )
+            except Exception as launch_error:  # noqa: BLE001
+                # A machine can have the playwright PACKAGE installed and no
+                # browser binary. That is "the optional gate cannot run", not
+                # a gate failure: report the documented skip (exit 2) instead
+                # of a driver error (exit 1) the pytest callers turn into red
+                # (#8668 review 2026-11-18). Failures AFTER a successful
+                # launch still count as failures.
+                message = str(launch_error)
+                if (
+                    "Executable doesn't exist at" in message
+                    or "playwright install" in message
+                    or "BrowserType.launch" in message
+                ):
+                    print(
+                        "SKIP: playwright chromium executable is unavailable; "
+                        "run `playwright install chromium`",
+                        file=sys.stderr,
+                    )
+                    return 2
+                raise
             context = browser.new_context(base_url=base_url)
             page = context.new_page()
             errors = _capture_page_errors(page)
@@ -719,7 +755,9 @@ def main() -> int:
                     "sid": apperror_sid,
                     "revision": "probe-apperror-revision",
                     "frame": APPERROR_FRAME,
-                    "previousMarker": APPERROR_PREVIOUS_ANSWER_TEXT,
+                    # The DOM keeps the rendered PROSE, not the markdown
+                    # source: this is the marker that survives rendering.
+                    "previousMarker": APPERROR_PREVIOUS_ANSWER_PROSE,
                 },
             )
             page.unroute("**/api/chat/start", _route_apperror_boundary)
