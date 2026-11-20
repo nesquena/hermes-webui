@@ -96,7 +96,7 @@ def _park_local_approval(sid: str, command: str = "rm -rf /tmp/x", key: str = "d
     """
     with ta._lock:
         ta._gateway_queues.pop(sid, None)
-        ta._pending.pop(sid, None)
+        ra._pending.pop(sid, None)  # WebUI's projection; newer Agents have none
 
     def _cb(approval_data):
         ra.submit_gateway_pending_mirror(sid, approval_data)
@@ -144,7 +144,7 @@ def _respond(sid: str, approval_id: str, choice: str = "once"):
 def _cleanup(sid: str):
     with ta._lock:
         ta._gateway_queues.pop(sid, None)
-        ta._pending.pop(sid, None)
+        ra._pending.pop(sid, None)  # WebUI's projection; newer Agents have none
     with models.LOCK:
         models.SESSIONS.pop(sid, None)
 
