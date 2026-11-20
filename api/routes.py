@@ -19511,7 +19511,8 @@ def handle_get(handler, parsed) -> bool:
         qs = parse_qs(parsed.query)
         category = qs.get("category", [None])[0]
         data = _skills_list_from_dir(_active_skills_dir(), category=category)
-        return j(handler, {"skills": data.get("skills", [])})
+        # ``profile``: the owner the panel's writes echo back as expected_profile (#9077).
+        return j(handler, {"skills": data.get("skills", []), "profile": _get_active_profile_name()})
 
     if parsed.path == "/api/skills/usage":
         from api.skill_usage import read_skill_usage
@@ -29202,6 +29203,7 @@ def _handle_memory_read(handler, parsed=None):
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
             "external_notes_enabled": _external_notes_sources_enabled(cfg),
+            "profile": _get_active_profile_name(),  # write owner, see _refuse_stale_profile_write
         },
     )
 
@@ -37173,11 +37175,48 @@ def _handle_handoff_summary(handler, body):
         })
 
 
+_STALE_PROFILE_WRITE_TEXT = {
+    "memory": "This editor was opened for profile '{expected}', but the active profile is now '{active}'. "
+              "Nothing was saved. Your text is still here: copy it before you close or reload this page.",
+    "toggle": "This list was loaded for profile '{expected}', but the active profile is now '{active}'. "
+              "Nothing was changed; the list now shows '{active}'.",
+    "save": "This request was made for profile '{expected}', but the active profile is now '{active}'. "
+            "Nothing was saved.",
+    "delete": "This request was made for profile '{expected}', but the active profile is now '{active}'. "
+              "Nothing was deleted.",
+}
+
+
+def _refuse_stale_profile_write(handler, body, surface: str) -> bool:
+    """Refuse (409) a Memory/Skills panel write made from another profile's data (#9077).
+
+    The panel echoes the ``profile`` its GET reply was served for as
+    ``expected_profile``. The active profile is a shared cookie, so it can move
+    under a tab (another tab, a late reply, a session-load switch); a mismatch
+    would write that profile's stale view here. Absent field: unchanged behaviour.
+    """
+    expected = body.get("expected_profile") if isinstance(body, dict) else None
+    if not expected:
+        return False
+    active = _get_active_profile_name()
+    if _profiles_match(str(expected), active):
+        return False
+
+    def shown(name):  # the root's aliases display as 'default'
+        return "default" if _is_root_profile(name) else name
+
+    message = _STALE_PROFILE_WRITE_TEXT[surface].format(expected=shown(str(expected)), active=shown(active))
+    j(handler, {"error": message, "code": "profile_mismatch"}, status=409)
+    return True
+
+
 def _handle_skill_save(handler, body):
     try:
         require(body, "name", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    if _refuse_stale_profile_write(handler, body, "save"):
+        return
     skill_name = body["name"].strip().lower().replace(" ", "-")
     if not skill_name or "/" in skill_name or ".." in skill_name:
         return bad(handler, "Invalid skill name")
@@ -37209,6 +37248,8 @@ def _handle_skill_delete(handler, body):
         require(body, "name")
     except ValueError as e:
         return bad(handler, str(e))
+    if _refuse_stale_profile_write(handler, body, "delete"):
+        return
     import shutil
 
     skill_name = str(body["name"]).strip().lower().replace(" ", "-")
@@ -37288,6 +37329,8 @@ def _handle_skill_toggle(handler, body):
         require(body, "name", "enabled")
     except ValueError as e:
         return bad(handler, str(e))
+    if _refuse_stale_profile_write(handler, body, "toggle"):
+        return
 
     name = body["name"].strip()
     enabled = bool(body["enabled"])
@@ -37364,6 +37407,8 @@ def _handle_memory_write(handler, body):
         require(body, "section", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    if _refuse_stale_profile_write(handler, body, "memory"):
+        return
     section = body["section"]
 
     # Respect memory_enabled and user_profile_enabled config flags (#6406)

@@ -5490,6 +5490,7 @@ async function loadSkills() {
   try {
     const data = await api('/api/skills');
     _skillsData = data.skills || [];
+    _skillsData.profile = data.profile;  // #9077: owner the writes echo back
     // Prune collapsed state to only keep categories present in fresh data,
     // avoiding stale keys when categories are renamed or removed server-side.
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
@@ -5578,7 +5579,7 @@ async function toggleSkill(name, currentlyEnabled) {
   try {
     const result = await api('/api/skills/toggle', {
       method: 'POST',
-      body: JSON.stringify({ name, enabled: newEnabled })
+      body: JSON.stringify({ name, enabled: newEnabled, expected_profile: _skillsData ? _skillsData.profile : undefined })
     });
     if (result && result.ok) {
       if (_skillsData) {
@@ -5591,7 +5592,8 @@ async function toggleSkill(name, currentlyEnabled) {
       setStatus((result && result.error) || t('skill_toggle_failed'));
     }
   } catch(e) {
-    setStatus(t('skill_toggle_failed') + e.message);
+    showToast(t('skill_toggle_failed') + e.message, 'error');
+    if (e && e.status === 409) { _skillsData = null; await loadSkills(); }  // #9077: reload the stale list
   }
 }
 
@@ -6100,9 +6102,9 @@ function _renderMemoryEdit(section) {
       <form class="detail-form" onsubmit="event.preventDefault(); submitMemorySave();">
         <div class="detail-form-row">
           <label for="memEditContent">${esc(t('memory_notes_label'))}</label>
-          <textarea id="memEditContent" rows="20" spellcheck="false">${esc(content)}</textarea>
+          <textarea id="memEditContent" rows="20" spellcheck="false" data-profile="${esc((_memoryData && _memoryData.profile) || '')}">${esc(content)}</textarea>
         </div>
-        <div id="memEditError" class="detail-form-error" style="display:none"></div>
+        <div id="memEditError" class="detail-form-error" role="alert" style="display:none"></div>
       </form>
     </div>`;
   body.style.display = '';
@@ -6207,12 +6209,19 @@ async function submitMemorySave() {
   if (!ta) return;
   if (errEl) errEl.style.display = 'none';
   try {
-    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: _currentMemorySection, content: ta.value})});
+    // #9077: expected_profile = the profile this editor's content was loaded for.
+    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: _currentMemorySection, content: ta.value,
+      expected_profile: (ta.dataset && ta.dataset.profile) || undefined})});
     showToast(t('memory_saved'));
     await loadMemory(true);
     _renderMemoryDetail(_currentMemorySection);
   } catch(e) {
-    if (errEl) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
+    if (errEl) {
+      errEl.textContent = t('error_prefix') + e.message; errEl.style.display = '';
+      // Phones: keep the error in view above the soft keyboard (#9077).
+      if (typeof errEl.scrollIntoView === 'function') errEl.scrollIntoView({block: 'nearest'});
+    }
+    if (e && e.status === 409) await loadMemory(true);  // refresh; the open editor keeps the typed text
   }
 }
 
