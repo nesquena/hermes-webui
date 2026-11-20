@@ -138,6 +138,11 @@ const ctx = {
   api: async (url, opts) => {
     apiCalls.push({ url, body: JSON.parse(opts.body) });
     if (!responses.length) throw new Error('unexpected extra api call to ' + url);
+    // #7679 (greptile P1): let a scenario simulate a newer Settings check that
+    // retires the grant while this request is still in flight.
+    if (scenario.revokeGrantBeforeResponse) {
+      vm.runInContext('_forceUpdateGrant = null;', ctx);
+    }
     return responses.shift();
   },
   showConfirmDialog: async (opts) => {
@@ -443,3 +448,32 @@ def test_force_update_refusal_offer_does_not_repeat_discard_confirmation(tmp_pat
     else:
         assert out["apiCalls"] == [first]
         assert out["waitCalls"] == 0
+
+
+def test_a_late_refusal_does_not_repaint_an_offer_for_a_retired_grant(tmp_path):
+    """#7679 (greptile P1): only the grant that still owns the controls may
+    publish a response.
+
+    While a Force request is pending, a newer Settings check can switch Force to
+    a dirty Agent checkout and mint its own grant. The older request then
+    returns `restart_blocked`; repainting its offer replaced the current Agent
+    control with a dead one that only reports "no longer applicable".
+    """
+    out = _run(
+        {
+            "entry": "force",
+            "target": "webui",
+            "updateData": _WEBUI_BEHIND,
+            "responses": [_refusal(2)],
+            "confirmAnswers": [True],
+            "revokeGrantBeforeResponse": True,
+        },
+        tmp_path,
+    )
+    refusal = out["afterRefusal"]
+    assert refusal["offer"]["count"] == 0, (
+        "a late refusal repainted an offer whose grant a newer check had "
+        f"already retired: {json.dumps(refusal)}"
+    )
+    # The button is restored so the user can act on the newer state.
+    assert out["applyInFlight"] is False

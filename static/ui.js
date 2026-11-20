@@ -16129,6 +16129,18 @@ async function forceUpdate(btn,opts){
         // so a newer Check that retargets the shared button and mints a
         // replacement grant cannot turn this confirmation into a different
         // destruction.
+        // #7679 (greptile P1, 2026-11-19): a LATE refusal must also not repaint
+        // an offer whose grant a newer Settings check already retired. Doing so
+        // replaced the current control with a dead offer and hid the valid
+        // Agent action until the next check. Only the grant that still owns the
+        // controls may publish its response.
+        const stillOwnsControls=(typeof _forceUpdateGrant!=='undefined')
+          &&_forceUpdateGrant===grantSnapshot
+          &&!(typeof _isUpdateCheckStale==='function'&&_isUpdateCheckStale(grantSnapshot.epoch));
+        if(!stillOwnsControls){
+          btn.disabled=false;btn.textContent=t('update_force','Force update');
+          return;
+        }
         _renderActiveRunsForceOffer(target,res,(bound)=>forceUpdate(btn,{forceActiveRuns:true,grant:bound&&bound.grant?bound.grant:null}),grantSnapshot);
       }
       return;
