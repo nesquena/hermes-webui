@@ -1047,6 +1047,13 @@ def _load_webui_deleted_session_tombstone() -> frozenset[str]:
 
 
 def _save_webui_deleted_session_tombstone(ids) -> None:
+    """Persist the durable set of deleted WebUI session IDs.
+
+    Write failures propagate so callers that require fail-closed durability
+    (such as the delete route) can detect the failure and report an error.
+    Callers performing best-effort tombstone clearing guard against write
+    exceptions so the entry remains, preserving the fail-closed invariant.
+    """
     try:
         sorted_ids = sorted(set(
             str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
@@ -1078,6 +1085,7 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
                 _tmp.unlink(missing_ok=True)
             except Exception:
                 pass
+        raise
 
 
 def _record_webui_deleted_session_tombstone(sid: str) -> None:
@@ -9429,6 +9437,10 @@ def _read_state_db_sidebar_overrides(
 def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
     """Apply state.db source/title overrides without full lineage enrichment.
 
+    "All rows" and "every row" below mean every row the active profile owns:
+    the overrides come from its state.db, so another profile's row that shares
+    a session id keeps its own projection (#9093).
+
     Source classification (source/title) is corrected for ALL rows because it
     feeds the CLI/WebUI sidebar filter that runs BEFORE the lazy lineage
     correction — capping it would silently drop rows whose stale JSON source
@@ -9464,9 +9476,13 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
         _cap = int(_os.environ.get("HERMES_WEBUI_STATE_DB_OVERRIDE_TOP_N", "300"))
     except (TypeError, ValueError):
         _cap = 300
-    all_ids = {str(s.get('session_id')) for s in sessions if s.get('session_id')}
-    if _cap > 0 and len(sessions) > _cap:
-        count_ids = {str(s.get('session_id')) for s in sessions[:_cap] if s.get('session_id')}
+    # #9093: the overrides come from the ACTIVE profile's state.db, so they
+    # belong only to rows that profile owns. Another profile's row can share a
+    # session id (copied/cloned profile data); it keeps its own projection.
+    owned = _active_profile_owned_rows(sessions)
+    all_ids = {str(s.get('session_id')) for s in owned if s.get('session_id')}
+    if _cap > 0 and len(owned) > _cap:
+        count_ids = {str(s.get('session_id')) for s in owned[:_cap] if s.get('session_id')}
     else:
         count_ids = None  # cap disabled / under cap -> count every row too
     try:
@@ -9477,7 +9493,18 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
         )
     except Exception:
         return
-    _apply_sidebar_state_db_override_metadata(sessions, metadata, count_ids)
+    _apply_sidebar_state_db_override_metadata(owned, metadata, count_ids)
+
+
+def _active_profile_owned_rows(sessions: list[dict]) -> list[dict]:
+    """The sidebar rows the active profile owns, in order (#9093).
+
+    An untagged row counts as the root profile's, as the later ``default``
+    backfill in :func:`all_sessions` attributes it.
+    """
+    from api.profiles import _profiles_match, get_active_profile_name
+    active_profile = get_active_profile_name()
+    return [s for s in sessions if _profiles_match(s.get('profile') or 'default', active_profile)]
 
 
 def _apply_sidebar_state_db_override_metadata(
@@ -9787,6 +9814,48 @@ def _apply_sidebar_state_db_override_rows(
             session['display_title'] = state_db_display_title
 
 
+def _overlay_old_fork_sources_by_owner(fork_rows: list[dict]) -> None:
+    """Apply source-only state.db metadata to old forks, per owning profile.
+
+    Each owner's rows are read only from that owner's state.db, and the result
+    is applied only to that owner's rows, so a same-ID row in another profile
+    never lends its source or read-only flag. An untagged row belongs to the
+    root profile (the convention all_sessions() backfills after enrichment).
+    An owner that cannot be resolved strictly gets no overlay rather than the
+    active profile's answer.
+    """
+    from api.profiles import (
+        _PROFILE_ID_RE,
+        _is_root_profile,
+        _profiles_match,
+        get_active_profile_name,
+    )
+
+    active_profile = get_active_profile_name()
+    by_owner: dict[str, list[dict]] = {}
+    for row in fork_rows:
+        owner = row.get('profile') or 'default'
+        if isinstance(owner, str):
+            by_owner.setdefault(owner, []).append(row)
+    for owner, rows in by_owner.items():
+        if _profiles_match(owner, active_profile):
+            db_path = _active_state_db_path()
+        elif _is_root_profile(owner) or _PROFILE_ID_RE.fullmatch(owner):
+            db_path = _strict_agent_state_db_path(profile=owner)
+        else:
+            continue  # a malformed owner tag would resolve to the root home
+        if db_path is None:
+            continue
+        source_metadata = _read_state_db_sidebar_overrides(
+            db_path, {str(s['session_id']) for s in rows}, count_session_ids=set(),
+        )
+        # The cheap sessions-table read also returns its message_count.
+        # Keep this fallback source/title-only, including for stale rows.
+        for entry in source_metadata.values():
+            entry.pop('_state_db_message_count', None)
+        _apply_sidebar_state_db_override_metadata(rows, source_metadata)
+
+
 def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     """Attach state.db compression lineage metadata used by sidebar collapse.
 
@@ -9804,10 +9873,30 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         _cap = int(_os.environ.get("HERMES_WEBUI_LINEAGE_TOP_N", "300"))
     except (TypeError, ValueError):
         _cap = 300
-    if _cap > 0 and len(sessions) > _cap:
-        candidates = sessions[:_cap]
+    # #9093: the metadata comes from the ACTIVE profile's state.db, so it belongs
+    # only to rows that profile owns. Another profile's row can share a session
+    # id (copied/cloned profile data); it keeps its own owner-db projection.
+    owned = _active_profile_owned_rows(sessions)
+    if _cap > 0 and len(owned) > _cap:
+        candidates = owned[:_cap]
     else:
-        candidates = sessions
+        candidates = owned
+    # Content search uses all_sessions() without the list route's uncapped
+    # source overlay. Normalize the old mirrored forks the active-db lookup
+    # below doesn't cover (owned rows past the cap, and every other profile's
+    # rows), each from its own profile's state.db, before sidebar hiding; but
+    # do not expand lineage traversal or message aggregation past the cap.
+    candidate_ids = {id(s) for s in candidates}
+    fork_rows = [
+        s for s in sessions
+        if id(s) not in candidate_ids and s.get('session_id')
+        and str(s.get('session_source') or '').strip().lower() == 'fork'
+    ]
+    if fork_rows:
+        try:
+            _overlay_old_fork_sources_by_owner(fork_rows)
+        except Exception:
+            logger.debug("Failed to normalize old sidebar fork sources")
     try:
         metadata = read_session_lineage_metadata(
             _active_state_db_path(),
@@ -9815,8 +9904,8 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         )
     except Exception:
         return
-    _apply_sidebar_state_db_override_metadata(sessions, metadata)
-    for session in sessions:
+    _apply_sidebar_state_db_override_metadata(owned, metadata)
+    for session in owned:
         sid = session.get('session_id')
         if sid in metadata:
             entry = dict(metadata[sid])
@@ -12362,7 +12451,7 @@ def _load_cli_sessions_uncached(
         else:
             _archived = bool(row.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
-        cli_sessions.append({
+        cli_session = {
             'session_id': sid,
             'title': _display_title,
             'workspace': _cli_workspace(),
@@ -12396,7 +12485,20 @@ def _load_cli_sessions_uncached(
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
-        })
+        }
+        # Preserve the projection's absence of child metadata. In particular,
+        # reset successors keep ``parent_session_id`` as durable lineage but
+        # must not acquire null child-only fields while adapting state.db rows
+        # to the sidebar response shape.
+        for key in (
+            'parent_title',
+            'parent_source',
+            'relationship_type',
+            '_parent_lineage_root_id',
+        ):
+            if key not in row:
+                cli_session.pop(key, None)
+        cli_sessions.append(cli_session)
 
     if source_filter is not None:
         return _result()

@@ -51,7 +51,11 @@ function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
   const name=parts[0].toLowerCase();
-  const args=parts.slice(1).join(' ').trim();
+  if(name!=='goal')return {name,args:parts.slice(1).join(' ').trim()};
+  // Keep line boundaries: /goal reads inline contract fields line by line.
+  const args=text.slice(1).replace(/^\S*/,'').split('\n')
+    .map(line=>line.split(/\s+/).filter(Boolean).join(' '))
+    .filter(Boolean).join('\n');
   return {name,args};
 }
 
@@ -261,23 +265,43 @@ function _slashCommandNameIncludes(name,q){
   const n=String(name||'').toLowerCase();
   return _slashCommandSlugVariants(q).some(v=>n.includes(v));
 }
-// With the `_` ≡ `-` alias active, a typed prefix can match BOTH spellings of
-// a command registered twice (e.g. plugin-review and plugin_review). Row zero
-// is what an Enter dispatches, so the literal as-typed match must rank ahead
-// of the alias-only match — registry order alone would let /plugin_review
-// dispatch /plugin-review (or vice versa once registration order flips).
-// Stable sort keeps original order within each rank.
-function _rankLiteralPrefixMatchesFirst(matches,q){
+// Row zero is what the dropdown preselects (showCmdDropdown) and what Enter
+// dispatches (selectCmdDropdownItem), so the assembled list has to be ordered
+// by how well each row matches the typed text, not by the order rows were pushed.
+// Skills are substring/description-matched and cached alphabetically, so typing
+// a whole skill name could leave a neighbour whose DESCRIPTION merely mentions
+// it at row zero: `/next` ran context7-mcp ("Next.js docs") instead of the
+// `next` skill (#9035).
+// Bands, best first: 0 exact name, 1 name prefix, 2 name substring, 3
+// description-only. Inside a band the assembled order is kept: sorting equal
+// strength rows by name moves row zero for a short prefix (`/st` accepted
+// `status` instead of `stop`, `/c` a skill instead of the builtin `clear`)
+// without any gain in match quality. The literal as-typed prefix check on top
+// preserves #8203: with both `_` and `-` spellings registered, row zero must be
+// the spelling the user typed, in either registration order.
+function _slashCommandMatchBand(row,q){
+  const needle=String(q||'').toLowerCase();
+  const name=String(row&&row.name||'').toLowerCase();
+  if(name===needle)return 0;
+  if(_slashCommandMatchesPrefix(name,needle))return 1;
+  if(_slashCommandNameIncludes(name,needle))return 2;
+  return 3;
+}
+function _rankSlashCommandMatches(matches,q){
   const needle=String(q||'').toLowerCase();
   if(!needle||matches.length<2)return matches;
-  // Only a separator spelling (`_` vs `-`) needs literal-first ordering; a plain
-  // prefix keeps master's order (skill rows matched by substring/description).
-  if(_slashCommandSlugVariants(needle).length<2)return matches;
-  return matches.slice().sort((a,b)=>{
-    const an=String(a&&a.name||'').toLowerCase();
-    const bn=String(b&&b.name||'').toLowerCase();
-    return (an.startsWith(needle)?0:1)-(bn.startsWith(needle)?0:1);
-  });
+  return matches
+    .map((row,index)=>({row,index}))
+    .sort((a,b)=>{
+      const band=_slashCommandMatchBand(a.row,needle)-_slashCommandMatchBand(b.row,needle);
+      if(band)return band;
+      const an=String(a.row&&a.row.name||'').toLowerCase();
+      const bn=String(b.row&&b.row.name||'').toLowerCase();
+      const literal=(an.startsWith(needle)?0:1)-(bn.startsWith(needle)?0:1);
+      if(literal)return literal;
+      return a.index-b.index;
+    })
+    .map(entry=>entry.row);
 }
 
 function getMatchingCommands(prefix){
@@ -346,7 +370,7 @@ function getMatchingCommands(prefix){
   // A same-slug bundle owns dispatch. Hold plain skills until the independent
   // bundle metadata request settles so a slow bundle response cannot briefly
   // expose a selectable, shadowed skill.
-  if(!_bundleCommandCacheReady)return _rankLiteralPrefixMatchesFirst(matches,q);
+  if(!_bundleCommandCacheReady)return _rankSlashCommandMatches(matches,q);
   for(const skill of _skillCommandCache){
     const name=String(skill&&skill.name||'').toLowerCase();
     const description=String(skill&&skill.desc||'').toLowerCase();
@@ -354,7 +378,7 @@ function getMatchingCommands(prefix){
     matches.push(skill);
     seen.add(name);
   }
-  return _rankLiteralPrefixMatchesFirst(matches,q);
+  return _rankSlashCommandMatches(matches,q);
 }
 
 let _forcedSkillDirectivePending=null;
@@ -1673,7 +1697,11 @@ async function cmdGoal(args){
     attachLiveStream(activeSid,r.stream_id,[]);
     if(typeof renderSessionList==='function')void renderSessionList();
   }catch(e){
-    const err=String((e&&e.message)||e||'Goal command failed');
+    let err=String((e&&e.message)||e||'Goal command failed');
+    // The /goal gate refusal explains itself in `message`; `error` is only its
+    // code. Other failures keep `error`: a failed kickoff's `message` is still
+    // the goal-set text from the step that succeeded.
+    try{const body=JSON.parse((e&&e.body)||'');if(body&&body.error==='unsupported_gate'&&body.message)err=String(body.message);}catch(_){}
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});
     showToast(err,3000);
@@ -2551,10 +2579,17 @@ function cmdVoice(){
 
 // ── YOLO mode toggle ──
 // Session-scoped: skips all approval prompts for the current session.
-// Toggles on/off; state is not persisted across page reloads.
+// /yolo toggles on/off from a fresh server read; the server keeps the flag in
+// memory only. The composer pill does NOT toggle: see disableYoloFromPill().
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
+  // One /yolo per session at a time: an overlapping call would read the same
+  // pre-toggle state (or the first's half-applied one) and post a duplicate or
+  // reverse. Another session's /yolo is independent and still runs.
+  if(!S._yoloCommandsInFlight)S._yoloCommandsInFlight=new Set();
+  if(S._yoloCommandsInFlight.has(sid))return;
+  S._yoloCommandsInFlight.add(sid);
   const generation=_loadSessionGeneration;
   const viewIsCurrent=()=>!!(
     S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
@@ -2564,6 +2599,9 @@ async function cmdYolo(){
     // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
     if(!viewIsCurrent())return;
+    // Same boolean rule as the pill's own read: a malformed answer is never
+    // inverted into a toggle (it would post enabled:true for {} or null).
+    if(!status||typeof status.yolo_enabled!=='boolean')throw new Error('unexpected answer from the server');
     const enable=!status.yolo_enabled;
     // A visible approval must belong to this exact session load before any
     // command handler may POST through it. Otherwise fail closed.
@@ -2584,8 +2622,7 @@ async function cmdYolo(){
     });
     if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
     const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
-    _yoloEnabled=settled;
-    _updateYoloPill();
+    _applyYoloState(sid,settled,{gen:generation});
     showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
   }catch(e){
     if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
@@ -2594,10 +2631,45 @@ async function cmdYolo(){
       try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
     if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
-      _yoloEnabled=errorPayload.yolo_enabled;
-      _updateYoloPill();
+      _applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation});
     }
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }finally{
+    S._yoloCommandsInFlight.delete(sid);
+  }
+}
+
+// #9101: the composer pill is shown only while this tab's YOLO view says the
+// open session is ON, and it is labelled "click to disable". Its click carries
+// exactly that intent: disable YOLO for the session the pill was painted for
+// (data-yolo-session). Unlike /yolo it never re-reads the server to compute a
+// toggle, so a stale pill (another tab, a server restart, a late read) can
+// never turn YOLO on, and it never goes through the approval card, whose YOLO
+// action approves the displayed command.
+async function disableYoloFromPill(){
+  const pill=$('yoloPill');
+  const sid=pill&&pill.getAttribute('data-yolo-session');
+  if(!sid){_updateYoloPill();return;}
+  const generation=_loadSessionGeneration;
+  try{
+    const result=await api('/api/session/yolo',{
+      method:'POST',
+      body:JSON.stringify({session_id:sid,enabled:false}),
+    });
+    const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:false;
+    // Dropped when the pill's session is no longer the open one: re-render so
+    // a pill painted for it disappears.
+    if(!_applyYoloState(sid,settled,{gen:generation}))_updateYoloPill();
+    showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
+  }catch(e){
+    let errorPayload=null;
+    if(e&&typeof e.body==='string'){
+      try{errorPayload=JSON.parse(e.body);}catch(_){}
+    }
+    const applied=!!(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'
+      &&_applyYoloState(sid,errorPayload.yolo_enabled,{gen:generation}));
+    if(!applied)_updateYoloPill();
+    showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||(e&&e.message)||''));
   }
 }
 

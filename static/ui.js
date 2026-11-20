@@ -4389,6 +4389,7 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
       catch(__){ref=ref.replace(/^file:\/\//i,'');}
     }
   }
+  if(/\x00/.test(String(ref))) return '';
   if(/^https?:\/\//i.test(ref)){
     let src=ref;
     if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
@@ -4511,6 +4512,7 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
+let _providerQuotaLastStatus=null;
 // A provider switch can complete before an older account-quota request returns.
 // Only the newest request may update the composer; otherwise an old Codex result
 // can reappear while the active conversation uses another provider.
@@ -4523,26 +4525,105 @@ function _providerQuotaProfileKey(){
   return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
 }
 
+// Number(null), Number('') and Number(false) are 0: a missing or rejected
+// measurement must hide, not render as $0.00 / 0%.
+function _isQuotaMeasurement(value){
+  return (typeof value==='number'||(typeof value==='string'&&value.trim()!==''))&&Number.isFinite(Number(value));
+}
 function _formatQuotaMoneyShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   if(Math.abs(n)>=100) return '$'+n.toFixed(0);
   if(Math.abs(n)>=10) return '$'+n.toFixed(1);
   return '$'+n.toFixed(2);
 }
 function _formatQuotaPercentShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+// Which account window the chip shows (Settings: quota_chip_window). The fixed modes pick by
+// the window's limit_window_seconds, never by list position: providers do not order windows.
+function _normalizeQuotaChipWindow(value){
+  return value==='shortest'||value==='longest'?value:'most_constrained';
+}
+function _quotaWindowSeconds(x){
+  return x&&_isQuotaMeasurement(x.limit_window_seconds)&&Number(x.limit_window_seconds)>0?Number(x.limit_window_seconds):null;
+}
+function _isAccountQuotaWindow(x){
+  const scope=typeof x.scope==='string'?x.scope.trim().toLowerCase():'';
+  return !scope||scope==='account';
+}
+function _selectQuotaChipWindow(windows){
+  const measured=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
+  if(!measured.length) return null;
+  // A model-only window (e.g. one model family's weekly cap) doesn't limit the
+  // account, so choose among account windows whenever there is one. The hover
+  // text still lists every window.
+  const account=measured.filter(_isAccountQuotaWindow);
+  const valid=account.length?account:measured;
+  const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
+  // Pick by duration only when every candidate window reports one. An untimed
+  // window can't be ordered, and skipping it could hide the depleted limit, so
+  // any gap falls back to the most constrained window.
+  if((mode==='shortest'||mode==='longest')&&valid.every(x=>_quotaWindowSeconds(x)!==null)){
+    return valid.reduce((best,x)=>{
+      const a=_quotaWindowSeconds(x),b=_quotaWindowSeconds(best);
+      return (mode==='shortest'?a<b:a>b)?x:best;
+    });
+  }
+  return valid.reduce((min,x)=>Number(x.remaining_percent)<Number(min.remaining_percent)?x:min);
+}
+// Time left until a window resets, e.g. "2h 14m" / "3d 5h"; '' when unknown or past.
+function _formatQuotaResetIn(value,now){
+  if(!value) return '';
+  const ms=new Date(value).getTime();
+  if(!Number.isFinite(ms)) return '';
+  const s=Math.round((ms-(typeof now==='number'?now:Date.now()))/1000);
+  if(s<=0) return '';
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d>0) return d+'d'+(h?' '+h+'h':'');
+  if(h>0) return h+'h'+(m?' '+m+'m':'');
+  return Math.max(1,m)+'m';
+}
+// Hover text: one line per account window (all periods), each with its remaining
+// share and time to reset when the provider reports one, then any detail lines.
+// With several windows, "▸ " marks the one the chip shows (`chosen`) and the other
+// window lines are indented to match.
+function _providerQuotaWindowLines(accountLimits,now,chosen){
+  const windows=accountLimits&&Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+  const shown=windows.filter(w=>w&&_isQuotaMeasurement(w.remaining_percent));
+  const mark=chosen&&shown.length>1&&shown.includes(chosen);
+  const lines=[];
+  for(const w of shown){
+    const name=typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    const reset=_formatQuotaResetIn(w.reset_at,now);
+    const prefix=mark?(w===chosen?'\u25B8 ':'\u2002 '):'';
+    lines.push(prefix+name+_formatQuotaPercentShort(w.remaining_percent)+' remaining'+(reset?' · resets in '+reset:''));
+  }
+  const details=accountLimits&&Array.isArray(accountLimits.details)?accountLimits.details:[];
+  for(const detail of details){
+    if(typeof detail==='string'&&detail.trim()) lines.push(detail.trim());
+  }
+  return lines;
 }
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
-    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    // Multi-window providers (rolling/5-hour, weekly, monthly): by default the most
+    // constrained window, since the lowest remaining share is the limit hit first.
+    const w=_selectQuotaChipWindow(accountLimits.windows);
+    const remaining=w?_formatQuotaPercentShort(w.remaining_percent):'';
+    const windowLabel=w&&typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    if(remaining){
+      const lines=_providerQuotaWindowLines(accountLimits,undefined,w);
+      const head=provider+' — '+(status.message||'Provider usage loaded');
+      // One window keeps the single-line form; several list every period on its own line.
+      if(lines.length<=1) return {label:remaining, title:head+' — '+(lines[0]||windowLabel+remaining+' remaining')};
+      return {label:remaining, title:head+'\n'+lines.join('\n')};
+    }
   }
   const quota=status.quota||null;
   if(quota){
@@ -4589,6 +4670,8 @@ function renderProviderQuotaIndicator(status){
     clearProviderQuotaIndicator();
     return;
   }
+  _providerQuotaLastStatus=status;
+  _initProviderQuotaTitleRefresh();
   label.textContent=text.label;
   chip.title=text.title;
   if(mobileLabel) mobileLabel.textContent=text.label;
@@ -4658,6 +4741,40 @@ window.addEventListener('visibilitychange',()=>{
     void refreshProviderQuotaIndicator(_currentQuotaProvider());
   }
 });
+// Reset countdowns are computed when the title is built; rebuild it on hover/focus
+// so "resets in" is current without waiting for the next quota fetch.
+function _refreshProviderQuotaTitle(){
+  const chip=$('providerQuotaChip');
+  if(!chip||chip.hidden||!_providerQuotaLastStatus) return;
+  const text=_providerQuotaIndicatorText(_providerQuotaLastStatus);
+  if(!text) return;
+  chip.title=text.title;
+  const mobileAction=$('composerMobileQuotaAction');
+  if(mobileAction) mobileAction.title=text.title;
+}
+// Bound lazily from renderProviderQuotaIndicator (hover only matters once the chip has drawn),
+// so this block runs no top-level DOM code. Both the desktop chip and the compact composer's
+// quota button refresh on hover / focus (CSS hides the chip in the compact layout).
+let _providerQuotaTitleRefreshBound=false;
+let _providerQuotaMobileTitleRefreshBound=false;
+function _initProviderQuotaTitleRefresh(){
+  if(!_providerQuotaTitleRefreshBound){
+    const chip=$('providerQuotaChip');
+    if(chip&&typeof chip.addEventListener==='function'){
+      chip.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      chip.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaTitleRefreshBound=true;
+    }
+  }
+  if(!_providerQuotaMobileTitleRefreshBound){
+    const mobileAction=$('composerMobileQuotaAction');
+    if(mobileAction&&typeof mobileAction.addEventListener==='function'){
+      mobileAction.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      mobileAction.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaMobileTitleRefreshBound=true;
+    }
+  }
+}
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -6830,6 +6947,24 @@ function renderModelDropdown(){
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
+  // #9074: the backend's badge label is English ("Primary", "Fallback 2"), so
+  // every renderer translates the role here. t() returns the key itself when
+  // no locale has it, which falls back to the English text.
+  const _badgeText=(key,english,...args)=>{
+    const value=t(key,...args);
+    return value&&value!==key?String(value):english;
+  };
+  const _modelBadgeLabel=(badge)=>{
+    if(!badge) return '';
+    const role=String(badge.role||'');
+    const label=String(badge.label||'');
+    if(role==='primary') return _badgeText('model_badge_primary','Primary');
+    if(role==='fallback'){
+      const index=(label.match(/(\d+)\s*$/)||[])[1]||'';
+      return _badgeText('model_badge_fallback',`Fallback ${index}`.trim(),index).trim();
+    }
+    return label&&!label.includes('@')?label:_badgeText('model_group_configured','Configured');
+  };
   const _renderProviderEndpointHint=(entry,parent)=>{
     if(!entry||!entry.label||!entry.modelsEndpointError) return;
     const hint=document.createElement('div');
@@ -6842,7 +6977,7 @@ function renderModelDropdown(){
   const _buildModelRow=(m,withProviderChip)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
-    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(_modelBadgeLabel(m.badge))}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
     row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
@@ -7016,7 +7151,7 @@ function renderModelDropdown(){
   const _makeModelRow=(m,shouldRenderHeading)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
-    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(_modelBadgeLabel(m.badge))}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
@@ -7153,17 +7288,44 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
         let badgeLabel = '';
+        let badgeTitle = '';
         if (m.badge) {
-          // 直接用badge的原始key（即config.yaml里的ID）
+          // #8733: the chip shows the readable role the group rows already use
+          // ("Primary", "Fallback 2") instead of the matched config key. That key
+          // can be an '@provider:model' routing spelling, which wraps the chip onto
+          // its own line on desktop and breaks mid-string on ~320px phones. The key
+          // stays reachable on the row subtitle, and the chip's title keeps master's
+          // full "key (provider)" text, so the provider the chip used to name isn't lost.
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
-          badgeLabel = rawId;
+          badgeLabel = _modelBadgeLabel(m.badge);
+          badgeTitle = rawId;
           if(m.badge.provider){
-            const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
-            badgeLabel += ` (${providerName})`;
+            const providerName=String(m.badge.provider).replace(/^custom:/,'').split('/')[0];
+            badgeTitle += ` (${providerName})`;
           }
         }
-        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        const badgeAttrs = badgeTitle ? ` title="${esc(badgeTitle)}"` : '';
+        const badgeHtml=m.badge?`<span${badgeAttrs} class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
+        // #9074: a title is out of reach on touch and keyboard, so the provider
+        // the chip used to name gets the muted pill the group rows use. It sits
+        // beside the chip rather than inside it, and ellipsizes on narrow phones.
+        // It names the provider the click selects, from that provider's own group:
+        // m.group can be the backend's injected "Default" group, or empty.
+        const providerId=String((m.badge&&m.badge.provider)||m.providerId||'');
+        const providerMeta=_groupMeta.get(providerId);
+        const providerLabel=providerMeta?String(providerMeta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
+        const providerName=(providerLabel&&providerLabel!=='Default')?providerLabel
+          :providerId.replace(/^custom:/,'').split('/')[0];
+        // A short name keeps its full width and wraps whole: an ellipsis on it
+        // leaves a stub ("Ope…") that can't tell OpenAI from OpenRouter.
+        const providerFit=providerName.length<=14?' model-opt-provider--fit':'';
+        const providerChip=providerName
+          ?`<span class="model-opt-provider model-opt-provider--configured${providerFit}" title="${esc(providerName)}">${esc(providerName)}</span>`
+          :'';
+        // #8733: the chip no longer carries the routing key, so the matched key
+        // rides on the chip's title. The subtitle stays the option id, which the
+        // Configured section has always shown.
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
@@ -10623,7 +10785,9 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
 }
 
 function renderMd(raw){
-  let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  // Raw NULs become U+FFFD (what a browser shows for a NUL in text) before any
+  // stash token is generated, so input text can never spell a token.
+  let s=(raw||'').replace(/\x00/g,'\uFFFD').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
@@ -10756,9 +10920,15 @@ function renderMd(raw){
       // For JSON/YAML blocks, add tree-view placeholder with raw data
       } else if(lang==='json'||lang==='yaml'){
         const rawCode=esc(code.replace(/\n$/,''));
+        // data-raw holds the fence's source text. MEDIA references were stashed
+        // before this pass, so put their source text back here (the stash is
+        // restored after this attribute is built) and drop any other stash token.
+        const rawSrc=code.replace(/\n$/,'')
+          .replace(/\x00D(\d+)\x00/g,(_,i)=>decode('MEDIA:'+media_stash[+i]))
+          .replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'');
         // Encode newlines as &#10; to prevent HTML attribute normalization
         // (browsers collapse \n to spaces inside attribute values).
-        const rawAttr=rawCode.replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
+        const rawAttr=esc(rawSrc).replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
         const blockId='tree-'+Math.random().toString(36).slice(2,10);
         _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawAttr}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
       // CSV blocks → render as styled table
@@ -10999,7 +11169,56 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    // Autolink only the text between tags, as the block pass below does: set
+    // aside complete links, images and pre blocks and every other tag, then
+    // turn a raw tag left without its closing ">" on its line into text by
+    // escaping its "<" (the block pass escapes those too), so a URL in an
+    // attribute value stays as written.
+    // - A bracketed address such as <https://example.com> or <mailto:a@b.c>
+    //   (any scheme, any case) is not a tag: it stays in place, so the URL in
+    //   it is linked as before. A name holding ":" is never an allowed tag.
+    // - Only the "<" of an unclosed tag is escaped; the rest stays plain text,
+    //   so a URL after it is linked with its "&" and quotes left as written.
+    //   The escaped "<" is set aside too, so it still ends a URL before it.
+    //   Each line is scanned once: a "<" before a letter is escaped when no
+    //   ">" follows it on its line.
+    // - Restoring scans every stash token in one left-to-right pass, so a run
+    //   of text between two tokens is never read as a token.
+    // - Setting tags aside is one forward scan that remembers where the next
+    //   ">", "</a>" and "</pre>" are (or that there is none), so a long line
+    //   of "<" without a close is read once, not once per "<".
+    const _tag_stash=[];
+    t=(()=>{
+      const out=[];
+      const head=/<(?![a-zA-Z][a-zA-Z0-9+.-]*:)\/?[a-zA-Z]/y;
+      let at=0,emitted=0,gt=-1,aClose=-2,preClose=-2;
+      while((at=t.indexOf('<',at))!==-1){
+        if(gt<at) gt=t.indexOf('>',at+1);
+        if(gt<0) break;
+        let end=-1;
+        if(t.startsWith('<a',at)&&!/\w/.test(t[at+2]||'')){
+          if(aClose===-2||(aClose>=0&&aClose<=gt)) aClose=t.indexOf('</a>',gt+1);
+          if(aClose>=0) end=aClose+4;
+        }
+        if(end<0&&t.startsWith('<img',at)&&!/\w/.test(t[at+4]||'')) end=gt+1;
+        if(end<0&&t.startsWith('<pre',at)&&!/\w/.test(t[at+4]||'')){
+          if(preClose===-2||(preClose>=0&&preClose<=gt)) preClose=t.indexOf('</pre>',gt+1);
+          if(preClose>=0) end=preClose+6;
+        }
+        if(end<0){head.lastIndex=at;if(head.test(t)) end=gt+1;}
+        if(end<0){at++;continue;}
+        out.push(t.slice(emitted,at));
+        _tag_stash.push(t.slice(at,end));
+        out.push(`\x00T${_tag_stash.length-1}\x00`);
+        emitted=end;
+        at=end;
+      }
+      out.push(t.slice(emitted));
+      return out.join('');
+    })();
+    t=t.split(/([\r\n\u2028\u2029])/).map(line=>{const at=line.lastIndexOf('>')+1;return line.slice(0,at)+line.slice(at).replace(/<(?=[a-zA-Z])/g,()=>{_tag_stash.push('&lt;');return `\x00T${_tag_stash.length-1}\x00`;});}).join('');
     t=_autolinkBareText(t);
+    t=t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='T'?_tag_stash[+i]:m);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
@@ -11200,7 +11419,11 @@ function renderMd(raw){
   // Tests verify this list is complete; _tag() enforces it.
   const SAFE_TAGS=/^<\/?(?:strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span|img)([\s>]|$)/i;
   function _safeAttrValue(v){
-    return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
+    // Stash tokens (\x00Q0\x00, math, code ...) are restored after this sanitizer runs,
+    // so a token left inside an attribute value would be replaced by rendered HTML
+    // there. No attribute legitimately carries one: drop them, and any stray \x00.
+    return String(v||'').replace(/\x00[^\x00]*\x00/g,'').replace(/\x00/g,'')
+      .replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
   }
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
@@ -11325,7 +11548,10 @@ function renderMd(raw){
     }
     if(name==='div'){
       const cls=_cls(a.class,['pre-header','mermaid-block','katex-block']);
-      const mermaid=a['data-mermaid-id']?` data-mermaid-id="${esc(a['data-mermaid-id'])}"`:'';
+      // Generated ids are word characters; anything else (a URL the autolink pass
+      // would rewrite, a stash token) must not reach this free-text attribute.
+      const mermaidId=_safeAttrValue(a['data-mermaid-id']);
+      const mermaid=/^[\w-]{1,64}$/.test(mermaidId)?` data-mermaid-id="${esc(mermaidId)}"`:'';
       const katex=a['data-katex']==='display'?' data-katex="display"':'';
       return `<div${cls}${mermaid}${katex}>`;
     }
@@ -11334,7 +11560,7 @@ function renderMd(raw){
       const target=a.target==='_blank'?' target="_blank"':'';
       const rel=a.rel==='noopener'?' rel="noopener"':'';
       const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back','session-link']);
-      const download=a.download?` download="${esc(a.download)}"`:'';
+      const download=a.download?` download="${esc(_safeAttrValue(a.download))}"`:'';
       // #7941: keep the blocked-remote-image tooltip only on a media chip whose
       // href really is a non-allowlisted remote image AND whose title begins with
       // the reason computed from that same href, so model-authored anchors cannot
@@ -11364,7 +11590,18 @@ function renderMd(raw){
     }
     return '';
   }
-  s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>_tag(tag));
+  // One pass over every "<": a tag goes through _tag(), and any other "<"
+  // becomes "&lt;". _tag() returns "" for a tag it removes, and a replace never
+  // scans its own output again, so a "<" left as is just before a removed tag
+  // would join the text after it into a new tag that was never checked.
+  // Consuming every "<" here means each "<" left in the result came from
+  // _tag() or starts an HTML comment written as "<!--" in the message (kept
+  // as before; a removal cannot form one, as its "<" would be escaped), so a
+  // removal can never join the text around it into a tag.
+  // That "&lt;" is held in the autolink stash below until autolinking is done,
+  // so it still ends a URL written just before it, as the raw "<" did.
+  const _al_stash=[];
+  s=s.replace(/<\/?[a-z][^>]*>|<(?!!--)/gi,m=>m==='<'?(_al_stash.push('&lt;'),`\x00B${_al_stash.length-1}\x00`):_tag(m));
   // Incomplete raw tags must not survive until paragraph wrapping, where the
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
@@ -11375,18 +11612,28 @@ function renderMd(raw){
     return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>`;
   }
   function _autolinkBareText(text){
+    // A stash token ends the URL: its content is restored after this pass and
+    // belongs after the link, not inside the rebuilt href.
     return String(text||'').replace(
-      /(https?:\/\/[^\s<>"')\]\uFF09]+)/g,
+      /(https?:\/\/[^\s<>"')\]\uFF09\x00]+)/g,
       run=>_autolinkBareRun(run),
     );
   }
-  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
-  const _al_stash=[];
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
+  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them, and
+  // every other tag (an opening <a> without its </a>, for one) so autolink
+  // never rewrites text inside a tag. The sanitizer pass above set aside every
+  // "<" it did not hand to _tag() as "&lt;", so every tag here was written
+  // by _tag(), with escaped, double-quoted attribute values, and ends at its
+  // first ">".
+  // Restoring scans every stash token (\x00, capital letters, digits, \x00) in
+  // one left-to-right pass and puts back only these entries, so a run of text
+  // between two tokens (math, code block, media) is never read as a token.
+  const _alRestore=t=>t.replace(/\x00([A-Z]+)(\d*)\x00/g,(m,k,i)=>k==='B'?_al_stash[+i]:m);
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>|<\/?[a-zA-Z][^>]*>)/g,m=>{_al_stash.push(_alRestore(m));return `\x00B${_al_stash.length-1}\x00`;});
   // Split high-confidence sentence boundaries while preserving valid CJK IRI
   // content, then rescan each plain-text trail so adjacent URLs all link.
   s=_autolinkBareText(s);
-  s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
+  s=_alRestore(s);
   // Restore math stash → katex placeholder spans/divs
   // These will be rendered by renderKatexBlocks() after DOM insertion
   s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{
@@ -14881,6 +15128,7 @@ async function applyUpdates(opts){
   // #7293: true only on the re-send after the user explicitly confirmed
   // interrupting the WebUI agent runs that made the server refuse the update.
   const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  const confirmedGateway=forceActiveRuns&&opts.confirmedGateway?opts.confirmedGateway:null;  // #8746
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
@@ -14921,11 +15169,12 @@ async function applyUpdates(opts){
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
       if(forceActiveRuns) _applyBody.force_active_runs=true;
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      if(confirmedGateway&&target==='agent') Object.assign(_applyBody,confirmedGateway);
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:300000});
       if(!res.ok){
         _showUpdateError(target,res);
         if(res.restart_blocked&&res.force_available){
-          _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
+          _renderActiveRunsForceOffer(target,res,(gw)=>applyUpdates({forceActiveRuns:true,confirmedGateway:gw}));
         }
         resetApplyButton(0);
         return;
@@ -14980,9 +15229,9 @@ function _showUpdateError(target,res){
     clearLockBtn.style.display='inline-block';
   }
 }
-function _activeRunsUpdateText(key,count,fallback){
+function _activeRunsUpdateText(key,count,fallback,extra){
   if(typeof t==='function'){
-    const val=t(key,count);
+    const val=extra!==undefined?t(key,count,extra):(count!==undefined?t(key,count):t(key));
     if(val&&val!==key) return val;
   }
   return fallback;
@@ -15003,39 +15252,98 @@ function _renderActiveRunsForceOffer(target,res,resend){
   // way forward (on the conflict path its re-send also carries the hard reset).
   const legacyForceBtn=$('btnForceUpdate');
   if(legacyForceBtn) legacyForceBtn.style.display='none';
-  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
-  const count=Math.max(1,Math.floor(rawCount));
-  const plural=count===1?'':'s';
-  const label=_activeRunsUpdateText('update_force_active_runs',count,'Update anyway (interrupts '+count+' run'+plural+')');
+  const agentTarget=target==='agent';
+  const total=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const w=(res&&res.webui_owned_runs!==undefined)?Number(res.webui_owned_runs):total;
+  const g=Number(res&&res.gateway_runs)||0;
+  const agentExternal=agentTarget&&Boolean(res)&&res.gateway_restart_managed===false;
+  const interruptedCount=agentExternal?w:total;
+  // #8746: the forced request carries the Gateway restart impact and the
+  // interrupted-run count this offer shows, so the server refuses again if the
+  // impact changed or more runs would be interrupted.
+  const confirmedGateway=(agentTarget&&res&&typeof res.gateway_restart_managed==='boolean')
+    ?{gateway_restart_managed:res.gateway_restart_managed,gateway_profile:res.gateway_profile,gateway_endpoint:res.gateway_endpoint,interrupted_runs:interruptedCount}
+    :null;
+  let label;
+  if(interruptedCount===0){
+    label=_activeRunsUpdateText('update_force_active_runs_no_runs',undefined,'Update anyway (interrupts nothing)');
+  }else{
+    const plural=interruptedCount===1?'':'s';
+    label=_activeRunsUpdateText('update_force_active_runs',interruptedCount,'Update anyway (interrupts '+interruptedCount+' run'+plural+')');
+  }
   const actions=document.createElement('div');
   actions.style.marginTop='6px';
   const btn=document.createElement('button');
   btn.type='button';
   btn.id='btnForceUpdateActiveRuns';
-  btn.className='update-btn';
-  btn.style.background='var(--error,#e05)';
-  btn.style.color='#fff';
-  btn.style.borderColor='var(--error,#e05)';
+  if(interruptedCount===0){
+    // #8746: a force that interrupts nothing is not a destructive action; the
+    // server refuses it again if the Gateway impact changes before the confirm.
+    btn.className='update-btn update-primary';
+  }else{
+    btn.className='update-btn';
+    btn.style.background='var(--error,#e05)';
+    btn.style.color='#fff';
+    btn.style.borderColor='var(--error,#e05)';
+  }
   btn.dataset.target=target;
   btn.textContent=label;
   btn.onclick=async()=>{
     if(btn.disabled) return;
+    // #8667: an Agent update also cycles the Gateway that executes the
+    // resumable runs, so its confirmation names both kinds of run. A WebUI
+    // update keeps the WebUI-only copy (#7293).
+    // #8746: qualify the Agent confirmation by Gateway lifecycle ownership.
+    // #8746: an external-Gateway-only refusal interrupts nothing, so its
+    // confirmation names the Gateway runs that keep running, not an interruption.
+    const nothingInterrupted=interruptedCount===0;
+    let confirmMessage;
+    if(nothingInterrupted){
+      const confirmMessageFallback=g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Forcing the update will not stop '+(g===1?'it':'them')+'.';
+      confirmMessage=_activeRunsUpdateText('update_force_active_runs_no_runs_message',g,confirmMessageFallback);
+    }else if(agentTarget){
+      if(g>0){
+        if(agentExternal){
+          const confirmMessageKey='update_force_active_runs_message_agent_external';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working, and '+g+' Gateway run'+(g===1?' keeps':'s keep')+' running because the WebUI cannot restart this profile\'s Gateway. Only the WebUI runs are saved as interrupted.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }else if(w===0){
+          // #8746: only Gateway runs are interrupted; do not name 0 WebUI runs.
+          const confirmMessageKey='update_force_active_runs_message_agent_gateway_only';
+          const confirmMessageFallback=g+' Gateway run'+(g===1?' is':'s are')+' still working. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. Wait for '+(g===1?'it':'them')+' to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,g,confirmMessageFallback);
+        }else{
+          const confirmMessageKey='update_force_active_runs_message_agent';
+          const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working and '+g+' Gateway run'+(g===1?' is':'s are')+' running. Updating the Agent also restarts the Gateway this profile uses and stops every run that Gateway is executing, including runs started from other profiles that use the same Gateway endpoint. The WebUI runs are saved as interrupted. Wait for them to finish if you can.';
+          confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback,g);
+        }
+      }else{
+        const confirmMessageKey='update_force_active_runs_message_agent_webui_only';
+        const confirmMessageFallback=w+' WebUI agent run'+(w===1?' is':'s are')+' still working. The WebUI runs are saved as interrupted if you force the update.';
+        confirmMessage=_activeRunsUpdateText(confirmMessageKey,w,confirmMessageFallback);
+      }
+    }else{
+      const count=Math.max(1,Math.floor(total));
+      const confirmMessageKey='update_force_active_runs_message';
+      const confirmMessageFallback=count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.';
+      confirmMessage=_activeRunsUpdateText(confirmMessageKey,count,confirmMessageFallback);
+    }
     const confirmed=await showConfirmDialog({
-      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
-      message:_activeRunsUpdateText(
-        'update_force_active_runs_message',
-        count,
-        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
-      ),
-      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
-      danger:true,
+      title:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_title',undefined,'Update the Agent now?')
+        :_activeRunsUpdateText('update_force_active_runs_title',interruptedCount,'Interrupt active runs?'),
+      message:confirmMessage,
+      confirmLabel:nothingInterrupted
+        ?_activeRunsUpdateText('update_force_active_runs_no_runs_confirm',undefined,'Update anyway')
+        :_activeRunsUpdateText('update_force_active_runs_confirm',interruptedCount,'Interrupt and update'),
+      danger:!nothingInterrupted,
       focusCancel:true,
     });
     if(!confirmed) return;
     btn.disabled=true;
     btn.textContent=_i18nUpdateText('update_updating','Updating\u2026');
     try{
-      await resend();
+      await resend(confirmedGateway);
     }finally{
       if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
     }
@@ -15056,7 +15364,8 @@ async function applyClearUpdateLock(btn,opts){
   try{
     const _clearBody={target};
     if(forceActiveRuns) _clearBody.force_active_runs=true;
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:60000});
+    if(forceActiveRuns&&opts.confirmedGateway) Object.assign(_clearBody,opts.confirmedGateway);  // #8746
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:300000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
@@ -15075,7 +15384,7 @@ async function applyClearUpdateLock(btn,opts){
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
       if(res.restart_blocked&&res.force_available){
-        _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
+        _renderActiveRunsForceOffer(target,res,(gw)=>applyClearUpdateLock(btn,{forceActiveRuns:true,confirmedGateway:gw}));
       }
     }
   }catch(e){
@@ -15210,12 +15519,13 @@ async function forceUpdate(btn,opts){
     const _ch=window._updateData?.[target]?.channel;
     if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
     if(forceActiveRuns) _forceBody.force_active_runs=true;
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
+    if(forceActiveRuns&&opts.confirmedGateway) Object.assign(_forceBody,opts.confirmedGateway);  // #8746
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
       if(res.restart_blocked&&res.force_available){
-        _renderActiveRunsForceOffer(target,res,()=>forceUpdate(btn,{forceActiveRuns:true}));
+        _renderActiveRunsForceOffer(target,res,(gw)=>forceUpdate(btn,{forceActiveRuns:true,confirmedGateway:gw}));
       }
       return;
     }
@@ -15782,8 +16092,9 @@ function _fmtDateSep(d){
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
   const dStart=new Date(d);dStart.setHours(0,0,0,0);
   const diffDays=Math.round((todayStart-dStart)/86400000);
-  if(diffDays===0) return 'Today';
-  if(diffDays===1) return 'Yesterday';
+  // hwc: same strings as the sidebar day buckets, already in every locale.
+  if(diffDays===0) return t('session_time_bucket_today');
+  if(diffDays===1) return t('session_time_bucket_yesterday');
   if(diffDays>0 && diffDays<7) return dStart.toLocaleDateString([], {weekday:'long'});
   const opts={month:'short', day:'numeric'};
   if(todayStart.getFullYear()!==dStart.getFullYear()) opts.year='numeric';
@@ -27586,7 +27897,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -27619,7 +27930,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _applyYoloState==='function')_applyYoloState(r.session.session_id,false,{reset:true});if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
