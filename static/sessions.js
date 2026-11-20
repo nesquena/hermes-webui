@@ -3341,11 +3341,11 @@ async function loadSession(sid){
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
 
+  const journalInflight=INFLIGHT[sid]?.journalSnapshot?INFLIGHT[sid]:null;
+  const journalStreamId=String(journalInflight?.streamId||'').trim();
   if(INFLIGHT[sid]){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
     const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
-    const journalInflight=INFLIGHT[sid].journalSnapshot?INFLIGHT[sid]:null;
-    const journalStreamId=String(journalInflight?.streamId||'').trim();
     S.toolCalls=[];
     // Switching between active sessions should rebuild the live worklog from
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
@@ -3364,30 +3364,11 @@ async function loadSession(sid){
       return;
     }
     const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages,S.session);
-    // Drop the completed assistant only once its content has been preserved
-    // into a live row (drop-and-replace, never drop-then-maybe-empty).  If
-    // the live assistant has no text yet, the completed assistant is still
-    // the authoritative response and must not be removed — dropping it
-    // would lose the settled answer before any live row can take over.
+    // Drop the settled answer only after a live row can take it over.
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
-    // An assistant-only journal snapshot can split into several live rows.
-    // Recover its missing prompt before deduping those rows: otherwise the
-    // previous turn's answer can suppress identical text in this turn.
-    if(journalStreamId&&journalInflight===INFLIGHT[sid]
-      &&journalStreamId===String(S.session.active_stream_id||'').trim()
-      &&inflightMessages.filter(m=>m&&m.role==='assistant'&&m._live).length>1
-      &&!_inflightTailTurnUser(inflightMessages)){
-      const turnStart=_inflightTurnOwnerStart(S.session,journalInflight,journalStreamId);
-      const prompt=turnStart?getPendingSessionMessage(S.session,S.messages):null;
-      if(prompt){
-        prompt._recoveredTurnStart=turnStart;
-        const base=S.messages.slice();
-        base.splice(_recoveredPromptTargetIndex(base,turnStart),0,_markRecoveredPromptRow(prompt));
-        S.messages=base;
-      }
-    }
+    S.messages=_restoreJournalPrompt(S.messages,inflightMessages,S.session,journalInflight,journalStreamId,INFLIGHT[sid]);
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
       _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId),
       INFLIGHT[sid]===_inflightAtLoadStart
@@ -5482,6 +5463,20 @@ function _inflightTailTurnUser(inflight){
     return null;
   }
   return null;
+}
+
+// Supply the missing prompt before deduping a multi-segment journal reply, so
+// identical text from the previous turn cannot suppress its first segment.
+function _restoreJournalPrompt(base,tail,session,snapshot,streamId,current){
+  if(!streamId||snapshot!==current||streamId!==String(session.active_stream_id||'').trim()
+    ||tail.filter(m=>m&&m.role==='assistant'&&m._live).length<2||_inflightTailTurnUser(tail)) return base;
+  const turnStart=_inflightTurnOwnerStart(session,snapshot,streamId);
+  const prompt=turnStart?getPendingSessionMessage(session,base):null;
+  if(!prompt) return base;
+  prompt._recoveredTurnStart=turnStart;
+  const messages=base.slice();
+  messages.splice(_recoveredPromptTargetIndex(messages,turnStart),0,_markRecoveredPromptRow(prompt));
+  return messages;
 }
 
 function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
