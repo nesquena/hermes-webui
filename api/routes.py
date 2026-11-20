@@ -21804,7 +21804,12 @@ def handle_delete(handler, parsed) -> bool:
         return _handle_mcp_server_delete(handler, name)
     if parsed.path.startswith("/api/env/keys/"):
         from api.env_keys import handle_env_key_delete
-        return handle_env_key_delete(handler, parsed.path[len("/api/env/keys/"):], parsed)
+        # Env names are case-sensitive: capture from the original-case path,
+        # not the case-folded matching path (same contract as the MCP server
+        # route above). Otherwise `MY_API_KEY` arrives as `my_api_key`, and the
+        # delete removes a different key or no-ops with a success reply.
+        name = _original_api_path(handler, parsed)[len("/api/env/keys/"):]
+        return handle_env_key_delete(handler, name, parsed)
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
         if not pid:
