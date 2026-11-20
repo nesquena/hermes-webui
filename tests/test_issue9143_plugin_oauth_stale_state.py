@@ -39,6 +39,7 @@ def _ms_from_now(delta_ms: int) -> int:
 
 def _row(**overrides):
     row = {
+        "auth_type": "oauth",
         "source": "manual:device_code",
         "label": "solstice account",
         "key_source": "",

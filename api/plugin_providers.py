@@ -165,6 +165,19 @@ def plugin_model_provider_is_oauth(provider_id: str) -> bool:
     return auth_type in _OAUTH_PLUGIN_AUTH_TYPES
 
 
+def plugin_model_provider_can_refresh(provider_id: str) -> bool:
+    """True when the plugin profile ships a ``refresh_credential`` hook.
+
+    The Agent treats an expired pooled OAuth row as refreshable only for a plugin
+    that supplies this hook (``plugin_refresh_hook()`` in
+    ``hermes_cli/auth_plugin_providers.py``: a callable ``refresh_credential``
+    attribute on the registered profile). The same profile objects are read here
+    without the Agent's credential-pool loader.
+    """
+    profile = plugin_model_provider_profiles().get((provider_id or "").strip().lower())
+    return callable(getattr(profile, "refresh_credential", None))
+
+
 def effective_provider_env_var(provider_id: str, static_map: dict[str, str]) -> str | None:
     pid = (provider_id or "").strip().lower()
     if not pid:

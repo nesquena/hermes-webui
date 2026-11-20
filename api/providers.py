@@ -61,6 +61,7 @@ from api.plugin_providers import (
     effective_provider_display_name,
     effective_provider_env_var,
     is_plugin_model_provider,
+    plugin_model_provider_can_refresh,
     plugin_model_provider_ids,
     plugin_model_provider_is_oauth,
 )
@@ -1375,6 +1376,80 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             env_path.chmod(_mode)
         except OSError:
             pass
+
+
+def _stored_row_expired(row: dict[str, Any], now: float) -> bool:
+    """True when a stored pool row's ``expires_at_ms`` / ISO ``expires_at`` is past.
+
+    Mirrors the Agent's ``_pool_entry_expired()``: the millisecond field wins, a
+    row with no expiry (or one that cannot be parsed) is not expired.
+    """
+    expires_at_ms = row.get("expires_at_ms")
+    if expires_at_ms is not None:
+        try:
+            return int(expires_at_ms) <= int(now * 1000)
+        except (TypeError, ValueError):
+            return False
+    text = row.get("expires_at")
+    text = text.strip() if isinstance(text, str) else ""
+    if not text:
+        return False
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp() <= now
+
+
+def _plugin_oauth_pool_account(provider_id: str) -> tuple[str, list[dict[str, Any]]]:
+    """Apply the Agent's usability rules to an OAuth plugin's pool rows.
+
+    Same rules as ``get_plugin_oauth_auth_status()`` (Agent), without its
+    credential-pool loader: a row counts only when it carries an access token or
+    agent key; an unexpired one is signed in, and when none is unexpired a row
+    with a refresh token is needs-refresh, but only for a plugin that ships a
+    ``refresh_credential`` hook. Returns ``(state, counted_rows)``, where state is
+    ``"signed_in"``, ``"needs_refresh"`` or ``""`` (no usable account).
+    """
+    rows = [
+        row
+        for row in _pool_entry_payloads(provider_id)
+        if str(row.get("access_token") or row.get("agent_key") or "").strip()
+    ]
+    now = time.time()
+    live = [row for row in rows if not _stored_row_expired(row, now)]
+    if live:
+        return "signed_in", live
+    if plugin_model_provider_can_refresh(provider_id):
+        refreshable = [row for row in rows if row.get("refresh_token")]
+        if refreshable:
+            return "needs_refresh", refreshable
+    return "", []
+
+
+def _pool_view_is_stored_rows() -> bool:
+    """True in a read-only profile scope, where the pool view is the raw auth.json rows."""
+    try:
+        from api.config import _thread_ctx
+    except ImportError:
+        return False
+    return bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+
+
+def _plugin_oauth_account_is_oauth_row(provider_id: str) -> bool:
+    """True unless a counted pool row is an API-key row (``auth_type`` other than ``oauth``).
+
+    ``hermes auth add <plugin> --type api-key`` stores an ``auth_type: api_key``
+    row; that account keeps its API-key card (#9143). When WebUI's pool view holds
+    no counted row at all (a stale cache while the Agent reports a signed-in
+    account) there is no API-key row to contradict the Agent's OAuth status.
+    """
+    _state, counted = _plugin_oauth_pool_account(provider_id)
+    return all(str(row.get("auth_type") or "").strip().lower() == "oauth" for row in counted)
 
 
 def _provider_has_key(provider_id: str) -> bool:
@@ -3016,7 +3091,28 @@ def get_providers() -> dict[str, Any]:
         is_oauth = _provider_is_oauth(pid)
         has_key = _provider_has_key(pid)
         plugin_auth_status: dict[str, Any] | None = None
-        if not has_key and is_plugin_model_provider(pid):
+        decided_from_stored_rows = False
+        if (
+            not has_key
+            and is_plugin_model_provider(pid)
+            and plugin_model_provider_is_oauth(pid)
+            and _pool_view_is_stored_rows()
+            and _pool_entry_payloads(pid)
+        ):
+            # Read-only profile scope: decide an already-pooled OAuth plugin
+            # account from the stored rows. get_auth_status() would run the
+            # Agent's full pool loader, which can seed, prune and save rows, and
+            # a listing request must not write the credential store (#9143).
+            decided_from_stored_rows = True
+            _stored_state, _stored_rows = _plugin_oauth_pool_account(pid)
+            if _stored_state:
+                has_key = True
+                plugin_auth_status = {
+                    "logged_in": _stored_state == "signed_in",
+                    "needs_refresh": _stored_state == "needs_refresh",
+                    "accounts": len(_stored_rows),
+                }
+        elif not has_key and is_plugin_model_provider(pid):
             try:
                 from hermes_cli.auth import get_auth_status as _gas_plugin
                 _plugin_status = _gas_plugin(pid)
@@ -3114,10 +3210,11 @@ def get_providers() -> dict[str, Any]:
                 and is_plugin_model_provider(pid)
                 and plugin_model_provider_is_oauth(pid)
                 and plugin_auth_status is not None
+                and _plugin_oauth_account_is_oauth_row(pid)
             ):
                 key_source = "oauth"
                 is_oauth = True
-        elif not _provider_env_var_for(pid):
+        elif not decided_from_stored_rows and not _provider_env_var_for(pid):
             # Fallback: provider is not a known API-key provider and not in
             # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or
             # newly-added OAuth provider (e.g. Anthropic connected via OAuth).
