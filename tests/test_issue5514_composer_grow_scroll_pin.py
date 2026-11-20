@@ -200,6 +200,10 @@ def test_programmatic_one_line_fill_refreshes_primary_button_without_height_writ
         };
         const msg = {
           value: 'prefilled', disabled: false, offsetHeight: 44, scrollHeight: 44,
+          attributes: {},
+          getAttribute(name) { return this.attributes[name] ?? null; },
+          setAttribute(name, value) { this.attributes[name] = String(value); },
+          removeAttribute(name) { delete this.attributes[name]; },
           style: { set height(_value) { heightWrites += 1; }, get height() { return '44px'; } },
         };
         const messages = { scrollTop: 0 };

@@ -38,9 +38,14 @@ except ImportError:  # pragma: no cover - exercised only where fcntl is unavaila
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _canonicalise_provider_id,
     _coerce_provider_cost_budget,
     _configured_model_ids,
+    _custom_provider_entries,
     _custom_provider_slug_from_name,
+    _is_native_custom_provider_key,
+    _resolve_configured_provider_id,
+    _resolve_custom_record_key,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
@@ -57,6 +62,7 @@ from api.plugin_providers import (
     effective_provider_env_var,
     is_plugin_model_provider,
     plugin_model_provider_ids,
+    plugin_model_provider_is_oauth,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,6 +225,10 @@ def _snapshot_payload(snapshot):
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
             "limit_window_seconds": _number(getattr(window, "limit_window_seconds", None)),
+            # Whether the Agent reported a length at all, so the parent can tell a missing
+            # length (eligible for a nominal one) from a rejected one (stays untimed).
+            "limit_window_seconds_reported": getattr(window, "limit_window_seconds", None) is not None,
+            "scope": str(getattr(window, "scope", "") or "").strip().lower() or "account",
         })
     payload = {
         "provider": str(getattr(snapshot, "provider", "") or ""),
@@ -1257,7 +1267,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
         provider_cfg = providers_cfg.get(provider_id, {})
         if isinstance(provider_cfg, dict):
             values.append(provider_cfg.get("api_key"))
-    custom_providers = cfg.get("custom_providers", [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
@@ -1377,6 +1387,8 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
     """
+    if provider_id.startswith("custom:"):
+        return _get_provider_api_key(provider_id) is not None
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1427,12 +1439,13 @@ def _provider_has_key(provider_id: str) -> bool:
             if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
                 return True
     # Check custom_providers
-    custom_providers = cfg.get("custom_providers", [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict):
                 if _custom_provider_name_matches(provider_id, cp.get("name")):
-                    if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
+                    key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
+                    if _provider_value_counts_as_api_key(provider_id, key):
                         return True
     return False
 
@@ -1440,6 +1453,33 @@ def _provider_has_key(provider_id: str) -> bool:
 def _get_provider_api_key(provider_id: str) -> str | None:
     """Return a configured provider API key without exposing it to callers."""
     provider_id = (provider_id or "").strip().lower()
+    if provider_id.startswith("custom:"):
+        from api.config import (
+            _select_custom_provider_record, _unique_custom_provider_entry,
+            _custom_provider_slug_key, _custom_provider_identity_disabled,
+        )
+
+        cfg = get_config()
+        if _custom_provider_identity_disabled(provider_id, cfg):
+            return None
+        entry, _source, _exact, _status = _select_custom_provider_record(
+            provider_id, _custom_provider_slug_key(provider_id), cfg,
+        )
+        if entry is None:
+            entry = _unique_custom_provider_entry(
+                _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
+            )
+        if entry is not None:
+            key = _resolve_custom_record_key(entry.get("api_key"), entry.get("key_env"), provider_id)
+            if key:
+                return key
+        # No presentation row does not rule out an explicitly owned pool key.
+        for pooled in _pool_entry_payloads(provider_id):
+            if not _pool_entry_currently_unusable(pooled):
+                key = str(pooled.get("runtime_api_key") or pooled.get("agent_key") or pooled.get("access_token") or "").strip()
+                if key:
+                    return key
+        return None
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1474,15 +1514,13 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if _provider_value_counts_as_api_key(provider_id, provider_key):
                 return provider_key
 
-    custom_providers = cfg.get("custom_providers", [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if not isinstance(cp, dict):
                 continue
             if _custom_provider_name_matches(provider_id, cp.get("name")):
-                cp_key = str(cp.get("api_key") or "").strip()
-                if cp_key.startswith("${") and cp_key.endswith("}"):
-                    return _thread_local_env_value(cp_key[2:-1]).strip() or None
+                cp_key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
@@ -1714,10 +1752,12 @@ def _sanitize_opencode_go_quota(payload: Any) -> dict[str, Any] | None:
     quota = payload.get("quota", payload.get("data", payload.get("usage", payload)))
     if not isinstance(quota, dict):
         return None
-    # OpenCode documents the rolling window as five hours.
-    specs = (("rolling", "5-hour"), ("weekly", "Weekly"), ("monthly", "Monthly"))
+    # OpenCode documents the rolling window as five hours. The durations let the composer chip's
+    # fixed quota_chip_window choices (shortest / longest) order these windows; the API omits them.
+    # Monthly is nominal (30 days): it only has to sort after weekly.
+    specs = (("rolling", "5-hour", 5 * 3600), ("weekly", "Weekly", 7 * 86400), ("monthly", "Monthly", 30 * 86400))
     windows = []
-    for key, label in specs:
+    for key, label, seconds in specs:
         raw = quota.get(key)
         if not isinstance(raw, dict):
             continue
@@ -1730,6 +1770,7 @@ def _sanitize_opencode_go_quota(payload: Any) -> dict[str, Any] | None:
             "remaining_percent": 100.0 - used_percent,
             "reset_at": _usage_api_reset_at(raw.get("resetsAt")),
             "detail": _usage_api_status_detail(raw.get("status")),
+            "limit_window_seconds": seconds,
         })
     if not windows:
         return None
@@ -1746,9 +1787,11 @@ def _sanitize_commandcode_quota(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("windowLimits"), dict):
         return None
     windows = []
-    for key, label in (("fiveHour", "5-hour"), ("weekly", "Weekly")):
+    # Durations as for OpenCode Go: the API names the windows but omits their length.
+    for key, label, seconds in (("fiveHour", "5-hour", 5 * 3600), ("weekly", "Weekly", 7 * 86400)):
         window = _quota_window(payload["windowLimits"].get(key), label)
         if window:
+            window["limit_window_seconds"] = seconds
             windows.append(window)
     if not windows:
         return None
@@ -1833,14 +1876,36 @@ def _isoformat_utc(value: Any) -> str | None:
     return text or None
 
 
+# Anthropic's usage API names its windows but reports no length, so the composer chip's
+# shortest / longest choices could not order them. These nominal lengths cover only the
+# Agent's own labels for Anthropic (agent/account_usage.py) and apply only when a window
+# reports no length at all, so a length the Agent reports later always wins, and a length it
+# reports but that is invalid stays untimed. Any other label stays untimed too and keeps the
+# chip's most-constrained fallback.
+_ANTHROPIC_NOMINAL_WINDOW_SECONDS = {
+    "Current session": 5 * 3600,
+    "Current week": 7 * 86400,
+    "Opus week": 7 * 86400,
+    "Sonnet week": 7 * 86400,
+}
+
+
 def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     if snapshot is None:
         return None
+    provider = str(getattr(snapshot, "provider", "") or "").strip().lower()
+    nominal_seconds = _ANTHROPIC_NOMINAL_WINDOW_SECONDS if provider == "anthropic" else {}
     windows: list[dict[str, Any]] = []
     for window in getattr(snapshot, "windows", ()) or ():
         label = str(getattr(window, "label", "") or "").strip()
         if not label:
             continue
+        raw_seconds = getattr(window, "limit_window_seconds", None)
+        limit_window_seconds = _quota_number(raw_seconds)
+        # Windows rebuilt from the probe worker carry whether a length was reported.
+        reported = getattr(window, "limit_window_seconds_reported", raw_seconds is not None)
+        if limit_window_seconds is None and not reported:
+            limit_window_seconds = nominal_seconds.get(label)
         used_percent = _quota_number(getattr(window, "used_percent", None))
         remaining_percent = None
         if used_percent is not None:
@@ -1851,7 +1916,10 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
             "remaining_percent": remaining_percent,
             "reset_at": _isoformat_utc(getattr(window, "reset_at", None)),
             "detail": str(getattr(window, "detail", "") or "").strip() or None,
-            "limit_window_seconds": _quota_number(getattr(window, "limit_window_seconds", None)),
+            "limit_window_seconds": limit_window_seconds,
+            # "model" windows cap one model family, not the account; older
+            # Agents carry no scope, which means account.
+            "scope": str(getattr(window, "scope", "") or "").strip().lower() or "account",
         })
 
     details = [
@@ -1943,6 +2011,8 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
             reset_at=window.get("reset_at"),
             detail=window.get("detail"),
             limit_window_seconds=window.get("limit_window_seconds"),
+            limit_window_seconds_reported=window.get("limit_window_seconds_reported") is True,
+            scope=window.get("scope"),
         )
         for window in (payload.get("windows") or ())
         if isinstance(window, dict)
@@ -2921,12 +2991,21 @@ def get_providers() -> dict[str, Any]:
     providers = []
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        known_ids.update(providers_cfg.keys())
+        known_ids.update(
+            key for key, value in providers_cfg.items()
+            if not _is_native_custom_provider_key(key)
+            or (isinstance(value, dict) and not value
+                and not str(key).strip().lower().startswith("custom:"))
+        )  # Empty bare settings remain keyless cards, never native authorities.
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
 
     for pid in sorted(known_ids):
+        # Named custom cards come from the read view below, never the raw
+        # providers map (which may contain disabled or shadowed records).
+        if pid.startswith("custom:"):
+            continue
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
         is_oauth = _provider_is_oauth(pid)
         has_key = _provider_has_key(pid)
@@ -2935,8 +3014,18 @@ def get_providers() -> dict[str, Any]:
             try:
                 from hermes_cli.auth import get_auth_status as _gas_plugin
                 _plugin_status = _gas_plugin(pid)
+                # OAuth-shaped plugins report configured=True once the profile is
+                # registered, even when nobody is signed in (#9105): only
+                # logged_in counts there, or needs_refresh (every token expired
+                # but the Agent can refresh one, so the account is usable).
+                # Other auth types keep configured.
                 if isinstance(_plugin_status, dict) and (
-                    _plugin_status.get("logged_in") or _plugin_status.get("configured")
+                    _plugin_status.get("logged_in")
+                    or _plugin_status.get("needs_refresh")
+                    or (
+                        _plugin_status.get("configured")
+                        and not plugin_model_provider_is_oauth(pid)
+                    )
                 ):
                     has_key = True
                     plugin_auth_status = _plugin_status
@@ -3169,7 +3258,7 @@ def get_providers() -> dict[str, Any]:
         })
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
-    custom_providers_cfg = cfg.get("custom_providers", [])
+    custom_providers_cfg = _custom_provider_entries(cfg)
     if isinstance(custom_providers_cfg, list):
         for cp in custom_providers_cfg:
             if not isinstance(cp, dict) or not cp.get("name"):
@@ -3196,13 +3285,7 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
-            # Check for env var reference (${VAR_NAME} pattern)
-            cp_api_key = str(cp.get("api_key") or "")
-            cp_has_key = bool(cp_api_key.strip())
-            # Replace env var reference to check actual value
-            if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
-                env_var = cp_api_key[2:-1]
-                cp_has_key = bool(_thread_local_env_value(env_var).strip())
+            cp_has_key = bool(_resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), cp_id))
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:
@@ -3213,7 +3296,7 @@ def get_providers() -> dict[str, Any]:
                     pass
             providers.append({
                 "id": cp_id,
-                "display_name": cp_name,
+                "display_name": cp.get("display_name") or cp_name,
                 "has_key": cp_has_key,
                 "configurable": False,  # custom providers managed via config.yaml
                 "is_custom": True,
@@ -3227,6 +3310,24 @@ def get_providers() -> dict[str, Any]:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         active_provider = model_cfg.get("provider")
+        # Bare custom stays the default lane, even beside custom:custom.
+        if active_provider and str(active_provider).strip().lower() != "custom":
+            # Existing card IDs own this display namespace (including plugins
+            # and empty bare settings); runtime aliases may use different IDs.
+            card_ids = {card["id"] for card in providers}
+            card_id = str(active_provider).strip().lower()
+            if card_id in card_ids:
+                active_provider = card_id
+            else:
+                # Match native identities BEFORE built-in underscore folding,
+                # using this request's snapshot rather than global cfg.
+                active_provider = _resolve_configured_provider_id(
+                    active_provider, cfg, resolve_alias=False,
+                )
+                card_id = _canonicalise_provider_id(active_provider)
+                if (card_id in card_ids
+                        and (card_id in _PROVIDER_DISPLAY or card_id in _PROVIDER_MODELS)):
+                    active_provider = card_id
 
     # Sort providers: active first, then custom:*, then has_key, then rest.
     def _provider_sort_key(p):
@@ -3357,8 +3458,22 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
 
     try:
         from api import yaml_compat as _yaml
+        from api.profiles import expand_profile_config, get_active_hermes_home, profile_env_binding
 
         changed = False
+
+        # config.yaml keeps raw ``${VAR}`` references (#8032): compare provider
+        # IDENTITY as the active profile resolves it, but delete from (and save)
+        # the raw document so no secret is expanded to disk. The binding is the
+        # active profile's own env — root's explicitly, never the live process
+        # env a named-profile worker may be mirroring into — and is computed
+        # BEFORE the non-reentrant _cfg_lock, so resolving the profile can't
+        # contend for it; inside, expansion is a pure thread-local read.
+        _home = get_active_hermes_home()
+        _binding = profile_env_binding(_home)
+
+        def _resolved(value):
+            return expand_profile_config(_home, value, env=_binding)
 
         with _cfg_lock:
             raw = config_path.read_text(encoding="utf-8")
@@ -3373,11 +3488,15 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                 if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
                     del provider_cfg["api_key"]
                     changed = True
+                    if not provider_cfg:
+                        del providers_cfg[provider_id]
+                        if not providers_cfg:
+                            del cfg["providers"]
 
             # 2. Clean model.api_key — only if this provider is the active one
             model_cfg = cfg.get("model", {})
             if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
-                active_provider = model_cfg.get("provider")
+                active_provider = _resolved(model_cfg.get("provider"))
                 if active_provider and str(active_provider).strip().lower() == provider_id.lower():
                     del model_cfg["api_key"]
                     changed = True
@@ -3387,7 +3506,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             if isinstance(custom_providers, list):
                 for cp in custom_providers:
                     if isinstance(cp, dict):
-                        if _custom_provider_name_matches(provider_id, cp.get("name")):
+                        if _custom_provider_name_matches(provider_id, _resolved(cp.get("name"))):
                             if cp.get("api_key"):
                                 del cp["api_key"]
                                 changed = True
