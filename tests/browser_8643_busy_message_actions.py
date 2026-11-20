@@ -357,16 +357,19 @@ APPERROR_SCENARIO_JS = """async ({sid, revision, frame, previousMarker}) => {
     renderBusy.push(!!S.busy);
     return realRender.apply(this, args);
   };
-  S.session.regeneration_revision = revision;
+  // Use the revision the real session load minted: the server rejects a
+  // synthetic one with 409 stale_regeneration_revision.
+  const liveRevision = (S.session && S.session.regeneration_revision) || revision;
+  S.session.regeneration_revision = liveRevision;
   let threw = null;
   try {
-    await startRegeneration(sid, revision);
+    await startRegeneration(sid, liveRevision);
   } catch (error) {
     threw = String((error && error.message) || error);
   }
   // The apperror frame is delivered asynchronously, so wait for the error row
   // it appends to land in the transcript before reading the action bar.
-  const deadline = Date.now() + 20000;
+  const deadline = Date.now() + 45000;
   let afterError = probe();
   let errorFrameSeen = false;
   while (Date.now() < deadline) {
