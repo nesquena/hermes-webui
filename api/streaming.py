@@ -13616,6 +13616,9 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
         )
 
 
+_NO_RELEASE_FIELD = object()
+
+
 def _session_db_is_open(session_db) -> bool:
     """Recognize the lifecycle of legacy SessionDB and newer Agent handles.
 
@@ -13629,7 +13632,17 @@ def _session_db_is_open(session_db) -> bool:
     if session_db is None:
         return False
     if isinstance(getattr(session_db, "_closed", None), bool):
-        return not session_db._closed and getattr(session_db, "_store", None) is not None
+        store = getattr(session_db, "_store", None)
+        if session_db._closed or store is None:
+            return False
+        # A shim whose own Persistence handle was released (``_release``
+        # cleared) fails every call: treat it as closed. A store without that
+        # field keeps the answer above.
+        try:
+            release = getattr(store, "_release", _NO_RELEASE_FIELD)
+        except Exception:
+            return True
+        return release is _NO_RELEASE_FIELD or callable(release)
     if hasattr(session_db, "_release"):
         return callable(session_db._release)
     return getattr(session_db, "_conn", None) is not None

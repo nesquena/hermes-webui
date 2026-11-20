@@ -160,6 +160,28 @@ def test_missing_same_and_unknown_handles():
     assert agent.persistence is new._store
 
 
+def test_shim_whose_store_was_released_is_closed():
+    shim = SessionDB()
+    assert streaming._session_db_is_open(shim)
+    shim._store.close()  # released underneath; the shim itself is not closed
+    assert shim._closed is False and shim._store is not None
+    assert not streaming._session_db_is_open(shim)
+    unknown = SessionDB()
+    unknown._store = object()  # a store shape without _release keeps the answer
+    assert streaming._session_db_is_open(unknown)
+
+
+def test_cached_agent_replaces_shim_whose_store_was_released():
+    old, new = SessionDB(), SessionDB()
+    agent = agent_for(old)
+    old._store.close()
+    assert streaming._adopt_session_db_for_cached_agent(agent, new) is new
+    assert agent._session_db is new and agent.persistence is new._store
+    assert agent.context_compressor.session_db is new
+    assert agent.context_compressor.persistence is new._store
+    assert old.close_calls == 1 and new.close_calls == 0
+
+
 @pytest.mark.parametrize("accepts_session_db", [False, True])
 def test_cached_reuse_keeps_constructor_kwargs_on_adopted_handle(monkeypatch, accepts_session_db):
     # Execute the unmodified production reuse statement, not a handwritten
@@ -227,6 +249,23 @@ def test_real_pending_shim_close_does_not_release_inflight_consumer(tmp_path):
         new.close()
     with pytest.raises(RuntimeError, match="persistence handle used after close"):
         _ = retained.coordination
+
+
+def test_real_shim_with_released_store_is_closed(tmp_path):
+    pytest.importorskip("persistence_assembly")
+    import hermes_state
+    if not hasattr(hermes_state, "_SessionDB"):
+        pytest.skip("Agent does not provide the new SessionDB shim")
+    shim = hermes_state.SessionDB(db_path=tmp_path / "state.db")
+    try:
+        assert streaming._session_db_is_open(shim)
+        shim._store.close()
+        assert shim._closed is False and shim._store is not None
+        with pytest.raises(RuntimeError, match="persistence handle used after close"):
+            _ = shim._store.coordination
+        assert not streaming._session_db_is_open(shim)
+    finally:
+        shim.close()
 
 
 @pytest.mark.parametrize("kind", ["direct", "shim"])
