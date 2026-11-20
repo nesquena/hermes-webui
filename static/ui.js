@@ -12484,7 +12484,15 @@ function setBusy(v){
           ||(Array.isArray(S.pendingFiles)&&S.pendingFiles.length))
     );
     const _sendAlreadyInProgress=typeof _sendInProgress!=='undefined'&&_sendInProgress;
-    const next=sid&&_isViewedSid&&!_composerHasUnsentContent&&!_sendAlreadyInProgress&&_queueDrainPendingSid!==sid
+    // A profile switch freezes the composer while it saves the source draft and
+    // rewrites the profile cookie. Draining here would let send() keep the
+    // source session id but read the destination profile/workspace when it
+    // builds the request, which the server rejects as a profile mismatch. Keep
+    // the queued turn queued; the switch resumes the drain after it unlocks,
+    // for whichever session is visible then (greptile P1, static/ui.js:12559).
+    const _profileSwitchLocked=_queueDrainBlockedByProfileSwitch();
+    const next=sid&&_isViewedSid&&!_composerHasUnsentContent&&!_sendAlreadyInProgress
+      &&!_profileSwitchLocked&&_queueDrainPendingSid!==sid
       ?shiftQueuedSessionMessage(sid):null;
     if(next){
       _queueDrainPendingSid=sid;
@@ -12513,6 +12521,14 @@ function setBusy(v){
         // clears. Requeue at the front instead of letting send() append this
         // item behind newer queued turns through its concurrent-send guard.
         if(typeof _sendInProgress!=='undefined'&&_sendInProgress){
+          _getSessionQueue(sid,true).unshift(next);
+          _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+          updateQueueBadge(sid);return;
+        }
+        // A profile switch can take the composer lock during the settle window
+        // too. Same rule as the guard above: requeue instead of draining into a
+        // transition that is rewriting the profile cookie.
+        if(_queueDrainBlockedByProfileSwitch()){
           _getSessionQueue(sid,true).unshift(next);
           _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
           updateQueueBadge(sid);return;
@@ -12553,10 +12569,22 @@ function setBusy(v){
 }
 
 let _queueDrainPendingSid=null;
+// The composer's 'profile-switch' lock is set by panels.js for the whole
+// transition and released in its finally. While it is held the profile cookie
+// is about to change (or has just changed), so a drained turn would keep its
+// source session id but read the destination profile/workspace when building
+// /api/chat/start — the server rejects that as a profile mismatch. Treat the
+// lock as "queue stays paused"; the switch resumes the drain after unlocking.
+function _queueDrainBlockedByProfileSwitch(){
+  const msg=$('msg');
+  return !!(msg&&msg._composerDisabledReasons
+    &&msg._composerDisabledReasons.has('profile-switch'));
+}
 function _resumeQueuedSessionMessageIfComposerEmpty(){
   if(S.busy
     ||(typeof _sendInProgress!=='undefined'&&_sendInProgress)
-    ||(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight))return;
+    ||(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight)
+    ||_queueDrainBlockedByProfileSwitch())return;
   const sid=S.session&&S.session.session_id;
   if(!sid||_queueDrainPendingSid===sid)return;
   if(typeof _composerHasContent==='function'

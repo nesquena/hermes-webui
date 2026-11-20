@@ -8380,6 +8380,14 @@ async function switchToProfile(name) {
     if(_switchGen===_profileSwitchGeneration){
       setProfileSwitchComposerPending(false);
       if(typeof updateSendBtn==='function')updateSendBtn();
+      // The composer lock was also pausing the queued-turn drain: a queued
+      // prompt must not start while the source draft save or the profile POST
+      // is pending. Now that the lock is released, resume for whatever session
+      // is visible (a successful switch owns a fresh session; a rolled-back
+      // one restores the source), so its own queue can drain again.
+      if(typeof _resumeQueuedSessionMessageIfComposerEmpty==='function'){
+        _resumeQueuedSessionMessageIfComposerEmpty();
+      }
       // Only hand focus back when nothing else claimed it meanwhile: freezing the
       // composer blurred #msg (activeElement falls back to body/null), but a user
       // who moved to another input during the switch must keep that focus.
