@@ -382,6 +382,19 @@ def test_diff_stats_counts_dash_prefixed_hunk_content_but_not_file_headers():
     assert deletions == 1
 
 
+def test_git_diff_counts_dash_prefixed_lines_in_untracked_file(tmp_path):
+    from api.workspace_git import git_diff
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    (repo / "notes.md").write_text("---\ntitle: x\n---\n++i;\n", encoding="utf-8")
+
+    diff = git_diff(repo, "notes.md", "unstaged")
+    assert diff["additions"] == 4
+    assert diff["deletions"] == 0
+
+
 def test_git_diff_skips_repo_local_textconv(tmp_path):
     import os
     import sys
