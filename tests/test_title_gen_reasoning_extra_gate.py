@@ -674,6 +674,7 @@ class TestAuxReasoningExtraRouteContract:
     @pytest.mark.parametrize(('candidate_provider', 'candidate_url'), (
         ('openrouter', ''),
         ('custom', 'https://openrouter.ai/api/v1'),
+        ('custom', 'https://openrouter.ai./api/v1'),
     ))
     def test_openrouter_candidate_keeps_an_openrouter_format_title_model(
         self, monkeypatch, candidate_provider, candidate_url,
@@ -1050,6 +1051,12 @@ class TestResolvedAutoTitleTransportAndFallback:
              "vendor/title-model"),
             ("vendor/title-model", "fallback-model", "https://openrouter.ai/api/v1",
              "vendor/title-model"),
+            # The Agent's host matcher ignores a hostname's final dot, and
+            # does not match a lookalike host that only starts with it.
+            ("vendor/title-model", "fallback-model", "https://openrouter.ai./api/v1",
+             "vendor/title-model"),
+            ("vendor/title-model", "fallback-model", "https://openrouter.ai.example/v1",
+             "fallback-model"),
         ),
     )
     def test_selected_fallback_takes_the_title_model_as_the_agent_does(

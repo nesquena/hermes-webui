@@ -6863,9 +6863,10 @@ def _aux_title_main_model_config() -> dict:
 
 
 def _is_openrouter_url(url) -> bool:
+    # Match the Agent's base_url_host_matches(): a final dot names the same host.
     try:
         from urllib.parse import urlsplit
-        host = (urlsplit(str(url or '').strip()).hostname or '').lower()
+        host = (urlsplit(str(url or '').strip()).hostname or '').lower().rstrip('.')
     except Exception:
         return False
     return host == 'openrouter.ai' or host.endswith('.openrouter.ai')
