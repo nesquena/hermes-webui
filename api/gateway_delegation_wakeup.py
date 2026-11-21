@@ -177,10 +177,20 @@ class ClearedSinceReserve(Exception):
 def _cutoff(webui_sid: str) -> float:
     """Time of the session's last clear/truncation (0 when never): older delivery rows are retired."""
     from api.config import _get_session_agent_lock
-    from api.models import get_session
+    from api.models import SessionFileNamesOtherSession, get_session
 
     with _get_session_agent_lock(webui_sid):
-        return float(getattr(get_session(webui_sid), "delegation_cutoff_ts", None) or 0.0)
+        try:
+            session = get_session(webui_sid)
+        except SessionFileNamesOtherSession:
+            # #9041: the sidecar now holds another session's body, so this
+            # session's owner cannot be verified. The pre-reserve reader
+            # (_live_webui_sid) already reports this as OwnershipUnknown; the
+            # readers that run after the reserve must agree, or the poll logs a
+            # WARNING on every sweep and the reserved rows stay leased for the
+            # whole reservation TTL.
+            raise OwnershipUnknown(webui_sid) from None
+        return float(getattr(session, "delegation_cutoff_ts", None) or 0.0)
 
 
 def _row_timestamps(db_path: Path, ids) -> dict:
@@ -207,6 +217,7 @@ def _stale_ids(db_path: Path, rows: list[dict], cutoff: float) -> list:
 
 def _start_wakeup(webui_sid: str, on_admitted) -> bool:
     """True once the wake turn is persisted as the session's pending turn."""
+    from api.models import SessionFileNamesOtherSession
     from api.routes import start_session_turn
 
     try:
@@ -214,6 +225,13 @@ def _start_wakeup(webui_sid: str, on_admitted) -> bool:
                                   on_admitted=on_admitted) or {}
     except ClearedSinceReserve:
         return False
+    except SessionFileNamesOtherSession:
+        # #9041: the session's sidecar was swapped for another session's body
+        # between the reserve and the wake. The owner cannot be verified, so
+        # this is the same condition the pre-reserve reader reports as
+        # OwnershipUnknown -- not a wake failure worth a WARNING on every
+        # sweep. Let the caller release the reservation and retry quietly.
+        raise OwnershipUnknown(webui_sid) from None
     except Exception:
         logger.warning("gateway delegation wakeup raised for %s", webui_sid, exc_info=True)
         return False
@@ -252,10 +270,18 @@ def _record_outcome(res: dict, accepted: bool) -> None:
 
 def _held_reservation(webui_sid: str, stream_id) -> dict | None:
     from api.config import _get_session_agent_lock
-    from api.models import get_session
+    from api.models import SessionFileNamesOtherSession, get_session
 
     with _get_session_agent_lock(webui_sid):
-        res = getattr(get_session(webui_sid), "delegation_reservation", None)
+        try:
+            session = get_session(webui_sid)
+        except SessionFileNamesOtherSession:
+            # #9041: same as _cutoff -- the sidecar names another session, so
+            # the lease holder cannot be verified. Reporting OwnershipUnknown
+            # keeps the poll quiet and lets the caller release the lease
+            # instead of waiting out the reservation TTL.
+            raise OwnershipUnknown(webui_sid) from None
+        res = getattr(session, "delegation_reservation", None)
     if not isinstance(res, dict) or (stream_id is not None and res.get("stream_id") != stream_id):
         return None
     return res
@@ -355,36 +381,46 @@ def _claim_and_wake(db_path: Path, state_sid: str, webui_sid: str) -> int:
     try:
         cutoff = _cutoff(webui_sid)
         reserved = db.reserve_caller_history_deliveries(state_sid, RESERVATION_OWNER, RESERVATION_TTL_S)
-        stale = set(_stale_ids(db_path, reserved, cutoff))  # cleared away since: retire, never publish
-        rows = [r for r in reserved if isinstance(r.get("content"), str) and r["content"].strip()
-                and r["id"] not in stale]
-        blank = [r["id"] for r in reserved if r not in rows]
-        if blank:  # nothing to deliver: settle them as the Gateway fold would
-            db.commit_caller_history_deliveries(blank, RESERVATION_OWNER)
-        if not rows:
-            return 0
-        lease = {"db": str(db_path), "sid": state_sid, "token": rows[0]["reservation_token"],
-                 "owner": RESERVATION_OWNER}
+        try:
+            stale = set(_stale_ids(db_path, reserved, cutoff))  # cleared away since: retire, never publish
+            rows = [r for r in reserved if isinstance(r.get("content"), str) and r["content"].strip()
+                    and r["id"] not in stale]
+            blank = [r["id"] for r in reserved if r not in rows]
+            if blank:  # nothing to deliver: settle them as the Gateway fold would
+                db.commit_caller_history_deliveries(blank, RESERVATION_OWNER)
+            if not rows:
+                return 0
+            lease = {"db": str(db_path), "sid": state_sid, "token": rows[0]["reservation_token"],
+                     "owner": RESERVATION_OWNER}
+            def on_admitted(s, stream_id):
+                # Under the session lock: a clear since the reserve must not publish pre-clear results.
+                if float(getattr(s, "delegation_cutoff_ts", None) or 0.0) != cutoff:
+                    raise ClearedSinceReserve(webui_sid)
+                _publish_results(s, rows, {**lease, "stream_id": stream_id})
 
-        def on_admitted(s, stream_id):
-            # Under the session lock: a clear since the reserve must not publish pre-clear results.
-            if float(getattr(s, "delegation_cutoff_ts", None) or 0.0) != cutoff:
-                raise ClearedSinceReserve(webui_sid)
-            _publish_results(s, rows, {**lease, "stream_id": stream_id})
-
-        if _start_wakeup(webui_sid, on_admitted):
-            return 1  # the wake turn's worker settles the lease and the back-off
-        # Not admitted: nothing was published (or the launch rollback removed it).
-        now_cutoff = _cutoff(webui_sid)
-        if now_cutoff != cutoff:
-            retired = _stale_ids(db_path, rows, now_cutoff)
-            if retired:
-                db.commit_caller_history_deliveries(retired, RESERVATION_OWNER)
+            if _start_wakeup(webui_sid, on_admitted):
+                return 1  # the wake turn's worker settles the lease and the back-off
+            # Not admitted: nothing was published (or the launch rollback removed it).
+            now_cutoff = _cutoff(webui_sid)
+            if now_cutoff != cutoff:
+                retired = _stale_ids(db_path, rows, now_cutoff)
+                if retired:
+                    db.commit_caller_history_deliveries(retired, RESERVATION_OWNER)
+                db.release_caller_history_deliveries(reservation_token=lease["token"], owner=RESERVATION_OWNER)
+                return 0  # cleared, not refused: no back-off; later rows go out on the next poll
             db.release_caller_history_deliveries(reservation_token=lease["token"], owner=RESERVATION_OWNER)
-            return 0  # cleared, not refused: no back-off; later rows go out on the next poll
-        db.release_caller_history_deliveries(reservation_token=lease["token"], owner=RESERVATION_OWNER)
-        _record_outcome(lease, accepted=False)
-        return 0
+            _record_outcome(lease, accepted=False)
+            return 0
+        except OwnershipUnknown:
+            # #9041: the session's sidecar was swapped for another session's
+            # body after the rows were reserved. Nothing may be delivered to
+            # that conversation, so the reservation is released instead of being
+            # parked until RESERVATION_TTL_S -- the rows stay deliverable once
+            # the file is repaired.
+            token = next((r.get("reservation_token") for r in reserved if r.get("reservation_token")), None)
+            if token:
+                db.release_caller_history_deliveries(reservation_token=token, owner=RESERVATION_OWNER)
+            raise
     finally:
         db.close()
 
