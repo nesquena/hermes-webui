@@ -32,6 +32,7 @@ import pytest
 
 import api.gateway_delegation_wakeup as gdw
 import api.models as models
+from api.routes import start_session_turn as _REAL_START_SESSION_TURN
 
 from tests.test_gateway_delegation_wakeup import FakeDB, env  # noqa: F401
 
@@ -139,3 +140,25 @@ def test_held_reservation_treats_a_swapped_sidecar_as_ownership_unknown(env, tmp
 
     with pytest.raises(gdw.OwnershipUnknown):
         gdw._held_reservation("sid1", None)
+
+
+def test_real_start_releases_swapped_sidecar_without_warning(env, tmp_path, monkeypatch, caplog):  # noqa: F811 - shared pytest fixture
+    from api import routes
+
+    monkeypatch.setattr(routes, "start_session_turn", _REAL_START_SESSION_TURN)
+    monkeypatch.setattr(routes, "run_admission_closed_response", lambda: None)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_: None)
+    real_cutoff = gdw._cutoff
+
+    def cutoff_and_swap(sid):
+        cutoff = real_cutoff(sid)
+        _swap_body_to_another_session(tmp_path / "sessions", sid, "other-test-session")
+        return cutoff
+
+    monkeypatch.setattr(gdw, "_cutoff", cutoff_and_swap)
+    FakeDB.add("sid1", "deleg_swap_during_start")
+    with caplog.at_level(logging.WARNING, logger=gdw.logger.name):
+        assert gdw.poll_once(0) == 0
+    assert not [r for r in caplog.records if r.name == gdw.logger.name]
+    assert FakeDB.rows
+    assert all(not r.get("reservation_token") and not r["consumed"] for r in FakeDB.rows.values())

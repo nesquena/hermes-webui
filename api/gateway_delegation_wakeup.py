@@ -236,6 +236,8 @@ def _start_wakeup(webui_sid: str, on_admitted) -> bool:
         logger.warning("gateway delegation wakeup raised for %s", webui_sid, exc_info=True)
         return False
     status = int(resp.get("_status", 200) or 200)
+    if status == 404 and resp.get("reason") == "session_owner_unknown":
+        raise OwnershipUnknown(webui_sid)
     if status >= 400 and status != 409:
         logger.warning("gateway delegation wakeup failed for %s: %s %r", webui_sid, status, resp.get("error"))
     return status < 400 and bool(resp.get("stream_id"))
