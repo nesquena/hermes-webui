@@ -139,9 +139,13 @@ def test_model_resolution_refuses_the_turn(monkeypatch):
     # an arbitrary name in place of x_ai, as the issue notes
     ("custom:foo", {"custom:foo": _record_a(), "myproxy": {"name": "foo", **_record_b()}},
      ["custom:foo", "myproxy"]),
+    # the aliasing record ALSO declares an explicit provider_key for the same
+    # identity: that is still a second claimant beside the exact keyed record
+    ("custom:x_ai", {"custom:x_ai": _record_a(), "myproxy": {"name": "x_ai", "provider_key": "custom:x_ai", **_record_b()}},
+     ["custom:x_ai", "myproxy"]),
 ], ids=[
     "keyed-vs-display-name", "case-folded-display-name", "custom-prefixed-display-name",
-    "display-name-vs-display-name", "arbitrary-name",
+    "display-name-vs-display-name", "arbitrary-name", "explicit-provider-key-claimant",
 ])
 def test_two_records_claiming_one_alias_are_refused(monkeypatch, pid, providers, claimants):
     cfg = _config(pid, providers)
@@ -250,3 +254,58 @@ def test_a_record_naming_a_different_slug_is_not_a_claimant(monkeypatch):
     _bind(monkeypatch, cfg)
     record, *_rest = _select("custom:x_ai", cfg)
     assert (record["base_url"], record["api_key"]) == (URL_A, KEY_A)
+
+
+# ── Greptile: ONE record whose mapping key differs from its provider_key ──────
+
+
+def test_sole_record_with_explicit_provider_key_is_not_counted_twice(monkeypatch):
+    """#9255 finding: ``providers: {myproxy: {name: foo, provider_key:
+    'custom:foo', ...}}`` is ONE record. The loop tracked the selected
+    record's *provider_key* instead of its actual mapping key, so the
+    provider_key ``custom:foo`` collided with the SELECTED record's own
+    identity and raised ``AmbiguousCustomProviderError`` for a single record.
+
+    Selection must resolve ``custom:foo`` to this record — preserving the
+    provider_key (endpoint, credential, pool) — not count it twice.
+    """
+    cfg = _config("custom:foo", {
+        "myproxy": {"name": "foo", "provider_key": "custom:foo",
+                    "models": ["synthetic-model"], **_record_a()},
+    })
+    _bind(monkeypatch, cfg)
+    record, source, is_exact, status = _select("custom:foo", cfg)
+    # The record's own config key is NOT the identity it declares. The
+    # selected record must keep its own provider_key's endpoint and credential.
+    assert (record["base_url"], record["api_key"]) == (URL_A, KEY_A)
+    assert record.get("provider_key") == "custom:foo"
+    assert record.get("models") == ["synthetic-model"]
+    assert (source, is_exact, status) == ("providers", False, config.CUSTOM_SELECTION_KEYED)
+    # The full public view resolves the same single authority: the model's
+    # provider stays on this record rather than being refused as ambiguous.
+    # The resolver keys the model to the record's ACTUAL mapping key
+    # (``custom:myproxy``), while the record's own declared provider_key
+    # (``custom:foo``) is preserved for the endpoint/credential/pool — the
+    # config-key/provided-key split is exactly what #9255 was about.
+    model, provider, _base_url = config.resolve_model_provider("synthetic-model")
+    assert (model, provider) == ("synthetic-model", "custom:myproxy")
+    api_key, resolved_url = config.resolve_custom_provider_connection("custom:foo")
+    assert (api_key, resolved_url) == (KEY_A, URL_A)
+
+
+def test_disjoint_records_with_explicit_provider_keys_still_route_independently(monkeypatch):
+    """Control: two records with distinct explicit provider_keys keep their
+    own provider_key, endpoint and credential — neither is suppressed."""
+    cfg = _config("custom:foo", {
+        "myproxy": {"name": "foo", "provider_key": "custom:foo", **_record_a()},
+        "otherproxy": {"name": "bar", "provider_key": "custom:bar", **_record_b()},
+    })
+    _bind(monkeypatch, cfg)
+    record, source, is_exact, status = _select("custom:foo", cfg)
+    assert (record["base_url"], record["api_key"]) == (URL_A, KEY_A)
+    assert record.get("provider_key") == "custom:foo"
+    assert (source, is_exact, status) == ("providers", False, config.CUSTOM_SELECTION_KEYED)
+    other, _source2, _exact2, status2 = _select("custom:bar", cfg)
+    assert (other["base_url"], other["api_key"]) == (URL_B, KEY_B)
+    assert other.get("provider_key") == "custom:bar"
+    assert status2 == config.CUSTOM_SELECTION_KEYED

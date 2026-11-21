@@ -4758,17 +4758,29 @@ def _raise_on_native_alias_collision(
     if not isinstance(providers_cfg, dict):
         return
     own_key = str(selected.get("provider_key") or "").strip()
-    own_lower = own_key.lower()
     claimants = [own_key or pid]
+    selected_mapping_key = ""
     for key, record in providers_cfg.items():
         key_text = str(key or "").strip()
-        if not key_text or key_text.lower() in {pid.lower(), "custom", own_lower}:
+        if not key_text or key_text.lower() in {pid.lower(), "custom"}:
             continue
         if not _is_native_custom_provider_key(key_text):
             continue  # built-in spelling: #8690's guard owns that collision
         if not isinstance(record, dict) or not record:
             continue
         if not _raw_provider_record_enabled(record):
+            continue
+        normalized = _normalized_raw_provider_record(record, key_text)
+        # The loop is scanning the same ``providers:`` mapping the SELECTED
+        # record was lifted from. Compare each candidate with ``selected`` at
+        # the same spelling the caller uses: when the candidate IS the selected
+        # record (e.g. keyed ``myproxy`` whose own ``provider_key`` is
+        # ``custom:foo``), it must not be counted a second time — identical
+        # normalized records are the SAME record, never a second claimant.
+        if normalized == selected:
+            # The record's ACTUAL mapping key, which can differ from the
+            # ``provider_key`` it declares. Use it when naming the record.
+            selected_mapping_key = key_text
             continue
         # The claimant must NAME the identity itself: only a record whose own
         # display name claims this alias counts. A record that claims through
@@ -4779,8 +4791,12 @@ def _raise_on_native_alias_collision(
             continue
         if pid not in _custom_provider_alias_set(name, "") and _custom_provider_slug_key(name) != slug:
             continue
-        if _custom_record_owns_connection(_normalized_raw_provider_record(record, key_text), pid):
+        if _custom_record_owns_connection(normalized, pid):
             claimants.append(key_text)
+    if selected_mapping_key:
+        # Name the selected record by its ACTUAL mapping key, not by the
+        # provider_key it may declare (they can differ — #9255).
+        claimants[0] = selected_mapping_key
     if len(claimants) >= 2:
         raise AmbiguousCustomProviderError(
             f"Custom provider records {claimants!r} under providers: all name the provider "
