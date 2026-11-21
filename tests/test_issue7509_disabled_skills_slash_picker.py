@@ -48,6 +48,7 @@ def _run_commands_js(script_body: str, skills: list) -> dict:
         f"""
         const vm = require('vm');
         let skillsPayload = {json.dumps(skills)};
+        let runtimeScope = 'profile';
         // In-flight control: __holdSkills(true) parks every /api/skills reply until
         // __releaseHeldSkills(), so a test can land a profile switch mid-request.
         let skillRequestCount = 0;
@@ -64,6 +65,7 @@ def _run_commands_js(script_body: str, skills: list) -> dict:
               // Snapshot at request time: a reply produced for the outgoing profile
               // must not be able to read a payload that only exists after the switch.
               const snapshot = skillsPayload;
+              const scopeSnapshot = runtimeScope;
               if (holdSkills) {{
                 await new Promise((resolve) => {{ heldSkills.push(resolve); }});
               }}
@@ -71,7 +73,7 @@ def _run_commands_js(script_body: str, skills: list) -> dict:
               // next /api/skills reject, so a test can prove the loader recovers
               // instead of latching an empty cache as "ready".
               if (failSkillsOnce) {{ failSkillsOnce = false; throw new Error('simulated /api/skills failure'); }}
-              return {{ skills: snapshot }};
+              return {{ skills: snapshot, runtime_scope: scopeSnapshot }};
             }}
             if (path === '/api/commands') return {{ commands: [] }};
             if (path === '/api/commands/bundles') return {{ bundles: [] }};
@@ -80,6 +82,7 @@ def _run_commands_js(script_body: str, skills: list) -> dict:
           // Test-only knob, same idiom as the other commands.js harnesses: lets the
           // in-context script swap the mocked /api/skills payload mid-run.
           __setSkills: (next) => {{ skillsPayload = next; }},
+          __setScope: (next) => {{ runtimeScope = next; }},
           __holdSkills: (on) => {{ holdSkills = !!on; }},
           __releaseHeldSkills: () => {{ heldSkills.splice(0).forEach((resolve) => resolve()); }},
           __failSkillsOnce: () => {{ failSkillsOnce = true; }},
@@ -325,6 +328,31 @@ def test_both_profile_switch_paths_drop_the_slash_skill_caches():
             "previous profile's /api/skills payload keeps hiding the new profile's skills"
         )
         assert invalidate_call > switch_call, f"{label}: caches dropped before the switch request"
+
+
+def test_unavailable_skill_loaders_use_partial_results_then_retry():
+    result = _run_commands_js(
+        """
+        __setScope('unavailable');
+        const partialCommands = (await loadSkillCommands()).map(s => s.name);
+        const partialArgs = await _loadSlashSkillSubArgs();
+        const partialReady = _skillCommandCacheReady;
+        __setScope('profile');
+        __setSkills([{name:'local-one'}, {name:'external-one'}]);
+        const fullCommands = (await loadSkillCommands()).map(s => s.name);
+        const fullArgs = await _loadSlashSkillSubArgs();
+        await loadSkillCommands();
+        await _loadSlashSkillSubArgs();
+        return {partialCommands, partialArgs, partialReady, fullCommands, fullArgs,
+          ready:_skillCommandCacheReady, requests:__skillRequests()};
+        """,
+        [{'name': 'local-one'}],
+    )
+    assert result['partialCommands'] == result['partialArgs'] == ['local-one']
+    assert result['partialReady'] is False
+    assert result['fullCommands'] == result['fullArgs'] == ['external-one', 'local-one']
+    assert result['ready'] is True
+    assert result['requests'] == 4
 
 
 def test_transient_skills_failure_does_not_wedge_the_picker():
