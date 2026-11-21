@@ -164,4 +164,14 @@ def test_fixture_subprocess_is_not_guarded():
 
 def test_restart_callers_remain_complete():
     source = (REPO / "api" / "updates.py").read_text(encoding="utf-8")
+    # 3 unguarded = apply_update / apply_force_update / the agent-update
+    # gateway path. Their own update holds the Agent transaction, so the
+    # successful-update restart keeps its semantics. 1 guarded =
+    # restart_stale_runtime (#7934): its admission ran before the delay and
+    # an external Agent updater takes no process-local lock, so it arms the
+    # delayed worker's transaction guard. A new caller must ship the same
+    # guard chain: admission check, update-state check, restart-blocker
+    # snapshot, _apply_lock acquisition, and a post-lock re-check before
+    # scheduling.
     assert source.count("_schedule_restart()") == 3
+    assert source.count("_schedule_restart(transaction_guard=True)") == 1

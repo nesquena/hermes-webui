@@ -402,12 +402,28 @@ budget, not an end-to-end chat-request timeout; chat admission can check twice.
 | Value | Observation |
 | --- | --- |
 | `active` | A recent Agent update marker names a live PID. |
+| `stale_live` | A live marker owner is older than the 20-minute diagnostic ceiling; the update is still running. |
+| `held` | The loaded checkout's kernel lock is still held by an updater child after the marker owner died. |
 | `incomplete` | An Agent recovery marker exists in the loaded checkout or configured venv installation. |
-| `stale` | The update marker names a dead PID or is older than the diagnostic age limit. |
-| `unknown` | Marker contents, PID liveness, or recovery-marker presence cannot be read or classified. |
+| `stale` | The update marker names a dead PID and no surviving delegate. |
+| `unknown` | Marker contents, PID liveness, checkout-lock custody, or recovery-marker presence cannot be read or classified. |
 | `unverified` | No active or recovery marker was found. Update completion and environment health remain unverified. |
 
 These are observations, not success receipts. Hermes Agent removes `.hermes-update-in-progress` on failed and interrupted exits too. A missing or stale marker, or a readable Git revision, does not prove a completed update or a healthy environment. WebUI only reads these markers; it does not remove or repair them.
+
+**Operator-initiated recovery.** Native clients that cannot reach a shell can
+call `POST /api/runtime/restart` on the running backend to perform the same
+manual restart. The route is authenticated like the other POST endpoints,
+refuses a runtime that is already current, and refuses while
+`agent_update_state` is `active`, `stale_live`, `incomplete`, `unknown`, or
+`held`; active chat work returns the shared restart-blocked response. A
+scheduled restart answers `200` with `{"ok": true, "restart_scheduled": true}`
+and replaces the backend within a few seconds. Runtime-state refusals use
+`409` with the typed `agent_runtime_stale` body; the restart-blocked response
+keeps the `200` convention of `/api/updates/apply`. Stale-runtime responses
+advertise the route with `restart_available: true` so clients only offer a
+Restart action where it exists (older servers omit the field). The route never
+removes or repairs Agent markers itself.
 
 **Fix.** Check the Agent updater's outcome and resolve any failed or incomplete Agent update first. Once the Agent checkout and environment are healthy and no updater is running, restart WebUI using the same launch method that started it:
 
