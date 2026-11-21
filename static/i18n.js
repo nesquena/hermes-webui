@@ -684,7 +684,24 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Local changes detected',
     update_force: 'Force update',
+    // #7679 round 2: shown when the destructive grant is retired between the
+    // confirm and the POST (a newer check, a channel change, an Apply retry).
+    // Without this key the real locale runtime rendered the raw key name to the
+    // user, so the message read "force_no_longer_applicable".
+    force_no_longer_applicable: 'Force update is no longer applicable — the update state changed. Please check again.',
+    // #7679 (greptile P2, 2026-11-18): the backend answered the destructive
+    // Force with a no-op ({ok:true,up_to_date:true}) — nothing needed
+    // resetting, so the install is already clean. The branch used to send
+    // this English straight to showToast(), which left every other locale
+    // showing English inside a translated panel. New copy lives only in the
+    // ``en`` locale and rides the existing t() fallback.
+    update_force_no_op: 'Already up to date — nothing to reset.',
+    // #7679: shown when a recovery control (Force / Clear lock) survives a
+    // check that carried no update status of its own. The banner must stay
+    // visible so the control inside it stays reachable.
+    update_recovery_pending: 'A recovery action is available above.',
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -2673,7 +2690,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Modifiche locali rilevate',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -4597,7 +4616,9 @@ const LOCALES = {
     update_later: '後で',
     update_now: '今すぐ更新',
     update_updating: '更新中…',
+    update_dirty_local_changes: 'ローカルの変更が検出されました',
     update_force: '強制更新',
+    force_no_longer_applicable: '強制更新は適用できなくなりました — 更新状態が変わりました。再度確認してください。',
     update_clear_lock_retry: 'ロックを解除して更新を再試行',
     update_hard_refresh_now: '今すぐハードリフレッシュ',
     update_no_target: '更新対象が選択されていません。更新ステータスを再取得してから再試行してください。',
@@ -7313,7 +7334,9 @@ const LOCALES = {
     update_later: 'Позже',
     update_now: 'Обновить сейчас',
     update_updating: 'Обновление…',
+    update_dirty_local_changes: 'Обнаружены локальные изменения',
     update_force: 'Обновить принудительно',
+    force_no_longer_applicable: 'Принудительное обновление больше не применимо — состояние обновления изменилось. Проверьте снова.',
     update_clear_lock_retry: 'Снять блокировку и повторить',
     update_hard_refresh_now: 'Обновить без кэша',
     update_no_target: 'Цель обновления не выбрана. Обновите статус и повторите.',
@@ -9206,7 +9229,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Se detectaron cambios locales',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -10735,7 +10760,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Lokale Änderungen erkannt',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -13009,7 +13036,9 @@ const LOCALES = {
     update_later: '稍后',
     update_now: '现在更新',
     update_updating: '更新中…',
+    update_dirty_local_changes: '检测到本地修改',
     update_force: '强制更新',
+    force_no_longer_applicable: '强制更新已不再适用 — 更新状态已变化，请重新检查。',
     update_clear_lock_retry: '清除锁定并重试更新',
     update_hard_refresh_now: '立即强制刷新',
     update_no_target: '未选择更新目标。请刷新更新状态并重试。',
@@ -14080,7 +14109,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: '偵測到本地修改',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -15893,7 +15924,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Alterações locais detectadas',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -17713,7 +17746,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: '로컬 변경 사항 감지됨',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -19651,7 +19686,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Modifications locales détectées',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -22015,7 +22052,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Zjištěny místní změny',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -23423,7 +23462,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Yerel değişiklikler algılandı',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -25363,7 +25404,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Wykryto lokalne zmiany',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',
@@ -28335,7 +28378,9 @@ const LOCALES = {
     update_later: 'Later',
     update_now: 'Update Now',
     update_updating: 'Updating…',
+    update_dirty_local_changes: 'Đã phát hiện thay đổi cục bộ',
     update_force: 'Force update',
+
     update_clear_lock_retry: 'Clear lock and retry update',
     update_hard_refresh_now: 'Hard refresh now',
     update_no_target: 'No update target selected. Refresh update status and retry.',

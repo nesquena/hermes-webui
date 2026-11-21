@@ -224,6 +224,12 @@ def test_update_flows_keep_explicit_longer_timeouts():
     # #7293: force builds its body in _forceBody (it may carry the explicit
     # force_active_runs override), same shape as apply's _applyBody.
     assert "api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000})" in src
+    # #7679 + #7293: force carries the GRANT's frozen channel, not a live
+    # re-read — a channel switch that races the confirm must not silently
+    # change the destructive action's target channel (stale-authority bug).
+    assert "if(grantSnapshot.channel) _forceBody.channel=grantSnapshot.channel;" in src, (
+        "the force POST must carry the grant's frozen channel, not a live re-read"
+    )
 
 
 def test_lock_recovery_waits_for_update_and_keeps_timeout_cleanup():
