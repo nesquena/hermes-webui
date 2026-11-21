@@ -350,6 +350,8 @@ const APPERROR_NOOPS = [
   '_scheduleAnchorRegistryCleanup', 'removeThinking', 'clearCompressionUi', '_attachProjectedAnchorSceneToLastAssistant',
   '_markSessionViewed', '_setActivePaneIdleIfOwner', 'renderSessionList', '_dispatchExtensionTurnLifecycle',
   '_retrySettledAnchorScene', 'trackBackgroundError',
+  // #8668: the PR's terminal sites clear the busy flag through this helper.
+  '_clearActivePaneBusyForTerminalRender',
 ];
 const apperrorStubs = (base) => {
   for (const n of APPERROR_NOOPS) base[n] = function () { return undefined; };
