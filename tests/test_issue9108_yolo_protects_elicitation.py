@@ -440,3 +440,38 @@ def test_enabling_yolo_refuses_when_a_protected_local_waiter_arrives_mid_relay(
     assert runner_spy == [], "no approval may be relayed once a protected one is seen"
     assert sid not in yolo_state["enabled"]
     assert _parked_protected_rows(sid), "the protected card must stay published"
+
+
+def test_enabling_yolo_still_relays_when_only_a_late_ordinary_command_arrives(
+    sid, yolo_state, monkeypatch, runner_spy
+):
+    """The race guard must not turn into a blanket refusal.
+
+    The maintainer's race matrix pairs the late-protected cases with a late
+    ORDINARY command control: a command approval that lands in the same
+    window must still be relayed and must still enable YOLO. This is the
+    control that proves the protected check narrows the refusal to protected
+    approvals instead of refusing every enable that races anything.
+    """
+    early = _run_approval(COMMON, run_id="run-9108-early")
+    route_approvals.submit_gateway_pending_mirror(sid, dict(early))
+    original_snapshot = routes.gateway_pending_mirrors
+    state = {"published": False}
+
+    def snapshot_publishing_late_command(session_id):
+        mirrors = original_snapshot(session_id)
+        if not state["published"]:
+            state["published"] = True
+            late = _run_approval(COMMON, run_id="run-9108-late-ordinary")
+            route_approvals.submit_gateway_pending_mirror(session_id, dict(late))
+        return mirrors
+
+    monkeypatch.setattr(routes, "gateway_pending_mirrors", snapshot_publishing_late_command)
+
+    payload, status = routes._enable_session_yolo_and_release_pending(sid, choice="once")
+
+    assert status == 200, payload
+    assert payload.get("ok") is not False
+    assert sid in yolo_state["enabled"], "an ordinary command must still enable YOLO"
+    assert runner_spy, "the ordinary command approval must still be relayed"
+    assert all(call["choice"] == "once" for call in runner_spy), runner_spy
