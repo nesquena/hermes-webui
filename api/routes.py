@@ -7477,7 +7477,7 @@ def _resolve_share_session_pair(sid: str, handler):
     except KeyError:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
-        if not _session_visible_to_active_profile(effective_profile, handler):
+        if not _session_visible_with_cli_owner_fallback(sid, effective_profile, handler):
             raise KeyError(sid) from None
         synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
         if reason == "was_webui" or synth is None:
@@ -11851,6 +11851,46 @@ def _cli_read_owner_profile(sid: str, read_profile=None):
     if str(sid or "").startswith(f"{CLAUDE_CODE_SOURCE}_"):
         return None
     return _get_active_profile_name()
+
+
+def _cli_session_messages_in_active_profile(sid: str) -> bool:
+    """Return whether ``sid`` has recoverable messages in the ACTIVE profile's state.db (#9104).
+
+    Fail-closed: an unreadable/missing state.db or any lookup error returns
+    False so callers keep refusing instead of treating an unknown session
+    as visible.
+    """
+    if not sid or not is_safe_session_id(sid):
+        return False
+    try:
+        msgs = get_cli_session_messages(sid)
+    except Exception:
+        logger.debug("cli session active-profile message lookup failed", exc_info=True)
+        return False
+    return bool(msgs)
+
+
+def _session_visible_with_cli_owner_fallback(sid, session_profile, handler) -> bool:
+    """Profile gate for foreign sessions whose CLI listing row carries no profile (#9104).
+
+    ``_lookup_cli_session_metadata`` only returns a row for the newest-N CLI
+    sessions (plus a by-id fallback for a few sources). An older session in a
+    named profile has no row at all, so the detail-load / share gates see
+    ``session_profile=None``, coerce it to the root profile via
+    ``_profiles_match``, and refuse the request before
+    ``_claim_or_synthesize_cli_session`` can stamp the session with its owner.
+
+    Mirror :func:`_cli_read_owner_profile`: without a read_profile,
+    ``get_cli_session_messages`` reads the ACTIVE profile's state.db, so
+    messages found there mean the session belongs to the active profile and
+    the gate must let it through. An explicit other-profile tag still fails
+    the gate so callers keep the #5419 409 / share refusal.
+    """
+    if _session_visible_to_active_profile(session_profile, handler):
+        return True
+    if session_profile is not None:
+        return False
+    return _cli_session_messages_in_active_profile(sid)
 
 
 def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
@@ -18172,7 +18212,9 @@ def _handle_session_get(handler, parsed) -> bool:
         # below would 404 every one of them under a named active profile
         # even though /api/sessions happily lists them. Exempt them.
         _profile_agnostic = _is_profile_agnostic_foreign_session(cli_meta)
-        if not _profile_agnostic and not _session_visible_to_active_profile(_session_profile, handler):
+        if not _profile_agnostic and not _session_visible_with_cli_owner_fallback(
+            sid, _session_profile, handler
+        ):
             if _session_profile:
                 # Valid CLI/foreign session owned by a KNOWN other profile:
                 # 409 so the client can offer to switch to it (#5419).
@@ -18187,6 +18229,9 @@ def _handle_session_get(handler, parsed) -> bool:
             # truly-missing session under a non-default active profile would
             # otherwise emit a useless 409 with profile=null and skip the
             # frontend self-heal + spin the SSE reconnect against a dead sid.
+            # #9104: the ownership fallback in the gate above already looked
+            # for the messages in the active profile's state.db, so reaching
+            # here means the session is not there either — still 404.
             return bad(handler, "Session not found", 404)
         synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta or {})
         if reason == "was_webui":
