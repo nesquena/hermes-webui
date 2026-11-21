@@ -18,6 +18,7 @@ BOOT_JS = ROOT.joinpath("static", "boot.js").read_text(encoding="utf-8")
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
 PANELS_JS = ROOT.joinpath("static", "panels.js").read_text(encoding="utf-8")
 WORKSPACE_JS = ROOT.joinpath("static", "workspace.js").read_text(encoding="utf-8")
+COMMANDS_JS = ROOT.joinpath("static", "commands.js").read_text(encoding="utf-8")
 I18N_JS = ROOT.joinpath("static", "i18n.js").read_text(encoding="utf-8")
 
 
@@ -5144,3 +5145,126 @@ def test_blank_page_file_action_still_mints_the_session_when_uncontested(entry):
     assert result["apiCalls"] == (
         ["/api/file/create"] if entry == "promptNewFile" else ["/api/file/create-dir"]
     )
+
+
+def _run_bundle_resolve_harness(new_session_body: str, pane_after: str) -> dict:
+    """Run the real resolveBundleCommand() against a stubbed newSession()."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = "\n".join([
+        _function(
+            SESSIONS_JS,
+            "_newSessionResultWasSuperseded",
+            "\n\nfunction _claimContextTransition(",
+        ),
+        _async_function(
+            COMMANDS_JS,
+            "resolveBundleCommand",
+            "\nfunction _activeSlashCommandOffset(",
+        ),
+        "const calls=[];",
+        "const S={session:null};",
+        "async function renderSessionList(){}",
+        "const api=async (url,options={})=>{calls.push({url,body:options.body?JSON.parse(options.body):null});return {message:'resolved'};};",
+        "async function newSession(){",
+        f"  {pane_after}",
+        f"  {new_session_body}",
+        "}",
+        "(async()=>{",
+        "  const result=await resolveBundleCommand('/bundle request');",
+        "  process.stdout.write(JSON.stringify({result,calls,paneSid:S.session&&S.session.session_id}));",
+        "})().catch(error=>{console.error(error);process.exit(1);});",
+    ])
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_bundle_resolve_stops_when_the_new_session_was_superseded():
+    """newSession() reports supersession as status:'superseded'; the old guard
+    read a `superseded` boolean that never exists, so the bundle resolve ran
+    against the pane that had replaced the abandoned create."""
+    result = _run_bundle_resolve_harness(
+        "return {status:'superseded',session:null};",
+        "S.session={session_id:'sidebar-session'};",
+    )
+
+    assert result["result"] == {"superseded": True}
+    assert result["calls"] == []
+    assert result["paneSid"] == "sidebar-session"
+
+
+def test_bundle_resolve_keeps_the_session_it_created():
+    """The resolve must name the session this call created, not a newer pane."""
+    result = _run_bundle_resolve_harness(
+        "return {status:'committed',session:{session_id:'created-owner'}};",
+        "S.session={session_id:'newer-pane'};",
+    )
+
+    assert result["result"] == {"message": "resolved"}
+    assert result["calls"] == [
+        {
+            "url": "/api/commands/bundles/resolve",
+            "body": {"command": "/bundle request", "session_id": "created-owner"},
+        }
+    ]
+    assert result["paneSid"] == "newer-pane"
+
+
+def _run_switch_file_detach_harness() -> dict:
+    """Compose the real tray repaint and owner-file helpers to prove a chat
+    switch keeps the departing chat's staged files restorable."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the browser behavior harness")
+    script = "\n".join([
+        "const _composerPendingFilesByOwner = new Map();",
+        "const S={session:{session_id:'session-a',profile:'default'},activeProfile:'default',pendingFiles:[]};",
+        "function $(id){return {innerHTML:'',classList:{add(){},remove(){}},appendChild(){}};}",
+        "function updateSendBtn(){}",
+        "function esc(value){return String(value);}",
+        "function li(){return '';}",
+        "function t(key){return key;}",
+        "function _mediaKindForName(){return null;}",
+        "const _IMAGE_EXTS=/\\.(png|jpe?g)$/i;",
+        "const _SVG_EXTS=/\\.svg$/i;",
+        "const URL={createObjectURL(){return 'blob:test';},revokeObjectURL(){}};",
+        "const document={createElement(){return {className:'',dataset:{},innerHTML:'',appendChild(){},querySelector(){return {onclick:null};}};},querySelectorAll(){return [];}};",
+        "function _composerRemoveFile(){}",
+        "function _resumeQueuedSessionMessageIfComposerEmpty(){}",
+        _function(SESSIONS_JS, "_composerPendingFileIsLive", "\nfunction _rememberComposerPendingFiles("),
+        _function(SESSIONS_JS, "_composerPendingFilesOwnerKey", "\nfunction _clearComposerDraftSaveTimer("),
+        _function(SESSIONS_JS, "_rememberComposerPendingFiles", "\nfunction _forgetComposerPendingFiles("),
+        _function(SESSIONS_JS, "_detachComposerPendingFilesForSwitch", "\n\nasync function loadSession("),
+        _function(SESSIONS_JS, "_restoreComposerPendingFiles", "\n// Bumped when a non-empty draft"),
+        _function(UI_JS, "_syncComposerFiles", "\nfunction renderTray("),
+        _function(UI_JS, "renderTray", "\nfunction _uploadTooLargeMessage("),
+        "const staged=new File(['A'],'A.txt');",
+        "S.pendingFiles=[staged];",
+        "_rememberComposerPendingFiles('session-a',[staged]);",
+        "_detachComposerPendingFilesForSwitch('session-a');",
+        "const afterDetach=S.pendingFiles.length;",
+        "const remembered=(_composerPendingFilesByOwner.get(_composerPendingFilesOwnerKey('session-a'))||[]).length;",
+        "_restoreComposerPendingFiles('session-a');",
+        "process.stdout.write(JSON.stringify({afterDetach,remembered,restored:S.pendingFiles.map(file=>file.name),sameObject:S.pendingFiles[0]===staged}));",
+    ])
+    proc = _run_node_script(script, timeout=30)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return json.loads(proc.stdout)
+
+
+def test_staged_files_survive_a_chat_switch_repaint():
+    """Returning to a chat must restore the File objects staged there. The
+    pre-switch clear repaints the tray while the old chat is still visible, and
+    that repaint used to record the temporary empty list as its own files."""
+    result = _run_switch_file_detach_harness()
+
+    assert result["afterDetach"] == 0, (
+        "the destination composer must not inherit the departing chat's chips"
+    )
+    assert result["remembered"] == 1, (
+        "the departing chat must keep owning its staged files across the repaint"
+    )
+    assert result["restored"] == ["A.txt"]
+    assert result["sameObject"] is True

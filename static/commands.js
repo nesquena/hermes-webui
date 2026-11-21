@@ -726,16 +726,26 @@ async function _runAgentCommandTransport(text,_meta){
 async function resolveBundleCommand(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  let createdSessionId='';
   if(!S.session&&typeof newSession==='function'){
     const created=await newSession();
     // A sidebar choice can win while the first turn is still creating its
-    // session. That resolution is a supersession, not a success: stop before
-    // issuing the bundle resolve so an abandoned command never runs against
+    // session. newSession() reports that as {status:'superseded', session:...};
+    // it never returns a `superseded` boolean. Read the shared predicate so the
+    // guard actually fires, and stop before the bundle resolve can run against
     // the newer pane (Greptile P1, 2026-11-16).
-    if(created&&created.superseded) return {superseded:true};
+    const superseded=typeof _newSessionResultWasSuperseded==='function'
+      ? _newSessionResultWasSuperseded(created)
+      : !!(created&&created.superseded);
+    if(superseded) return {superseded:true};
+    // Resolve for the session this call created, not whatever the pane holds
+    // by the time the resolve is posted.
+    createdSessionId=String((created&&created.session&&created.session.session_id)||'').trim();
     if(typeof renderSessionList==='function') await renderSessionList();
   }
-  const sessionId=String(_meta&&(_meta.sessionId||_meta.session_id)||S&&S.session&&S.session.session_id||'').trim();
+  const sessionId=String(_meta&&(_meta.sessionId||_meta.session_id)||'').trim()
+    ||createdSessionId
+    ||String(S&&S.session&&S.session.session_id||'').trim();
   return api('/api/commands/bundles/resolve',{
     method:'POST',
     body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})

@@ -3362,6 +3362,20 @@ async function _switchProfileForSessionLoad(profile){
   }
 }
 
+// A chat switch detaches the departing composer's staged files before the
+// destination loads, but the repaint syncs whatever `S.pendingFiles` holds as
+// the outgoing session's own files. Painting the temporary empty list would
+// delete the entry that lets a return to that chat restore its live File
+// objects, so hand them back to their owner after the repaint.
+function _detachComposerPendingFilesForSwitch(sid) {
+  const departing = Array.isArray(S.pendingFiles) ? [...S.pendingFiles] : [];
+  S.pendingFiles = [];
+  if (typeof renderTray === 'function') renderTray();
+  if (departing.length && typeof _rememberComposerPendingFiles === 'function') {
+    _rememberComposerPendingFiles(sid, departing);
+  }
+}
+
 async function loadSession(sid){
   let opts = arguments[1] || {};
   const requestedSid=sid;
@@ -3537,9 +3551,14 @@ async function loadSession(sid){
     // extended to cover the new pre-switch await).
     if (!_isCurrentLoad()) return;
     // The outgoing File objects are now owned by currentSid's in-memory
-    // fallback (if the save failed); detach them before the destination loads.
-    S.pendingFiles = [];
-    if (typeof renderTray === 'function') renderTray();
+    // fallback (if the save failed); detach them before the destination loads,
+    // without dropping the entry that a return to this chat restores.
+    if (typeof _detachComposerPendingFilesForSwitch === 'function') {
+      _detachComposerPendingFilesForSwitch(currentSid);
+    } else {
+      S.pendingFiles = [];
+      if (typeof renderTray === 'function') renderTray();
+    }
     // Snapshot the live turn before msgInner is replaced. Preserves the activity
     // timer, partial response, and tool cards so switching back does not rebuild
     // the stream UI from scratch.
