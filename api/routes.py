@@ -3677,13 +3677,20 @@ def _build_session_list_cache_payload(
         return list(rows)
 
     full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
-    webui_session_count = sum(
-        1 for s in full_scoped_all_sources
-        if not _sidebar_bucket_is_cli(s)
-    )
-    cli_session_count = sum(
-        1 for s in full_scoped_all_sources
-        if _sidebar_bucket_is_cli(s)
+    # Every counted row's bucket is decided here, before the lineage enrichment
+    # below, as it always was: the verdict is memoised and published on the row.
+    for s in full_scoped_all_sources:
+        _sidebar_bucket_is_cli(s)
+    # #9011: with Show archived off, the browser drops a child that no visible
+    # row holds when its chain reaches an archived ancestor (#4293), so it must
+    # not count either. Each tab's badge is decided from what that tab renders:
+    # the tab's own visible rows and the archived reference rows that tab is
+    # sent (chosen here, before enrichment, exactly as for the response), per
+    # profile. The decision itself waits for the enrichment: a native WebUI
+    # sidecar only learns it is a child (relationship_type) from state.db.
+    count_references_by_tab = (
+        None if include_archived
+        else _sidebar_archived_references_by_tab(visible_scoped, archived_scoped, _sidebar_bucket_is_cli)
     )
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
@@ -3713,6 +3720,36 @@ def _build_session_list_cache_payload(
         diag_stage("filter_archived_sessions")
     diag_stage("visible_lineage_metadata")
     _enrich_sidebar_lineage_metadata(scoped)
+    if include_archived:
+        counted_rows = full_scoped_all_sources
+    else:
+        # The response rows are enriched above (only the requested tab, #4766).
+        # The other tab's badge reads the same lineage for the rows that could
+        # be children, on copies (see _sidebar_rows_with_count_lineage).
+        _response_row_ids = {id(s) for s in scoped}
+        count_view = _sidebar_rows_with_count_lineage(
+            visible_scoped, _response_row_ids, _sidebar_bucket_is_cli
+        )
+        original_of = {id(view): row for view, row in zip(count_view, visible_scoped, strict=True)}
+        dropped_by_archived = {
+            id(original_of[row_id])
+            for row_id in _sidebar_rows_dropped_by_archived_ancestors_for_payload(
+                count_view,
+                count_references_by_tab,
+                lambda r: _sidebar_bucket_is_cli(original_of.get(id(r), r)),
+            )
+        }
+        counted_rows = [
+            s for s in full_scoped_all_sources if id(s) not in dropped_by_archived
+        ]
+    webui_session_count = sum(
+        1 for s in counted_rows
+        if not _sidebar_bucket_is_cli(s)
+    )
+    cli_session_count = sum(
+        1 for s in counted_rows
+        if _sidebar_bucket_is_cli(s)
+    )
     # Delegated subagent children (#5307) are view-only, owned by the delegate
     # runner. The model-layer batch overlay above has already applied the
     # authoritative source and view-only flags before this route runs.
@@ -13932,6 +13969,393 @@ def _sidebar_delegation_parent(row: dict, rows_by_id: dict) -> dict | None:
         if parent is not None and parent is not row:
             return parent
     return None
+
+
+def _is_sidebar_child_session(row: dict) -> bool:
+    """Mirror of the browser's ``_isChildSession``: a parent link plus ``child_session``."""
+    return bool(
+        isinstance(row, dict)
+        and row.get("parent_session_id")
+        and row.get("relationship_type") == "child_session"
+    )
+
+
+def _is_sidebar_fork_child(row: dict, ids_in_list) -> bool:
+    """Mirror of the browser's ``_isForkWithResolvableParent`` for an unpinned row."""
+    return bool(
+        isinstance(row, dict)
+        and row.get("session_source") == "fork"
+        and row.get("parent_session_id")
+        and row.get("parent_session_id") in ids_in_list
+        and not row.get("pinned")
+    )
+
+
+def _sidebar_collapse_lineage_key(row: dict, ids_in_list, rows_by_sid: dict) -> str | None:
+    """Mirror of the browser's ``_sessionLineageKey``: the key a row collapses under."""
+    if not row.get("session_id"):
+        return None
+    if _is_sidebar_child_session(row) or row.get("session_source") == "fork":
+        return None
+    lineage_key = row.get("_lineage_root_id") or row.get("lineage_root_id")
+    if lineage_key:
+        return lineage_key
+    parent_id = row.get("parent_session_id")
+    parent = rows_by_sid.get(parent_id) if parent_id else None
+    if row.get("pre_compression_snapshot") or (parent and parent.get("pre_compression_snapshot")):
+        root = row
+        seen: set = set()
+        while (
+            root.get("parent_session_id")
+            and root.get("parent_session_id") in rows_by_sid
+            and root.get("parent_session_id") not in seen
+        ):
+            nxt = rows_by_sid[root["parent_session_id"]]
+            if (
+                _is_sidebar_child_session(nxt)
+                or nxt.get("session_source") == "fork"
+                or not (root.get("pre_compression_snapshot") or nxt.get("pre_compression_snapshot"))
+            ):
+                break
+            seen.add(root.get("session_id"))
+            root = nxt
+        return root.get("session_id") or parent_id or row.get("session_id")
+    if parent_id and parent_id in ids_in_list:
+        return None
+    return parent_id or None
+
+
+def _sidebar_row_lineage_key(row: dict) -> str | None:
+    """Mirror of the browser's ``_sidebarLineageKeyForRow``."""
+    if row.get("session_source") == "fork":
+        return row.get("session_id") or row.get("parent_session_id") or None
+    return (
+        row.get("_lineage_key")
+        or row.get("_lineage_root_id")
+        or row.get("lineage_root_id")
+        or row.get("parent_session_id")
+        or row.get("session_id")
+        or None
+    )
+
+
+# The browser's ``_MESSAGING_RAW_SOURCES`` (static/sessions.js).
+_SIDEBAR_BROWSER_MESSAGING_RAW_SOURCES = frozenset({
+    "weixin", "telegram", "discord", "slack", "email", "wecom", "wecom_callback",
+    "matrix", "signal", "feishu", "dingtalk",
+})
+
+
+def _sidebar_parent_row_is_external(parent: dict) -> bool:
+    """Mirror of the browser's ``parentIsExternal`` check in the child attach step."""
+    raw = str(parent.get("raw_source") or parent.get("source_tag") or parent.get("source") or "").lower()
+    messaging = parent.get("session_source") == "messaging" or raw in _SIDEBAR_BROWSER_MESSAGING_RAW_SOURCES
+    marker = str(
+        parent.get("session_source") or parent.get("raw_source")
+        or parent.get("source_tag") or parent.get("source") or ""
+    ).lower()
+    return bool(
+        messaging
+        or parent.get("is_cli_session") is True
+        or (marker and marker not in ("webui", "subagent", "other", "fork"))
+    )
+
+
+def _sidebar_rows_dropped_by_archived_ancestors(
+    visible_rows: list[dict], reference_rows: list[dict]
+) -> set[int]:
+    """Rows of one sidebar render that the browser drops for an archived ancestor (#9011).
+
+    Mirrors ``_attachChildSessionsToSidebarRows`` with Show archived off, for one
+    tab (source bucket) of one profile: ``visible_rows`` are the rows the tab
+    renders and ``reference_rows`` the archived ancestor references the server
+    sends for that tab (``_hidden_archived_sidebar_reference_sessions``).
+
+    A child (or an unpinned fork whose parent is listed) is dropped only when
+    no visible row holds it AND its exact ``parent_session_id`` chain, followed
+    through the rendered and reference rows, reaches an archived row or a child
+    already dropped (``hasHiddenArchivedAncestor``). A holder is looked up the
+    way the browser looks it up: by the resolved parent id among the top-level
+    rows, their compression segments and the children attached so far, then by
+    the parent lineage's tip, root and lineage key. Compression-lineage aliases
+    only resolve a parent that is itself a payload row; they never make an
+    archived row an ancestor the exact chain does not reach. Rows are processed
+    in the browser's attach order (shallowest first), so each chain is walked
+    once and later children reuse the verdicts of their parents.
+
+    Returns the ``id()`` of every dropped row in ``visible_rows``.
+    """
+    raw = [r for r in visible_rows if isinstance(r, dict) and r.get("session_id")]
+    refs_all = [*raw, *(r for r in reference_rows if isinstance(r, dict) and r.get("session_id"))]
+    if not raw:
+        return set()
+    ids_in_list = {r["session_id"] for r in refs_all}
+    refs_by_id = {r["session_id"]: r for r in refs_all}  # the browser's Map: last row wins
+    raw_ids = {r["session_id"] for r in raw}
+    raw_rows_by_sid: dict[str, list[dict]] = defaultdict(list)
+    for r in raw:
+        raw_rows_by_sid[r["session_id"]].append(r)
+
+    payload_by_id: dict[str, dict] = {}
+    payload_by_root: dict[str, dict] = {}
+    for r in refs_all:
+        payload_by_id.setdefault(r["session_id"], r)
+        if r.get("_lineage_root_id"):
+            payload_by_root.setdefault(r["_lineage_root_id"], r)
+
+    def payload_parent(row: dict) -> dict | None:
+        pid = row.get("parent_session_id")
+        if not pid:
+            return None
+        return (
+            payload_by_id.get(pid)
+            or payload_by_id.get(row.get("_parent_lineage_tip_id"))
+            or payload_by_root.get(pid)
+            or payload_by_root.get(row.get("_parent_lineage_root_id"))
+        )
+
+    # Top-level rows after the lineage collapse, keyed like the browser's
+    # visibleBySid / visibleBySegmentSid / visibleByLineageKey maps.
+    raw_by_sid = {r["session_id"]: r for r in raw}
+    groups: dict[str, list[dict]] = {}
+    singles: list[dict] = []
+    for r in raw:
+        key = _sidebar_collapse_lineage_key(r, raw_ids, raw_by_sid)
+        if key:
+            groups.setdefault(key, []).append(r)
+        else:
+            singles.append(r)
+    by_sid: dict[str, dict] = {}
+    by_segment: dict[str, dict] = {}
+    by_lineage: dict[str, dict] = {}
+
+    def add_top_level(rep: dict, lineage_key, segments) -> None:
+        if _is_sidebar_child_session(rep) or _is_sidebar_fork_child(rep, ids_in_list):
+            return
+        by_sid[rep["session_id"]] = rep
+        if lineage_key and lineage_key not in by_lineage:
+            by_lineage[lineage_key] = rep
+        for seg in segments:
+            by_segment[seg["session_id"]] = rep
+
+    for r in singles:
+        add_top_level(r, _sidebar_row_lineage_key(r), ())
+    for key, items in groups.items():
+        if len(items) == 1:
+            add_top_level(items[0], _sidebar_row_lineage_key(items[0]), ())
+        else:
+            # Every segment is a top-level candidate, so which one represents
+            # the group does not change what the maps can resolve.
+            add_top_level(items[0], key, items)
+
+    depth_cache: dict[str, int] = {}
+
+    def attach_depth(row: dict) -> int:
+        path: list[str] = []
+        seen: set[str] = set()
+        cur = row
+        tail = 0
+        while True:
+            sid = cur.get("session_id")
+            if not sid:
+                break
+            if sid in depth_cache:
+                tail = depth_cache[sid]
+                break
+            if sid in seen:
+                break
+            seen.add(sid)
+            parent = payload_parent(cur) if cur.get("parent_session_id") else None
+            if parent and (_is_sidebar_child_session(cur) or _is_sidebar_fork_child(cur, ids_in_list)):
+                path.append(sid)
+                cur = parent
+                continue
+            depth_cache[sid] = 0
+            break
+        for sid in reversed(path):
+            tail += 1
+            depth_cache[sid] = tail
+        return depth_cache.get(row.get("session_id"), tail)
+
+    hidden_tree: set[str] = set()
+    not_hidden_from: set[str] = set()
+
+    def has_hidden_archived_ancestor(row: dict) -> bool:
+        walked: list[str] = []
+        seen: set[str] = set()
+        parent_id = row.get("parent_session_id")
+        verdict = False
+        while parent_id:
+            if parent_id in hidden_tree:
+                verdict = True
+                break
+            if parent_id in not_hidden_from or parent_id in seen:
+                break
+            seen.add(parent_id)
+            walked.append(parent_id)
+            parent = refs_by_id.get(parent_id)
+            if parent is None:
+                break
+            if parent.get("archived"):
+                verdict = True
+                break
+            parent_id = parent.get("parent_session_id")
+        if not verdict:
+            not_hidden_from.update(walked)
+        return verdict
+
+    queue: dict[str, dict] = {}
+    for r in refs_all:
+        queue.setdefault(r["session_id"], r)
+    dropped: set[int] = set()
+    for child in sorted(queue.values(), key=attach_depth):
+        sid = child["session_id"]
+        if sid in by_sid:
+            continue
+        renderable = sid in raw_ids
+        lineage_key = child.get("_lineage_root_id") or child.get("lineage_root_id") or child.get("parent_session_id")
+        is_child = _is_sidebar_child_session(child)
+        is_fork_child = _is_sidebar_fork_child(child, ids_in_list)
+        hidden_reference_child = bool(
+            child.get("archived") and child.get("parent_session_id") and lineage_key
+            and not child.get("pinned") and not renderable
+        )
+        if not (is_child or is_fork_child or hidden_reference_child):
+            continue
+        pid = child.get("parent_session_id")
+        resolved = payload_parent(child)
+        parent_sid = (
+            resolved["session_id"]
+            if resolved is not None and pid not in by_sid and pid not in by_segment
+            else pid
+        )
+        holder = by_sid.get(parent_sid) or by_segment.get(parent_sid)
+        tip = child.get("_parent_lineage_tip_id")
+        if holder is None and tip:
+            holder = by_sid.get(tip) or by_segment.get(tip)
+        if holder is None and child.get("_parent_lineage_root_id"):
+            holder = by_lineage.get(child["_parent_lineage_root_id"])
+        if holder is None:
+            holder = by_lineage.get(lineage_key or parent_sid)
+        if holder is None:
+            if has_hidden_archived_ancestor(child):
+                hidden_tree.add(sid)
+                # A drop can make a walk that already ended reach a hidden row now.
+                not_hidden_from.clear()
+                if renderable:
+                    dropped.update(id(r) for r in raw_rows_by_sid[sid])
+            continue
+        source_role = next(
+            (str(child.get(k) or "").strip().lower() for k in ("raw_source", "source_tag", "source")
+             if str(child.get(k) or "").strip()),
+            "",
+        )
+        delegated = is_child and source_role == "subagent"
+        if child.get("_cross_surface_child_session") and _sidebar_parent_row_is_external(holder) and not delegated:
+            continue  # rendered as an orphan; it holds nothing
+        by_segment[sid] = holder
+    return dropped
+
+
+def _sidebar_rows_with_count_lineage(rows: list[dict], enriched_ids: set[int], is_cli) -> list[dict]:
+    """``rows`` with the lineage the other tab's own request would see, for its badge (#9011).
+
+    The payload enriches only the requested tab's rows (#4766). A native WebUI
+    sidecar learns it is a child (``relationship_type``) only from that
+    enrichment, so the other tab's badge would count such a child as a
+    top-level row. For that tab, read the same state.db lineage for the rows
+    whose child status it can change (rows naming a parent), within the same
+    top-N window its own request enriches, and apply it to copies: the rows
+    themselves, and what the response sends, are unchanged. Like the response
+    enrichment, only the active profile's rows read the active state.db.
+    Returns a list aligned with ``rows``.
+    """
+    try:
+        top_n = int(os.environ.get("HERMES_WEBUI_LINEAGE_TOP_N", "300"))
+    except (TypeError, ValueError):
+        top_n = 300
+    try:
+        from api.profiles import _profiles_match, get_active_profile_name
+        active_profile = get_active_profile_name()
+    except Exception:
+        return list(rows)
+    wanted: dict[int, str] = {}
+    for cli_tab in (False, True):
+        tab_rows = [r for r in rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
+        if any(id(r) in enriched_ids for r in tab_rows):
+            continue  # the requested tab: its rows were enriched for the response
+        # The same window the tab's own request enriches: the first top_n rows
+        # of the whole tab, then only the active profile's rows within it.
+        for r in tab_rows[:top_n] if top_n > 0 else tab_rows:
+            if (
+                r.get("session_id") and r.get("parent_session_id")
+                and _profiles_match(r.get("profile") or "default", active_profile)
+            ):
+                wanted[id(r)] = str(r["session_id"])
+    if not wanted:
+        return list(rows)
+    try:
+        from api import models as _models
+        from api.agent_sessions import read_session_lineage_metadata
+        metadata = read_session_lineage_metadata(_models._active_state_db_path(), set(wanted.values()))
+    except Exception:
+        return list(rows)
+    view: list[dict] = []
+    for r in rows:
+        entry = metadata.get(wanted.get(id(r), ""))
+        if not entry:
+            view.append(r)
+            continue
+        lineage = {k: v for k, v in entry.items() if not k.startswith("_state_db_")}
+        if "parent_source" in r:
+            lineage.pop("parent_source", None)
+        view.append({**r, **lineage})
+    return view
+
+
+def _sidebar_archived_references_by_tab(
+    visible_rows: list[dict], archived_rows: list[dict], is_cli
+) -> dict[bool, list[dict]]:
+    """The archived reference rows each tab is sent, keyed by ``is_cli`` (#9011).
+
+    Each tab is requested with its own ``sidebar_source``, so its references
+    come from that tab's rows alone (``_hidden_archived_sidebar_reference_sessions``
+    on the source-filtered lists). Taken before the lineage enrichment, as the
+    response's references are.
+    """
+    references: dict[bool, list[dict]] = {}
+    for cli_tab in (False, True):
+        tab_visible = [r for r in visible_rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
+        tab_archived = [r for r in archived_rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
+        references[cli_tab] = (
+            _hidden_archived_sidebar_reference_sessions(tab_visible, tab_archived) if tab_visible else []
+        )
+    return references
+
+
+def _sidebar_rows_dropped_by_archived_ancestors_for_payload(
+    visible_rows: list[dict], references_by_tab: dict[bool, list[dict]], is_cli
+) -> set[int]:
+    """``id()`` of the visible rows the default sidebar drops, over both tabs (#9011).
+
+    The browser renders each tab from that tab's rows and references, and each
+    profile on its own. Decide every tab and profile the same way, on the
+    enriched rows the browser receives.
+    """
+    dropped: set[int] = set()
+    for cli_tab in (False, True):
+        tab_visible = [r for r in visible_rows if isinstance(r, dict) and bool(is_cli(r)) is cli_tab]
+        if not tab_visible:
+            continue
+        visible_by_group: dict[str, list[dict]] = defaultdict(list)
+        refs_by_group: dict[str, list[dict]] = defaultdict(list)
+        for r in tab_visible:
+            visible_by_group[_sidebar_profile_group_key(r.get("profile"))].append(r)
+        for r in references_by_tab.get(cli_tab) or []:
+            refs_by_group[_sidebar_profile_group_key(r.get("profile"))].append(r)
+        for group, rows in visible_by_group.items():
+            dropped |= _sidebar_rows_dropped_by_archived_ancestors(rows, refs_by_group.get(group, []))
+    return dropped
 
 
 def _sidebar_rows_by_profile(rows) -> dict[str, dict[str, dict]]:

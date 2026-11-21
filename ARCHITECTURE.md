@@ -1842,7 +1842,14 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                generations cannot overwrite the winning transcript.
                                Missing authority never creates an automatic refetch
                                loop.
-    /api/sessions              List of all session compact() dicts, sorted by updated_at
+    /api/sessions              List of all session compact() dicts, sorted by updated_at.
+                               webui_session_count / cli_session_count are the tab
+                               badges: the logical rows each tab renders. With Show
+                               archived off they leave out rows the sidebar drops
+                               for an archived ancestor (a child no visible row
+                               holds whose exact parent chain reaches an archived
+                               reference row, #4293/#9011); the response still
+                               sends those rows.
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)
     /share/<token>             Public read-only HTML shell for a sanitized shared transcript snapshot
