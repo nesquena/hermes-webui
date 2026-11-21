@@ -6418,7 +6418,10 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
                 continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
-                rows.append(_anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id))
+                row = _anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id)
+                # Match the live projector: msgContent() only joins typed text parts.
+                row["_inline_prose_visible"] = False
+                rows.append(row)
             continue
         part_type = part.get("type")
         if part_type in ("text", "input_text", "output_text"):
@@ -6426,7 +6429,10 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
                 continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
-                rows.append(_anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id))
+                row = _anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id)
+                if part_type != "text":
+                    row["_inline_prose_visible"] = False
+                rows.append(row)
             continue
         if part_type in ("thinking", "reasoning"):
             text = _anchor_scene_content_text(part)
