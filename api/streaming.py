@@ -6899,7 +6899,7 @@ _TITLE_SCHEMA_REFUSALS = set()
 _TITLE_SCHEMA_REFUSALS_LOCK = threading.Lock()
 
 
-def _send_title_request(send, provider=None, model=None):
+def _send_title_request(send, provider=None, model=None, *, base_url=None, profile_home=None):
     """Call ``send(response_format)`` asking for a strict ``{"title"}`` object.
 
     Used by the auxiliary title route and the agent's Chat Completions route;
@@ -6912,15 +6912,14 @@ def _send_title_request(send, provider=None, model=None):
     unsupported is resent once without the schema. Every other error
     propagates unchanged to the caller's existing retry and error path. When
     the caller passes both a ``provider`` and a ``model``, a refusal is
-    remembered per (provider, model) for the process lifetime: the next title
-    request for that pair skips the schema instead of paying for the same
-    refusal again (#9154), while a different model or provider still gets it.
+    remembered per (provider, model, endpoint, profile home) for the process
+    lifetime. Another model, endpoint or profile does not inherit it (#9154).
     The Agent's auxiliary client keeps its own per-process memory for the
     auxiliary route, which passes neither here. Each send gets its own copy of
     the schema, so an adapter that edits the request cannot change the module
     constant.
     """
-    refusal_key = (provider, model) if provider is not None and model is not None else None
+    refusal_key = (provider, model, base_url, profile_home) if provider is not None and model is not None else None
     if refusal_key is not None:
         with _TITLE_SCHEMA_REFUSALS_LOCK:
             remembered = refusal_key in _TITLE_SCHEMA_REFUSALS
@@ -7079,6 +7078,12 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
     if agent is None:
         return None, 'missing_agent'
 
+    from api.config import _thread_local_env_value
+    from api.profiles import get_hermes_home_for_profile
+
+    # Named background workers pin HERMES_HOME in the WebUI thread context.
+    # Prefer that captured profile home to the legacy process-wide mirror.
+    profile_home = _thread_local_env_value("HERMES_HOME") or str(get_hermes_home_for_profile("default"))
     qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
@@ -7165,6 +7170,8 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                             _send,
                             getattr(agent, 'provider', '') or None,
                             getattr(agent, 'model', '') or None,
+                            base_url=str(getattr(client, 'base_url', None) or getattr(agent, 'base_url', '') or ''),
+                            profile_home=profile_home,
                         )
                         raw, empty_status = _extract_title_response(resp)
                     raw = str(raw or '').strip()

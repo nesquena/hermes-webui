@@ -48,13 +48,13 @@ def _clear_title_schema_refusals():
         streaming._TITLE_SCHEMA_REFUSALS.clear()
 
 
-def _agent(create, provider, model):
+def _agent(create, provider, model, base_url="http://localhost:1234/v1"):
     client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
     agent = MagicMock()
     agent.api_mode = "chat_completions"
     agent.provider = provider
     agent.model = model
-    agent.base_url = "http://localhost:1234/v1"
+    agent.base_url = base_url
     agent.reasoning_config = None
     agent._build_api_kwargs.return_value = {"model": model, "messages": []}
     agent._ensure_primary_openai_client.return_value = client
@@ -88,7 +88,7 @@ def test_refusal_is_remembered_and_the_next_title_skips_the_schema():
     agent = _agent(create, "custom", "deepseek-chat")
     assert generate_title_raw_via_agent(agent, "q", "a") == ("Docker Volume Permissions", "llm")
     assert ["response_format" in c for c in calls] == [True, False]
-    assert ("custom", "deepseek-chat") in streaming._TITLE_SCHEMA_REFUSALS
+    assert any(key[:2] == ("custom", "deepseek-chat") for key in streaming._TITLE_SCHEMA_REFUSALS)
 
     # The next title on the same route does not send the schema again.
     calls.clear()
@@ -133,7 +133,7 @@ def test_context_length_error_is_not_remembered():
     agent = _agent(create, "custom", "ctx-limited")
     assert generate_title_raw_via_agent(agent, "q", "a") == (None, "llm_error")
     assert calls and all("response_format" in c for c in calls)
-    assert ("custom", "ctx-limited") not in streaming._TITLE_SCHEMA_REFUSALS
+    assert not streaming._TITLE_SCHEMA_REFUSALS
 
     # The next title still sends the schema: this error keeps the schema.
     calls.clear()
@@ -166,5 +166,32 @@ def test_concurrent_first_refusals_record_the_pair_once():
         t.join()
 
     assert results == ["sent"] * 8
-    assert ("custom", "deepseek-chat") in streaming._TITLE_SCHEMA_REFUSALS
+    assert ("custom", "deepseek-chat", None, None) in streaming._TITLE_SCHEMA_REFUSALS
     assert len(streaming._TITLE_SCHEMA_REFUSALS) == 1
+
+
+@pytest.mark.parametrize("changes", ["endpoint", "profile"])
+def test_title_schema_refusal_does_not_cross_route_boundaries(monkeypatch, changes):
+    from api import config
+
+    home = "/example/profile-a"
+    monkeypatch.setattr(config._thread_ctx, "env", {"HERMES_HOME": home}, raising=False)
+    calls = []
+
+    def reject(**kwargs):
+        if "response_format" in kwargs:
+            raise _StatusError(400, _SCHEMA_REJECTED)
+        return _response("First Endpoint")
+
+    def accept(**kwargs):
+        calls.append("response_format" in kwargs)
+        return _response("Second Endpoint")
+
+    first = _agent(reject, "custom", "same-model", "https://first.example.test/v1")
+    next_url = "https://second.example.test/v1" if changes == "endpoint" else first.base_url
+    second = _agent(accept, "custom", "same-model", next_url)
+    assert generate_title_raw_via_agent(first, "q", "a") == ("First Endpoint", "llm")
+    if changes == "profile":
+        monkeypatch.setattr(config._thread_ctx, "env", {"HERMES_HOME": "/example/profile-b"})
+    assert generate_title_raw_via_agent(second, "q", "a") == ("Second Endpoint", "llm")
+    assert calls == [True]
