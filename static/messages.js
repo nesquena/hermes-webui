@@ -7164,8 +7164,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return hasTc||hasPartialTc||hasTu;
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>tc);
-            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
+            // #8994-F1 — d.session.tool_calls carries FULL-transcript
+            // assistant_msg_idx values, but the card renderer resolves them
+            // against the RESIDENT array (which the done handler just trimmed
+            // to a bounded tail window / filtered recovery rows). Rebase to
+            // the resident coordinate space by message identity and drop
+            // owners that did not survive the window.
+            const _settledFull=Array.isArray(d.session.messages)?d.session.messages:[];
+            const _remapped=typeof _remapDoneToolCallsToResident==='function'
+              ? _remapDoneToolCallsToResident(d.session.tool_calls,_settledFull,S.messages||[])
+              : d.session.tool_calls;
+            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(_remapped);
           } else {
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
@@ -8001,6 +8010,54 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     return pre.slice(0,anchor).concat(settled);
+  }
+  // #8994-F1 — the `done` listener's settled session-level tool_calls carry
+  // FULL-transcript coordinates, but the card renderer reads S.toolCalls'
+  // assistant_msg_idx as a RESIDENT-array index. When the settled full
+  // transcript is adopted behind a bounded tail window (positive offset) or
+  // after legacy recovery rows were filtered out, full→resident is not an
+  // identity (nor a fixed rebase): a full-index 9 can land on an unrelated
+  // resident assistant row at local index 9. Rebase each settled tool card
+  // against the ACTUAL adopted resident messages by message identity, and drop
+  // any card whose owner did not survive into the resident set (evicted by the
+  // window, or removed by the recovery filter). Returns [] when nothing maps.
+  function _remapDoneToolCallsToResident(toolCalls, settledFull, resident){
+    if(!Array.isArray(toolCalls)||!toolCalls.length) return [];
+    if(!Array.isArray(settledFull)||!Array.isArray(resident)) return toolCalls.slice();
+    // Identity→resident index (first occurrence). An ambiguous duplicate key
+    // cannot name a unique visible owner, so it is left out of the map and its
+    // card is dropped rather than attached to a guess.
+    const residentByIdentity=new Map();
+    const ambiguousIdentities=new Set();
+    for(let i=0;i<resident.length;i++){
+      const key=_messageIdentityKey(resident[i]);
+      if(!key) continue;
+      if(!residentByIdentity.has(key)) residentByIdentity.set(key,i);
+      else ambiguousIdentities.add(key);
+    }
+    const out=[];
+    for(const tc of toolCalls){
+      if(!tc||typeof tc!=='object') continue;
+      const fullIdx=typeof tc.toolIdx==='number'?tc.toolIdx:parseInt(tc.assistant_msg_idx,10);
+      if(!Number.isFinite(fullIdx)||fullIdx<0||fullIdx>=settledFull.length) continue;
+      const owner=settledFull[fullIdx];
+      if(!owner||owner.role!=='assistant') continue;
+      // Locate the same message in the resident array by identity — the
+      // authoritative bridge, because the settle's recovery filter shifts
+      // local indices away from any fixed full−offset rebase.
+      const ownerKey=_messageIdentityKey(owner);
+      if(!ownerKey||ambiguousIdentities.has(ownerKey)) continue;
+      const localIdx=residentByIdentity.get(ownerKey);
+      if(typeof localIdx!=='number'||localIdx<0) continue; // evicted or filtered — drop
+      const next={...tc};
+      if(typeof next.toolIdx==='number') next.toolIdx=localIdx;
+      else next.assistant_msg_idx=localIdx;
+      out.push(next);
+    }
+    return out;
+  }
+  if(typeof window!=='undefined'){
+    window._remapDoneToolCallsToResident=_remapDoneToolCallsToResident;
   }
   // #8989 — a settled `done` payload embeds the FULL transcript
   // (api/streaming.py::_session_payload_with_full_messages), so the wholesale

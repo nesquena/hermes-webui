@@ -85,8 +85,12 @@ def _pieces() -> list[str]:
     pieces = [
         *[_extract_function(MESSAGES_JS, name) for name in names],
         _optional_function(MESSAGES_JS, "_residentMergeIdentityKey"),
+        # The F1 helper is required — a missing helper means the PR's fix was
+        # reverted, which must FAIL (RED) rather than silently skip.
+        _optional_function(MESSAGES_JS, "_remapDoneToolCallsToResident"),
         _optional_function(MESSAGES_JS, "_mergeResidentPrefix"),
         _optional_function(MESSAGES_JS, "_doneResidentMergeOptions"),
+        _optional_function(MESSAGES_JS, "_mergeSettledToolCallsWithLiveMetadata"),
         # The fix under test. Absent on upstream -> the listener's `typeof`
         # guard keeps the legacy adoption, which is the RED control.
         _optional_function(MESSAGES_JS, "_boundedDoneTailWindow"),
@@ -828,3 +832,158 @@ def test_done_window_width_matches_the_reload_width_rule(
     assert got["doneWidth"] == max(loaded_rows, current_count - oldest_idx, 30), got
     assert got["offset"] == current_count - got["doneWidth"], got
     assert got["truncated"] is (got["offset"] > 0), got
+
+
+# --------------------------------------------------------------------------- #
+# #8994-F1 — the `done` fallback must rebase session tool_calls from the FULL
+# transcript coordinate space into the RESIDENT space, and drop owners that did
+# not survive the bounded window / recovery filter.
+# --------------------------------------------------------------------------- #
+def _f1_scenario() -> dict:
+    """Full→resident rebase scenario for the F1 helper.
+
+    - settledFull: 204 rows (200-row transcript + a 4-row no-metadata turn).
+      Assistant rows sit at odd full indices (1,3,...,199,203).
+    - resident: the bounded tail the done handler adopted — full[148:] with
+      the raw-161 assistant row (identity 'assistant|162|...') filtered out
+      because it was marked recovery_control, exactly as the listener's final
+      `_filterRecoveryControlMessages` pass leaves it.
+    - toolCalls: session-level summaries in FULL-transcript coordinates.
+    """
+    full = _transcript(200)
+    turn = [
+        {"role": "user", "content": "the new question", "_ts": "9001"},
+        {"role": "assistant", "content": "intermediate text", "_ts": "9002"},
+        {"role": "tool", "content": "grep output", "_ts": "9003", "tool_call_id": "call-1"},
+        {"role": "assistant", "content": STREAMED_ANSWER, "_ts": "9004"},
+    ]
+    settled_full = full + turn
+    # The bounded tail the listener adopts is sliced off the SETTLED payload:
+    # settled[148:] = the 52-row resident span plus the 4-row turn. Raw-161's
+    # assistant row is then evicted by _filterRecoveryControlMessages.
+    resident = [dict(m) for m in settled_full[148:]]
+    resident = [m for m in resident if str(m["_ts"]) != str(161 + 1)]
+
+    tool_calls = [
+        {"assistant_msg_idx": 9, "tid": "t-out", "name": "outside-win", "snippet": "out-summary"},
+        {"assistant_msg_idx": 151, "tid": "t-in", "name": "inside-win", "snippet": "in-summary"},
+        {"assistant_msg_idx": 161, "tid": "t-rec", "name": "recovery-owner", "snippet": "rec-summary"},
+        {"assistant_msg_idx": 203, "tid": "t-answer", "name": "final", "snippet": "answer-summary"},
+    ]
+    case = "\n".join(
+        [
+            "const settledFull=" + json.dumps(settled_full) + ";",
+            "const resident=" + json.dumps(resident) + ";",
+            "const toolCalls=" + json.dumps(tool_calls) + ";",
+            "const out=_remapDoneToolCallsToResident(toolCalls,settledFull,resident);",
+            "const report=out.map(tc=>{",
+            "  const idx=typeof tc.toolIdx==='number'?tc.toolIdx:tc.assistant_msg_idx;",
+            "  return {tid:tc.tid,idx:idx,identity:_messageIdentityKey(resident[idx]||{})};",
+            "});",
+            "console.log(JSON.stringify({report:report,count:out.length,residentCount:resident.length}));",
+        ]
+    )
+    return _run_node(case)
+
+
+def test_done_tool_calls_rebase_full_to_resident_coordinates() -> None:
+    """F1 — settled tool_calls must anchor to the resident array, not the full transcript."""
+    got = _f1_scenario()
+    report = {r["tid"]: r for r in got["report"]}
+    assert "t-in" in report, f"in-window owner must be retained: {got}"
+    assert "t-answer" in report, f"settled-answer owner must be retained: {got}"
+    # t-out: full index 9 is outside the resident window → dropped.
+    assert "t-out" not in report, f"windowed-out owner must be dropped: {got}"
+    # t-rec: raw 161 was filtered by the recovery pass → no resident owner → dropped.
+    assert "t-rec" not in report, f"recovery-filtered owner must be dropped: {got}"
+    # The retained t-in card must point at the SAME message identity it had in
+    # the full transcript (raw 151), rebased to its local index.
+    # t-in: full index 151 is an assistant row (_transcript puts assistant at
+    # odd indices): content 'transcript row 151', _ts '152'.
+    full_151_identity = "assistant|152|transcript row 151"
+    in_card = report["t-in"]
+    assert in_card["identity"] == full_151_identity, (
+        f"t-in must rebase to its real resident owner, got {in_card['identity']!r} "
+        f"expected {full_151_identity!r}"
+    )
+    assert 0 <= in_card["idx"] < got["residentCount"], f"t-in index out of bounds: {got}"
+
+
+def test_done_listener_wires_f1_remap_into_the_fallback() -> None:
+    """F1 — the done fallback must call the remap helper (source-shape pin).
+
+    A bare helper that is never wired into the fallback would keep the display
+    attribution defect alive while the helper test above stays green. This pin
+    proves the wiring exists in the real done-listener fallback branch.
+    """
+    # The fallback lives AFTER _hydrateTodosFromSession, so it is outside the
+    # _done_listener_statements() window. Assert on the module source directly.
+    assert "_remapDoneToolCallsToResident" in MESSAGES_JS, (
+        "done listener fallback must invoke _remapDoneToolCallsToResident"
+    )
+    fallback_site = MESSAGES_JS.find("if(!hasMessageToolMetadata&&d.session.tool_calls")
+    assert fallback_site >= 0, "done listener fallback branch not found"
+    fallback_chunk = MESSAGES_JS[fallback_site:fallback_site + 1200]
+    assert "S.toolCalls=d.session.tool_calls.map" not in fallback_chunk, (
+        "the raw full-transcript assignment must be gone from the fallback"
+    )
+    assert "_remapDoneToolCallsToResident(d.session.tool_calls" in fallback_chunk, (
+        "the fallback must route through the remap helper"
+    )
+
+
+def _done_fallback_statements() -> str:
+    """The real done-listener fallback block (has-message-metadata check + assignment)."""
+    start = MESSAGES_JS.find("const hasMessageToolMetadata=S.messages.some")
+    end = MESSAGES_JS.find("if(typeof projectSessionArtifactsForOwner", start)
+    assert start >= 0 and end > start, "done fallback statements not found"
+    return MESSAGES_JS[start:end]
+
+
+def test_done_fallback_attaches_rebased_tool_cards_to_resident_owners() -> None:
+    """F1 — execute the REAL fallback statements over a settled payload.
+
+    The maintainer's repro: a full-transcript tool summary at absolute index 9,
+    with a resident window starting at 148, attaches its command/output to an
+    unrelated recent assistant at local index 9. The fix rebases before the
+    renderer reads the index.
+    """
+    full = _transcript(200)
+    turn = [
+        {"role": "user", "content": "the new question", "_ts": "9001"},
+        {"role": "assistant", "content": STREAMED_ANSWER, "_ts": "9002"},
+    ]
+    settled_full = full + turn
+    resident = [dict(m) for m in settled_full[148:]]
+    tool_calls = [
+        # Out-of-window owner (absolute 9) — the maintainer's exact repro.
+        {"assistant_msg_idx": 9, "tid": "t-out", "name": "old", "snippet": "out"},
+        # In-window owner at absolute 151.
+        {"assistant_msg_idx": 151, "tid": "t-in", "name": "grep", "snippet": "in"},
+    ]
+    case = "\n".join(
+        [
+            *_RUNTIME_STUBS,
+            "const S={toolCalls:[],messages:" + json.dumps(resident) + "};",
+            "const d={session:{messages:" + json.dumps(settled_full) + ",tool_calls:"
+            + json.dumps(tool_calls) + "}};",
+            # The exact fallback block from the done listener, executed verbatim.
+            _done_fallback_statements(),
+            "const report=(S.toolCalls||[]).map(tc=>{",
+            "  const idx=typeof tc.toolIdx==='number'?tc.toolIdx:tc.assistant_msg_idx;",
+            "  const owner=S.messages[idx]||{};",
+            "  return {tid:tc.tid,idx:idx,identity:_messageIdentityKey(owner)};",
+            "});",
+            "console.log(JSON.stringify({report:report,residentCount:S.messages.length}));",
+        ]
+    )
+    got = _run_node(case)
+    report = {r["tid"]: r for r in got["report"]}
+    assert "t-out" not in report, (
+        f"windowed-out full-index-9 summary must not attach to unrelated resident "
+        f"row {report.get('t-out', {}).get('idx')}: {got}"
+    )
+    assert "t-in" in report, f"in-window owner must survive: {got}"
+    assert report["t-in"]["identity"] == "assistant|152|transcript row 151", (
+        f"t-in must map to its real resident owner: {got}"
+    )
