@@ -21,8 +21,6 @@ The cache is module-level state, so each test resets it.
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 
 from api import profiles
