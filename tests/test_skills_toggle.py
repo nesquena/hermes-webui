@@ -347,6 +347,13 @@ def test_toggle_accepts_plugin_registered_skill(tmp_path, monkeypatch):
     toggle writes the qualified name into that profile's disabled set (which
     the agent's own listing honors) instead of failing."""
     from unittest.mock import MagicMock
+
+    # Install the hermes_constants twin BEFORE importing the production
+    # modules: api/routes.py binds the request home through that module, and
+    # the agent package is absent in agent-less CI (PR #7781 review
+    # 2026-11-20). The real module is preferred when it is importable.
+    _install_fake_hermes_constants(monkeypatch)
+
     from api.routes import _handle_skill_toggle
     from api.config import _load_yaml_config_file
 
@@ -366,14 +373,12 @@ def test_toggle_accepts_plugin_registered_skill(tmp_path, monkeypatch):
         lambda: _FakePluginSkillManager({"demo:skill": plugin_md}),
     )
     # The route binds the request's Hermes home around plugin-manager calls
-    # and fails closed when it cannot (2026-11-18 review). This test exercises
-    # the toggle wiring, not profile scoping, so bind a null scope explicitly.
-    import contextlib
-
-    monkeypatch.setattr(
-        "api.routes._plugin_manager_home_context",
-        lambda: contextlib.nullcontext(),
-    )
+    # and FAILS CLOSED when it cannot (2026-11-18 review). This test
+    # exercises the toggle wiring, not profile scoping, so it installs the
+    # hermes_constants twin above and lets the real
+    # _plugin_manager_home_context() bind — mocking that context away with
+    # a nullcontext would disable the fail-closed contract this PR
+    # introduced (PR #7781 review 2026-11-20).
 
     handler = MagicMock()
     _handle_skill_toggle(handler, {"name": "demo:skill", "enabled": False})
@@ -422,6 +427,13 @@ def test_toggle_cold_registry_discovers_before_lookup(tmp_path, monkeypatch):
     request-home scope BEFORE the lookup, then write only the active
     profile's config (A/B isolation preserved)."""
     from unittest.mock import MagicMock
+
+    # Install the hermes_constants twin BEFORE importing the production
+    # modules: api/routes.py binds the request home through that module, and
+    # the agent package is absent in agent-less CI (PR #7781 review
+    # 2026-11-20). The real module is preferred when it is importable.
+    _install_fake_hermes_constants(monkeypatch)
+
     from api.routes import _handle_skill_toggle
     from api.config import _load_yaml_config_file
 
@@ -439,13 +451,11 @@ def test_toggle_cold_registry_discovers_before_lookup(tmp_path, monkeypatch):
     manager = _ColdRegistryPluginSkillManager({"reviewdemo:skill": plugin_md})
     monkeypatch.setattr("api.routes._get_plugin_manager_for_visibility", lambda: manager)
     # Scope binding is covered by tests/test_7781_round11_findings.py; this
-    # test pins the discovery-before-lookup contract.
-    import contextlib
-
-    monkeypatch.setattr(
-        "api.routes._plugin_manager_home_context",
-        lambda: contextlib.nullcontext(),
-    )
+    # test pins the discovery-before-lookup contract. The real
+    # _plugin_manager_home_context() must run here (the hermes_constants twin
+    # above makes it bind in agent-less CI) — mocking it away would disable
+    # the fail-closed contract this PR introduced (PR #7781 review
+    # 2026-11-20).
 
     handler = MagicMock()
     _handle_skill_toggle(handler, {"name": "reviewdemo:skill", "enabled": False})
@@ -527,3 +537,83 @@ def test_toggle_plugin_lookup_binds_request_active_home(tmp_path, monkeypatch):
     # ambient profile A home, and the override was reset afterwards.
     assert manager.seen_homes == [profile_b_home, profile_b_home], manager.seen_homes
     assert Path(get_hermes_home()) == ambient_before
+
+
+def test_toggle_fails_closed_when_the_home_cannot_be_bound(tmp_path, monkeypatch):
+    """PR #7781 review (2026-11-18 P1, re-asserted 2026-11-20): when the
+    request's Hermes home cannot be bound, the toggle must NOT fall through
+    to the plugin manager.
+
+    The plugin manager is keyed by the agent-side Hermes home. If the scope
+    fails to bind and the route still calls it, the manager resolves the
+    AMBIENT home and the request reads another profile's plugin skills — the
+    leak the finding names. So the route must answer 404 and must not touch
+    the manager at all.
+
+    This is the route-level counterpart of the context-level guard in
+    ``tests/test_7781_round11_findings.py``: that file proves the context
+    raises, this one proves the ROUTE honours the raise instead of
+    continuing into the plugin-manager block.
+    """
+    from unittest.mock import MagicMock
+
+    _install_fake_hermes_constants(monkeypatch)
+
+    from api.routes import _handle_skill_toggle
+    from api.config import _load_yaml_config_file
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("skills:\n  disabled: []\n", encoding="utf-8")
+
+    monkeypatch.setattr("api.routes._find_skill_in_dirs", lambda name, dirs: (None, None))
+
+    plugin_md = tmp_path / "plugin-skills" / "ambientdemo" / "skill" / "SKILL.md"
+    plugin_md.parent.mkdir(parents=True, exist_ok=True)
+    plugin_md.write_text("---\nname: ambientdemo:skill\n---\nPlugin body", encoding="utf-8")
+
+    class _CountingManager(_FakePluginSkillManager):
+        """Records every manager call so the test can prove the route never
+        reached the plugin manager at all."""
+
+        def __init__(self, find_paths=None):
+            super().__init__(find_paths)
+            self.find_calls: list = []
+
+        def find_plugin_skill(self, qualified_name):
+            self.find_calls.append(qualified_name)
+            return super().find_plugin_skill(qualified_name)
+
+    manager = _CountingManager({"ambientdemo:skill": plugin_md})
+    monkeypatch.setattr("api.routes._get_plugin_manager_for_visibility", lambda: manager)
+
+    # The active home cannot be resolved -> the scope cannot bind.
+    import api.profiles as profiles
+
+    def boom():
+        raise RuntimeError("no active home")
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", boom)
+
+    captured = {}
+
+    def fake_bad(handler, msg, status):
+        captured["msg"] = msg
+        captured["status"] = status
+        return True
+
+    monkeypatch.setattr("api.routes.bad", fake_bad)
+
+    handler = MagicMock()
+    _handle_skill_toggle(handler, {"name": "ambientdemo:skill", "enabled": False})
+
+    # Fail closed: 404, no config write.
+    assert captured.get("status") == 404, captured
+    cfg_after = _load_yaml_config_file(config_path)
+    assert "ambientdemo:skill" not in (cfg_after.get("skills", {}).get("disabled") or [])
+
+    # And the manager was never consulted, so nothing could leak from the
+    # ambient home.
+    assert manager.find_calls == [], manager.find_calls
+    assert manager.discover_calls == [], manager.discover_calls
