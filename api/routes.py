@@ -9586,6 +9586,11 @@ def _custom_provider_slug_for_context(name: object) -> str:
 
         return _custom_provider_slug_from_name(name)
     except Exception:
+        # Mirrors _custom_provider_slug_from_name for the import-failure path:
+        # ASCII identifiers slugify with ':' folded out (the @provider:model
+        # grammar cannot carry one), and a name with no ASCII identifier
+        # characters - and no ':' - keeps them so the id matches the one the
+        # Agent resolves. A ':' takes the ASCII fold, same as the main path.
         raw = str(name or "").strip().lower()
         if not raw:
             return ""
@@ -9593,7 +9598,36 @@ def _custom_provider_slug_for_context(name: object) -> str:
             return raw
         slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
         slug = re.sub(r"-{2,}", "-", slug)
-        return f"custom:{slug}" if slug else ""
+        if not slug:
+            if raw.isascii() or ":" in raw:
+                return ""
+            slug = raw.replace(" ", "-")
+            if not slug:
+                return ""
+        return f"custom:{slug}"
+
+
+def _custom_provider_entry_slug_for_context(
+    entry: object,
+    custom_providers: object = None,
+    providers_cfg: object = None,
+    model_cfg: object = None,
+) -> str:
+    """cfg-aware identity for ONE ``custom_providers`` entry, or ``""`` when shadowed.
+
+    A fallback-derived name that a legacy entry, a ``providers:`` record or a
+    connection-owning ``model:`` block already owns mints nothing (#8026), so those
+    entries are skipped instead of matching an identity they do not own. Falls back
+    to the plain producer when the cfg-aware helper is unavailable (import-failure
+    path).
+    """
+    try:
+        from api.config import _custom_provider_entry_identity
+
+        return _custom_provider_entry_identity(entry, custom_providers, providers_cfg, model_cfg)
+    except Exception:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        return _custom_provider_slug_for_context(name)
 
 
 def _providers_match_for_context(config_key: object, requested_provider: str) -> bool:
@@ -9643,8 +9677,18 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
             return resolved
 
     try:
-        from api.config import _lookup_custom_api_key_env
+        from api.config import (
+            _custom_provider_record_may_take_convention_key,
+            _lookup_custom_api_key_env,
+        )
 
+        if not _custom_provider_record_may_take_convention_key(entry, "custom_providers"):
+            # This entry is a newly admitted fallback identity whose id sanitizes to the
+            # shared constant CUSTOM, so the convention variable belongs to whichever
+            # provider claimed it first. Reading it here would send that provider's key to
+            # this endpoint. Keyless is the honest answer; a literal/api_key/key_env above
+            # still wins, so a properly configured entry is unaffected.
+            return ""
         return _lookup_custom_api_key_env(provider) or ""
     except Exception:
         return ""
@@ -10063,7 +10107,12 @@ def _context_length_lookup_inputs_for_model(
             if not isinstance(entry, dict):
                 continue
             entry_name = str(entry.get("name") or "").strip()
-            entry_slug = _custom_provider_slug_for_context(entry_name)
+            entry_slug = _custom_provider_entry_slug_for_context(
+                entry,
+                custom_providers,
+                providers_cfg,
+                cfg.get("model") if isinstance(cfg, dict) else None,
+            )
             entry_base = str(entry.get("base_url") or "").strip()
             entry_base_norm = entry_base.rstrip("/")
             provider_matches = bool(
@@ -10528,9 +10577,12 @@ def _repair_bare_custom_provider_model(
             return None
         from api.config import (
             _custom_provider_entries,
-            _custom_provider_slug_from_name,
             get_config,
         )
+        # `_custom_provider_entry_slug_for_context` is defined in THIS module (above, at
+        # line 7385), not in api.config. Importing it from there raised ImportError inside
+        # this `try`, and the `except Exception: return None` below swallowed it, so repair
+        # returned None for EVERY custom provider, ASCII included. Use the local helper.
 
         if isinstance(config_obj, dict):
             _entries = _custom_provider_entries(config_obj)
@@ -10539,12 +10591,19 @@ def _repair_bare_custom_provider_model(
             _entries = _custom_provider_entries(
                 _cfg if isinstance(_cfg, dict) else None
             )
+            config_obj = _cfg if isinstance(_cfg, dict) else None
+        _providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
         prov_norm = str(prov).strip().lower()
         raw_suffix = prov_norm.removeprefix("custom:")
         _matching_cp = None
         for _entry in _entries:
             entry_name = str(_entry.get("name") or "").strip().lower()
-            slug = _custom_provider_slug_from_name(_entry.get("name"))
+            slug = _custom_provider_entry_slug_for_context(
+                _entry,
+                _entries,
+                _providers_cfg,
+                config_obj.get("model") if isinstance(config_obj, dict) else None,
+            )
             if not slug:
                 continue
             if (
@@ -10581,6 +10640,9 @@ def _repair_removed_qualified_custom_provider_model(
     profile config; ``None`` is ambiguous (no profile, unreadable profile, or
     a caller that doesn't pass one) and the shared ``cfg`` may belong to
     another profile, so it never repairs from it. Colliding slugs fail closed.
+    A same-slug list entry that only reaches the identity through the non-ASCII
+    fallback is not the owner, so its pinned list says nothing about a provider
+    the ``model:`` block or a keyed ``providers:`` record already owns.
     """
     prov = _clean_session_model_provider(provider)
     bare_model, qualified_provider = _split_provider_qualified_model(model)
@@ -10603,6 +10665,8 @@ def _repair_removed_qualified_custom_provider_model(
         entry = _unique_custom_provider_entry(
             _custom_provider_entries(config_obj),
             _custom_provider_slug_key(prov),
+            config_obj.get("providers"),
+            config_obj.get("model"),
         )
     except AmbiguousCustomProviderError:
         return None
@@ -28400,15 +28464,21 @@ def _handle_live_models(handler, parsed):
                 if not (provider == "custom" or provider.startswith("custom:")):
                     return []
                 try:
-                    from api.config import _custom_provider_entries, _custom_provider_slug_from_name
+                    from api.config import _custom_provider_entries, _custom_provider_entry_identity
                     _cp_entries = _custom_provider_entries(cfg)
                     if not isinstance(_cp_entries, list):
                         return []
+                    _cp_providers_cfg = cfg.get("providers")
                     _matches = []
                     for _cp in _cp_entries:
                         if not isinstance(_cp, dict):
                             continue
-                        _slug = _custom_provider_slug_from_name(_cp.get("name", ""))
+                        # cfg-aware: a fallback-derived name a legacy entry
+                        # already owns mints nothing (#8026), so it is not
+                        # treated as the provider this request named.
+                        _slug = _custom_provider_entry_identity(
+                            _cp, _cp_entries, _cp_providers_cfg, cfg.get("model") if isinstance(cfg, dict) else None
+                        )
                         if provider.startswith("custom:"):
                             if _slug == provider:
                                 _matches.append(_cp)
