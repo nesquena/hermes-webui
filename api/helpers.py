@@ -1431,6 +1431,38 @@ class StreamDeltaRedactor:
         return _redact_text(tail, _enabled=True)
 
 
+def flush_stream_delta_tail(delta_redactor, put) -> bool:
+    """Release the redactor's held tail as a token frame before a boundary.
+
+    The tail window holds text that belongs to the paragraph that produced it.
+    A paragraph boundary (``interim_assistant``) and every terminal event
+    (``done`` / ``stream_end`` / ``apperror``, plus the gateway's failed runs)
+    must release it BEFORE the boundary frame — otherwise the held character
+    run is appended to the next paragraph, and a replay reconstructs it there.
+
+    Returns True when a token frame was emitted.
+    """
+    held = delta_redactor.flush()
+    if not held:
+        return False
+    put('token', {'text': held})
+    return True
+
+
+def redact_stream_boundary_text(text: str) -> str:
+    """Redact a whole segment before it is re-sent as a boundary frame.
+
+    ``interim_assistant`` carries the segment text again (the browser uses it
+    as a completed prose boundary), so it must obey the same redaction
+    contract as the token deltas that streamed that segment. Redacting the
+    segment here also keeps the boundary payload consistent with the already
+    emitted deltas.
+    """
+    if not text:
+        return text
+    return _redact_text(text, _enabled=True)
+
+
 _RASTER_IMAGE_DATA_URI_PREFIXES = (
     ("data:image/png;base64,", "png"),
     ("data:image/jpeg;base64,", "jpeg"),

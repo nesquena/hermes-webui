@@ -240,7 +240,12 @@ def test_streaming_exit_routes_token_deltas_through_redactor():
     # The old verbatim emit is gone from the live path.
     assert "put('token', {'text': text})" not in src
     assert "_delta_redactor.feed(" in src, "on_token must redact each delta"
-    assert "_delta_redactor.flush()" in src, "the held tail must be flushed at stream end"
+    # The held tail is released through one shared helper: once before every
+    # terminal event (done/stream_end/apperror) and once at the paragraph
+    # boundary (interim_assistant), so the tail stays in its own paragraph.
+    assert src.count("flush_stream_delta_tail(_delta_redactor, put)") >= 2, (
+        "the held tail must be released before terminal events and paragraph boundaries"
+    )
 
 
 def test_gateway_exit_routes_token_deltas_through_redactor():
@@ -253,7 +258,11 @@ def test_gateway_exit_routes_token_deltas_through_redactor():
     assert "emit=put_gateway_event" not in src, "session RPC emit bypasses the redactor"
     # Relay sites (2) + worker site (1) + session wrapper (1).
     assert src.count(".feed(") >= 4, "every gateway delta site must redact"
-    assert "_delta_redactor.flush()" in src
+    # All three gateway terminal paths release the tail through the shared
+    # helper: done/stream_end/apperror, run.completed-with-error, run.failed.
+    assert src.count("flush_stream_delta_tail(") >= 3, (
+        "every gateway terminal path must release the held delta tail"
+    )
 
 
 # ── Real-agent coverage (skipped when hermes-agent is not installed) ───────
@@ -457,3 +466,315 @@ def test_one_character_suffix_is_never_held():
     assert red2.feed("ok") == "ok"
     red3 = _redactor()
     assert red3.feed("look") == "look"
+
+
+# ── Paragraph boundaries: the held tail belongs to its own paragraph ──────
+#
+# The tail window holds ordinary text whose tail could still grow into a
+# marker (``"The last word is the key"`` ends in ``key``, a prefix of
+# ``key=``/``key_material``). That text belongs to the paragraph that produced
+# it. A paragraph boundary (``interim_assistant``) and every terminal event
+# must release it BEFORE the boundary frame, or the held character run is
+# appended to the next paragraph (and a replay reconstructs it there).
+#
+# Both directions are pinned: the release keeps the tail in its paragraph, and
+# the unflushed sequence still carries it forward — so the test fails on a
+# tree that never releases at the boundary, and keeps failing if the release
+# is moved to the wrong side of the frame.
+
+
+def _boundary_flush(red, put):
+    """Call the production boundary release, or fail loudly on an unfixed tree."""
+    fn = getattr(helpers, "flush_stream_delta_tail", None)
+    assert fn is not None, (
+        "api.helpers exposes no flush_stream_delta_tail — a paragraph boundary "
+        "cannot release the held delta tail, so it lands in the next paragraph"
+    )
+    return fn(red, put)
+
+
+def test_without_a_boundary_flush_the_tail_lands_in_the_next_paragraph():
+    """The defect itself, on the pre-fix sequence: the tail joins the next paragraph."""
+    red = _redactor()
+
+    first = red.feed("The last word is the key")
+    second = red.feed(" Second paragraph starts.")
+
+    assert first == "The last word is the ", (
+        f"probe: the tail window must hold the marker prefix, got {first!r}"
+    )
+    assert second.startswith("key"), (
+        f"probe: without a boundary flush the held tail moves into the next "
+        f"paragraph, got {second!r}"
+    )
+
+
+def _drive_paragraph_boundary(first, boundary_text, second):
+    """Drive one paragraph boundary through the production release helper."""
+    red = _redactor()
+    events = []
+
+    def put(event, data):
+        events.append((event, (data or {}).get("text", "")))
+
+    head = red.feed(first)
+    if head:
+        put("token", {"text": head})
+    _boundary_flush(red, put)
+    put("interim_assistant", {"text": boundary_text, "already_streamed": True})
+    nxt = red.feed(second)
+    if nxt:
+        put("token", {"text": nxt})
+    _boundary_flush(red, put)
+    return events
+
+
+def test_boundary_flush_keeps_the_tail_in_the_previous_paragraph():
+    """Per-event: the boundary frame comes after every token of paragraph one."""
+    first = "The last word is the key"
+    second = " Second paragraph starts."
+
+    events = _drive_paragraph_boundary(first, first, second)
+
+    boundary_idx = next(
+        i for i, (event, _text) in enumerate(events) if event == "interim_assistant"
+    )
+    before = [text for event, text in events[:boundary_idx] if event == "token"]
+    after = [text for event, text in events[boundary_idx + 1 :] if event == "token"]
+
+    assert "".join(before) == first, (
+        f"paragraph one must be complete before the boundary frame, got {before!r}"
+    )
+    assert after == [second], (
+        f"the next paragraph must start clean, got {after!r}"
+    )
+    assert "key" not in "".join(after), "the previous paragraph's tail leaked forward"
+    assert "".join(before) + "".join(after) == first + second, (
+        "the boundary must not drop or duplicate text"
+    )
+
+
+def test_boundary_flush_is_idempotent_when_nothing_is_held():
+    """A boundary with no held tail emits no stray token frame."""
+    red = _redactor()
+    events = []
+
+    def put(event, data):
+        events.append((event, (data or {}).get("text", "")))
+
+    out = red.feed("Plain prose with no marker prefix at all")
+    if out:
+        put("token", {"text": out})
+    assert _boundary_flush(red, put) is False, "nothing held, nothing to release"
+    assert events == [("token", "Plain prose with no marker prefix at all")]
+
+
+def test_terminal_boundary_releases_the_tail_before_the_terminal_frame():
+    """The terminal flush emits the tail, then the terminal frame — never after."""
+    red = _redactor()
+    events = []
+
+    def put(event, data):
+        events.append((event, (data or {}).get("text", "")))
+
+    out = red.feed("The last word is the key")
+    if out:
+        put("token", {"text": out})
+    _boundary_flush(red, put)
+    put("done", {})
+
+    assert events[-2] == ("token", "key"), (
+        f"the held tail must be a token frame before done, got {events!r}"
+    )
+    assert events[-1][0] == "done"
+    assert red.flush() == "", "a second flush after the terminal release is empty"
+
+
+def test_interim_boundary_text_is_redacted_before_it_is_sent():
+    """The interim frame re-sends the whole segment, so it needs the same redaction."""
+    fn = getattr(helpers, "redact_stream_boundary_text", None)
+    assert fn is not None, (
+        "api.helpers exposes no redact_stream_boundary_text — the interim frame "
+        "would carry segment text outside the redaction contract"
+    )
+    text = "here is " + _FAKE_SK + " in the prose"
+    safe = fn(text)
+
+    assert _FAKE_SK not in safe
+    assert "here is " in safe
+    assert "in the prose" in safe
+    assert fn("plain visible prose") == "plain visible prose"
+
+
+def test_gateway_relay_without_a_redactor_still_emits_plain_tokens():
+    """A caller that passes no redactor still runs and relays ordinary text."""
+    import json
+    import threading
+
+    from api import gateway_chat
+
+    emitted = []
+
+    def put_gateway_event(event_name, data):
+        if event_name == "token" and isinstance(data, dict):
+            emitted.append(data.get("text") or "")
+
+    lines = [
+        "data: " + json.dumps({"event": "message.delta", "delta": "plain "}),
+        "data: " + json.dumps({"event": "message.delta", "delta": "words"}),
+        "data: [DONE]",
+    ]
+    gateway_chat._relay_gateway_run_events(
+        _FakeSseResponse(lines),
+        "same-session",
+        "stream-1",
+        "run-1",
+        "http://gateway.invalid",
+        "",
+        put_gateway_event=put_gateway_event,
+        cancel_event=threading.Event(),
+    )
+
+    assert "".join(emitted) == "plain words", (
+        f"the default-redactor relay must still emit ordinary tokens, got {emitted!r}"
+    )
+
+
+def test_gateway_relay_defaults_a_redactor_for_split_secrets():
+    """The default redactor masks a split secret on a terminal error path too."""
+    import json
+    import threading
+
+    from api import gateway_chat
+
+    emitted = []
+
+    def put_gateway_event(event_name, data):
+        if event_name == "token" and isinstance(data, dict):
+            emitted.append(data.get("text") or "")
+
+    lines = [
+        "data: " + json.dumps({"event": "message.delta", "delta": _FAKE_SK[:12]}),
+        "data: " + json.dumps({"event": "message.delta", "delta": _FAKE_SK[12:]}),
+        "data: " + json.dumps({"event": "run.completed", "error": "boom"}),
+        "data: [DONE]",
+    ]
+    try:
+        gateway_chat._relay_gateway_run_events(
+            _FakeSseResponse(lines),
+            "same-session",
+            "stream-1",
+            "run-1",
+            "http://gateway.invalid",
+            "",
+            put_gateway_event=put_gateway_event,
+            cancel_event=threading.Event(),
+        )
+    except RuntimeError:
+        pass
+
+    assert _FAKE_SK not in "".join(emitted), (
+        "a caller that passes no redactor must still get masked deltas"
+    )
+
+
+# ── Replay: the reconstructed transcript keeps the same paragraph split ────
+
+
+def _write_replay_journal(root, events, run_id="run_1", session_id="session_1"):
+    import json
+
+    from api import run_journal as RJ
+
+    session_root = root / RJ.RUN_JOURNAL_DIR_NAME / session_id
+    session_root.mkdir(parents=True, exist_ok=True)
+    path = session_root / f"{run_id}.jsonl"
+    rows = []
+    for seq, (event, payload) in enumerate(events, start=1):
+        rows.append(
+            json.dumps(
+                {
+                    "version": 1,
+                    "event_id": f"{run_id}:{seq}",
+                    "seq": seq,
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "event": event,
+                    "type": event,
+                    "created_at": 1000 + seq,
+                    "payload": payload,
+                }
+            )
+        )
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+def test_replay_keeps_the_released_tail_in_the_previous_paragraph(tmp_path, monkeypatch):
+    """After the boundary release, replay splits the paragraphs the same way."""
+    from api import run_journal as RJ
+    import api.routes as routes
+
+    first = "The last word is the key"
+    second = " Second paragraph starts."
+    _write_replay_journal(
+        tmp_path,
+        [
+            ("token", {"text": first[: len(first) - 3]}),
+            ("token", {"text": "key"}),
+            ("interim_assistant", {"text": first, "already_streamed": True}),
+            ("token", {"text": second}),
+        ],
+    )
+    monkeypatch.setattr(RJ, "_default_session_dir", lambda: tmp_path)
+
+    snapshot = routes._run_journal_live_snapshot("run_1")
+
+    assert snapshot is not None, "the replay snapshot must be produced"
+    assert snapshot["last_assistant_text"] == first + second
+    rows = snapshot["anchor_activity_scene"]["activity_rows"]
+    prose = [row for row in rows if row.get("kind") == "process_prose"]
+    assert prose, f"no prose rows in the replay snapshot: {rows!r}"
+    assert prose[0]["text"].strip() == first, (
+        f"the first paragraph must keep its own tail, got {prose[0]['text']!r}"
+    )
+    assert "key" not in "".join(row["text"] for row in prose[1:]), (
+        "the tail leaked into a later paragraph on replay"
+    )
+
+
+def test_replay_of_an_unflushed_boundary_shows_the_misplacement(tmp_path, monkeypatch):
+    """Control: the pre-fix frame order really does split the paragraph wrong.
+
+    Without the boundary release, the journal carries the held tail AFTER the
+    ``interim_assistant`` frame, and replay reconstructs paragraph one without
+    its last word. This pins the discriminating power of the test above: it is
+    the frame order, not the replay code, that decides where the tail lands.
+    """
+    from api import run_journal as RJ
+    import api.routes as routes
+
+    first = "The last word is the key"
+    second = " Second paragraph starts."
+    _write_replay_journal(
+        tmp_path,
+        [
+            ("token", {"text": first[: len(first) - 3]}),
+            ("interim_assistant", {"text": first, "already_streamed": True}),
+            ("token", {"text": "key" + second}),
+        ],
+    )
+    monkeypatch.setattr(RJ, "_default_session_dir", lambda: tmp_path)
+
+    snapshot = routes._run_journal_live_snapshot("run_1")
+
+    assert snapshot is not None, "the replay snapshot must be produced"
+    prose = [
+        row
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+        if row.get("kind") == "process_prose"
+    ]
+    assert prose[0]["text"].strip() == first[: len(first) - 3].strip(), (
+        f"control: the unflushed order loses the tail from paragraph one, got "
+        f"{prose[0]['text']!r}"
+    )

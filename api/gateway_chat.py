@@ -39,7 +39,7 @@ from api.config import (
     unregister_stream_owner,
     update_active_run,
 )
-from api.helpers import _redact_text, StreamDeltaRedactor
+from api.helpers import _redact_text, StreamDeltaRedactor, flush_stream_delta_tail
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 from api.turn_journal import append_turn_journal_event_for_stream
@@ -1224,9 +1224,7 @@ def _relay_gateway_run_events(
                 # #8901: same terminal-with-error path as `run.failed` below —
                 # release the held-back delta tail before unwinding, or the
                 # last streamed text is swallowed by the redactor's window.
-                _held_delta = delta_redactor.flush()
-                if _held_delta:
-                    emit("token", {"text": _held_delta})
+                flush_stream_delta_tail(delta_redactor, emit)
                 raise RuntimeError(str(payload["error"]))
             output = str(payload.get("output") or "")
             if output and (output_is_authoritative or not final_text):
@@ -1254,9 +1252,7 @@ def _relay_gateway_run_events(
             # It stays AFTER the steer relay: relaying the unconsumed steer
             # before the turn is torn down is the existing order, and
             # test_gateway_steer_forwarding.py pins that first line.
-            _held_delta = delta_redactor.flush()
-            if _held_delta:
-                emit("token", {"text": _held_delta})
+            flush_stream_delta_tail(delta_redactor, emit)
             from api.route_approvals import settle_gateway_pending_run
             settle_gateway_pending_run(
                 session_id,
@@ -3299,9 +3295,7 @@ def _run_gateway_chat_streaming(
         # so a secret-shaped prefix is never swallowed at end of turn. The
         # released text is redacted and journaled like any other delta.
         if event in ("done", "stream_end", "apperror"):
-            _held_delta = _delta_redactor.flush()
-            if _held_delta:
-                put_gateway_event("token", {"text": _held_delta})
+            flush_stream_delta_tail(_delta_redactor, put_gateway_event)
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
