@@ -1042,20 +1042,34 @@ def _gateway_health_base_url() -> str:
 
     Falls back through the same env-var chain used by agent_health.py
     (#6150): GATEWAY_HEALTH_URL → HERMES_GATEWAY_HEALTH_URL →
-    HERMES_API_URL → HERMES_WEBUI_GATEWAY_BASE_URL → default.
+    HERMES_API_URL → HERMES_WEBUI_GATEWAY_BASE_URL → Docker default.
+
+    Each candidate is stripped *before* the precedence decision and a blank
+    one is skipped, so a whitespace-only high-priority variable cannot shadow
+    a valid lower-priority URL (or the Docker default) and leave an empty base
+    with no probe at all (#6289, mirrors ``api.agent_health``). The health-path
+    suffix list is the canonical one, so a gateway configured at
+    ``.../v1/health`` or ``.../status`` is not probed at ``/status/health``.
     """
-    raw = (
-        os.environ.get('GATEWAY_HEALTH_URL')
-        or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
-        or os.environ.get('HERMES_API_URL')
-        or os.environ.get('HERMES_WEBUI_GATEWAY_BASE_URL')
-        or 'http://hermes-agent:8642'
-    ).strip()
-    if raw.endswith('/health/detailed'):
-        raw = raw[: -len('/health/detailed')]
-    elif raw.endswith('/health'):
-        raw = raw[: -len('/health')]
-    return raw.rstrip('/')
+    raw = ''
+    for var in (
+        'GATEWAY_HEALTH_URL',
+        'HERMES_GATEWAY_HEALTH_URL',
+        'HERMES_API_URL',
+        'HERMES_WEBUI_GATEWAY_BASE_URL',
+    ):
+        candidate = os.environ.get(var, '').strip()
+        if candidate:
+            raw = candidate
+            break
+    if not raw:
+        raw = 'http://hermes-agent:8642'
+    base = raw.rstrip('/')
+    for suffix in ('/health/detailed', '/health', '/v1/health', '/status'):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base.rstrip('/')
 
 
 def _version_from_gateway_health_payload(payload: object) -> str | None:
