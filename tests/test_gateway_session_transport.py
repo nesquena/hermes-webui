@@ -133,17 +133,37 @@ def test_authority_refusal_is_terminal_without_submit_or_http_fallback(protocol,
 
 
 def test_disconnect_keeps_recovering_past_old_retry_limit(protocol, monkeypatch):
+    """A disconnect AFTER a submission keeps recovering past the old retry limit.
+
+    #8905 changed when the relay gives up: a failure BEFORE the first
+    submission is terminal (nothing was sent, so there is nothing to
+    recover). This test keeps its original subject — the recovery path has
+    no attempt ceiling, so a turn that WAS admitted still comes back after
+    more reconnects than the old limit allowed — but it now disconnects
+    after the submission was attempted, which is the state the recovery
+    contract is about.
+
+    The old shape (five connect failures BEFORE any submission) asserted the
+    opposite contract, so it is rewritten here rather than deleted: the test
+    body, the leak-safe error text and the journal assertions all stay.
+    """
     attempts = []
-    client = Client()
+    first, second = Client(lose_ack=True), Client()
+    peers = iter([first, None, None, None, None, second])
+
     @asynccontextmanager
     async def connect(home):
         attempts.append(home)
-        if len(attempts) <= 5:
-            raise ConnectionError("do not leak ws://credential@host")
-        yield client
+        peer = next(peers)
+        if peer is None:
+            raise ConnectionError("do not leak ws://***@host")
+        yield peer
+
     monkeypatch.setattr(sessions, "connect_local", connect)
+
     async def no_delay(_):
         pass
+
     monkeypatch.setattr(sessions.asyncio, "sleep", no_delay)
     instance, _, records = relay()
     assert asyncio.run(instance.run()) == ("original session reply", {})
@@ -464,3 +484,163 @@ def test_native_approval_http_response_keeps_transport_owner(
         with route_approvals._lock:
             route_approvals._pending.pop(sid, None)
             route_approvals._gateway_queues.pop(sid, None)
+
+
+# ── #8905: a missing transport socket must not reconnect forever ─────────────
+#
+# The native Gateway session transport connects through `connector()`. When the
+# `unix` socket path does not exist, the connector raises BEFORE any
+# `prompt.submit`, so the relay never learns whether the turn was admitted.
+# The generic `except Exception:` in `SessionRelay.run` used to swallow that
+# error and fall through to the reconnect loop, so the turn retried forever
+# (every <=5s) and Stop could not end it: `control()` raised "Gateway session is
+# reconnecting." because no client was attached.
+#
+# The rule: a failure BEFORE the first submission is terminal (nothing was
+# sent, so there is nothing to recover). A failure AFTER a submission keeps the
+# existing indefinite recovery, because the admission is then uncertain.
+
+
+class _RetryLimitExceeded(BaseException):
+    """Raised when the relay dials the transport more often than allowed.
+
+    Derives from BaseException on purpose: `SessionRelay.run` swallows bare
+    `Exception`, so an `AssertionError` guard would be absorbed by the very
+    reconnect loop this test is meant to catch, and the test would hang
+    instead of failing.
+    """
+
+
+class _FailingConnector:
+    """A transport connector that raises before any client is attached.
+
+    The attempt counter is bounded so a regression that reconnects forever
+    fails the test instead of hanging the suite.
+    """
+
+    def __init__(self, attempts, error, limit=5):
+        self.attempts = attempts
+        self.error = error
+        self.limit = limit
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        self.attempts.append(self)
+        if len(self.attempts) > self.limit:
+            raise _RetryLimitExceeded(
+                f"the transport was dialled {len(self.attempts)} times; "
+                "a first-connect failure must not be retried"
+            )
+        raise self.error
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def failing_connector(attempts, error, limit=5):
+    return _FailingConnector(attempts, error, limit)
+
+
+def test_missing_transport_socket_fails_terminally_instead_of_reconnecting(protocol, monkeypatch):
+    """A connector that cannot reach the transport ends the turn; it does not retry."""
+    attempts = []
+    instance, _, _ = relay()
+    instance.connector = failing_connector(attempts, FileNotFoundError(2, "No such file or directory"))
+    with pytest.raises(sessions.SessionTransportError) as excinfo:
+        asyncio.run(instance.run())
+    message = str(excinfo.value)
+    assert "transport is unavailable" in message, (
+        f"the failure must name the transport as unavailable, got: {message!r}"
+    )
+    assert "not submitted" in message, (
+        f"the failure must say the turn was never submitted, got: {message!r}"
+    )
+    assert len(attempts) == 1, (
+        f"the relay retried {len(attempts)} times after a terminal connect failure; "
+        "it must stop at the first failure"
+    )
+    assert "session:stable" not in sessions._CONNECTIONS
+
+
+def test_first_connect_failure_never_submits_or_records_an_admission(protocol, monkeypatch):
+    """Nothing was submitted, so the durable request must not be journaled as sent."""
+    attempts = []
+    instance, _, records = relay()
+    instance.connector = failing_connector(attempts, FileNotFoundError(2, "No such file or directory"))
+    with pytest.raises(sessions.SessionTransportError):
+        asyncio.run(instance.run())
+    assert records == [], f"no submission happened, so nothing may be journaled: {records!r}"
+
+
+def test_failure_after_a_submission_keeps_recovering(protocol, monkeypatch):
+    """Control: once a submission was attempted, the indefinite recovery stays.
+
+    The shape mirrors the existing lost-ack test: the FIRST connection
+    succeeds and `prompt.submit` is attempted; the LOST acknowledgment is what
+    makes the admission uncertain, so the relay must keep reconnecting instead
+    of ending the turn.
+    """
+    attempts = []
+    first, second = Client(lose_ack=True), Client()
+    peers = iter([first, second])
+
+    @asynccontextmanager
+    async def connect(home):
+        attempts.append(home)
+        if len(attempts) > 8:
+            raise _RetryLimitExceeded(
+                f"the transport was dialled {len(attempts)} times; "
+                "the recovery loop must stop once the turn completes"
+            )
+        peer = next(peers)
+        yield peer
+
+    monkeypatch.setattr(sessions, "connect_local", connect)
+
+    async def no_delay(_):
+        pass
+
+    monkeypatch.setattr(sessions.asyncio, "sleep", no_delay)
+
+    instance, _, _ = relay()
+    assert asyncio.run(instance.run()) == ("original session reply", {})
+    assert len(attempts) == 2, (
+        f"expected the recovery loop to keep retrying after a submission, got {len(attempts)} attempts"
+    )
+    assert any(method == "prompt.submit" for method, _ in first.calls), (
+        "the control must really have attempted a submission"
+    )
+
+
+def test_stop_before_any_submission_ends_the_turn_locally(protocol, monkeypatch):
+    """Stop while nothing was submitted must not raise 'Gateway session is reconnecting.'."""
+    attempts = []
+    instance, _, _ = relay()
+    instance.connector = failing_connector(attempts, FileNotFoundError(2, "No such file or directory"))
+    instance.cancel.set()
+    assert asyncio.run(instance.run()) == (None, {}), (
+        "a cancelled turn that never reached the Gateway must end locally"
+    )
+    assert len(attempts) == 1, (
+        f"the relay retried {len(attempts)} times for a cancelled turn; "
+        "it must stop at the first failure"
+    )
+
+
+def test_stop_ends_an_unsubmitted_turn_locally_instead_of_raising(protocol, monkeypatch):
+    """The Stop path must not raise 'Gateway session is reconnecting.' for a turn that was never sent."""
+    instance, _, _ = relay()
+    assert instance.client is None and instance.receipt is None and instance.attempted is False
+    assert asyncio.run(instance.control("stop")) is True
+    assert instance.cancel.is_set(), "Stop must cancel the turn locally"
+
+
+def test_stop_still_refuses_after_a_submission(protocol, monkeypatch):
+    """Control: an uncertain admission keeps the previous contract — the caller retries after reconnect."""
+    instance, _, _ = relay()
+    instance.attempted = True
+    with pytest.raises(sessions.SessionTransportError, match="reconnecting"):
+        asyncio.run(instance.control("stop"))
+    assert not instance.cancel.is_set()

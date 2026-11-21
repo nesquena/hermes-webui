@@ -219,6 +219,16 @@ class SessionRelay:
 
     async def control(self, action, **params):
         if self.client is None or self.receipt is None:
+            # #8905: nothing was submitted, so the Gateway holds no admission
+            # for this turn and there is nothing to interrupt there. A Stop
+            # must still end the turn locally instead of raising "Gateway
+            # session is reconnecting." and leaving the conversation busy.
+            # A turn that WAS submitted keeps the previous contract: its
+            # admission is uncertain, so the caller has to retry once the
+            # relay has reconnected.
+            if action == "stop" and not self.attempted and self.receipt is None:
+                self.cancel.set()
+                return True
             raise SessionTransportError("Gateway session is reconnecting.")
         receipt = await self.status()
         generation = receipt.get("execution_generation")
@@ -446,8 +456,27 @@ class SessionRelay:
             except SessionTransportError:
                 if terminal_outcome or not self.attempted:
                     raise
-            except Exception:
-                pass
+            except Exception as exc:
+                # #8905: a failure BEFORE the first submission means nothing was
+                # ever sent, so there is no uncertain admission to recover. The
+                # generic branch used to swallow it and fall through to the
+                # reconnect loop, so a missing transport socket (e.g. the
+                # `unix` path does not exist) reconnected forever, every <=5s,
+                # and Stop could not end the turn: `control()` raised "Gateway
+                # session is reconnecting." because no client was attached.
+                #
+                # A failure AFTER a submission is a different contract: the
+                # admission is then uncertain, so the existing indefinite
+                # recovery stays (it keeps the input ID and worker ownership).
+                if not self.attempted and self.receipt is None:
+                    if self.cancel.is_set():
+                        # The user stopped the turn before it reached the
+                        # Gateway: end it locally instead of reconnecting.
+                        return None, {}
+                    raise SessionTransportError(
+                        "Gateway session transport is unavailable: "
+                        f"{exc.__class__.__name__}. The turn was not submitted."
+                    ) from None
             finally:
                 self.client = None
                 from api.clarify import resolve_clarify_by_id
