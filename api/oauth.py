@@ -62,6 +62,62 @@ _OAUTH_FLOWS_LOCK = threading.Lock()
 _OAUTH_START_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _OAUTH_START_LOCKS_LOCK = threading.Lock()
 _ANTHROPIC_ENV_KEYS = ("ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")
+_PUBLICATION_STATE = threading.local()
+
+
+class _OAuthPublicationWithdrawn(Exception):
+    """The flow lost authority before its first durable mutation."""
+
+
+class _OAuthPublication:
+    """Serialize the local publication phase with cancellation and expiry.
+
+    Acquire at the first concrete writer, not during provider reads or staging.
+    Once publication starts, cancellation waits for its terminal outcome.
+    """
+
+    def __init__(self, flow_id: str):
+        self.flow_id = flow_id
+        self.held = False
+
+    def __enter__(self):
+        self.previous = getattr(_PUBLICATION_STATE, "current", None)
+        _PUBLICATION_STATE.current = self
+        return self
+
+    def begin(self):
+        if self.held:
+            return
+        _OAUTH_FLOWS_LOCK.acquire()
+        self.held = True
+        flow = _OAUTH_FLOWS.get(self.flow_id)
+        if not flow or flow.get("status") != "pending":
+            raise _OAuthPublicationWithdrawn()
+        if float(flow.get("expires_at") or 0) <= time.time():
+            flow["status"] = "expired"
+            flow["updated_at"] = time.time()
+            _drop_sensitive_flow_fields(flow)
+            raise _OAuthPublicationWithdrawn()
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self.begin()
+                flow = _OAUTH_FLOWS[self.flow_id]
+                flow["status"] = "success"
+                flow["updated_at"] = time.time()
+                _drop_sensitive_flow_fields(flow)
+        finally:
+            _PUBLICATION_STATE.current = self.previous
+            if self.held:
+                self.held = False
+                _OAUTH_FLOWS_LOCK.release()
+
+
+def _begin_flow_publication() -> None:
+    publication = getattr(_PUBLICATION_STATE, "current", None)
+    if publication is not None:
+        publication.begin()
 
 
 def _oauth_start_key(provider: str, hermes_home: Path) -> tuple[str, str]:
@@ -187,14 +243,18 @@ def read_auth_json():
 def _write_auth_json(data: dict[str, Any], auth_path: Path | None = None) -> Path:
     """Atomically write auth.json with owner-only permissions.
 
-    OAuth access/refresh tokens live in this file. The temp file is chmod 0600
-    before rename so the final path never inherits a permissive process umask.
+    OAuth access/refresh tokens live in this file. Create the temporary file
+    exclusively with mode 0600 before writing any credential bytes.
     """
+    _begin_flow_publication()
     path = auth_path or AUTH_JSON_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    created = False
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())  # durable before rename: no truncated auth.json on power loss
@@ -210,7 +270,7 @@ def _write_auth_json(data: dict[str, Any], auth_path: Path | None = None) -> Pat
         return path
     finally:
         try:
-            if tmp.exists():
+            if created and tmp.exists():
                 tmp.unlink()
         except OSError:
             pass
@@ -343,6 +403,7 @@ def _clear_anthropic_env_values(hermes_home: Path) -> None:
     env lock. Keep a locked process-env clear here too so import/write failures
     cannot leave or partially clear stale Anthropic fallbacks.
     """
+    _begin_flow_publication()
     try:
         from api.providers import _write_env_file
 
@@ -485,18 +546,10 @@ def _run_anthropic_credential_worker(flow_id: str) -> None:
                     return
 
             hermes_home = Path(flow["hermes_home"])
-            _link_anthropic_credentials(hermes_home)
-            with _OAUTH_FLOWS_LOCK:
-                current = _OAUTH_FLOWS.get(flow_id)
-                if not current or current.get("status") != "pending":
-                    cancelled = bool(current and current.get("status") == "cancelled")
-                else:
-                    current["status"] = "success"
-                    current["updated_at"] = time.time()
-                    _drop_sensitive_flow_fields(current)
-                    cancelled = False
-            if cancelled:
-                _remove_anthropic_link_marker(hermes_home)
+            with _OAuthPublication(flow_id):
+                _link_anthropic_credentials(hermes_home)
+            return
+        except _OAuthPublicationWithdrawn:
             return
         except Exception as exc:
             logger.warning("Anthropic credential polling failed: %s", exc)
@@ -669,7 +722,7 @@ def _set_flow_status(flow_id: str, status: str, **fields: Any) -> None:
     """Update a flow's status under the lock, then strip sensitive fields on terminal transitions."""
     with _OAUTH_FLOWS_LOCK:
         flow = _OAUTH_FLOWS.get(flow_id)
-        if not flow:
+        if not flow or flow.get("status") != "pending":
             return
         flow["status"] = status
         flow["updated_at"] = time.time()
@@ -717,8 +770,10 @@ def _run_codex_oauth_worker(flow_id: str) -> None:
                 current = _OAUTH_FLOWS.get(flow_id)
                 if not current or current.get("status") != "pending":
                     return
-            _persist_codex_credentials(Path(live["hermes_home"]), tokens)
-            _set_flow_status(flow_id, "success")
+            with _OAuthPublication(flow_id):
+                _persist_codex_credentials(Path(live["hermes_home"]), tokens)
+            return
+        except _OAuthPublicationWithdrawn:
             return
         except Exception as exc:
             logger.warning("Codex OAuth onboarding flow failed: %s", exc)
