@@ -1788,3 +1788,32 @@ def test_a_scheduled_restart_leaves_run_admission_open(
         "a scheduled restart left run admission closed: the next test in "
         "this shard would be refused with server_draining"
     )
+
+
+@pytest.mark.parametrize("metadata", [".git", "commondir"])
+def test_unreadable_linked_checkout_metadata_refuses_restart(real_restart_env, monkeypatch, metadata):
+    env = real_restart_env
+    _publish_dead_owner_marker(env.checkout)
+    link = env.checkout.root / ".git"
+    worktree = env.checkout.root.parent / "worktree-metadata"
+    worktree.mkdir()
+    if link.is_dir():
+        link.rename(worktree / "original-git-dir")
+    link.write_text(f"gitdir: {worktree}\n", encoding="utf-8")
+    common = worktree / "commondir"
+    common.write_text("../shared-git\n", encoding="utf-8")
+    denied = link if metadata == ".git" else common
+    from pathlib import Path
+
+    read_text = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == denied:
+            raise PermissionError("unreadable checkout metadata")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    result = env.updates.restart_stale_runtime()
+    assert result.get("agent_update_state") == "unknown"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0

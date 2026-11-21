@@ -559,14 +559,13 @@ _AGENT_WINDOWS_OWNER_LOCK_OFFSET = 1 << 20
 _AGENT_WINDOWS_LEASE_SLOTS = 16
 
 
-def _agent_checkout_lock_path() -> Path | None:
-    """Return the installed Agent's checkout kernel lock path, or ``None``.
+def _agent_checkout_lock_path() -> Path | str | None:
+    """Return the checkout lock path, ``None`` when no checkout is loaded.
 
-    Mirrors ``hermes_cli/update_lock.py`` ``checkout_lock_path`` for the
-    LOADED Agent checkout: a linked worktree (``.git`` is a ``gitdir:``
-    file) locks inside its common git dir; any other checkout locks
-    ``.hermes-update.lock`` at its root.  Read-only — the path is resolved
-    from disk, never created.
+    The ``unknown`` sentinel means checkout metadata could not be read or
+    resolved. It must stay distinct from a missing ``.git`` path: the latter
+    is a regular checkout whose root lock can be probed, while the former
+    cannot prove that a restart is safe.
     """
     if _AGENT_SOURCE_DIR is None:
         return None
@@ -578,18 +577,25 @@ def _agent_checkout_lock_path() -> Path | None:
         elif dot.is_file():
             text = dot.read_text(encoding="utf-8-sig").strip()
             if not text.startswith("gitdir:"):
-                return root / _AGENT_CHECKOUT_LOCK_NAME
-            gitdir = root / text[len("gitdir:"):].strip()
+                return "unknown"
+            gitdir = Path(text[len("gitdir:"):].strip())
+            if not gitdir.is_absolute():
+                gitdir = root / gitdir
         else:
             return root / _AGENT_CHECKOUT_LOCK_NAME
         common = gitdir / "commondir"
         if common.is_file():
-            gitdir = gitdir / common.read_text(encoding="utf-8-sig").strip()
+            common_text = common.read_text(encoding="utf-8-sig").strip()
+            if not common_text:
+                return "unknown"
+            common_path = Path(common_text)
+            gitdir = common_path if common_path.is_absolute() else gitdir / common_path
         return Path(os.path.normpath(gitdir)) / _AGENT_GIT_CHECKOUT_LOCK_NAME
-    except OSError:
-        # An unreadable checkout is never provably unlocked; probe the
-        # root-side lock path, hardening the admission below.
-        return root / _AGENT_CHECKOUT_LOCK_NAME
+    except (OSError, ValueError, RuntimeError):
+        # An unreadable linked checkout is never provably unlocked. Returning
+        # the sentinel keeps the admission fail-closed instead of probing a
+        # different root-side lock that may not protect this checkout.
+        return "unknown"
 
 
 def _agent_checkout_lock_state() -> str:
@@ -615,6 +621,9 @@ def _agent_checkout_lock_state() -> str:
     if path is None:
         # No loaded checkout — nothing to protect.
         return "free"
+    if path == "unknown":
+        # Checkout metadata could not be proven readable; fail closed.
+        return "unknown"
     flags = getattr(os, "O_BINARY", 0)
     if sys.platform == "win32":
         # msvcrt.locking needs a writable-capable handle; O_RDWR never
