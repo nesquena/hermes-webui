@@ -371,6 +371,52 @@ def test_auto_install_rejects_a_stage_changed_after_publication(tmp_path):
         assert _agent_install_dir(mount.resolve()) == mount.resolve()
 
 
+def _run_secure_stage_install_inputs(stage: Path) -> None:
+    """Run docker_init.bash's real fast-restart repair against ``stage``.
+
+    The repair is a shell function; running it (not just chmod-ing the file in
+    the test) keeps the producer side honest: if it ever stopped covering
+    ``setup.py``, this helper's caller must fail.
+    """
+    start = INIT_SH.index("secure_stage_install_inputs() {")
+    end = INIT_SH.index("\n}\n", start) + len("\n}\n")
+    function = INIT_SH[start:end]
+    result = subprocess.run(
+        ["bash", "-c", function + '\nsecure_stage_install_inputs "$1"\n',
+         "docker_init", str(stage)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
+def test_auto_install_rejects_a_setup_py_edited_before_the_restart_repair(tmp_path):
+    """#8501: the fast-restart repair must not launder an edited setup.py.
+
+    A stage copied while the Agent's ``setup.py`` was group- or world-writable
+    can be rewritten by a peer user. The repair
+    (``secure_stage_install_inputs``) only strips group/world write from an
+    existing stage; it never compares contents. The manifest records
+    ``setup.py``'s digest too, so a copy edited *before* that repair must still
+    be rejected — and the recovery install must fall back to the mount instead
+    of executing the other user's code.
+    """
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    (mount / "setup.py").write_text("print('authorized')\n", encoding="utf-8")
+    staged = _staged_copy(tmp_path, mount)
+    # What a peer user could write while the old stage was peer-writable.
+    (staged / "setup.py").write_text("print('attacker')\n", encoding="utf-8")
+    (staged / "setup.py").chmod(0o666)
+    # The restart repair makes the file private but keeps that content.
+    _run_secure_stage_install_inputs(staged)
+    assert not stat.S_IMODE((staged / "setup.py").stat().st_mode) & 0o022
+
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
 def test_auto_install_falls_back_to_the_mount_without_a_stage_dir(tmp_path):
     from api.startup import _agent_install_dir
 
