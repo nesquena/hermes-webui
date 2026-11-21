@@ -1,0 +1,284 @@
+"""#8786 items 1-2: uploads and the vision allow-check must trust the attachment
+inbox as resolved at server startup, never re-resolve it by name.
+
+#8780 fixed the public-share reader of the inbox root (#8590): shares now
+trust the root through the startup-resolved helper and walk it no-follow.
+The two other readers still resolve it by name on every call:
+
+1. Uploads (``api/upload.py:_session_attachment_dir``) -- if something
+   replaces the inbox, or one of its ancestors, with a symlink, later
+   uploads land wherever the symlink points (the write-side twin of #8590).
+   In the default layout the inbox sits under HOME, so anything able to
+   write there can do it.
+2. The vision allow-check (``api/streaming.py:_build_native_multimodal_message``)
+   -- a redirected inbox widens which local files may be read into the
+   model's context.
+
+Both must use the startup-trusted root and fail closed: the upload is
+refused instead of written through the redirect, and the vision check
+stops allowing paths under the redirected location.  The control cases pin
+that the normal paths keep working: an upload still lands in the real
+inbox, an image inside the inbox still embeds, and an inbox configured
+through a symlink on purpose still resolves (once, at startup).
+
+Out of scope for this slice (separate follow-ups, see issue #8786):
+hardlinked files (item 3), import-order pinning (item 4), and settings
+that legitimately change at runtime (item 5).
+
+Test patterns follow tests/test_issue8590_share_root_trust.py (real
+directories, real symlinks, real redirect) and
+tests/test_attachment_upload_toctou.py (real multipart body through
+``handle_upload`` with a fake handler).
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import api.upload as upload
+from api.routes import _normalize_chat_attachments
+from api.streaming import _build_native_multimodal_message
+from api.upload import handle_upload
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+
+PNG = (
+    b"\x89PNG\r\n\x1a\n"
+    b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+    b"\x00\x00\x00\x0bIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N"
+    b"\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+LAYOUTS = ["override-root", "override-ancestor", "default-root", "default-ancestor"]
+
+
+def _put(d: Path) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "img.png").write_bytes(PNG)
+
+
+def _swap_to(path: Path, target: Path) -> None:
+    os.rename(path, path.with_name(path.name + ".saved"))
+    os.symlink(target, path)
+
+
+def _layout(base: Path, monkeypatch, kind: str):
+    """(attachment inbox, redirect target, swap) configured like production.
+
+    The inbox is nested under a HOME-like workspace, reachable either through
+    the override env var or the default ``STATE_DIR / "attachments"`` layout,
+    and the swap redirects the inbox itself or one of its ancestors.
+    """
+    ws = base / "home"
+    out = base / "outside" / "attachments"
+    att = ws / ".hermes" / "webui" / "attachments"
+    _put(att)
+    if kind.startswith("default"):
+        monkeypatch.delenv("HERMES_WEBUI_ATTACHMENT_DIR", raising=False)
+        monkeypatch.setattr(upload, "STATE_DIR", att.parent)
+    else:
+        monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
+    if kind.endswith("ancestor"):
+        # The swap renames the ancestor, so the real inbox ends up under
+        # webui.saved/attachments.
+        return (att, out, lambda: _swap_to(ws / ".hermes" / "webui", base / "outside"),
+                ws / ".hermes" / "webui.saved" / "attachments")
+    return (att, out, lambda: _swap_to(att, base / "outside" / "attachments"),
+            att.with_name(att.name + ".saved"))
+
+
+def _multipart_body(fields=None, files=None, boundary=b"8786boundary"):
+    fields = fields or {}
+    files = files or {}
+    body = b""
+    for name, value in fields.items():
+        body += b"--" + boundary + b"\r\n"
+        body += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        body += str(value).encode() + b"\r\n"
+    for name, (filename, data, content_type) in files.items():
+        body += b"--" + boundary + b"\r\n"
+        body += (
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode()
+        body += data + b"\r\n"
+    body += b"--" + boundary + b"--\r\n"
+    return body, f"multipart/form-data; boundary={boundary.decode()}"
+
+
+class _FakeHandler:
+    def __init__(self, body: bytes, content_type: str):
+        self.rfile = io.BytesIO(body)
+        self.wfile = io.BytesIO()
+        self.headers = {
+            "Content-Type": content_type,
+            "Content-Length": str(len(body)),
+        }
+        self.status = None
+        self.sent_headers = {}
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.sent_headers[key] = value
+
+    def end_headers(self):
+        pass
+
+    def payload(self):
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+
+def _upload(monkeypatch, session_id: str, filename: str, data: bytes) -> _FakeHandler:
+    monkeypatch.setattr(
+        upload, "get_session", lambda sid: SimpleNamespace(session_id=sid, profile=None)
+    )
+    monkeypatch.setattr(upload, "_get_active_profile_name", lambda: "default")
+    body, content_type = _multipart_body(
+        fields={"session_id": session_id},
+        files={"file": (filename, data, "application/octet-stream")},
+    )
+    handler = _FakeHandler(body, content_type)
+    handle_upload(handler)
+    return handler
+
+
+def _embeds(path: Path, workspace: Path) -> bool:
+    """True when the vision allow-check passes *path* into the model context."""
+    atts = _normalize_chat_attachments(
+        [{"name": "img.png", "path": str(path), "mime": "image/png",
+          "size": path.stat().st_size, "is_image": True}]
+    )
+    return isinstance(
+        _build_native_multimodal_message("", "describe", atts, str(workspace)), list
+    )
+
+
+# --- 1. Uploads must not follow a redirected inbox (write side) ---------------
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_upload_after_inbox_redirect_is_refused_and_writes_nowhere(tmp_path, monkeypatch, layout):
+    att, out, swap, original = _layout(tmp_path, monkeypatch, layout)
+    # Control: the server uploaded from this configuration before the symlink
+    # appeared (non-vacuous: the file lands in the real inbox).
+    h1 = _upload(monkeypatch, "sess-1", "first.txt", b"first")
+    assert h1.status == 200, h1.payload()
+    assert (att / "sess-1" / "first.txt").read_bytes() == b"first"
+
+    swap()
+    # The inbox (or an ancestor) now points outside.  The upload must be
+    # refused -- fail closed -- and nothing may land under the redirect.
+    h2 = _upload(monkeypatch, "sess-1", "payload.txt", b"OUTSIDE-PAYLOAD")
+    assert h2.status == 400, h2.payload()
+    assert not list(tmp_path.joinpath("outside").rglob("payload.txt"))
+    # The original inbox (renamed aside by the swap) still holds only the
+    # pre-redirect upload.
+    assert (original / "sess-1" / "first.txt").read_bytes() == b"first"
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_upload_before_inbox_redirect_still_lands_in_inbox(tmp_path, monkeypatch, layout):
+    """Control: the normal path is untouched (no false refusal)."""
+    att, _out, _swap, _original = _layout(tmp_path, monkeypatch, layout)
+    h = _upload(monkeypatch, "sess-2", "notes.txt", b"hello")
+    assert h.status == 200, h.payload()
+    assert (att / "sess-2" / "notes.txt").read_bytes() == b"hello"
+
+
+def test_unresolvable_inbox_refuses_upload_instead_of_resolving_by_name(tmp_path, monkeypatch):
+    """A root that cannot be resolved fails closed: refuse, never fall back.
+
+    The fallback would re-introduce the bug, so None must mean "no upload",
+    not "resolve by name again".
+    """
+    att = tmp_path / "attachments"
+    _put(att)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
+    # Trust is established at startup (first call), like the server's import.
+    upload._trusted_attachment_root()
+    # A fresh spelling (a rename in progress) so the cache cannot answer.
+    moved = tmp_path / "attachments-renamed"
+    os.rename(att, moved)
+    real_resolve = Path.resolve
+
+    def resolve(self, strict=False):
+        if str(self) == str(moved):
+            raise OSError(5, "Input/output error")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(moved))
+    monkeypatch.setattr(Path, "resolve", resolve)
+    h = _upload(monkeypatch, "sess-3", "x.txt", b"x")
+    assert h.status == 400, h.payload()
+
+
+def test_symlink_loop_inbox_refuses_upload(tmp_path, monkeypatch):
+    loop = tmp_path / "loop"
+    os.symlink(loop, loop)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(loop))
+    h = _upload(monkeypatch, "sess-4", "x.txt", b"x")
+    assert h.status == 400, h.payload()
+    assert not list(tmp_path.rglob("x.txt"))
+
+
+def test_inbox_configured_through_symlink_still_accepts_uploads(tmp_path, monkeypatch):
+    """A symlinked inbox configured on purpose resolves once, at startup.
+
+    The trusted root is resolved before the redirect is planted, so a
+    deliberately symlinked configuration keeps working (no false refusal).
+    """
+    real = tmp_path / "data" / "attachments"
+    _put(real)
+    link = tmp_path / "attachments-link"
+    os.symlink(real, link)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(link))
+    h = _upload(monkeypatch, "sess-5", "ok.txt", b"ok")
+    assert h.status == 200, h.payload()
+    assert (real / "sess-5" / "ok.txt").read_bytes() == b"ok"
+
+
+# --- 2. The vision allow-check must not follow a redirected inbox -------------
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_vision_allow_check_after_inbox_redirect_refuses_outside(tmp_path, monkeypatch, layout):
+    att, out, swap, _original = _layout(tmp_path, monkeypatch, layout)
+    ws = tmp_path / "home"
+    # Control: an image inside the real inbox embeds.
+    assert _embeds(att / "img.png", ws)
+
+    swap()
+    _put(out)  # the redirect target now holds its own image
+    # A path under the redirected inbox must not be read into the model.
+    assert not _embeds(out / "img.png", ws)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_vision_allow_check_before_inbox_redirect_still_allows(tmp_path, monkeypatch, layout):
+    """Control: an image in the (not yet redirected) inbox still embeds."""
+    att, _out, _swap, _original = _layout(tmp_path, monkeypatch, layout)
+    ws = tmp_path / "home"
+    assert _embeds(att / "img.png", ws)
+
+
+def test_vision_allow_check_with_unresolvable_inbox_ignores_it(tmp_path, monkeypatch):
+    """Fail closed: an unresolvable inbox is not an allowed root.
+
+    The workspace root keeps working; only the attachment root is dropped.
+    """
+    loop = tmp_path / "loop"
+    os.symlink(loop, loop)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(loop))
+    ws = tmp_path / "ws"
+    _put(ws)
+    assert _embeds(ws / "img.png", ws)          # workspace still allowed
+    rogue = tmp_path / "rogue"
+    _put(rogue)
+    assert not _embeds(rogue / "img.png", ws)   # outside both roots

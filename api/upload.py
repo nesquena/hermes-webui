@@ -203,11 +203,17 @@ def _sanitize_upload_name(filename: str) -> str:
 
 
 def _attachment_root() -> Path:
-    """Return the configured upload inbox root.
+    """Return the configured upload inbox root, resolved by name.
 
     Plain chat attachments are transient context for the agent, not project
     source files.  Keep them out of the active workspace by default while still
     allowing operators to move the inbox with HERMES_WEBUI_ATTACHMENT_DIR.
+
+    Security-sensitive readers must not use this: it re-resolves the
+    configured spelling on every call, so a symlink planted later over the
+    inbox or one of its ancestors moves it.  They use
+    ``_trusted_attachment_root()``, which resolves once at server startup
+    (#8590, #8786).
     """
     override = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip()
     if override:
@@ -215,28 +221,31 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
-_SHARE_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
+_TRUSTED_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
 
 
-def _share_attachment_root() -> Path | None:
-    """The attachment root as trusted by public shares, or None (#8590).
+def _trusted_attachment_root() -> Path | None:
+    """The attachment root as trusted at server startup, or None (#8590, #8786).
 
     Resolved once per configured spelling -- at import, i.e. server startup,
     since STATE_DIR and HERMES_WEBUI_ATTACHMENT_DIR are process-wide -- and
-    never by name again: shares walk it no-follow, so a symlink planted later
-    (e.g. inside a workspace that contains it) cannot move it.  A root that
-    cannot be resolved is None (fail closed).  Uploads keep _attachment_root().
+    never by name again: every reader contains paths under it by comparing
+    against this resolved root (uploads, the vision allow-check) or by
+    walking it no-follow (public shares), so a symlink planted later (e.g.
+    inside a workspace that contains the inbox) cannot move it.  A root that
+    cannot be resolved is None (fail closed): uploads refuse, shares drop it,
+    and the vision allow-check stops allowing it.
     """
     key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
-    if key not in _SHARE_ATTACHMENT_ROOTS:
+    if key not in _TRUSTED_ATTACHMENT_ROOTS:
         try:
-            _SHARE_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
+            _TRUSTED_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
         except (OSError, RuntimeError, ValueError):
-            _SHARE_ATTACHMENT_ROOTS[key] = None
-    return _SHARE_ATTACHMENT_ROOTS[key]
+            _TRUSTED_ATTACHMENT_ROOTS[key] = None
+    return _TRUSTED_ATTACHMENT_ROOTS[key]
 
 
-_share_attachment_root()
+_trusted_attachment_root()
 
 
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
@@ -259,7 +268,18 @@ def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None =
 
 
 def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Path:
-    root = (root or _attachment_root()).resolve()
+    if root is None:
+        # #8786: trust the inbox as resolved at server startup, never by name
+        # again -- a symlink planted over the inbox or one of its ancestors
+        # afterwards must not redirect uploads.  The resolved destination is
+        # compared against the trusted root below, so a redirect fails closed;
+        # an unresolvable root (None) refuses the upload instead of falling
+        # back to a by-name resolve, which would leave the hole open.
+        root = _trusted_attachment_root()
+        if root is None:
+            raise ValueError('Attachment inbox is unavailable')
+    else:
+        root = root.resolve()
     dest_dir = (root / _re.sub(r'[^\w.\-]', '_', str(session_id or 'session'))[:120]).resolve()
     if not dest_dir.is_relative_to(root):
         raise ValueError('Invalid attachment directory')
