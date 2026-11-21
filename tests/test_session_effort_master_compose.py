@@ -149,4 +149,3 @@ def test_field_only_effort_write_is_counted_for_cold_publication(tmp_path, monke
 
 # A draft save never re-saves a CLI chat as WebUI-native: checked on the draft
 # path, which does not reload the session, in tests/test_composer_draft_cli_identity.py.
-

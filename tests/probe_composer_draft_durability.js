@@ -1,16 +1,27 @@
 // Real composer code in fresh realms sharing only browser durable storage.
 const fs = require('fs'), vm = require('vm'), assert = require('node:assert/strict');
-const source = fs.readFileSync(process.argv[2], 'utf8').split('const SESSION_VIEWED_COUNTS_KEY =')[0];
+const path = require('node:path');
+const sessions = fs.readFileSync(process.argv[2], 'utf8');
+const commands = fs.readFileSync(path.join(path.dirname(process.argv[2]), 'commands.js'), 'utf8');
+const between = (src, start, end) => src.slice(src.indexOf(start), src.indexOf(end, src.indexOf(start)));
+const source = [
+  sessions.split('const SESSION_VIEWED_COUNTS_KEY =')[0],
+  between(sessions, 'async function _switchProfileForSessionLoad(', 'async function loadSession('),
+  between(commands, 'function _steerOwnerIsCurrent(', 'function _steerFallbackIsDeadRun('),
+  between(commands, 'let _steerUploadCache =', 'function _steerFilesSignature('),
+].join('\n');
 const wire = JSON.parse(process.argv[3] || '{}');
 const storage = new Map();
 function page(profile = 'default', failureStatus = 409) {
   const timers = new Map(), requests = [], ta = {value: ''};
   let id = 0, fail = true, hold = null;
   const c = vm.createContext({S: {activeProfile: profile, session: {session_id:'probe-owner'}, pendingFiles:[]},
-    $: () => ta, console: {warn() {}},
+    $: () => ta, console: {warn() {}}, document: {getElementById:()=>null},
     localStorage: {getItem:k=>storage.get(k)||null, setItem:(k,v)=>storage.set(k,v), removeItem:k=>storage.delete(k)},
     setTimeout:(fn,delay)=>{timers.set(++id,{fn,delay});return id;}, clearTimeout:id=>timers.delete(id),
-    api: async (_,opts) => {const body=JSON.parse(opts.body); requests.push(body);
+    api: async (url,opts) => {const body=JSON.parse(opts.body);
+      if (url==='/api/profile/switch') return {active:body.name};
+      assert.equal(url,'/api/session/draft'); requests.push(body);
       if (wire.bridge && wire.bridge-- > 0) {
         process.stdout.write(JSON.stringify({request:body})+'\n');
         let line='', byte=Buffer.alloc(1);
@@ -101,7 +112,11 @@ async function flush(){for(let i=0;i<40;i++) await Promise.resolve();}
     storage.clear();
     const saving=page(), ack=saving.hold();
     saving.run("_saveComposerDraftNow('probe-owner','already saved',[]).catch(()=>{})");
-    saving.run("S.activeProfile='bravo'; S.session.composer_draft={text:'bravo draft',files:[]}");
+    await flush();
+    assert.equal(saving.requests.length,1,'original save is in flight before the profile switch');
+    await saving.run("_switchProfileForSessionLoad('bravo')");
+    assert.equal(saving.run('S.activeProfile'),'bravo');
+    saving.run("S.session.composer_draft={text:'bravo draft',files:[]}");
     saving.ta.value='bravo composer';
     if (editOtherProfile) saving.run("_saveComposerDraft('probe-owner','bravo pending',[])");
     ack.resolve({session_id:'probe-owner'}); await flush();
@@ -128,10 +143,12 @@ async function flush(){for(let i=0;i<40;i++) await Promise.resolve();}
     }
     remote={text:body.text,files:body.files}; return {session_id:body.session_id,draft:remote};
   };
-  const retirement=retiring.run("_clearComposerDraftIfUnchanged('probe-owner','delivered steer',[],_composerDraftRevision('probe-owner'))");
+  retiring.ta.value='delivered steer';
+  const retirement=retiring.run("_steerRetireOwnedDraft('probe-owner',{text:'delivered steer',files:[],rev:_composerDraftRevision('probe-owner')})");
   await retiring.tick(); // A retry queued behind the in-flight comparison must also be cancelled.
   releaseCompare();
-  assert.equal(await retirement,false,'compare mismatch preserves the remote draft');
+  await retirement;
+  assert.equal(retiring.ta.value,'','delivered guidance is removed from the composer');
   await retiring.tick();
   assert.equal(remote.text,'newer remote draft','retry cannot overwrite a mismatching draft after retirement');
   assert.equal(storage.size,0,'retired edit is not restored after reload');
@@ -142,9 +159,10 @@ async function flush(){for(let i=0;i<40;i++) await Promise.resolve();}
       const editing=page();
       editing.run("_saveComposerDraftNow('probe-owner','delivered steer',[]).catch(()=>{})"); await flush();
       const comparison=editing.hold();
-      const clearing=editing.run("_clearComposerDraftIfUnchanged('probe-owner','delivered steer',[],_composerDraftRevision('probe-owner'))");
+      editing.ta.value='delivered steer';
+      const clearing=editing.run("_steerRetireOwnedDraft('probe-owner',{text:'delivered steer',files:[],rev:_composerDraftRevision('probe-owner')})");
       await flush();
-      if (replacement==='profile') editing.run("S.activeProfile='bravo'");
+      if (replacement==='profile') await editing.run("_switchProfileForSessionLoad('bravo')");
       if (replacement==='retype') editing.run("_noteComposerDraftPayload('probe-owner','',[])");
       const nextText=replacement==='text'?'new local edit':'delivered steer';
       const nextFiles=replacement==='files'?[{name:'new.txt',size:3}]:[];
@@ -153,6 +171,13 @@ async function flush(){for(let i=0;i<40;i++) await Promise.resolve();}
       const pendingValue=storage.get(pendingKey);
       comparison.resolve({session_id:'probe-owner',mismatch}); await clearing;
       assert.equal(storage.get(pendingKey),pendingValue,'retirement leaves replacement intent intact');
+      if (replacement==='profile') {
+        const original=page(); original.succeed();
+        original.run("_restoreComposerDraft({text:'newer remote draft'},'probe-owner')");
+        assert.equal(original.ta.value,'newer remote draft','retirement discards its captured profile intent');
+        await original.tick();
+        assert.equal(original.requests.length,0,'retired guidance does not replay after a profile switch');
+      }
       const restored=page(replacement==='profile'?'bravo':'default'); restored.succeed();
       restored.run("_restoreComposerDraft({text:'remote'},'probe-owner')");
       assert.equal(restored.ta.value,nextText,'replacement survives reload');

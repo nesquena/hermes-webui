@@ -708,7 +708,12 @@ function _clearComposerDraftIfUnchanged(sid, text, files, maxRev) {
       && _draftSaveTimerPayload === _composerDraftPayloadSignature(text, files)) clearTimeout(_draftSaveTimer);
   const ifFiles = _composerDraftFilesForPersist(files);
   const ifSig = _composerDraftPayloadSignature(String(text || ''), ifFiles);
+  const profile = S.activeProfile || 'default';
   const fallback = _composerDraftLocalFallbackBySid.get(sid);
+  const pendingRetirement = fallback && fallback.profile === profile
+    && _composerDraftRevision(sid) <= Number(maxRev)
+    && _composerDraftPayloadSignature(fallback.text, _composerDraftFilesForPersist(fallback.files)) === ifSig
+    ? fallback : null;
   // Join the per-session draft write chain so an earlier queued save cannot
   // land after this compare-and-clear and resurrect the retired draft.
   const previous = _composerDraftPostPromisesBySid.get(sid);
@@ -723,13 +728,20 @@ function _clearComposerDraftIfUnchanged(sid, text, files, maxRev) {
   _composerDraftPostPromisesBySid.set(sid, pending);
   return pending.then((r) => {
     // A mismatch preserves the remote draft, not a retry of the retired edit.
-    if (fallback && _composerDraftLocalFallbackBySid.get(sid) === fallback
-        && _composerDraftRevision(sid) <= Number(maxRev)
-        && _composerDraftPayloadSignature(fallback.text, _composerDraftFilesForPersist(fallback.files)) === ifSig) {
-      _forgetComposerDraftLocalFallback(sid);
+    if (pendingRetirement) {
+      if (_composerDraftLocalFallbackBySid.get(sid) === pendingRetirement
+          && _composerDraftRevision(sid) <= Number(maxRev)) {
+        _forgetComposerDraftLocalFallback(sid);
+      } else if (typeof _removeComposerDraftPending === 'function'
+                 && _composerDraftLocalFallbackBySid.get(sid) !== pendingRetirement) {
+        // A replacement owns the live timer; retire only the old stored token.
+        _removeComposerDraftPending(sid, pendingRetirement);
+      }
     }
     if (r && r.mismatch) return false;
-    _rememberComposerDraftPayloadState(sid, '', []);
+    if ((S.activeProfile || 'default') === profile && _composerDraftRevision(sid) <= Number(maxRev)) {
+      _rememberComposerDraftPayloadState(sid, '', []);
+    }
     return true;
   }).catch(() => false);
 }
