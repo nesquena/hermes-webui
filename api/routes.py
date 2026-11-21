@@ -19223,10 +19223,31 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/updates/check":
         settings = load_settings()
-        if not settings.get("check_for_updates", True):
-            return j(handler, {"disabled": True})
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         qs = parse_qs(parsed.query)
+
+        channel_param = qs.get("channel", [None])[0]
+        query_channel = channel_param if channel_param in ("stable", "experimental") else None
+        channel = query_channel if query_channel is not None else (settings.get("update_channel") if parsed.query else None)
+
+        include_agent_param = qs.get("include_agent", [None])[0]
+        if include_agent_param == "1":
+            include_agent_val = True
+        elif include_agent_param == "0":
+            include_agent_val = False
+        else:
+            include_agent_val = include_agent_updates
+
+        if not settings.get("check_for_updates", True):
+            from api.updates import cached_update_status, manual_update_check_poll_allowed
+
+            if not manual_update_check_poll_allowed(channel, include_agent_val):
+                return j(handler, {"disabled": True})
+            return j(
+                handler,
+                cached_update_status(include_agent=include_agent_val, channel=channel),
+            )
+
         # ?simulate=1 returns fake behind counts for UI testing (localhost only)
         if (
             qs.get("simulate", ["0"])[0] == "1"
@@ -19259,7 +19280,10 @@ def handle_get(handler, parsed) -> bool:
             )
         from api.updates import cached_update_status
 
-        return j(handler, cached_update_status(include_agent=include_agent_updates))
+        kwargs = {"include_agent": include_agent_val}
+        if query_channel is not None:
+            kwargs["channel"] = query_channel
+        return j(handler, cached_update_status(**kwargs))
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
@@ -20133,7 +20157,10 @@ def handle_post(handler, parsed) -> bool:
         channel = body.get("channel") if isinstance(body, dict) else None
         if channel not in ("stable", "experimental"):
             channel = settings.get("update_channel")
-        from api.updates import check_for_updates
+        from api.updates import check_for_updates, mark_manual_update_check
+
+        if force:
+            mark_manual_update_check(channel, include_agent_updates)
 
         logger.info("checking for updates (force=%s, include_agent=%s, channel=%s)", force, include_agent_updates, channel)
         # Defensive-only guard: wrap check_for_updates() for consistent

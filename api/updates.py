@@ -56,12 +56,47 @@ except ImportError:
     _AGENT_DIR = None
 
 _update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}
+_update_cache_by_key: dict[tuple[str, bool], dict] = {}
+_manual_update_checks: dict[tuple[str, bool], float] = {}
+# A refresh that raised publishes nothing, so answering loud from the cache
+# (or from an empty one) reported the *previous* answer -- or empty targets --
+# as if the check the caller asked for had succeeded (#9056). A refresh now
+# publishes a terminal failure for its own (channel, include_agent) key, and
+# both the POST (check_for_updates) and the cache-only GET
+# (cached_update_status) report it instead of stale or empty data until a
+# successful publish supersedes it.
+_update_check_failures: dict[tuple[str, bool], dict] = {}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
+
+
+def _invalidate_update_cache():
+    """Invalidate the flat cache mirror and clear all retained per-key entries."""
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+        _update_cache_by_key.clear()
+        _manual_update_checks.clear()
+        _update_check_failures.clear()
 _check_in_progress = False
+_running_key = None
+_refresh_queue: list[tuple[str, bool]] = []
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
+
+# A refresh shells out to `git fetch` in both checkouts. On a host whose Agent
+# clone is large that takes tens of seconds, and the POST used to hold the whole
+# request for it (#9055). Callers now wait at most this long for a refresh and
+# otherwise answer from the cache; the refresh keeps running in a background
+# thread and publishes into _update_cache for the next read. Override with
+# HERMES_WEBUI_UPDATE_CHECK_WAIT (seconds).
+DEFAULT_UPDATE_CHECK_WAIT = 5.0
+
+# One refresh at a time, whatever the channel/include_agent key: the cache can
+# only hold one answer, and two parallel fetches cost twice the wall clock.
+_refresh_lock = threading.Lock()
+_refresh_thread = None
+_refresh_event = None
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
@@ -763,8 +798,7 @@ def _apply_clear_lock_inner(target: str) -> dict:
         # records. Pass the configured channel through — otherwise an
         # experimental-channel WebUI lock-recovery retry silently falls back
         # to stable (Codex gate: _apply_update_inner defaults to stable).
-        with _cache_lock:
-            _update_cache['checked_at'] = 0
+        _invalidate_update_cache()
         retry_result = _apply_update_inner(target, _read_update_channel())
         retry_result = dict(retry_result)
         retry_result['lock_recovery'] = {
@@ -2258,77 +2292,482 @@ def _ignored_agent_update_info() -> dict:
     return {'name': 'agent', 'behind': 0, 'ignored': True}
 
 
+def mark_manual_update_check(channel=None, include_agent=True) -> tuple[str, bool]:
+    """Record an explicit manual update-check request for cache retrieval."""
+    include_agent = bool(include_agent)
+    if channel is None:
+        channel = _read_update_channel()
+    channel = _normalize_channel(channel)
+    key = (channel, include_agent)
+    with _cache_lock:
+        _manual_update_checks[key] = time.time()
+    return key
+
+
+def manual_update_check_poll_allowed(channel=None, include_agent=True) -> bool:
+    """Check if a cache-only poll for this key is authorized by a manual check."""
+    if channel is None:
+        return False
+    include_agent = bool(include_agent)
+    channel = _normalize_channel(channel)
+    key = (channel, include_agent)
+    now = time.time()
+    with _cache_lock:
+        expired = [
+            k for k, reg_time in _manual_update_checks.items()
+            if now - float(reg_time or 0) >= CACHE_TTL
+        ]
+        for k in expired:
+            del _manual_update_checks[k]
+        reg_time = _manual_update_checks.get(key)
+        if reg_time is not None and (now - float(reg_time or 0) < CACHE_TTL):
+            return True
+        return False
+
+
 def cached_update_status(*, include_agent=True, channel=None):
     """Return cached update status without performing network or git mutations."""
+    global _running_key, _refresh_queue
     include_agent = bool(include_agent)
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    requested_key = (channel, include_agent)
     with _cache_lock:
+        if float(_update_cache.get('checked_at') or 0) == 0:
+            _update_cache_by_key.clear()
+
+        # A key whose last refresh raised has no answer to serve: report the
+        # failure instead of the previous (or empty) payload, which would read
+        # as success for a check that never completed (#9056). While a retry for
+        # this key is still in flight the pending answer stays the honest one.
+        key_in_flight = _check_in_progress and (
+            _running_key == requested_key
+            or requested_key in _refresh_queue
+        )
+        failure = _failure_for_key_locked(requested_key, time.time())
+        if failure is not None and not key_in_flight:
+            checked_at = float(_update_cache.get('checked_at') or 0)
+            if requested_key in _update_cache_by_key:
+                checked_at = float(
+                    _update_cache_by_key[requested_key].get('checked_at') or 0
+                )
+            return _failure_payload(
+                failure,
+                channel=channel,
+                include_agent=include_agent,
+                checked_at=checked_at,
+            )
+
+        if key_in_flight:
+            pending = {
+                'pending': True,
+                'cached': True,
+                'pending_key': {'channel': channel, 'include_agent': include_agent},
+                'channel': channel,
+                'include_agent': include_agent,
+                'checked_at': _update_cache.get('checked_at', 0),
+            }
+            if requested_key in _update_cache_by_key:
+                entry = _update_cache_by_key[requested_key]
+                pending['webui'] = entry.get('webui')
+                pending['agent'] = entry.get('agent')
+                pending['checked_at'] = entry.get('checked_at', 0)
+            elif (
+                _update_cache.get('include_agent') == include_agent
+                and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+            ):
+                pending['webui'] = _update_cache.get('webui')
+                pending['agent'] = _update_cache.get('agent')
+                pending['checked_at'] = _update_cache.get('checked_at', 0)
+            else:
+                pending['webui'] = None
+                pending['agent'] = None
+                pending['stale_key'] = True
+            return pending
+
+        if requested_key in _update_cache_by_key:
+            res = dict(_update_cache_by_key[requested_key])
+            res['cached'] = True
+            return res
+
         cached = dict(_update_cache)
-    # If the cache was populated for a different channel, it is not a valid
-    # answer for this channel — signal that so callers don't render stale
-    # cross-channel data as authoritative.
-    if cached.get('channel') != channel:
-        cached['channel'] = channel
-        cached['stale_channel'] = True
-    if cached.get('include_agent') != include_agent:
-        cached['include_agent'] = include_agent
-        if not include_agent:
-            cached['agent'] = _ignored_agent_update_info()
-    cached['cached'] = True
-    return cached
+        cached_channel = cached.get('channel')
+        # If the cache was populated for a different channel, it belongs to
+        # another key and is not a valid answer for this channel.
+        if cached_channel is not None and cached_channel != channel:
+            return {
+                'pending': True,
+                'cached': True,
+                'pending_key': {'channel': channel, 'include_agent': include_agent},
+                'channel': channel,
+                'include_agent': include_agent,
+                'webui': None,
+                'agent': None,
+                'stale_key': True,
+                'checked_at': cached.get('checked_at', 0),
+            }
+
+        if cached.get('include_agent') == include_agent:
+            cached['channel'] = channel
+            cached['cached'] = True
+            return cached
+
+        # Re-enable adaptation on legacy flat entry (pinned by test_security_review_fixes.py):
+        if (
+            include_agent
+            and cached.get('include_agent') is False
+            and not cached.get('agent', {}).get('ignored')
+        ):
+            cached['include_agent'] = True
+            if cached_channel is None:
+                cached['channel'] = channel
+            cached['cached'] = True
+            return cached
+
+        if float(cached.get('checked_at') or 0) == 0:
+            cached['channel'] = channel
+            cached['include_agent'] = include_agent
+            if not include_agent:
+                cached['agent'] = _ignored_agent_update_info()
+            cached['cached'] = True
+            return cached
+
+        return {
+            'pending': True,
+            'cached': True,
+            'pending_key': {'channel': channel, 'include_agent': include_agent},
+            'channel': channel,
+            'include_agent': include_agent,
+            'webui': None,
+            'agent': None,
+            'stale_key': True,
+            'checked_at': cached.get('checked_at', 0),
+        }
 
 
-def check_for_updates(force=False, *, include_agent=True, channel=None):
-    """Return cached update status for webui and agent repos."""
-    global _check_in_progress
+def _update_check_wait_budget():
+    """Seconds a request is willing to wait for a refresh (#9055)."""
+    raw = os.getenv('HERMES_WEBUI_UPDATE_CHECK_WAIT')
+    if raw is None or not str(raw).strip():
+        return DEFAULT_UPDATE_CHECK_WAIT
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_UPDATE_CHECK_WAIT
+
+
+def _update_check_failure_message(exc) -> str:
+    """Short, display-safe description of a refresh exception."""
+    detail = str(exc).strip()
+    if not detail:
+        detail = type(exc).__name__
+    else:
+        detail = f'{type(exc).__name__}: {detail}'
+    if len(detail) > _GIT_DIAGNOSTIC_MAX_CHARS:
+        detail = detail[:_GIT_DIAGNOSTIC_MAX_CHARS].rstrip() + '...'
+    return f'update check failed: {detail}'
+
+
+def _failure_payload(failure, *, channel, include_agent, checked_at=0.0) -> dict:
+    """Payload for a key whose last refresh terminated with an exception.
+
+    ``pending`` is deliberately False: the worker is gone, so the only honest
+    answers are "failed" or a later success. Both targets carry the error so
+    every consumer that already renders per-target failures ("WebUI: ...") shows
+    it, and neither target can be mistaken for an up-to-date result.
+    """
+    message = str(failure.get('error') or 'update check failed')
+    payload = {
+        'pending': False,
+        'cached': True,
+        'failed': True,
+        'error': message,
+        'failed_at': failure.get('failed_at', 0),
+        'channel': channel,
+        'include_agent': include_agent,
+        'checked_at': checked_at,
+        'webui': {'name': 'webui', 'behind': None, 'error': message},
+    }
+    if include_agent:
+        payload['agent'] = {'name': 'agent', 'behind': None, 'error': message}
+    else:
+        payload['agent'] = _ignored_agent_update_info()
+    return payload
+
+
+def _publish_update_check_failure(include_agent, channel, exc) -> None:
+    """Record a terminal failure for one key so every reader can observe it."""
+    now = time.time()
+    with _cache_lock:
+        _prune_update_check_failures(now)
+        _update_check_failures[(channel, include_agent)] = {
+            'error': _update_check_failure_message(exc),
+            'failed_at': now,
+            'channel': channel,
+            'include_agent': include_agent,
+        }
+
+
+def _prune_update_check_failures(now) -> None:
+    """Drop failure records older than the cache TTL (caller holds the lock)."""
+    for key, entry in list(_update_check_failures.items()):
+        if now - float(entry.get('failed_at') or 0) >= CACHE_TTL:
+            del _update_check_failures[key]
+
+
+def _failure_for_key_locked(key, now):
+    """Return the live failure record for ``key``, or None (caller holds lock)."""
+    failure = _update_check_failures.get(key)
+    if failure is None:
+        return None
+    if now - float(failure.get('failed_at') or 0) >= CACHE_TTL:
+        _update_check_failures.pop(key, None)
+        return None
+    return failure
+
+
+def _publish_update_cache(webui_info, agent_info, include_agent, channel):
+    with _cache_lock:
+        now = time.time()
+        expired_keys = [
+            k for k, v in _update_cache_by_key.items()
+            if now - float(v.get('checked_at') or 0) >= CACHE_TTL
+        ]
+        for k in expired_keys:
+            del _update_cache_by_key[k]
+        _prune_update_check_failures(now)
+
+        entry = {
+            'webui': webui_info,
+            'agent': agent_info,
+            'checked_at': now,
+            'include_agent': include_agent,
+            'channel': channel,
+        }
+        _update_cache_by_key[(channel, include_agent)] = dict(entry)
+        # A fresh answer supersedes any terminal failure recorded for this key.
+        _update_check_failures.pop((channel, include_agent), None)
+
+        _update_cache['webui'] = webui_info
+        _update_cache['agent'] = agent_info
+        _update_cache['checked_at'] = now
+        _update_cache['include_agent'] = include_agent
+        _update_cache['channel'] = channel
+        return dict(_update_cache)
+
+
+def _refresh_updates_in_background(include_agent, channel, done):
+    """Fetch both repos, publish the answer, and never raise into the caller."""
+    global _check_in_progress, _running_key, _refresh_queue, _refresh_event, _refresh_thread
+    try:
+        with _refresh_lock:
+            webui_info = _check_repo(REPO_ROOT, 'webui', channel)
+            # The update channel is a WebUI-only concept. The Agent is a separate
+            # project that tags plain v* and legitimately tracks master past its
+            # tags; it must ALWAYS use the default channel regardless of the user's
+            # WebUI channel selection. (Codex gate: passing 'experimental' here made
+            # the Agent ignore its v* tags and fall back to origin/master.)
+            agent_info = (
+                _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL)
+                if include_agent
+                else _ignored_agent_update_info()
+            )
+            _publish_update_cache(webui_info, agent_info, include_agent, channel)
+    except Exception as exc:
+        # The caller answers from the cache either way, so log the traceback --
+        # but also publish a terminal failure for this key: without it the cache
+        # answer reads as success even though the requested check raised (#9056).
+        logger.exception('background update check failed')
+        try:
+            _publish_update_check_failure(include_agent, channel, exc)
+        except Exception:
+            logger.exception('failed to publish update check failure')
+    finally:
+        with _cache_lock:
+            done.set()
+            if _refresh_queue:
+                next_channel, next_include_agent = _refresh_queue.pop(0)
+                _running_key = (next_channel, next_include_agent)
+                next_done = threading.Event()
+                _refresh_event = next_done
+                thread = threading.Thread(
+                    target=_refresh_updates_in_background,
+                    args=(next_include_agent, next_channel, next_done),
+                    name='hermes-update-check',
+                    daemon=True,
+                )
+                _refresh_thread = thread
+                thread.start()
+            else:
+                _running_key = None
+                _check_in_progress = False
+
+
+def check_for_updates(force=False, *, include_agent=True, channel=None, wait=None):
+    """Return cached update status for webui and agent repos.
+
+    The git work runs in a background thread: the caller waits at most ``wait``
+    seconds (default ``DEFAULT_UPDATE_CHECK_WAIT``) and otherwise receives the
+    cached payload marked ``pending``, which keeps a slow fetch out of the
+    request path (#9055). Distinct (channel, include_agent) keys arriving
+    while a refresh is in progress are queued and served (#9056).
+    """
+    global _check_in_progress, _running_key, _refresh_queue, _refresh_thread, _refresh_event
     include_agent = bool(include_agent)
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    requested_key = (channel, include_agent)
+    budget = _update_check_wait_budget() if wait is None else max(0.0, float(wait))
+
     with _cache_lock:
+        if float(_update_cache.get('checked_at') or 0) == 0:
+            _update_cache_by_key.clear()
+
         # Cache is only valid when BOTH the channel AND include_agent match —
         # a channel switch must not serve the previous channel's answer, and an
         # in-progress check for the other channel must not short-circuit this one
         # with a stale cross-channel payload (Codex SILENT #5).
-        cache_matches = (
+        if not force:
+            in_flight_now = _check_in_progress and (
+                _running_key == requested_key
+                or requested_key in _refresh_queue
+            )
+            failure = _failure_for_key_locked(requested_key, time.time())
+            if failure is not None and not in_flight_now:
+                return _failure_payload(
+                    failure,
+                    channel=channel,
+                    include_agent=include_agent,
+                    checked_at=float(_update_cache.get('checked_at') or 0),
+                )
+            if requested_key in _update_cache_by_key:
+                entry = _update_cache_by_key[requested_key]
+                if time.time() - float(entry.get('checked_at') or 0) < CACHE_TTL:
+                    cached = dict(entry)
+                    cached['cached'] = True
+                    return cached
+            else:
+                cache_matches = (
+                    _update_cache.get('include_agent') == include_agent
+                    and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+                )
+                if (
+                    cache_matches
+                    and time.time() - float(_update_cache.get('checked_at') or 0) < CACHE_TTL
+                ):
+                    cached = dict(_update_cache)
+                    cached['cached'] = True
+                    cached['channel'] = channel
+                    cached['include_agent'] = include_agent
+                    return cached
+
+        prior_checked_at = 0.0
+        if requested_key in _update_cache_by_key:
+            prior_checked_at = float(_update_cache_by_key[requested_key].get('checked_at') or 0)
+        elif (
             _update_cache.get('include_agent') == include_agent
-            and _update_cache.get('channel') == channel
-        )
-        if (
-            not force
-            and cache_matches
-            and time.time() - _update_cache['checked_at'] < CACHE_TTL
+            and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
         ):
-            cached = dict(_update_cache)
-            cached['cached'] = True
-            return cached
-        if _check_in_progress and cache_matches:
-            cached = dict(_update_cache)
-            cached['cached'] = True
-            return cached  # another thread is already checking this channel
-        _check_in_progress = True
+            prior_checked_at = float(_update_cache.get('checked_at') or 0)
 
-    try:
-        # Run checks outside the lock (network I/O)
-        webui_info = _check_repo(REPO_ROOT, 'webui', channel)
-        # The update channel is a WebUI-only concept. The Agent is a separate
-        # project that tags plain v* and legitimately tracks master past its
-        # tags; it must ALWAYS use the default channel regardless of the user's
-        # WebUI channel selection. (Codex gate: passing 'experimental' here made
-        # the Agent ignore its v* tags and fall back to origin/master.)
-        agent_info = _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL) if include_agent else _ignored_agent_update_info()
+        owns_refresh = False
 
-        with _cache_lock:
-            _update_cache['webui'] = webui_info
-            _update_cache['agent'] = agent_info
-            _update_cache['checked_at'] = time.time()
-            _update_cache['include_agent'] = include_agent
-            _update_cache['channel'] = channel
-            return dict(_update_cache)
-    finally:
-        _check_in_progress = False
+        if not _check_in_progress:
+            _check_in_progress = True
+            _running_key = requested_key
+            _refresh_queue.clear()
+            done = threading.Event()
+            _refresh_event = done
+            owns_refresh = True
+        else:
+            if requested_key != _running_key:
+                if requested_key not in _refresh_queue:
+                    _refresh_queue.append(requested_key)
+            done = _refresh_event
+
+    if owns_refresh:
+        thread = threading.Thread(
+            target=_refresh_updates_in_background,
+            args=(include_agent, channel, done),
+            name='hermes-update-check',
+            daemon=True,
+        )
+        _refresh_thread = thread
+        thread.start()
+
+    if done is not None:
+        done.wait(budget)
+
+    with _cache_lock:
+        if float(_update_cache.get('checked_at') or 0) == 0:
+            _update_cache_by_key.clear()
+
+        refreshed_entry = None
+        if requested_key in _update_cache_by_key:
+            entry = _update_cache_by_key[requested_key]
+            if float(entry.get('checked_at') or 0) > prior_checked_at:
+                refreshed_entry = dict(entry)
+        elif (
+            _update_cache.get('include_agent') == include_agent
+            and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+            and float(_update_cache.get('checked_at') or 0) > prior_checked_at
+        ):
+            refreshed_entry = dict(_update_cache)
+            refreshed_entry['channel'] = channel
+            refreshed_entry['include_agent'] = include_agent
+
+        if refreshed_entry is not None:
+            refreshed_entry['cached'] = False
+            return refreshed_entry
+
+        # The worker terminated without publishing a fresh answer. If it raised,
+        # the terminal failure for this key is the answer; the stale or empty
+        # cache must never stand in for the check the caller asked for (#9056).
+        key_in_flight = _check_in_progress and (
+            _running_key == requested_key
+            or requested_key in _refresh_queue
+        )
+        failure = _failure_for_key_locked(requested_key, time.time())
+        if failure is not None and not key_in_flight:
+            failure_checked_at = 0.0
+            if requested_key in _update_cache_by_key:
+                failure_checked_at = float(
+                    _update_cache_by_key[requested_key].get('checked_at') or 0
+                )
+            return _failure_payload(
+                failure,
+                channel=channel,
+                include_agent=include_agent,
+                checked_at=failure_checked_at,
+            )
+
+        pending = {
+            'pending': True,
+            'cached': True,
+            'pending_key': {'channel': channel, 'include_agent': include_agent},
+            'channel': channel,
+            'include_agent': include_agent,
+            'checked_at': _update_cache.get('checked_at', 0),
+        }
+        if requested_key in _update_cache_by_key:
+            entry = _update_cache_by_key[requested_key]
+            pending['webui'] = entry.get('webui')
+            pending['agent'] = entry.get('agent')
+            pending['checked_at'] = entry.get('checked_at', 0)
+        elif (
+            _update_cache.get('include_agent') == include_agent
+            and (_update_cache.get('channel') is None or _update_cache.get('channel') == channel)
+        ):
+            pending['webui'] = _update_cache.get('webui')
+            pending['agent'] = _update_cache.get('agent')
+            pending['checked_at'] = _update_cache.get('checked_at', 0)
+        else:
+            pending['webui'] = None
+            pending['agent'] = None
+            pending['stale_key'] = True
+        return pending
 
 
 def _repo_path_for_update_target(target: str):
@@ -3022,8 +3461,7 @@ def _apply_force_update_inner(target: str, channel) -> dict:
     if not _discard_local_changes(path, compare_ref):
         return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
-    with _cache_lock:
-        _update_cache['checked_at'] = 0
+    _invalidate_update_cache()
 
     if target == 'agent':
         gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
@@ -3338,8 +3776,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                     ),
                     'stash_conflict': True,
                 }
-            with _cache_lock:
-                _update_cache['checked_at'] = 0
+            _invalidate_update_cache()
 
             if target == 'agent':
                 gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
@@ -3370,8 +3807,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             return response
 
     # Invalidate cache
-    with _cache_lock:
-        _update_cache['checked_at'] = 0
+    _invalidate_update_cache()
 
     if target == 'agent':
         gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()

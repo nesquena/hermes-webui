@@ -5,6 +5,7 @@ import json
 from urllib.parse import urlparse
 
 import api.routes as routes
+import api.updates as updates
 
 
 class _FakeUpdatesHandler:
@@ -53,6 +54,8 @@ def _run_updates_check(monkeypatch, *, check_for_updates_enabled, body):
     # Never let the real check run (network / git); prove only whether it's reached.
     sentinel = {"reached_real_check": True}
     monkeypatch.setattr("api.updates.check_for_updates", lambda **kw: sentinel)
+    if hasattr(updates, "_manual_update_checks"):
+        monkeypatch.setattr(updates, "_manual_update_checks", {})
     # The visibility guard is not relevant to this route; allow it through.
     monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *a, **k: True)
 

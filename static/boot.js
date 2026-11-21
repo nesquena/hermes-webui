@@ -4345,7 +4345,26 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
     const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d,_recoveryGenerationAtCheck);}).catch(()=>{});
+    const _runStartupUpdateCheck=async()=>{
+      try{
+        let d=await api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000});
+        if(!d) return;
+        if(!_testUpdates&&d.pending===true){
+          const pollChannel=encodeURIComponent(d.channel||'stable');
+          const pollIncludeAgent=d.include_agent===false?'0':'1';
+          const pollUrl=`api/updates/check?channel=${pollChannel}&include_agent=${pollIncludeAgent}`;
+          // #9056 gate RED: the same fixed twelve-reply window existed here, so
+          // a legitimately slow first check was abandoned at startup. The named
+          // helper keeps observing and leaves a retrievable continuation.
+          d=await _observeStartupUpdateCompletion(pollUrl,d);
+        }
+        if(d&&d.pending!==true){
+          if(!_testUpdates) sessionStorage.setItem('hermes-update-checked','1');
+          if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0)) _showUpdateBanner(d,_recoveryGenerationAtCheck);
+        }
+      }catch(_){}
+    };
+    _runStartupUpdateCheck();
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';
@@ -4815,6 +4834,26 @@ async function shutdownServer() {
   try { var bc = new BroadcastChannel('hermes-webui-shutdown'); bc.postMessage('stop'); bc.close(); } catch(_) {}
   _showServerStopped();
   try { await api('/api/shutdown', { method: 'POST' }); } catch (_) {}
+}
+
+async function _observeStartupUpdateCompletion(pollUrl, initial) {
+  // Observe a legitimately slow startup update check until it actually
+  // finishes (#9056 gate RED). The server's Git fetch allowance and queued
+  // keys outlive any short fixed window, so abandoning after a dozen replies
+  // left the banner unshown and the tab marked as already checked. When the
+  // bound is finally reached the continuation stays retrievable, so the next
+  // Settings check fetches the completed result instead of starting new work.
+  var d = initial;
+  var maxReplies = 240;
+  var baseMs = 1500;
+  var capMs = 5000;
+  for (var attempt = 0; attempt < maxReplies; attempt++) {
+    if (!d || d.pending !== true) break;
+    await new Promise(function (r) { setTimeout(r, Math.min(baseMs + attempt * 250, capMs)); });
+    d = await api(pollUrl, { method: 'GET' });
+  }
+  if (d && d.pending === true) window._pendingUpdatePollUrl = pollUrl;
+  return d;
 }
 
 function _showServerStopped() {
