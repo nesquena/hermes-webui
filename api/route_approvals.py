@@ -1200,12 +1200,62 @@ def resolve_gateway_pending_local_no_run_mirror(
     return True, 1, head, total
 
 
+#: Pattern keys that mark a consent prompt rather than a command approval.
+_PROTECTED_APPROVAL_PATTERN_KEYS = frozenset({"mcp_elicitation"})
+#: Approval surfaces that mark an outbound/public side effect.
+_PROTECTED_APPROVAL_SURFACES = frozenset({"publish"})
+
+
+def is_protected_approval(approval) -> bool:
+    """True when an approval asks for consent, not to pre-authorise a command.
+
+    Session YOLO answers command approvals: the user said "run this session's
+    commands without asking me". An MCP elicitation (``pattern_key:
+    "mcp_elicitation"``) and an approval on a ``publish`` surface are consent
+    prompts for an outbound send, a public post, a money change or a
+    destructive action raised by a plugin; turning YOLO on did not agree to any
+    of those, so no YOLO path may answer one (#9108).
+    """
+    if not isinstance(approval, dict):
+        return False
+    keys = [str(approval.get("pattern_key") or "")]
+    pattern_keys = approval.get("pattern_keys")
+    if isinstance(pattern_keys, (list, tuple, set)):
+        keys.extend(str(key) for key in pattern_keys)
+    if any(key.strip() in _PROTECTED_APPROVAL_PATTERN_KEYS for key in keys):
+        return True
+    return str(approval.get("surface") or "").strip().lower() in _PROTECTED_APPROVAL_SURFACES
+
+
+def pending_protected_approval(session_key: str) -> bool:
+    """True when the session parks any protected (elicitation/publish) approval.
+
+    Enabling YOLO answers whatever is pending in the session, so a protected
+    approval must block the whole enable instead of being answered with it
+    (#9108). Both the live producers and WebUI's mirrors are inspected: a
+    run-backed prompt may exist only as a mirror.
+    """
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(session_key)
+        for entry in _gateway_queues.get(session_key) or []:
+            if is_protected_approval(getattr(entry, "data", None)):
+                return True
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        return any(is_protected_approval(entry) for entry in entries if isinstance(entry, dict))
+
+
 def resolve_gateway_pending_local_all(
     session_key: str,
     choice: str,
     reason: str | None = None,
 ) -> tuple[int, dict | None, int]:
-    """Resolve every parked local/no-run approval without touching remote runs."""
+    """Resolve every parked local/no-run approval without touching remote runs.
+
+    Protected approvals (elicitation / publish) are never drained: this is the
+    bulk answer behind session YOLO, and YOLO does not consent to a send, a
+    public post or a payment (#9108). They stay queued and keep their card.
+    """
     targets = []
     removed_pending = False
     with _lock:
@@ -1215,7 +1265,7 @@ def resolve_gateway_pending_local_all(
         retained_gateway_queue = []
         for entry in gateway_queue:
             data = getattr(entry, "data", None) or {}
-            if str(data.get("run_id") or "").strip():
+            if str(data.get("run_id") or "").strip() or is_protected_approval(data):
                 retained_gateway_queue.append(entry)
             else:
                 targets.append(entry)
@@ -1230,7 +1280,10 @@ def resolve_gateway_pending_local_all(
             entry
             for entry in entries
             if _is_gateway_mirror_entry(entry)
-            and str(entry.get("run_id") or "").strip()
+            and (
+                str(entry.get("run_id") or "").strip()
+                or is_protected_approval(entry)
+            )
         ]
         removed_pending = len(retained_pending) != len(entries)
         if retained_pending:
@@ -1258,10 +1311,18 @@ def settle_gateway_pending_local_notification(
     Serialize that callback with session YOLO commit/disable so a waiter arriving
     after a drain snapshot cannot be parked behind an already-committed enable.
     Run-backed approvals stay on the Runs API path and are never resolved here.
+
+    Session YOLO never answers a protected approval (MCP elicitation / publish
+    surface): it is published as a card for the user, same as with YOLO off
+    (#9108).
     """
     with gateway_yolo_handoff(session_key):
         run_id = str((approval or {}).get("run_id") or "").strip()
-        if not run_id and is_session_yolo_enabled(session_key):
+        if (
+            not run_id
+            and not is_protected_approval(approval)
+            and is_session_yolo_enabled(session_key)
+        ):
             _resolved, head, total = resolve_gateway_pending_local_all(
                 session_key,
                 "once",

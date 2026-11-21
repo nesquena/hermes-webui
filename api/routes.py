@@ -14893,6 +14893,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     finish_session_yolo_transition,
     gateway_pending_mirror,
     gateway_pending_mirrors,
+    pending_protected_approval,
     release_gateway_approval_relay_owner,
     retire_gateway_pending_mirror,
     settle_gateway_pending_run,
@@ -35019,6 +35020,11 @@ _GATEWAY_APPROVAL_RELAY_IN_PROGRESS = (
     "Another approval response for this Gateway run is already in progress. "
     "Wait for it to finish, then retry if the card is still visible."
 )
+_GATEWAY_PROTECTED_APPROVAL_PENDING = (
+    "This session has a pending consent request (an MCP elicitation or a publish "
+    "approval). Session YOLO never answers those, so answer or dismiss the card "
+    "first, then turn YOLO on."
+)
 
 
 def _gateway_approval_failure(
@@ -35400,6 +35406,19 @@ def _enable_session_yolo_and_release_pending(
             if conflict is not None:
                 return conflict, 409
             yolo_transition = begin_session_yolo_transition(sid)
+            # Session YOLO must not answer a consent prompt (MCP elicitation /
+            # publish surface). Refuse the whole enable while one is parked,
+            # before anything is relayed or drained, so the elicitation is not
+            # answered by the same request that turned YOLO on (#9108).
+            if pending_protected_approval(sid):
+                return _gateway_approval_failure(
+                    sid,
+                    choice,
+                    code="gateway_protected_approval_pending",
+                    error=_GATEWAY_PROTECTED_APPROVAL_PENDING,
+                    status=409,
+                    enable_yolo=True,
+                )
             stale_cleared = False
             if approval_id:
                 exact_owner, any_pending = _pending_approval_owner_state(
