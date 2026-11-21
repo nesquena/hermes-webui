@@ -6013,11 +6013,109 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 
 
 # ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
-# Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
-# importing from the agent tree (which may not be installed).  Any drift here
-# will show up in the shared test suite since both sides accept the same set.
-# Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# The WebUI-known ladder: the six levels the WebUI has always accepted (fixed
+# canonical rank, ascending) plus any extras the installed Hermes Agent adds
+# on top, in the Agent's own order. The Agent's tuple alone is not enough and
+# its raw order alone is not trustworthy: released rungs differ in BOTH set and
+# order — v2026.3.28 exported ("xhigh", "high", "medium", "low", "minimal")
+# DESCENDING with no 'max'; April–July 2026 agents topped out at 'xhigh';
+# v2026.7.7 added 'max' and v2026.7.20 added 'ultra'. The union keeps every
+# level the WebUI itself already accepted (a stored 'max' from the master era
+# must keep running, not silently become Default), and ranking by the canonical
+# order makes ceiling math like ``_efforts_above`` immune to a descending agent
+# tuple. Extras come from the Agent import, so a future level released into
+# hermes-agent (the way 'ultra' joined above 'max') appears in this picker
+# without a matching WebUI release; ``parse_reasoning_effort`` below mirrors
+# hermes_constants.parse_reasoning_effort so the WebUI validates without
+# importing the function itself.
+_WEBUI_BASE_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _agent_route_supported_efforts():
+    """The Agent's route rule (``agent.reasoning_effort.route_supported_efforts``)
+    or None. Its presence (landed 2026-09-19 in 39726f8bb7f2, two-argument
+    form; gained ``api_mode`` 2026-10-02 in 3f4aedb37e5d) is the feature gate:
+    with the ``api_mode``-aware rule every wire transport clamps the effort
+    itself (``chat_completions.clamp_reasoning_config`` since 2026-09-15,
+    ``codex.codex_supported_efforts``), so above-``max`` levels can be offered
+    and accepted safely. An older Agent (v2026.7.20 .. ~2026-08-19) puts
+    'ultra' in its ladder but forwards it verbatim on transports whose
+    documented values stop at 'max' — on those the level must be neither
+    offered nor accepted, only coerced away. The three-argument call against
+    the two-argument rule raises, is caught, and reads as "no rule", which is
+    the conservative answer."""
+    try:
+        from agent.reasoning_effort import route_supported_efforts
+
+        return route_supported_efforts
+    except Exception:
+        return None
+
+
+def openai_runtime_api_mode(profile_home=None) -> str | None:
+    """Resolve the Codex runtime authority for a profile.
+
+    - Opted-in profile (``model.openai_runtime: codex_app_server``, explicit
+      value only — the Agent's ``hermes_cli/runtime_provider.py`` is the
+      reference) → ``'codex_app_server'``.
+    - A CONCRETELY CONSULTED profile (``profile_home`` given) without the
+      opt-in → ``'codex_responses'``: absent/``auto`` resolve to the plain
+      Responses API, so the answer is a concrete non-app-server mode. This
+      keeps "profile says NOT app-server" distinct from None ("no runtime
+      authority given"), which would otherwise re-read the ambient profile
+      and answer for the wrong one (review round-5: ambient opted in, named
+      session profile opted out — status said ``ultra``, the turn sent
+      ``max``).
+    - Ambient read (``profile_home`` None) without the opt-in, or any read
+      failure → None: genuine fallback callers keep answering for the
+      default profile.
+
+    Callers holding the resolved runtime bundle should pass
+    ``bundle['api_mode']`` directly instead of consulting config.
+    """
+    try:
+        if profile_home is not None:
+            config_data = get_config_for_profile_home(
+                profile_home, isolate_config_override=True
+            )
+        else:
+            config_data = _load_yaml_config_file(_get_config_path())
+    except Exception:
+        return None
+    model_cfg = config_data.get("model") if isinstance(config_data, dict) else None
+    if isinstance(model_cfg, dict) and str(model_cfg.get("openai_runtime") or "").strip().lower() == "codex_app_server":
+        return "codex_app_server"
+    return "codex_responses" if profile_home is not None else None
+
+
+def _codex_app_server_runtime_enabled() -> bool:
+    """Ambient-profile fallback for callers without a resolved runtime."""
+    return openai_runtime_api_mode() == "codex_app_server"
+
+
+def _rank_valid_efforts(agent_efforts) -> tuple:
+    """Rank the base ladder first (canonical ascending order), then append any
+    levels the Agent knows that the base lacks, in the Agent's own order — but
+    only when the Agent ships the route rule (see
+    ``_agent_route_supported_efforts``). On pre-clamp Agents the extras exist in
+    the ladder yet no transport can carry them, so the accepted set stays the
+    base six and a stored extra coerces down instead."""
+    ranked = list(_WEBUI_BASE_EFFORTS)
+    rule = _agent_route_supported_efforts()
+    for eff in (agent_efforts or ()):
+        level = str(eff).strip().lower()
+        if level and level not in ranked:
+            if rule is None:
+                continue
+            ranked.append(level)
+    return tuple(ranked)
+
+
+try:
+    from hermes_constants import VALID_REASONING_EFFORTS as _agent_valid_efforts
+except Exception:
+    _agent_valid_efforts = ()
+VALID_REASONING_EFFORTS = _rank_valid_efforts(_agent_valid_efforts)
 
 
 def parse_reasoning_effort(effort):
@@ -6038,6 +6136,133 @@ def parse_reasoning_effort(effort):
     return None
 
 
+def _efforts_above(ceiling: str) -> frozenset:
+    """Ladder levels strictly above *ceiling*, sourced from the agent ladder.
+
+    The provider ceiling rules in ``_filter_reasoning_efforts_for_provider`` and
+    the coercion default-deny strip "everything at or above" a documented cap,
+    so a thinking level released into hermes-agent above the cap (this is how
+    'ultra' joined above 'max') is capped by those rules exactly like 'max' is
+    today, without a per-level WebUI edit.
+    """
+    try:
+        idx = VALID_REASONING_EFFORTS.index(ceiling)
+    except ValueError:
+        return frozenset()
+    return frozenset(VALID_REASONING_EFFORTS[idx + 1:])
+
+
+def _reasoning_route_identity(
+    model_id: str | None, provider_id: str | None, base_url: str | None = None
+) -> tuple[str, str, str | None]:
+    """The route a WebUI routing token resolves to for reasoning rules.
+
+    An opaque ``model-alias-<digest>`` lane is a WebUI-only routing token: the
+    chat worker resolves it to the alias's real provider/model/endpoint before
+    building the turn, so the Agent never classifies the digest. Every reasoning
+    lookup that asks the Agent's route rule, a provider ceiling or a capability
+    probe must see that same identity — otherwise an alias onto ``openai-codex``
+    + ``codex_app_server`` is judged as an unknown OpenAI-compatible provider
+    (its above-``max`` levels disappear from the dropdown and a stored one
+    coerces to ``max`` while the worker keeps it), and a probe-backed provider
+    such as LM Studio is queried on the profile's default endpoint instead of
+    the alias's own.
+
+    Returns ``(model, provider, base_url)``. Non-alias selections are returned
+    unchanged. An alias lane that no longer resolves (deleted, foreign profile,
+    retargeted) keeps its opaque identity, exactly as before: there is no route
+    to describe.
+    """
+    model = str(model_id or "").strip()
+    provider = str(provider_id or "").strip().lower()
+    base_url = str(base_url or "").strip() or None
+    if not provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
+        return model, provider, base_url
+    try:
+        resolved = resolve_model_alias_runtime(
+            provider, expected_model=_strip_provider_hint_for_reasoning(model, provider)
+        )
+    except Exception:
+        resolved = None
+    if not resolved:
+        return model, provider, base_url
+    resolved_model = str(resolved.get("model") or "").strip() or model
+    resolved_provider = str(resolved.get("provider") or "").strip().lower() or provider
+    # The alias's endpoint is hidden from the browser, so a caller usually has
+    # none. Carry it here or a probe-backed provider asks a different server
+    # than the turn will use; an explicit caller endpoint still wins.
+    alias_base_url = str(resolved.get("base_url") or "").strip() or None
+    return resolved_model, resolved_provider, base_url or alias_base_url
+
+
+def _route_wire_efforts(
+    model_id: str | None, provider_id: str | None, api_mode: str | None = None
+) -> frozenset | None:
+    """The Agent route rule's accepted levels for this route, or None.
+
+    None means "no answer": the installed Agent ships no ``route_supported_
+    efforts`` (pre-clamp) or the rule raised. Resolves provider/model/api_mode
+    the same way ``_route_wire_accepts_ultra`` does — ``api_mode`` MUST be the
+    runtime the turn will actually use (runtime bundle / session profile), the
+    ambient config read is only a fallback for callers with neither.
+    """
+    rule = _agent_route_supported_efforts()
+    if rule is None:
+        return None
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        try:
+            _, provider, _ = resolve_model_provider(str(model_id or ""))
+        except Exception:
+            provider = ""
+        provider = str(provider or "").strip().lower()
+    # A picker token is a WebUI routing hint, not part of the model the Agent
+    # classifies. Preserve the full provider before aliasing so multi-colon
+    # custom-provider hints strip without changing a model's own suffix.
+    model = _strip_provider_hint_for_reasoning(str(model_id or ""), provider)
+    # An opaque model-alias lane is likewise WebUI-only: resolve it to the
+    # provider/model the chat worker will actually send before the Agent's
+    # route rule sees the digest.
+    model, provider, _alias_base_url = _reasoning_route_identity(model, provider)
+    try:
+        provider = _resolve_provider_alias(provider)
+    except Exception:
+        pass
+    if api_mode is None:
+        api_mode = openai_runtime_api_mode()
+    else:
+        api_mode = str(api_mode or "").strip().lower() or None
+    try:
+        return frozenset(rule(provider, model, api_mode))
+    except Exception:
+        return None
+
+
+def _route_wire_accepts_ultra(
+    model_id: str | None, provider_id: str | None, api_mode: str | None = None
+) -> bool:
+    """Decide with the Agent's own rule whether 'ultra' survives on this route.
+
+    The Agent's ``route_supported_efforts(provider, model, api_mode)`` returns
+    'ultra' only for the built-in ``openai-codex`` lane running the
+    ``codex_app_server`` runtime, and only for models whose ladder reaches
+    'max'; every other route — OpenAI-compat, aggregators, and ANY custom
+    provider regardless of a record's ``api_mode`` — tops out at 'max'.
+
+    ``api_mode`` MUST be the runtime the turn will actually use — the chat
+    path passes its resolved ``_runtime_bundle['api_mode']``, the reasoning
+    status path passes the session profile's ``openai_runtime_api_mode`` —
+    because the session profile and the process default can disagree on
+    ``model.openai_runtime``. The ambient config read is only a fallback for
+    callers with neither (they answer for the default profile). When the rule
+    itself is missing (pre-clamp Agent) the answer is False: the level is not
+    even in the accepted ladder, and a stored one coerces to 'max' in
+    ``coerce_reasoning_effort_for_model``.
+    """
+    accepted = _route_wire_efforts(model_id, provider_id, api_mode)
+    return accepted is not None and "ultra" in accepted
+
+
 def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = None) -> str:
     """Remove WebUI routing hints before provider-specific capability lookup.
 
@@ -6050,11 +6275,12 @@ def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = Non
     no longer starts with ``vertex/gemini-``), silently re-enabling reasoning
     controls on routes that must never expose them.
 
-    When the resolved *provider* is known (e.g. ``"custom:agg"``), strip the
-    exact ``@{provider}:`` prefix first so both segments are removed in one
-    pass. Falls back to the generic first-colon split when no provider is
-    given or it doesn't match — preserving prior behavior for plain
-    ``@provider:model`` hints.
+    When the *provider* is known (e.g. ``"custom:agg"``), strip the exact
+    ``@{provider}:`` prefix first so both segments are removed in one pass.
+    A custom endpoint hint can resolve to a different provider (e.g. an
+    Ollama server's ``custom:host:port`` alias); for that mismatch, use the
+    same qualified-model parser as ``resolve_model_provider``. Other hints
+    keep the generic first-colon fallback.
     """
     model = str(model_id or "").strip()
     if not model.startswith("@"):
@@ -6063,6 +6289,10 @@ def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = Non
         exact_prefix = f"@{provider}:".lower()
         if model.lower().startswith(exact_prefix):
             return model[len(exact_prefix) :]
+    if model.lower().startswith("@custom:"):
+        parsed = _parse_provider_qualified_model_id("@custom:" + model[len("@custom:"):])
+        if parsed is not None:
+            return parsed[0]
     if ":" in model:
         return model.split(":", 1)[1]
     return model
@@ -6366,14 +6596,14 @@ def _filter_reasoning_efforts_for_provider(
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
         if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
-            return [eff for eff in normalized if eff != "max"]
+            return [eff for eff in normalized if eff not in _efforts_above("xhigh")]
     # Providers whose native ladder tops out below 'max' must NOT advertise it,
     # otherwise a stored/CLI 'max' degrades WORSE than the
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
     # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
     # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
-        return [eff for eff in normalized if eff != "max"]
+        return [eff for eff in normalized if eff not in _efforts_above("xhigh")]
     # Legacy Claude is pre-adaptive whether served natively OR via Azure Foundry /
     # Bedrock / Vertex — the ceiling follows the MODEL, not just the provider name.
     _anthropic_lanes = {
@@ -6382,13 +6612,16 @@ def _filter_reasoning_efforts_for_provider(
         "vertex", "google-vertex",
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
-        return [eff for eff in normalized if eff != "max"]
+        return [eff for eff in normalized if eff not in _efforts_above("xhigh")]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
-    # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
-    # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
+    # True → keep the ladder through Z.AI's documented ceiling 'max' (GLM-5.2+);
+    # anything above it (agent-ladder 'ultra' and future rungs) is Hermes-internal
+    # and stripped so it is never advertised as a Z.AI wire level; False → strip
+    # the ladder entirely (pre-5.2 GLM and forced-thinking GLM-4.7); None → not a
+    # zai GLM case, defer.
     zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
     if zai_supports is True:
-        return normalized
+        return [eff for eff in normalized if eff not in _efforts_above("max")]
     if zai_supports is False:
         return []
     return normalized
@@ -6723,6 +6956,9 @@ def resolve_model_reasoning_efforts(
     retained for GPT-5.6 and other models whose native ladder includes it, and
     stripped where it would be rejected or mishandled.
     """
+    model_id, provider_id, base_url = _reasoning_route_identity(
+        model_id, provider_id, base_url
+    )
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
         return raw
@@ -6738,6 +6974,12 @@ def resolve_model_reasoning_efforts(
     filtered = _filter_reasoning_efforts_for_provider(
         [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
     )
+    if _agent_route_supported_efforts() is None:
+        # Pre-clamp Agent: sourced metadata may already advertise above-`max`
+        # levels (models.dev learned 'ultra' before the transports could carry
+        # it). The dropdown must not offer what the wire would reject.
+        allowed = set(VALID_REASONING_EFFORTS)
+        filtered = [e for e in filtered if e in allowed]
     if had_none:
         # Keep 'none' in its original leading position if it was there.
         return ["none", *filtered] if raw and raw[0] == "none" else [*filtered, "none"]
@@ -6890,8 +7132,20 @@ def coerce_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    api_mode: str | None = None,
 ) -> str:
-    """Return the closest supported effort for the target model/provider."""
+    """Return the closest supported effort for the target model/provider.
+
+    ``api_mode`` is the runtime the request will actually use (e.g.
+    ``_runtime_bundle['api_mode']``); omitted, the ambient profile's
+    ``model.openai_runtime`` decides the Codex runtime.
+    """
+    # An opaque model-alias lane is a WebUI routing token; the worker sends the
+    # alias's own provider/model/endpoint, so resolve it before the wire rule,
+    # the provider ceilings and the capability lookup below judge the route.
+    model_id, provider_id, base_url = _reasoning_route_identity(
+        model_id, provider_id, base_url
+    )
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
@@ -6904,8 +7158,37 @@ def coerce_reasoning_effort_for_model(
         return ""
     if raw == "none":
         return "none"
+    if raw == "ultra" and _agent_route_supported_efforts() is None:
+        # Pre-clamp Agent: the level existed in its ladder but no transport
+        # could carry it, and it is deliberately absent from the accepted
+        # ladder below — a stored value still has to run, as 'max'.
+        raw = "max"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
+    if raw in _efforts_above("max"):
+        # Every rung ABOVE 'max' (ultra today; the next level the Agent adds
+        # tomorrow) is a Hermes-internal step, not a wire level: the Agent's
+        # clamp_effort passes levels outside its own EFFORT_LADDER through
+        # UNCHANGED, so forwarding one verbatim would put e.g.
+        # reasoning.effort: "hyper" on an OpenRouter request. Accept it only
+        # where the Agent's route rule includes it; otherwise step down to the
+        # highest level the route does accept — 'max' when the installed Agent
+        # ships no rule (pre-clamp) or the rule answers nothing below it. The
+        # ceiling and default-deny logic below then runs against a level that
+        # is real wire vocabulary, exactly as it already does for 'max'.
+        accepted = _route_wire_efforts(model_id, provider_id, api_mode)
+        if accepted is None:
+            raw = "max"
+        elif raw not in accepted:
+            try:
+                idx = VALID_REASONING_EFFORTS.index(raw)
+            except ValueError:
+                idx = None
+            if idx is not None:
+                raw = next(
+                    (lvl for lvl in reversed(VALID_REASONING_EFFORTS[:idx]) if lvl in accepted),
+                    "max",
+                )
     supported = resolve_model_reasoning_efforts(
         model_id,
         provider_id=provider_id,
@@ -6948,7 +7231,8 @@ def coerce_reasoning_effort_for_model(
     # "unknown", so preserve the user's configured effort verbatim where it is
     # still valid. (#3505 review)
     #
-    # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
+    # EXCEPTION for 'max' and anything above it (the #3505 default-deny
+    # refinement, maintainer call
     # 2026-07-11): 'max' is ABOVE the universally-safe ceiling 'xhigh'. A
     # genuinely unknown/custom provider will 400 on it. So when the
     # capability list is empty AND the provider is not one we recognize as
@@ -6967,7 +7251,7 @@ def coerce_reasoning_effort_for_model(
     if not supported:
         if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
             return ""
-        if raw == "max" and not _provider_known_reasoning_capable(provider_id):
+        if raw in _efforts_above("xhigh") and not _provider_known_reasoning_capable(provider_id):
             return "xhigh"
         return raw
     if raw in supported:
@@ -7004,12 +7288,16 @@ def resolve_session_reasoning_effort(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    api_mode: str | None = None,
 ) -> str:
     """Resolve the effort used by one WebUI session for its next turn.
 
     ``Session.reasoning_effort`` is authoritative when present, including the
     empty string (provider default). Legacy sessions store ``None`` and inherit
     the active profile's CLI-compatible ``agent.reasoning_effort`` value.
+    ``api_mode`` is the runtime bundle's mode the turn will actually use — the
+    session profile may opt into (or out of) the Codex app-server runtime
+    independently of the ambient profile.
     """
     effort_raw = session_effort
     if effort_raw is None:
@@ -7019,7 +7307,53 @@ def resolve_session_reasoning_effort(
         model_id,
         provider_id=provider_id,
         base_url=base_url,
+        api_mode=api_mode,
     )
+
+
+def _effort_honest_label(
+    stored: str, effective: str, model_id, provider_id, api_mode: str | None = None
+) -> str:
+    """CLI-parity chip label: when the STORED level is above the route's real
+    wire level, say so instead of labelling the chip with a level nothing is
+    sent as. The annotation is built from the EFFECTIVE effort the WebUI
+    actually computed (its per-model ceilings can clamp below what the
+    transport would, e.g. Gemini's xhigh); the Agent's ``effort_display_label``
+    is consulted only as a phrasing source when it describes that same
+    effective value — otherwise its Codex/OpenAI-compat clamp alone would
+    promise a level (``max``) we never send."""
+    stored = str(stored or "").strip().lower()
+    effective = str(effective or "").strip().lower()
+    if not stored or not effective or stored == effective:
+        return effective
+    # A pre-clamp Agent omits ultra from the accepted ladder, but saved ultra
+    # is still coerced to max (or a lower model ceiling). Recognize that legacy
+    # selection for display without making it valid for new requests.
+    if stored not in _efforts_above("max") and not (
+        stored == "ultra" and _agent_route_supported_efforts() is None
+    ):
+        return effective
+    literal = f"{stored} (sends {effective} on this route)"
+    provider = str(provider_id or "").strip().lower()
+    model = _strip_provider_hint_for_reasoning(str(model_id or ""), provider)
+    model, provider, _alias_base_url = _reasoning_route_identity(model, provider)
+    try:
+        provider = _resolve_provider_alias(provider)
+    except Exception:
+        pass
+    try:
+        from agent.reasoning_effort import effort_display_label
+
+        if api_mode is None:
+            api_mode = openai_runtime_api_mode()
+        else:
+            api_mode = str(api_mode or "").strip().lower() or None
+        label = effort_display_label(stored, provider, model, api_mode)
+        if label and f"(sends {effective} on this route)" in str(label):
+            return str(label)
+    except Exception:
+        pass
+    return literal
 
 
 def effective_session_reasoning_effort(session_effort, profile_home) -> str:
@@ -7046,12 +7380,16 @@ def get_reasoning_status(
     provider_id: str | None = None,
     base_url: str | None = None,
     effort_override=_REASONING_EFFORT_UNSET,
+    api_mode: str | None = None,
 ) -> dict:
     """Return current reasoning configuration for a model.
 
     The active profile's config.yaml is the default (and remains the CLI source
     of truth). ``effort_override`` lets a WebUI session supply its durable
-    per-session selection without changing capability resolution.
+    per-session selection without changing capability resolution. ``api_mode``
+    is the runtime the session's turn will actually use (the caller resolves
+    it from the session's profile, not the ambient one); omitted, the ambient
+    ``model.openai_runtime`` decides the Codex runtime.
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
@@ -7088,6 +7426,17 @@ def get_reasoning_status(
         provider_id=resolve_provider,
         base_url=resolve_base_url,
     )
+    # Advertise above-max rungs only where this session's route accepts them.
+    # Missing/older/raising Agent rules prove no extras safe. Keep the catalog's
+    # base levels, order and provider ceilings; the stored choice and its wire
+    # coercion below are independent of what the dropdown offers.
+    above_max = _efforts_above("max")
+    if any(effort in above_max for effort in supported_efforts):
+        wire_efforts = _route_wire_efforts(resolve_model, resolve_provider, api_mode) or frozenset()
+        supported_efforts = [
+            effort for effort in supported_efforts
+            if effort not in above_max or effort in wire_efforts
+        ]
     # supports_thinking_toggle: can the user turn thinking on/off at all? An
     # effort-capable model obviously can. The ZAI gate separately exposes the
     # toggle for GLM-4.5–5.1 (which accept `thinking: {"type": ...}` but NOT the
@@ -7095,20 +7444,38 @@ def get_reasoning_status(
     # when supported_efforts is empty. Without this, returning [] for those models
     # would hide the entire reasoning chip and silently regress the working
     # thinking on/off control (#6219 round-2 review).
+    # The zai tier check must see the alias's real provider too: an alias onto
+    # native zai keeps the thinking toggle for GLM-4.5–5.1 (which exposes no
+    # effort ladder at all), but judged by the opaque lane it looks like no
+    # control whatsoever and the composer hides the toggle.
+    zai_model, zai_provider, _zai_base_url = _reasoning_route_identity(
+        resolve_model, resolve_provider, resolve_base_url
+    )
     zai_thinking = _zai_glm_thinking_toggle_supported(
-        resolve_model, resolve_provider
+        zai_model, zai_provider
     )
     supports_thinking_toggle = bool(supported_efforts) or (zai_thinking is True)
+    _stored_effort = str(effort_raw or "").strip().lower()
+    _effective_effort = coerce_reasoning_effort_for_model(
+        _stored_effort,
+        resolve_model,
+        provider_id=resolve_provider,
+        base_url=resolve_base_url,
+        api_mode=api_mode,
+    )
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         # Report the COERCED effort so boot/status/chip read paths agree with
         # what streaming actually sends. (Codex review of the drop-max alignment.)
-        "reasoning_effort": coerce_reasoning_effort_for_model(
-            str(effort_raw or "").strip().lower(),
-            resolve_model,
-            provider_id=resolve_provider,
-            base_url=resolve_base_url,
+        "reasoning_effort": _effective_effort,
+        # Honest label for the STORED selection: above-wire levels render as
+        # "ultra (sends <effective> on this route)" (CLI-parity phrasing via
+        # the Agent's effort_display_label when it agrees with the effective
+        # level) instead of silently claiming the chip level.
+        "reasoning_effort_display": _effort_honest_label(
+            _stored_effort, _effective_effort, resolve_model, resolve_provider,
+            api_mode=api_mode,
         ),
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),
@@ -7240,8 +7607,10 @@ def set_reasoning_effort(
 ) -> dict:
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
-    Mirrors CLI ``/reasoning <level>``: same key, same valid values
-    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
+    Mirrors CLI ``/reasoning <level>``: same key, same valid values — the
+    ``VALID_REASONING_EFFORTS`` ladder (sourced from the agent's
+    ``hermes_constants``, currently ``none`` | ``minimal`` | ``low`` |
+    ``medium`` | ``high`` | ``xhigh`` | ``max`` | ``ultra``).
 
     An empty string is accepted as "clear the override" — it removes the
     ``agent.reasoning_effort`` key so the provider default takes effect. This is
