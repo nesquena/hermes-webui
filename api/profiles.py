@@ -1513,6 +1513,40 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     return names
 
 
+def _all_profiles_secret_env_names(profile_home_path: Path) -> set[str]:
+    """Every credential env name ANY profile on this server declares, not just *profile_home_path*'s.
+
+    ``_apply_profile_env_to_process`` scrubs the names it is given out of the process
+    env for a background worker's body, and WebUI runs the Agent with multiplexing
+    off, so ``agent.secret_scope.get_secret`` falls through to ``os.environ`` on a
+    scope miss. A name only ANOTHER profile's ``config.yaml`` declares (a custom
+    provider's ``key_env``) was in neither set, so a concurrent worker's mirror left
+    it in the process env and this profile's reads resolved it as its own (#9187).
+    The wider set keeps the scrub fail-closed: it only ever removes names a profile
+    config declares as credentials, and the body profile's own values are mirrored in
+    from its runtime env, so they stay readable. A profile home that cannot be listed
+    (or read) contributes its base set only, exactly as ``_profile_secret_env_names``
+    does for an unreadable ``config.yaml``.
+    """
+    names = _profile_secret_env_names(profile_home_path)
+    try:
+        base_home = Path(_DEFAULT_HERMES_HOME)
+        homes = [base_home]
+        profiles_root = base_home / "profiles"
+        if profiles_root.is_dir():
+            homes.extend(sorted(p for p in profiles_root.iterdir() if p.is_dir()))
+        for home in homes:
+            if home == Path(profile_home_path):
+                continue
+            names |= _profile_secret_env_names(home)
+    except Exception:
+        logger.debug(
+            "Failed to collect every profile's credential env names for the worker scrub",
+            exc_info=True,
+        )
+    return names
+
+
 def _apply_profile_env_to_process(
     process_env,
     safe_runtime_env: dict[str, str],
@@ -1654,7 +1688,10 @@ def profile_env_for_background_worker(
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
-        secret_env_names = _profile_secret_env_names(profile_home_path)
+        # #9187: the scrub must cover the credential env names EVERY profile on this
+        # server declares, not only this one's, or a name only another profile's
+        # config.yaml declares survives the mirror and this body reads it as its own.
+        secret_env_names = _all_profiles_secret_env_names(profile_home_path)
     except Exception:
         log.debug(
             "Failed to resolve profile env for %s profile %s; falling back to current env",
