@@ -102,6 +102,62 @@ def _patch_profile_config(monkeypatch, cfg):
         ("Fatto, riavviato il servizio e ora è attivo.", "it"),
         ("Ok", ""),
         ("Sì", ""),
+        # #9065: French, Spanish and Portuguese no longer vote Italian.
+        ("Le chat est là, et la maison est très belle.", ""),
+        ("La casa es muy grande y tiene un jardín con flores.", ""),
+        ("Ela é uma pessoa muito boa e você sabe disso.", ""),
+        ("Il est allé à la maison avec son ami.", ""),
+        ("Nous avons déjà réglé la connexion et la configuration.", ""),
+        ("Ella ha estado en la casa todo el día con su familia.", ""),
+        ("He encontrado un error en la función del inicio.", ""),
+        ("Ele já fez o almoço na casa da avó.", ""),
+        ("Alle Dateien wurden gespeichert. Alle Dienste laufen wieder.", ""),
+        ("Alla filer har sparats och alla tjänster körs igen.", ""),
+        # Shared la/le/un/una/con back up only a strongly Italian word.
+        ("Il a fini la configuration.", ""),
+        ("Di la verdad con una sonrisa.", ""),
+        ("Lo hago con una herramienta.", ""),
+        ("Cosa hago con una herramienta?", ""),
+        ("Cuando la build termina?", ""),
+        ("Quando a build termina?", ""),
+        ("Je ne sais pas, non, la build est verte.", ""),
+        # French "non" as interjection before punctuation does not anchor Italian backup.
+        ("Non, le service fonctionne.", ""),
+        ("Non, la connexion fonctionne.", ""),
+        ("Non, la compilation fonctionne.", ""),
+        # Accented foreign markers survive tokenization: não blocks the backup.
+        ("Ho letto la guida, não entendi.", ""),
+        # ...while short Italian replies that lost la/un/con still vote Italian.
+        *[(text, "it") for text in [
+            "La connessione è stata ripristinata.",
+            "Ho aggiornato la configurazione e riavviato il server.",
+            "Ho trovato un errore nella funzione di login.",
+            "Fatto! Ho sistemato il bug con una patch.",
+            "Ecco la configurazione aggiornata.",
+            "Le modifiche sono pronte.",
+            "Va bene, procedo con le modifiche.",
+            "Perfetto, la build è verde.",
+            "Lo faccio con una patch.",
+            "Cosa faccio con una patch?",
+            "Quando la build termina?",
+            "La connessione non funziona.",
+            "La build non passa.",
+            "Non la trovo.",
+            "Non le vedo.",
+            "La patch è su GitHub.",
+            "Questa cache tiene le sessioni.",
+            "C'è un errore.",
+            "C'è un problema con la build.",
+            "Non c'è problema.",
+            "Dov'è il file?",
+            "Com'è andata la build?",
+            "Perché fallisce sempre?",
+            "Con la nuova patch funziona.",
+        ]],
+        # Splitting on the apostrophe must not make French elisions vote Italian.
+        ("C'est la configuration.", ""),
+        ("Qu'il a déjà la connexion.", ""),
+        ("Le marché est fermé.", ""),
         ("", ""),
     ],
 )
@@ -132,13 +188,73 @@ def test_unresolved_env_reference_is_treated_as_absent(monkeypatch):
     # load_profile_config leaves an unresolvable ${VAR} literal; forwarding it
     # would trip the allowlist, so it must degrade to the built-in default.
     _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "${REVIEW_VOICE}"}}})
-    assert routes._default_edge_voice("Ok") == "it-IT-ElsaNeural"
+    assert routes._default_edge_voice("Ok") == "en-US-AvaMultilingualNeural"
 
 
 @pytest.mark.parametrize("cfg", [{}, {"tts": "edge"}, {"tts": {"edge": True}}, {"tts": {"edge": {"voice": 7}}}])
 def test_malformed_config_shapes_never_crash(monkeypatch, cfg):
     _patch_profile_config(monkeypatch, cfg)
-    assert routes._default_edge_voice("Ok") == "it-IT-ElsaNeural"
+    assert routes._default_edge_voice("Ok") == "en-US-AvaMultilingualNeural"
+
+
+# #9065: a configured voice outranks the built-in per-language defaults,
+# unless it speaks the other language the detector knows.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Le chat est là, et la maison est très belle.",
+        # Detected as Italian, still read with the configured French voice:
+        # the detector cannot tell French from Italian reliably.
+        "Questo è un test con abbastanza parole.",
+        "Ok",
+    ],
+)
+def test_configured_voice_in_another_language_always_wins(monkeypatch, text):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "fr-FR-DeniseNeural"}}})
+    assert routes._default_edge_voice(text) == "fr-FR-DeniseNeural"
+
+
+def test_configured_english_voice_yields_to_italian_text(monkeypatch):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "en-US-GuyNeural"}}})
+    assert routes._default_edge_voice("Questo è un test con abbastanza parole.") == "it-IT-ElsaNeural"
+    assert routes._default_edge_voice("This is a test with enough words here.") == "en-US-GuyNeural"
+
+
+def test_configured_multilingual_voice_always_wins(monkeypatch):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "en-US-AndrewMultilingualNeural"}}})
+    assert (
+        routes._default_edge_voice("Questo è un test con abbastanza parole.")
+        == "en-US-AndrewMultilingualNeural"
+    )
+
+
+def test_per_language_config_wins_over_configured_voice(monkeypatch):
+    cfg = {"tts": {"edge": {"voice": "fr-FR-DeniseNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    assert routes._default_edge_voice("Questo è un test con abbastanza parole.") == "it-IT-IsabellaNeural"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("La casa es muy grande y tiene un jardín con flores.", "en-US-AvaMultilingualNeural"),
+        ("Ok", "en-US-AvaMultilingualNeural"),
+        ("Questo è un test con abbastanza parole.", "it-IT-ElsaNeural"),
+        ("This is a test with enough words here.", "en-US-AvaNeural"),
+        ("C'è un errore.", "it-IT-ElsaNeural"),
+        ("C'è un problema con la build.", "it-IT-ElsaNeural"),
+        ("Non c'è problema.", "it-IT-ElsaNeural"),
+        ("Dov'è il file?", "it-IT-ElsaNeural"),
+        ("Com'è andata la build?", "it-IT-ElsaNeural"),
+        ("Perché fallisce sempre?", "it-IT-ElsaNeural"),
+        ("Con la nuova patch funziona.", "it-IT-ElsaNeural"),
+    ],
+)
+def test_no_configured_voice(monkeypatch, text, expected):
+    _patch_profile_config(monkeypatch, {})
+    assert routes._default_edge_voice(text) == expected
 
 
 # ── handler: ordering regressions ─────────────────────────────────────────
@@ -219,6 +335,101 @@ def test_omitted_voice_synthesizes_in_english(monkeypatch):
     assert captured["voice"] == "en-US-AvaNeural"
 
 
+_SHORT_ITALIAN_REPLIES = [
+    "La connessione è stata ripristinata.",
+    "Ho aggiornato la configurazione e riavviato il server.",
+    "Ho trovato un errore nella funzione di login.",
+    "Fatto! Ho sistemato il bug con una patch.",
+    "Le modifiche sono pronte.",
+    "Va bene, procedo con le modifiche.",
+    "Perfetto, la build è verde.",
+    "Lo faccio con una patch.",
+    "Cosa faccio con una patch?",
+    "Quando la build termina?",
+    "La connessione non funziona.",
+    "La build non passa.",
+    "Non la trovo.",
+    "Non le vedo.",
+    "La patch è su GitHub.",
+    "Questa cache tiene le sessioni.",
+    "C'è un errore.",
+    "C'è un problema con la build.",
+    "Non c'è problema.",
+    "Dov'è il file?",
+    "Com'è andata la build?",
+    "Perché fallisce sempre?",
+    "Con la nuova patch funziona.",
+]
+
+
+@pytest.mark.parametrize("text", _SHORT_ITALIAN_REPLIES)
+def test_short_italian_reply_uses_configured_italian_voice(monkeypatch, text):
+    cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.4")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "it-IT-IsabellaNeural"
+
+
+def test_english_reply_keeps_configured_voice_next_to_italian_entry(monkeypatch):
+    cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": "The connection was restored and the server is up."}, client="10.42.1.5")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "en-US-GuyNeural"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Lo hago con una herramienta.", "Cosa hago con una herramienta?", "Ho letto la guida, não entendi."],
+)
+def test_foreign_reply_does_not_take_the_italian_entry(monkeypatch, text):
+    cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.6")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "en-US-GuyNeural"
+
+
+_FRENCH_NON_REPLIES = [
+    "Non, le service fonctionne.",
+    "Non, la connexion fonctionne.",
+    "Non, la compilation fonctionne.",
+]
+
+
+@pytest.mark.parametrize("text", _FRENCH_NON_REPLIES)
+def test_french_non_reply_selects_multilingual_ava_with_no_configured_voice(monkeypatch, text):
+    _patch_profile_config(monkeypatch, {})
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.7")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "en-US-AvaMultilingualNeural"
+
+
+@pytest.mark.parametrize("text", _FRENCH_NON_REPLIES)
+def test_french_non_reply_keeps_configured_voice_next_to_italian_entry(monkeypatch, text):
+    cfg = {"tts": {"edge": {"voice": "en-US-GuyNeural", "voices": {"it": "it-IT-IsabellaNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client="10.42.1.8")
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == "en-US-GuyNeural"
+
+
 def test_explicit_voice_override_still_wins(monkeypatch):
     _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "it-IT-ElsaNeural"}}})
     captured = {}
@@ -230,3 +441,52 @@ def test_explicit_voice_override_still_wins(monkeypatch):
     routes._handle_tts(h, None)
     assert h.status == 200, h.payload()
     assert captured["voice"] == "fr-FR-DeniseNeural"
+
+
+# ── gate EDGE-B1: a configured voice outside the allowlist is skipped ─────
+# With no voice in the request, the configured voice is chosen before the
+# built-in default, but the handler then rejects a voice outside the Edge
+# allowlist: working TTS turned into 400 "invalid voice". Selection now skips
+# such a voice and keeps the normal fallback. An explicit request voice is
+# still validated as before.
+
+
+@pytest.mark.parametrize(
+    "configured,text,expected,client",
+    [
+        ("en-US-ChristopherNeural", "The connection was restored and the server is up.",
+         "en-US-AvaNeural", "10.42.9.1"),
+        ("de-DE-KatjaNeural", "Questo è un test con abbastanza parole.", "it-IT-ElsaNeural", "10.42.9.2"),
+        ("de-DE-KatjaNeural", "Ok", "en-US-AvaMultilingualNeural", "10.42.9.3"),
+    ],
+)
+def test_unsupported_configured_voice_falls_back_instead_of_failing(monkeypatch, configured, text, expected, client):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": configured}}})
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": text}, client=client)
+    routes._handle_tts(h, None)
+    assert h.status == 200, h.payload()
+    assert captured["voice"] == expected
+
+
+def test_unsupported_per_language_voice_falls_back_to_the_configured_voice(monkeypatch):
+    cfg = {"tts": {"edge": {"voice": "fr-FR-DeniseNeural", "voices": {"it": "it-IT-GianniNeural"}}}}
+    _patch_profile_config(monkeypatch, cfg)
+    assert routes._default_edge_voice("Questo è un test con abbastanza parole.") == "fr-FR-DeniseNeural"
+
+
+def test_explicit_unsupported_voice_is_still_rejected(monkeypatch):
+    _patch_profile_config(monkeypatch, {"tts": {"edge": {"voice": "it-IT-ElsaNeural"}}})
+    captured = {}
+    _stub_edge_tts(monkeypatch, captured)
+    h = _post({"text": "The connection was restored and the server is up.", "voice": "en-US-ChristopherNeural"},
+              client="10.42.9.4")
+    routes._handle_tts(h, None)
+    assert h.status == 400, h.payload()
+    assert "voice" not in captured
+
+
+def test_selection_and_handler_share_one_allowlist():
+    assert "it-IT-ElsaNeural" in routes._EDGE_TTS_ALLOWED_VOICES
+    assert "en-US-ChristopherNeural" not in routes._EDGE_TTS_ALLOWED_VOICES

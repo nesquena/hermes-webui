@@ -26564,13 +26564,42 @@ def _detect_text_lang(text: str) -> str:
     Returns "" when the vote is inconclusive (short texts), so callers fall back
     to the configured single voice instead of guessing wrong.
     """
-    words = re.findall(r"[a-zàèéìòù']+", (text or "").lower())
+    # Every Latin-1 letter, so accented markers such as não/você/está stay
+    # whole words instead of splitting into fragments that match nothing.
+    # An apostrophe splits: Italian c'è/dov'è/com'è then count the stopword
+    # "è", and French c'est/qu'il leave "est"/"il" as they would standing alone.
+    words = re.findall(r"[a-zà-öø-ÿ]+", (text or "").lower())
     if len(words) < 3:
         return ""
+    # No articles or prepositions Italian shares with French and Spanish
+    # (la, le, un, una, con): they made French/Spanish text vote Italian.
+    # Their place is taken by words only Italian uses (ho, stata, nella,
+    # fatto...), so short replies such as "Ho trovato un errore nella
+    # funzione di login." still reach two votes. Not alla/alle: German and
+    # Swedish use them for "all".
     it_words = {
-        "il", "lo", "la", "gli", "le", "un", "una", "di", "che", "non", "per",
-        "con", "sono", "questo", "questa", "anche", "più", "già", "perché",
-        "cosa", "come", "quando", "adesso", "oggi", "molto", "così", "ma",
+        "il", "lo", "gli", "di", "che", "non", "per", "è", "sono", "questo",
+        "questa", "anche", "più", "già", "perché", "cosa", "come", "quando",
+        "adesso", "oggi", "molto", "così", "ma",
+        "ho", "hai", "abbiamo", "hanno", "stato", "stata", "stati", "fatto",
+        "ecco", "ancora", "nel", "nella", "nelle", "negli", "della", "dello",
+        "delle", "degli", "sulla", "dalla", "bene", "perfetto", "faccio",
+        # Spanish funciona/nuevo, Portuguese funciona/novo, French
+        # fonctionne/nouveau: these spellings are Italian only.
+        "funziona", "funzionano", "nuovo", "nuova", "nuovi", "nuove",
+    }
+    # Words Italian shares with French/Spanish. They only back up a strong
+    # Italian vote, and only when no French/Spanish/Portuguese word
+    # is present, so "Le modifiche sono pronte." is Italian while
+    # "Il est allé à la maison" (il + la) stays inconclusive. The markers
+    # are words ordinary Italian doesn't use: not su or tiene ("La patch è
+    # su GitHub.", "Questa cache tiene le sessioni.").
+    shared_words = {"la", "le", "un", "una", "con"}
+    other_romance_words = {
+        "est", "et", "les", "des", "du", "une", "je", "nous", "vous", "avec",
+        "pas", "dans", "très", "mais", "es", "el", "los", "las", "y", "muy",
+        "pero", "para", "está", "en", "sus", "uma", "um",
+        "você", "não", "ele", "ela", "já", "os",
     }
     en_words = {
         "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
@@ -26579,8 +26608,36 @@ def _detect_text_lang(text: str) -> str:
     }
     it_votes = sum(1 for w in words if w in it_words)
     en_votes = sum(1 for w in words if w in en_words)
-    accented_it = sum(1 for w in words if any(c in "àèéìòù" for c in w))
+    # é/è are as common in French, Spanish and Portuguese; the word "è" is
+    # counted as a stopword instead. French à/là/déjà/voilà carry à too.
+    french_grave = {"à", "là", "déjà", "voilà"}
+    accented_it = sum(
+        1 for w in words if w not in french_grave and any(c in "àìòù" for c in w)
+    )
+    # An é is no Italian sign by itself (French marché, Spanish café), but
+    # these -ché conjunctions are Italian only, so they keep their accent vote.
+    accented_it += sum(1 for w in words if w in {
+        "perché", "poiché", "finché", "benché", "purché", "affinché",
+        "sicché", "giacché", "nonché",
+    })
     it_votes += accented_it
+    # -zione/-zioni is Italian only (French -tion, Spanish -ción).
+    it_votes += sum(1 for w in words if w.endswith(("zione", "zioni")))
+    # These are also French or Spanish words, so they can't be the Italian
+    # vote that shared words back up ("Il a fini la ...", "Lo hago con una
+    # ..."); "Lo faccio con una ..." needs an Italian-only word. Not quando:
+    # Portuguese writes it too, but uses none of the shared words, so
+    # "Quando la build termina?" is Italian. French uses "non" as an
+    # interjection ("Non, ..."), where Italian writes "no" ("No, ..."). An
+    # interjection "non" cannot anchor shared-word backup votes; otherwise
+    # it is Italian pre-verbal negation ("La build non passa.", "Non la trovo.")
+    # and acts as a strong vote.
+    weak_it_words = {"il", "lo", "di", "ma", "come", "cosa"}
+    if re.search(r"\bnon\s*[,;:!?]", text or "", re.IGNORECASE):
+        weak_it_words.add("non")
+    strong_it_votes = it_votes - sum(1 for w in words if w in weak_it_words)
+    if strong_it_votes and not any(w in other_romance_words for w in words):
+        it_votes += sum(1 for w in words if w in shared_words)
     if it_votes >= 2 and it_votes > en_votes:
         return "it"
     if en_votes >= 2 and en_votes > it_votes:
@@ -26588,13 +26645,39 @@ def _detect_text_lang(text: str) -> str:
     return ""
 
 
+# Edge voices /api/tts accepts. An explicit request voice outside this set is
+# rejected; a configured default outside it is skipped (_default_edge_voice).
+_EDGE_TTS_ALLOWED_VOICES = frozenset({
+    "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
+    "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
+    "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
+    "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
+    "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
+    "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
+    "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
+    "it-IT-GiuseppeMultilingualNeural",
+    "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
+    "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
+    "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
+    "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
+    "id-ID-GadisNeural",
+})
+
+
 def _default_edge_voice(text: str = "") -> str:
     """Default Edge voice for /api/tts, picked by the text's language.
 
     Precedence: ``tts.edge.voices.<lang>`` from the active profile's config.yaml,
-    then a built-in per-language default (it -> Elsa, en -> Ava), then
-    ``tts.edge.voice`` (the configured single voice, all languages), then Elsa.
-    Before this, the endpoint hardcoded zh-CN-XiaoxiaoNeural and spoke Chinese.
+    then ``tts.edge.voice`` (the configured single voice), then a built-in
+    per-language default (it -> Elsa, en -> Ava), then the multilingual Ava.
+    The built-in default outranks the configured voice only when that voice
+    speaks the other detected language (an it-IT voice for English text, or an
+    en-* voice for Italian text). A voice in any other language, or a
+    multilingual one, is kept: the detector only knows it/en, so it must not
+    replace a French voice because French text looked Italian (#9065).
+    A configured voice outside ``_EDGE_TTS_ALLOWED_VOICES`` is skipped, so a
+    request that named no voice falls through to the next default instead of
+    failing the allowlist check after selection.
     """
     cfg: dict = {}
     try:
@@ -26610,12 +26693,17 @@ def _default_edge_voice(text: str = "") -> str:
         edge_cfg = {}
 
     def _usable(value) -> str:
-        # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
-        # would trip the voice allowlist, so treat it as absent.
-        if isinstance(value, str) and value.strip() and "${" not in value:
-            return value.strip()
+        # An unresolved ${VAR} stays literal (load_profile_config), and a voice
+        # outside the allowlist would be rejected after selection: treat both as
+        # absent so the next default applies instead of a 400 "invalid voice"
+        # on a request that named no voice.
+        if isinstance(value, str) and value.strip() and not _has_env_ref(value):
+            voice = value.strip()
+            if voice in _EDGE_TTS_ALLOWED_VOICES:
+                return voice
         return ""
 
+    builtins = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}
     lang = _detect_text_lang(text)
     if lang:
         voices = edge_cfg.get("voices")
@@ -26623,13 +26711,20 @@ def _default_edge_voice(text: str = "") -> str:
             per_lang = _usable(voices.get(lang))
             if per_lang:
                 return per_lang
-        builtin = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}.get(lang)
-        if builtin:
-            return builtin
     configured = _usable(edge_cfg.get("voice"))
     if configured:
-        return configured
-    return "it-IT-ElsaNeural"
+        configured_lang = configured.split("-", 1)[0].lower()
+        speaks_other_detected_lang = (
+            lang in builtins
+            and configured_lang in builtins
+            and configured_lang != lang
+            and "Multilingual" not in configured
+        )
+        if not speaks_other_detected_lang:
+            return configured
+    if lang in builtins:
+        return builtins[lang]
+    return "en-US-AvaMultilingualNeural"
 
 
 class _TtsRateLimiter:
@@ -26949,22 +27044,7 @@ def _handle_tts(handler, parsed):
     # request rejected earlier never reads profile config.
     if not voice:
         voice = _default_edge_voice(text)
-    allowed = {
-        "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
-        "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
-        "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
-        "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
-        "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
-        "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
-        "it-IT-GiuseppeMultilingualNeural",
-        "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
-        "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
-        "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
-        "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
-        "id-ID-GadisNeural",
-    }
-    if voice not in allowed:
+    if voice not in _EDGE_TTS_ALLOWED_VOICES:
         from api.helpers import bad as _bad
         return _bad(handler, "invalid voice", 400)
 
