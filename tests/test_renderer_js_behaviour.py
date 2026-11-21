@@ -12,6 +12,7 @@ asserting the rendered HTML for the most common LLM-output shapes.
 Add a case here whenever the renderer fix targets a class of input the
 Python mirror cannot exercise faithfully.
 """
+import json
 import os
 import re
 import shutil
@@ -87,6 +88,59 @@ def driver_path(tmp_path_factory):
     p = tmp_path_factory.mktemp("renderer_driver") / "driver.js"
     p.write_text(_DRIVER_SRC, encoding="utf-8")
     return str(p)
+
+
+# Same prelude, but the driver renders several payloads inside ONE process and
+# reports how long each renderMd() call took.  Keeping the timer inside the
+# process isolates renderer cost from node startup, which matters for growth
+# comparisons where the arms are only a few milliseconds apart.
+_PERF_DRIVER_SRC = _DRIVER_SRC.replace(
+    """let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', c => { buf += c; });
+process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+""",
+    """let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', c => { buf += c; });
+process.stdin.on('end', () => {
+  const payloads = JSON.parse(buf);
+  const samples = payloads.map(p => {
+    const times = [];
+    for (let r = 0; r < 2; r++) {
+      const t0 = process.hrtime.bigint();
+      renderMd(p);
+      times.push(Number(process.hrtime.bigint() - t0) / 1e6);
+    }
+    return Math.min(...times);
+  });
+  process.stdout.write(JSON.stringify(samples));
+});
+""",
+)
+if _PERF_DRIVER_SRC == _DRIVER_SRC:  # pragma: no cover - guard against drift
+    raise RuntimeError("perf driver prelude no longer matches _DRIVER_SRC")
+
+
+@pytest.fixture(scope="module")
+def growth_driver_path(tmp_path_factory):
+    p = tmp_path_factory.mktemp("renderer_growth_driver") / "driver.js"
+    p.write_text(_PERF_DRIVER_SRC, encoding="utf-8")
+    return str(p)
+
+
+def _render_timings_ms(driver_path, payloads):
+    """Render each payload through the real renderMd and return ms per payload."""
+    result = subprocess.run(
+        [NODE, driver_path, str(UI_JS_PATH)],
+        input=json.dumps(payloads),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node perf driver failed: {result.stderr}")
+    return json.loads(result.stdout)
 
 
 def _render(driver_path, markdown: str) -> str:
@@ -1031,6 +1085,184 @@ class TestBareFileUrlMediaRendering:
         assert "<img" not in out
 
 
+class TestRootRelativeMarkdownImage:
+    """#9071: same-origin root-relative image paths must render in the settled
+    renderer.  The streaming path accepts a leading `/`, but both settled image
+    passes only matched absolute schemes, so `![x](/static/chart.svg)` fell
+    through to literal text once the answer settled.  Scheme-relative
+    (`//host/x`) and backslash (`/\\host/x`) forms stay literal: the browser
+    normalises those to a remote origin, which the image policy must not load."""
+
+    def test_root_relative_image_in_paragraph(self, driver_path):
+        out = _render(driver_path, "![chart](/static/charts/probe.svg)")
+        assert '<img' in out, f"root-relative markdown image must render: {out!r}"
+        assert 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative src must be preserved verbatim: {out!r}"
+        )
+
+    def test_root_relative_image_in_list_item(self, driver_path):
+        out = _render(driver_path, "- ![chart](/static/charts/probe.svg)")
+        assert '<img' in out and 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative image inside a list item must render: {out!r}"
+        )
+
+    def test_root_relative_image_in_table_cell(self, driver_path):
+        src = "| chart |\n| --- |\n| ![chart](/static/charts/probe.svg) |"
+        out = _render(driver_path, src)
+        assert '<img' in out and 'src="/static/charts/probe.svg"' in out, (
+            f"root-relative image inside a table cell must render: {out!r}"
+        )
+
+    def test_protocol_relative_image_stays_literal(self, driver_path):
+        out = _render(driver_path, "![x](//evil.example/x.png)")
+        assert '<img' not in out, f"protocol-relative URL must not render as img: {out!r}"
+
+    def test_backslash_authority_image_stays_literal(self, driver_path):
+        out = _render(driver_path, r"![x](/\evil.example/x.png)")
+        assert '<img' not in out, f"backslash authority URL must not render as img: {out!r}"
+
+    def test_root_relative_image_in_fenced_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "```\n![x](/static/charts/probe.svg)\n```")
+        assert '<img' not in out, f"image inside a fenced code block must stay literal: {out!r}"
+
+    def test_root_relative_image_in_inline_code_stays_literal(self, driver_path):
+        # #9072 review: the outer image pass now matches root-relative paths, so
+        # image syntax written inside an inline code span must stay verbatim
+        # instead of rendering as an <img> nested in <code>.
+        out = _render(driver_path, "see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, f"image inside inline code must stay literal: {out!r}"
+        assert '[chart](/static/charts/probe.svg)' in out, (
+            f"inline code content must be preserved verbatim: {out!r}"
+        )
+
+    def test_code_wrapped_link_label_still_links(self, driver_path):
+        # Control for the inline-code stash: only spans containing `![` are
+        # stashed, so a code-wrapped link label keeps flowing through the
+        # outer link pass.
+        out = _render(driver_path, "[`chart`](https://example.com/page)")
+        assert '<a href="https://example.com/page"' in out, (
+            f"code-wrapped link label must still link: {out!r}"
+        )
+        assert '<code>chart</code>' in out, f"label must stay code: {out!r}"
+
+    def test_image_between_two_inline_code_spans_still_renders(self, driver_path):
+        # #9072 review: code spans pair up the way inlineMd() pairs them, so a
+        # stash may never run from the closing backtick of one span to the
+        # opening backtick of the next -- that would swallow the image sitting
+        # between them and leave it as literal Markdown.
+        out = _render(
+            driver_path, "see `before` ![chart](/static/charts/probe.svg) `after` here"
+        )
+        assert 'src="/static/charts/probe.svg"' in out, (
+            f"image between two code spans must render: {out!r}"
+        )
+        assert '<code>before</code>' in out and '<code>after</code>' in out, (
+            f"both code spans must stay literal: {out!r}"
+        )
+
+    def test_root_relative_image_in_list_item_inline_code_stays_literal(self, driver_path):
+        # List item text is rendered to <code> before the outer image pass and
+        # then re-entered through inlineMd() by the paragraph splitter, so the
+        # second pass must not render image syntax inside an existing <code>
+        # element either.
+        out = _render(driver_path, "- see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, (
+            f"image inside inline code in a list item must stay literal: {out!r}"
+        )
+        assert '<code>![chart](/static/charts/probe.svg)</code>' in out, (
+            f"list-item inline code content must be preserved verbatim: {out!r}"
+        )
+
+    def test_root_relative_image_in_heading_inline_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "## see `![chart](/static/charts/probe.svg)` here")
+        assert '<img' not in out, (
+            f"image inside inline code in a heading must stay literal: {out!r}"
+        )
+
+    def test_absolute_https_image_still_renders(self, driver_path):
+        out = _render(driver_path, "![x](https://example.com/x.png)")
+        assert '<img' in out and 'src="https://example.com/x.png"' in out, (
+            f"absolute https image regression: {out!r}"
+        )
+
+
+class TestHFlatUnterminatedCodeGrowth:
+    """Gate G9072-HFLAT-QUADRATIC (greptile P1 on #9072, review 01:54Z).
+
+    ``_hFlat`` stripped attributed code openings with ``/<code\\b[^>]*>/g``.
+    The class looks linear but, once backtick removal joins a forged run of
+    ``<co`de ``` openers into repeated ``<code `` tags with no closing ``>``,
+    each opener makes the engine rescan the rest of the line: 128 KB reached
+    ~630 ms in the browser versus ~69 ms with the strip removed.  The strip
+    is now a forward scan that stops at the first opener without a closing
+    ``>``; this gate fails on the old regex (~14 ms -> ~540 ms for 18->144 KB).
+    """
+
+    def test_hflat_unterminated_openers_grow_linear(self, growth_driver_path):
+        def payload(openers):
+            # Backtick removal joins these into a run of unterminated
+            # `<code ` openers in _hFlat before the tag strip runs.
+            return "# " + "<co`de `" * openers
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(2000), payload(16000)]
+        )
+        # 8x the bytes: linear work lands near 8x, the backtracking regex ~36x.
+        assert large_ms < small_ms * 12, (
+            "unterminated <code openers must not rescale per opener in _hFlat: "
+            f"16 KB={small_ms:.1f} ms, 128 KB={large_ms:.1f} ms"
+        )
+
+    def test_hflat_still_strips_attributed_opening(self, driver_path):
+        # Correctness control: the forward scan must still remove a well-formed
+        # attributed opening so the adaptive C prefix sees the joined bytes.
+        out = _render(
+            driver_path,
+            "## " + "![a\x00<code class=\"language-text\">C0\x00</code>b](http://localhost/x.png)",
+        )
+        assert "undefined" not in out, out
+        m = re.search(r'alt="([^"]*)"', out)
+        assert m and m.group(1) == "a\x00C0\x00b", out
+
+
+class TestUnterminatedCodeStashGrowth:
+    """Gate G9072-CODE-QUADRATIC: the selective ``<code>`` stash must stay
+    linear when a message opens a code element and never closes it.
+
+    The tempered pattern this replaces searched for ``![`` between two lazy
+    "not ``</code>``" runs, so an unterminated opener made every image opener
+    rescan the remaining suffix: four times the bytes cost about eleven times
+    the render time, and 160 KB took ~32x a clean render.  A forward scan must
+    keep that flat while preserving the code-opacity controls above."""
+
+    def test_unterminated_code_span_growth_is_linear(self, growth_driver_path):
+        def payload(openers):
+            return '<code class="language-text">' + "![x] " * openers
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(8000), payload(32000)]
+        )
+        # 4x the bytes: linear work lands near 4x, the tempered pattern ran ~11x.
+        assert large_ms < small_ms * 6, (
+            "unterminated <code> must not rescale per image opener: "
+            f"40 KB={small_ms:.1f} ms, 160 KB={large_ms:.1f} ms"
+        )
+        assert large_ms < 1500, (
+            f"160 KB unterminated <code> render is far too slow: {large_ms:.1f} ms"
+        )
+
+    def test_unterminated_code_leaves_later_images_alone(self, driver_path):
+        # Control: a span that never closes is not a code span, so the image
+        # after it keeps flowing through the outer image pass as before.
+        out = _render(
+            driver_path,
+            '<code class="language-text"> ![x](/static/charts/probe.svg)',
+        )
+        assert 'src="/static/charts/probe.svg"' in out, (
+            f"image after an unterminated code tag must still render: {out!r}"
+        )
+
+
 class TestMarkdownTableCellLineBreaks:
     """<br> inside markdown table cells must be preserved and not split cells across lines."""
 
@@ -1162,3 +1394,746 @@ class TestRendererGateRegressions7618:
         out = _render(driver_path, "  | a | b |\n  |---|---|\n  | x<br>y | z |")
         assert "<table>" in out
         assert "x<br>y" in out
+
+
+class TestImageQuadraticGrowth:
+    """Gate G9072-ROOTIMAGE-QUADRATIC / G9072-INLINECODE-QUADRATIC.
+
+    Accepting a root-relative url made the image regex scan the remaining
+    suffix for every ``![`` opener whenever the closing parenthesis is missing:
+    96 KB of ``![x](/`` rendered in ~1.5 s against ~2 ms on frozen master.  The
+    same shape lived in inlineMd()'s block-local ``<code>`` stash, where a
+    heading or list line that opens code elements and never closes them
+    searched the whole line once per opener.  Both passes now walk the input
+    once, and a delimiter that never appears ends the search immediately.
+    """
+
+    def test_unclosed_root_relative_image_growth_is_linear(self, growth_driver_path):
+        unit = "![x](" + "/"
+
+        def payload(openers):
+            return unit * openers
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(4000), payload(16000)]
+        )
+        # 4x the bytes: linear work lands near 4x, the regex form ran ~75x.
+        assert large_ms < small_ms * 6, (
+            "unclosed root-relative images must not rescale per opener: "
+            f"24 KB={small_ms:.1f} ms, 96 KB={large_ms:.1f} ms"
+        )
+        assert large_ms < 200, (
+            f"96 KB of unclosed images renders far too slowly: {large_ms:.1f} ms"
+        )
+
+    def test_unclosed_root_relative_image_stays_literal(self, driver_path):
+        out = _render(driver_path, "![x](/static/charts/probe.png")
+        assert "<img" not in out, f"unclosed image must stay literal: {out!r}"
+
+    def test_unclosed_inline_code_heading_growth_is_linear(self, growth_driver_path):
+        # This gates the heading shape, not the whole complexity class: on
+        # `<code>`-heavy input a pass outside this PR is already superlinear on
+        # frozen master (8.3x-10.7x for 4x the bytes, measured on 2000/8000
+        # openers with and without a trailing </code>), so a gate tight enough
+        # to fail ac7d6d6 (~10.3x) fails master as well.  The shape below stays
+        # at ~3.6x for both the scan and the regex it replaced, and it trips if
+        # the stash ever starts rescanning its suffix again.
+        def payload(openers):
+            return "# " + '<code class="language-text">' * openers + "\n</code>"
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(2000), payload(8000)]
+        )
+        assert large_ms < small_ms * 6, (
+            "unclosed <code> in a heading must not rescan per opener: "
+            f"56 KB={small_ms:.1f} ms, 224 KB={large_ms:.1f} ms"
+        )
+        assert large_ms < 600, (
+            f"224 KB heading with unclosed <code> renders too slowly: {large_ms:.1f} ms"
+        )
+
+    def test_unclosed_inline_code_list_growth_is_linear(self, growth_driver_path):
+        def payload(openers):
+            return "- " + '<code class="language-text">' * openers + "\n\npara\n</code>"
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(2000), payload(8000)]
+        )
+        assert large_ms < small_ms * 6, (
+            "unclosed <code> in a list item must not rescan per opener: "
+            f"56 KB={small_ms:.1f} ms, 232 KB={large_ms:.1f} ms"
+        )
+
+
+class TestNestedImageOpeners:
+    """Regression: a nested ``![`` must not become a second image.
+
+    The single forward scan kept every opener it saw, so an opener that sat
+    inside a match it had already consumed stayed pending; the next ``](``
+    reused that position, emitted another ``<img>`` and copied text that was
+    already rendered into the new alt.  Repeated input grew the HTML
+    quadratically (16 KB in, megabytes out).  Openers left of a consumed match
+    are now dropped, so a bracket pair still yields exactly one image, which
+    is what the regex this pass replaced did.
+    """
+
+    def test_nested_image_renders_once(self, driver_path):
+        out = _render(driver_path, "![A![B](/one.png)](/two.png)")
+        assert out.count("<img") == 1, f"nested image must render once: {out!r}"
+        # The emitted alt entity-encodes brackets (gate G9072-IMAGE-REENTRY) so
+        # a later image pass cannot re-pair it; the attribute renders as `![B`.
+        assert 'alt="A!&#91;B"' in out, f"alt must keep the nested opener text: {out!r}"
+        assert "](/two.png)" in out, f"the extra closer stays literal text: {out!r}"
+
+    def test_nested_image_between_text_renders_once(self, driver_path):
+        out = _render(driver_path, "see ![A![B](/one.png) now")
+        assert out.count("<img") == 1, f"nested image must render once: {out!r}"
+        assert "see " in out and " now" in out, f"surrounding text lost: {out!r}"
+
+    def test_repeated_nested_images_do_not_grow_the_output(self, driver_path):
+        unit = "![A![B](/one.png)](/two.png)"
+        small = _render(driver_path, unit * 200)
+        large = _render(driver_path, unit * 800)
+        assert small.count("<img") == 200, f"one image per unit: {small.count('<img')}"
+        assert large.count("<img") == 800, f"one image per unit: {large.count('<img')}"
+        assert len(large) < len(small) * 6, (
+            "4x the input must not rescale the output: "
+            f"{len(small)} -> {len(large)} bytes"
+        )
+        # Constant bytes per unit is the invariant that breaks when a stale
+        # opener drags previously rendered text into a new alt.
+        assert abs(len(large) / 800 - len(small) / 200) < 1, (
+            "output per unit drifted: "
+            f"{len(small) / 200:.1f} -> {len(large) / 800:.1f} bytes"
+        )
+
+
+class TestImageAltCodeSpans:
+    """Gate G9072-IMAGEALT-STASH: code spans in an image alt must reach the
+    attribute as plain text.
+
+    Stash placeholders leaked into the alt as raw NUL tokens (list / heading
+    text arrives with code already rendered), and restoring ``<code>`` markup
+    into the attribute string ended the attribute early, spilling the rest of
+    the tag into the paragraph ("![</code>\" class=...").  Formatted alt text
+    now renders as ``alt="logo"`` in every context, and image syntax written
+    inside a code span never produces markup inside an attribute.
+    """
+
+    def test_formatted_alt_in_paragraph(self, driver_path):
+        out = _render(driver_path, "![`logo`](/static/logo.png)")
+        assert 'alt="logo"' in out, f"alt must be the plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_formatted_alt_in_list(self, driver_path):
+        out = _render(driver_path, "- ![`logo`](/static/logo.png)")
+        assert 'alt="logo"' in out, f"list alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_formatted_alt_in_heading(self, driver_path):
+        out = _render(driver_path, "## ![`logo`](/static/logo.png)")
+        assert 'alt="logo"' in out, f"heading alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_formatted_alt_in_table(self, driver_path):
+        src = "| a | b |\n| --- | --- |\n| ![`logo`](/static/logo.png) | x |"
+        out = _render(driver_path, src)
+        assert 'alt="logo"' in out, f"table alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_image_syntax_inside_code_alt_stays_plain(self, driver_path):
+        out = _render(driver_path, "![`![`](/static/logo.png)")
+        # The emitted alt entity-encodes [ and ] so a later image pass cannot
+        # re-pair it (gate G9072-IMAGE-REENTRY); the attribute renders as `![`.
+        assert 'alt="!&#91;"' in out, f"code content must stay plain text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+        assert "<code>" not in out, f"code markup must not enter the tag: {out!r}"
+        assert 'class="msg-media-img"' in out, (
+            f"the img tag must stay well formed: {out!r}"
+        )
+
+    def test_code_alt_on_https_image_stays_plain(self, driver_path):
+        # Same control on the scheme the renderer supported before this PR.
+        out = _render(driver_path, "![`logo`](https://example.com/x.png)")
+        assert 'alt="logo"' in out, f"https alt must be plain code text: {out!r}"
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+
+class TestPlaceholderTokens:
+    """Regression: a message that already contains a placeholder keeps its text.
+
+    The bounded code stashes wrote fixed ``\\x00K0\\x00`` (outer) and
+    ``\\x00H0\\x00`` (block-local) markers, and the restore replace could not
+    tell them from the caller's own characters: a link whose url held such a
+    token lost its href to the stash, and the code span beside it was replaced
+    with the stash index (``undefined``).  Each pass now picks, once per render,
+    a prefix the text does not contain.
+    """
+
+    TOKEN = "\x00K0\x00"
+    LINE = "[x](https://localhost/" + TOKEN + ") `![doc](/a.png)`"
+    # Every control character the marker may use as a lead.
+    CONTROLS = "".join(
+        chr(c) for c in list(range(0x00, 0x09)) + list(range(0x0E, 0x20))
+    )
+
+    def _assert_preserved(self, out, where):
+        assert 'href="https://localhost/' + self.TOKEN + '"' in out, (
+            f"{where}: the link must keep its own url: {out!r}"
+        )
+        assert "<code>![doc](/a.png)</code>" in out, (
+            f"{where}: the code span must round-trip unchanged: {out!r}"
+        )
+        assert "undefined" not in out, f"{where}: a stash index leaked: {out!r}"
+
+    def test_literal_placeholder_in_a_paragraph(self, driver_path):
+        self._assert_preserved(_render(driver_path, self.LINE), "paragraph")
+
+    def test_literal_placeholder_in_a_list(self, driver_path):
+        self._assert_preserved(_render(driver_path, "- " + self.LINE), "list")
+
+    def test_literal_placeholder_in_a_heading(self, driver_path):
+        self._assert_preserved(_render(driver_path, "# " + self.LINE), "heading")
+
+    def test_literal_placeholder_in_a_table(self, driver_path):
+        table = "| h |\n|---|\n| " + self.LINE + " |"
+        self._assert_preserved(_render(driver_path, table), "table")
+
+    def test_literal_block_token_in_an_alt_stays_text(self, driver_path):
+        out = _render(
+            driver_path, "| ![lit \x00H0\x00 <code>c</code>](/a.png) |\n|---|"
+        )
+        assert "undefined" not in out, f"a stash index leaked: {out!r}"
+        alt = out.split('alt="', 1)[1].split('"', 1)[0]
+        assert alt.startswith("lit") and alt.endswith("c"), (
+            f"alt must keep the message text and the code's text: {out!r}"
+        )
+        assert "<code" not in alt, f"code markup must not enter the tag: {out!r}"
+
+    def test_placeholder_survives_a_control_rich_message(self, driver_path):
+        # Greptile P2 on #9072.  The lead was picked by bare presence and the
+        # last-resort lead was not checked at all, so a message holding every
+        # candidate control character plus a literal ``\x00K0\x00`` had those
+        # own characters taken for a placeholder and replaced by a stash entry
+        # (``undefined`` with an empty stash).  The lead is now chosen against
+        # the marker shape and lengthened while that shape is already spelled
+        # out, so the message keeps its text.
+        line = self.CONTROLS + " " + self.LINE
+        cases = (
+            ("paragraph", line),
+            ("list", "- " + line),
+            ("heading", "# " + line),
+            ("table", "| h |\n|---|\n| " + line + " |"),
+        )
+        for where, message in cases:
+            self._assert_preserved(_render(driver_path, message), where)
+
+    def test_every_single_character_marker_spelled_out(self, driver_path):
+        # The text spells out `<lead>K0\x00` for every lead, so no single
+        # character is free and only a two-character lead can carry the stash.
+        spelled = "".join(c + "K0\x00" for c in self.CONTROLS)
+        out = _render(driver_path, spelled + " `![doc](/a.png)`")
+        assert "undefined" not in out, f"a stash index leaked: {out!r}"
+        assert "<code>![doc](/a.png)</code>" in out, (
+            f"the code span must round-trip unchanged: {out!r}"
+        )
+        assert "\x00K0\x00" in out, f"the message text must survive: {out!r}"
+
+    def test_marker_insertion_boundary_keeps_caller_prefix_and_code(self, driver_path):
+        # G9072-MARKER-INSERTION-BOUNDARY.  The caller text ends in a dangling
+        # NUL "K" digits tail sitting directly in front of a stashed code
+        # span: the appended placeholder lent its first NUL to that tail, the
+        # pair read as a marker for an index that was never stashed, and the
+        # restore replaced the caller's tail plus the real marker's first
+        # byte with "undefined".  A placeholder written behind such a tail
+        # now spells one extra K -- the lead it owns -- so the borrowed NUL
+        # no longer lands on a digit, and the restore only consumes indices
+        # it actually wrote; a match it does not own stays caller text.
+        message = self.CONTROLS + chr(0) + "K5" + "`![doc](/a.png)`"
+        out = _render(driver_path, message)
+        assert "undefined" not in out, f"an unstashed index was consumed: {out!r}"
+        assert "<code>![doc](/a.png)</code>" in out, (
+            f"the code span must still render: {out!r}"
+        )
+        assert chr(0) + "K5" in out, f"the caller prefix must survive: {out!r}"
+
+    def test_manufactured_token_in_a_code_alt_stays_text(self, driver_path):
+        # G9072-MANUFACTURED-TOKEN-AMPLIFICATION.  The outer K lead was chosen
+        # against the message as it stood, and the image pass flattens a
+        # code-formatted alt by stripping the <code> boundaries, so bytes that
+        # arrived separated by such a boundary could spell the chosen marker.
+        # The final global restore then substituted a stash entry into every
+        # copy inside that alt (``undefined`` with an empty stash).  The lead
+        # is now also chosen against the boundary-stripped text, a superset of
+        # every flattened alt, so no alt flattening can manufacture it.
+        out = _render(
+            driver_path, self.CONTROLS + "![a<code>\x00K</code>0\x00b](/one.png)"
+        )
+        assert "undefined" not in out, f"a manufactured token was restored: {out!r}"
+        alt = out.split('alt="', 1)[1].split('"', 1)[0]
+        assert alt.startswith("a") and alt.endswith("b"), (
+            f"the alt must keep the message text around the code span: {out!r}"
+        )
+        assert "<code" not in alt, f"code markup must not enter the tag: {out!r}"
+
+    def test_manufactured_token_copies_are_not_amplified(self, driver_path):
+        # Same hole at n copies: every flattened copy matched the chosen
+        # marker, and the final global restore expanded each into the one
+        # stashed code span, so a ~39 KB message rendered 4.3 MB of HTML
+        # holding 2,049 copies of a span that appears once in the input
+        # (gate table, n=2048 -> x2049).  One copy is expected at every size.
+        span = "`![doc](/a.png)`"
+        for n in (128, 512, 2048):
+            msg = (
+                span + " " + self.CONTROLS
+                + "![a" + "<code>\x00K</code>0\x00" * n + "b](/one.png)"
+            )
+            out = _render(driver_path, msg)
+            assert out.count("![doc](/a.png)") == 1, (
+                f"n={n}: the stashed span must be restored exactly once, "
+                f"got {out.count('![doc](/a.png)')} copies: {out[:300]!r}"
+            )
+            assert "undefined" not in out, f"n={n}: a manufactured token was restored"
+
+    def test_normal_image_and_code_still_render(self, driver_path):
+        out = _render(driver_path, "![doc](/a.png) and `![doc](/a.png)`")
+        assert out.count('class="msg-media-img"') == 1, (
+            f"the image must render exactly once: {out!r}"
+        )
+        assert "<code>![doc](/a.png)</code>" in out, (
+            f"image syntax inside inline code stays literal: {out!r}"
+        )
+        assert "\x00" not in out, f"stash tokens must not leak: {out!r}"
+
+    def test_nul_letter_run_does_not_size_the_marker(self, growth_driver_path):
+        # The marker used to be the shortest run of `K` / `H` after a NUL, so a
+        # single NUL plus a long letter run made a marker as long as that run:
+        # every stashed code span then copied the whole prefix into the
+        # temporary text, and the stash grew with spans x run.  A marker whose
+        # length ignores the message keeps this linear.  Four times the run and
+        # four times the spans is sixteen times the linear cost, so the ratio
+        # gate below only passes once the prefix stops scaling with the input.
+        def payload(run, spans):
+            return "\x00" + "K" * run + " " + "`![doc](/a.png)` " * spans
+
+        small_ms, large_ms = _render_timings_ms(
+            growth_driver_path, [payload(5000, 100), payload(20000, 400)]
+        )
+        assert large_ms < small_ms * 6, (
+            "a letter run after a NUL must not size the stash marker: "
+            f"{small_ms:.1f} ms -> {large_ms:.1f} ms"
+        )
+        assert large_ms < 600, (
+            f"letter run plus code spans renders too slowly: {large_ms:.1f} ms"
+        )
+
+class TestNestedImageReentry9072Round3:
+    """Greptile round 3 on #9072: the inlineMd() image output re-enters the
+    outer image pass, and alt tokens resolve in the wrong order.
+
+    Paragraph text was already safe; list / heading / table text runs
+    through inlineMd(), whose emitted <img> carries the alt verbatim: an
+    alt that still spells `![` paired with the literal `](/two.png)` tail
+    left after the match, so the outer pass rebuilt a second image out of
+    the finished tag, dropped the tail and spilled the tag attributes into
+    the new alt (item 2). And a backtick span wrapping an H placeholder
+    made the C plain text carry a NEW H token that the single H-then-C
+    pass left raw inside the attribute (item 3)."""
+
+    def _contexts(self, md):
+        nl = chr(10)
+        return {
+            'list': '- ' + md,
+            'heading': '# ' + md,
+            'table': '| h | f |' + nl + '| --- | --- |' + nl + '| ' + md + ' | z |',
+        }
+
+    def test_nested_image_keeps_tail_and_generated_text_out_of_alt(self, driver_path):
+        for name, src in self._contexts('![A![B](/one.png)](/two.png)').items():
+            out = _render(driver_path, src)
+            assert '/two.png' in out, (
+                name + ': literal image tail was consumed by re-entry: ' + repr(out))
+            assert 'class=&quot;' not in out, (
+                name + ': generated attribute text leaked into an alt: ' + repr(out))
+            assert out.count('<img') == 1, (
+                name + ': one source image must stay one image: ' + repr(out))
+
+    def test_nested_control_tokens_resolve_to_plain_alt(self, driver_path):
+        controls = ''.join(chr(c) for c in list(range(9)) + list(range(14, 32)))
+        md = controls + '![``![doc](/a.png)``](/one.png)'
+        for name, src in self._contexts(md).items():
+            out = _render(driver_path, src)
+            m = re.search(r'alt="([^"]*)"', out)
+            assert m, name + ': no rendered image alt: ' + repr(out)
+            alt = m.group(1)
+            assert chr(0) not in alt, (
+                name + ': internal NUL marker leaked into the alt: ' + repr(out.replace(chr(0), '<NUL>')))
+            assert 'H0' not in alt, (
+                name + ': internal marker text leaked into the alt: ' + repr(out.replace(chr(0), '<NUL>')))
+            assert 'doc' in alt, (
+                name + ': alt must keep the resolved plain text: ' + repr(out))
+
+    def test_paragraph_nested_image_control_still_keeps_tail(self, driver_path):
+        out = _render(driver_path, '![A![B](/one.png)](/two.png)')
+        assert '](/two.png)' in out, repr(out)
+        assert '/one.png' in out, repr(out)
+
+
+class TestRepeatedExampleMarkerTailGrowth:
+    """Gate G9072-MARKER-TAIL-QUADRATIC, review round 3: the boundary probe
+    removed the regex walk, but its callers still materialised the whole
+    prefix in front of every stashed span (`str.slice(0,offset)` and
+    `out+s.slice(i,open)`), so replies built from repeated examples went
+    quadratic again: 70 KB of `` `![x]` `` cost ~670 ms against ~60 ms on
+    the pre-PR renderer, and 280 KB hit ~18.5 s. The callers now hand the
+    probe a bounded reader (source bounded at the match offset, or the
+    accumulated output joined with the pending gap) instead of a
+    materialised string."""
+
+    def test_repeated_example_growth_is_linear(self, growth_driver_path):
+        def payload(n):
+            return '`![x]` ' * n
+
+        small_ms, mid_ms, large_ms = _render_timings_ms(
+            growth_driver_path,
+            [payload(8750), payload(17500), payload(35000)],
+        )
+        # 2x the bytes: linear work lands near 2x per step with loose headroom;
+        # the materialised-prefix arms ran ~4.7x and ~5.8x per step.
+        assert mid_ms < small_ms * 4, (
+            "repeated examples must not rescale per stashed span: "
+            f"70 KB={small_ms:.1f} ms, 140 KB={mid_ms:.1f} ms"
+        )
+        assert large_ms < mid_ms * 4, (
+            "repeated examples must not rescale per stashed span: "
+            f"140 KB={mid_ms:.1f} ms, 280 KB={large_ms:.1f} ms"
+        )
+        assert large_ms < 2000, (
+            f"280 KB of repeated examples renders far too slowly: {large_ms:.1f} ms"
+        )
+
+
+class TestCallerNulTokenAmplification9072Round4:
+    """Greptile round 4 on #9072: the image-alt resolver's fixpoint re-scanned
+    restored caller text, and the C token shape was hardcoded (`\x00C0\x00`),
+    so a message that TYPES real NUL bytes forged tokens the resolver kept
+    expanding: one backtick span holding 20 literal `\x00C0\x00` copies
+    resolved to 20 fresh matches per round, and eight rounds built 20^8
+    tokens out of a ~90-byte message, freezing or crashing the tab.  C tokens
+    now use the same caller-adaptive prefix the H tokens already carry
+    (checked against the text and its boundary-stripped form, mirroring the
+    K/H treatment), so the only matchable tokens are the ones this pass
+    wrote and every resolution is terminal."""
+
+    def test_typed_nul_c_tokens_resolve_once_and_stay_bounded(self, driver_path):
+        payload = '# ![``' + '\x00C0\x00' * 20 + '``](/one.png)'
+        out = _render(driver_path, payload)
+        # The caller's 20 literal copies survive verbatim; the resolver must
+        # not treat them as tokens of its own (each extra generation would
+        # multiply the count by 20 again).  On the pre-fix renderer this input
+        # blew up into 20^8 tokens and node died before returning.
+        assert out.count('\x00C0\x00') == 20, repr(out.replace('\x00', '<NUL>'))[:400]
+        assert '/one.png' in out, repr(out)[:400]
+
+    def test_typed_nul_c_tokens_stay_bounded_in_list_and_table(self, driver_path):
+        nl = chr(10)
+        payloads = [
+            '- ![``' + '\x00C0\x00' * 20 + '``](/one.png)',
+            '| h | f |' + nl + '| --- | --- |' + nl
+            + '| ![``' + '\x00C0\x00' * 20 + '``](/one.png) | z |',
+        ]
+        for md in payloads:
+            out = _render(driver_path, md)
+            assert out.count('\x00C0\x00') == 20, repr(out.replace('\x00', '<NUL>'))[:400]
+
+    def test_legit_nested_resolution_survives_the_adaptive_prefix(self, driver_path):
+        # The C prefix now shifts when the message carries the ordinary shape;
+        # a backtick span wrapping a rendered <code> element must still resolve
+        # the nested H token to plain text inside the image alt.
+        controls = ''.join(chr(c) for c in list(range(9)) + list(range(14, 32)))
+        out = _render(driver_path, controls + '![`![doc](/a.png)`](/one.png)')
+        m = re.search(r'alt="([^"]*)"', out)
+        assert m, repr(out)[:400]
+        assert chr(0) not in m.group(1), repr(out.replace(chr(0), '<NUL>'))[:400]
+        assert 'doc' in m.group(1), repr(out)[:400]
+
+
+class TestAttributedCodeTokenJoin9072Round5:
+    """Greptile round 5 on #9072: H normalization can manufacture the C token
+    shape after ``_cPre`` was chosen.
+
+    ``_hFlat`` (the boundary-stripped form the adaptive prefixes are chosen
+    against) stripped only bare ``<code>`` openings, while the H plain-text
+    extraction strips attributed openings too (``<code class="...">``).  An
+    image alt could therefore hide ``\x00C0\x00`` split by the opening tag:
+    the tag made the prefix scan miss the shape, then resolving the H token
+    joined the caller NULs with the element's plain text ``C0`` and the alt
+    resolver read the result as an owned C index -- there was no such stash
+    entry, so the attribute rendered ``aundefinedb``.  The flattened form now
+    removes the same attributed openings the extraction removes, and every
+    resolution keeps a token's literal bytes when its index was never
+    stashed.
+    """
+
+    CONTROLS = ''.join(chr(c) for c in list(range(9)) + list(range(14, 32)))
+    IMAGE = (
+        CONTROLS
+        + '![a\x00<code class="language-text">C0\x00</code>b]'
+        + '(http://localhost/one.png)'
+    )
+
+    def _assert_alt_keeps_caller_bytes(self, out, where):
+        assert "undefined" not in out, f"{where}: a stash index leaked: {out!r}"
+        assert '<img' in out, f"{where}: the image must still render: {out!r}"
+        m = re.search(r'alt="([^"]*)"', out)
+        assert m, f"{where}: no alt attribute: {out!r}"
+        # The attributed element resolves to its plain text, so the alt is the
+        # caller's NUL + `C0` + NUL sequence exactly -- never a C reference.
+        assert m.group(1) == "a\x00C0\x00b", (
+            f"{where}: caller bytes must survive verbatim: "
+            f"{m.group(1).replace(chr(0), '<NUL>')!r}"
+        )
+
+    def test_attributed_code_alt_in_a_heading(self, driver_path):
+        self._assert_alt_keeps_caller_bytes(
+            _render(driver_path, "## " + self.IMAGE), "heading"
+        )
+
+    def test_attributed_code_alt_in_a_list_item(self, driver_path):
+        self._assert_alt_keeps_caller_bytes(
+            _render(driver_path, "- " + self.IMAGE), "list"
+        )
+
+    def test_attributed_code_alt_in_a_table_cell(self, driver_path):
+        table = "| h |\n| --- |\n| " + self.IMAGE + " |"
+        self._assert_alt_keeps_caller_bytes(_render(driver_path, table), "table")
+
+
+class TestGeneratedImageHtmlOpaque9072:
+    """Round-7 residual (#9072): already-emitted image HTML must stay opaque
+    to later Markdown image parsing. A URL containing `![` (e.g. a destination
+    with a nested image) or a generated SVG alt containing `![` must not be
+    re-paired with a trailing `](/url)` by a second image pass — that rebuilt a
+    second <img>, dropped the literal tail and spilled attributes into the
+    alt. Paragraph output is the passing one-pass control.
+    """
+
+    URL_RECIPE = '![x](http://localhost/a![b.png)](/two.png)'
+    SVG_RECIPE = '![A![B](file:///one.svg)](/two.png)'
+
+    def _contexts(self, md):
+        nl = chr(10)
+        return {
+            'list': '- ' + md,
+            'heading': '# ' + md,
+            'table': '| h | f |' + nl + '| --- | |' + nl + '| ' + md + ' | z |',
+        }
+
+    def test_url_recipe_keeps_tail_and_generated_attributes_out_of_alt(self, driver_path):
+        for name, src in self._contexts(self.URL_RECIPE).items():
+            out = _render(driver_path, src)
+            assert out.count('<img') == 1, (
+                name + ': one source image must stay one image: ' + repr(out))
+            assert '/two.png' in out, (
+                name + ': literal image tail was consumed by re-entry: ' + repr(out))
+            assert 'alt="b.png' not in out, (
+                name + ': destination attributes leaked into an alt: ' + repr(out))
+            assert 'class=&quot;' not in out, (
+                name + ': generated attribute text leaked into an alt: ' + repr(out))
+
+    def test_url_recipe_paragraph_control(self, driver_path):
+        out = _render(driver_path, self.URL_RECIPE)
+        assert out.count('<img') == 1 and '/two.png' in out and 'alt="x"' in out, (
+            'paragraph control must render one clean image: ' + repr(out))
+
+    @staticmethod
+    def _md_image_pass_driver_path(tmp_path):
+        # Extract just _mdImagePass and feed it a _mdImageHtml that emits an
+        # SVG image whose alt keeps `![` verbatim (the real file:// SVG route
+        # before the fix). Verifies the scan treats emitted tags as opaque.
+        src = UI_JS_PATH.read_text(encoding='utf-8')
+        prelude = r"""
+const src = require('fs').readFileSync(process.argv[2], 'utf8');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start), depth = 1; i++;
+  while (depth > 0) { if (src[i] === '{') depth++; else if (src[i] === '}') depth--; i++; }
+  return src.slice(start, i);
+}
+eval(extractFunc('_mdImagePass'));
+// Emitted file:// SVG image: alt keeps the caller's `![` exactly like the
+// real _inlineMediaHtmlForRef SVG branch did before this fix.
+function _mdImageHtml(alt, url) {
+  return '<img class="msg-media-svg" src="' + esc(url) +
+    '" alt="' + esc(alt) + '" loading="lazy">';
+}
+process.stdout.write(_mdImagePass(
+  _mdImagePass(process.argv[3], null), null));  // second pass simulates the
+                                               // paragraph splitter re-entry
+"""
+        p = tmp_path / 'md_image_pass_driver.js'
+        p.write_text(prelude, encoding='utf-8')
+        return str(p)
+
+    def test_svg_recipe_generated_alt_stays_opaque(self, tmp_path):
+        driver = self._md_image_pass_driver_path(tmp_path)
+        for name, md in [('paragraph', self.SVG_RECIPE),
+                         ('list', '- ' + self.SVG_RECIPE),
+                         ('heading', '# ' + self.SVG_RECIPE)]:
+            out = subprocess.run(
+                [NODE, driver, str(UI_JS_PATH), md],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+            assert out.count('<img') == 1, (
+                name + ': one source image must stay one image: ' + repr(out))
+            assert '/two.png' in out, (
+                name + ': literal image tail was consumed by re-entry: ' + repr(out))
+            m = re.search(r'alt="([^"]*)"', out)
+            assert m and m.group(1) == 'A![B', (
+                name + ': emitted SVG alt must stay opaque and unmodified: ' + repr(out))
+            assert out.count('alt=') == 1, (
+                name + ': no second image was rebuilt out of the emitted tag: ' + repr(out))
+
+
+class TestImageAltHtmlTags9072:
+    """Round-8 residual (#9072, greptile P2): user HTML tags inside an image
+    description must stay eligible for image pairing. The round-7 opaque-tag
+    skip made any <span>/<svg>/<a>/... tag hide a pending `![` opener, so
+    ![A<span>logo</span>](/a.png) stayed literal Markdown (and became a bare
+    link with a stray '!' for an HTTPS destination). Generated tags emitted by
+    an earlier image pass still carry `![` in their own attributes and must
+    remain opaque; the discriminator is whether an opener is already pending
+    at the tag, not the tag name.
+    """
+
+    RECIPE = '![A<span>logo</span>](/a.png)'
+    HTTPS_RECIPE = '![A<span>logo</span>](https://example.com/a.png)'
+
+    def test_html_tag_in_alt_still_renders_image(self, driver_path):
+        out = _render(driver_path, self.RECIPE)
+        assert out.count('<img') == 1, (
+            'image description with <span> must still produce one image: ' + repr(out))
+        assert 'src="/a.png"' in out, (
+            'image destination must be preserved: ' + repr(out))
+        assert 'logo' in out, (
+            'description text must survive into the alt: ' + repr(out))
+        assert '![A<span>' not in out, (
+            'image must not be left as literal Markdown: ' + repr(out))
+
+    def test_html_tag_in_alt_https_destination(self, driver_path):
+        out = _render(driver_path, self.HTTPS_RECIPE)
+        assert out.count('<img') == 1, (
+            'HTTPS image with <span> in alt must render one image, not a bare '
+            'link with a stray "!": ' + repr(out))
+        assert '<a href=' not in out, (
+            'must not degrade to a plain markdown link: ' + repr(out))
+        assert 'src="https://example.com/a.png"' in out, repr(out)
+
+    def test_multiple_html_tags_in_alt(self, driver_path):
+        out = _render(driver_path, '![A<span>x</span><svg></svg>](/b.png)')
+        assert out.count('<img') == 1 and 'src="/b.png"' in out, repr(out)
+
+
+class TestUnfinishedOpenerDoesNotEatGeneratedImage9072:
+    """Greptile P2 round 9 (#9072): the round-8 `pend.length===0` guard let an
+    unfinished `![` opener consume an image already rendered by an earlier
+    heading/list pass. A generated tag carries the renderer's own markers
+    (class="msg-…" / loading="lazy"); it must stay opaque even while an opener
+    is pending. Genuine user HTML inside an image description has none of those
+    markers and must remain eligible for pairing (round-8 control).
+    """
+
+    RECIPE = '![unfinished\n# ![x](/a.png) tail ](/two.png)'
+    LIST_RECIPE = '![unfinished\n- ![x](/a.png) tail ](/two.png)'
+
+    def test_heading_generated_image_stays_rendered(self, driver_path):
+        out = _render(driver_path, self.RECIPE)
+        # The inner image renders once as a real <img> and the trailing prose
+        # is left intact; the unfinished opener must not rebuild a second
+        # image out of the generated tag's attributes.
+        assert out.count('<img') == 1, repr(out)
+        assert 'class=&quot;msg-media' not in out, (
+            'generated tag attributes leaked into a rebuilt alt: ' + repr(out))
+        assert 'tail ](/two.png)' in out, (
+            'unfinished opener consumed the literal tail: ' + repr(out))
+
+    def test_list_generated_image_stays_rendered(self, driver_path):
+        out = _render(driver_path, self.LIST_RECIPE)
+        assert out.count('<img') == 1, repr(out)
+        assert 'class=&quot;msg-media' not in out, (
+            'generated tag attributes leaked into a rebuilt alt: ' + repr(out))
+        assert 'tail ](/two.png)' in out, repr(out)
+
+    def test_user_html_in_alt_still_pairs(self, driver_path):
+        # Guard against over-correcting: a genuine <span> in an alt has no
+        # renderer marker and must still produce the image (round-8 fix).
+        out = _render(driver_path, '![A<span>logo</span>](/a.png)')
+        assert out.count('<img') == 1 and 'src="/a.png"' in out, repr(out)
+
+
+class TestLongGeneratedImageTagOpaque9072Round10:
+    """Greptile round 10 on #9072: generated-image opacity used a 220-char
+    prefix probe (`str.slice(i, i+220)`). A generated image places its `src`
+    before the `class`/`loading` markers, so a 240-char URL pushed those
+    markers past the probe window and an unfinished opener rebuilt a second
+    image out of the generated tag's escaped attributes. Inspect the full
+    start tag (up to its closing `>`) instead, while keeping genuine user
+    HTML inside an image description pairable."""
+
+    def _recipe(self, marker):
+        url = 'http://localhost/' + 'a' * 240 + '.png'
+        return marker + ' ![unfinished\n' + marker + ' ![x](' + url + ') tail ](/two.png)'
+
+    def test_long_heading_generated_image_stays_rendered(self, driver_path):
+        out = _render(driver_path, self._recipe('#'))
+        assert out.count('<img') == 1, repr(out)
+        assert 'class=&quot;msg-media' not in out, (
+            'generated tag attributes leaked into a rebuilt alt: ' + repr(out))
+        assert 'tail ](/two.png)' in out, (
+            'unfinished opener consumed the literal tail: ' + repr(out))
+
+    def test_long_list_generated_image_stays_rendered(self, driver_path):
+        out = _render(driver_path, self._recipe('-'))
+        assert out.count('<img') == 1, repr(out)
+        assert 'class=&quot;msg-media' not in out, (
+            'generated tag attributes leaked into a rebuilt alt: ' + repr(out))
+        assert 'tail ](/two.png)' in out, repr(out)
+
+    def test_user_html_in_alt_still_pairs_round10(self, driver_path):
+        # Over-correction guard: full-tag inspection must not make genuine
+        # <span> markup in an image alt opaque (round-8 control retained).
+        out = _render(driver_path, '![A<span>logo</span>](/a.png)')
+        assert out.count('<img') == 1 and 'src="/a.png"' in out, repr(out)
+
+
+class TestPendingUnmarkedTagGrowth9072Round10:
+    """Round 10 on #9072: each pending unmarked `<span` recomputed
+    `str.indexOf('>', i+1)` without caching. For `'![' + '<span '.repeat(n)
+    + '>'` that rescanned the whole suffix per opener. Cache the
+    monotonically advancing next-tag-end search, including a missing result.
+
+    The payload sizes are the actual court-sized inputs: 16k/32k/64k/128k
+    repetitions. With the cached fix, 16k->128k grows ~7x (27->191 ms);
+    restoring only the preceding ui.js (87653503) grows ~26x (32->830 ms).
+    The 12x ceiling below separates those two arms with headroom.
+    """
+
+    def test_repeated_pending_spans_grow_near_linear(self, growth_driver_path):
+        def payload(n):
+            return '![' + '<span ' * n + '>'
+
+        ms_16k, ms_32k, ms_64k, ms_128k = _render_timings_ms(
+            growth_driver_path,
+            [payload(16000), payload(32000), payload(64000), payload(128000)],
+        )
+        # 8x the bytes (16k->128k): near-linear work lands near 8x (loose
+        # headroom); the rescan-every-opener form grows ~26x over this range.
+        assert ms_128k < ms_16k * 12, (
+            'pending <span openers must not rescan the suffix per opener: '
+            f'16k={ms_16k:.1f} ms, 32k={ms_32k:.1f} ms, '
+            f'64k={ms_64k:.1f} ms, 128k={ms_128k:.1f} ms'
+        )
