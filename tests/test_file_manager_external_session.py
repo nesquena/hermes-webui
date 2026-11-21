@@ -629,7 +629,14 @@ def test_compression_lock_alias_keeps_old_and_new_ids_on_one_live_lock():
     streaming_source = (Path(__file__).parents[1] / "api" / "streaming.py").read_text(
         encoding="utf-8"
     )
-    assert "_migrate_compression_session_ownership(s, old_sid, new_sid, _agent_lock)" in streaming_source
+    # The ownership migration is called from the shared rotation helper, so the
+    # parameter names are the helper's, not the turn's. Assert the call exists
+    # and is passed an old/new pair plus a lock -- not one spelling of it, which
+    # only pins an identifier and breaks on any rename.
+    assert re.search(
+        r"_migrate_compression_session_ownership\(\s*\w+,\s*\w+,\s*\w+,\s*\w+\s*\)",
+        streaming_source,
+    ), "compression ownership migration is no longer called"
     assert "SESSION_AGENT_LOCKS[old_sid] = agent_lock" in streaming_source
     assert "SESSION_AGENT_LOCKS[new_sid] = agent_lock" in streaming_source
 

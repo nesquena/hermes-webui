@@ -49,6 +49,38 @@ every new browser turn. The browser only receives a compact status event
 (`source`, `label`, message count, compaction metadata, and redacted errors),
 never the prefill message bodies.
 
+## Silent-turn retry (opt-in)
+
+When a provider closes a turn with no content and no error, the Agent raises
+nothing: the stream ends, no assistant row is added, and the WebUI would settle
+on a dead-end "No response from provider" card. WebUI can retry that turn once.
+
+**It is off by default.** The installed Agent already runs its own
+empty-response ladder (`agent/turn_empty_response.py`: post-tool nudge, budgeted
+empty retries behind a cost guard, the fallback chain, then a visible `(empty)`
+reply). A WebUI retry starts a *fresh* agent, which resets that budget — so
+enabling it spends provider calls the Agent's own cost guard was there to
+prevent. Turn it on deliberately:
+
+| Setting | Where |
+|---|---|
+| `HERMES_WEBUI_SILENT_FAILURE_RETRY=1` | environment (wins) |
+| `webui_silent_failure_retry: true` | config |
+
+Accepted truthy values are `1`, `true`, `yes`, `on`. The environment value is
+stripped before precedence, so a whitespace-only value counts as unset and does
+not mask a valid config key.
+
+Even when enabled, the retry is deliberately narrow. It fires only when the turn
+produced **nothing at all**: no assistant reply, no streamed text, no tool call
+or tool result, no reasoning, no tool-iteration-limit exit, no context-compression
+session rotation. A turn that did work but ended invisibly is never replayed —
+re-running it would repeat tool side effects. An attempt that handed back the
+pre-turn context byte-for-byte is not retried either: re-sending the identical
+request reproduces the identical result. When the retry itself fails, its own
+error (429, quota, a raised exception) classifies the card instead of the first
+attempt's silent `no_response`.
+
 ## Session title generation
 
 Hermes WebUI derives a provisional session title from the first user message
