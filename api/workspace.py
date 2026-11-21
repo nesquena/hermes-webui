@@ -201,9 +201,33 @@ def _normalize_posix_path(path: str | Path | None) -> str | None:
     return candidate.as_posix()
 
 
-def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
-    """Return True when the active terminal backend runs outside this WebUI host."""
+def _terminal_backend_is_unresolved(terminal_cfg: dict | None) -> bool:
+    """True when ``terminal.backend`` is a ``${VAR}`` reference nobody resolved.
+
+    A profile config is expanded under that profile's own ``.env`` binding, and
+    a reference the binding cannot resolve stays the literal ``${VAR}``
+    (#8129 / #8737). That literal names no backend at all.
+    """
     if not isinstance(terminal_cfg, dict):
+        return False
+    from api.config import _has_env_ref
+
+    return _has_env_ref(terminal_cfg.get('backend'))
+
+
+def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
+    """Return True when the active terminal backend runs outside this WebUI host.
+
+    An unresolved ``${VAR}`` backend is treated as absent, never as a positive
+    remote classification (#8744): it must not switch on remote-workspace
+    behavior such as preferring ``terminal.cwd`` over a saved local workspace.
+    Gates that may only proceed on a known-local backend (workspace recovery,
+    the embedded terminal) must also check
+    :func:`_terminal_backend_is_unresolved` and refuse explicitly.
+    """
+    if not isinstance(terminal_cfg, dict):
+        return False
+    if _terminal_backend_is_unresolved(terminal_cfg):
         return False
     backend = str(terminal_cfg.get('backend') or '').strip().lower()
     return backend not in ('', 'local')
@@ -1199,7 +1223,10 @@ def resolve_implicit_workspace_with_recovery(
         except Exception:
             logger.debug("Failed to classify terminal backend for workspace recovery", exc_info=True)
             raise original_error from None
-        if _is_remote_terminal_backend(terminal_cfg):
+        # An unresolved ${VAR} backend is not classified as remote, but it is not
+        # known to be local either, so a host-local stat proves nothing: refuse
+        # recovery the same way a remote backend does (#8744).
+        if _is_remote_terminal_backend(terminal_cfg) or _terminal_backend_is_unresolved(terminal_cfg):
             raise original_error from None
         try:
             local_candidate = (
