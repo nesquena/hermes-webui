@@ -5,7 +5,7 @@ The issue: `/api/skills` rows are cached alphabetically
 ``getMatchingCommands()`` appended every skill that matched on NAME **or**
 DESCRIPTION in that same raw order. Row zero is what the dropdown preselects
 (``showCmdDropdown()`` sets ``_cmdSelectedIdx=0``) and what Enter accepts
-(``acceptCmdSelection()`` dispatches ``items[0]``), so typing a full skill
+(``selectCmdDropdownItem()`` dispatches ``items[0]``), so typing a full skill
 name could run an alphabetically-earlier neighbour whose *description* merely
 mentions the typed word:
 
@@ -351,3 +351,53 @@ def test_partial_separator_spelling_keeps_typed_spelling_in_both_orders():
     assert out["underscore_first_typed_underscore"] == ["plugin_review", "plugin-review"], (
         f"registration order: plugin_review first, typed: plugin_rev; got {out['underscore_first_typed_underscore']!r}"
     )
+
+
+def test_trailing_space_ranks_exact_name_first_and_keeps_raw_inclusion():
+    """#9110: `/next ` still ranks `next` at index 0.
+
+    A trailing space used to miss the exact and prefix bands, so every
+    included row fell through to the description band and an earlier cached
+    description match took row zero. Inclusion stays on the untrimmed query:
+    `context7-mcp` describes "Next.js" and must not match `next `.
+    """
+    out = _run(
+        _PRELUDE
+        + """
+        const names = getMatchingCommands('next ').map(m => m.name);
+        return { names };
+        """
+    )
+    assert out["names"] and out["names"][0] == "next", (
+        "a trailing space dropped the exact name out of the exact and prefix "
+        f"bands; got {out['names']!r} (#9110)"
+    )
+    assert "context7-mcp" not in out["names"], (
+        "description matching must stay on the untrimmed query; "
+        f"got {out['names']!r} (#9110)"
+    )
+
+
+def test_other_separator_exact_outranks_longer_literal_prefix():
+    """#9110: `deep_research` is an exact match for `deep-research`.
+
+    With only those two commands registered, both used to land in the prefix
+    band, and the literal tie-break then put `deep_research_extra` at index 0.
+    """
+    out = _run(
+        """
+        _skillCommandCache = [];
+        _bundleCommandCacheReady = true;
+        _bundleCommandCache = [];
+        _agentCommandCache = [
+          { name: 'deep-research', description: 'Canonical', cli_only: false, category: 'Plugin' },
+          { name: 'deep_research_extra', description: 'Longer literal prefix', cli_only: false, category: 'Plugin' },
+        ];
+        return { names: getMatchingCommands('deep_research').map(m => m.name) };
+        """
+    )
+    assert out["names"][0] == "deep-research", (
+        "the other separator spelling stayed in the prefix band, so the longer "
+        f"literal prefix won row zero; got {out['names']!r} (#9110)"
+    )
+    assert "deep_research_extra" in out["names"]
