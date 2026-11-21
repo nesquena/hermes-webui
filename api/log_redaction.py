@@ -13,8 +13,9 @@ into bug reports.
 Mechanism
 ---------
 The Agent redacts at the formatter: ``agent.redact.RedactingFormatter`` masks
-the userinfo part of a URL (``user:<password>@`` -> ``user:***@``,
-keeping scheme, username and host visible). Its own entry points
+the userinfo part of a URL — the whole user-and-password pair in front of the
+at-sign becomes asterisks — while the scheme and the host stay readable. Its own
+entry points
 (``gateway/run.py``, ``gateway/run_turn.py``, ``acp_adapter/entry.py``) install
 it. WebUI embeds the Agent as a library, and nothing in ``server.py`` or
 ``api/`` called ``addHandler``/``setFormatter``/``basicConfig``/``dictConfig``,
