@@ -1616,7 +1616,16 @@ def _recompute_process_env(name: str) -> None:
 
 
 def _claim_process_env(desired: dict[str, object]) -> object:
-    """Register one live scope's claims and return the token that releases them."""
+    """Register one live scope's claims and return the token that releases them.
+
+    #9244: the claims are registered before the values are written, so a write
+    that raises (a value carrying an embedded NUL, which ``os.environ``
+    refuses) would leave the scope registered forever: the caller never
+    receives the token, so its cleanup cannot release the claims. A leaked
+    claim keeps a failed worker's values active and keeps other profiles'
+    credential names hidden for the rest of the server's lifetime. Roll the
+    registration back before re-raising.
+    """
     token = object()
     with _ENV_MIRROR_LOCK:
         for name, value in desired.items():
@@ -1624,20 +1633,73 @@ def _claim_process_env(desired: dict[str, object]) -> object:
                 _ENV_MIRROR_BASELINE[name] = os.environ.get(name)
             _ENV_MIRROR_OWNERS.setdefault(name, {})[token] = value
         _ENV_MIRROR_CLAIMS[token] = tuple(desired)
-        for name in desired:
-            _recompute_process_env(name)
+        try:
+            for name in desired:
+                _recompute_process_env(name)
+        except BaseException:
+            # Undo this scope's registration. The lock is already held here, so
+            # the rollback runs the locked variant. A rollback that itself
+            # fails must not hide the original failure, so it is best-effort:
+            # the claim entries are removed either way.
+            try:
+                _release_process_env_locked(token, robust=True)
+            except BaseException:
+                logger.debug(
+                    "Failed to roll back the process-env mirror claims of a "
+                    "worker whose mirror write failed",
+                    exc_info=True,
+                )
+                _ENV_MIRROR_CLAIMS.pop(token, None)
+                for owners in _ENV_MIRROR_OWNERS.values():
+                    owners.pop(token, None)
+            raise
     return token
+
+
+def _release_process_env_locked(token: object, *, robust: bool = False) -> None:
+    """Drop one live scope's claims. The caller must hold ``_ENV_MIRROR_LOCK``.
+
+    #9244: ``robust`` is used on the rollback path, where a recompute can fail
+    because the value the environment refuses (e.g. one carrying an embedded
+    NUL) is being written back. There each name is handled on its own and a
+    failing one is forced back to the baseline captured for it, so releasing
+    does not stop half-way and leave the remaining claims registered. The
+    normal release path keeps its original behaviour and lets a failing
+    recompute propagate.
+    """
+    for name in _ENV_MIRROR_CLAIMS.pop(token, ()):
+        owners = _ENV_MIRROR_OWNERS.get(name)
+        if owners is None or token not in owners:
+            continue
+        del owners[token]
+        if not robust:
+            _recompute_process_env(name)
+            continue
+        try:
+            _recompute_process_env(name)
+        except BaseException:
+            logger.debug(
+                "Failed to recompute the process env of %s while rolling back a "
+                "worker's claims; restoring its baseline",
+                name,
+                exc_info=True,
+            )
+            baseline = _ENV_MIRROR_BASELINE.get(name)
+            if baseline is None:
+                os.environ.pop(name, None)
+            else:
+                try:
+                    os.environ[name] = baseline
+                except BaseException:
+                    logger.debug(
+                        "Failed to restore the baseline of %s", name, exc_info=True
+                    )
 
 
 def _release_process_env(token: object) -> None:
     """Drop one live scope's claims and let the remaining claimants decide."""
     with _ENV_MIRROR_LOCK:
-        for name in _ENV_MIRROR_CLAIMS.pop(token, ()):
-            owners = _ENV_MIRROR_OWNERS.get(name)
-            if owners is None or token not in owners:
-                continue
-            del owners[token]
-            _recompute_process_env(name)
+        _release_process_env_locked(token)
 
 
 def _apply_profile_env_to_process(
