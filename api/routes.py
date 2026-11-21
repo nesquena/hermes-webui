@@ -18832,6 +18832,12 @@ def handle_get(handler, parsed) -> bool:
             pass
         return j(handler, settings)
 
+    if parsed.path == "/api/push/status":
+        return _handle_push_status(handler, parsed)
+
+    if parsed.path == "/api/push/vapid-public-key":
+        return _handle_push_vapid_public_key(handler)
+
     if parsed.path == "/api/transcribe/capability":
         return handle_transcribe_capability(handler)
 
@@ -18917,6 +18923,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/session":
+        _note_session_device(handler, parse_qs(parsed.query).get("session_id", [""])[0])
         return _handle_session_get(handler, parsed)
 
     if parsed.path == "/api/session/lineage/report":
@@ -22644,6 +22651,21 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 409)
 
+    if parsed.path == "/api/push/subscribe":
+        if not _push_csrf_ok(handler):
+            return _push_csrf_reject(handler)
+        return _handle_push_subscribe(handler, body)
+
+    if parsed.path == "/api/push/cron":
+        if not _push_csrf_ok(handler):
+            return _push_csrf_reject(handler)
+        return _handle_push_cron(handler, body)
+
+    if parsed.path == "/api/push/test":
+        if not _push_csrf_ok(handler):
+            return _push_csrf_reject(handler)
+        return _handle_push_test(handler)
+
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
         from api.auth import (
@@ -24190,6 +24212,11 @@ def handle_delete(handler, parsed) -> bool:
         # original-case path, not the folded matching path.
         name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
+    if parsed.path == "/api/push/subscribe":
+        if not _push_csrf_ok(handler):
+            return _push_csrf_reject(handler)
+        return _handle_push_unsubscribe(handler, body)
+
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
         if not pid:
@@ -28900,6 +28927,185 @@ def _handle_cron_status(handler, parsed):
     return j(handler, {"running": all_running})
 
 
+def _push_owner(handler) -> str:
+    from api import web_push
+
+    return web_push.owner_from_headers(getattr(handler, "headers", None))
+
+
+def _push_csrf_ok(handler) -> bool:
+    """Strict CSRF for Web Push mutations.
+
+    ``_check_csrf`` deliberately admits requests without Origin/Referer (curl,
+    agents). Push routes bind a durable delivery endpoint to this browser, so
+    when auth is enabled they ALWAYS require a valid X-Hermes-CSRF-Token.
+    """
+    from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
+
+    if not is_auth_enabled():
+        return True
+    headers = getattr(handler, "headers", None)
+    submitted = (headers.get(CSRF_HEADER_NAME) if headers is not None else "") or ""
+    return verify_csrf_token(parse_cookie(handler) or "", submitted)
+
+
+def _push_csrf_reject(handler):
+    arm_connection_close_if_body_pending(handler)
+    return j(handler, {"error": "Session expired - reload the page"}, status=403)
+
+
+def _push_session_exists(session_id) -> bool:
+    """True only for a real session (in memory or persisted), so unknown ids
+    from the query string never create owner records."""
+    sid = str(session_id or "")
+    if not sid or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", sid):
+        return False
+    try:
+        from api.models import SESSIONS, SESSION_DIR
+
+        return sid in SESSIONS or (SESSION_DIR / f"{sid}.json").exists()
+    except Exception:
+        return False
+
+
+def _note_session_device(handler, session_id) -> None:
+    """Remember which device opened/started ``session_id`` (push targeting)."""
+    try:
+        from api import web_push
+
+        owner = web_push.owner_from_headers(handler.headers)
+        if owner and session_id and web_push.is_enabled() and _push_session_exists(session_id):
+            # Push enrollment is a write too. A rejected foreign-profile read
+            # must not enroll the caller before the route's ownership preflight.
+            readings = session_owner_readings_readonly(str(session_id), full_load=True)
+            if readings and all(
+                reading is not UNVERIFIABLE_SESSION_OWNER and _session_visible_to_active_profile(reading, handler)
+                for reading in readings
+            ):
+                web_push.register_session_owner(str(session_id), owner)
+    except Exception:
+        logger.debug("push session-owner note failed", exc_info=True)
+
+
+def _handle_push_status(handler, parsed):
+    """Web Push availability plus whether *this device's* endpoint is subscribed.
+
+    Exposes only booleans -- never key material, owners, or other devices'
+    subscriptions. A legacy (pre-owner) subscription whose exact endpoint the
+    caller presents is bound to the caller's device.
+    """
+    from api import web_push
+
+    out = dict(web_push.status())
+    endpoint = parse_qs(parsed.query).get("endpoint", [""])[0]
+    owner = _push_owner(handler)
+    try:
+        subscribed = False
+        if endpoint and owner:
+            subscribed = web_push.has_subscription(endpoint, owner)
+            if not subscribed and web_push.adopt_legacy_subscription(endpoint, owner):
+                subscribed = True
+        out["subscribed"] = subscribed
+        from api.profiles import get_active_hermes_home
+        out["cron_subscribed"] = bool(subscribed and web_push.cron_opted_in(endpoint, owner, get_active_hermes_home()))
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    return j(handler, out)
+
+
+def _handle_push_vapid_public_key(handler):
+    from api import web_push
+
+    st = web_push.status()
+    if not st["enabled"]:
+        return bad(handler, "Web Push is not configured", 404)
+    return j(handler, {"public_key": web_push.public_key()})
+
+
+def _handle_push_subscribe(handler, body):
+    from api import web_push
+
+    if not web_push.is_enabled():
+        return bad(handler, "Web Push is not configured", 404)
+    owner = _push_owner(handler)
+    if not owner:
+        return bad(handler, "A valid X-Hermes-Push-Device header is required - reload the page")
+    body = body if isinstance(body, dict) else {}
+    subscription = body.get("subscription")
+    if not isinstance(subscription, dict):
+        return bad(handler, "subscription is required")
+    try:
+        web_push.add_subscription(
+            subscription, previous_endpoint=body.get("previous_endpoint"), owner=owner
+        )
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    return j(handler, {"ok": True})
+
+
+def _handle_push_cron(handler, body, *, now_ns=None):
+    from api import web_push
+    from api.profiles import get_active_hermes_home
+
+    if not web_push.is_enabled():
+        return bad(handler, "Web Push is not configured", 404)
+    owner = _push_owner(handler)
+    if not owner:
+        return bad(handler, "A valid X-Hermes-Push-Device header is required - reload the page")
+    body = body if isinstance(body, dict) else {}
+    endpoint = body.get("endpoint")
+    if not isinstance(endpoint, str) or not endpoint or type(body.get("enabled")) is not bool:
+        return bad(handler, "endpoint and boolean enabled are required")
+    try:
+        found = web_push.set_cron_opt_in(
+            endpoint, owner, get_active_hermes_home(), body["enabled"], now_ns=now_ns
+        )
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    except (ValueError, OSError):
+        return bad(handler, "Cron notification profile is unavailable or at its limit")
+    if not found:
+        return bad(handler, "This device has no matching Web Push subscription", 409)
+    return j(handler, {"ok": True, "enabled": body["enabled"]})
+
+
+def _handle_push_unsubscribe(handler, body):
+    from api import web_push
+
+    owner = _push_owner(handler)
+    if not owner:
+        return bad(handler, "A valid X-Hermes-Push-Device header is required - reload the page")
+    body = body if isinstance(body, dict) else {}
+    endpoint = str(body.get("endpoint") or "").strip()
+    if not endpoint:
+        return bad(handler, "endpoint is required")
+    try:
+        removed = web_push.remove_subscription(endpoint, owner)
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    return j(handler, {"ok": True, "removed": bool(removed)})
+
+
+def _handle_push_test(handler):
+    from api import web_push
+
+    if not web_push.is_enabled():
+        return bad(handler, "Web Push is not configured", 404)
+    owner = _push_owner(handler)
+    if not owner:
+        return bad(handler, "A valid X-Hermes-Push-Device header is required - reload the page")
+    try:
+        count = web_push.subscription_count(owner)
+    except web_push.PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    if not count:
+        return bad(handler, "This device has no Web Push subscription", 409)
+    queued = web_push.send_test(owner)
+    return j(handler, {"ok": bool(queued), "subscriptions": count})
+
+
 def _handle_cron_recent(handler, parsed):
     """Return cron jobs that have completed since a given timestamp."""
     import datetime
@@ -32727,6 +32933,10 @@ def _handle_chat_start(handler, body, diag=None):
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
+        # CLI/TUI/Desktop sessions may have no WebUI sidecar at dispatch.
+        # Enroll only after materialization and profile validation, but before
+        # the run can publish its first approval or completion.
+        _note_session_device(handler, s.session_id)
         recovery_cleared_for_start = None
         recovery_restore_error = None
         def _restore_cleared_recovery():

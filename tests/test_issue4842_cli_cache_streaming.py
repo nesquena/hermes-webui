@@ -259,14 +259,42 @@ def test_get_cli_sessions_clear_during_rebuild_preserves_joiners(monkeypatch, tm
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    # This case tests invalidation/coalescing, not the intentional timeout
+    # fallback covered above. A 200ms sleep left only 50ms of the production
+    # 250ms deadline and made a scheduler delay look like lost joiners.
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_WAIT_SECONDS", 5.0)
 
     owner_started = threading.Event()
     owner_block = threading.Event()
     second_started = threading.Event()
     second_block = threading.Event()
+    first_joined = {name: threading.Event() for name in ("follower_a", "follower_b")}
+    replacement_joined = threading.Event()
+    owner_event = []
     load_count = {"value": 0}
     load_count_lock = threading.Lock()
     results = {}
+
+    claim_rebuild = models._cli_sessions_cache_claim_rebuild
+
+    def observed_claim(cache_key):
+        event, is_owner = claim_rebuild(cache_key)
+        if is_owner:
+            if not owner_event:
+                owner_event.append(event)
+            return event, True
+
+        class ObservedWait:
+            def wait(self, timeout):
+                if event is owner_event[0]:
+                    first_joined[threading.current_thread().name].set()
+                else:
+                    replacement_joined.set()
+                return event.wait(timeout)
+
+        return ObservedWait(), False
+
+    monkeypatch.setattr(models, "_cli_sessions_cache_claim_rebuild", observed_claim)
 
     def _blocking_loader(*_args, **_kwargs):
         with load_count_lock:
@@ -289,30 +317,32 @@ def test_get_cli_sessions_clear_during_rebuild_preserves_joiners(monkeypatch, tm
         results[name] = models.get_cli_sessions()
 
     owner = threading.Thread(target=_owner, daemon=True)
-    follower_a = threading.Thread(target=lambda: _follower("follower_a"), daemon=True)
-    follower_b = threading.Thread(target=lambda: _follower("follower_b"), daemon=True)
+    follower_a = threading.Thread(target=lambda: _follower("follower_a"), name="follower_a", daemon=True)
+    follower_b = threading.Thread(target=lambda: _follower("follower_b"), name="follower_b", daemon=True)
+    threads = (owner, follower_a, follower_b)
+    try:
+        owner.start()
+        assert owner_started.wait(2.0), "owner did not enter rebuild"
+        follower_a.start()
+        assert first_joined["follower_a"].wait(2.0), "first follower did not join owner"
+        models.clear_cli_sessions_cache()
+        follower_b.start()
+        assert first_joined["follower_b"].wait(2.0), "invalidation discarded the in-flight owner"
 
-    owner.start()
-    assert owner_started.wait(1.0), "owner did not enter rebuild"
-    follower_a.start()
-    models.clear_cli_sessions_cache()
-    follower_b.start()
-    time.sleep(0.2)
+        assert load_count["value"] == 1
+        assert follower_a.is_alive()
+        assert follower_b.is_alive()
 
-    assert load_count["value"] == 1
-    assert follower_a.is_alive()
-    assert follower_b.is_alive()
-
-    owner_block.set()
-    assert second_started.wait(1.0), "second rebuild did not start"
-    time.sleep(0.2)
-
-    assert load_count["value"] == 2
-    second_block.set()
-
-    owner.join(2.0)
-    follower_a.join(2.0)
-    follower_b.join(2.0)
+        owner_block.set()
+        assert second_started.wait(2.0), "second rebuild did not start"
+        assert replacement_joined.wait(2.0), "remaining follower did not join the replacement rebuild"
+        assert load_count["value"] == 2
+    finally:
+        owner_block.set()
+        second_block.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(2.0)
 
     assert not owner.is_alive()
     assert not follower_a.is_alive()

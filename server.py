@@ -685,6 +685,7 @@ def main() -> None:
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
     from api.gateway_chat import resume_gateway_runs_after_restart; resume_gateway_runs_after_restart()  # bound, not yet serving
+    from api.web_push_cron import start as start_cron_push; start_cron_push()
 
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
@@ -723,6 +724,7 @@ def main() -> None:
         httpd.serve_forever()
     finally:
         httpd.server_close()
+        from api.web_push_cron import stop as stop_cron_push; stop_cron_push()
         _log_shutdown_audit()
         try:
             from api.gateway_watcher import stop_watcher
