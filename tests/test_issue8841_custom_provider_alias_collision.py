@@ -256,6 +256,33 @@ def test_a_record_naming_a_different_slug_is_not_a_claimant(monkeypatch):
     assert (record["base_url"], record["api_key"]) == (URL_A, KEY_A)
 
 
+# ── Equal-content records are still two records when their keys differ ────────
+
+
+def test_equal_content_records_under_different_keys_still_collide(monkeypatch):
+    """Two DISTINCT mapping keys declaring identical content are STILL two
+    records claiming the same identity (#9255 round 2: the skip must track the
+    mapping key, never record contents — equal normalized dicts are not a
+    reason to treat two records as one)."""
+    rec = {"name": "foo", "provider_key": "custom:foo", **_record_a()}
+    cfg = _config("custom:foo", {"custom:foo": rec, "myproxy": dict(rec)})
+    _bind(monkeypatch, cfg)
+    text = _refusal(cfg, "custom:foo")
+    assert "'custom:foo'" in text and "'myproxy'" in text
+
+
+def test_exact_keyed_record_equal_content_not_double_counted(monkeypatch):
+    """The exact canonical key beside itself-content is the single-record case
+    under a different spelling: the mapping key that was selected is skipped by
+    KEY (never by content), so a lone record resolves."""
+    rec = {"name": "foo", "provider_key": "custom:foo", **_record_a()}
+    cfg = _config("custom:foo", {"custom:foo": rec})
+    _bind(monkeypatch, cfg)
+    record, source, is_exact, status = _select("custom:foo", cfg)
+    assert (record["base_url"], record["api_key"]) == (URL_A, KEY_A)
+    assert (source, is_exact, status) == ("providers", False, config.CUSTOM_SELECTION_KEYED)
+
+
 # ── Greptile: ONE record whose mapping key differs from its provider_key ──────
 
 

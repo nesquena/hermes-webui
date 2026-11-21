@@ -1787,7 +1787,7 @@ def _custom_provider_entries(
         # insertion order must never choose a different native authority.
         slug = _custom_provider_slug_key(identity)
         try:
-            record, _disabled = _native_custom_provider_record(
+            record, _disabled, _record_key = _native_custom_provider_record(
                 _native_identity_scope(native, index, identity, slug), identity, slug,
             )
         except AmbiguousCustomProviderError:
@@ -4687,8 +4687,9 @@ def _normalized_raw_provider_record(record: dict, ep_name: str) -> dict:
     return normalized
 
 
-def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> dict | None:
-    """The ONE enabled raw ``providers:<key>`` record that owns ``pid``, else None.
+def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> tuple[str, dict] | None:
+    """The ONE enabled raw ``providers:<key>`` record that owns ``pid`` — as
+    ``(mapping_key, normalized_record)`` — else None.
 
     Skips the two keys that already have dedicated, higher-precedence candidates
     in :func:`_select_custom_provider_record` — ``providers['custom:<slug>']``
@@ -4726,7 +4727,7 @@ def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> d
             f"slug {slug!r}; an endpoint and API key could be resolved from different "
             f"records. Rename one so each custom provider has a unique slug."
         )
-    return owning[0][1] if owning else None
+    return owning[0] if owning else None
 
 
 def _raise_on_native_alias_collision(
@@ -4734,6 +4735,7 @@ def _raise_on_native_alias_collision(
     pid: str,
     slug: str,
     selected: dict,
+    selected_key: str = "",
 ) -> None:
     """Raise when a SECOND native record also claims ``pid``'s identity (#8841).
 
@@ -4746,6 +4748,14 @@ def _raise_on_native_alias_collision(
     could pair one record's endpoint with the other record's key. Refuse the
     turn instead, naming both records.
 
+    ``selected_key`` is the SELECTED record's actual ``providers:`` mapping
+    key. Tracking it directly — rather than comparing record contents — is what
+    keeps one record from being counted twice: a record whose mapping key
+    differs from its declared ``provider_key`` (``providers: {myproxy: {name:
+    foo, provider_key: 'custom:foo'}}``, #9255) is skipped by KEY, while two
+    DISTINCT keys that happen to declare equal contents are still two records
+    and still collide.
+
     What is NOT a second claimant: a record the Agent treats as disabled (its
     resolver never sees it), a record that names the identity but declares no
     connection field (not a competing authority, as in
@@ -4757,12 +4767,17 @@ def _raise_on_native_alias_collision(
     """
     if not isinstance(providers_cfg, dict):
         return
-    own_key = str(selected.get("provider_key") or "").strip()
+    own_key = str(selected_key or selected.get("provider_key") or "").strip()
     claimants = [own_key or pid]
-    selected_mapping_key = ""
     for key, record in providers_cfg.items():
         key_text = str(key or "").strip()
         if not key_text or key_text.lower() in {pid.lower(), "custom"}:
+            continue
+        if selected_key and key_text == selected_key:
+            # The selected record itself. Its mapping key can differ from the
+            # provider_key it declares (the #9255 shape); skipping it by KEY
+            # keeps one record from counting twice WITHOUT treating two
+            # equal-content records under different keys as one record.
             continue
         if not _is_native_custom_provider_key(key_text):
             continue  # built-in spelling: #8690's guard owns that collision
@@ -4771,17 +4786,6 @@ def _raise_on_native_alias_collision(
         if not _raw_provider_record_enabled(record):
             continue
         normalized = _normalized_raw_provider_record(record, key_text)
-        # The loop is scanning the same ``providers:`` mapping the SELECTED
-        # record was lifted from. Compare each candidate with ``selected`` at
-        # the same spelling the caller uses: when the candidate IS the selected
-        # record (e.g. keyed ``myproxy`` whose own ``provider_key`` is
-        # ``custom:foo``), it must not be counted a second time — identical
-        # normalized records are the SAME record, never a second claimant.
-        if normalized == selected:
-            # The record's ACTUAL mapping key, which can differ from the
-            # ``provider_key`` it declares. Use it when naming the record.
-            selected_mapping_key = key_text
-            continue
         # The claimant must NAME the identity itself: only a record whose own
         # display name claims this alias counts. A record that claims through
         # its config KEY alone is the #8428 shape (an exact canonical key
@@ -4793,10 +4797,6 @@ def _raise_on_native_alias_collision(
             continue
         if _custom_record_owns_connection(normalized, pid):
             claimants.append(key_text)
-    if selected_mapping_key:
-        # Name the selected record by its ACTUAL mapping key, not by the
-        # provider_key it may declare (they can differ — #9255).
-        claimants[0] = selected_mapping_key
     if len(claimants) >= 2:
         raise AmbiguousCustomProviderError(
             f"Custom provider records {claimants!r} under providers: all name the provider "
@@ -4805,26 +4805,28 @@ def _raise_on_native_alias_collision(
         )
 
 
-def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -> tuple[dict | None, bool]:
-    """Return the native authority and whether its explicit disable is terminal.
+def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -> tuple[dict | None, bool, str]:
+    """Return the native authority, whether its explicit disable is terminal,
+    and the ``providers:`` KEY that record was found under.
 
     Exact canonical keys outrank aliases, including their disabled verdict.
     Without one, reuse the raw selector's collision check rather than silently
     choosing the first key that normalizes to the same identity.
     """
     if not isinstance(providers_cfg, dict):
-        return None, False
+        return None, False, ""
     exact = providers_cfg.get(pid)
     normalized = None
     if isinstance(exact, dict) and exact:
         if not _raw_provider_record_enabled(exact):
-            return None, True
+            return None, True, ""
         normalized = _normalized_raw_provider_record(exact, pid)
         if _custom_record_owns_connection(normalized, pid):
-            return normalized, False
-    record = _unique_raw_provider_record(providers_cfg, pid, slug)
-    if record is not None:
-        return record, False
+            return normalized, False, pid
+    unique = _unique_raw_provider_record(providers_cfg, pid, slug)
+    if unique is not None:
+        key, record = unique
+        return record, False, key
     disabled = any(
         _is_native_custom_provider_key(key)
         and isinstance(candidate, dict) and bool(candidate)
@@ -4833,18 +4835,20 @@ def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -
         for key, candidate in providers_cfg.items()
     )
     if disabled:
-        return None, True
+        return None, True, ""
     # Metadata-only rows remain readable, but the runtime candidate loop still
     # requires a declared connection. They cannot displace an owning alias above.
     if normalized is not None:
-        return normalized, False
+        return normalized, False, pid
     metadata = [
-        _normalized_raw_provider_record(candidate, key)
+        (key, _normalized_raw_provider_record(candidate, key))
         for key, candidate in providers_cfg.items()
         if _is_native_custom_provider_key(key) and isinstance(candidate, dict) and candidate
         and _raw_provider_record_enabled(candidate) and _custom_provider_slug_key(key) == slug
     ]
-    return (metadata[0] if len(metadata) == 1 else None), False
+    if len(metadata) == 1:
+        return metadata[0][1], False, metadata[0][0]
+    return None, False, ""
 
 
 def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool:
@@ -4859,7 +4863,7 @@ def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool
     slug = _custom_provider_slug_key(pid)
     if not slug or _unique_custom_provider_entry(cfg_data.get("custom_providers"), slug) is not None:
         return False
-    _record, disabled = _native_custom_provider_record(cfg_data.get("providers"), pid, slug)
+    _record, disabled, _record_key = _native_custom_provider_record(cfg_data.get("providers"), pid, slug)
     return disabled
 
 
@@ -4928,7 +4932,7 @@ def _select_custom_provider_record(
     # one of them is keyed on this provider's OWN identity.
     providers_cfg = cfg_data.get("providers", {})
     provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
-    native_record, disabled = _native_custom_provider_record(providers_cfg, pid, slug)
+    native_record, disabled, native_record_key = _native_custom_provider_record(providers_cfg, pid, slug)
     if disabled:
         # The identity's authority said no; generic model/pool fallbacks cannot
         # resurrect it under the name the user explicitly took offline.
@@ -4937,8 +4941,10 @@ def _select_custom_provider_record(
         # #8841: another record claiming this alias by its own display name
         # would share the Agent's display-name-keyed credential pool with this
         # one, so refuse the turn naming both records before either is handed
-        # back.
-        _raise_on_native_alias_collision(providers_cfg, pid, slug, native_record)
+        # back. The record's own providers: KEY is tracked explicitly so a
+        # mapping key that differs from its declared provider_key is never
+        # counted as two claimants.
+        _raise_on_native_alias_collision(providers_cfg, pid, slug, native_record, native_record_key)
 
     model_cfg = cfg_data.get("model", {})
     model_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
