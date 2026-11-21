@@ -50,6 +50,35 @@ PUBLISH_SURFACE = {
     "surface": "publish",
 }
 
+# A plugin's own approval rule: the Agent stamps the plugin's rule key, so
+# this is the "ask before an outbound send / a public post / a money change"
+# gate issue #9108 names. The rule key is the plugin's, so the pattern key is
+# namespaced.
+PLUGIN_RULE = {
+    "command": "Publish the drafted release notes to the public blog?",
+    "description": "Plugin requires approval for publish",
+    "pattern_key": "plugin_rule:blog.publish",
+    "pattern_keys": ["plugin_rule:blog.publish"],
+}
+
+# The guard on writes to a protected instruction file: a consent prompt the
+# Agent raises with its own pattern key, not an elicitation.
+PROTECTED_FILE = {
+    "command": "Write the agent's standing instructions to AGENTS.md",
+    "description": "protected instruction file",
+    "pattern_key": "protected_instruction_file",
+    "pattern_keys": ["protected_instruction_file"],
+}
+
+# A computer-use action: the Agent asks a person before it acts on the
+# screen, so YOLO must not answer it either.
+COMPUTER_USE = {
+    "command": "Click the Pay button on the checkout page",
+    "description": "computer use action",
+    "pattern_key": "cua:click:execute",
+    "pattern_keys": ["cua:click:execute"],
+}
+
 # A plain command approval: YOLO is expected to keep answering this one.
 COMMON = {
     "command": "rm -rf /tmp/webui-9108-target",
@@ -58,8 +87,14 @@ COMMON = {
     "pattern_keys": ["recursive delete"],
 }
 
-PROTECTED = [ELICITATION, PUBLISH_SURFACE]
-PROTECTED_IDS = ["elicitation", "publish"]
+PROTECTED = [
+    ELICITATION,
+    PUBLISH_SURFACE,
+    PLUGIN_RULE,
+    PROTECTED_FILE,
+    COMPUTER_USE,
+]
+PROTECTED_IDS = ["elicitation", "publish", "plugin-rule", "protected-file", "computer-use"]
 
 
 # ── Scripted Agent state (no installed Agent required) ─────────────────────
@@ -475,3 +510,336 @@ def test_enabling_yolo_still_relays_when_only_a_late_ordinary_command_arrives(
     assert sid in yolo_state["enabled"], "an ordinary command must still enable YOLO"
     assert runner_spy, "the ordinary command approval must still be relayed"
     assert all(call["choice"] == "once" for call in runner_spy), runner_spy
+
+
+# ── The Gateway event chain: a consent prompt must survive YOLO ────────────
+#
+# The Gateway describes one prompt twice. The ``approval.request`` event
+# carries the Agent's ``pattern_key``; the ``pending_controls`` authority
+# projection carries the same prompt WITHOUT one (the projection keeps only
+# kind / prompt_id / command / description / choices). Both descriptions reach
+# WebUI through the same translation, so a consent prompt that only the
+# projection describes must still be protected -- otherwise session YOLO
+# answers a publish/spend consent the person never saw.
+#
+# These tests drive the real Gateway event handling chain
+# (``gateway_chat._relay_gateway_run_approval``) over a synthetic
+# ``approval.request`` event and a synthetic ``pending_controls`` projection,
+# with the remote Runs API replaced by a spy. No real Gateway is contacted and
+# no command or publish action is executed.
+
+
+def _gateway_event_payload(approval, *, prompt_id="prompt-9108", generation=7):
+    """A synthetic Gateway ``approval.request`` event, as the Runs API emits it."""
+    data = dict(approval)
+    data.update({
+        "event": "approval.request",
+        "run_id": "run-9108",
+        "prompt_id": prompt_id,
+        "execution_generation": generation,
+        "choices": ["once", "deny"],
+    })
+    return data
+
+
+def _gateway_projection_payload(approval, *, prompt_id="prompt-9108", generation=7):
+    """The ``pending_controls`` projection of the same prompt (no pattern key)."""
+    return {
+        "kind": "approval",
+        "prompt_id": prompt_id,
+        "execution_generation": generation,
+        "command": str(approval.get("command") or ""),
+        "description": str(approval.get("description") or ""),
+        "choices": ["once", "deny"],
+    }
+
+
+class _EventSink:
+    """Fake transport: records every approval event WebUI would publish."""
+
+    def __init__(self):
+        self.events = []
+
+    def __call__(self, name, payload):
+        self.events.append((name, payload))
+
+    @property
+    def approvals(self):
+        return [payload for name, payload in self.events if name == "approval"]
+
+
+def _relay_gateway_event(sid, payload, *, run_id="run-9108"):
+    """Run one Gateway approval through the real event handling chain."""
+    sink = _EventSink()
+    relayed = gateway_chat._relay_gateway_run_approval(
+        sid,
+        run_id,
+        payload,
+        "http://gateway.test",
+        "key",
+        put_gateway_event=sink,
+    )
+    return relayed, sink
+
+
+@pytest.mark.parametrize("approval", PROTECTED, ids=PROTECTED_IDS)
+def test_gateway_approval_request_event_is_not_auto_answered_by_yolo(
+    sid, yolo_state, runner_spy, approval
+):
+    """The Gateway event path: a consent prompt stays a card for the person."""
+    yolo_state["enabled"].add(sid)
+
+    relayed, sink = _relay_gateway_event(sid, _gateway_event_payload(approval))
+
+    assert relayed is True
+    assert runner_spy == [], "YOLO must not answer a consent prompt on the Gateway"
+    assert sink.approvals, "the consent prompt must still surface as a card"
+    assert _parked_protected_rows(sid), "the consent card must stay published"
+
+
+@pytest.mark.parametrize("approval", PROTECTED, ids=PROTECTED_IDS)
+def test_gateway_pending_controls_projection_does_not_answer_a_consent_prompt(
+    sid, yolo_state, runner_spy, approval
+):
+    """The projection path: the same consent prompt, described without a pattern key.
+
+    The Gateway's ``pending_controls`` projection keeps no ``pattern_key``, so
+    the translation cannot read the consent marker off this payload. The
+    markers WebUI already recorded for the prompt (the ``approval.request``
+    event mirrored it) must carry over, or this projection hands a consent
+    prompt straight to YOLO.
+    """
+    yolo_state["enabled"].add(sid)
+
+    # The event arrives first and mirrors the consent prompt.
+    relayed, _sink = _relay_gateway_event(sid, _gateway_event_payload(approval))
+    assert relayed is True
+    assert runner_spy == [], "the event path must not answer the consent prompt"
+
+    # The projection re-describes the same prompt without a pattern key.
+    relayed, _sink = _relay_gateway_event(
+        sid, _gateway_projection_payload(approval)
+    )
+
+    assert relayed is True
+    assert runner_spy == [], (
+        "YOLO must not answer a consent prompt the Gateway describes without a "
+        f"pattern key; remote answers: {runner_spy!r}"
+    )
+    assert _parked_protected_rows(sid), "the consent card must stay published"
+
+
+@pytest.mark.parametrize("approval", PROTECTED, ids=PROTECTED_IDS)
+def test_a_parked_consent_prompt_is_still_visible_and_manually_answerable(
+    sid, yolo_state, runner_spy, approval
+):
+    """A protected prompt must stay visible AND be answerable by the person.
+
+    Not auto-answering is only half the contract: the card has to remain in
+    the queue and a manual answer has to reach the Gateway.
+    """
+    yolo_state["enabled"].add(sid)
+
+    relayed, sink = _relay_gateway_event(sid, _gateway_event_payload(approval))
+
+    assert relayed is True
+    assert runner_spy == [], "YOLO must not answer the consent prompt"
+
+    rows = _pending_rows(sid)
+    assert rows, "the consent card must stay visible in the approval queue"
+    card = rows[0]
+    assert card.get("approval_id"), "the visible card must carry its approval id"
+
+    # The person's own answer reaches the Gateway.
+    mirror = route_approvals.gateway_pending_mirror(
+        sid, approval_id=card["approval_id"], run_id="run-9108"
+    )
+    assert mirror is not None, "the visible card must be a relayable mirror"
+    relay_payload, relay_status = routes._relay_gateway_run_approval(
+        sid, mirror, "once", enable_yolo=False
+    )
+
+    assert relay_status == 200, relay_payload
+    assert relay_payload.get("ok") is not False, relay_payload
+    assert len(runner_spy) == 1, "the manual answer must reach the Gateway"
+    assert runner_spy[0]["choice"] == "once"
+    assert runner_spy[0]["run_id"] == "run-9108"
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["publish", "mcp-elicitation", "mcp-trust/blog", "vault-payment"],
+)
+def test_gateway_translation_marks_a_consent_surface_as_protected(
+    sid, yolo_state, runner_spy, surface
+):
+    """Every consent surface the Agent raises must read as protected.
+
+    The surface travels with the Gateway approval payload; dropping it in the
+    shared translation would let YOLO answer the consent prompt.
+    """
+    yolo_state["enabled"].add(sid)
+    approval = {
+        "command": "Publish the drafted release notes",
+        "description": "mcp:blog/publish",
+        "surface": surface,
+    }
+
+    relayed, sink = _relay_gateway_event(sid, _gateway_event_payload(approval))
+
+    assert relayed is True
+    assert runner_spy == [], f"YOLO answered a '{surface}' consent prompt"
+    assert sink.approvals, "the consent prompt must still surface as a card"
+
+
+def test_gateway_translation_keeps_an_ordinary_command_unprotected(
+    sid, yolo_state, runner_spy
+):
+    """Differential control: an ordinary command approval stays answerable."""
+    yolo_state["enabled"].add(sid)
+
+    relayed, _sink = _relay_gateway_event(sid, _gateway_event_payload(COMMON))
+
+    assert relayed is True
+    assert len(runner_spy) == 1, runner_spy
+    assert runner_spy[0]["choice"] == "once"
+
+
+def test_gateway_projection_of_an_ordinary_command_is_still_auto_answered(
+    sid, yolo_state, runner_spy
+):
+    """Differential control on the projection path: an ordinary command still goes."""
+    yolo_state["enabled"].add(sid)
+
+    relayed, _sink = _relay_gateway_event(sid, _gateway_event_payload(COMMON))
+    assert relayed is True
+    assert len(runner_spy) == 1, runner_spy
+
+    relayed, _sink = _relay_gateway_event(
+        sid, _gateway_projection_payload(COMMON)
+    )
+    assert relayed is True
+    assert len(runner_spy) == 2, runner_spy
+    assert runner_spy[1]["choice"] == "once"
+
+
+# ── A late ordinary command: which approval was relayed, and when ──────────
+#
+# The enable path relays the approvals its snapshot contains. An approval that
+# lands AFTER the snapshot is not part of that round: it stays parked and is
+# answered by the next round, when session YOLO is already on. The test must
+# say which approval was relayed, how many times, and what the queue looked
+# like afterwards -- "the spy was called" cannot tell an early relay from a
+# late one.
+
+
+def _relayed_run_ids(calls):
+    return [call["run_id"] for call in calls]
+
+
+def test_late_ordinary_command_is_not_relayed_in_the_enabling_round(
+    sid, yolo_state, monkeypatch, runner_spy
+):
+    """The enabling round relays the EARLY approval only.
+
+    The late approval lands after the enable took its snapshot, so this round
+    must not relay it; it stays parked for the next round. The assertion names
+    the run id of every relayed approval, so an early relay cannot satisfy it.
+    """
+    early = _run_approval(COMMON, run_id="run-9108-early")
+    route_approvals.submit_gateway_pending_mirror(sid, dict(early))
+    original_snapshot = routes.gateway_pending_mirrors
+    state = {"published": False}
+
+    def snapshot_publishing_late_command(session_id):
+        mirrors = original_snapshot(session_id)
+        if not state["published"]:
+            state["published"] = True
+            late = _run_approval(COMMON, run_id="run-9108-late-ordinary")
+            route_approvals.submit_gateway_pending_mirror(session_id, dict(late))
+        return mirrors
+
+    monkeypatch.setattr(routes, "gateway_pending_mirrors", snapshot_publishing_late_command)
+
+    payload, status = routes._enable_session_yolo_and_release_pending(sid, choice="once")
+
+    assert status == 200, payload
+    assert sid in yolo_state["enabled"], "an ordinary command must still enable YOLO"
+
+    # Exactly one approval was relayed, and it is the EARLY one.
+    assert len(runner_spy) == 1, f"expected one relayed approval, got {runner_spy!r}"
+    assert _relayed_run_ids(runner_spy) == ["run-9108-early"], runner_spy
+    assert runner_spy[0]["choice"] == "once"
+
+    # The late approval is still parked: this round did not answer it.
+    parked_run_ids = [
+        row.get("run_id")
+        for row in _pending_rows(sid)
+        if row.get("run_id")
+    ]
+    assert "run-9108-late-ordinary" in parked_run_ids, (
+        "the late approval must stay parked for the next round; "
+        f"parked: {parked_run_ids!r}"
+    )
+    assert "run-9108-early" not in parked_run_ids, (
+        "the relayed approval must not stay parked; "
+        f"parked: {parked_run_ids!r}"
+    )
+
+
+def test_late_ordinary_command_is_answered_by_the_next_round(
+    sid, yolo_state, monkeypatch, runner_spy
+):
+    """The next round answers the late approval, and answers it once.
+
+    This is the contract the enabling round leaves behind: the late approval
+    is not relayed by the enable, it is answered when it is next delivered
+    with session YOLO already enabled.
+    """
+    early = _run_approval(COMMON, run_id="run-9108-early")
+    route_approvals.submit_gateway_pending_mirror(sid, dict(early))
+    original_snapshot = routes.gateway_pending_mirrors
+    state = {"published": False}
+    late_payload = {}
+
+    def snapshot_publishing_late_command(session_id):
+        mirrors = original_snapshot(session_id)
+        if not state["published"]:
+            state["published"] = True
+            late = _run_approval(COMMON, run_id="run-9108-late-ordinary")
+            route_approvals.submit_gateway_pending_mirror(session_id, dict(late))
+            late_payload["event"] = _gateway_event_payload(
+                COMMON, prompt_id="prompt-9108-late"
+            )
+            late_payload["event"]["run_id"] = "run-9108-late-ordinary"
+        return mirrors
+
+    monkeypatch.setattr(routes, "gateway_pending_mirrors", snapshot_publishing_late_command)
+
+    _payload, status = routes._enable_session_yolo_and_release_pending(sid, choice="once")
+    assert status == 200
+    assert _relayed_run_ids(runner_spy) == ["run-9108-early"], runner_spy
+
+    # The next round: the late approval is delivered with YOLO already on.
+    relayed, _sink = _relay_gateway_event(
+        sid, late_payload["event"], run_id="run-9108-late-ordinary"
+    )
+
+    assert relayed is True
+    assert _relayed_run_ids(runner_spy) == [
+        "run-9108-early",
+        "run-9108-late-ordinary",
+    ], runner_spy
+    assert all(call["choice"] == "once" for call in runner_spy), runner_spy
+    assert len(runner_spy) == 2, "the late approval must be answered exactly once"
+
+    # Queue终态: the late approval was answered exactly once and is no longer
+    # an outstanding question for the enable. (The auto-approve path does not
+    # retire the local mirror -- that is the shipped behaviour of the
+    # YOLO auto-answer, unchanged here -- so the queue is checked through the
+    # remote answers, which are the answer of record.)
+    assert len(runner_spy) == 2, "the late approval must be answered exactly once"
+    assert _relayed_run_ids(runner_spy).count("run-9108-late-ordinary") == 1, (
+        f"the late approval must be answered exactly once, got {runner_spy!r}"
+    )
+    assert runner_spy[1]["approval_id"] == "prompt-9108-late", runner_spy
