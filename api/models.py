@@ -7533,12 +7533,38 @@ def _resolve_session_once(
                             SESSIONS.move_to_end(sid)
                         cached = disk_session
                     else:
-                        # Another writer (the retry/undo shrink) replaced the
-                        # sidecar while this read was in flight. Our snapshot
-                        # is the pre-shrink one; serve whatever the cache now
-                        # holds instead of resurrecting the removed reply.
+                        # Another writer replaced the sidecar while this read
+                        # was in flight, so our snapshot may be stale. Which
+                        # snapshot is the correct one depends on what that
+                        # writer changed:
+                        #   - An intentional shrink (retry/undo) published a
+                        #     SHORTER transcript. Our snapshot is the
+                        #     pre-shrink one; publishing it would put the
+                        #     removed reply back, so serve the resident.
+                        #   - Any other write (e.g. a reasoning-effort pick,
+                        #     which rewrites the sidecar without touching the
+                        #     transcript, or a writer that appended messages)
+                        #     leaves the resident BEHIND the disk. Discarding
+                        #     our snapshot there would serve older messages
+                        #     than the sidecar holds, and the next save of
+                        #     that object could erase the newer messages.
+                        # The freshness check is the same one this path
+                        # already trusts: the resident is behind the sidecar
+                        # only while the sidecar holds MORE messages.
                         resident = SESSIONS.get(sid)
-                        if resident is not None:
+                        if resident is None:
+                            pass  # nothing cached to fall back to
+                        elif _cached_session_lags_disk(resident):
+                            # The resident is behind the sidecar: keep the
+                            # transcript we just loaded and publish it.
+                            SESSIONS[sid] = disk_session
+                            if promote_cache:
+                                SESSIONS.move_to_end(sid)
+                            cached = disk_session
+                        else:
+                            # The resident is at parity with (or ahead of) the
+                            # sidecar -- the shrink case. Serve it and drop our
+                            # pre-shrink snapshot.
                             cached = resident
             except Exception:
                 logger.debug(

@@ -445,3 +445,96 @@ def test_a_read_that_finishes_before_the_save_still_sees_the_old_transcript(
     after = models.get_session("presave")
     after_contents = [m["content"] for m in (after.messages or [])]
     assert "OLD-A2" not in after_contents, after_contents
+
+
+def test_a_concurrent_non_transcript_write_does_not_serve_older_messages(
+    monkeypatch, tmp_path
+):
+    """#9229 follow-up: a concurrent write that does NOT change the transcript
+    must not make the reader fall back to older cached messages.
+
+    A reasoning-effort pick rewrites the sidecar without touching the
+    transcript, but it still bumps the sidecar write count. The read then
+    knows its snapshot is stale, but the resident object is still BEHIND the
+    sidecar (it holds fewer messages), so serving the resident would return
+    older messages than the sidecar holds -- and saving that object could
+    erase the newer ones.
+    """
+    import api.models as models
+
+    models = _prepare_session_dir(monkeypatch, tmp_path, "effortrace")
+
+    def _msg(role, content, ts, mid):
+        return {"id": mid, "role": role, "content": content, "timestamp": ts}
+
+    # The cache holds 5 messages.
+    cached = models.Session(
+        session_id="effortrace",
+        messages=[
+            _msg("user", "q1", 1.0, "u1"),
+            _msg("assistant", "a1", 2.0, "a1"),
+            _msg("assistant", "partial", 2.5, "p1"),
+            _msg("user", "q2", 3.0, "u2"),
+            _msg("assistant", "A2", 4.0, "a2"),
+        ],
+    )
+    cached.save()
+    models.SESSIONS["effortrace"] = cached
+
+    # Another writer persists two MORE messages: the sidecar now holds 7 and
+    # the cache still holds 5, so the cached object genuinely lags the disk.
+    other = models.Session.load("effortrace")
+    other.messages = other.messages + [
+        _msg("user", "q3", 5.0, "u3"),
+        _msg("assistant", "A3", 6.0, "a3"),
+    ]
+    other.save()
+    models.SESSIONS["effortrace"] = cached
+
+    # During the read, ANOTHER thread makes a non-transcript write: it bumps
+    # the write count but leaves the messages alone.
+    real_load = models.Session.load.__func__
+
+    def _load(cls, sid):
+        session = real_load(cls, sid)
+        if sid == "effortrace" and threading.current_thread().name == "effort-reader":
+            def _writer():
+                models.set_session_reasoning_effort("effortrace", "high")
+
+            thread = threading.Thread(target=_writer, name="effort-writer")
+            thread.start()
+            thread.join(10)
+        return session
+
+    monkeypatch.setattr(models.Session, "load", classmethod(_load))
+
+    results: dict = {}
+
+    def _read():
+        try:
+            results["session"] = models.get_session("effortrace")
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion
+            results["error"] = exc
+
+    reader = threading.Thread(target=_read, name="effort-reader")
+    reader.start()
+    reader.join(10)
+    assert not reader.is_alive(), "the reader never finished"
+    assert "error" not in results, f"the reader raised: {results.get('error')}"
+
+    contents = [m["content"] for m in (results["session"].messages or [])]
+    assert "q3" in contents and "A3" in contents, (
+        "a concurrent write that did not change the transcript made the read "
+        f"serve older messages than the sidecar holds: {contents}"
+    )
+    assert len(contents) == 7, contents
+
+    # The next full read must still see all seven, and the cache must hold
+    # them too -- a stale resident must not survive the read.
+    with models.LOCK:
+        cached_now = models.SESSIONS.get("effortrace")
+    assert cached_now is not None
+    cached_contents = [m["content"] for m in (cached_now.messages or [])]
+    assert "q3" in cached_contents and "A3" in cached_contents, (
+        f"the cache kept the stale transcript: {cached_contents}"
+    )
