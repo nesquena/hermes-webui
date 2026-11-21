@@ -47,7 +47,7 @@ class TestIssue1432NewChatGuardInFlight:
 
         # Locate the btnNewChat onclick handler and verify it uses the helper.
         m = re.search(
-            r"\$\('btnNewChat'\)\.onclick=async\(\)=>\{(.*?)\};",
+            r"\$\('btnNewChat'\)\.onclick=async\(e\)=>\{(.*?)\};",
             src, re.DOTALL,
         )
         assert m, "btnNewChat onclick handler not found in boot.js"
