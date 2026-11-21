@@ -1508,6 +1508,8 @@ def test_provider_config_object_list_catalog_uses_picker_supported_keys_6121(mon
                 {'model': 'by-model-key', 'label': 'By Model Key'},
                 {'name': 'by-name-key'},
                 {'id': 'by-id-key', 'label': 'By Id Key'},
+                {'id': 'verbatim', 'label': 'verbatim'},
+                'plain-entry',
             ],
         },
     }
@@ -1517,20 +1519,33 @@ def test_provider_config_object_list_catalog_uses_picker_supported_keys_6121(mon
         _cfg._cfg_mtime = 0.0
     monkeypatch.setattr(_cfg, "_read_live_provider_model_ids", lambda pid: [])
     try:
-        result = _cfg.get_available_models()
+        results = [
+            _cfg._static_models_catalog_without_live_probes(),
+            _cfg.get_available_models(force_refresh=True),
+        ]
     finally:
         _cfg.cfg.clear()
         _cfg.cfg.update(old_cfg)
 
-    groups = {group['provider_id']: group['models'] for group in result['groups']}
-    model_rows = groups.get('myprov') or []
-    model_ids = [row['id'] for row in model_rows]
-    assert 'by-model-key' in model_ids
-    assert 'by-name-key' in model_ids
-    assert 'by-id-key' in model_ids
-    labels = {row['id']: row['label'] for row in model_rows}
-    assert labels['by-model-key'] == 'By Model Key'
-    assert labels['by-id-key'] == 'By Id Key'
+    for result in results:
+        groups = {group['provider_id']: group['models'] for group in result['groups']}
+        # Native custom entries publish canonical identities even when the active
+        # config still uses the historical bare mapping key. Both cold and forced
+        # catalogs must retain all object-list IDs and their configured labels.
+        model_rows = groups['custom:myprov']
+        model_ids = [row['id'] for row in model_rows]
+        assert 'by-model-key' in model_ids
+        assert 'by-name-key' in model_ids
+        assert 'by-id-key' in model_ids
+        assert 'verbatim' in model_ids
+        assert 'plain-entry' in model_ids
+        labels = {row['id']: row['label'] for row in model_rows}
+        assert labels['by-model-key'] == 'By Model Key'
+        assert labels['by-id-key'] == 'By Id Key'
+        assert labels['verbatim'] == 'verbatim'
+        # Do not change the existing humanized fallback for unlabelled rows.
+        assert labels['by-name-key'] == _cfg._get_label_for_model('by-name-key', [])
+        assert labels['plain-entry'] == _cfg._get_label_for_model('plain-entry', [])
 
 
 # ── get_available_models(): phantom "Custom" group regression ─────────────
@@ -1905,6 +1920,26 @@ def _resolve_with_providers(model_id, providers_cfg, *, provider=None, default=N
         config.cfg.update(old_cfg)
 
 
+@pytest.mark.parametrize('session_provider', ['myprov', 'custom:myprov'])
+@pytest.mark.parametrize('model_id', ['plainmodel', 'qwen3.8:27b'])
+def test_native_provider_persisted_bare_and_canonical_session_inputs(monkeypatch, session_provider, model_id):
+    """Old bare session hints remain readable; new catalog identities are canonical.
+
+    The explicit legacy hint may preserve its spelling in the resolved triple.
+    Compatibility requires the same exact model and endpoint, not a disk rewrite.
+    """
+    data = {
+        'model': {'provider': 'openai', 'default': 'gpt-5'},
+        'providers': {'myprov': {'base_url': 'https://my.example/v1', 'models': ['plainmodel', 'qwen3.8:27b']}},
+    }
+    monkeypatch.setattr(config, 'cfg', data)
+    hint = config.model_with_provider_context(model_id, session_provider)
+    assert hint == f'@{session_provider}:{model_id}'
+    assert config.resolve_model_provider(hint) == (model_id, session_provider, 'https://my.example/v1')
+    assert set(data['providers']) == {'myprov'}
+    assert 'custom_providers' not in data
+
+
 def test_providers_scan_routes_user_defined_allowlist_5511():
     """A user-defined providers.<slug>.models allowlist routes a bare model id
     to that provider (the feature #5511 adds)."""
@@ -1914,7 +1949,7 @@ def test_providers_scan_routes_user_defined_allowlist_5511():
         provider='openai',
         default='gpt-5',
     )
-    assert provider == 'myprov', f"user-defined provider allowlist must route; got {provider!r}"
+    assert provider == 'custom:myprov', f"user-defined provider allowlist must route; got {provider!r}"
     assert model == 'my-model-1'
     assert base_url == 'https://my.example/v1'
 
@@ -1972,14 +2007,15 @@ def test_providers_scan_honors_active_provider_ownership_5511():
 def test_providers_scan_active_provider_own_entry_still_matches_5511():
     """The ownership guard still lets the ACTIVE provider's own providers: entry
     match (e.g. active myprov + a model in providers.myprov.models resolves to
-    myprov with its base_url)."""
+    custom:myprov with its base_url)."""
     model, provider, base_url = _resolve_with_providers(
         'gpt-5',
         {'myprov': {'base_url': 'https://my.example/v1', 'models': ['gpt-5']}},
         provider='myprov',
         default='gpt-5',
     )
-    assert provider == 'myprov', f"active provider's own entry must match; got {provider!r}"
+    assert provider == 'custom:myprov', f"active provider's own entry must match; got {provider!r}"
+    assert model == 'gpt-5'
     assert base_url == 'https://my.example/v1'
 
 
@@ -2050,10 +2086,11 @@ def test_providers_scan_active_own_providers_entry_owns_over_other_slug_5511():
         },
         provider='myprov',
     )
-    assert provider == 'myprov', (
+    assert provider == 'custom:myprov', (
         "active provider's own providers: allowlist must own its model over "
         f"another slug's overlapping entry; got {provider!r}"
     )
+    assert model == 'gpt-x'
     assert base_url == 'https://my.example/v1'
 
 

@@ -1,6 +1,7 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import json
 import logging
+import math
 import os
 import sqlite3
 import sys
@@ -106,6 +107,15 @@ MESSAGING_SOURCES = {
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 
+_RESET_END_REASONS = frozenset({
+    'session_reset',
+    'idle',
+    'daily',
+    'suspended',
+    'resume_pending_expired',
+    'session_switch',
+})
+
 # Sub-second scheduling/write-order races during a compression/cli_close
 # handoff can persist the continuation row with ``started_at`` a few
 # milliseconds BEFORE the parent's ``ended_at`` lands (#6931). The tolerance
@@ -130,6 +140,7 @@ SOURCE_LABELS = {
     'api_server': 'API',
     'cli': 'CLI',
     'cron': 'Cron',
+    'desktop': 'Desktop',
     'dingtalk': 'DingTalk',
     'discord': 'Discord',
     'email': 'Email',
@@ -160,12 +171,12 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw in {'acp', 'cli', 'tui'}:
-        # 'acp' (Agent Client Protocol adapter — Zed, external device bridges)
-        # is a local interactive agent client like the CLI/TUI: its sessions
-        # live only in state.db, so classifying it 'other' would leave them
-        # invisible in both sidebar buckets (webui skips the state.db
-        # projection; cli keeps only CLI-classified rows).
+    elif raw in {'acp', 'cli', 'desktop', 'tui'}:
+        # ACP adapters and Hermes Desktop are interactive clients like the
+        # CLI/TUI. Their sessions live only in state.db, so classifying them
+        # as 'other' would leave them invisible in both sidebar buckets
+        # (webui skips the state.db projection; cli keeps only interactive
+        # rows).
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -317,10 +328,10 @@ def is_cli_session_row(row: dict) -> bool:
     if source in {"external_agent", "external-agent"}:
         return True
     if (
-        source_tag in {"acp", "cli", "tui"}
-        or raw_source in {"acp", "cli", "tui"}
-        or source_name in {"acp", "cli", "tui"}
-        or source_label in {"acp", "cli", "tui"}
+        source_tag in {"acp", "cli", "desktop", "tui"}
+        or raw_source in {"acp", "cli", "desktop", "tui"}
+        or source_name in {"acp", "cli", "desktop", "tui"}
+        or source_label in {"acp", "cli", "desktop", "tui"}
     ):
         return True
 
@@ -364,11 +375,13 @@ def is_cli_session_row_visible(row: dict) -> bool:
     }
     if "tui" in interactive_sources:
         return True
-    if "acp" in interactive_sources:
-        # Like TUI rows, user-driven ACP sessions stay visible even when
-        # ended/untitled. Unlike TUI, an ACP connection can record only
-        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
-        # require at least one user turn before surfacing the row.
+    if {"acp", "desktop"} & interactive_sources:
+        # Like TUI rows, user-driven ACP/Desktop sessions stay visible even
+        # when ended/untitled. Unlike TUI, these clients can leave connection
+        # records containing only assistant/tool/system rows, so require at
+        # least one user turn when roles are known. The database projection
+        # preserves a positive-message fallback for legacy Desktop history
+        # whose roles are unavailable.
         return _count_user_turns(row) > 0
 
     if _has_cli_lineage(row):
@@ -546,6 +559,10 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     if parent.get('end_reason') not in {'compression', 'cli_close'}:
         return False
+    if _is_user_visible_reset_successor(parent, child):
+        # Reset intent is a conversation boundary in every lineage walk, even
+        # if an inconsistent parent row still records a compression ending.
+        return False
     ended_at = parent.get('ended_at')
     if ended_at is None:
         # Older state.db rows/tests may not have ended_at populated. Preserve
@@ -563,6 +580,104 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     # session — an exact title match is not evidence (titles are user-controlled
     # and non-unique, so it cannot extend the tolerance).
     return False
+
+
+def _parse_model_config(value: object) -> dict | None:
+    """Return a model-config object, treating malformed metadata as invalid."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _is_user_visible_reset_successor(parent: dict | None, child: dict | None) -> bool:
+    """Return whether a parent-linked row starts a new visible conversation.
+
+    Agent reset successors retain ``parent_session_id`` as durable lineage, but
+    unlike compression segments, delegates, and branches they are distinct
+    conversations in the sidebar. Prefer the canonical modern marker so a
+    bounded query need not include the parent. Older messaging resets keep
+    their source/chat identity rule; other legacy resets require the same
+    session key and a proved timestamp boundary.
+    """
+    if not child:
+        return False
+    parent_id = str(child.get('parent_session_id') or '').strip()
+    if not parent_id:
+        return False
+    # Tool children are delegated work, even when they share a routing key or
+    # inherited reset marker. Match Agent's reopen/continuation boundary.
+    if str(child.get('source') or '').strip().lower() == 'tool':
+        return False
+    if str(child.get('session_source') or '').strip().lower() == 'fork':
+        return False
+
+    config = _parse_model_config(child.get('model_config'))
+    if config is None:
+        return False
+
+    # Markers describe an edge, not every descendant. A valid ancestor marker
+    # may be inherited by a reset, but a branch/delegate of THIS parent (or
+    # malformed provenance) must never be promoted by either reset rule.
+    for key in ('_branched_from', '_delegate_from'):
+        if key in config:
+            value = config[key]
+            if not isinstance(value, str) or not value.strip() or value.strip() == parent_id:
+                return False
+
+    messaging_reset = bool(
+        parent
+        and str(parent.get('id') or '').strip() == parent_id
+        and _safe_lower(parent.get('source')) in MESSAGING_SOURCES | {'messaging'}
+        and _safe_lower(parent.get('end_reason')) == 'session_reset'
+    )
+    if messaging_reset and _safe_lower(child.get('source')) != _safe_lower(parent.get('source')):
+        # A canonical marker cannot bypass master's known messaging-reset
+        # surface boundary. Missing/reopened parents still use durable intent.
+        return False
+
+    if '_reset_from' in config:
+        reset_from = config.get('_reset_from')
+        return isinstance(reset_from, str) and reset_from == parent_id
+
+    if not parent or str(parent.get('id') or '').strip() != parent_id:
+        return False
+    if messaging_reset:
+        # This is the complete messaging compatibility rule, not an OR with
+        # the generic fallback: that would bypass its cross-surface refusal.
+        return _is_messaging_reset_successor(parent, child)
+    if '_branched_from' in config or '_delegate_from' in config:
+        return False
+    if parent.get('end_reason') not in _RESET_END_REASONS:
+        return False
+
+    parent_key = str(parent.get('session_key') or '').strip()
+    child_key = str(child.get('session_key') or '').strip()
+    if not parent_key or parent_key != child_key:
+        return False
+
+    # /branch creates the child before switch_session ends its parent. Only
+    # infer a legacy reset when both timestamps prove the opposite ordering.
+    started_at = child.get('started_at')
+    ended_at = parent.get('ended_at')
+    if isinstance(started_at, bool) or isinstance(ended_at, bool):
+        return False
+    try:
+        started_at = float(started_at)
+        ended_at = float(ended_at)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(started_at) and math.isfinite(ended_at) and started_at >= ended_at
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:
@@ -603,12 +718,12 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             continue
         children_by_parent.setdefault(parent_id, []).append(row)
         parent = rows_by_id.get(parent_id)
+        if _is_user_visible_reset_successor(parent, row):
+            row['relationship_type'] = 'reset_successor'
+            row['_lineage_root_id'] = row['id']
+            continue
         if _is_continuation_session(parent, row):
             continuation_child_ids.add(row['id'])
-        elif _is_messaging_reset_successor(parent, row):
-            # A session_reset successor keeps its lineage link but stays a
-            # top-level row so it sorts by its own (fresh) timestamp.
-            continue
         else:
             row['relationship_type'] = 'child_session'
             row['parent_title'] = parent.get('title') if parent else None
@@ -744,6 +859,8 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         key=lambda row: _as_score(row.get('last_activity'), row.get('started_at')),
         reverse=True,
     )
+    for row in projected:
+        row.pop('model_config', None)
     return projected
 
 
@@ -914,8 +1031,18 @@ def read_importable_agent_session_rows(
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
             if 'role' in message_cols:
-                user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+                # NULL-only roles carry no evidence about who spoke. Keep the
+                # legacy message-count fallback for that Desktop session only;
+                # known assistant/tool-only sessions must still stay hidden.
+                user_message_count_expr = (
+                    "CASE WHEN LOWER(COALESCE(s.source, '')) = 'desktop' "
+                    "AND COUNT(m.role) = 0 "
+                    f"THEN COUNT(m.{count_col}) "
+                    "ELSE COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END) END"
+                )
             else:
+                # Legacy schemas cannot prove message roles. Preserve their
+                # positive-message fallback instead of hiding Desktop history.
                 user_message_count_expr = f"COUNT(m.{count_col})"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
@@ -1368,6 +1495,11 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
             ended_expr = _optional_col('ended_at', session_cols)
             end_reason_expr = _optional_col('end_reason', session_cols)
             parent_expr = _optional_col('parent_session_id', session_cols)
+            identity_exprs = ", ".join(
+                _optional_col(column, session_cols)
+                for column in ('session_key', 'user_id', 'chat_id', 'thread_id',
+                               'origin_chat_id', 'origin_user_id')
+            )
 
             def fetch_one(row_id: str | None) -> dict | None:
                 if not row_id:
@@ -1381,6 +1513,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                            {title_expr},
                            {started_expr},
                            {parent_expr},
+                           {identity_exprs},
                            {ended_expr},
                            {end_reason_expr}
                     FROM sessions s
@@ -1428,6 +1561,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                            {title_expr},
                            {started_expr},
                            {parent_expr},
+                           {identity_exprs},
                            {ended_expr},
                            {end_reason_expr}
                     FROM sessions s
@@ -1445,6 +1579,8 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                 parent_children.sort(key=lambda row: row.get('started_at') or 0, reverse=True)
                 for child in parent_children:
                     if child['id'] in segment_ids:
+                        continue
+                    if _is_user_visible_reset_successor(parent, child):
                         continue
                     if _is_continuation_session(parent, child):
                         # A continuation outside the selected path means the
@@ -1714,13 +1850,15 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
 
         parent_id = row.get('parent_session_id')
         parent_row = rows.get(parent_id) if parent_id else None
-        if parent_id and parent_row:
+        is_reset_successor = _is_user_visible_reset_successor(parent_row, row)
+        if parent_id and (parent_row or is_reset_successor):
             entry = metadata.setdefault(sid, {})
             entry['parent_session_id'] = parent_id
-            if (
-                not _is_continuation_session(parent_row, row)
-                and not _is_messaging_reset_successor(parent_row, row)
-            ):
+            if is_reset_successor:
+                entry['relationship_type'] = 'reset_successor'
+                entry['_lineage_root_id'] = sid
+                continue
+            if not _is_continuation_session(parent_row, row):
                 entry['relationship_type'] = 'child_session'
                 entry['parent_title'] = parent_row.get('title')
                 entry['parent_source'] = parent_row.get('source')
