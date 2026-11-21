@@ -9712,10 +9712,40 @@ function _markSpeechPreferenceChanged(settingKey,desiredValue,writeRefused){
 // consumers in boot.js actually read.
 let _settingsStorageWriteRefusedWarned=false;
 let _settingsLastStorageWriteRefused=false;
+// #9114: a mirror write that finally landed proves this browser accepts writes
+// again, so the refusal recorded for THIS key while storage was refusing is
+// stale. Reconcile it per key: drop the per-key refusal metadata (plus the
+// stale unapplied-server-value entry that withholds the key from unrelated
+// saves) and clear the control's note. Other keys keep their refusal state and
+// every explicit desired value is preserved — only the recovered key moves.
+// This runs for every successful mirror (hydration, `voiceschanged`
+// repopulation via `_syncSpeechPreferenceCache`, onchange handlers), because
+// the `voiceschanged` path reaches `_writeSettingsStorageMirror` without
+// passing through the hydration branch that clears the note.
+function _reconcileSpeechRefusalOnMirrorLanded(storageKey){
+  let settingKey=null;
+  for(const candidate of Object.keys(_SETTINGS_SPEECH_STORAGE_KEYS)){
+    if(_SETTINGS_SPEECH_STORAGE_KEYS[candidate]===storageKey){ settingKey=candidate; break; }
+  }
+  if(settingKey===null) return;
+  const refused=_settingsSpeechRefusedKeys.has(settingKey);
+  const unapplied=Object.prototype.hasOwnProperty.call(_unappliedSpeechServerValues,settingKey);
+  if(!refused&&!unapplied) return;
+  _settingsSpeechRefusedKeys.delete(settingKey);
+  delete _unappliedSpeechServerValues[settingKey];
+  if(_settingsSpeechChangedKeys.has(settingKey)){
+    // Only a key the user explicitly changed restores its warning state from
+    // the refused set on every later read; clear this key's note alone.
+    const controlId=_SETTINGS_SPEECH_CONTROL_IDS[settingKey];
+    const el=(typeof $==='function'&&controlId)?$(controlId):null;
+    if(el) _setControlUnappliedNote(el,false);
+  }
+}
 function _writeSettingsStorageMirror(storageKey,value){
   try{
     localStorage.setItem(storageKey,String(value));
     _settingsLastStorageWriteRefused=false;
+    _reconcileSpeechRefusalOnMirrorLanded(storageKey);
     return true;
   }catch(e){
     _settingsLastStorageWriteRefused=true;
