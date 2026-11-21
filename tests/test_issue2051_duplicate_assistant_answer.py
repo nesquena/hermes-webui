@@ -327,9 +327,8 @@ def test_both_append_branches_are_gated_by_the_ownership_check():
     assert "inflight.liveTurnHtml=null;" in restore, (
         "a refused snapshot must be released, or it is re-refused on every restore"
     )
-    reattach = UI_JS[UI_JS.index("    const _rebuilt=document.getElementById('liveAssistantTurn');"):]
-    reattach = reattach[:reattach.index("  // Only force-scroll when not actively streaming")]
-    assert "_settledTranscriptOwnsLiveTurn(sid,_preservedLiveTurn)" in reattach, (
+    reattach = js("_reconcilePreservedLiveTurn")
+    assert "_settledTranscriptOwnsLiveTurn(S.session?.session_id,_preservedLiveTurn)" in reattach, (
         "the renderMessages append branch must be gated by the ownership check"
     )
     assert reattach.count("_settledTranscriptOwnsLiveTurn(") == 1, (

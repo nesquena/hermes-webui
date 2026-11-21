@@ -77,7 +77,7 @@ def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_l
 
 def test_cached_render_path_uses_same_scroll_policy_as_fresh_render():
     render_body = _function_body(UI_JS, "renderMessages")
-    cached_branch = render_body[render_body.index("if(sid&&sid!==_sessionHtmlCacheSid") : render_body.index("const compressionState=")]
+    cached_branch = render_body[render_body.index("if(!ownedWindow&&sid&&sid!==_sessionHtmlCacheSid") : render_body.index("const compressionState=")]
 
     assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in cached_branch
     assert "if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}" not in cached_branch

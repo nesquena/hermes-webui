@@ -519,6 +519,10 @@ def _render_messages_harness() -> str:
           querySelector(selector) {{
             return this.querySelectorAll(selector)[0] || null;
           }}
+          get outerHTML() {{
+            return '<'+this.tagName+' class="'+this.className+'">'+this.innerHTML+
+              this.children.map(child=>child.outerHTML).join('')+'</'+this.tagName+'>';
+          }}
           insertAdjacentHTML() {{}}
         }}
         function dataKey(name) {{
@@ -720,6 +724,12 @@ def _render_messages_harness() -> str:
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(insert_block_source)});
+        eval({json.dumps(_function_source(_ui_js(), '_reconcilePreservedLiveTurn'))});
+        const _sourceWindowHistoricalScenes=new WeakSet();
+        eval({json.dumps(_function_source(_ui_js(), '_sourceWindowOwnsHistoricalScene'))});
+        let _messageWindowRevision=0;
+        eval({json.dumps(_function_source(_ui_js(), '_rememberMessageWindowReader'))});
+        eval({json.dumps(_function_source(_ui_js(), '_initializeMessageWindowOwnership'))});
         {evals}
 """
 
