@@ -15,7 +15,7 @@ import threading
 
 _LOCAL_SOURCES = frozenset({"cli", "tui", "desktop", "gui", "local", "acp"})
 _MESSAGING_SOURCES = frozenset({"telegram", "discord", "slack", "whatsapp", "signal",
-                               "matrix", "mattermost", "teams", "line", "feishu"})
+                               "matrix", "mattermost", "teams", "line", "feishu", "email"})
 _CONNECTIONS = {}
 _LOCK = threading.Lock()
 PREFIX = "session:"
@@ -69,7 +69,13 @@ def configured(session, config=None):
         return False
     if config is None:
         config = config_for_session(session)
-    return config.get("webui_gateway_session_transport") in {"local", "unix"}
+    if config.get("webui_gateway_session_transport") not in {"local", "unix"}:
+        return False
+    source = str(session.get("raw_source") or session.get("source_tag")
+                 or session.get("session_source") or "").strip().lower()
+    # Browser-originated turns on an email route send their reply over SMTP to
+    # the original sender. Do not opt email in via the general session switch.
+    return source != "email" or config.get("webui_gateway_email_delivery") is True
 
 
 def model_change_requested(session, body):
@@ -175,6 +181,11 @@ def _verified_messaging_owner(home, display_id, owner_id, *, recovering=False):
             return False
         rows = [db.get_session(sid) for sid in lineage]
         if any(not row or row.get("source") not in _MESSAGING_SOURCES for row in rows):
+            return False
+        # A shared route cannot establish email provenance from another messaging
+        # channel; otherwise a browser turn could mail the wrong correspondent.
+        if any(row.get("source") == "email" for row in rows if row is not None) and any(
+                row.get("source") != "email" for row in rows if row is not None):
             return False
         route = rows[0].get("session_key")
         if not route or any(row.get("session_key") != route for row in rows):
