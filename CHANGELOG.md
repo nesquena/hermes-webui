@@ -29,8 +29,6 @@
 
 ### Security
 
-- **The text-to-speech throttle can no longer be dodged with a forged forwarded header (#8637, closes #8610).** With `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` set, the TTS endpoint's one-request-per-2-seconds throttle trusted forwarded headers from any client, so a client could pick a fresh bucket on every request. It now identifies the client exactly as the login limiter does: forwarded headers count only with `HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1` and the proxy listed in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`. A WebUI with no password behind a proxy that set only `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` now gives its users one shared TTS bucket until the other two settings are added; signed-in sessions keep their own. Default installs are unchanged. Docs updated in `docs/remote-access.md` and `.env.example`.
-
 - **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
   crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
   CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
@@ -319,6 +317,12 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.724] — 2026-11-21
+
+### Security
+
+- **The text-to-speech throttle can no longer be dodged with a forged forwarded header (#8637, closes #8610).** With `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` set, the TTS endpoint's one-request-per-2-seconds throttle trusted forwarded headers from any client, so a client could pick a fresh bucket on every request. It now identifies the client exactly as the login limiter does: forwarded headers count only with `HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1` and the proxy listed in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`. A WebUI with no password behind a proxy that set only `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` now gives its users one shared TTS bucket until the other two settings are added; signed-in sessions keep their own. Default installs are unchanged. Docs updated in `docs/remote-access.md` and `.env.example`.
 
 ## [v0.52.723] — 2026-11-21
 
