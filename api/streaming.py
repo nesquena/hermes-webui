@@ -19235,7 +19235,7 @@ def _run_agent_streaming(
                     # it (possibly only after this put), so this apperror is the run's
                     # only journaled terminal. Make it a cancel: the run settles as
                     # interrupted-by-user and a replay shows the cancel, not an error.
-                    # Drop the provider details (the cancel marker says no provider
+                    # Drop the provider fields (the cancel marker says no provider
                     # failure occurred) and name the server when it settled the run,
                     # as _worker_cancel_event_payload does. Carry the cancelled-turn
                     # hint too: when this frame reaches the client before the cancel
