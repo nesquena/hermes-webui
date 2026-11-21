@@ -32,6 +32,7 @@ tests/test_attachment_upload_toctou.py (real multipart body through
 """
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -282,3 +283,74 @@ def test_vision_allow_check_with_unresolvable_inbox_ignores_it(tmp_path, monkeyp
     rogue = tmp_path / "rogue"
     _put(rogue)
     assert not _embeds(rogue / "img.png", ws)   # outside both roots
+
+
+# --- 3. mkdir() errnos: refusal vs server-side storage fault -----------------
+
+
+_STORAGE_FAULT_ERRNOS = [errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EIO]
+_INVALID_PATH_ERRNOS = [errno.ELOOP, errno.ENOTDIR]
+
+
+def _inject_mkdir_errno(monkeypatch, att: Path, err: int) -> Path:
+    """Make the session-directory mkdir() in the inbox fail with *err*.
+
+    Injected at the real creation seam -- the only mkdir() that names a
+    session directory under the trusted root -- so ``handle_upload`` runs its
+    production path end to end.
+    """
+    target = (att / "sess-errno").resolve()
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):
+        if self == target:
+            raise OSError(err, os.strerror(err))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    return target
+
+
+@pytest.mark.parametrize(
+    "err", _STORAGE_FAULT_ERRNOS, ids=lambda e: errno.errorcode[e]
+)
+def test_storage_faults_from_mkdir_are_server_errors(tmp_path, monkeypatch, capsys, err):
+    """A full disk, a quota, a read-only fs or an I/O fault is a 500.
+
+    Those are server-side storage failures: they must reach handle_upload's
+    HTTP500 branch and its error log instead of being reported as a client
+    mistake (a 400 would also hide the fault from the operator).
+    """
+    att = tmp_path / "attachments"
+    _put(att)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
+    upload._trusted_attachment_root()
+    target = _inject_mkdir_errno(monkeypatch, att, err)
+
+    h = _upload(monkeypatch, "sess-errno", "x.txt", b"x")
+
+    assert h.status == 500, h.payload()
+    assert "[webui] upload error:" in capsys.readouterr().out
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "err", _INVALID_PATH_ERRNOS, ids=lambda e: errno.errorcode[e]
+)
+def test_invalid_path_errnos_from_mkdir_are_upload_refusals(tmp_path, monkeypatch, capsys, err):
+    """A symlink loop or a non-directory component stays a refusal (400).
+
+    The path can never become the inbox, so the upload is denied -- and no
+    server-error log is written, because nothing server-side failed.
+    """
+    att = tmp_path / "attachments"
+    _put(att)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(att))
+    upload._trusted_attachment_root()
+    target = _inject_mkdir_errno(monkeypatch, att, err)
+
+    h = _upload(monkeypatch, "sess-errno", "x.txt", b"x")
+
+    assert h.status == 400, h.payload()
+    assert "[webui] upload error:" not in capsys.readouterr().out
+    assert not target.exists()

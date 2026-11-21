@@ -1,6 +1,7 @@
 """
 Hermes Web UI -- File upload: multipart parser and upload handler.
 """
+import errno
 import mimetypes
 import os
 import re as _re
@@ -224,6 +225,14 @@ def _attachment_root() -> Path:
 
 _TRUSTED_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
 
+# mkdir() failures that mean the destination path can never become the inbox
+# (and are therefore upload refusals): a symlink loop, or a path component
+# that is not a directory. Every other errno out of mkdir() -- ENOSPC, EDQUOT,
+# EROFS, EIO, EACCES -- is a server-side storage fault and propagates to
+# handle_upload()'s HTTP500 branch.
+_UPLOAD_REFUSAL_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
+
+
 
 def _trusted_attachment_root() -> Path | None:
     """The attachment root as trusted at server startup, or None (#8590, #8786).
@@ -283,11 +292,15 @@ def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None =
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        # The trusted root can be unusable at write time even when it resolved
-        # at startup — a symlink loop planted in the inbox raises ELOOP
-        # (errno 40) here, and a path that cannot be created is a refused
-        # upload, not a server fault. ValueError maps to the 400 branch in the
-        # caller; a blanket OSError->500 would report a bad inbox as a crash.
+        # Only the errnos that mean "this path can never be the inbox" are
+        # upload refusals: a symlink loop planted in the inbox (ELOOP) or a
+        # path component that is not a directory (ENOTDIR). Everything else
+        # that mkdir() can raise -- ENOSPC, EDQUOT, EROFS, EIO, EACCES -- is a
+        # server-side storage fault, and must reach handle_upload()'s HTTP500
+        # branch and its error log instead of being reported as a client
+        # mistake (which would also hide it from the operator).
+        if e.errno not in _UPLOAD_REFUSAL_ERRNOS:
+            raise
         raise ValueError(f'Upload destination unavailable: {e.strerror or e}') from e
     dest = (dest_dir / safe_name).resolve()
     if not dest.is_relative_to(dest_dir):
