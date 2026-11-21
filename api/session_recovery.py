@@ -1179,8 +1179,11 @@ def restore_goal_continuations_on_startup(session_dir: Path) -> dict:
     NOT the repair path: repair_safe_session_recovery() must never re-arm a
     consumed continuation. This runs BEFORE the missing-session-dir early
     return of the session scan, so a fresh install with no sessions dir still
-    restores durable intent. Also sweeps expired records so stale disk intent
-    cannot survive forever. Never raises into startup.
+    restores durable intent. Also sweeps ABANDONED evidence (an attempt that
+    stopped reporting itself live, and work whose retirement is already
+    recorded) -- never a still-valid intent by wall-clock age: the session
+    SSE contract says a queued continuation has no wall-clock expiry.
+    Never raises into startup.
     """
     try:
         from api.goal_continuation_store import (

@@ -92,7 +92,12 @@ _MAX_TOMBSTONES = 512
 # documentation of the bounds that USED to evict live receipts.
 _MAX_ROLLBACK_RECEIPTS = 64  # historical global cap — removed
 _MAX_ROLLBACK_RECEIPTS_PER_SESSION = 4  # historical per-session cap — removed
-_MAX_INTENT_AGE_SECONDS = 24 * 60 * 60  # stale disk intent must not survive forever
+_MAX_INTENT_AGE_SECONDS = 24 * 60 * 60  # historical wall-clock bound: NOT a retirement rule
+# #7862 round 21: a pending goal continuation has NO wall-clock expiry (the
+# session SSE contract says so explicitly). The constant above is kept only so
+# a caller that passes an age cannot silently reintroduce an age-based
+# retirement; ``sweep_expired_goal_continuations`` ignores it for the intent
+# and only narrows the ABANDONED-receipt bound with it.
 # A rollback receipt's TTL. Circular by design: it is only claimed by the ONE
 # attempt that minted it, and that attempt either launches (discarding it) or
 # rolls back (claiming it) within the same request. Anything older than this
@@ -689,7 +694,9 @@ def _receipt_attempt_is_live(sid: str) -> bool:
     return False
 
 
-def _sweep_expired_receipts_unlocked() -> int:
+def _sweep_expired_receipts_unlocked(
+    ttl_seconds: "float | None" = None,
+) -> int:
     """Drop receipts whose attempt is long gone; return how many were dropped.
 
     #7862 round 7 (finding 3): elapsed age ALONE is not evidence that an
@@ -736,6 +743,8 @@ def _sweep_expired_receipts_unlocked() -> int:
         # still-running start as finished.
         if now - max(_receipt_minted_at(record), _receipt_last_claimed_at(record)) > (
             _ROLLBACK_RECEIPT_TTL_SECONDS
+            if ttl_seconds is None
+            else float(ttl_seconds)
         ):
             expired.append(key)
     for key in expired:
@@ -1584,7 +1593,25 @@ def _load_file_payload():
         _LAST_FILE_GENERATION = 0
         return _MISSING
     if isinstance(data, dict):
-        _LAST_FILE_GENERATION = int(data.get("generation") or 0)
+        # #7862 round 21 (P2, "malformed records break recovery"): the
+        # top-level ``generation`` conversion has the same problem as the
+        # per-record ones -- a non-numeric value raised out of the reader,
+        # so startup skipped the entire restore and a continuation send
+        # degraded into an ordinary message. A malformed generation is a
+        # LOAD FAILURE: report it and treat the file as unreadable rather
+        # than raising.
+        try:
+            _LAST_FILE_GENERATION = int(data.get("generation") or 0)
+        except (TypeError, ValueError) as exc:
+            _LAST_LOAD_ERROR = (
+                f"registry generation is not a number "
+                f"({data.get('generation')!r}): {exc}"
+            )
+            logger.warning(
+                "Goal continuation registry unreadable: %s", _LAST_LOAD_ERROR
+            )
+            _LAST_FILE_GENERATION = 0
+            return _MISSING
     else:
         # v1 (a bare list) or an unexpected shape: no global generation.
         _LAST_FILE_GENERATION = 0
@@ -1685,7 +1712,21 @@ def _load_file_sections() -> (
             f"registry has no records mapping ({type(raw_records).__name__})"
         )
         return {}, {}, {}, {}
-    file_generation = int(data.get("generation") or 0)
+    # #7862 round 21 (P2, "malformed records break recovery"): every numeric
+    # conversion below used to raise. A valid JSON file with one bad field
+    # (``"created_at": "bad"``) took the whole reader down, so startup skipped
+    # the ENTIRE restore and a continuation send caught the error and
+    # proceeded as an ordinary message -- the explicit continuation silently
+    # degraded. A malformed record is a LOAD FAILURE, not a crash: it must be
+    # reported, and the reader must not treat a partially-understood file as
+    # a valid registry.
+    try:
+        file_generation = int(data.get("generation") or 0)
+    except (TypeError, ValueError) as exc:
+        _LAST_LOAD_ERROR = (
+            f"registry generation is not a number ({data.get('generation')!r}): {exc}"
+        )
+        return {}, {}, {}, {}
     raw_tombstones = data.get("tombstones")
     if not isinstance(raw_tombstones, dict):
         raw_tombstones = {}
@@ -1704,10 +1745,20 @@ def _load_file_sections() -> (
             sid, _, attempt = str(key).partition("\u0000")
             if not sid or not attempt:
                 continue
+            try:
+                handoff_generation = int(rec.get("generation") or file_generation)
+                handoff_created_at = float(rec.get("created_at") or time.time())
+                handoff_minted_at = float(rec.get("_handoff_minted_at") or 0.0)
+            except (TypeError, ValueError) as exc:
+                _LAST_LOAD_ERROR = (
+                    f"continuation handoff {key!r} has a malformed numeric "
+                    f"field: {exc}"
+                )
+                return {}, {}, {}, {}
             handoffs[(sid, attempt)] = {
                 "prompt": str(rec.get("prompt") or ""),
-                "generation": int(rec.get("generation") or file_generation),
-                "created_at": float(rec.get("created_at") or time.time()),
+                "generation": handoff_generation,
+                "created_at": handoff_created_at,
                 "reason": str(rec.get("reason") or "goal_continue"),
                 "continuation_id": str(rec.get("continuation_id") or ""),
                 # #7862 round 10: the liveness clock must survive the load.
@@ -1715,7 +1766,7 @@ def _load_file_sections() -> (
                 # dropped even though it is persisted — and a restored
                 # handoff with no clock reads as abandoned, which sweeps the
                 # receipt it is supposed to protect.
-                "_handoff_minted_at": float(rec.get("_handoff_minted_at") or 0.0),
+                "_handoff_minted_at": handoff_minted_at,
                 # #7862 re-gate CORE (Oct 10): the stream identity of an
                 # admission that LAUNCHED. Same whitelist trap as the clock:
                 # dropping it would make every restored admission look like
@@ -1728,10 +1779,23 @@ def _load_file_sections() -> (
     for sid, rec in raw_records.items():
         if not isinstance(rec, dict):
             continue
+        try:
+            record_generation = int(rec.get("generation") or file_generation)
+            record_created_at = float(rec.get("created_at") or time.time())
+        except (TypeError, ValueError) as exc:
+            # One malformed record invalidates the whole load: a file that
+            # cannot be understood must not be served as a valid registry,
+            # and the failure has to be visible (the operator and the
+            # caller both need to know).
+            _LAST_LOAD_ERROR = (
+                f"pending continuation record {str(sid)!r} has a malformed "
+                f"numeric field: {exc}"
+            )
+            return {}, {}, {}, {}
         out[str(sid)] = {
             "prompt": str(rec.get("prompt") or ""),
-            "generation": int(rec.get("generation") or file_generation),
-            "created_at": float(rec.get("created_at") or time.time()),
+            "generation": record_generation,
+            "created_at": record_created_at,
             "reason": str(rec.get("reason") or "goal_continue"),
             "continuation_id": str(rec.get("continuation_id") or ""),
         }
@@ -2030,6 +2094,64 @@ def _continuation_text_matches(recorded_prompt: str, incoming_text: str) -> bool
         normalize_continuation_text(strip_known_skill_envelope(incoming_text)),
     }
     return recorded in candidates
+
+
+def pending_goal_continuation_matches(
+    session_id: str,
+    continuation_id: str = "",
+) -> bool:
+    """True when a live, claimable intent exists for *session_id*.
+
+    #7862 round 21 (P1, "valid continuations get rejected"): the route used
+    to refuse a continuation token from THIS process's in-memory marker set
+    before the store had its say. With two WebUI processes sharing the state
+    directory, process A can persist a new continuation while process B has
+    not observed it yet -- B then refused a perfectly valid token, and the
+    browser's queued turn could not run.
+
+    The answer therefore comes from the STORE's locked read: the durable
+    state is reloaded under the cross-process lock first, so a peer's
+    persisted record counts. An already-consumed intent has no record left
+    and is still refused, which keeps the single-execution right intact.
+
+    Never raises. A registry that cannot be read answers False (the caller
+    then refuses, which is the safe direction).
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    request_id = str(continuation_id or "").strip()
+    try:
+        with _registry_transaction():
+            # Reload the durable state under the cross-process lock: the
+            # local memory is not authoritative (round 16).
+            _merge_disk_state_unlocked()
+            from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+            record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
+            if not isinstance(record, dict):
+                return False
+            recorded_id = str(record.get("continuation_id") or "").strip()
+            if request_id and recorded_id:
+                # A token for a different generation is not this
+                # continuation's token.
+                return recorded_id == request_id
+            # No token to compare against: the intent itself is claimable.
+            return True
+    except _RegistryLockUnavailable:
+        # A lock we cannot take must not answer "yes": the caller refuses,
+        # which is the safe direction (no duplicate worker).
+        logger.error(
+            "Goal continuation registry: could not read the durable state, "
+            "so the continuation token cannot be matched"
+        )
+        return False
+    except Exception:
+        logger.warning(
+            "Goal continuation registry: the continuation match check failed",
+            exc_info=True,
+        )
+        return False
 
 
 def consume_pending_goal_continuation(
@@ -2660,7 +2782,24 @@ def _schedule_deferred_handoff_recovery_unlocked(now: "float | None" = None) -> 
 
 
 def _run_deferred_handoff_recovery() -> None:
-    """Timer callback: adopt the handoffs whose ownership window has ended."""
+    """Timer callback: adopt the handoffs whose ownership window has ended.
+
+    #7862 round 21 (P1, "later recovery checks never run"): the timer
+    reference has to be CLEARED before the recovery runs. A ``threading.Timer``
+    is still ``is_alive()`` while its own callback is executing, so the
+    "one timer per process" guard in
+    ``_schedule_deferred_handoff_recovery_unlocked`` rejected the successor
+    the callback itself wanted to arm. With two handoffs whose ownership
+    windows end at different times, the FIRST deadline's callback could
+    therefore never arm the SECOND one, and once the callback ended nothing
+    else scheduled a check -- the later continuation stayed blocked until
+    another restart.
+    """
+    global _DEFERRED_RECOVERY_TIMER
+    # Clear the reference FIRST: the recovery below re-arms the timer for
+    # the next deadline, and the guard must not see this (still running)
+    # timer as "one is already scheduled".
+    _DEFERRED_RECOVERY_TIMER = None
     try:
         recover_deferred_goal_continuation_handoffs()
     except Exception:  # pragma: no cover - never let a timer thread die loudly
@@ -2668,6 +2807,21 @@ def _run_deferred_handoff_recovery() -> None:
             "Goal continuation registry: the deferred handoff recovery failed",
             exc_info=True,
         )
+    finally:
+        # The recovery pass may have registered a NEW deadline (a handoff
+        # whose window ends later). Arm it here as well, so a later deadline
+        # is checked in the SAME process lifetime. The recovery itself
+        # schedules too; this is the belt-and-braces path for the case where
+        # the recovery raised before reaching its own schedule call.
+        try:
+            with _LOCK:
+                _schedule_deferred_handoff_recovery_unlocked()
+        except Exception:  # pragma: no cover - never let a timer thread die loudly
+            logger.warning(
+                "Goal continuation registry: could not schedule the next "
+                "deferred handoff recovery",
+                exc_info=True,
+            )
 
 
 def recover_deferred_goal_continuation_handoffs(
@@ -2754,6 +2908,29 @@ def restore_goal_continuations() -> int:
     try:
         with _registry_transaction():
             disk, disk_tombstones, disk_handoffs, disk_spent = _load_file_sections()
+            # #7862 round 21 (P1, "recovery erases pending goals"): an
+            # UNREADABLE or CORRUPT registry is not evidence that the
+            # records are gone. The generic merge already refuses to drop or
+            # adopt anything when ``_LAST_LOAD_ERROR`` is set (round 15), but
+            # this restore does its own read, its own reconciliation and its
+            # own closing snapshot -- so it needs the same guard. Without it
+            # the empty maps were treated as "there is nothing on disk", the
+            # reconciliation dropped the live records and cached handoffs,
+            # and the closing snapshot PERSISTED that drop: the pending
+            # continuations were gone for good.
+            #
+            # A lock we cannot take must not fall back to an unlocked write
+            # either, so the refusal below leaves the durable state untouched
+            # for the next attempt.
+            if _LAST_LOAD_ERROR:
+                logger.warning(
+                    "Goal continuation registry: the restore was skipped "
+                    "because the durable state could not be read (%s); the "
+                    "live records are kept untouched instead of being "
+                    "treated as an empty registry",
+                    _LAST_LOAD_ERROR,
+                )
+                return 0
             # #7862 re-gate round 18: fold the durable spend ledger in before
             # any adoption decision, exactly like the generic merge does.
             for _sid, _per_generation in disk_spent.items():
@@ -3213,21 +3390,59 @@ def restore_goal_continuations() -> int:
 
 
 def sweep_expired_goal_continuations(
-    max_age_seconds: float = _MAX_INTENT_AGE_SECONDS,
+    max_age_seconds: "float | None" = None,
 ) -> int:
-    """Retire durable intent older than ``max_age_seconds``; return count swept."""
+    """Retire durable intent that is provably DEAD; return count swept.
+
+    #7862 round 21 (P1, "restart expires valid queued continuations"):
+    this used to retire any pending intent older than 24h of WALL-CLOCK age.
+    That contradicts the session SSE contract
+    (``docs/rfcs/session-sse-contract-v1.md``): "The record is single-use on
+    a match. There is no wall-clock expiry: the browser deliberately keeps a
+    queued continuation - it survives a refresh and is restored for the user
+    to send later - so a TTL retired continuations that were still perfectly
+    usable."
+
+    The symptom was user-visible: the browser still held the original token,
+    but the restart's sweep had retired the record, so sending it raised
+    ``_GoalContinuationTokenUnmatched`` and the queued turn could not run.
+
+    What is still swept here is the ABANDONED evidence, not the intent:
+
+    * a rollback receipt whose attempt stopped reporting itself live (its
+      own liveness signal, not a clock alone) -- an abandoned attempt;
+    * a pending record whose handoff is gone AND whose generation is older
+      than the session's retirement -- work that already ran.
+
+    A VALID pending intent is never retired by age. It ends when it is
+    consumed, or when the goal/session explicitly retires it
+    (``/goal clear``, session delete).
+
+    ``max_age_seconds`` is accepted for backward compatibility but is NOT
+    used to retire an intent: it may only narrow the abandoned-receipt
+    bound. Passing it must never change whether a still-valid continuation
+    survives.
+    """
     from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
-    now = time.time()
+    swept = 0
     with _LOCK:
-        stale = [
-            sid
-            for sid, record in PENDING_GOAL_CONTINUATION_RECORDS.items()
-            if (now - float(record.get("created_at") or now)) > max_age_seconds
-        ]
-        for sid in stale:
-            retire_pending_goal_continuation(sid, reason="expired")
-        return len(stale)
+        # 1. Abandoned attempts: the receipt's own attempt stopped reporting
+        #    itself live. This is the ``_sweep_expired_receipts_unlocked``
+        #    contract (an attempt's liveness signal, not age alone).
+        receipt_ttl = (
+            _ROLLBACK_RECEIPT_TTL_SECONDS
+            if max_age_seconds is None
+            else min(float(max_age_seconds), _ROLLBACK_RECEIPT_TTL_SECONDS)
+        )
+        swept += _sweep_expired_receipts_unlocked(ttl_seconds=receipt_ttl)
+        # 2. A pending record whose session was explicitly retired is dead
+        #    work: the retirement tombstone is the authority, never a clock.
+        for sid in list(PENDING_GOAL_CONTINUATION_RECORDS.keys()):
+            if int(_TOMBSTONES.get(sid) or 0) > 0 and sid not in _CONTINUATION_HANDOFF_TOKENS:
+                if retire_pending_goal_continuation(sid, reason="retired"):
+                    swept += 1
+    return swept
 
 
 def durability_diagnostics() -> dict:

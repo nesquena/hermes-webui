@@ -190,6 +190,16 @@ def test_an_abandoned_attempts_receipt_is_swept(clean_registry):
     The handoff anchors a live receipt, so without an abandonment rule the
     registry would grow without bound — trading a bounded registry for an
     unbounded one.
+
+    #7862 round 21 (P2, "cleanup test removes its receipt"): this test used
+    to POP its own receipt before calling the sweep, and its assertion
+    ended in ``or True``. The final check therefore passed even when the
+    sweep did nothing at all, so it could not catch broken cleanup of
+    abandoned receipts.
+
+    The order matters: prove the receipt is THERE, call the cleanup under
+    test, and only then prove it is GONE — and prove that it was the CLEANUP
+    that removed it, by showing the sweep's own return value counts it.
     """
     store = _store()
     sid = "sess-r10-abandoned"
@@ -198,7 +208,14 @@ def test_an_abandoned_attempts_receipt_is_swept(clean_registry):
         store.consume_pending_goal_continuation(sid, PROMPT, "tok-1", "att-1")
         == store.CONSUME_COMMITTED
     )
-    assert store.pop_goal_continuation_rollback_receipt(sid, "att-1") is None or True
+
+    # The receipt must EXIST before the cleanup runs: the sweep is what has
+    # to remove it. Do not pop it here.
+    with store._LOCK:
+        assert (sid, "att-1") in store._ROLLBACK_RECEIPTS, (
+            "the setup did not leave the abandoned attempt's receipt in "
+            "place, so the cleanup has nothing to remove"
+        )
 
     # Nobody ever reclaimed: both clocks age out together.
     stale = store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 1
@@ -208,11 +225,55 @@ def test_an_abandoned_attempts_receipt_is_swept(clean_registry):
             rec["_receipt_reclaimed_at"] = stale
         for rec in store._CONTINUATION_HANDOFF_TOKENS.values():
             rec["_handoff_minted_at"] = stale
-        store._sweep_expired_receipts_unlocked()
+        swept = store._sweep_expired_receipts_unlocked()
 
+    # The CLEANUP removed it: the sweep counted this receipt among the ones
+    # it dropped, so the receipt's absence is the sweep's doing and not the
+    # test's own doing.
+    assert swept >= 1, (
+        "the cleanup did not report the abandoned receipt as swept, so the "
+        "receipt's absence cannot be attributed to the cleanup"
+    )
     assert not any(k[0] == sid for k in store._ROLLBACK_RECEIPTS), (
         "an abandoned attempt's receipt was never swept, so the registry grows "
         "without bound"
+    )
+
+
+def test_the_abandoned_receipt_sweep_keeps_a_live_attempts_receipt(clean_registry):
+    """The cleanup's other half: a live attempt's receipt must survive.
+
+    This is the counter-control for the case above. Without it, a sweep
+    that dropped EVERY receipt would pass the cleanup test.
+    """
+    store = _store()
+    sid = "sess-r10-abandoned-live"
+    store.arm_pending_goal_continuation(sid, PROMPT, continuation_id="tok-live")
+    assert (
+        store.consume_pending_goal_continuation(sid, PROMPT, "tok-live", "att-live")
+        == store.CONSUME_COMMITTED
+    )
+
+    with store._LOCK:
+        assert (sid, "att-live") in store._ROLLBACK_RECEIPTS, (
+            "the setup did not leave the live attempt's receipt in place"
+        )
+        # Age ONLY the receipt's own clocks. The HANDOFF's clock stays fresh:
+        # it is the authoritative evidence that the attempt is still in
+        # flight, and age alone must not be conclusive for a live attempt.
+        stale = store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 1
+        for rec in store._ROLLBACK_RECEIPTS.values():
+            rec["_receipt_minted_at"] = stale
+            rec["_receipt_reclaimed_at"] = stale
+        swept = store._sweep_expired_receipts_unlocked()
+
+    assert swept == 0, (
+        "the cleanup dropped a LIVE attempt's receipt: the rejection it "
+        "backs could no longer be restored"
+    )
+    assert (sid, "att-live") in store._ROLLBACK_RECEIPTS, (
+        "the cleanup dropped a LIVE attempt's receipt: the rejection it "
+        "backs could no longer be restored"
     )
 
 

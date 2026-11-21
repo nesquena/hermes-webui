@@ -50,12 +50,29 @@ from __future__ import annotations
 
 import copy
 import errno
-import fcntl
 import json
 import os
 import time
 
 import pytest
+
+try:  # pragma: no cover - the POSIX-only branch is the normal one
+    import fcntl
+except ImportError:  # pragma: no cover - native Windows has no fcntl
+    # #7862 round 21 (P1, "Windows tests cannot load"): a module-scope
+    # ``import fcntl`` made the WHOLE file uncollectable on native Windows
+    # ("ModuleNotFoundError" before any test could be skipped), which stopped
+    # the entire suite's collection. The import is therefore optional, and
+    # only the cases that actually drive ``fcntl.flock`` are skipped -- the
+    # cross-platform cases in this file still run on Windows.
+    fcntl = None
+
+# The cases that genuinely need the POSIX file lock. Everything else in this
+# file runs everywhere.
+requires_fcntl = pytest.mark.skipif(
+    fcntl is None,
+    reason="requires fcntl-backed cross-process file locking",
+)
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -226,6 +243,7 @@ class TestBrokenRegistryLockDoesNotBreakChatStart:
     the continuation mutation — never an unlocked write, never a chat-start
     failure."""
 
+    @requires_fcntl
     def test_an_ordinary_chat_start_survives_a_broken_flock(
         self, clean_registry, monkeypatch, tmp_path
     ):
@@ -270,6 +288,7 @@ class TestBrokenRegistryLockDoesNotBreakChatStart:
         finally:
             _clean_journals(sid)
 
+    @requires_fcntl
     def test_record_and_discard_without_a_handoff_never_take_the_file_lock(
         self, clean_registry, monkeypatch
     ):
@@ -292,6 +311,7 @@ class TestBrokenRegistryLockDoesNotBreakChatStart:
             is True
         )
 
+    @requires_fcntl
     def test_registry_mutations_are_refused_while_the_lock_is_broken(
         self, clean_registry, monkeypatch
     ):
@@ -709,6 +729,7 @@ class TestNoGoalSessionDeleteSkipsRegistryWrite:
     tombstone, goal or not. With no record, handoff or receipt the
     retirement must return early — no write, no tombstone."""
 
+    @requires_fcntl
     def test_delete_without_goal_state_does_not_touch_the_registry(
         self, tmp_path, monkeypatch
     ):
@@ -792,6 +813,7 @@ class TestNoGoalSessionDeleteSkipsRegistryWrite:
         )
         assert not store._PENDING_GOAL_FILE.exists()
 
+    @requires_fcntl
     def test_delete_with_goal_state_still_retires(self, tmp_path, monkeypatch):
         """Control: an armed session's delete still runs the retirement."""
         import api.models as models

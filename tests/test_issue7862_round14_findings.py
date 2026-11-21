@@ -41,7 +41,6 @@ defect the reviewer described.
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
 import os
 import shutil
@@ -51,6 +50,24 @@ import time
 from pathlib import Path
 
 import pytest
+
+try:  # pragma: no cover - the POSIX-only branch is the normal one
+    import fcntl
+except ImportError:  # pragma: no cover - native Windows has no fcntl
+    # #7862 round 21 (P1, "Windows tests cannot load"): a module-scope
+    # ``import fcntl`` made the WHOLE file uncollectable on native Windows
+    # ("ModuleNotFoundError" before any test could be skipped), which stopped
+    # the entire suite's collection. The import is therefore optional, and
+    # only the case that actually drives ``fcntl.flock`` is skipped -- the
+    # cross-platform cases in this file still run on Windows.
+    fcntl = None
+
+# The case that genuinely needs the POSIX file lock. Everything else in this
+# file runs everywhere.
+requires_fcntl = pytest.mark.skipif(
+    fcntl is None,
+    reason="requires fcntl-backed cross-process file locking",
+)
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -277,6 +294,7 @@ class TestCrossProcessRegistryTransaction:
             "reload disk state under the cross-process lock (CORE finding 1)"
         )
 
+    @requires_fcntl
     def test_the_registry_lock_serializes_writers_across_processes(self, clean_registry):
         store = clean_registry
 

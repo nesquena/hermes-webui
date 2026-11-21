@@ -4149,7 +4149,6 @@ from api.config import (
     get_webui_session_save_mode,
     get_config_snapshot,
     STREAM_GOAL_RELATED,
-    PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
     _load_yaml_config_file_raw,
@@ -4172,6 +4171,7 @@ from api.goal_continuation_store import (
     discard_goal_continuation_rollback_receipt,
     goal_continuation_attempt_owns_admission,
     normalize_continuation_text,
+    pending_goal_continuation_matches,
     pop_goal_continuation_handoff,
     pop_goal_continuation_rollback_receipt,
     reclaim_goal_continuation_receipt,
@@ -31106,7 +31106,19 @@ def _start_chat_stream_for_session(
         # exact misclassification that produced the second
         # ``goal_related=False`` worker, so REFUSE instead.
         if not goal_related and goal_continuation_id:
-            if s.session_id not in PENDING_GOAL_CONTINUATION:
+            # #7862 round 21 (P1, "valid continuations get rejected"): the
+            # refusal used to come from THIS process's in-memory marker set,
+            # which is not authoritative. With two WebUI processes sharing
+            # the state directory, process A can persist a new continuation
+            # while process B has not observed it yet -- B then refused a
+            # perfectly valid token and the browser's queued turn could not
+            # run. The store's locked read decides: it reloads the durable
+            # state under the cross-process lock first, so a peer's
+            # persisted record counts. An already-consumed intent still has
+            # no record and is still refused (single execution right).
+            if not pending_goal_continuation_matches(
+                s.session_id, goal_continuation_id
+            ):
                 logger.warning(
                     "Refusing chat start for session %s: the request carried "
                     "a continuation token but no pending intent exists "

@@ -328,7 +328,26 @@ class TestRetirement:
         assert disk["sess-b"]["prompt"] == "prompt-b"
 
     def test_expired_sweep_retires_stale_intent(self, clean_registry):
-        """Stale disk intent is retired by the age sweep and logged."""
+        """A stale-by-age intent is NOT retired -- age is not a retirement rule.
+
+        #7862 round 21 (P1, "restart expires valid queued continuations"):
+        this test used to assert the opposite: that the sweep retired an
+        intent older than 24h. That contradicts the session SSE contract
+        (``docs/rfcs/session-sse-contract-v1.md``): "The record is single-use
+        on a match. There is no wall-clock expiry: the browser deliberately
+        keeps a queued continuation - it survives a refresh and is restored
+        for the user to send later - so a TTL retired continuations that
+        were still perfectly usable."
+
+        The user's symptom was concrete: the browser still held the token,
+        but the restart's sweep had retired the record, so sending it raised
+        ``_GoalContinuationTokenUnmatched`` and the queued turn could not
+        run.
+
+        So the aged intent must SURVIVE the sweep, and the sweep must still
+        clean up what is provably dead (an intent whose retirement is
+        already recorded).
+        """
         from api import goal_continuation_store as store
         from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
@@ -338,14 +357,53 @@ class TestRetirement:
             time.time() - 25 * 3600
         )
         swept = store.sweep_expired_goal_continuations(max_age_seconds=24 * 3600)
-        assert swept == 1
         disk = store.load_pending_goal_continuations()
-        assert "sess-stale" not in disk
+        assert "sess-stale" in disk, (
+            "the age sweep retired a still-valid queued continuation: the "
+            "session SSE contract says a queued continuation has no "
+            "wall-clock expiry"
+        )
         assert "sess-fresh" in disk
-        retired = store.durability_diagnostics()["retired"]
-        assert any(
-            r["session_id"] == "sess-stale" and r["reason"] == "expired"
-            for r in retired
+        assert swept == 0, (
+            "the age sweep reported retiring an intent, but age alone is not "
+            "evidence that the intent ended"
+        )
+
+    def test_the_sweep_still_cleans_up_a_retired_intent(self, clean_registry):
+        """The sweep's other job survives: provably dead work is cleaned up.
+
+        This is the counter-control for the age rule above: without it, a
+        sweep that removed nothing at all would pass.
+        """
+        from api import goal_continuation_store as store
+        from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+        store.arm_pending_goal_continuation("sess-cleared", "cleared")
+        # The goal was explicitly retired (``/goal clear``): the retirement
+        # tombstone is the authority, not a clock.
+        store.retire_pending_goal_continuation("sess-cleared", reason="clear")
+
+        # Re-plant the record WITHOUT the retirement, so the sweep has to
+        # decide on the tombstone alone.
+        PENDING_GOAL_CONTINUATION_RECORDS["sess-cleared"] = {
+            "prompt": "cleared",
+            "generation": 1,
+            "created_at": time.time(),
+            "reason": "goal_continue",
+            "continuation_id": "tok-cleared",
+        }
+        with store._LOCK:
+            store._TOMBSTONES["sess-cleared"] = 99
+
+        swept = store.sweep_expired_goal_continuations()
+
+        assert swept >= 1, (
+            "the sweep no longer cleans up an intent whose retirement was "
+            "already recorded: the registry grows without bound"
+        )
+        disk = store.load_pending_goal_continuations()
+        assert "sess-cleared" not in disk, (
+            "the sweep left a retired intent in the durable registry"
         )
 
     def test_control_unrelated_sessions_untouched(self, clean_registry):
