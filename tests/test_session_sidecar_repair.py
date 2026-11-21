@@ -1335,6 +1335,78 @@ class TestNonEmptyMessagesPendingCleared:
         assert s.tool_calls[0]["name"] == "terminal"
         assert not [m for m in s.messages if m.get("_error")]
 
+    def test_core_sync_branch_does_not_duplicate_journal_output_already_in_core_stamped(
+        self, hermes_home, monkeypatch
+    ):
+        """Stamped control for the gate finding-2 fixture.
+
+        Same shape as the unstamped regression above, except the core rows
+        carry turn identity: the user row has the current turn's timestamp
+        and the tool card carries this stream's recovery tag. The stamped
+        shape must keep exactly one answer, one tool card and no error
+        marker — the identity must not reopen the duplication path.
+        """
+        s = _make_session(messages=[])
+        s.pending_user_message = "Check maintainer activity"
+        s.pending_started_at = time.time() - 120
+        s.active_stream_id = "duplicate_core_journal_stream"
+        s.save()
+
+        core_messages = [
+            {
+                "role": "user",
+                "content": "Check maintainer activity",
+                "timestamp": s.pending_started_at,
+            },
+            {"role": "assistant", "content": "I will check GitHub first."},
+        ]
+        core_tool_calls = [
+            {
+                "name": "terminal",
+                "preview": "gh pr list --repo nesquena/hermes-webui",
+                "snippet": "gh pr list --repo nesquena/hermes-webui",
+                "assistant_msg_idx": 1,
+                "done": True,
+                "_recovered_stream_id": "duplicate_core_journal_stream",
+            },
+        ]
+        core_path = _write_core_transcript(
+            hermes_home,
+            s.session_id,
+            core_messages,
+            tool_calls=core_tool_calls,
+        )
+
+        append_run_event(
+            s.session_id,
+            "duplicate_core_journal_stream",
+            "token",
+            {"text": "I will check GitHub first."},
+        )
+        append_run_event(
+            s.session_id,
+            "duplicate_core_journal_stream",
+            "tool",
+            {
+                "name": "terminal",
+                "preview": "gh pr list --repo nesquena/hermes-webui",
+                "args": {"command": "gh pr list --repo nesquena/hermes-webui"},
+            },
+        )
+
+        result = _apply_core_sync_or_error_marker(
+            s,
+            core_path,
+            stream_id_for_recheck="duplicate_core_journal_stream",
+        )
+
+        assert result is True
+        contents = [m.get("content", "") for m in s.messages]
+        assert contents.count("I will check GitHub first.") == 1
+        assert len(s.tool_calls) == 1
+        assert s.tool_calls[0]["name"] == "terminal"
+        assert not [m for m in s.messages if m.get("_error")]
+
 
 class TestLastResortSyncDelegation:
     """_last_resort_sync_from_core delegates to the shared helpers
