@@ -3938,7 +3938,7 @@ function _applyComposerControlOrder(order){
     });
     marker.remove();
   });
-  if(typeof _fitComposerFooter==='function') _fitComposerFooter();
+  if(typeof _fitComposerFooter==='function') _fitComposerFooter(true);
 }
 window._applyComposerControlOrder=_applyComposerControlOrder;
 
