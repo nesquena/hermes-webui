@@ -1172,7 +1172,7 @@ _UNPROVEN = {"managed": False, "reason": "local_gateway_unproven", "start_comman
 _ESC_SRC = UI_JS[UI_JS.index("const esc=s=>") : UI_JS.index("\n", UI_JS.index("const esc=s=>"))]
 _EN_LOCAL_UNPROVEN = (
     "WebUI hasn't confirmed this Gateway runs on this machine. "
-    "If it does, start it once with {cmd}; WebUI can manage it after that."
+    "If it does, WebUI can manage it after you start it once with {cmd}."
 )
 
 
@@ -1217,7 +1217,7 @@ def test_renderer_unproven_note_uses_the_external_note_lock_markup():
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_renderer_unproven_note_renders_command_as_inline_code_and_stays_escaped():
+def test_renderer_unproven_note_escapes_the_sentence_and_the_command():
     html = _render_gateway_card(
         {**_STATUS_BRANCHES["not_running"], "lifecycle": _UNPROVEN},
         strings={"gateway_local_unproven": _EN_LOCAL_UNPROVEN},
@@ -1227,7 +1227,7 @@ def test_renderer_unproven_note_renders_command_as_inline_code_and_stays_escaped
     assert ">hermes gateway start</code>" in html
     assert "{cmd}" not in html
     assert "WebUI hasn&#39;t confirmed this Gateway runs on this machine." in html
-    assert "start it once with <code" in html
+    assert "start it once with" in html
 
     hostile = '<img src=x onerror=alert(1)> then run {cmd} "now"'
     html = _render_gateway_card(
@@ -1290,6 +1290,217 @@ def test_renderer_unproven_branch_keys_on_reason_and_running():
     assert "t('gateway_external_managed')" in body
 
 
+# ── #8639 (2): the one-time start command is its own line, with a copy button ─
+#
+# Inline, a long `hermes --profile <name> gateway start` chip wraps mid-command
+# inside the sentence, which is hard to select on a touch device. The card puts
+# the command in a block of its own, under the sentence, next to a copy button.
+# The sentence is split at the locale's {cmd} placeholder, so every translation
+# keeps its own wording and punctuation instead of being retranslated.
+
+_COPY_STRINGS = {"copy": "Copy", "copied": "Copied!", "copy_failed": "Copy failed"}
+
+
+def _click_copy_button(button_html: str, *, fail: bool = False) -> dict:
+    """Click a rendered copy button: run the card's handler on its attributes.
+
+    The handler is extracted from panels.js and executed with `_copyText` and
+    `showToast` stubbed, so the assertion is the behaviour of the button the
+    card actually rendered, not the source text that produced it.
+    """
+    body = extract_function(PANELS_JS, "_copyGatewayStartCommand")
+    attrs = dict(re.findall(r'([a-z-]+)="([^"]*)"', button_html))
+    harness = f"""
+const copied = [];
+const toasts = [];
+const _strings = {json.dumps(_COPY_STRINGS)};
+const t = (k) => Object.prototype.hasOwnProperty.call(_strings, k) ? _strings[k] : '[' + k + ']';
+const showToast = (m) => toasts.push(m);
+const _copyText = (text) => {{
+  copied.push(text);
+  return {'Promise.reject(new Error("denied"))' if fail else 'Promise.resolve()'};
+}};
+{body}
+const _attrs = {json.dumps(attrs)};
+const btn = {{
+  textContent: 'Copy',
+  classList: {{ add() {{}}, remove() {{}} }},
+  getAttribute(name) {{ return Object.prototype.hasOwnProperty.call(_attrs, name) ? _attrs[name] : null; }},
+}};
+_copyGatewayStartCommand(btn);
+setTimeout(() => {{
+  process.stdout.write(JSON.stringify({{ copied, toasts, label: btn.textContent }}));
+}}, 0);
+"""
+    proc = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _unproven_card(*, start_command: str = "hermes gateway start", sentence: str | None = None) -> str:
+    return _render_gateway_card(
+        {**_STATUS_BRANCHES["not_running"], "lifecycle": {**_UNPROVEN, "start_command": start_command}},
+        strings={"gateway_local_unproven": sentence or _EN_LOCAL_UNPROVEN, **_COPY_STRINGS},
+        esc_src=_ESC_SRC,
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_start_command_sits_in_its_own_block():
+    html = _unproven_card(start_command="hermes --profile work gateway start")
+
+    block = re.search(r"<div[^>]*data-gateway-cmd-block[^>]*>(.*?)</div>", html, re.S)
+    assert block, html
+    # One command, one block: the sentence never wraps around the command again.
+    assert html.count("<code") == 1
+    assert block.group(0).count("<code") == 1
+    assert "hermes --profile work gateway start</code>" not in block.group(0)  # --profile is wrapped
+    assert "gateway start</code>" in block.group(0)
+    code = re.search(r'<code style="([^"]*)"', block.group(0))
+    assert code, block.group(0)
+    assert "display:block" in code.group(1).replace(" ", "")
+
+    # The translation places {cmd} at the end of the sentence: the text
+    # before it introduces the command, and nothing renders after the block.
+    before, after = html.split(block.group(0))
+    before_text = re.sub(r"<[^>]+>", "", before)
+    after_text = re.sub(r"<[^>]+>", "", after)
+    assert before.rstrip().endswith("</div>")
+    assert before_text.strip().endswith("start it once with")
+    assert after_text.strip() == ""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_copy_button_copies_the_exact_start_command():
+    command = "hermes --profile work gateway start"
+    html = _unproven_card(start_command=command)
+
+    block = re.search(r"<div[^>]*data-gateway-cmd-block[^>]*>(.*?)</div>", html, re.S)
+    assert block, html
+    button = re.search(r"<button[^>]*>.*?</button>", block.group(1), re.S)
+    assert button, block.group(1)
+    assert 'type="button"' in button.group(0)
+    assert f'data-gateway-cmd="{command}"' in button.group(0)
+    assert ">Copy</button>" in button.group(0)
+
+    result = _click_copy_button(button.group(0))
+    assert result["copied"] == [command]
+    assert result["label"] == "Copied!"
+    assert result["toasts"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_copy_button_does_not_stretch():
+    html = _unproven_card()
+    block = re.search(r"<div[^>]*data-gateway-cmd-block[^>]*>(.*?)</div>", html, re.S)
+    assert block, html
+    button = re.search(r'<button class="[^"]*gateway-copy-cmd-btn"[^>]*style="([^"]*)"', block.group(1))
+    assert button, block.group(1)
+    style = button.group(1).replace(" ", "")
+    assert "flex:00auto" in style
+    assert "flex-shrink" not in style
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_copy_button_double_click_restores_label():
+    body = extract_function(PANELS_JS, "_copyGatewayStartCommand")
+    harness = f"""
+const _strings = {json.dumps(_COPY_STRINGS)};
+const t = (k) => Object.prototype.hasOwnProperty.call(_strings, k) ? _strings[k] : '[' + k + ']';
+const _copyText = () => Promise.resolve();
+{body}
+const btn = {{
+  textContent: 'Copy',
+  classList: {{ add() {{}}, remove() {{}} }},
+  getAttribute(name) {{ return name === 'data-gateway-cmd' ? 'hermes gateway start' : null; }},
+}};
+_copyGatewayStartCommand(btn);
+setTimeout(() => {{
+  const firstLabel = btn.textContent;
+  _copyGatewayStartCommand(btn);
+  setTimeout(() => {{
+    const secondLabel = btn.textContent;
+    setTimeout(() => {{
+      process.stdout.write(JSON.stringify({{ firstLabel, secondLabel, finalLabel: btn.textContent }}));
+    }}, 1600);
+  }}, 10);
+}}, 10);
+"""
+    proc = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["firstLabel"] == "Copied!"
+    assert result["secondLabel"] == "Copied!"
+    assert result["finalLabel"] == "Copy"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_copy_button_reports_a_failed_copy():
+    html = _unproven_card()
+    button = re.search(r"<button[^>]*>.*?</button>", re.search(
+        r"<div[^>]*data-gateway-cmd-block[^>]*>(.*?)</div>", html, re.S).group(1), re.S)
+
+    result = _click_copy_button(button.group(0), fail=True)
+    assert result["copied"] == ["hermes gateway start"]
+    assert result["toasts"] == ["Copy failed"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_external_note_offers_no_start_command_or_copy_button():
+    # The copy affordance belongs to the one-time start hint only: a Gateway
+    # managed elsewhere has nothing for this machine to run.
+    html = _render_gateway_card(
+        {**_STATUS_BRANCHES["not_running"], "lifecycle": _EXTERNAL},
+        strings={"gateway_local_unproven": _EN_LOCAL_UNPROVEN, **_COPY_STRINGS},
+        esc_src=_ESC_SRC,
+    )
+
+    assert "data-gateway-cmd-block" not in html
+    assert "data-gateway-cmd=" not in html
+    assert "<code" not in html
+    assert "<button" not in html
+
+
+# ── #8639 (3): the card's chips use the inline-code colours ──────────────────
+#
+# The command chip and the platform badges painted themselves with --code-bg,
+# the fenced-block background. Chat inline code reads --code-inline-bg for the
+# background and --code-text for the text, and the themes define those two as a
+# pair, so the card only matches chat across the theme pairs if it reads both.
+
+
+def test_renderer_start_command_chip_uses_the_inline_code_colours():
+    html = _unproven_card()
+    code = re.search(r'<code style="([^"]*)"', html)
+    assert code, html
+    style = code.group(1).replace(" ", "")
+    assert "background:var(--code-inline-bg)" in style
+    assert "color:var(--code-text)" in style
+    assert "--code-bg" not in style
+
+
+def test_renderer_platform_badges_use_the_inline_code_colours():
+    html = _render_gateway_card(
+        {
+            **_STATUS_BRANCHES["running"],
+            "lifecycle": _LOCAL,
+            "platforms": [
+                {"name": "telegram", "label": "Telegram"},
+                {"name": "web", "label": "Web"},
+            ],
+        }
+    )
+
+    badges = re.findall(r'<span style="display:inline-flex;align-items:center;gap:4px;[^"]*">', html)
+    assert len(badges) == 2, html
+    for badge in badges:
+        style = badge.replace(" ", "")
+        assert "background:var(--code-inline-bg)" in style, badge
+        assert "color:var(--code-text)" not in style, badge
+        assert "--code-bg" not in style, badge
+    assert "Telegram" in html and "Web" in html
+
+
 def _locale_blocks() -> dict[str, str]:
     blocks: dict[str, list[str]] = {}
     current = None
@@ -1328,6 +1539,23 @@ def test_gateway_local_unproven_copy_exists_once_per_locale_with_external_note()
     assert I18N_JS.count("gateway_local_unproven:") == len(with_external)
     assert values["en"] == _EN_LOCAL_UNPROVEN
     assert all(values[name] != values["en"] for name in with_external if name != "en")
+
+
+def test_gateway_local_unproven_command_closes_the_sentence_in_every_locale():
+    blocks = _locale_blocks()
+    with_external = [name for name, body in blocks.items() if "gateway_external_managed:" in body]
+    assert len(with_external) == 15
+
+    for name in with_external:
+        body = blocks[name]
+        match = re.search(r"^\s*gateway_local_unproven: '((?:[^'\\]|\\.)*)',$", body, re.M)
+        assert match, name
+        val = match.group(1).replace("\\'", "'")
+        cut = val.index("{cmd}")
+        after_cmd = val[cut + len("{cmd}"):]
+        assert not any(c.isalpha() for c in after_cmd), (
+            f"Locale {name} has letters after {{cmd}}: {after_cmd!r}"
+        )
 
 
 # ── follow-up D: the start hint names the target profile ─────────────────
@@ -1495,7 +1723,10 @@ def test_renderer_unproven_note_shows_the_server_start_command(command):
 
     assert html.count("<code") == 1
     assert _code_text(html) == command
-    assert "start it once with <code" in html
+    # The sentence stops at the block that carries the command (#8639).
+    assert re.search(
+        r"start it once with</div><div[^>]*data-gateway-cmd-block", html
+    ), html
     assert "{cmd}" not in html
 
 
