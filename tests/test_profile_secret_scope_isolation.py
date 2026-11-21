@@ -617,6 +617,54 @@ def test_launcher_reading_matches_ctl_sh_decoding(tmp_path):
     assert profiles._launcher_dotenv_values(env_file) == expected
 
 
+# Line breaks, bytes and spaces bash's `read` loop treats differently from Python's text handling. Each file also
+# has an escaped value (A1), which only the launcher reading decodes. These shapes export the same values in the
+# C and in a UTF-8 locale here (GNU bash and awk).
+LAUNCHER_BYTE_CASES = {
+    "byte_not_utf8_in_comment": b"# DUMMY comment \xff\n",
+    "byte_not_utf8_in_value": b"A2=DUMMY\xffV2\n",
+    "lone_cr": b"B2=DUMMY_B2\rB3=x\n",
+    "form_feed": b"B4=DUMMY_B4\x0cB5=y\n",
+    "vertical_tab": b"B6=DUMMY_B6\x0bB7=z\n",
+    "nul": b'C3=DUMMY\x00V3\nC4="DUMMY\x00\\tV4"\n',
+    "nbsp_before_comment": "D1=DUMMY_V1\u00a0# c\n".encode(),
+    "nbsp_after_quoted": 'D2="DUMMY\\tV2"\u00a0# c\n'.encode(),
+    "info_separator_before_comment": b"D6=DUMMY_V6\x1c# c\n",
+}
+
+
+def _ctl_sh_exports(tmp_path, data: bytes, locale: dict[str, str]) -> dict[str, str]:
+    """What ctl.sh's real ``_apply_env_file_safely`` exports for a file holding *data* (A-E keys only)."""
+    body = re.search(r"\n(_apply_env_file_safely\(\) \{.*?\n\})\n", (REPO / "ctl.sh").read_text(encoding="utf-8"), re.S)
+    assert body, "ctl.sh no longer defines _apply_env_file_safely"
+    env_file = tmp_path / "t.env"
+    env_file.write_bytes(data)
+    script = tmp_path / "run.sh"
+    script.write_text(body.group(1) + '\n_apply_env_file_safely "$1"\nexec "$2" -c '
+                      '"import json, os; print(json.dumps(dict(os.environ)))"\n', encoding="utf-8")
+    cp = subprocess.run(["bash", str(script), str(env_file), sys.executable], env={"PATH": "/usr/bin:/bin", **locale},
+                        capture_output=True, text=True, timeout=60)
+    assert cp.returncode == 0, cp.stderr
+    return {k: v for k, v in json.loads(cp.stdout).items() if k[:1] in "ABCDE" and k[1:].isdigit()}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None, reason="needs bash and awk")
+@pytest.mark.parametrize("locale", [{"LC_ALL": "C"}, {"LANG": "C.UTF-8"}], ids=["C", "C.UTF-8"])
+@pytest.mark.parametrize("case", sorted(LAUNCHER_BYTE_CASES))
+def test_launcher_reading_matches_ctl_sh_for_line_breaks_bytes_and_spaces(tmp_path, case, locale):
+    exported = _ctl_sh_exports(tmp_path, b'A1="DUMMY\\tV1"\n' + LAUNCHER_BYTE_CASES[case], locale)
+    assert exported.get("A1") == "DUMMY\tV1", "precondition: ctl.sh decoded the escaped value"
+    assert profiles._launcher_dotenv_values(tmp_path / "t.env") == exported
+
+
+def test_webui_reading_matches_its_actual_strict_utf8_text_loader(tmp_path):
+    env_file = tmp_path / "t.env"
+    env_file.write_bytes(b"# DUMMY comment \xff\nA1=DUMMY_V1\nA2=DUMMY\xffV2\nB2=DUMMY_B2\rB3=x\nC3=DUMMY\x00V3\n")
+    assert profiles._read_dotenv_values(env_file) == {}, "WebUI cannot load a non-UTF8 file"
+    env_file.write_bytes(b"A1=DUMMY_V1\nB2=DUMMY_B2\rB3=x\n")
+    assert profiles._read_dotenv_values(env_file) == {"A1": "DUMMY_V1", "B2": "DUMMY_B2", "B3": "x"}
+
+
 # 6 ── the private Agent attribute the startup install replaces ──
 
 
