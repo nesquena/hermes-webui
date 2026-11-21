@@ -7509,12 +7509,37 @@ def _resolve_session_once(
             if not allow_full_load:
                 raise _FullSessionResolveRequired
             try:
+                # #9229: a full read that starts before an intentional shrink
+                # (retry/undo) saves can still be holding the OLD sidecar when
+                # it finishes: the shrink detaches the entry, saves the
+                # truncated transcript and republishes the shortened object,
+                # and then this reader would publish its pre-shrink snapshot
+                # over it — putting the removed reply back in the cache (and
+                # back on disk on the next save). The cold-load path below
+                # already guards its publication with the write generation;
+                # the cache-hit reload path needs the same guard: if another
+                # writer replaced the sidecar while this read was in flight,
+                # our snapshot is stale and must not be published.
+                before = _sidecar_write_generation(sid)
                 disk_session = Session.load(sid)
                 with LOCK:
-                    SESSIONS[sid] = disk_session
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
-                cached = disk_session
+                    now = _sidecar_write_generation(sid)
+                    # Writes by THIS thread (a self-heal save inside load) are
+                    # part of what it read; only other writers make it stale.
+                    unchanged = (now[0] - before[0]) == (now[1] - before[1])
+                    if unchanged:
+                        SESSIONS[sid] = disk_session
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
+                        cached = disk_session
+                    else:
+                        # Another writer (the retry/undo shrink) replaced the
+                        # sidecar while this read was in flight. Our snapshot
+                        # is the pre-shrink one; serve whatever the cache now
+                        # holds instead of resurrecting the removed reply.
+                        resident = SESSIONS.get(sid)
+                        if resident is not None:
+                            cached = resident
             except Exception:
                 logger.debug(
                     "cached session disk-freshness check failed for session %s", sid, exc_info=True,
