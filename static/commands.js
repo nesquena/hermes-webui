@@ -1704,7 +1704,7 @@ async function cmdGoal(args){
     try{const body=JSON.parse((e&&e.body)||'');if(body&&body.error==='unsupported_gate'&&body.message)err=String(body.message);}catch(_){}
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});
-    showToast(err,3000);
+    showToast(err,3000,'error');
   }
 }
 
