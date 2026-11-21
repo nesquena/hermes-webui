@@ -31655,6 +31655,8 @@ def start_session_turn(
     turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
     try:
         s = get_session(session_id)
+    except SessionFileNamesOtherSession:
+        return {"error": "Session not found", "_status": 404, "reason": "session_owner_unknown"}
     except KeyError:
         return {"error": "Session not found", "_status": 404}
     if getattr(s, "_sidecar_names_other_session", None):
