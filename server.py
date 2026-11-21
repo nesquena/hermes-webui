@@ -124,6 +124,7 @@ from api.run_drain import RunAdmissionClosed, ShutdownDrain, send_admission_clos
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
+from api.log_redaction import install_server_log_redaction
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -567,6 +568,13 @@ def main() -> None:
     # handler-thread exception during startup or serving produces a diagnostic
     # instead of a silent death. The paired memory root-cause is #4765.
     install_crash_visibility()
+
+    # Log redaction (issue #8984): install ONE root handler on stderr so Agent
+    # WARNINGs are masked by the Agent's RedactingFormatter instead of falling
+    # through to logging.lastResort in clear text (a provider base_url with
+    # userinfo credentials would otherwise land verbatim in the server log).
+    # Idempotent, and safe when the Agent is not importable (plain formatter).
+    install_server_log_redaction()
 
     print_startup_config()
 
