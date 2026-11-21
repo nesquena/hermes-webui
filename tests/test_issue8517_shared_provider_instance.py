@@ -33,6 +33,7 @@ from tests.test_issue8517_profile_scoped_memory import (  # noqa: F401  (fixture
     SharedInstanceMemoryProvider,
     _cached_agent,
     _key,
+    _memory_manager_twin,
     _profile_identity,
     bank_rows,
     hc,
@@ -339,9 +340,7 @@ def test_install_is_idempotent_and_reinstalls_on_a_reloaded_module(hc, homes, gu
 
 
 def test_agent_without_the_claim_seam_is_left_alone_and_logged_once(guard_state, monkeypatch, caplog):
-    import types  # noqa: PLC0415
-
-    old_agent = types.ModuleType("agent.memory_manager")
+    old_agent = _memory_manager_twin()
     monkeypatch.setitem(sys.modules, "agent.memory_manager", old_agent)
     caplog.set_level(logging.WARNING)
     assert not guard_state.install_shared_provider_instance_guard()

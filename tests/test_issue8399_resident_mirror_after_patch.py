@@ -77,7 +77,7 @@ def test_resident_saved_between_mirror_and_patch_does_not_keep_the_revoked_token
     real_persist = routes._persist_share_fields
     landed = {}
 
-    def _save_in_the_window(sid_, session_, *, share_token, share_created_at):
+    def _save_in_the_window(sid_, session_, *, share_token, share_created_at, **kw):
         if share_token is None and not landed:
             # The revoke's first mirror has run; a resident save lands before the
             # sidecar patch. Without the committed baseline this save adopted the
@@ -86,7 +86,7 @@ def test_resident_saved_between_mirror_and_patch_does_not_keep_the_revoked_token
             resident.messages = [*resident.messages, {"role": "assistant", "content": "ck", "partial": True}]
             resident.save(touch_updated_at=False, skip_index=skip_index)
             landed["saved"] = True
-        return real_persist(sid_, session_, share_token=share_token, share_created_at=share_created_at)
+        return real_persist(sid_, session_, share_token=share_token, share_created_at=share_created_at, **kw)
 
     monkeypatch.setattr(routes, "_persist_share_fields", _save_in_the_window)
 

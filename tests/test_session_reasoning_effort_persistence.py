@@ -198,10 +198,12 @@ def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
         # A pause inside that index lock would block the pick on the index lock
         # too, and the test would pass without the persistence lock (#8399
         # review, release fold). The caller check skips the share snapshot's
-        # own fsync in shares._write_json_atomic.
+        # own fsync in shares._write_json_atomic. Since #8830 the share-field
+        # patch runs in _patch_session_sidecar (update_session_share_fields
+        # delegates to it, under the same persistence lock).
         if (
             threading.current_thread().name == "share"
-            and sys._getframe(1).f_code.co_name == "update_session_share_fields"
+            and sys._getframe(1).f_code.co_name == "_patch_session_sidecar"
             and not paused.is_set()
         ):
             paused.set()  # patched bytes written under the persistence lock
@@ -468,7 +470,7 @@ def test_lock_held_reload_keeps_cli_source_identity(tmp_path, monkeypatch, path,
     SESSIONS[sid] = resident
 
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value, **_kw: {})
-    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda s: None, raising=False)
+    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda s, **_kw: None, raising=False)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *a, **kw: None)
     monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *a, **kw: None)
     monkeypatch.setattr(routes, "list_profiles_api", lambda: [])

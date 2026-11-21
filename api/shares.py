@@ -1091,6 +1091,62 @@ def build_share_snapshot(session) -> dict:
     }
 
 
+class ShareLinkOwnedElsewhere(Exception):
+    """The share link a session names was published by another conversation (#8734)."""
+
+
+SHARE_OWNED_ELSEWHERE_MESSAGE = "This share link belongs to another conversation, so nothing was changed."
+_COMPRESSION_MARKERS = ("pre_compression_snapshot", "pre_compression_continuation_session_id")
+
+
+def _session_record(sid) -> dict | None:
+    """``sid``'s sidecar, or None when it is absent, unreadable or names another session."""
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(sid):
+            return None
+        data = json.loads((models.SESSION_DIR / f"{sid}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) and data.get("session_id") == sid else None
+
+
+def _chain_parent(record):
+    """The parent a record names as a lineage link, or "" for none or a fork.
+
+    A fork (``/api/session/branch``) also names its source as parent, but it is
+    a separate conversation with its own link, so it is not a chain link. The
+    value is returned as stored: only a parent equal to the owner's id, type
+    included, links the two records.
+    """
+    if record.get("session_source") == "fork":
+        return ""
+    return record.get("parent_session_id") or ""
+
+
+def _link_owned_by_other_conversation(payload, session_id: str) -> bool:
+    """True only for a live snapshot published by a different conversation that
+    still exists, when neither side is part of a compression chain (#8734).
+
+    A compression continuation inherits its parent's link, so either side of a
+    chain can hold a link the other published. A record counts as part of a
+    chain when it carries a compression marker or names a parent other than as
+    a fork. A snapshot with no owner, an owner that is gone, and a record that
+    cannot be read keep the behaviour from before this check.
+    """
+    if not isinstance(payload, dict) or payload.get("revoked_at"):
+        return False
+    owner = payload.get("source_session_id")
+    if not session_id or owner == session_id:
+        return False
+    owner_record = _session_record(owner)
+    if owner_record is None or any(owner_record.get(k) for k in _COMPRESSION_MARKERS) or _chain_parent(owner_record):
+        return False
+    acting = _session_record(session_id) or {}
+    return not (any(acting.get(k) for k in _COMPRESSION_MARKERS) or _chain_parent(acting) == owner)
+
+
 def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: str = "") -> dict:
     """Persist a prebuilt share snapshot under ``token`` (or a fresh one).
 
@@ -1118,6 +1174,8 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
                 token = ""
                 path = None
                 existing = None
+            if _link_owned_by_other_conversation(existing, str(source_session_id or "")):
+                raise ShareLinkOwnedElsewhere(SHARE_OWNED_ELSEWHERE_MESSAGE)
         if path is None:
             token = secrets.token_urlsafe(18)
             path = _share_path(token)
@@ -1153,7 +1211,38 @@ def create_or_refresh_share(session) -> dict:
     )
 
 
+def _share_owner_exists(payload: dict) -> bool:
+    """True while the conversation that published ``payload`` still exists (#8837).
+
+    Every share create since sharing shipped has written the owner's sidecar
+    (``SESSION_DIR/<sid>.json``) before returning the link, external sessions
+    included (they get a metadata-only sidecar), and every snapshot records that
+    ``source_session_id``. So a stat of that one path answers the question. The
+    sidecar is never opened: this runs for anonymous requests, and a sidecar can
+    be tens of MiB. A snapshot without a valid owner id, or whose owner's sidecar
+    is gone (the conversation was deleted, including by a delete from before
+    this check existed), is not served.
+    """
+    sid = payload.get("source_session_id")
+    if not isinstance(sid, str) or not sid:
+        return False
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(sid):
+            return False
+        return (models.SESSION_DIR / f"{sid}.json").is_file()
+    except Exception:
+        logger.debug("Failed to check the owner of a share snapshot", exc_info=True)
+        return False
+
+
 def load_share(token: str) -> dict | None:
+    """The public view of a share, or ``None`` (the caller answers 404).
+
+    A refused snapshot (revoked, or its conversation no longer exists) gives the
+    same ``None`` as an unknown token (#8837).
+    """
     try:
         path = _share_path(token)
     except ValueError:
@@ -1169,7 +1258,57 @@ def load_share(token: str) -> dict | None:
         return None
     if payload.get("revoked_at"):
         return None
+    if not _share_owner_exists(payload):
+        return None
     return _public_share_payload(payload)
+
+
+def revoke_share_owned_by(token: str, session_id: str) -> bool:
+    """Revoke the snapshot under ``token`` if ``session_id`` published it (#8837).
+
+    For deleting a conversation. A compression continuation inherits its
+    parent's token, and refreshing its share rewrites the snapshot under that
+    token with the continuation as owner; deleting the parent must not revoke
+    that link, so only a snapshot this session owns is touched.
+
+    Returns True when no unrevoked snapshot of ``session_id`` remains under
+    ``token`` (revoked now or before, absent, unparseable, or owned by another
+    session), False when the snapshot could not be read or the revoke could not
+    be written; the caller then refuses the delete.
+    """
+    token = str(token or "").strip()
+    session_id = str(session_id or "").strip()
+    if not token or not session_id:
+        return True
+    try:
+        path = _share_path(token)
+    except ValueError:
+        return True  # nothing can be stored under an invalid token
+    with _SHARE_LOCK:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return True
+        except UnicodeDecodeError:
+            return True  # load_share() cannot decode it either, so it serves nothing
+        except Exception:
+            logger.warning("Failed to read share snapshot %s to revoke it", path, exc_info=True)
+            return False
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return True  # load_share() cannot parse it either, so it serves nothing
+        if not isinstance(payload, dict) or payload.get("revoked_at"):
+            return True
+        if str(payload.get("source_session_id") or "") != session_id:
+            return True
+        payload["revoked_at"] = time.time()
+        try:
+            _write_json_atomic(path, payload)
+        except Exception:
+            logger.warning("Failed to revoke share snapshot %s", path, exc_info=True)
+            return False
+    return True
 
 
 def revoke_share(session) -> bool:
@@ -1188,6 +1327,8 @@ def revoke_share(session) -> bool:
                 payload = {}
             if not isinstance(payload, dict):
                 payload = {}
+            if _link_owned_by_other_conversation(payload, str(getattr(session, "session_id", "") or "")):
+                raise ShareLinkOwnedElsewhere(SHARE_OWNED_ELSEWHERE_MESSAGE)
             payload["revoked_at"] = time.time()
             _write_json_atomic(path, payload)
     return True
