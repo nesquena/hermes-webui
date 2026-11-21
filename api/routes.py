@@ -13362,11 +13362,39 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages
     if null_timestamp_count or state_before_count != sidecar_before_count:
         return None, sidecar_messages
+    # Restamped-tail parity (2026-11-13 RED certificate): the bounded merge
+    # cannot positionally collapse a tail row whose clock was restamped
+    # relative to its sidecar twin, so the planner must take the full read
+    # whenever the tail clocks cannot prove parity.  Runs before BOTH
+    # bounded returns below so the empty-prefix shape is covered too.
+    if state_db_tail_keys_disagree_with_sidecar(
+        getattr(session, "session_id", None),
+        sidecar_messages,
+        floor,
+        profile=getattr(session, "profile", None) or None,
+    ):
+        return None, sidecar_messages
     if sidecar_before_count == 0:
         return floor, sidecar_messages
 
     sidecar_before_keys = [
-        _session_message_visible_key(msg)
+        # Both sides of the ordered proof use the SAME representation: the
+        # visible key with the PRIVATE identity removed from the occurrence
+        # slot (#8672 gate C67-F3).  The sidecar carries a stable message
+        # ``id`` while the SQLite projection carries a ``_state_db_row_id``;
+        # those describe DIFFERENT things about the SAME logical row, so
+        # comparing the raw keys literally made this proof fail for every
+        # settled row.  That refused the bounded read and forced a
+        # full-history read of the whole transcript on the display path --
+        # exactly what the regeneration consumer
+        # (session_ops._bounded_tail_snapshot_if_safe) already avoids.
+        #
+        # The representation stays CLOCK-sensitive (the clock half is kept),
+        # so a repeated turn below and above the read floor stays
+        # distinguishable, and the tool/provider identity (slots 2 and 4)
+        # keeps separating rows.  The count and null-clock guards above are
+        # untouched.
+        _visible_key_without_private_identity(_session_message_visible_key(msg))
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
         if ts < floor
     ]
@@ -13375,7 +13403,12 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         floor,
         profile=getattr(session, "profile", None) or None,
     )
-    if state_before_keys is None or state_before_keys != sidecar_before_keys:
+    if state_before_keys is None:
+        return None, sidecar_messages
+    state_before_keys = [
+        _visible_key_without_private_identity(key) for key in state_before_keys
+    ]
+    if state_before_keys != sidecar_before_keys:
         return None, sidecar_messages
     return floor, sidecar_messages
 
@@ -14455,6 +14488,7 @@ from api.models import (
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
+    state_db_tail_keys_disagree_with_sidecar,
     get_state_db_session_summary,
     merge_session_messages_append_only,
     reconciled_state_db_messages_for_session,
@@ -14471,6 +14505,7 @@ from api.models import (
     _session_message_merge_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
+    _visible_key_without_private_identity,
     _message_timestamp_as_float,
     _persisted_session_meta_prefix,
     _is_empty_partial_activity_message,

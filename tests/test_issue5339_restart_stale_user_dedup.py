@@ -164,6 +164,12 @@ def test_content_key_is_idempotent_for_bare_user_message():
         "just a plain message",
         "",
         "",
+        # #7587 occurrence discriminator: this row has neither a timestamp nor
+        # a private identity, so there is nothing to tell it apart from another
+        # row of the same shape -- they key together.  (A row with no timestamp
+        # but an id/message_id/_state_db_row_id gets that identity as its
+        # occurrence instead, and stays distinct.)
+        "",
     )
 
 
