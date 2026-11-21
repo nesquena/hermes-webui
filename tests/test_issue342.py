@@ -48,8 +48,9 @@ def test_autolink_uses_esc_for_xss_safety():
     # Find the autolink section (between the SAFE_TAGS pass and paragraph wrap)
     autolink_idx = content.find('// Autolink: convert plain URLs')
     assert autolink_idx != -1, "Autolink comment not found in ui.js"
-    # Extract the autolink block (next ~1200 chars after the comment)
-    autolink_block = content[autolink_idx:autolink_idx + 1200]
+    # Extract the autolink block (next ~1600 chars after the comment; grown by
+    # the shared autolink helper)
+    autolink_block = content[autolink_idx:autolink_idx + 1600]
     # esc() must be used on the visible link text to prevent XSS
     assert 'esc(clean)' in autolink_block, (
         "Autolink block should use esc(clean) for the link display text (XSS safety), "
@@ -87,7 +88,13 @@ def test_autolink_after_safe_tags_pass():
     content = read_ui_js()
     # Accept either the new _tag() sanitizer or the legacy SAFE_TAGS line so this
     # test works on both the old and new renderer.
-    sanitizer_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>_tag(tag));')
+    # Current form: the same pass also sets aside every "<" that starts no tag
+    # as "&lt;" until autolinking is done (an HTML comment "<!--" is kept).
+    sanitizer_idx = content.find(
+        "s=s.replace(/<\\/?[a-z][^>]*>|<(?!!--)/gi,m=>m==='<'?(_al_stash.push('&lt;'),`\\x00B${_al_stash.length-1}\\x00`):_tag(m));"
+    )
+    if sanitizer_idx == -1:
+        sanitizer_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>_tag(tag));')
     if sanitizer_idx == -1:
         sanitizer_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));')
     autolink_idx = content.find('// Autolink: convert plain URLs')
@@ -107,8 +114,9 @@ def test_autolink_target_blank_and_rel():
     content = read_ui_js()
     autolink_idx = content.find('// Autolink: convert plain URLs')
     assert autolink_idx != -1, "Autolink comment not found"
-    # Use a larger window to account for the stash preamble added by the fix
-    autolink_block = content[autolink_idx:autolink_idx + 1200]
+    # Use a larger window to account for the stash preamble and shared autolink
+    # helper, both of which grew this block.
+    autolink_block = content[autolink_idx:autolink_idx + 1600]
     assert 'target="_blank"' in autolink_block, (
         'Autolinked URLs should have target="_blank"'
     )

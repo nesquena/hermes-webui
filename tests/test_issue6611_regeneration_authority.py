@@ -1,3 +1,4 @@
+import ast
 import json
 import shutil
 import subprocess
@@ -37,11 +38,15 @@ def test_all_terminal_payloads_carry_fresh_revision():
 
 
 def test_get_revision_consumer_delegates_imported_ownership_to_shared_authority():
-    from pathlib import Path
-
     source = (Path(__file__).parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
-    get_start = source.index("imported_turn_marker = any(")
-    body = source[get_start:get_start + 900]
+    get_handler = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_handle_session_get"
+    )
+    body = ast.get_source_segment(source, get_handler)
+    assert body is not None
     assert "regeneration_authority(" in body
     assert "imported_turn_marker" in body
 
@@ -875,8 +880,12 @@ def test_snapshot_refuses_when_wal_data_version_changes(monkeypatch, tmp_path):
     ])
     real_conn = sqlite3.connect(db)
     fake = _FakeConn(real_conn)
+    # Bind the temporary DB before the existence check, otherwise this test
+    # returns the empty missing-DB snapshot without ever exercising WAL proof.
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
     monkeypatch.setattr(models, "open_state_db_readonly", lambda _p: fake)
     snap = models.get_state_db_regeneration_tail_snapshot("s1", 50.0)
+    assert fake._dv_calls == 2, "both data_version reads must actually execute"
     assert snap is None, "changed data_version must refuse the bounded snapshot"
 
 
