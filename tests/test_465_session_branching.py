@@ -609,7 +609,7 @@ def test_branch_route_messaging_empty_cli_does_not_copy_hidden_state_db(monkeypa
     monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: source)
     monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
     monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: True)
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: [])
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, **_kw: [])
     monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _s: [conclusion])
     monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("hidden state.db read")))
     monkeypatch.setattr(routes, "merge_session_messages_append_only", lambda side, state, **_k: side + state)

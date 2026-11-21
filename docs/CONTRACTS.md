@@ -144,6 +144,16 @@ contributor guidance; it does not change runtime behavior or CI gates.
   launch-phase claim that covers registration-to-admission, and the lock discipline
   (`STREAMS_LOCK → ACTIVE_RUNS_LOCK`). Start here before changing subscriber liveness, channel
   collection, stream registration, or orphan reclaim (#7302).
+- [`docs/architecture/gateway-dual-store-display-merge.md`](architecture/gateway-dual-store-display-merge.md):
+  current contract for the chronological-union branch of
+  `_merged_session_messages_for_display()`: why a gateway-backed turn exists in
+  both the Agent store and the WebUI sidecar, the Agent message uid the gateway
+  writeback stamps so the two copies pair exactly, which copy survives, the
+  identity checks that must hold before two rows are treated as one turn, and
+  the asymmetric lanes that decide whether display metadata, semantic payload,
+  or `api_content` may travel between them. Start here before changing
+  transcript dedupe, cross-store reconciliation, or anything that pairs rows
+  from the two stores (#7349).
 
 - [`docs/architecture/async-delegation-ledger-owner.md`](architecture/async-delegation-ledger-owner.md):
   owner-ledger resolution and the claim-bound ACK/release/retry/replay scope for
