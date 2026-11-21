@@ -26380,7 +26380,9 @@ def _detect_text_lang(text: str) -> str:
     """
     # Every Latin-1 letter, so accented markers such as não/você/está stay
     # whole words instead of splitting into fragments that match nothing.
-    words = re.findall(r"[a-zà-öø-ÿ']+", (text or "").lower())
+    # An apostrophe splits: Italian c'è/dov'è/com'è then count the stopword
+    # "è", and French c'est/qu'il leave "est"/"il" as they would standing alone.
+    words = re.findall(r"[a-zà-öø-ÿ]+", (text or "").lower())
     if len(words) < 3:
         return ""
     # No articles or prepositions Italian shares with French and Spanish
@@ -26396,6 +26398,9 @@ def _detect_text_lang(text: str) -> str:
         "ho", "hai", "abbiamo", "hanno", "stato", "stata", "stati", "fatto",
         "ecco", "ancora", "nel", "nella", "nelle", "negli", "della", "dello",
         "delle", "degli", "sulla", "dalla", "bene", "perfetto", "faccio",
+        # Spanish funciona/nuevo, Portuguese funciona/novo, French
+        # fonctionne/nouveau: these spellings are Italian only.
+        "funziona", "funzionano", "nuovo", "nuova", "nuovi", "nuove",
     }
     # Words Italian shares with French/Spanish. They only back up a strong
     # Italian vote, and only when no French/Spanish/Portuguese word
@@ -26423,6 +26428,12 @@ def _detect_text_lang(text: str) -> str:
     accented_it = sum(
         1 for w in words if w not in french_grave and any(c in "àìòù" for c in w)
     )
+    # An é is no Italian sign by itself (French marché, Spanish café), but
+    # these -ché conjunctions are Italian only, so they keep their accent vote.
+    accented_it += sum(1 for w in words if w in {
+        "perché", "poiché", "finché", "benché", "purché", "affinché",
+        "sicché", "giacché", "nonché",
+    })
     it_votes += accented_it
     # -zione/-zioni is Italian only (French -tion, Spanish -ción).
     it_votes += sum(1 for w in words if w.endswith(("zione", "zioni")))

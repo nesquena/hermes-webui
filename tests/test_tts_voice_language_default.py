@@ -146,7 +146,18 @@ def _patch_profile_config(monkeypatch, cfg):
             "Non le vedo.",
             "La patch è su GitHub.",
             "Questa cache tiene le sessioni.",
+            "C'è un errore.",
+            "C'è un problema con la build.",
+            "Non c'è problema.",
+            "Dov'è il file?",
+            "Com'è andata la build?",
+            "Perché fallisce sempre?",
+            "Con la nuova patch funziona.",
         ]],
+        # Splitting on the apostrophe must not make French elisions vote Italian.
+        ("C'est la configuration.", ""),
+        ("Qu'il a déjà la connexion.", ""),
+        ("Le marché est fermé.", ""),
         ("", ""),
     ],
 )
@@ -232,6 +243,13 @@ def test_per_language_config_wins_over_configured_voice(monkeypatch):
         ("Ok", "en-US-AvaMultilingualNeural"),
         ("Questo è un test con abbastanza parole.", "it-IT-ElsaNeural"),
         ("This is a test with enough words here.", "en-US-AvaNeural"),
+        ("C'è un errore.", "it-IT-ElsaNeural"),
+        ("C'è un problema con la build.", "it-IT-ElsaNeural"),
+        ("Non c'è problema.", "it-IT-ElsaNeural"),
+        ("Dov'è il file?", "it-IT-ElsaNeural"),
+        ("Com'è andata la build?", "it-IT-ElsaNeural"),
+        ("Perché fallisce sempre?", "it-IT-ElsaNeural"),
+        ("Con la nuova patch funziona.", "it-IT-ElsaNeural"),
     ],
 )
 def test_no_configured_voice(monkeypatch, text, expected):
@@ -334,6 +352,13 @@ _SHORT_ITALIAN_REPLIES = [
     "Non le vedo.",
     "La patch è su GitHub.",
     "Questa cache tiene le sessioni.",
+    "C'è un errore.",
+    "C'è un problema con la build.",
+    "Non c'è problema.",
+    "Dov'è il file?",
+    "Com'è andata la build?",
+    "Perché fallisce sempre?",
+    "Con la nuova patch funziona.",
 ]
 
 
