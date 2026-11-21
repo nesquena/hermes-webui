@@ -367,10 +367,11 @@ function getMatchingCommands(prefix){
       seen.add(bundle.name);
     }
   }
-  // A same-slug bundle owns dispatch. Hold plain skills until the independent
-  // bundle metadata request settles so a slow bundle response cannot briefly
-  // expose a selectable, shadowed skill.
-  if(!_bundleCommandCacheReady)return _rankSlashCommandMatches(matches,q);
+  // A same-slug bundle owns dispatch. Only hold plain skills while a bundle
+  // metadata request is actually IN FLIGHT: a settled success/failure or a
+  // request that was never started must not hide the skill list (existing
+  // /slash autocomplete callers load skills without touching bundle metadata).
+  if(_bundleCommandLoadPromise)return _rankSlashCommandMatches(matches,q);
   for(const skill of _skillCommandCache){
     const name=String(skill&&skill.name||'').toLowerCase();
     const description=String(skill&&skill.desc||'').toLowerCase();
@@ -389,6 +390,13 @@ let _slashPersonalityCachePromise=null;
 let _bundleCommandCache=[];
 let _bundleCommandLoadPromise=null;
 let _bundleCommandCacheReady=false;
+// True once the current-generation bundle request has SETTLED (success or
+// failure). getMatchingCommands() holds plain skills until then, but a settled
+// failure must not hide them forever (#5896 re-gate).
+let _bundleCommandCacheSettled=false;
+// A failed bundle load stays retryable, but the composer asks on every input
+// event: back off so a downed endpoint does not cost two requests per keystroke.
+let _bundleCommandRetryAt=0;
 // Bumped by invalidateSlashSkillCaches(). The two skill-cache loaders below capture
 // it when they issue /api/skills and refuse to commit when it moved while their
 // response was in flight: a reply generated for the previous profile would otherwise
@@ -441,6 +449,7 @@ async function _loadSlashModelSubArgs(force=false){
   }
   if(_slashModelCache&&!force) return _slashModelCache;
   if(_slashModelCachePromise&&!force) return _slashModelCachePromise;
+  const gen=_slashSkillCacheGen;
   _slashModelCachePromise=(async()=>{
     try{
       const data=await api('/api/models');
@@ -461,13 +470,14 @@ async function _loadSlashModelSubArgs(force=false){
         }
       }
       const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      if(gen!==_slashSkillCacheGen) return _slashModelCache||domValues;
       _slashModelCache=deduped;
       return deduped;
     }catch(_){
-      _slashModelCache=domValues;
-      return domValues;
+      if(gen===_slashSkillCacheGen)_slashModelCache=domValues;
+      return _slashModelCache||domValues;
     }finally{
-      _slashModelCachePromise=null;
+      if(gen===_slashSkillCacheGen)_slashModelCachePromise=null;
     }
   })();
   return _slashModelCachePromise;
@@ -476,6 +486,7 @@ async function _loadSlashModelSubArgs(force=false){
 async function _loadSlashPersonalitySubArgs(force=false){
   if(_slashPersonalityCache&&!force) return _slashPersonalityCache;
   if(_slashPersonalityCachePromise&&!force) return _slashPersonalityCachePromise;
+  const gen=_slashSkillCacheGen;
   _slashPersonalityCachePromise=(async()=>{
     try{
       const data=await api('/api/personalities');
@@ -485,13 +496,14 @@ async function _loadSlashPersonalitySubArgs(force=false){
         if(name) values.push(name);
       }
       const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      if(gen!==_slashSkillCacheGen) return _slashPersonalityCache||['none'];
       _slashPersonalityCache=deduped;
       return deduped;
     }catch(_){
-      _slashPersonalityCache=['none'];
-      return _slashPersonalityCache;
+      if(gen===_slashSkillCacheGen)_slashPersonalityCache=['none'];
+      return _slashPersonalityCache||['none'];
     }finally{
-      _slashPersonalityCachePromise=null;
+      if(gen===_slashSkillCacheGen)_slashPersonalityCachePromise=null;
     }
   })();
   return _slashPersonalityCachePromise;
@@ -543,6 +555,27 @@ function invalidateSlashSkillCaches(){
   _skillCommandCache=[];
   _skillCommandCacheReady=false;
   _skillCommandLoadPromise=null;
+  // Slash command metadata is profile-scoped: a profile switch must never
+  // keep profile A's skill/agent/bundle command list authoritative in
+  // profile B (#5896 gate-fail #7).
+  _bundleCommandCache=[];
+  _bundleCommandLoadPromise=null;
+  _bundleCommandCacheReady=false;
+  _bundleCommandCacheSettled=false;
+  _bundleCommandRetryAt=0;
+  _agentCommandCache=null;
+  _agentCommandCachePromise=null;
+  _agentCommandCacheReady=false;
+  // Availability describes the CURRENT profile's registry. Leaving the
+  // previous profile's `true` here makes the send-path fail-closed guard treat
+  // an unknown command as known until the new registry loads.
+  _agentCommandCacheAvailable=false;
+  // /personality and /model sub-arg caches are profile-scoped too: an old
+  // profile's names must not stay offered after the switch (#5896 gate-fail #7).
+  _slashPersonalityCache=null;
+  _slashPersonalityCachePromise=null;
+  _slashModelCache=null;
+  _slashModelCachePromise=null;
 }
 
 function _getSlashSubArgOptions(spec){
@@ -563,9 +596,13 @@ let _agentCommandMetadataRetryAt=0;
 async function loadAgentCommandMetadata(force=false){
   if(_agentCommandCacheReady&&!force)return _agentCommandCache||[];
   if(_agentCommandCachePromise&&!force)return _agentCommandCachePromise;
+  // Capture the profile generation: a reply produced for the outgoing profile
+  // must not commit after invalidateSlashSkillCaches() (#5896 gate-fail #7).
+  const gen=_slashSkillCacheGen;
   _agentCommandCachePromise=(async()=>{
     try{
       const data=await api('/api/commands');
+      if(gen!==_slashSkillCacheGen) return _agentCommandCache||[];
       _agentCommandCache=Array.isArray(data&&data.commands)?data.commands:[];
       _agentCommandCacheAvailable=true;
       _agentCommandCacheReady=true;
@@ -577,11 +614,15 @@ async function loadAgentCommandMetadata(force=false){
       // empty registry: leave ready=false so the next call retries, and record
       // the failure so callers can distinguish an unavailable registry from a
       // genuine unknown command (#7683).
-      _agentCommandCache=null;
-      _agentCommandCacheAvailable=false;
-      _agentCommandCacheReady=false;
+      if(gen===_slashSkillCacheGen){
+        _agentCommandCache=null;
+        _agentCommandCacheAvailable=false;
+        _agentCommandCacheReady=false;
+      }
     }finally{
-      _agentCommandCachePromise=null;
+      // A stale reply must not touch the promise either: the switch already
+      // cleared it and a newer load may own the slot.
+      if(gen===_slashSkillCacheGen)_agentCommandCachePromise=null;
     }
     return _agentCommandCache||[];
   })();
@@ -734,6 +775,17 @@ async function resolveBundleCommand(text,_meta){
   return api('/api/commands/bundles/resolve',{
     method:'POST',
     body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})
+  });
+}
+
+async function resolveSkillCommand(text, sessionId){
+  const command=String(text||'').trim();
+  if(!command) throw new Error('command is required');
+  const body={command};
+  if(sessionId) body.session_id=sessionId;
+  return api('/api/commands/skills/resolve',{
+    method:'POST',
+    body:JSON.stringify(body)
   });
 }
 
@@ -2858,15 +2910,36 @@ async function loadSkillCommands(force=false){
 async function loadBundleCommands(force=false){
   if(_bundleCommandCacheReady&&!force)return _bundleCommandCache;
   if(_bundleCommandLoadPromise&&!force)return _bundleCommandLoadPromise;
+  // Capture the profile generation: a reply produced for the outgoing profile
+  // must not commit after invalidateSlashSkillCaches() (#5896 gate-fail #7).
+  const gen=_slashSkillCacheGen;
+  let _committed=false;
   _bundleCommandLoadPromise=(async()=>{
     try{
       await loadAgentCommandMetadata();
       const data=await api('/api/commands/bundles');
       const deduped=new Map();
       for(const bundle of (data&&data.bundles)||[]){const entry=_buildBundleCommandEntry(bundle);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      if(gen!==_slashSkillCacheGen) return _bundleCommandCache;
       _bundleCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
-    }catch(_){_bundleCommandCache=[];}
-    finally{_bundleCommandCacheReady=true;_bundleCommandLoadPromise=null;}
+      _committed=true;
+    }catch(_){
+      if(gen===_slashSkillCacheGen){
+        _bundleCommandCache=[];
+        _bundleCommandRetryAt=Date.now()+5000;
+      }
+    }
+    finally{
+      // Only publish "ready" after a successful current-generation commit; a
+      // transient failure stays retryable (mirrors loadSkillCommands) but is
+      // SETTLED, so the picker still offers plain skills. A stale reply must not
+      // touch the promise: the switch already cleared it.
+      if(gen===_slashSkillCacheGen){
+        _bundleCommandCacheReady=_committed;
+        _bundleCommandCacheSettled=true;
+        _bundleCommandLoadPromise=null;
+      }
+    }
     return _bundleCommandCache;
   })();
   return _bundleCommandLoadPromise;
@@ -2919,7 +2992,7 @@ function ensureSkillCommandsLoadedForAutocomplete(){
       if(_skillCommandCacheReady)refreshSlashCommandDropdown();
     });
   }
-  if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise){
+  if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise&&Date.now()>=_bundleCommandRetryAt){
     loadBundleCommands().then(()=>{
       if(_bundleCommandCacheReady)refreshSlashCommandDropdown();
     });
