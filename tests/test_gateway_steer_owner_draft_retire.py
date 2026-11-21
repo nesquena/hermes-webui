@@ -23,7 +23,9 @@ def _run(scenario):
     ses = (ROOT / 'static/sessions.js').read_text(encoding='utf-8')
     msg = (ROOT / 'static/messages.js').read_text(encoding='utf-8')
     parts = [
-        _slice(ses, 'let _draftSaveTimer = null;', 'function _composerDraftFileSignature('),
+        # The serialized context-transition coordinator newSession() runs inside.
+        _slice(ses, 'let _contextTransitionGeneration=0;', 'let _newSessionInFlight=null;'),
+        _slice(ses, 'const _draftSaveTimerByOwner = new Map();', 'function _composerDraftFileSignature('),
         _slice(ses, 'function _composerDraftFileSignature(', 'function _profileMatchesActiveProfile('),
         _slice(ses, 'function _isRestorableNewChatDraftSession(', 'function _adoptRegenerationRevision('),
         _slice(ses, 'function _saveComposerDraft(', 'const SESSION_VIEWED_COUNTS_KEY'),

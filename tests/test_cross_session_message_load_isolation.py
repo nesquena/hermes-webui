@@ -137,6 +137,10 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+CLAIM_PANE_NAVIGATION_SRC = _extract_function(SESSIONS_SRC, "_claimPaneNavigation")
+PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC = _extract_function(
+    SESSIONS_SRC, "_paneNavigationClaimIsCurrent"
+)
 COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
     _extract_function(SESSIONS_SRC, name)
     for name in (
@@ -165,6 +169,14 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_restoreComposerDraft",
         "_switchProfileForSessionLoad",
         "_clearComposerDraft",
+        "_composerPendingFilesOwnerKey",
+        "_composerPendingFileIsLive",
+        "_clearComposerDraftSaveTimer",
+        "_queueComposerDraftWrite",
+        "_syncComposerOwnerStateFromDraft",
+        "_rememberComposerPendingFiles",
+        "_forgetComposerPendingFiles",
+        "_restoreComposerPendingFiles",
     )
 )
 
@@ -284,6 +296,7 @@ function createEnvironment() {
   globalThis._loadingSessionId = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  globalThis._paneNavigationGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
@@ -438,11 +451,17 @@ const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _composerDraftLocalFallbackBySid = new Map();
 const _composerDraftLatestIntentSequenceBySid = new Map();
 const _composerDraftPostPromisesBySid = new Map();
+const _composerDraftWriteBySid = new Map();
+const _composerPendingFilesByOwner = new Map();
+const _draftSaveTimerByOwner = new Map();
+const _draftSavePendingBySid = new Map();
 let _composerDraftIntentSequence = 0;
 __COMPOSER_DRAFT_HELPERS_SRC__
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
+__CLAIM_PANE_NAVIGATION_SRC__
+__PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -1061,6 +1080,11 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
+        .replace("__CLAIM_PANE_NAVIGATION_SRC__", CLAIM_PANE_NAVIGATION_SRC)
+        .replace(
+            "__PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC__",
+            PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC,
+        )
         .replace("__COMPOSER_DRAFT_HELPERS_SRC__", COMPOSER_DRAFT_HELPERS_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
@@ -1257,6 +1281,11 @@ def test_new_chat_pane_takeover_midflight_does_not_write_stale_rows(tmp_path):
         )
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
+        )
+        .replace("__CLAIM_PANE_NAVIGATION_SRC__", CLAIM_PANE_NAVIGATION_SRC)
+        .replace(
+            "__PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC__",
+            PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC,
         )
         .replace("__COMPOSER_DRAFT_HELPERS_SRC__", COMPOSER_DRAFT_HELPERS_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
