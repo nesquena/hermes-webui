@@ -449,10 +449,29 @@ function _sessionSkillUsage(){
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
 // Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
+// #5747: tools that mutate files through shell/python TEXT (sed -i, shell
+// redirects, open(...,'w')) rather than a structured path arg. Their
+// command/code/result text is scanned for the open preview's path so the
+// preview still refreshes after such edits. Complements #5752 (which scoped
+// these tools as a follow-up).
+const ARTIFACT_TEXT_MUTATION_TOOLS = new Set(['terminal','execute_code']);
 
-function _normalizeArtifactPath(path){
+// #5747 re-gate (F2): collapse '.'/'..' segments so workdir-relative resolution
+// and workspace containment are exact — no path can escape via '..'.
+function _collapseDotSegments(p){
+  const parts=String(p||'').split('/');
+  const out=[];
+  for(const part of parts){
+    if(part===''||part==='.') continue;
+    if(part==='..'){ if(out.length) out.pop(); }
+    else out.push(part);
+  }
+  return '/'+out.join('/');
+}
+
+function _normalizeArtifactPath(path, opts){
   if(!path) return '';
-  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  path = String(path).trim().replace(/[`"'<>),.;:]+$/g,'').replace(/^[`"'(<]+/g,'');
   if(!path || path.length > 240 || path.includes('://')) return '';
   // Canonicalize workspace-relative prefixes so a file-tree open ("foo.md") and a
   // tool arg recorded as "./foo.md" or "~/foo.md" compare equal for mutation
@@ -461,7 +480,32 @@ function _normalizeArtifactPath(path){
   path = path.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   if(!path) return '';
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
-  if(!/[./]/.test(path)) return '';
+  // #5747 re-gate (F2): honor the tool's effective workdir when provided.
+  // Resolve relative paths against it, collapse ../ segments, and require
+  // containment inside the active workspace root — foreign/escaping paths are
+  // rejected ('') and the result is normalized to a workspace-relative key so
+  // it compares equal to the open preview's path.
+  if(opts && opts.workdir){
+    const root=(typeof S!=='undefined'&&S&&S.session&&S.session.workspace)
+      ? String(S.session.workspace).replace(/\/+$/,'') : '';
+    const wd=String(opts.workdir).replace(/\/+$/,'');
+    let abs;
+    if(path.startsWith('/')) abs=path;
+    else if(wd) abs=wd+'/'+path;
+    else abs=path;
+    abs=_collapseDotSegments(abs);
+    if(root){
+      if(abs===root) return '';
+      if(!abs.startsWith(root+'/')) return ''; // foreign / escaping path
+      path=abs.slice(root.length+1);
+    } else {
+      path=abs;
+    }
+  }
+  // #5747: allow extension-less root files (Makefile, Dockerfile) when the path
+  // comes from a structured tool arg ({allowBare:true}); text-mined candidates
+  // keep the strict filter so prose like "hello" can't become an artifact.
+  if(!(opts&&opts.allowBare)&&!/[./]/.test(path)) return '';
   return path;
 }
 
@@ -493,14 +537,14 @@ function _artifactCandidatesFromToolCall(tc){
   const args = tc.arguments || tc.args || tc.input || {};
   const result = tc.result || tc.output || tc.snippet || '';
   const out = [];
-  const add = (path, source=name || 'tool') => {
-    path = _normalizeArtifactPath(path);
+  const add = (path, source=name || 'tool', addOpts) => {
+    path = _normalizeArtifactPath(path, addOpts);
     if(path) out.push({path, kind:source});
   };
   if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
-    for(const key of ['path','file_path','source','destination']) add(args[key]);
-    if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
-    if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));
+    for(const key of ['path','file_path','source','destination']) add(args[key], name || 'tool', {allowBare:true});
+    if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p, name || 'tool', {allowBare:true}));
+    if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path, name || 'tool', {allowBare:true}));
   }
   const resultText = typeof result === 'string' ? result : (result ? JSON.stringify(result) : '');
   // Tool results may include unified diffs from patch-style tools; scan those
@@ -513,17 +557,169 @@ function _artifactCandidatesFromToolCall(tc){
   return out;
 }
 
-const _turnMutatedPreviewPaths = new Set();
+// #5747 re-gate (F2): pending mutations are keyed by full visible owner
+// (session/profile/workspace/stream) + normalized workspace-relative path, so a
+// terminal/execute_code write in one session/profile/workspace can never
+// refresh the preview of another. The live authorities are
+// S.session.session_id, the string S.activeProfile, and S.session.workspace —
+// not the phantom S.session?.id / S.activeProfile?.id / S.activeWorkspace?.id
+// fields that were always undefined.
+const _turnMutatedPreviewPaths = new Map(); // mutationKey(owner+path) -> entry{...owner, path}
+
+function _currentMutationOwner(){
+  return {
+    sessionId: (S && S.session && S.session.session_id) ? String(S.session.session_id) : '',
+    profile: (S && S.activeProfile) ? String(S.activeProfile) : 'default',
+    workspace: (S && S.session && S.session.workspace) ? String(S.session.workspace) : '',
+    streamId: (S && S.activeStreamId) ? String(S.activeStreamId) : '',
+  };
+}
+
+function _mutationKey(owner, path){
+  // #5747 re-gate (F2): keyed by durable pane ownership only. S.activeStreamId is
+  // transient — the stream-done path clears it before the settled replay runs —
+  // so including it orphaned every entry recorded under that stream and the
+  // pending refresh could never fire. streamId stays on the owner record for
+  // logging; it is not part of the identity.
+  return JSON.stringify([owner.sessionId, owner.profile, owner.workspace, path]);
+}
+
+// Stable identity of already-consumed tool events (F3): the live tool_complete
+// handler consumes each mutation exactly once, and the stream-settle replay
+// (noteWorkspaceMutationsFromToolCalls) must not re-add those same events
+// (settlement double-add). The object flag travels with the call through
+// _mergeSettledToolCallsWithLiveMetadata; the tid set is a second net for
+// merged copies that lost the flag.
+let _consumedMutationToolIds = new Set();
+const _CONSUMED_MUTATION_TOOL_IDS_MAX = 400;
+
+function _toolMutationIdentity(tc){
+  if(!tc||typeof tc!=='object') return '';
+  const id=tc.tid||tc.tool_call_id||tc.tool_use_id||tc.call_id||tc.id||'';
+  if(id) return 'tid:'+String(id);
+  let argsStr='';
+  try{ argsStr=JSON.stringify(tc.arguments||tc.args||tc.input||{}); }catch(_){}
+  return 'sig:'+String(tc.name||'')+'|'+argsStr+'|'+String(tc.preview||tc.snippet||'').slice(0,80);
+}
 
 function resetTurnWorkspaceMutations(){
   _turnMutatedPreviewPaths.clear();
+  _consumedMutationToolIds.clear();
+}
+
+// #5747: terminal/execute_code don't expose a structured path arg — the
+// mutation target lives in the shell command / python code / tool result text.
+// Extract only the TARGETS of recognized write operations (sed -i, shell
+// redirects, patch -o, open(...,'w'), write_file(...)) so a mere path mention
+// in prose is never treated as a mutation (F2: mention ≠ change). Each target
+// is resolved against the tool's workdir below.
+function _textWriteOpTargets(text){
+  if(!text || typeof text !== 'string') return [];
+  const out=[];
+  const push=(t)=>{
+    if(!t) return;
+    const s=String(t).trim().replace(/^['"`]+|['"`;,]+$/g,'');
+    if(s) out.push(s);
+  };
+  let m;
+  // 1. shell redirects: `> file` / `>> file` (excludes numeric-fd / stderr dup
+  //    forms like `2> err.log` and `2>&1` — those don't mutate the target).
+  const redirRe=/(^|[\s;|&(])(?:>>?)\s*(?:"([^"]*)"|'([^']*)'|([^\s;|&<>"'`]+))/g;
+  while((m=redirRe.exec(text))){
+    const t=m[2]||m[3]||m[4];
+    if(t && !/^&?\d+$/.test(t)) push(t);
+  }
+  // 2. `sed -i ... <file>` — the last bare token of the sed invocation.
+  const sedRe=/(?:^|[\s;|&])sed\s+-i\b([^;|&\n]*)/g;
+  while((m=sedRe.exec(text))){
+    const toks=(m[1]||'').split(/\s+/).filter(Boolean);
+    if(toks.length) push(toks[toks.length-1]);
+  }
+  // 3. `patch ... -o <file>`.
+  const patchRe=/\bpatch\b([^;|&\n]*?)\s+-o\s+(?:"([^"]+)"|'([^']+)'|([^\s;|&<>"'`]+))/g;
+  while((m=patchRe.exec(text))){
+    push(m[2]||m[3]||m[4]);
+  }
+  // 4. python open('<path>', '<mode>') with a write-capable mode (w/a/+).
+  const openRe=/\bopen\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*,\s*(?:"([^"]*)"|'([^']*)')\s*\)/g;
+  while((m=openRe.exec(text))){
+    const mode=String(m[3]||m[4]||'').toLowerCase();
+    if(/^[rwa]b?\+?$/.test(mode) && (mode[0]==='w'||mode[0]==='a'||mode.includes('+'))) push(m[1]||m[2]);
+  }
+  // 5. write_file('<path>', ...) calls embedded in code text.
+  const wfRe=/\bwrite_file\s*\(\s*(?:"([^"]+)"|'([^']+)')/g;
+  while((m=wfRe.exec(text))) push(m[1]||m[2]);
+  return out;
+}
+
+// Write-op targets resolved to canonical workspace-relative paths (or dropped
+// when they escape the active workspace). `workdir` is the tool's effective
+// working directory (args.workdir, falling back to the session workspace).
+function _textPathTokens(text, workdir){
+  if(!text || typeof text !== 'string') return [];
+  const out=[];
+  for(const raw of _textWriteOpTargets(text)){
+    const p=_normalizeArtifactPath(raw,{allowBare:true, workdir:workdir});
+    if(p && !out.includes(p)) out.push(p);
+  }
+  return out;
 }
 
 function noteWorkspaceMutationsFromToolCall(tc){
-  for(const a of _artifactCandidatesFromToolCall(tc)){
-    const path=_normalizeArtifactPath(a.path);
-    if(path) _turnMutatedPreviewPaths.add(path);
+  // F3: consume each tool event once — the live tool_complete handler records
+  // the mutation; the stream-settle replay (noteWorkspaceMutationsFromToolCalls)
+  // must not re-add the same event (settlement double-add).
+  if(tc && typeof tc==='object' && tc._workspaceMutationConsumed) return;
+  const ident=_toolMutationIdentity(tc);
+  if(ident&&_consumedMutationToolIds.has(ident)) return;
+  if(ident){
+    if(_consumedMutationToolIds.size>=_CONSUMED_MUTATION_TOOL_IDS_MAX) _consumedMutationToolIds=new Set();
+    _consumedMutationToolIds.add(ident);
   }
+  const owner=_currentMutationOwner();
+  // F1: candidates are already normalized — structured ones with
+  // {allowBare:true}, so extension-less root files (Makefile, Dockerfile)
+  // survive. Insert them directly; do not re-normalize without allowBare
+  // (that would drop `Makefile` before it ever reaches the mutation sink).
+  for(const a of _artifactCandidatesFromToolCall(tc)){
+    const path=a.path;
+    if(path) _turnMutatedPreviewPaths.set(_mutationKey(owner,path),{...owner,path:path});
+  }
+  // #5747: text-based mutation tools (terminal/execute_code) — scan command,
+  // code, and result text so preview auto-refresh works for shell/python edits.
+  // F2: only explicit write-op TARGETS count (a mere path mention is never a
+  // mutation), and every candidate is resolved against the tool's effective
+  // workdir (args.workdir → S.session.workspace) and rejected when it escapes
+  // the active workspace. Entries are keyed by owner+path, not path alone.
+  const name = String(tc && tc.name || '').replace(/^functions\./,'');
+  if(ARTIFACT_TEXT_MUTATION_TOOLS.has(name)){
+    const args = (tc && (tc.arguments || tc.args || tc.input)) || {};
+    const result = (tc && (tc.result || tc.output || tc.snippet)) || '';
+    const workdir = (args && typeof args==='object' && args.workdir)
+      || (S && S.session && S.session.workspace) || '.';
+    // #5747 re-gate (F1): the write-op parser expects RAW command/code text — its
+    // shell anchors require whitespace before the operator and JSON framing puts a
+    // quote or colon there, while escaping hides the target. Scan the canonical
+    // payload fields instead of JSON.stringify(args); args.workdir stays the
+    // normalization metadata. Result text is a separate source and still goes
+    // through the same strict write-op extractor, so a mere path mention never
+    // counts as a mutation (F2: mention != change).
+    const texts = [];
+    if(typeof args === 'string') texts.push(args);
+    else if(args && typeof args === 'object'){
+      if(typeof args.command === 'string') texts.push(args.command);
+      if(typeof args.code === 'string') texts.push(args.code);
+    }
+    if(typeof result === 'string') texts.push(result);
+    else if(result) texts.push(JSON.stringify(result));
+    for(const t of texts){
+      for(const p of _textPathTokens(t, workdir)){
+        const key=_mutationKey(owner,p);
+        if(!_turnMutatedPreviewPaths.has(key)) _turnMutatedPreviewPaths.set(key,{...owner,path:p});
+      }
+    }
+  }
+  if(tc && typeof tc==='object') tc._workspaceMutationConsumed=true;
 }
 
 function noteWorkspaceMutationsFromToolCalls(toolCalls){
@@ -533,8 +729,39 @@ function noteWorkspaceMutationsFromToolCalls(toolCalls){
 
 function _isOpenPreviewPathMutated(){
   if(!_previewCurrentPath) return false;
-  const current=_normalizeArtifactPath(_previewCurrentPath);
-  return !!(current&&_turnMutatedPreviewPaths.has(current));
+  const current=_normalizeArtifactPath(_previewCurrentPath, {allowBare:true});
+  if(!current) return false;
+  // F2: ownership is encoded in the key (session/profile/workspace/stream + path).
+  return _turnMutatedPreviewPaths.has(_mutationKey(_currentMutationOwner(),current));
+}
+
+let _previewRefreshPromise = null;
+
+// F3 (re-gate 2026-10-29): the preview's stale-read contract is the base's
+// ownership token — `_previewOpenOwned(openGen, sessionId, wsTreeGen)` — not a
+// stream id. A run that ends clears `S.activeStreamId`, and keying staleness on
+// it discarded the refresh for the last tool call of every turn (the very bug
+// #5747 is about). Every async branch of openFile() therefore guards through
+// _previewOpenOwned, and `clearPreview()` retires in-flight opens by bumping
+// `_previewOpenGen`.
+
+// Drain every pending mutation for the currently open preview, reloading via
+// openFile() once per entry. A mutation recorded while a reload is in flight
+// triggers another pass, so no mutation is dropped; concurrent triggers
+// coalesce onto the single in-flight promise (F3: one mutation → at most one
+// reload; N mutations → at most N sequential reloads).
+async function _runPreviewRefreshLoop(){
+  while(true){
+    if(!S || !S.session || !_previewCurrentPath) return;
+    const current=_normalizeArtifactPath(_previewCurrentPath, {allowBare:true});
+    if(!current) return;
+    const key=_mutationKey(_currentMutationOwner(),current);
+    if(!_turnMutatedPreviewPaths.has(key)) return;
+    // Consume the entry before reloading so one mutation entry drives at most
+    // one reload — even if further triggers race with the reload.
+    _turnMutatedPreviewPaths.delete(key);
+    await openFile(_previewCurrentPath, { bustCache: true });
+  }
 }
 
 async function refreshOpenPreviewIfMutated(){
@@ -543,21 +770,29 @@ async function refreshOpenPreviewIfMutated(){
   if(typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits()) return;
   if(!_isOpenPreviewPathMutated()) return;
   if(!_previewCurrentPath||!S.session) return;
-  await openFile(_previewCurrentPath, { bustCache: true });
+  // Coalesce concurrent triggers onto the single in-flight refresh.
+  if(_previewRefreshPromise) return _previewRefreshPromise;
+  _previewRefreshPromise=_runPreviewRefreshLoop().finally(()=>{_previewRefreshPromise=null;});
+  return _previewRefreshPromise;
 }
 
 function collectSessionArtifacts(){
   const items = [];
   const seen = new Set();
-  const push = (path, source) => {
-    path = _normalizeArtifactPath(path);
+  const push = (path, source, structured) => {
+    // #5747 re-gate (F5): structured candidates arrive already normalized by
+    // _artifactCandidatesFromToolCall (which runs the allowBare pass for
+    // extension-less root files), so re-normalizing them here silently discards
+    // `Makefile` / `Dockerfile`. Only text-mined candidates need the strict
+    // normalization — provenance decides, not the path shape.
+    if(!structured) path = _normalizeArtifactPath(path);
     if(!path || seen.has(path)) return;
     seen.add(path); items.push({path, source});
   };
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
   for(const tc of (S.toolCalls || [])){
-    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
+    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool', true);
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
@@ -577,7 +812,7 @@ function collectSessionArtifacts(){
         let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
         if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
         const fakeTc = {name, args, result: tc.result || tc.output || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool');
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool', true);
       }
     }
     // Structured content array with tool_use blocks (Anthropic format).
@@ -587,7 +822,7 @@ function collectSessionArtifacts(){
         let inp = block.input || {};
         if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
         const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool');
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool', true);
       }
     }
   }
@@ -1440,6 +1675,11 @@ async function toggleEditMode(){
       _previewEditSessionId=(S.session&&S.session.session_id)||'';
       _previewEditWorkspace=(S.session&&S.session.workspace)||'';
       _previewDirty=false;
+      // #5747 re-gate (F2): clearing the dirty flag makes this pane eligible for
+      // refresh again — a mutation recorded while the user was editing is still
+      // pending (durable key, see _mutationKey) and must drain now, otherwise it
+      // stays orphaned until an unrelated trigger.
+      if(typeof refreshOpenPreviewIfMutated==='function') refreshOpenPreviewIfMutated();
       // Update read-only views AND the cached raw content so a later
       // "Render as markdown anyway" force-render reflects the just-saved text
       // (not the stale pre-edit fetch). #3378 review (Codex).
@@ -1483,6 +1723,9 @@ function cancelEditMode(){
   if(_previewCurrentMode==='code') $('previewCode').style.display='';
   else $('previewMd').style.display='';
   _resetPreviewDirty();
+  // #5747 re-gate (F2): same drain as the save path — cancel makes the pane
+  // eligible again, so a pending mutation recorded while editing must fire here.
+  if(typeof refreshOpenPreviewIfMutated==='function') refreshOpenPreviewIfMutated();
 }
 
 // Map file extensions to Prism.js language identifiers.
@@ -1627,7 +1870,13 @@ async function openFile(path, opts={}){
         return true;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed')); return false;}
+    // #5747 re-gate (F4): a rejection can land after a newer openFile() call, and
+    // its failure status belongs to a preview that is no longer showing.
+    }catch(e){
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
+      setStatus(t('file_open_failed'));
+      return false;
+    }
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1662,6 +1911,9 @@ async function openFile(path, opts={}){
       if(renderCsvPreviewContent(path, data.content)) return true;
       renderCodePreviewContent(path, data.content);
     }catch(e){
+      // #5747 re-gate (F4): same ownership guard as the markdown catch — a
+      // superseded read must not trigger a download for the pane that moved on.
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       downloadFile(path);
       return false;   // downloaded, nothing previewed
     }
@@ -1685,6 +1937,11 @@ async function openFile(path, opts={}){
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){
+      // #5747 re-gate (F4): clear-grant/toast/download are rejection-side effects
+      // of THIS read. When a newer openFile() superseded it they would clear the
+      // wrong pane's grant and download a file the user already navigated away
+      // from — bail out first.
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
