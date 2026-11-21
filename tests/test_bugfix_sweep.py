@@ -1,3 +1,4 @@
+import ast
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,12 +142,48 @@ def test_session_url_builder_strips_legacy_session_query_alias():
     assert "current.searchParams.delete('session_id');" in helper
 
 
+def _session_visibility_get_exemptions():
+    tree = ast.parse((ROOT / "api" / "routes.py").read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_request_session_visibility_exempt"
+    )
+    for branch in ast.walk(function):
+        if not isinstance(branch, ast.If):
+            continue
+        comparisons = [node for node in ast.walk(branch.test) if isinstance(node, ast.Compare)]
+        is_get = any(
+            isinstance(node.left, ast.Name) and node.left.id == "method"
+            and any(isinstance(op, ast.Eq) for op in node.ops)
+            and any(isinstance(value, ast.Constant) and value.value == "GET" for value in node.comparators)
+            for node in comparisons
+        )
+        if not is_get:
+            continue
+        path_membership = next(
+            node for node in comparisons
+            if isinstance(node.left, ast.Name) and node.left.id == "path"
+            and any(isinstance(op, ast.In) for op in node.ops)
+        )
+        return set(ast.literal_eval(path_membership.comparators[0]))
+    raise AssertionError("GET session-visibility exemption branch not found")
+
+
 def test_cross_profile_session_deep_links_switch_profile_instead_of_self_healing():
-    routes = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+    from api import routes
+
+    routes_source = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
-    assert '"code": "session_profile_mismatch"' in routes
-    assert 'if method == "GET" and path == "/api/session":' in routes
+    assert _session_visibility_get_exemptions() == {"/api/session", "/api/session/turns"}
+    for path in ("/api/session", "/api/session/turns"):
+        assert routes._request_session_visibility_exempt("GET", path) is True
+        assert routes._request_session_visibility_exempt("HEAD", path) is False
+        assert routes._request_session_visibility_exempt("POST", path) is False
+    for path in ("/api/sessions", "/api/session/duplicate", "/api/session/turn", None):
+        assert routes._request_session_visibility_exempt("GET", path) is False
+
+    assert '"code": "session_profile_mismatch"' in routes_source
     assert "function _sessionProfileMismatchFromError" in sessions
     assert "_switchProfileForSessionLoad(profileMismatch.profile)" in sessions
     assert "skipProfileResolve:true" in sessions
