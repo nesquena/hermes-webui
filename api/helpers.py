@@ -1272,6 +1272,15 @@ _STREAM_DELTA_PEM_WINDOW = 16384
 _STREAM_ENV_KEY_NAME_RE = _re.compile(
     r"[A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}"
 )
+# The literal markers whose PREFIX can arrive before the rest of the marker.
+# Only these need the tail window: a pattern-shaped secret (the regexes above)
+# is recognised by its whole shape, so a partial arrival is not yet a secret
+# and must not be held back — holding it would split ordinary text.
+_STREAM_MARKER_PREFIXES = tuple(
+    marker for marker in (
+        _SENSITIVE_CASE_MARKERS + _SENSITIVE_LOWER_MARKERS
+    ) if isinstance(marker, str) and marker
+)
 
 
 def _stream_secret_starts(text: str) -> tuple[list[int], set[int]]:
@@ -1348,6 +1357,36 @@ class StreamDeltaRedactor:
         self._enabled = bool(load_settings().get("api_redact_enabled", True))
         self._tail = ""
 
+    def _stream_marker_prefix_tail(self, text: str) -> str:
+        """Return the trailing part of *text* that could still grow into a marker.
+
+        A marker only matters when the text already contains one in full — the
+        redaction pass handles that case. What the tail window has to protect is
+        the OTHER case: a marker that has only partially arrived, so its prefix is
+        at the very END of the text and the rest arrives with the next delta.
+
+        So the held tail is exactly the longest suffix of *text* that is a proper
+        prefix of some marker. Ordinary text has no such suffix, so nothing is
+        held back and the delta is emitted verbatim — which is what keeps a
+        non-secret message from being split in the middle across two frames.
+
+        A one-character suffix is never a prefix worth holding: markers like
+        ``key_material`` and ``key=`` start with ``k``, so holding a trailing
+        ``k`` would split every ordinary word that ends in one.
+        """
+        if not text:
+            return ""
+        best = ""
+        for marker in _STREAM_MARKER_PREFIXES:
+            upper = len(marker) - 1
+            for size in range(min(upper, len(text)), 1, -1):
+                candidate = text[-size:]
+                if marker.startswith(candidate):
+                    if size > len(best):
+                        best = candidate
+                    break
+        return best
+
     def feed(self, delta: str) -> str:
         """Consume one delta; return the redacted text safe to emit now.
 
@@ -1361,12 +1400,10 @@ class StreamDeltaRedactor:
             return ""
         buf = self._tail + delta
         starts, pem = _stream_secret_starts(buf)
-        # Hold back the last character always: a secret may start exactly
-        # there and continue in the next delta.
-        cut = len(buf) - 1
-        if cut <= 0:
-            self._tail = buf
-            return ""
+        # A marker already present in the buffer is redacted in full, so the
+        # buffer can be cut right before it. A marker that has only partially
+        # arrived lives at the very end and is held by the prefix tail below.
+        cut = len(buf)
         for start in sorted(starts, reverse=True):
             if start >= cut:
                 continue
@@ -1375,6 +1412,10 @@ class StreamDeltaRedactor:
             ) <= cut:
                 continue
             cut = start
+        # Hold back only the trailing run that could still become a marker.
+        held = self._stream_marker_prefix_tail(buf[:cut] if cut < len(buf) else buf)
+        if held:
+            cut = len(buf) - len(held)
         if cut <= 0:
             self._tail = buf
             return ""

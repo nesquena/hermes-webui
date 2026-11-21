@@ -179,12 +179,20 @@ def test_flush_releases_held_tail_without_swallowing_text():
 
 
 def test_flush_after_ordinary_deltas_releases_exactly_the_tail():
+    """Ordinary text is released as it arrives; only a marker prefix is held.
+
+    The previous expectation — "exactly the last character stays buffered" —
+    pinned the behaviour that split ordinary prose across frames, which is
+    what the browser lifecycle gate caught. The tail window now holds only a
+    run that could still grow into a marker, so ordinary text goes out whole
+    and the flush has nothing to release.
+    """
     red = _redactor()
     text = "The quick brown fox"
     emitted = "".join(red.feed(text[i : i + 3]) for i in range(0, len(text), 3))
 
-    assert emitted == text[:-1], "exactly the last character stays buffered"
-    assert emitted + red.flush() == text
+    assert emitted == text, "ordinary text must not be held back"
+    assert red.flush() == "", "nothing of ordinary text should remain buffered"
 
 
 # ── 6. Control: no over-redaction of secret-shaped prefixes ────────────────
@@ -382,3 +390,70 @@ def test_failed_run_still_redacts_a_split_secret():
         {"event": "run.failed", "error": "boom"},
     ])
     assert secret not in text, "the failure path must not release a secret in the clear"
+
+
+# ── Ordinary text must not be split across frames ────────────────────────
+#
+# The tail window exists to protect a marker whose PREFIX arrived before the
+# rest of it. Holding back anything else splits ordinary prose in the middle:
+# the front end then receives a truncated first frame and a detached tail
+# frame, and a message row that the front end matches by content (a process
+# row, for instance) never renders.
+#
+# The browser lifecycle gate caught exactly this: the terminal-error scenario
+# streams one delta and expects it intact.
+
+
+def test_ordinary_text_is_emitted_in_one_piece_not_split():
+    """A single delta must be emitted WHOLE, not split across frames.
+
+    The frame boundary is what matters, not the eventual concatenation: the
+    front end matches a process row by content, so a delta that arrives in
+    two pieces (a truncated head plus a detached tail) never renders as the
+    row it names. The lifecycle gate's terminal-error scenario streams exactly
+    one delta and expects that one frame intact.
+    """
+    text = "Lifecycle terminal process check"
+    red = _redactor()
+    first = red.feed(text)
+    assert first == text, (
+        f"ordinary text was split across frames: {first!r}"
+    )
+
+
+def test_ordinary_text_is_not_split_even_when_it_ends_mid_word():
+    """A delta whose last characters are not a marker prefix stays whole."""
+    red = _redactor()
+    assert red.feed("a quick brown fox") == "a quick brown fox"
+
+
+def test_marker_prefix_at_the_end_is_held_until_the_next_delta():
+    """A real marker prefix IS held back, so the secret cannot leak early.
+
+    This is the deliberate trade: a delta ending in a marker prefix is held
+    (and released by the next delta or the flush) rather than emitted whole.
+    The alternative — emitting it — would put the first characters of a split
+    secret in the clear.
+    """
+    secret = _FAKE_GHP
+    red = _redactor()
+    first = red.feed(secret[:8])
+    assert secret[:8] not in first, (
+        f"the marker prefix was emitted before the secret was complete: {first!r}"
+    )
+    rest = red.feed(secret[8:]) + red.flush()
+    assert secret not in first + rest, "the split secret leaked in the clear"
+
+
+def test_one_character_suffix_is_never_held():
+    """A single trailing character is not a prefix worth holding.
+
+    Markers like ``key_material`` and ``key=`` begin with ``k``, so holding a
+    trailing ``k`` would split every ordinary word ending in one.
+    """
+    red = _redactor()
+    assert red.feed("a quick check") == "a quick check"
+    red2 = _redactor()
+    assert red2.feed("ok") == "ok"
+    red3 = _redactor()
+    assert red3.feed("look") == "look"
