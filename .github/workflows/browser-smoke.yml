@@ -140,6 +140,10 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_smoke.py
 
+      - name: Run composer tooltip geometry gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_composer_tooltip_geometry.py
+
       - name: Run new-chat focus gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_new_chat_focus.py

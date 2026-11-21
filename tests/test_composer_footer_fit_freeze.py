@@ -17,9 +17,9 @@ Every class or style mutation and every overflow measurement commits a layout
 sample, so the recorded sequence of footer heights / messages client heights
 is exactly what a browser would have painted.
 
-Covered from each starting stage (full, icons, burger) and for each forced
-overflow outcome (full, icons, burger), with empty and caller-owned prior
-inline styles:
+Covered from each starting stage (full, shrink, icons, burger) and for each
+forced overflow outcome (full, shrink, icons, burger), with empty and
+caller-owned prior inline styles:
   * the resolved stage classes are correct;
   * the footer border-box height and the messages client height never move
     while the probe runs (no intermediate geometry, no resize notification);
@@ -44,8 +44,13 @@ UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
-STAGES = ("full", "icons", "burger")
-STAGE_CLASSES = {"full": "", "icons": "cf-icons", "burger": "cf-burger cf-icons"}
+STAGES = ("full", "shrink", "icons", "burger")
+STAGE_CLASSES = {
+    "full": "",
+    "shrink": "cf-shrink",
+    "icons": "cf-icons",
+    "burger": "cf-burger cf-icons",
+}
 
 
 _DRIVER_SRC = r"""
@@ -68,14 +73,22 @@ function extractFunc(name) {
 // cluster's content width. The left cluster's clientWidth is the width the
 // scenario makes available; scrollWidth is content width clamped to it, so
 // overflow (scrollWidth > clientWidth + 1) depends on the CURRENT stage.
-const STAGE_HEIGHT = { full: 56, icons: 48, burger: 40 };
-const STAGE_LEFT_WIDTH = { full: 900, icons: 600, burger: 300 };
-const OUTCOME_WIDTH = { full: 1000, icons: 700, burger: 400 };
-const STAGE_CLASSES = { full: [], icons: ['cf-icons'], burger: ['cf-icons', 'cf-burger'] };
+const STAGE_HEIGHT = { full: 56, shrink: 52, icons: 48, burger: 40 };
+const STAGE_LEFT_WIDTH = { full: 900, shrink: 760, icons: 600, burger: 300 };
+const OUTCOME_WIDTH = { full: 1000, shrink: 800, icons: 700, burger: 400 };
+const STAGE_CLASSES = {
+  full: [],
+  shrink: ['cf-shrink'],
+  icons: ['cf-icons'],
+  burger: ['cf-icons', 'cf-burger'],
+};
 const VIEWPORT_HEIGHT = 800;
 
 function stageOf(classes) {
-  return classes.has('cf-burger') ? 'burger' : classes.has('cf-icons') ? 'icons' : 'full';
+  return classes.has('cf-burger') ? 'burger'
+    : classes.has('cf-icons') ? 'icons'
+    : classes.has('cf-shrink') ? 'shrink'
+    : 'full';
 }
 
 function makeFooterDom(opts) {
