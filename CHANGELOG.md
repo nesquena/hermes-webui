@@ -45,6 +45,8 @@
 
 ### Fixed
 
+- **On a server launched under a named profile, values from that profile's `.env` are recognised however the line is written (#9212).** WebUI now compares launch values with the profile's `.env` as WebUI, the launcher and the Agent each read it, so a value loaded from that file is never taken for the operator's own launch setting. The Gateway settings check uses the same comparison. Servers launched as root are unchanged.
+
 - **Login and read-aloud rate limits ignore a forwarded client address that carries an IPv6 zone (#9211).** Behind a trusted proxy, a forwarded IPv6 client address with a scope ID now falls back to the connecting peer, as other unusable forwarded values already did. Unscoped addresses and deployments without a trusted proxy are unchanged.
 
 - **Deleting a Gateway-backed session works again on Hermes Agent v0.23.3 and later (#9218, closes #9213).** Since the Agent moved its session-retirement step in v0.23.3, deleting a session that had Gateway runs failed with "runtime ledger unavailable". WebUI now finds the step in its new place and passes the profile's attachment folder it needs. Sessions with work still running are still refused, and older Agents behave as before.
