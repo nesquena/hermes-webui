@@ -2994,7 +2994,12 @@ function ensureSkillCommandsLoadedForAutocomplete(){
   }
   if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise&&Date.now()>=_bundleCommandRetryAt){
     loadBundleCommands().then(()=>{
-      if(_bundleCommandCacheReady)refreshSlashCommandDropdown();
+      // Refresh once the current bundle request has SETTLED, success OR failure:
+      // on failure _bundleCommandCacheReady stays false, but the skills may
+      // already be loaded and getMatchingCommands() only holds them back while
+      // _bundleCommandLoadPromise is in flight. Skipping the refresh here left
+      // the picker empty until the next keystroke (#5896 Greptile P2).
+      if(_bundleCommandCacheSettled)refreshSlashCommandDropdown();
     });
   }
   // Also preload agent/plugin command metadata for autocomplete.
