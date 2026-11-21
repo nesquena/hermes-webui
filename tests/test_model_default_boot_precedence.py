@@ -125,10 +125,30 @@ let _dynamicModelLabels = {};
 let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
 
+// Production globals the authority chain reads (ui.js always has these).
+let _dynamicProviderIds = {};
+var S = {session: null};
+eval(new RegExp('^const _PY_WS_CLASS=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_TRIM_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+eval(new RegExp('^const _CUSTOM_SLUG_HOST_REJECT_RE=.*$', 'm').exec(ui)[0].replace(/^const /, 'var '));
+
 for (const name of [
-  '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
-  '_captureModelDropdownSelection', '_findModelInDropdown', '_refreshOpenModelDropdown',
-  '_applyModelToDropdown', '_reconcileModelDropdownSelection', 'populateModelDropdown'
+  '_customSlugIsEndpointAuthority',
+  '_parseQualifiedCustomId',
+  '_optionDeclaredProviderId',
+  '_clientProviderAuthorityForModel',
+  '_persistedProviderAuthorityForModel',
+  '_dynamicProviderAuthorityForQualifiedCustomId',
+  '_qualifiedCustomIdNeedsBackendAuthority',
+  '_getOptionProviderId',
+  '_providerFromModelValue',
+  '_modelStateForSelect',
+  '_captureModelDropdownSelection',
+  '_findModelInDropdown',
+  '_refreshOpenModelDropdown',
+  '_applyModelToDropdown',
+  '_reconcileModelDropdownSelection',
+  'populateModelDropdown'
 ]) {
   eval(extractFunc(name));
 }

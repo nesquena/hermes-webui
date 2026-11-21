@@ -26,8 +26,28 @@ function extractFunc(src, name){
   while(depth>0&&i<src.length){if(src[i]==='{')depth++;else if(src[i]==='}')depth--;i++;}
   return src.slice(start,i);
 }
+function extractConst(src, name){
+  const m=src.match(new RegExp('^(?:const|let)\\s+'+name+'=.*$','m'));
+  if(!m) throw new Error(name+' not found');
+  return m[0].replace(/^(?:const|let)\s+/,'var ');
+}
 for(const name of ['_buildModelCandidates','_resolveModelAliasTarget','_looksLikeVersionedModel','_bestModelMatch','_nearestModelSuggestion']) eval('globalThis.'+name+'='+extractFunc(cmds,name));
-for(const name of ['_providerFromModelValue','_getOptionProviderId','_modelStateForSelect','_ensureModelOptionInDropdown','_findModelInDropdown']) eval('globalThis.'+name+'='+extractFunc(ui,name));
+// The REAL production dependency chain of the picker identity helpers — the
+// same list the #1228/#6657 harness fixes settled on. _getOptionProviderId
+// delegates to _optionDeclaredProviderId and (for @custom: values) to
+// _parseQualifiedCustomId, which closes over the slug regex consts and
+// _dynamicProviderIds; _modelStateForSelect/_ensureModelOptionInDropdown
+// traverse the authority chain and persistence. Extracting the real chain
+// keeps any future ui.js dependency addition fatal here (ReferenceError ->
+// CalledProcessError) instead of silently testing a stale copy.
+eval(extractConst(ui,'_PY_WS_CLASS'));
+eval(extractConst(ui,'_CUSTOM_SLUG_TRIM_RE'));
+eval(extractConst(ui,'_CUSTOM_SLUG_HOST_REJECT_RE'));
+eval('var _dynamicProviderIds={}');
+for(const name of ['_customSlugIsEndpointAuthority','_parseQualifiedCustomId','_optionDeclaredProviderId','_dynamicProviderAuthorityForQualifiedCustomId','_qualifiedCustomIdNeedsBackendAuthority','_getOptionProviderId','_providerFromModelValue','_storedModelProvider','_clientProviderAuthorityForModel','_readPersistedModelState','_persistedProviderAuthorityForModel','_modelStateForSelect','_findModelInDropdown','_ensureModelOptionInDropdown']) eval('globalThis.'+name+'='+extractFunc(ui,name));
+const MODEL_STATE_KEY='hermes-webui-model-state';
+const _stateStore=new Map();
+const localStorage={getItem(k){return _stateStore.has(k)?_stateStore.get(k):null;},setItem(k,v){_stateStore.set(k,String(v));},removeItem(k){_stateStore.delete(k);}};
 eval('globalThis.cmdModel=async '+extractFunc(cmds,'cmdModel'));
 function makeOption(value,provider='',model=''){return {value,textContent:value,dataset:{provider,model}};}
 const result={persisted:null};
