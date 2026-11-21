@@ -27472,7 +27472,7 @@ def _handle_media(handler, parsed):
         | _AUDIO_VIDEO_PDF_TYPES
         | _ARCHIVE_TYPES
         | _SESSION_TEXT_ARTIFACT_TYPES
-        | {"text/html"}
+        | {"text/html", "text/markdown"}
     )
     session_media_allowed = _session_media_token_allows_path(
         qs.get("session_id", [""])[0],
