@@ -236,7 +236,13 @@ def test_skill_enabled_in_new_profile_appears_in_both_surfaces_after_switch():
         // is what has to serve the incoming profile's payload.
         __setSkills([{ name: 'shared-skill', description: 'Enabled in the incoming profile' }]);
         invalidateSlashSkillCaches();
+        // The invalidation now also drops the bundle cache (#5896 gate-fail #7),
+        // and getMatchingCommands() holds plain skills until that cache is
+        // ready. Mirror the real picker refresh
+        // (ensureSkillCommandsLoadedForAutocomplete) by reloading both
+        // profile-scoped caches.
         await loadSkillCommands();
+        await loadBundleCommands(false);
         const after = {
           commands: skillsOffered(await getSlashAutocompleteMatches('/sh')),
           sub_args: subArgsOffered(await getSlashAutocompleteMatches('/use ')),
@@ -272,6 +278,9 @@ def test_inflight_skills_reply_cannot_repopulate_caches_after_switch():
         await inflightCommands;
         await inflightSubArgs;
         await loadSkillCommands();
+        // Same as the previous test: the invalidation dropped the bundle cache,
+        // and the skill surface waits for it.
+        await loadBundleCommands(false);
         const after = {
           commands: skillsOffered(await getSlashAutocompleteMatches('/sh')),
           sub_args: subArgsOffered(await getSlashAutocompleteMatches('/use ')),
@@ -369,3 +378,33 @@ def test_transient_skills_failure_does_not_wedge_the_picker():
         "latched _skillCommandCacheReady and no retry ever happens"
     )
     assert result["requests"] >= 2, "the loader must actually re-issue /api/skills"
+
+
+def test_bundle_and_agent_loaders_guard_stale_generation_replies():
+    """#5896 gate-fail #7: invalidateSlashSkillCaches() only helps if every
+    profile-scoped loader checks the generation before committing. The bundle and
+    agent loaders must capture `_slashSkillCacheGen` and guard their writes, or an
+    old reply that lands last replaces the new profile's commands."""
+    for marker in ("async function loadBundleCommands(", "async function loadAgentCommandMetadata("):
+        start = COMMANDS_JS.index(marker)
+        end = COMMANDS_JS.index("\n}", start)
+        body = COMMANDS_JS[start:end]
+        assert "const gen=_slashSkillCacheGen;" in body, f"{marker}: missing generation capture"
+        assert "gen!==_slashSkillCacheGen" in body, f"{marker}: stale reply can still commit"
+        # Assert the guarded catch and finally writes: a bare `if(gen===...)`
+        # also matches the catch block, so an unconditional reset would slip
+        # through without pinning both sides.
+        assert body.count("if(gen===_slashSkillCacheGen)") >= 2, (
+            f"{marker}: the catch and the finally must both be generation-guarded"
+        )
+        if marker.startswith("async function loadBundleCommands"):
+            assert "_bundleCommandCacheReady=_committed;" in body, (
+                f"{marker}: stale reply can still publish ready=true"
+            )
+            assert "_bundleCommandCacheSettled=true;" in body, (
+                f"{marker}: the settled flag must be current-generation only"
+            )
+        else:
+            assert "if(gen===_slashSkillCacheGen)_agentCommandCachePromise=null;" in body, (
+                f"{marker}: stale reply can still clear the newer load's promise"
+            )
