@@ -4,6 +4,7 @@ import io
 import json
 import os
 import threading
+import time as time_module
 import urllib.error
 from email.message import Message
 
@@ -167,10 +168,23 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
     s.pending_started_at = 123.0
     s.save()
     captured = {}
+    clock_reads = []
+
+    class Clock:
+        """Distinct, recorded wall-clock reads so the persisted turn start is traceable."""
+
+        def __getattr__(self, name):
+            return getattr(time_module, name)
+
+        def time(self):
+            clock_reads.append(1_700_000_000.0 + len(clock_reads))
+            return clock_reads[-1]
 
     def fake_urlopen(req, timeout=None):
         if req.get_method() == "POST":
             captured["post_headers"] = dict(req.header_items())
+            captured["post_body"] = req.data
+            captured["reads_before_post"] = list(clock_reads)
             return io.BytesIO(b'{"run_id":"run_live"}')
         # The run id is durable before the first event is relayed.
         captured["persisted_at_events"] = _saved(s.session_id).get("gateway_run")
@@ -183,16 +197,26 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
     monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", _REAL_OPEN_EVENTS)
+    monkeypatch.setattr(gateway_chat, "time", Clock())
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "sk-secret-never-persisted")
     with STREAMS_LOCK:
         STREAMS[stream_id] = create_stream_channel()
 
     gateway_chat._run_gateway_chat_streaming(s.session_id, "hi", "test-model", "/tmp", stream_id, [])
 
     assert captured["post_headers"]["Idempotency-key"] == f"webui-{stream_id}"
-    # Only ids and flags are persisted, never a credential.
-    assert captured["persisted_at_events"] == {
+    assert "sk-secret-never-persisted" in captured["post_headers"].get("Authorization", "")
+    # The turn start is the clock read taken when the turn began, before the run was posted.
+    turn_start = captured["reads_before_post"][0]
+    persisted = captured["persisted_at_events"]
+    assert persisted == {
         "run_id": "run_live", "stream_id": stream_id, "regeneration": False, "goal_related": False,
+        "turn_started_at": turn_start,
     }
+    # Only ids, flags and the timestamp are persisted: no credential, no replayable request.
+    assert "request" not in persisted
+    assert "sk-secret-never-persisted" not in json.dumps(persisted)
+    assert "sk-secret-never-persisted" not in (models.SESSION_DIR / f"{s.session_id}.json").read_text()
     saved = _saved(s.session_id)
     assert saved["gateway_run"] is None
     assert saved["active_stream_id"] is None
