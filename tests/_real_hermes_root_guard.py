@@ -17,7 +17,9 @@ account home from ``pwd``, the starting ``HOME`` and the root of the starting ``
 and published in ``HERMES_WEBUI_TEST_REAL_HERMES_ROOTS`` so later imports and child processes
 inherit them instead of re-deriving them from the already sandboxed environment. Allowed roots
 (the checkout, the test state/sandbox dirs, the temp dir, pytest's ``--basetemp``) win over
-protected ones: a checkout or scratch temp dir may legitimately live under ``~/.hermes``.
+protected ones: a checkout or scratch temp dir may legitimately live under ``~/.hermes``. An
+allowed root that equals or contains a protected root is dropped instead — it would exempt the
+whole root (``--basetemp=~/.hermes``, ``--basetemp=~``).
 
 Descriptor-relative calls (``dir_fd``) are resolved against their directory through
 ``/proc/self/fd`` (Linux) or ``F_GETPATH`` (macOS); Windows has no ``dir_fd``. Where neither
@@ -205,13 +207,38 @@ def _profiles_listing():
     return listing
 
 
+def _profiles_changes() -> list:
+    """Real roots whose ``profiles/`` listing differs from the one recorded when the guard first saw them."""
+    changes = []
+    for root, before in _STATE["profiles"].items():
+        after = _profiles_listing().get(root)
+        if after != before:
+            changes.append(f"{root}/profiles changed during the run (by this run or by another process on this host):"
+                           f" {before} -> {after}")
+    return changes
+
+
+def _allowable(paths) -> list:
+    """*paths* that may exempt a write, minus every entry that is or contains a protected root.
+
+    An allowed root wins over a protected one, so an entry equal to a root (``--basetemp=~/.hermes``) or above
+    one (``--basetemp=~``) would exempt that whole root for the rest of the session. ``violation()`` already
+    refuses to let an Agent checkout do that; allowed roots get the same rule. An entry INSIDE a root stays
+    allowed, as before: a checkout or scratch dir under the real home is legitimate."""
+    resolved = sorted({os.path.realpath(os.fspath(p)) for p in paths})
+    return [p for p in resolved if not any(_under(r, [p]) for r in PROTECTED)]
+
+
 def install(allowed) -> None:
     """Protect the real roots (minus *allowed*) for the rest of this process."""
     PROTECTED[:] = real_roots()
     # Union, never replace: conftest.py can run again mid-session (a test loads it by path), and a path
     # allowed earlier, such as --basetemp from pytest_configure, must stay allowed.
-    ALLOWED[:] = sorted(set(ALLOWED) | {os.path.realpath(os.fspath(p)) for p in allowed})
-    _STATE["profiles"] = _profiles_listing()
+    ALLOWED[:] = _allowable(set(ALLOWED) | {os.fspath(p) for p in allowed})
+    # Snapshot each root's profiles/ listing only the FIRST time: install() runs again mid-session, and taking a
+    # fresh snapshot would forget a profile a child process created or deleted before that point.
+    for root, listing in _profiles_listing().items():
+        _STATE["profiles"].setdefault(root, listing)
     _STATE["active"] = True
     if not _STATE["installed"]:  # audit hooks cannot be removed; never stack a second one
         sys.addaudithook(_hook)
@@ -222,7 +249,10 @@ def install(allowed) -> None:
 
 
 def allow(path) -> None:
-    ALLOWED.append(os.path.realpath(os.fspath(path)))
+    """Allow *path* for writes into a protected root — unless it is or contains one (see ``_allowable``)."""
+    allowed = _allowable([path])
+    if allowed and allowed[0] not in ALLOWED:
+        ALLOWED.append(allowed[0])
 
 
 def register_agent_checkout(path) -> None:
@@ -260,10 +290,4 @@ def playwright_uses_default_cache(environ) -> bool:
 def finish() -> list:
     """Stop guarding and return every problem found during the session."""
     _STATE["active"] = False
-    problems = list(VIOLATIONS)
-    for root, before in _STATE["profiles"].items():
-        after = _profiles_listing().get(root)
-        if after != before:
-            problems.append(f"{root}/profiles changed during the run (by this run or by another process on this host):"
-                            f" {before} -> {after}")
-    return problems
+    return list(VIOLATIONS) + _profiles_changes()
