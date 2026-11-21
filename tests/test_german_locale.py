@@ -45,7 +45,9 @@ DE_BLOCK = extract_locale_block("de")
 def _values(block: str) -> dict:
     """key -> raw value expression (string literal or arrow function)."""
     out = {}
-    for match in re.finditer(r"^ {4,}([a-zA-Z0-9_]+):[ \t]*(.+?),?$", block, re.MULTILINE):
+    for match in re.finditer(r"^ {2,}([a-zA-Z0-9_]+):[ \t]*(.+?),?$", block, re.MULTILINE):
+        if match.group(2) == "{":  # the locale block's own opener
+            continue
         out[match.group(1)] = match.group(2)
     return out
 
