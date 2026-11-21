@@ -50,6 +50,13 @@ def profile_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(profiles, "_set_hermes_home", lambda home: None)
     monkeypatch.setattr(profiles, "_reload_dotenv", lambda home: None)
     monkeypatch.setattr("api.config.reload_config", lambda: None)
+    # A process-wide switch is refused while any agent stream is live. This
+    # suite is about the skills-stats cache, not stream lifecycle — clear any
+    # STREAMS entries a same-shard neighbour left behind so the [True] arm
+    # switches instead of raising "agent is running".
+    from api.config import STREAMS
+
+    STREAMS.clear()
     profiles._tls.profile = None
     yield profiles, default_home.resolve(), writer_home.resolve(), computed
     profiles._tls.profile = None
