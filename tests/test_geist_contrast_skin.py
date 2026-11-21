@@ -36,7 +36,7 @@ def test_geist_contrast_dark_tokens_use_yellow_accent_with_neutral_surfaces():
 def test_geist_contrast_selection_is_neutral_not_solid_yellow():
     active_rule = ':root[data-skin="geist-contrast"] .session-item.active{position:relative;border:1px solid var(--border2)!important;}'
     marker_rule = ':root[data-skin="geist-contrast"] .session-item.active::before{content:"";position:absolute;left:6px;top:10px;bottom:10px;width:2px;border-radius:999px;background:var(--accent);}'
-    dark_text_rule = ':root.dark[data-skin="geist-contrast"] .session-item.active,\n  :root.dark[data-skin="geist-contrast"] .session-item.active *{color:var(--text)!important;}'
+    dark_text_rule = ':root.dark[data-skin="geist-contrast"] .session-item.active,\n  :root.dark[data-skin="geist-contrast"] .session-item.active :not(:where(.session-child-count,.session-child-count-label,.session-child-count-state,.session-child-session-state,.session-child-activity-indicator)){color:var(--text)!important;}'
     assert active_rule in CSS
     assert marker_rule in CSS
     assert dark_text_rule in CSS
