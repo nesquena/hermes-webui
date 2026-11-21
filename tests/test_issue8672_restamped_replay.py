@@ -100,6 +100,45 @@ def test_restamped_mirror_plus_null_clock_row_keeps_later_user_row():
     )
 
 
+def _make_state_db_restamped_only():
+    """State.db holds only the restamped mirror (2000/2001), no NULL-clock row."""
+    return [
+        {
+            "role": "user",
+            "content": "Q",
+            "timestamp": 2000.0,
+            "_state_db_row_id": 3,
+        },
+        {
+            "role": "assistant",
+            "content": "A",
+            "timestamp": 2001.0,
+            "_state_db_row_id": 4,
+        },
+    ]
+
+
+def test_restamped_mirror_alone_collapses_to_saved_pair():
+    """Bare restamped mirror suppresses onto the saved pair, exactly once.
+
+    Scenario ① of the gate finding without the later NULL-clock row: the
+    clock-tolerant positional match is the only consumer, so the restamped
+    mirror must collapse onto the saved Q,A and leave exactly two rows --
+    no duplicated prompt and no dropped sidecar row.  Pins the base
+    suppression semantics the capacity-charging fix builds on.
+    """
+    sidecar = _make_saved_transcript()
+    state = _make_state_db_restamped_only()
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    contents = [m.get("content") for m in merged]
+    assert contents == ["Q", "A"], (
+        "bare restamped mirror must collapse onto the saved pair exactly once: "
+        f"expected ['Q', 'A'] got {contents}"
+    )
+
+
 def test_matching_clock_mirror_plus_null_clock_row_keeps_later_user_row():
     """Control: matching-clock mirror also keeps the NULL-clock row."""
     sidecar = _make_saved_transcript()
