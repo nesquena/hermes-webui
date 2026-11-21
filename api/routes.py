@@ -7477,9 +7477,13 @@ def _resolve_share_session_pair(sid: str, handler):
     except KeyError:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
-        if not _session_visible_with_cli_owner_fallback(sid, effective_profile, handler):
+        visible, cli_messages = _session_visible_with_cli_owner_fallback(sid, effective_profile, handler)
+        if not visible:
             raise KeyError(sid) from None
-        synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
+        if cli_messages is None:
+            synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
+        else:
+            synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta, cli_messages=cli_messages)
         if reason == "was_webui" or synth is None:
             raise KeyError(sid) from None
         return synth, None, cli_meta
@@ -11853,47 +11857,33 @@ def _cli_read_owner_profile(sid: str, read_profile=None):
     return _get_active_profile_name()
 
 
-def _cli_session_messages_in_active_profile(sid: str) -> bool:
-    """Return whether ``sid`` has recoverable messages in the ACTIVE profile's state.db (#9104).
-
-    Fail-closed: an unreadable/missing state.db or any lookup error returns
-    False so callers keep refusing instead of treating an unknown session
-    as visible.
-    """
+def _cli_session_messages_in_active_profile(sid: str) -> list:
+    """Read recoverable messages from the active profile, or fail closed (#9104)."""
     if not sid or not is_safe_session_id(sid):
-        return False
+        return []
     try:
-        msgs = get_cli_session_messages(sid)
+        return get_cli_session_messages(sid) or []
     except Exception:
         logger.debug("cli session active-profile message lookup failed", exc_info=True)
-        return False
-    return bool(msgs)
+        return []
 
 
-def _session_visible_with_cli_owner_fallback(sid, session_profile, handler) -> bool:
-    """Profile gate for foreign sessions whose CLI listing row carries no profile (#9104).
+def _session_visible_with_cli_owner_fallback(sid, session_profile, handler) -> tuple[bool, list | None]:
+    """Return visibility and any messages read to establish active-profile ownership.
 
-    ``_lookup_cli_session_metadata`` only returns a row for the newest-N CLI
-    sessions (plus a by-id fallback for a few sources). An older session in a
-    named profile has no row at all, so the detail-load / share gates see
-    ``session_profile=None``, coerce it to the root profile via
-    ``_profiles_match``, and refuse the request before
-    ``_claim_or_synthesize_cli_session`` can stamp the session with its owner.
-
-    Mirror :func:`_cli_read_owner_profile`: without a read_profile,
-    ``get_cli_session_messages`` reads the ACTIVE profile's state.db, so
-    messages found there mean the session belongs to the active profile and
-    the gate must let it through. An explicit other-profile tag still fails
-    the gate so callers keep the #5419 409 / share refusal.
+    An explicit foreign owner still fails the gate. For a missing listing
+    owner, keep the transcript read from the active profile for the caller
+    so synthesis does not have to load and decode the same history twice.
     """
     if _session_visible_to_active_profile(session_profile, handler):
-        return True
+        return True, None
     if session_profile is not None:
-        return False
-    return _cli_session_messages_in_active_profile(sid)
+        return False, None
+    messages = _cli_session_messages_in_active_profile(sid)
+    return bool(messages), messages
 
 
-def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
+def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None, *, cli_messages: list | None = None):
     """Resolve a session_id that has no WebUI sidecar.
 
     Returns ``(session_or_None, reason)``. Reasons:
@@ -11938,7 +11928,8 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     computed ``_lookup_cli_session_metadata(sid)`` (e.g. the GET path
     building a sidebar dict) can pass it in to avoid the redundant
     lookup; callers without it (POST path, tests) pass nothing and the
-    helper does the lookup itself.
+    helper does the lookup itself. ``cli_messages`` may carry the transcript
+    already read by the active-profile visibility gate on this request.
 
     Closing the GET-vs-POST asymmetry for foreign-origin sessions: GET
     ``/api/session`` and POST ``/api/chat/start`` both call this helper
@@ -12024,7 +12015,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         return None, "was_webui"
     if cli_meta is None:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
-    msgs = get_cli_session_messages(sid)
+    msgs = cli_messages if cli_messages is not None else get_cli_session_messages(sid)
     if not msgs:
         return None, "no_foreign_state"
     # TUI/Desktop sessions often have empty cli_meta (they don't appear in
@@ -18212,9 +18203,10 @@ def _handle_session_get(handler, parsed) -> bool:
         # below would 404 every one of them under a named active profile
         # even though /api/sessions happily lists them. Exempt them.
         _profile_agnostic = _is_profile_agnostic_foreign_session(cli_meta)
-        if not _profile_agnostic and not _session_visible_with_cli_owner_fallback(
+        visible, cli_messages = (True, None) if _profile_agnostic else _session_visible_with_cli_owner_fallback(
             sid, _session_profile, handler
-        ):
+        )
+        if not visible:
             if _session_profile:
                 # Valid CLI/foreign session owned by a KNOWN other profile:
                 # 409 so the client can offer to switch to it (#5419).
@@ -18233,7 +18225,10 @@ def _handle_session_get(handler, parsed) -> bool:
             # for the messages in the active profile's state.db, so reaching
             # here means the session is not there either — still 404.
             return bad(handler, "Session not found", 404)
-        synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta or {})
+        if cli_messages is None:
+            synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta or {})
+        else:
+            synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta or {}, cli_messages=cli_messages)
         if reason == "was_webui":
             # Deleted WebUI session: 404 so the client self-heals
             # (clears stale /session/<id> URL and localStorage, #2782).

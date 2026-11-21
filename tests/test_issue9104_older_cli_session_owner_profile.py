@@ -92,7 +92,7 @@ def _detail_load(monkeypatch, sid, *, active_profile, cli_meta, messages, claim=
     parsed = urlparse("/api/session?session_id=%s&messages=0&resolve_model=0" % sid)
     calls = {"claim": 0}
 
-    def fake_claim(sid_, cli_meta=None):
+    def fake_claim(sid_, cli_meta=None, *, cli_messages=None):
         calls["claim"] += 1
         if claim_error is not None:
             raise claim_error
@@ -312,3 +312,30 @@ def test_root_profile_detail_load_behaviour_is_unchanged(monkeypatch):
     assert calls["claim"] == 1
     assert cap["status"] == 404
     assert cap["error"] == "Session not found"
+
+
+@pytest.mark.parametrize("surface", ["detail", "share"])
+def test_older_cli_session_decodes_transcript_once(surface, monkeypatch):
+    reads = []
+    transcript = _transcript()
+
+    def read_messages(sid, **_kwargs):
+        reads.append(sid)
+        return transcript
+
+    cap = _capture(monkeypatch)
+    handler = MagicMock()
+    monkeypatch.setattr(routes, "get_session", MagicMock(side_effect=KeyError(OLD_SID)))
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "test-profile")
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "get_cli_session_messages", read_messages)
+    monkeypatch.setattr(routes, "_session_index_marks_was_webui", lambda _sid: False)
+    monkeypatch.setattr(routes, "_session_deleted_tombstone_marks_was_webui", lambda _sid: False)
+
+    if surface == "share":
+        snap, _, _ = routes._resolve_share_session_pair(OLD_SID, handler)
+        assert snap.messages == transcript
+    else:
+        assert routes.handle_get(handler, urlparse(f"/api/session?session_id={OLD_SID}&messages=0&resolve_model=0"))
+        assert cap["status"] == 200
+    assert reads == [OLD_SID]
