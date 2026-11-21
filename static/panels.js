@@ -9718,11 +9718,17 @@ let _settingsLastStorageWriteRefused=false;
 // stale unapplied-server-value entry that withholds the key from unrelated
 // saves) and clear the control's note. Other keys keep their refusal state and
 // every explicit desired value is preserved — only the recovered key moves.
+// #9242: a landed write is not proof that the *server* value landed. Storage
+// can refuse a longer server voice while accepting a rewrite of the existing
+// shorter cache value (`_populateTtsVoices` re-syncs that stale value on every
+// repopulation). Keep the pending entry unless the written value matches it or
+// the user explicitly edited the key, or an unrelated save persists the stale
+// cache over the server preference.
 // This runs for every successful mirror (hydration, `voiceschanged`
 // repopulation via `_syncSpeechPreferenceCache`, onchange handlers), because
 // the `voiceschanged` path reaches `_writeSettingsStorageMirror` without
 // passing through the hydration branch that clears the note.
-function _reconcileSpeechRefusalOnMirrorLanded(storageKey){
+function _reconcileSpeechRefusalOnMirrorLanded(storageKey,writtenValue){
   let settingKey=null;
   for(const candidate of Object.keys(_SETTINGS_SPEECH_STORAGE_KEYS)){
     if(_SETTINGS_SPEECH_STORAGE_KEYS[candidate]===storageKey){ settingKey=candidate; break; }
@@ -9731,6 +9737,7 @@ function _reconcileSpeechRefusalOnMirrorLanded(storageKey){
   const refused=_settingsSpeechRefusedKeys.has(settingKey);
   const unapplied=Object.prototype.hasOwnProperty.call(_unappliedSpeechServerValues,settingKey);
   if(!refused&&!unapplied) return;
+  if(unapplied&&!_settingsSpeechChangedKeys.has(settingKey)&&!_speechValuesEqual(writtenValue,_unappliedSpeechServerValues[settingKey])) return;
   _settingsSpeechRefusedKeys.delete(settingKey);
   delete _unappliedSpeechServerValues[settingKey];
   if(_settingsSpeechChangedKeys.has(settingKey)){
@@ -9745,7 +9752,7 @@ function _writeSettingsStorageMirror(storageKey,value){
   try{
     localStorage.setItem(storageKey,String(value));
     _settingsLastStorageWriteRefused=false;
-    _reconcileSpeechRefusalOnMirrorLanded(storageKey);
+    _reconcileSpeechRefusalOnMirrorLanded(storageKey,value);
     return true;
   }catch(e){
     _settingsLastStorageWriteRefused=true;

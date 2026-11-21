@@ -229,3 +229,135 @@ def test_hydration_refusal_metadata_cleared_after_successful_mirror():
   assert.strictEqual(body.tts_voice, 'Old Voice', 'after the successful mirror the key is no longer withheld');
 
 """)
+
+
+# ── #9242: a landed stale-cache rewrite is not a landed server value ────────
+# Greptile P1 (discussion_r4651090167): storage can refuse the longer server
+# voice while still accepting a rewrite of the existing shorter cache value.
+# The successful rewrite proves only that writes work again — the server value
+# is still not applied in this browser — so the per-key guard must survive it,
+# or an unrelated save writes the stale voice back over the server preference.
+
+
+def test_stale_cache_rewrite_after_refused_longer_server_voice_keeps_guard():
+    """#9242 P1: refuse the longer server voice, allow rewriting the old cache.
+
+    The rewrite must not clear `_unappliedSpeechServerValues`, and an unrelated
+    save must omit the stale voice instead of persisting it.
+    """
+    _upstream._run_native_select_scenario(r"""
+  const hasKey = (key) => Object.prototype.hasOwnProperty.call(_unappliedSpeechServerValues, key);
+
+  REFUSE = false;
+  REFUSE_LONGER = false;
+  store.set('hermes-tts-engine', 'browser');
+  store.set('hermes-tts-voice', 'Old Voice');
+  store.set('hermes-tts-rate', '1');
+
+  // Quota: growing an existing entry is refused, rewriting it still lands.
+  REFUSE_LONGER = true;
+  const payload = nativePayload('browser', 'Third Voice');
+  payload.tts_rate = 1.4;
+  __hydrateHead(payload);
+  __hydrate(payload);
+
+  assert.strictEqual(store.get('hermes-tts-voice'), 'Old Voice',
+    'the longer server voice was refused, so the cache keeps the old voice');
+  assert.strictEqual(hasKey('tts_voice'), true,
+    'the refused server voice must stay pending after hydration');
+  assert.strictEqual(hasKey('tts_rate'), true,
+    'an unrelated refused speech key must stay pending too');
+  assert.ok(rowNote(), 'the control still shows that the server value is unapplied');
+
+  // Hydration repopulation (`_populateTtsVoices`) already rewrote the stale
+  // cache. That write lands — and must not release the pending server voice.
+  assert.strictEqual(_syncSpeechPreferenceCache('tts_voice', 'Old Voice'), true,
+    'controlled storage accepts rewriting the existing shorter value');
+  assert.strictEqual(hasKey('tts_voice'), true,
+    'a successful stale-cache rewrite must NOT clear the pending server voice');
+
+  // An unrelated save must omit the stale voice so the server keeps its value.
+  els.settingsNotificationsEnabled.checked = true;
+  const notifListener = els.settingsNotificationsEnabled.listeners.find((l) => l.type === 'change');
+  assert.ok(notifListener, 'notification toggle must be wired to the autosave');
+  notifListener.fn();
+  await pendingTimers.shift()();
+  const body = JSON.parse(posts[posts.length - 1].body);
+  assert.strictEqual(body.notifications_enabled, true, 'the unrelated edit is saved');
+  assert.ok(!Object.prototype.hasOwnProperty.call(body, 'tts_voice'),
+    'unrelated save must omit the withheld voice: ' + JSON.stringify(body));
+  assert.notStrictEqual(body.tts_voice, 'Old Voice',
+    'the stale cached voice must never be written back to the server');
+
+  // Per-key: the sibling refused speech key is still withheld as well.
+  assert.strictEqual(hasKey('tts_rate'), true,
+    'rewriting the voice key must not touch the sibling speech key');
+  assert.ok(!Object.prototype.hasOwnProperty.call(body, 'tts_rate'),
+    'the sibling refused key stays omitted from unrelated saves');
+""")
+
+
+def test_landed_server_voice_releases_pending_protection():
+    """#9242 control: once the real server value lands, the key is released."""
+    _upstream._run_native_select_scenario(r"""
+  const hasKey = (key) => Object.prototype.hasOwnProperty.call(_unappliedSpeechServerValues, key);
+
+  REFUSE = false;
+  REFUSE_LONGER = false;
+  store.set('hermes-tts-engine', 'browser');
+  store.set('hermes-tts-voice', 'Old Voice');
+
+  REFUSE_LONGER = true;
+  const payload = nativePayload('browser', 'Third Voice');
+  __hydrateHead(payload);
+  __hydrate(payload);
+  assert.strictEqual(hasKey('tts_voice'), true, 'the refused server voice is pending');
+
+  // Storage frees up; the next repopulation writes the real server value.
+  REFUSE_LONGER = false;
+  voiceschangedListeners.forEach((fn) => fn());
+  assert.strictEqual(store.get('hermes-tts-voice'), 'Third Voice',
+    'the real server value landed in the cache');
+  assert.strictEqual(hasKey('tts_voice'), false,
+    'a landed server value must release the pending protection');
+  assert.strictEqual(rowNote(), null, 'no unapplied note once the server value landed');
+
+  els.settingsNotificationsEnabled.checked = true;
+  const notifListener = els.settingsNotificationsEnabled.listeners.find((l) => l.type === 'change');
+  notifListener.fn();
+  await pendingTimers.shift()();
+  const body = JSON.parse(posts[posts.length - 1].body);
+  assert.strictEqual(body.tts_voice, 'Third Voice',
+    'the landed value is no longer withheld from unrelated saves');
+""")
+
+
+def test_explicit_voice_edit_after_refused_server_value_wins_over_guard():
+    """#9242 control: an explicit edit is the user's intent and must ship."""
+    _upstream._run_native_select_scenario(r"""
+  const hasKey = (key) => Object.prototype.hasOwnProperty.call(_unappliedSpeechServerValues, key);
+
+  REFUSE = false;
+  REFUSE_LONGER = false;
+  store.set('hermes-tts-engine', 'browser');
+  store.set('hermes-tts-voice', 'Old Voice');
+
+  REFUSE_LONGER = true;
+  const payload = nativePayload('browser', 'Third Voice');
+  __hydrateHead(payload);
+  __hydrate(payload);
+  assert.strictEqual(hasKey('tts_voice'), true, 'the refused server voice is pending');
+
+  // The user explicitly picks another voice; the old guard must not swallow it.
+  voiceSel.value = 'New Voice';
+  voiceSel.onchange.call(voiceSel);
+  assert.strictEqual(_settingsSpeechChangedKeys.has('tts_voice'), true,
+    'the explicit edit is recorded');
+  assert.strictEqual(hasKey('tts_voice'), false,
+    'the explicit edit releases the withheld server value');
+  assert.strictEqual(store.get('hermes-tts-voice'), 'New Voice',
+    'the explicit choice mirrors to the cache');
+  await pendingTimers.shift()();
+  assert.strictEqual(JSON.parse(posts[posts.length - 1].body).tts_voice, 'New Voice',
+    'the explicit choice is what the server receives');
+""")
