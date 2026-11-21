@@ -972,7 +972,15 @@ class IdempotencyStore:
                         f"idempotency WAL {path} op seq {seq} has an unknown "
                         f"tombstone origin {origin!r}"
                     )
-                self._expired_keys[key] = origin
+                # #7782 re-gate F1: replay must apply the SAME tombstone
+                # semantics the running server applied when it minted the
+                # op — refresh an existing entry's recency (delete +
+                # re-insert moves it to the tail) and enforce the bound
+                # after each insert. A bare assignment leaves an existing
+                # entry at its OLD position and never bounds the set, so
+                # the load-time final cap below would evict the wrong
+                # (most recently protected) key and re-admit its turn.
+                self._remember_expired_key_locked(key, origin)
             self._seq = max(self._seq, seq)
         self._wal_lines = len(entries)
 

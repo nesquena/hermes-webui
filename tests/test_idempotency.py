@@ -2378,6 +2378,107 @@ def test_tombstones_survive_ttl_expiry_and_restart(idem_env):
         restarted.claim("gone", fingerprint, profile="default")
 
 
+def test_wal_replay_reproduces_tombstone_order_and_bound(idem_env):
+    """#7782 re-gate F1 (greptile P1, 2026-11-20): restart replay must
+    reproduce the tombstone removal / insertion order / bound that the
+    RUNNING server applies per operation.
+
+    Repro from the finding, tombstone cap = 2: saved tombstones [A, B];
+    expiring C evicts A; admitting and later expiring A leaves [C, A] in
+    memory. On restart the replay branch did ``_expired_keys[key] =
+    origin`` — a bare assignment that neither refreshes an existing
+    entry's position nor applies the bound — so replaying expire C then
+    expire A produced {A, B, C} with A still at its OLD position, and the
+    load-time final cap then dropped A (the key the running server still
+    protects), leaving [B, C]: a retry of A could start another turn.
+    """
+    import time
+
+    from api.idempotency import (
+        IdempotencyKeyExpired,
+        IdempotencyStore,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "messages": []}
+    fingerprint = compute_request_fingerprint(body, "default")
+
+    # Phase 1 — the running server. Cap 2 so every expire beyond two
+    # evicts the OLDEST tombstone, exactly like the finding's scenario.
+    run1 = IdempotencyStore(
+        path=env.store._path,
+        ttl_seconds=0.01,
+        max_records=100,
+        tombstone_max_records=2,
+    )
+
+    def _claim_and_complete(name: str) -> None:
+        run1.claim(name, fingerprint, profile="default")
+        with run1._lock:
+            run1._records[build_storage_key(name, "default")].owner_pid = 999999
+        run1.complete(
+            name,
+            profile="default",
+            session_id="s",
+            stream_id=f"st-{name}",
+            turn_id=f"t-{name}",
+            response_status=200,
+            response_payload={},
+        )
+
+    # A and B complete. C's claim drives the sweep that expires both of
+    # them into tombstones [A, B].
+    _claim_and_complete("replay-a")
+    _claim_and_complete("replay-b")
+    time.sleep(0.05)
+    _claim_and_complete("replay-c")
+    # A is re-admitted (its tombstone was cap-evicted when C expired),
+    # then expires again on the driver's claim, which leaves the running
+    # memory at [C, A] — the state the finding says a restart must
+    # reproduce.
+    time.sleep(0.05)
+    _claim_and_complete("replay-a")
+    time.sleep(0.05)
+    run1.claim("replay-driver", fingerprint, profile="default")
+
+    a_key = build_storage_key("replay-a", "default")
+    b_key = build_storage_key("replay-b", "default")
+    c_key = build_storage_key("replay-c", "default")
+
+    # The running server's own state is correct: B was evicted by the cap,
+    # A (re-admitted then re-expired) sits at the TAIL.
+    assert list(run1._expired_keys) == [c_key, a_key], (
+        "running server must hold [C, A]; got "
+        f"{list(run1._expired_keys)}"
+    )
+
+    # Phase 2 — restart. Replay must land on the same [C, A].
+    restarted = IdempotencyStore(
+        path=env.store._path,
+        ttl_seconds=9999,
+        max_records=100,
+        tombstone_max_records=2,
+    )
+    restarted._ensure_loaded()
+    assert list(restarted._expired_keys) == [c_key, a_key], (
+        "replay must reproduce the running tombstone order [C, A]; got "
+        f"{list(restarted._expired_keys)} — the load-time cap dropped the "
+        "wrong key"
+    )
+    assert restarted._expired_keys[a_key] == "complete"
+
+    # A is still protected after the restart: the retry must be refused.
+    with pytest.raises(IdempotencyKeyExpired):
+        restarted.claim("replay-a", fingerprint, profile="default")
+
+    # The cap still bounds the set: B was the evicted oldest and stays
+    # re-admittable (an over-broad "never evict" fix would fail here).
+    assert b_key not in restarted._expired_keys
+    restarted.claim("replay-b", fingerprint, profile="default")
+
+
 def test_root_profile_alias_aliases_share_one_namespace(idem_env):
     """#7782 finding 2: the root profile may legitimately be spelled several
     ways (``active-profile resolve`` names). Keying the namespace by the raw
