@@ -1047,6 +1047,13 @@ def _load_webui_deleted_session_tombstone() -> frozenset[str]:
 
 
 def _save_webui_deleted_session_tombstone(ids) -> None:
+    """Persist the durable set of deleted WebUI session IDs.
+
+    Write failures propagate so callers that require fail-closed durability
+    (such as the delete route) can detect the failure and report an error.
+    Callers performing best-effort tombstone clearing guard against write
+    exceptions so the entry remains, preserving the fail-closed invariant.
+    """
     try:
         sorted_ids = sorted(set(
             str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
@@ -1078,6 +1085,7 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
                 _tmp.unlink(missing_ok=True)
             except Exception:
                 pass
+        raise
 
 
 def _record_webui_deleted_session_tombstone(sid: str) -> None:
@@ -9429,6 +9437,10 @@ def _read_state_db_sidebar_overrides(
 def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
     """Apply state.db source/title overrides without full lineage enrichment.
 
+    "All rows" and "every row" below mean every row the active profile owns:
+    the overrides come from its state.db, so another profile's row that shares
+    a session id keeps its own projection (#9093).
+
     Source classification (source/title) is corrected for ALL rows because it
     feeds the CLI/WebUI sidebar filter that runs BEFORE the lazy lineage
     correction — capping it would silently drop rows whose stale JSON source
@@ -9464,9 +9476,13 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
         _cap = int(_os.environ.get("HERMES_WEBUI_STATE_DB_OVERRIDE_TOP_N", "300"))
     except (TypeError, ValueError):
         _cap = 300
-    all_ids = {str(s.get('session_id')) for s in sessions if s.get('session_id')}
-    if _cap > 0 and len(sessions) > _cap:
-        count_ids = {str(s.get('session_id')) for s in sessions[:_cap] if s.get('session_id')}
+    # #9093: the overrides come from the ACTIVE profile's state.db, so they
+    # belong only to rows that profile owns. Another profile's row can share a
+    # session id (copied/cloned profile data); it keeps its own projection.
+    owned = _active_profile_owned_rows(sessions)
+    all_ids = {str(s.get('session_id')) for s in owned if s.get('session_id')}
+    if _cap > 0 and len(owned) > _cap:
+        count_ids = {str(s.get('session_id')) for s in owned[:_cap] if s.get('session_id')}
     else:
         count_ids = None  # cap disabled / under cap -> count every row too
     try:
@@ -9477,7 +9493,18 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
         )
     except Exception:
         return
-    _apply_sidebar_state_db_override_metadata(sessions, metadata, count_ids)
+    _apply_sidebar_state_db_override_metadata(owned, metadata, count_ids)
+
+
+def _active_profile_owned_rows(sessions: list[dict]) -> list[dict]:
+    """The sidebar rows the active profile owns, in order (#9093).
+
+    An untagged row counts as the root profile's, as the later ``default``
+    backfill in :func:`all_sessions` attributes it.
+    """
+    from api.profiles import _profiles_match, get_active_profile_name
+    active_profile = get_active_profile_name()
+    return [s for s in sessions if _profiles_match(s.get('profile') or 'default', active_profile)]
 
 
 def _apply_sidebar_state_db_override_metadata(
@@ -9787,6 +9814,48 @@ def _apply_sidebar_state_db_override_rows(
             session['display_title'] = state_db_display_title
 
 
+def _overlay_old_fork_sources_by_owner(fork_rows: list[dict]) -> None:
+    """Apply source-only state.db metadata to old forks, per owning profile.
+
+    Each owner's rows are read only from that owner's state.db, and the result
+    is applied only to that owner's rows, so a same-ID row in another profile
+    never lends its source or read-only flag. An untagged row belongs to the
+    root profile (the convention all_sessions() backfills after enrichment).
+    An owner that cannot be resolved strictly gets no overlay rather than the
+    active profile's answer.
+    """
+    from api.profiles import (
+        _PROFILE_ID_RE,
+        _is_root_profile,
+        _profiles_match,
+        get_active_profile_name,
+    )
+
+    active_profile = get_active_profile_name()
+    by_owner: dict[str, list[dict]] = {}
+    for row in fork_rows:
+        owner = row.get('profile') or 'default'
+        if isinstance(owner, str):
+            by_owner.setdefault(owner, []).append(row)
+    for owner, rows in by_owner.items():
+        if _profiles_match(owner, active_profile):
+            db_path = _active_state_db_path()
+        elif _is_root_profile(owner) or _PROFILE_ID_RE.fullmatch(owner):
+            db_path = _strict_agent_state_db_path(profile=owner)
+        else:
+            continue  # a malformed owner tag would resolve to the root home
+        if db_path is None:
+            continue
+        source_metadata = _read_state_db_sidebar_overrides(
+            db_path, {str(s['session_id']) for s in rows}, count_session_ids=set(),
+        )
+        # The cheap sessions-table read also returns its message_count.
+        # Keep this fallback source/title-only, including for stale rows.
+        for entry in source_metadata.values():
+            entry.pop('_state_db_message_count', None)
+        _apply_sidebar_state_db_override_metadata(rows, source_metadata)
+
+
 def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     """Attach state.db compression lineage metadata used by sidebar collapse.
 
@@ -9804,10 +9873,30 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         _cap = int(_os.environ.get("HERMES_WEBUI_LINEAGE_TOP_N", "300"))
     except (TypeError, ValueError):
         _cap = 300
-    if _cap > 0 and len(sessions) > _cap:
-        candidates = sessions[:_cap]
+    # #9093: the metadata comes from the ACTIVE profile's state.db, so it belongs
+    # only to rows that profile owns. Another profile's row can share a session
+    # id (copied/cloned profile data); it keeps its own owner-db projection.
+    owned = _active_profile_owned_rows(sessions)
+    if _cap > 0 and len(owned) > _cap:
+        candidates = owned[:_cap]
     else:
-        candidates = sessions
+        candidates = owned
+    # Content search uses all_sessions() without the list route's uncapped
+    # source overlay. Normalize the old mirrored forks the active-db lookup
+    # below doesn't cover (owned rows past the cap, and every other profile's
+    # rows), each from its own profile's state.db, before sidebar hiding; but
+    # do not expand lineage traversal or message aggregation past the cap.
+    candidate_ids = {id(s) for s in candidates}
+    fork_rows = [
+        s for s in sessions
+        if id(s) not in candidate_ids and s.get('session_id')
+        and str(s.get('session_source') or '').strip().lower() == 'fork'
+    ]
+    if fork_rows:
+        try:
+            _overlay_old_fork_sources_by_owner(fork_rows)
+        except Exception:
+            logger.debug("Failed to normalize old sidebar fork sources")
     try:
         metadata = read_session_lineage_metadata(
             _active_state_db_path(),
@@ -9815,8 +9904,8 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         )
     except Exception:
         return
-    _apply_sidebar_state_db_override_metadata(sessions, metadata)
-    for session in sessions:
+    _apply_sidebar_state_db_override_metadata(owned, metadata)
+    for session in owned:
         sid = session.get('session_id')
         if sid in metadata:
             entry = dict(metadata[sid])
@@ -12362,7 +12451,7 @@ def _load_cli_sessions_uncached(
         else:
             _archived = bool(row.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
-        cli_sessions.append({
+        cli_session = {
             'session_id': sid,
             'title': _display_title,
             'workspace': _cli_workspace(),
@@ -12396,7 +12485,20 @@ def _load_cli_sessions_uncached(
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
-        })
+        }
+        # Preserve the projection's absence of child metadata. In particular,
+        # reset successors keep ``parent_session_id`` as durable lineage but
+        # must not acquire null child-only fields while adapting state.db rows
+        # to the sidebar response shape.
+        for key in (
+            'parent_title',
+            'parent_source',
+            'relationship_type',
+            '_parent_lineage_root_id',
+        ):
+            if key not in row:
+                cli_session.pop(key, None)
+        cli_sessions.append(cli_session)
 
     if source_filter is not None:
         return _result()
@@ -17523,7 +17625,124 @@ def _has_gateway_runtime_rows(conn, session_ids, tables):
     return False
 
 
-def _retire_gateway_runtime_ledger(conn, session_ids, tables):
+# Where the Agent's deletion fence (``retire_sessions``) lives, newest first: the
+# current store module, then the module older Agents shipped before the store
+# refactor. Neither is a public API; nothing else exposes the fence on a caller's
+# own connection and transaction.
+_RETIREMENT_FENCE_MODULES = (
+    "persistence.sqlite.conversation._store.retirement",
+    "hermes_state_mutation_retirement",
+)
+
+
+def _retirement_fence_call(fn):
+    """How to call one ``retire_sessions``, decided from its signature.
+
+    Returns ``"media_root"`` when it takes the keyword-only ``media_root`` the
+    current fence requires, ``"plain"`` when it needs only ``(conn,
+    session_ids)``, and None for any other shape (a required argument WebUI
+    cannot supply), which is treated like a missing fence.
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return None
+    positional = [
+        p for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(positional) < 2:
+        return None
+    takes_media_root = False
+    for param in params:
+        if param in positional[:2] or param.kind in (
+            inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD
+        ):
+            continue
+        if param.name == "media_root" and param.kind is inspect.Parameter.KEYWORD_ONLY:
+            takes_media_root = True
+        elif param.default is inspect.Parameter.empty:
+            return None
+    return "media_root" if takes_media_root else "plain"
+
+
+def _agent_retirement_fence():
+    """The active Agent's ``retire_sessions`` and its call shape, or ImportError."""
+    import importlib
+
+    failures = []
+    for module_name in _RETIREMENT_FENCE_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            failures.append(f"{module_name}: {exc!r}")
+            continue
+        fn = getattr(module, "retire_sessions", None)
+        shape = _retirement_fence_call(fn) if callable(fn) else None
+        if shape is None:
+            failures.append(f"{module_name}: unsupported retire_sessions")
+            continue
+        return fn, shape
+    raise ImportError("no usable Agent retirement fence (" + "; ".join(failures) + ")")
+
+
+def _agent_media_root(hermes_home):
+    """The retained native-inputs root of the profile at *hermes_home*, or None.
+
+    The current fence matches hosted-document paths against this root to record
+    which retained files the delete makes collectable, so it must be the root of
+    the profile that owns the state.db being modified, not the launch profile's.
+    It is the Agent's own resolution (``native_inputs_root()``, the value its CLI
+    passes) evaluated with *hermes_home* bound as the context-local Hermes home.
+    None, never a guess, when that cannot be established.
+    """
+    if hermes_home is None:
+        return None
+    import importlib
+
+    home = Path(hermes_home)
+    try:
+        constants = importlib.import_module("hermes_constants")
+        # Import the media-cache module before the override: its module-level
+        # roots must keep naming the process home, not the profile being deleted.
+        importlib.import_module("gateway.platforms.base")
+        media = importlib.import_module("gateway.session_ingress_media")
+    except Exception:
+        logger.debug("Agent media root helpers unavailable", exc_info=True)
+        return None
+    set_override = getattr(constants, "set_hermes_home_override", None)
+    reset_override = getattr(constants, "reset_hermes_home_override", None)
+    store_of = getattr(media, "native_inputs_store", None)
+    root_of = getattr(media, "native_inputs_root", None)
+    if not all(callable(f) for f in (set_override, reset_override, store_of, root_of)):
+        return None
+    try:
+        token = set_override(str(home))
+    except Exception:
+        logger.debug("Could not bind %s as the Agent home", home, exc_info=True)
+        return None
+    try:
+        store = Path(store_of())
+        root = Path(root_of())
+    except Exception:
+        logger.debug("Agent media root unavailable for %s", home, exc_info=True)
+        return None
+    finally:
+        try:
+            reset_override(token)
+        except Exception:
+            logger.warning("Failed to reset the Agent home override", exc_info=True)
+    # The unresolved store must sit in the bound home, or the override did not
+    # reach the Agent's resolution and the root would name another profile.
+    if not store.is_relative_to(home):
+        logger.warning(
+            "Agent media root %s is outside profile %s; not guessing one", store, home,
+        )
+        return None
+    return str(root)
+
+
+def _retire_gateway_runtime_ledger(conn, session_ids, tables, hermes_home=None):
     """Retire gateway runtime rows with the Agent's own deletion fence.
 
     Terminal receipts survive as exact-retry evidence; live or unknown work
@@ -17531,7 +17750,9 @@ def _retire_gateway_runtime_ledger(conn, session_ids, tables):
     tables has nothing to retire. A partial ledger schema fails closed: deleting
     only some of the ledger would leave the Agent's guards unsatisfied — but only
     when there is something to retire, so a downgraded or misconfigured Agent
-    cannot block deleting a session that has no runtime rows at all.
+    cannot block deleting a session that has no runtime rows at all. The same
+    holds when no fence is importable, or when the fence needs the profile's
+    media root (*hermes_home*'s) and it cannot be resolved.
     """
     if not tables & {"session_admissions", "worker_executions"}:
         return
@@ -17544,7 +17765,7 @@ def _retire_gateway_runtime_ledger(conn, session_ids, tables):
             return
         raise SessionDeleteRefused("runtime_ledger_unavailable")
     try:
-        from hermes_state_mutation_retirement import retire_sessions
+        retire_sessions, call_shape = _agent_retirement_fence()
     except Exception as exc:
         if not _has_gateway_runtime_rows(conn, session_ids, tables):
             logger.warning(
@@ -17553,6 +17774,18 @@ def _retire_gateway_runtime_ledger(conn, session_ids, tables):
             )
             return
         raise SessionDeleteRefused("runtime_ledger_unavailable") from exc
+    fence_kwargs = {}
+    if call_shape == "media_root":
+        media_root = _agent_media_root(hermes_home)
+        if media_root is None:
+            if not _has_gateway_runtime_rows(conn, session_ids, tables):
+                logger.warning(
+                    "Agent media root unavailable; deleting row-free session(s) "
+                    "%s without the fence", session_ids,
+                )
+                return
+            raise SessionDeleteRefused("runtime_ledger_unavailable")
+        fence_kwargs["media_root"] = media_root
     # The helper imports the rest of the Agent lazily (hermes_state_common,
     # tools.tool_result_storage, hermes_state_local, ...). An interpreter that
     # can import the helper but not the Agent's dependencies fails inside the
@@ -17560,7 +17793,7 @@ def _retire_gateway_runtime_ledger(conn, session_ids, tables):
     # soft path free of a half-written fence.
     conn.execute("SAVEPOINT gateway_fence")
     try:
-        retire_sessions(conn, session_ids)
+        retire_sessions(conn, session_ids, **fence_kwargs)
     except ImportError as exc:
         conn.execute("ROLLBACK TO gateway_fence")
         conn.execute("RELEASE gateway_fence")
@@ -17820,7 +18053,9 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 ).fetchall()
             }
             try:
-                _retire_gateway_runtime_ledger(conn, all_removed_ids, ledger_tables)
+                _retire_gateway_runtime_ledger(
+                    conn, all_removed_ids, ledger_tables, hermes_home=hermes_home
+                )
             except SessionDeleteRefused:
                 conn.rollback()
                 raise
