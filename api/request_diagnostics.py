@@ -164,6 +164,14 @@ class RequestDiagnostics:
             # the watchdog entry would never register and the structured
             # log would never fire.
             ("GET", "/api/session"),
+            # perf(sessions/search): the content scan resolves every sidebar
+            # transcript, so it is the slowest request the UI can issue and the
+            # one whose duration no caller-side knob bounds. Both handlers call
+            # maybe_start()/finish() themselves (the legacy JSON endpoint and the
+            # SSE stream); the stream path is a separate entry because
+            # maybe_start() matches the clean path exactly.
+            ("GET", "/api/sessions/search"),
+            ("GET", "/api/sessions/search/stream"),
         }:
             return None
         return cls(method, clean_path, logger=logger, print_fn=print_fn)
