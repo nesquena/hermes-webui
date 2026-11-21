@@ -4,6 +4,16 @@ import sys
 from pathlib import Path
 
 
+def _restore_agent_launch_env_at_teardown(monkeypatch):
+    """init_profile_state() replaces the Agent's launch_profile_policy._launch_env; put it back afterwards."""
+    try:
+        from tui_gateway import launch_profile_policy as lpp
+    except Exception:
+        return
+    if hasattr(lpp, "_launch_env"):
+        monkeypatch.setattr(lpp, "_launch_env", lpp._launch_env)
+
+
 def test_profile_switch_clears_previous_profile_env_vars(monkeypatch, tmp_path):
     base = tmp_path / ".hermes"
     (base / "profiles" / "p1").mkdir(parents=True)
@@ -25,6 +35,7 @@ def test_profile_switch_clears_previous_profile_env_vars(monkeypatch, tmp_path):
     import api.profiles as profiles
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
 
+    _restore_agent_launch_env_at_teardown(monkeypatch)
     profiles.init_profile_state()
     profiles.switch_profile("p1")
     assert os.environ.get("OPENAI_API_KEY") == "secret-from-p1"
@@ -62,6 +73,7 @@ def test_profile_switch_replaces_overlapping_keys(monkeypatch, tmp_path):
     import api.profiles as profiles
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
 
+    _restore_agent_launch_env_at_teardown(monkeypatch)
     profiles.init_profile_state()
     profiles.switch_profile("p1")
     assert os.environ.get("OPENAI_API_KEY") == "secret-from-p1"
