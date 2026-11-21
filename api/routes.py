@@ -9387,6 +9387,28 @@ def _context_lookup_origin(url: object) -> str:
         if ":" not in host:
             host = host.lower()
         port = parts.port or (80 if parts.scheme == "http" else 443)
+        # #8922: one host spelled two ways must compare as one origin, or a legitimate key is dropped (IDN
+        # against punycode, a trailing dot, an IPv6 address written expanded against compressed). IP literals
+        # compress; a DNS name loses one trailing dot (the root label); a non-ASCII spelling encodes with the
+        # ``idna`` package — the same IDNA 2008 call httpx 0.28 (the Agent's metadata client) makes, so the
+        # compare agrees with the wire. ``idna`` is optional (WebUI does not depend on it): without it today's
+        # compare stands and the IDN spelling drops its key (fail closed). Never the built-in
+        # ``str.encode("idna")``: it is IDNA 2003 and folds sharp-s to ss and final-sigma to sigma, hosts the
+        # wire never sees. A host that parses as no address, or that ``idna`` refuses, keeps today's spelling.
+        import ipaddress
+
+        try:
+            host = ipaddress.ip_address(host).compressed
+        except ValueError:
+            if host.endswith("."):
+                host = host[:-1]
+            if not host.isascii():
+                try:
+                    import idna
+
+                    host = idna.encode(host.lower()).decode("ascii")
+                except Exception:
+                    pass
     except ValueError:
         return ""
     return f"{host}:{port}" if host else ""
