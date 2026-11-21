@@ -425,6 +425,12 @@ _ALLOWED = {
     # not None, whichever path bound it); with none bound it is a wildcard claim.
     ("config.py", "_provider_identity_sources"): "reads provider record NAMES unexpanded; a ${VAR} is judged by the Agent's expander only under a bound profile secret scope (#8690)",
     ("streaming.py", "_title_provider_name_ambiguous"): "reads the Agent profile's provider NAMES unexpanded for the title guard (#8690)",
+    # #7170: reasoning effort snapshot reader (value reader via the helper)
+    ("config.py", "get_config_snapshot_for_profile_home"): "value reader: snapshot via the isolated loader",
+    # #7170: reasoning effort writer (raw loader + save)
+    ("config.py", "set_reasoning_effort"): _WRITER + " (reasoning effort route)",
+    # #7170: gateway endpoint presence check (value reader)
+    ("gateway_chat.py", "_gateway_session_has_own_endpoint"): "value reader: endpoint presence check",
 }
 
 
