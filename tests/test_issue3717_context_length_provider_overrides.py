@@ -236,3 +236,47 @@ def test_route_helper_keeps_all_context_length_sources_aligned(providers_cfg):
     assert unrelated.base_url == ""
     assert unrelated.provider == "custom:missing"
     assert unrelated.api_key == ""
+
+
+def test_missing_slug_shares_no_credential_with_a_sibling_on_the_same_url(monkeypatch):
+    """A slug that matches no record must not borrow a sibling's URL or key.
+
+    The sibling shares the lookup's base_url, so a lookup that matched
+    records by URL instead of by name would hand the missing slug the
+    sibling's credential. This is the same class as #8841 (one record's key
+    travelling with another record's URL), and the lookup is identity-owned:
+    a slug that names nothing owns nothing.
+
+    Measured on this head the resolver is not even called with a credential,
+    so this pins behaviour that holds.
+    """
+    import api.config as config
+    import api.routes as routes
+
+    calls = _install_fake_context_resolver(monkeypatch)
+    cfg = {
+        "model": {
+            "provider": "openai",
+            "default": "default-model",
+            "context_length": "123456",
+        },
+        "custom_providers": [
+            {
+                "name": "zenmux",
+                "base_url": "https://shared.example.test/v1",
+                "api_key": "synthetic-sibling-key",
+                "models": {"custom-model": {"context_length": 999000}},
+            },
+        ],
+    }
+    monkeypatch.setattr(config, "get_config", lambda *a, **k: cfg)
+
+    result = routes._resolve_context_length_for_session_model(
+        "other-model", "custom:missing"
+    )
+
+    assert result == 256000
+    assert calls, "the lookup must still run"
+    assert calls[-1]["base_url"] in (None, ""), calls[-1]
+    assert not calls[-1]["api_key"], calls[-1]
+    assert calls[-1]["config_context_length"] is None, calls[-1]
