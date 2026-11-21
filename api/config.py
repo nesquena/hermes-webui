@@ -4027,11 +4027,34 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     return _finalize(model_id, config_provider, config_base_url)
 
 
+def _config_base_url(value: object) -> str | None:
+    """Return a config-declared ``base_url`` as a stripped string, or None.
+
+    #8982: only a string is a URL. A type slip in config.yaml (``base_url: 123``,
+    ``true``, a mapping) is a malformed declaration, and ``str()``-ing it invents
+    the URL-shaped value ``"123"``: enough for a route to look owned, for the
+    context-length lookup to count it as the chat's endpoint, and — on that path
+    — for the route's credential to travel beside it. Nothing declares an
+    endpoint here, so the honest reading is "no URL", exactly as with an empty
+    string or a missing field. Consumers then take the same path a keyless or
+    endpointless record already takes.
+    """
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
 def _custom_record_base_url(record: object) -> str | None:
-    """Return a custom record's OWN endpoint, or None when it declares none."""
+    """Return a custom record's OWN endpoint, or None when it declares none.
+
+    A non-string ``base_url`` is a declaration of no endpoint (#8982), never a
+    URL to stringify: this is where the route bundle's endpoint is merged, so
+    the rule reaches every consumer of the merged bundle (the chat route, the
+    resolver's ``(api_key, base_url)`` view, and GET /api/session's lookup).
+    """
     if not isinstance(record, dict):
         return None
-    return str(record.get("base_url") or "").strip() or None
+    return _config_base_url(record.get("base_url"))
 
 
 def _resolve_custom_record_key(
