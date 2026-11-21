@@ -124,7 +124,12 @@ const el = {
   matches: () => HOVER,
   contains: (n) => n === el || !!(n && n._inEl),
 };
-const document = { getElementById: (id) => (id === 'messages' ? el : null), activeElement: null };
+const document = {
+  getElementById: (id) => (id === 'messages' ? el : null),
+  activeElement: null,
+  body: { tagName: 'BODY' },
+  documentElement: { tagName: 'HTML' },
+};
 function $(id) { return document.getElementById(id); }
 function getComputedStyle(n) { return (n && n._cs) || { overflowY: '', overscrollBehaviorY: '' }; }
 
@@ -182,6 +187,9 @@ const pane = {
 };
 const paneTarget = { parentElement: pane, _inEl: true };
 const directTarget = { parentElement: el, _inEl: true };
+// A widget OUTSIDE the transcript that can own the keyboard (tree row, palette,
+// drawer): focus there means the key is consumed off-pane (#6653 gate).
+const treeRow = { tagName: 'LI', parentElement: null, _inEl: false, closest: () => null };
 function out(obj) { console.log(JSON.stringify(obj)); }
 """
 )
@@ -367,3 +375,59 @@ def test_false_cache_blocks_every_automatic_writer_and_stays_sticky():
         "the post-render re-anchor must not move a reader whose follow-intent is false"
     )
     assert m["cache"] is False, "the re-anchor must keep the false cache sticky"
+
+
+def test_hovered_transcript_does_not_steal_a_key_owned_by_a_focused_widget():
+    """#6653 gate, the production case: the pointer rests over the transcript
+    while the keyboard focus sits in a widget outside it (tree row, palette,
+    drawer). That widget consumes ArrowUp/PageUp itself, so the transcript never
+    scrolls — hovering it must not cost a follower its intent."""
+    m = _run(
+        "document.activeElement = treeRow; HOVER = true;\n"
+        "_onKeydown({key:'ArrowUp', target:treeRow, shiftKey:false});\n"
+        "out({cache:_messageFollowIntentCache, gen:_messageScrollInputTailGeneration});\n"
+    )
+    assert m["gen"] == 0, "a key consumed off-pane must not mint transcript re-pin authority"
+    assert m["cache"] is True, (
+        "hover alone must not invalidate follow-intent while another widget owns the "
+        "keyboard and consumes the key (#6653 gate)"
+    )
+
+
+def test_hover_fallback_survives_when_no_widget_owns_the_keyboard():
+    """Control: the body/hover fallback is intentional (#7494). With nothing
+    focused the hovered transcript does receive the key, so it must still
+    invalidate — the gate only removes hover's authority over a focused widget."""
+    m = _run(
+        "document.activeElement = document.body; HOVER = true;\n"
+        "_onKeydown({key:'PageUp', target:document.body, shiftKey:false});\n"
+        "out({cache:_messageFollowIntentCache, gen:_messageScrollInputTailGeneration});\n"
+    )
+    assert m["gen"] == 1, "with no keyboard owner the hovered transcript still captures the tail"
+    assert m["cache"] is False, (
+        "with no competing keyboard owner, PageUp on the hovered transcript must still "
+        "invalidate follow-intent (#7494 fallback preserved)"
+    )
+
+
+def test_foreign_key_keeps_following_through_cancellation_and_growth():
+    """Composed contract: an off-pane key while hovering is followed by a
+    cancellation and live content growth. Because the transcript kept its
+    follow-intent, the automatic writer must still reach the tail — and the
+    growth must not be mistaken for reader input."""
+    m = _run(
+        "document.activeElement = treeRow; HOVER = true;\n"
+        "_onKeydown({key:'ArrowUp', target:treeRow, shiftKey:false});\n"
+        "const afterKey = {cache:_messageFollowIntentCache, top:el.scrollTop};\n"
+        "el.scrollTop = 4000;             // streamed content previously moved the reader\n"
+        "_setMessageScrollToBottom();      // automatic follow on live growth\n"
+        "out({afterKey, top:el.scrollTop, cache:_messageFollowIntentCache});\n"
+    )
+    assert m["afterKey"]["cache"] is True, (
+        "the off-pane key must leave a follower following so the next growth can re-pin"
+    )
+    assert m["afterKey"]["top"] == 4200, "the off-pane key must not move the reader"
+    assert m["top"] == 5000, (
+        "with follow-intent intact, the automatic writer must still reach the tail"
+    )
+    assert m["cache"] is True, "the follow writer must not flip follow-intent off"

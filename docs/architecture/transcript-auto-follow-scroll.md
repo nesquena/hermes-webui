@@ -82,7 +82,11 @@ The contract that closes that race:
    direction. The transcript's own scrollbar is exempt from the nested check
    because it belongs to `.messages`. The keydown path applies the check to the
    focused element, falling back to `.messages` itself when focus is outside
-   the transcript (for example on `<body>` with the pointer over it).
+   the transcript (for example on `<body>` with the pointer over it). That
+   fallback is ownership only when nothing else owns the keyboard: if focus sits
+   in a widget outside the pane (a tree row, the command palette, a drawer), the
+   widget consumes the key itself, the transcript never scrolls, and hovering it
+   must not cancel a follower's intent (#6653).
 2. **Consume once.** Each captured input tail authorizes exactly one scroll
    event (`_messageScrollInputTailConsumedGeneration`). A later programmatic or
    layout scroll cannot reuse stale authority — this is what prevents the

@@ -9452,9 +9452,18 @@ if(typeof window!=='undefined'){
     // handlers have not yet preventDefault()/stopPropagation()'d; inspect the
     // active/target control path directly.
     if((e.key===' '||e.key==='Spacebar')&&(_isMessageInteractiveKeyTarget(t)||_isMessageInteractiveKeyTarget(a))) return;
-    // Count only when the message pane itself is the scroll target: it is focused,
-    // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
-    if(a===el||el.contains(a)||el.matches(':hover')){
+    // Count only when the message pane itself owns the keyboard: it is focused
+    // or contains the focus. Hovering the pane is the fallback for the case
+    // where nothing owns the keyboard at all (focus on <body>, e.g. right after
+    // a click on empty space) — deliberately kept, because readers scroll a
+    // hovered transcript without focusing it (#7494).
+    // It is NOT ownership when another widget already holds focus: a tree row,
+    // palette or drawer outside the pane consumes ArrowUp/PageUp itself, so the
+    // transcript never scrolls and a follower must not lose its intent (#6653).
+    const focusOnTranscript=!!a&&(a===el||el.contains(a));
+    const focusOnForeignWidget=!!a&&a!==document.body&&a!==document.documentElement&&!focusOnTranscript;
+    if(!focusOnTranscript&&!(el.matches(':hover')&&!focusOnForeignWidget)) return;
+    {
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       const now=performance.now();
       // Nested-pane focus (tool output, code block) consumes scroll keys —
