@@ -19295,7 +19295,20 @@ def handle_get(handler, parsed) -> bool:
                 wait_for_gateway_run_id,
             )
 
-            structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
+            # #9227: a native session relay registers under its deterministic
+            # id BEFORE the first submission, so a Stop on a turn that has not
+            # reached the Gateway can cancel it locally instead of waiting for
+            # a run id that cannot exist yet. `stop_gateway_run` on that id
+            # resolves to `SessionRelay.control("stop")`: a never-submitted
+            # turn cancels locally and returns True; an attempted-but-uncertain
+            # submission raises, which stop_gateway_run reports as False, so
+            # the existing retry contract (502, recovery kept) is preserved.
+            from api.gateway_sessions import active_session_run_id
+
+            structured_gateway = False
+            run_id = active_session_run_id(stream_id)
+            if not run_id:
+                structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
             if not run_id and structured_gateway:
                 gateway_stop_blocked = True
             if run_id:
