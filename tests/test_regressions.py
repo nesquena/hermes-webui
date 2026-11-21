@@ -724,8 +724,10 @@ def test_live_stream_tokens_persist_partial_assistant_for_session_switch(cleanup
     # assistant text is mirrored into INFLIGHT state — is unchanged.
     assert "content:split.content" in messages_src, \
         "messages.js must persist the (think-split) partial assistant text into INFLIGHT state"
-    assert "_splitThinkFromContent(assistantText" in messages_src, \
-        "the persisted partial must be derived from the live assistantText"
+    from tests.test_pr7478_stage1_semantics import run_js
+    run_js("token('before<think>reason</think>after');"
+           "assert.equal(INFLIGHT.s.messages[0].content,'beforeafter');"
+           "assert.equal(INFLIGHT.s.messages[0].reasoning,'reason');")
     assert "_live:true" in messages_src, \
         "messages.js must mark the persisted in-flight assistant row so renderMessages can re-anchor it"
     assert "syncInflightAssistantMessage();" in messages_src, \

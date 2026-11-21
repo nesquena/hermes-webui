@@ -618,7 +618,10 @@ global.resetTurnWorkspaceMutations=()=>{};
 global._resetStreamScrollFollow=()=>{};
 global._suspendSessionStreamForLiveChat=()=>{};
 global.ensureLiveWorklogShell=()=>null;
-global._extractInlineThinkingFromContent=(content,reasoning)=>({content:String(content||''),displayText:String(content||''),reasoning:String(reasoning||'')});
+// Load the actual shared grammar and incremental scanner used by attachLiveStream.
+const grammarStart=messagesSrc.indexOf('const _thinkPairs=');
+const grammarEnd=messagesSrc.indexOf("if(typeof window!=='undefined')",grammarStart);
+eval(messagesSrc.slice(grammarStart,grammarEnd));
 
 class FakeEventSource {
   static instances=[];

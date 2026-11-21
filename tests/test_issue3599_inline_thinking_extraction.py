@@ -96,11 +96,13 @@ def test_unclosed_inline_thinking_after_content_stays_visible_on_persist():
 
 def test_messages_js_live_and_persist_paths_share_extractor():
     stream_display = _function_body(MESSAGES_JS, "function _streamDisplay")
-    parse_state = _function_body(MESSAGES_JS, "function _parseStreamState")
+    parse_state = _function_body(MESSAGES_JS, "function _parseStreamState(")
     split_persist = _function_body(MESSAGES_JS, "function _splitThinkFromContent")
 
-    assert "_extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content" in stream_display
-    assert "return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true});" in parse_state
+    assert "_semanticSnapshot().content" in stream_display
+    assert "return _semanticSnapshot();" in parse_state
+    from tests.test_pr7478_stage1_semantics import test_every_prefix_preserves_batch_grammar
+    test_every_prefix_preserves_batch_grammar()
     assert "return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});" in split_persist
     assert "window._extractInlineThinkingFromContentForRender" in MESSAGES_JS
     assert "_thinkingFenceMarkerAt" in MESSAGES_JS
