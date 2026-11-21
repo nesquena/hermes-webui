@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The chat shows when background subagents are still working.** After `delegate_task` returns, the composer stays usable and the parent turn ends, so a long fan-out used to look idle. A bar above the composer now says how many delegated children are still running and the latest tool name, or that results are on their way back, or that work is still running when the last step cannot be read (for example right after a restart). Expanded subagent rows use the same running indicator as forked conversations. The existing `GET /api/session/delegations` counts are unchanged; `children` is added only when the in-process registry can be read, and is null otherwise. Each child is an id, a status, a tool name, a count, and an age — no goal, transcript, path, or result.
+
 ### Performance
 
 - **A slow New Chat request now logs how long each step took (#8992, @CharlesMcquade).** When creating a chat takes two seconds or more, the server prints one `[SLOW]` line with the time spent in each step (workspace, worktree, session creation, response), like the existing line for slow conversation loads. It contains no session IDs, paths or other user data.
