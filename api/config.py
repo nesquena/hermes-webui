@@ -4048,13 +4048,22 @@ def _resolve_custom_record_key(
     record is what keeps an endpoint and a credential from being resolved out
     of two different authorities.
 
-    ``key_env`` outranks ``api_key_env`` when one record declares both: that is
-    the Agent's own order (``runtime_provider_custom._key_env_secret`` reads
-    ``key_env`` first) and the order ``_normalized_raw_provider_record``
-    applies to ``providers.<id>`` records, so both spellings resolve to the
-    same key in WebUI and in the Agent (#8959). Legacy ``custom_providers[]``
-    entries reach this ladder directly, without that normalisation, so the
-    ``api_key_env`` spelling has to be read here too.
+    ``key_env`` is the primary spelling and ``api_key_env`` its compatibility
+    synonym: the synonym takes over only when the primary FIELD is absent or
+    blank, which is the Agent's own order
+    (``runtime_provider_custom._key_env_secret`` reads
+    ``entry.get("key_env") or entry.get("api_key_env")`` — it picks the NAME
+    first, then reads that one variable) and the order
+    ``_normalized_raw_provider_record`` applies to ``providers.<id>`` records.
+    Legacy ``custom_providers[]`` entries reach this ladder directly, without
+    that normalisation, so the ``api_key_env`` spelling has to be read here too
+    (#8959).
+
+    The FIELD is chosen before its value is read. A declared ``key_env`` whose
+    variable is unset or empty stays this record's credential source: it does
+    NOT hand the record to the ``api_key_env`` variable, because that would
+    send a different account's key to the endpoint ``key_env`` names — a
+    credential leak instead of a report of the real misconfiguration (#9225).
     """
     api_key = None
     if raw_api_key is not None:
@@ -4064,13 +4073,12 @@ def _resolve_custom_record_key(
         elif key_text:
             api_key = key_text
     if not api_key:
-        key_env = str(raw_key_env or "").strip()
-        if key_env:
-            api_key = _thread_local_env_value(key_env).strip() or None
-    if not api_key:
-        api_key_env = str(raw_api_key_env or "").strip()
-        if api_key_env:
-            api_key = _thread_local_env_value(api_key_env).strip() or None
+        # One variable name per record, decided by the DECLARED field: the
+        # primary spelling wins whenever it is declared, and the compatibility
+        # spelling is read only when the primary field is absent or blank.
+        env_name = str(raw_key_env or "").strip() or str(raw_api_key_env or "").strip()
+        if env_name:
+            api_key = _thread_local_env_value(env_name).strip() or None
     if not api_key and provider_hint:
         api_key = _lookup_custom_api_key_env(provider_hint)
     return api_key
