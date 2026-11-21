@@ -238,17 +238,10 @@ def test_route_helper_keeps_all_context_length_sources_aligned(providers_cfg):
     assert unrelated.api_key == ""
 
 
-def test_missing_slug_shares_no_credential_with_a_sibling_on_the_same_url(monkeypatch):
-    """A slug that matches no record must not borrow a sibling's URL or key.
+def test_missing_slug_with_no_lookup_url_does_not_borrow_a_sibling_key(monkeypatch):
+    """A missing slug with no caller URL inherits neither the sibling URL nor its key.
 
-    The sibling shares the lookup's base_url, so a lookup that matched
-    records by URL instead of by name would hand the missing slug the
-    sibling's credential. This is the same class as #8841 (one record's key
-    travelling with another record's URL), and the lookup is identity-owned:
-    a slug that names nothing owns nothing.
-
-    Measured on this head the resolver is not even called with a credential,
-    so this pins behaviour that holds.
+    This test does not exercise caller-supplied URL ownership.
     """
     import api.config as config
     import api.routes as routes
