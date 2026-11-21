@@ -6100,6 +6100,78 @@ def _reasoning_name_candidates(model_id: str) -> list[str]:
     return candidates
 
 
+# xAI / Grok reasoning ladder: parity with the installed Agent
+# (_GROK_EFFORT_CAPABLE_PREFIXES from agent/model_metadata.py:369 and
+# XAI_GROK46_EFFORTS / XAI_LEGACY_EFFORTS from agent/reasoning_effort.py:48).
+# Grok 4.5/4.6 reject "none", unlike grok-4.3 (agent/model_metadata.py:377).
+_GROK_EFFORT_CAPABLE_PREFIXES = (
+    "grok-3-mini",
+    "grok-4.20-multi-agent",
+    "grok-4.3",
+    "grok-4.5",
+    "grok-4.6",
+)
+_XAI_GROK46_EFFORTS = ["low", "medium", "high", "xhigh"]
+_XAI_LEGACY_EFFORTS = ["low", "medium", "high"]
+
+
+def _normalize_grok_model_id(model_id: str | None) -> str:
+    """Strip hint, vendor prefix, and normalize delimiters for Grok matching."""
+    text = str(model_id or "").strip().lower()
+    pos = 0
+    grok_start = -1
+    while True:
+        idx = text.find("grok", pos)
+        if idx < 0:
+            break
+        if idx == 0 or not text[idx - 1].isalnum():
+            grok_start = idx
+            break
+        pos = idx + len("grok")
+    if grok_start < 0:
+        return ""
+    tail = text[grok_start:].replace("_", "-")
+    tail = re.sub(r"^grok-(\d+)-(\d+)", r"grok-\1.\2", tail)
+    return tail
+
+
+def _grok_reasoning_profile(model_id: str | None) -> dict | None:
+    """Single source of truth for the Grok reasoning surface.
+
+    Consults the installed Agent (agent.model_metadata.grok_supports_reasoning_effort
+    and is_grok_46_family) when available, falling back to the mirrored allowlist
+    and effort ladder. Returns None when the id gets no reasoning dial.
+    """
+    norm = _normalize_grok_model_id(model_id)
+    if not norm:
+        return None
+
+    supports = False
+    is_46 = False
+    try:
+        from agent.model_metadata import grok_supports_reasoning_effort, is_grok_46_family
+
+        supports = grok_supports_reasoning_effort(norm)
+        if supports:
+            is_46 = is_grok_46_family(norm)
+    except (ImportError, AttributeError):
+        supports = any(norm.startswith(p) for p in _GROK_EFFORT_CAPABLE_PREFIXES)
+        if supports:
+            is_46 = norm == "grok-4.6" or norm.startswith("grok-4.6-")
+
+    if not supports:
+        return None
+
+    efforts = list(_XAI_GROK46_EFFORTS) if is_46 else list(_XAI_LEGACY_EFFORTS)
+    can_disable = not (norm.startswith("grok-4.5") or is_46)
+    return {
+        "supports": True,
+        "max_effort": "xhigh" if is_46 else "high",
+        "supported_efforts": efforts,
+        "can_disable": can_disable,
+    }
+
+
 def _candidate_supports_reasoning(candidate: str) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "-", str(candidate or "").strip().lower()).strip("-")
     if not normalized:
@@ -6173,6 +6245,12 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         idx = tokens.index("deepseek")
         if idx + 1 < len(tokens) and tokens[idx + 1].startswith(("v", "r")):
             return True
+    if "grok" in token_set or normalized.startswith("grok"):
+        # Restrict to capable Grok models via _grok_reasoning_profile.
+        return (
+            _grok_reasoning_profile(candidate) is not None
+            or _grok_reasoning_profile(normalized) is not None
+        )
     return False
 
 
@@ -6383,6 +6461,14 @@ def _filter_reasoning_efforts_for_provider(
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
         return [eff for eff in normalized if eff != "max"]
+    # Grok reasoning capability and effort ceiling follow the model id alone
+    # across every lane (xai, xai-oauth, custom:proxy). Unknown Grok models
+    # get no dial ([]), 4.6 gets low..xhigh, and legacy gets low..high.
+    if _normalize_grok_model_id(bare):
+        grok_profile = _grok_reasoning_profile(bare)
+        if grok_profile is None:
+            return []
+        return [eff for eff in normalized if eff in grok_profile["supported_efforts"]]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
     # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
     # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
@@ -6739,6 +6825,9 @@ def resolve_model_reasoning_efforts(
         [e for e in raw if e != "none"], str(model_id or ""), str(provider_id or "")
     )
     if had_none:
+        grok_prof = _grok_reasoning_profile(model_id)
+        if grok_prof is not None and not grok_prof.get("can_disable", True):
+            return filtered
         # Keep 'none' in its original leading position if it was there.
         return ["none", *filtered] if raw and raw[0] == "none" else [*filtered, "none"]
     return filtered
@@ -6902,6 +6991,31 @@ def coerce_reasoning_effort_for_model(
     # early-return below so the forced-tier contract wins. (#6219 round-3)
     if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
         return ""
+    # Grok reasoning coercion mirrors the Agent clamp_effort contract:
+    # no-dial Grok ids coerce to "" (nothing sent on wire);
+    # grok-4.5* and 4.6 family reject "none" and coerce to "";
+    # grok-4.3 accepts "none"; other levels clamp to nearest weaker supported level,
+    # or weakest supported level when below the floor.
+    if _normalize_grok_model_id(model_id):
+        grok_profile = _grok_reasoning_profile(model_id)
+        if grok_profile is None:
+            return ""
+        if raw == "none":
+            return "" if grok_profile.get("can_disable") is False else "none"
+        if raw not in VALID_REASONING_EFFORTS:
+            return ""
+        supported = grok_profile["supported_efforts"]
+        if raw in supported:
+            return raw
+        ladder = list(VALID_REASONING_EFFORTS)
+        try:
+            raw_idx = ladder.index(raw)
+        except ValueError:
+            return ""
+        weaker = [lvl for lvl in supported if lvl in ladder and ladder.index(lvl) < raw_idx]
+        if weaker:
+            return max(weaker, key=ladder.index)
+        return min(supported, key=ladder.index)
     if raw == "none":
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
@@ -7098,7 +7212,18 @@ def get_reasoning_status(
     zai_thinking = _zai_glm_thinking_toggle_supported(
         resolve_model, resolve_provider
     )
-    supports_thinking_toggle = bool(supported_efforts) or (zai_thinking is True)
+    # Grok 4.x is the mirror image of the ZAI case above: it HAS an effort ladder
+    # but NO off switch. For every other effort-capable family the ladder implies
+    # the toggle, so the flag has to be narrowed here — it is what hides the
+    # "None" option in the composer, and a model that cannot disable reasoning
+    # must not advertise a disable control. (#6437 review)
+    grok_profile = _grok_reasoning_profile(resolve_model)
+    grok_can_disable = (
+        bool(grok_profile["can_disable"]) if grok_profile is not None else True
+    )
+    supports_thinking_toggle = (
+        bool(supported_efforts) and grok_can_disable
+    ) or (zai_thinking is True)
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
