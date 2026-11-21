@@ -125,8 +125,9 @@ def test_wakeup_resolve_passes_prefer_cached_catalog(monkeypatch):
 
     def _spy(model_id, model_provider=None, *, profile_provider=None,
              profile_default_model=None, profile_config=None,
-             prefer_cached_catalog=False, **kwargs):
+             prefer_cached_catalog=False, wait_for_inflight_rebuild=True, **kwargs):
         seen["prefer_cached_catalog"] = prefer_cached_catalog
+        seen["wait_for_inflight_rebuild"] = wait_for_inflight_rebuild
         # The wakeup path now also threads the session's profile model defaults
         # through (greptile fix) so a brand-new session with an empty model
         # falls back to the profile default, not the global DEFAULT_MODEL.
@@ -159,6 +160,10 @@ def test_wakeup_resolve_passes_prefer_cached_catalog(monkeypatch):
     assert seen.get("prefer_cached_catalog") is True, (
         "start_session_turn must resolve the model with "
         "prefer_cached_catalog=True so a wakeup never triggers a live probe"
+    )
+    assert seen.get("wait_for_inflight_rebuild") is True, (
+        "wakeup routing must keep wait_for_inflight_rebuild=True so it joins "
+        "an in-flight rebuild instead of routing from a stale snapshot"
     )
     assert real is not None  # the real function still exists (not deleted)
 
