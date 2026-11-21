@@ -408,6 +408,86 @@ def handle_upload(handler):
         return j(handler, {'error': 'Upload failed'}, status=500)
 
 
+# A single archive member path component longer than this makes the anchored
+# walk / leaf create fail with ENAMETOOLONG (Linux caps one component at 255
+# BYTES -- NAME_MAX -- while macOS caps it at 255 characters). Used to tell an
+# over-long-component FileNotFoundError apart from a genuine missing file
+# (#8826).
+_MAX_NAME_COMPONENT = 255
+
+
+def _archive_member_label(member_name: str) -> str:
+    """Shorten a hostile member name for an error message (it can be 305+ chars)."""
+    return member_name if len(member_name) <= 64 else member_name[:64] + '...'
+
+
+def _member_component_too_long(part: str) -> bool:
+    """True when one path component is over the filesystem's per-component limit.
+
+    The limit is a BYTE limit, not a character count: Linux's NAME_MAX is 255
+    bytes, so 128 "é" characters (256 UTF-8 bytes) are too long even though
+    they are only 128 characters. Measuring with ``len(part)`` lets such a
+    component through, the anchored walk then fails with ENAMETOOLONG, and the
+    member is classified as a generic missing file instead of a name problem.
+    ``os.fsencode`` measures the component the way the filesystem does.
+    """
+    return len(os.fsencode(part)) > _MAX_NAME_COMPONENT
+
+
+def _create_archive_member_fd(workspace: Path, member_path: Path, member_name: str) -> int:
+    """Create one archive member file, classifying expected filesystem failures (#8826).
+
+    ``open_anchored_create_fd`` is the race-safe exclusive create; archives can
+    ask it to fail in ways that are the archive's fault, not the server's:
+
+    - ``FileExistsError``: a duplicate member name (a second member with the
+      same name would silently overwrite the first) or an EMPTY member name (it
+      resolves to the destination directory itself, which already exists).
+    - ``ENAMETOOLONG``: an over-long member name (leaf create fails).
+    - ``FileNotFoundError`` from the anchored path walk: an over-long directory
+      component makes the walk's ``os.open``/``os.mkdir`` fail, and
+      ``open_anchored_create_fd`` converts that ``OSError`` to
+      ``FileNotFoundError('Not found: ...')``. A genuine missing-file
+      FileNotFoundError must NOT be reported as a name problem, so the mapping
+      requires BOTH the walk's ``Not found:`` marker AND an over-long component
+      in the member name. "Over-long" is measured in BYTES
+      (``_member_component_too_long``), because that is how the filesystem
+      limits a path component -- a character count would miss a multibyte name.
+
+    Each becomes a ValueError with a specific message, so the upload handlers'
+    existing ValueError paths report a 400 / ``extract_error`` naming the member
+    and the reason instead of a generic 500. Rejecting the archive stays
+    correct: duplicate names would otherwise silently overwrite. Cleanup is
+    unchanged -- the ValueError propagates through extract_archive's
+    ``except Exception``, which removes the partial destination directory
+    before re-raising.
+    """
+    import errno
+
+    try:
+        return open_anchored_create_fd(workspace, member_path)
+    except FileExistsError:
+        if not member_name:
+            raise ValueError('Archive member has an empty name') from None
+        raise ValueError(
+            f'Archive contains a duplicate file name: {_archive_member_label(member_name)}'
+        ) from None
+    except FileNotFoundError as exc:
+        if str(exc).startswith('Not found:') and any(
+            _member_component_too_long(part) for part in Path(member_name).parts
+        ):
+            raise ValueError(
+                f'Archive member name too long: {_archive_member_label(member_name)}'
+            ) from None
+        raise
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            raise ValueError(
+                f'Archive member name too long: {_archive_member_label(member_name)}'
+            ) from None
+        raise
+
+
 def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     """Extract a zip or tar archive into the workspace.
 
@@ -484,7 +564,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                     # race-safely under the true workspace root (anchored mkdirat),
                     # so no pathname member_path.parent.mkdir() before it (which
                     # could be redirected outside by a raced symlink component).
-                    _mfd = open_anchored_create_fd(workspace, member_path)
+                    _mfd = _create_archive_member_fd(workspace, member_path, member.filename)
                     with zf.open(member) as src, os.fdopen(_mfd, 'wb', closefd=True) as dst:
                         _chunk_size = 65536
                         while True:
@@ -535,7 +615,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                     src_obj = tf.extractfile(member)
                     if src_obj:
                         # #3398: fd-anchored member create under the TRUE workspace root.
-                        _mfd = open_anchored_create_fd(workspace, member_path)
+                        _mfd = _create_archive_member_fd(workspace, member_path, member.name)
                         with src_obj as src, os.fdopen(_mfd, 'wb', closefd=True) as dst:
                             _chunk_size = 65536
                             while True:
