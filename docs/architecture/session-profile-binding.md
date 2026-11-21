@@ -29,9 +29,10 @@ For each turn, in order:
 2. **The profile home's `.env` `HERMES_SESSION_PROFILE`** — used only when the
    session resolves no profile, so a profile's own dotenv identity still
    reaches the agent (the pre-#8452 behavior).
-3. **Empty / unresolved** — the turn binds an unresolved identity. The TCP
-   mirror keeps the ambient value visible but the turn's ContextVar resolves
-   `""` rather than another tab's name.
+3. **Ambient / unresolved** — the turn binds the captured ambient value while
+   a publisher is live, or the current process environment value otherwise.
+   If that value is absent, the ContextVar resolves to `""`. Another live
+   turn's published profile does not replace the captured ambient value.
 
 A saved chat with **no** `profile` belongs to the **root** profile: its home is
 the root Hermes home, and its turn identity is the root one. It must never
