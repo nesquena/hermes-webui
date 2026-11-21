@@ -19,7 +19,12 @@ from bisect import bisect_left
 from typing import Any
 
 from api.config import LOCK, _get_session_agent_lock
-from api.models import get_session, SESSIONS
+from api.models import (
+    get_session,
+    SESSIONS,
+    _detach_session_for_intentional_shrink,
+    _republish_session_after_shrink,
+)
 from api.agent_sessions import normalize_agent_session_source
 from api.process_event_utils import is_hidden_transcript_row
 
@@ -1181,7 +1186,17 @@ def retry_last(session_id: str) -> dict[str, Any]:
                     s.context_messages = _context_prefix_before_last_user(
                         s.context_messages
                     )
-        s.save()
+        # #9029: the shrunk object is now visible in SESSIONS but not yet on
+        # disk — a concurrent full read in this window would treat the
+        # fewer-messages cache as stale and reload the old sidecar over it,
+        # putting the removed reply back. Detach first so the window is a
+        # cache miss (readers see the old sidecar — the correct pre-save
+        # semantics), then republish once the truncation is durable.
+        _detach_session_for_intentional_shrink(session_id)
+        try:
+            s.save()
+        finally:
+            _republish_session_after_shrink(session_id, s)
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
@@ -1242,7 +1257,14 @@ def undo_last(session_id: str) -> dict[str, Any]:
                     s.context_messages = _context_prefix_before_last_user(
                         s.context_messages
                     )
-        s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+        # #9029: same shrink-then-save window as retry_last — detach before
+        # the divergence is observable, republish after the truncation is
+        # durable.
+        _detach_session_for_intentional_shrink(session_id)
+        try:
+            s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+        finally:
+            _republish_session_after_shrink(session_id, s)
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
         'removed_count': removed_count,

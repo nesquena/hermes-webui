@@ -7087,6 +7087,41 @@ def _cached_session_lags_disk(cached) -> bool:
     return False
 
 
+def _detach_session_for_intentional_shrink(sid) -> None:
+    """Drop *sid* from the LRU while an intentional shrink is being persisted.
+
+    retry/undo/truncate/clear all shrink the cached Session object's message
+    list in memory before saving it. Between the shrink and the save the
+    cached object holds FEWER messages than its sidecar — exactly the shape
+    ``_cached_session_lags_disk`` reads as a stale cache. A concurrent full
+    read in that window reloads the old sidecar over the shrunk object
+    (#9029): the reply the user just removed comes back in the transcript,
+    and the next save writes it to disk again.
+
+    Detaching the entry first turns the window into a cache miss instead of
+    a stale hit: concurrent readers cold-load the sidecar — still the old,
+    un-shrunk content, which is the correct pre-save semantics — and the
+    caller republishes the shrunk object once it is durable. This changes
+    nothing about ``_cached_session_lags_disk``; a genuinely stale cache
+    (sidecar ahead of cache through another writer) still takes the reload
+    path.
+    """
+    with LOCK:
+        SESSIONS.pop(sid, None)
+
+
+def _republish_session_after_shrink(sid, session) -> None:
+    """Publish a shrunk, already-saved session back into the LRU (#9029).
+
+    Counterpart to ``_detach_session_for_intentional_shrink``: called once
+    the shrunk object is durable so the cache and the sidecar agree again.
+    """
+    with LOCK:
+        SESSIONS[sid] = session
+        SESSIONS.move_to_end(sid)
+        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+
+
 def _persisted_message_count(sid) -> int | None:
     """Return the on-disk message count for *sid* without a full load (#4765).
 
@@ -7474,12 +7509,37 @@ def _resolve_session_once(
             if not allow_full_load:
                 raise _FullSessionResolveRequired
             try:
+                # #9229: a full read that starts before an intentional shrink
+                # (retry/undo) saves can still be holding the OLD sidecar when
+                # it finishes: the shrink detaches the entry, saves the
+                # truncated transcript and republishes the shortened object,
+                # and then this reader would publish its pre-shrink snapshot
+                # over it — putting the removed reply back in the cache (and
+                # back on disk on the next save). The cold-load path below
+                # already guards its publication with the write generation;
+                # the cache-hit reload path needs the same guard: if another
+                # writer replaced the sidecar while this read was in flight,
+                # our snapshot is stale and must not be published.
+                before = _sidecar_write_generation(sid)
                 disk_session = Session.load(sid)
                 with LOCK:
-                    SESSIONS[sid] = disk_session
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
-                cached = disk_session
+                    now = _sidecar_write_generation(sid)
+                    # Writes by THIS thread (a self-heal save inside load) are
+                    # part of what it read; only other writers make it stale.
+                    unchanged = (now[0] - before[0]) == (now[1] - before[1])
+                    if unchanged:
+                        SESSIONS[sid] = disk_session
+                        if promote_cache:
+                            SESSIONS.move_to_end(sid)
+                        cached = disk_session
+                    else:
+                        # Another writer (the retry/undo shrink) replaced the
+                        # sidecar while this read was in flight. Our snapshot
+                        # is the pre-shrink one; serve whatever the cache now
+                        # holds instead of resurrecting the removed reply.
+                        resident = SESSIONS.get(sid)
+                        if resident is not None:
+                            cached = resident
             except Exception:
                 logger.debug(
                     "cached session disk-freshness check failed for session %s", sid, exc_info=True,
