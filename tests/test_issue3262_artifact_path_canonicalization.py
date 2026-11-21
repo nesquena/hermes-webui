@@ -33,10 +33,9 @@ def _extract(decl_regex: str) -> str:
     return m.group(0)
 
 
-def _normalize_via_node(paths):
-    ignore_re = _extract(r"const ARTIFACT_IGNORE_RE = /.*?/;")
-    # Extract the full function body by brace-matching.
-    start = WORKSPACE_JS.index("function _normalizeArtifactPath(")
+def _extract_fn_body(name: str) -> str:
+    """Extract a top-level function body from workspace.js by brace-matching."""
+    start = WORKSPACE_JS.index(f"function {name}(")
     brace = WORKSPACE_JS.index("{", start)
     depth = 0
     end = None
@@ -49,7 +48,18 @@ def _normalize_via_node(paths):
             if depth == 0:
                 end = i + 1
                 break
-    fn = WORKSPACE_JS[start:end]
+    assert end is not None, f"function {name} did not close"
+    return WORKSPACE_JS[start:end]
+
+
+def _normalize_via_node(paths):
+    ignore_re = _extract(r"const ARTIFACT_IGNORE_RE = /.*?/;")
+    # _normalizeArtifactPath now calls _isWindowsStylePath/_stripWorkspacePrefix;
+    # extract those helpers first so the driver has them in scope.
+    fn = "\n".join(
+        _extract_fn_body(n)
+        for n in ("_isWindowsStylePath", "_stripWorkspacePrefix", "_canonicalizeRelativePath", "_normalizeArtifactPath")
+    )
     driver = (
         ignore_re + "\n" + fn + "\n"
         + "const out = JSON.parse(process.argv[1]).map(_normalizeArtifactPath);\n"
