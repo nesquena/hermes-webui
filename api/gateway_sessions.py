@@ -35,8 +35,11 @@ def external_session(session):
     return session.get("session_source") != "fork" and source in _LOCAL_SOURCES | _MESSAGING_SOURCES
 
 
-def display_history(snapshot):
-    """Canonical display projections use text; WebUI transcript rows use content."""
+def display_history(snapshot, turn_token=None, turn_text=None):
+    """Canonical display projections use text; WebUI transcript rows use content.
+
+    `turn_token` re-stamps the just-settled turn's prompt row, which the Gateway stores without it.
+    """
     rows = []
     for row in snapshot.get("display_messages", snapshot.get("messages", [])):
         if not isinstance(row, dict) or row.get("role") not in {"user", "assistant"}:
@@ -45,6 +48,11 @@ def display_history(snapshot):
         # Retain the Gateway's row_id and timestamp. Do not invent a WebUI id:
         # the existing state.db reader merges these rows by their native identity.
         rows.append(item)
+    if turn_token:
+        from api.streaming import _active_turn_user_text_matches
+        users = [r for r in rows if r["role"] == "user" and r.get("display_kind") != "steer"]
+        if users and _active_turn_user_text_matches(users[-1], turn_text):
+            users[-1]["_active_turn_token"] = turn_token
     return rows
 
 

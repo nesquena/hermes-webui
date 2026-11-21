@@ -3423,6 +3423,15 @@ def _session_has_cancel_marker(session) -> bool:
     return False
 
 
+def _turn_end_provenance(msg):
+    """'user'/'server' when this row is a persisted cancel or interruption marker, else None (read from its fields)."""
+    if not isinstance(msg, dict) or msg.get('role') != 'assistant' or msg.get('_error') is not True:
+        return None
+    if msg.get('provider_details_label') == 'Cancellation details':
+        return 'server' if _cancel_initiator_is_server(msg.get('cancel_initiator')) else 'user'
+    return 'server' if msg.get('type') == 'interrupted' else None
+
+
 def _cancelled_turn_content(
     message: str = 'Task cancelled.',
     agent_name: str | None = None,
@@ -20178,8 +20187,13 @@ def _cancel_stream_impl(
                                 _last_user = _m
                                 _last_user_idx = _idx
                                 break
-                        _already_persisted = False
-                        if _last_user is not None:
+                        # The token's own row owns the turn even when a later Steer row is the latest user row.
+                        _checkpoint_idx = next((i for i, m in enumerate(_msgs_for_recovery) if _active_turn_token_matches(
+                            m, {'token': _cancel_turn_token})), None)
+                        _already_persisted = _checkpoint_idx is not None
+                        if _already_persisted:
+                            _last_user_idx = _checkpoint_idx
+                        elif _last_user is not None:
                             _last_content = _last_user.get('content')
                             _last_ts = _last_user.get('timestamp') or 0
                             # Only treat as already-persisted if the latest user turn

@@ -22503,6 +22503,15 @@ def handle_post(handler, parsed) -> bool:
         command = str(body.get("command", "") or "").strip()
         if not command:
             return bad(handler, "command is required")
+        name, *rest = command.split(maxsplit=1)  # any whitespace, like _parse_slash_command()
+        if name.lower() in ("/loop", "loop", "/proactive", "proactive"):
+            from api.loops import SessionRotated, run_loop_command  # ownership: the generic POST guard above
+            try:
+                return j(handler, {"output": run_loop_command(str(body.get("session_id") or ""), "".join(rest),
+                                                              request_profile=_get_active_profile_name())})
+            except SessionRotated as e:
+                return j(handler, {"error": str(e), "code": "session_rotated",
+                                   "continuation_session_id": e.continuation}, status=409)
 
         try:
             return j(handler, {"output": execute_agent_command(command)})
@@ -23191,7 +23200,9 @@ def handle_post(handler, parsed) -> bool:
                 s.thread_id = cli_meta.get("thread_id")
                 s.session_key = cli_meta.get("session_key")
                 s.platform = cli_meta.get("platform")
-        with _get_session_agent_lock(sid):
+        from api.loops import archive_guard
+
+        with archive_guard(sid) as _loop_archive, _get_session_agent_lock(sid):
             # #7738: re-resolve the canonical session under the lock so the
             # object we mutate is the resident one (not a stale, evicted one).
             # For the in-cache path the outer get_session(sid) above can drop
@@ -23227,6 +23238,7 @@ def handle_post(handler, parsed) -> bool:
                 _apply_cli_source_meta_to_session(s, _archive_source_meta)
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
+            _loop_archive["session"] = s
             with LOCK:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
@@ -30517,6 +30529,7 @@ def _start_regeneration_stream_locked(
             retained_context_user=retained_context_user,
             defer_save=True,
         )
+        launched_started_at = s.pending_started_at  # read under the lock: the worker clears it
 
         diag.stage("turn_journal_submitted") if diag else None
         from api.turn_journal import append_turn_journal_event
@@ -30626,7 +30639,7 @@ def _start_regeneration_stream_locked(
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
-        "pending_started_at": s.pending_started_at,
+        "pending_started_at": launched_started_at,
         "turn_id": journal_event.get("turn_id"),
         "title": s.title,
     }
@@ -30947,6 +30960,7 @@ def _start_chat_stream_for_session(
     backup_provenance = None
     was_hidden_empty_session = False
     journal_event = {}
+    launched_started_at = None
     while True:
         with session_lock:
             locked_stream_id = getattr(s, "active_stream_id", None)
@@ -31051,6 +31065,8 @@ def _start_chat_stream_for_session(
                         stream_id=stream_id,
                         source=source,
                     )
+                    # Captured under the lock: the worker (or Stop) clears s.pending_* once it runs.
+                    launched_started_at = s.pending_started_at
                     diag.stage("turn_journal_submitted") if diag else None
                     try:
                         from api.turn_journal import append_turn_journal_event
@@ -31204,7 +31220,7 @@ def _start_chat_stream_for_session(
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
-        "pending_started_at": s.pending_started_at,
+        "pending_started_at": launched_started_at,
         "turn_id": journal_event.get("turn_id"),
         "title": s.title,
     }
@@ -32023,8 +32039,9 @@ def _handle_goal_command(handler, body):
         except ImportError:
             requested_profile = ""
     if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-        session_profile, retag_result = _retag_empty_session_profile(
-            s, requested_profile
+        from api.loops import retag_session_profile
+        session_profile, retag_result = retag_session_profile(
+            s, requested_profile, _retag_empty_session_profile
         )
         if retag_result == "external":
             return bad(handler, "Session belongs to a different profile", 403)
@@ -32514,8 +32531,9 @@ def _handle_chat_start(handler, body, diag=None):
                 requested_profile
                 and _profiles_match(requested_profile, active_profile)
             ):
-                session_profile, retag_result = (
-                    _retag_empty_session_profile(s, requested_profile)
+                from api.loops import retag_session_profile
+                session_profile, retag_result = retag_session_profile(
+                    s, requested_profile, _retag_empty_session_profile
                 )
                 if retag_result not in ("same_owner", "retagged"):
                     return _session_profile_mismatch_response(
