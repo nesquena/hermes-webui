@@ -17,6 +17,7 @@ from api.config import (
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
     _HERMES_FOUND,
+    _canonicalise_provider_id,
     invalidate_models_cache,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
@@ -199,14 +200,16 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("nvidia", [])),
         "category": "specialized",
     },
-    "mistralai": {
+    "mistral": {
         "label": "Mistral",
         "env_var": "MISTRAL_API_KEY",
         "default_model": "mistral-large-latest",
         "default_base_url": "https://api.mistral.ai/v1",
         "requires_base_url": False,
-        # No catalog entry for mistralai today — wizard shows a free-text input.
-        "models": list(_PROVIDER_MODELS.get("mistralai", [])),
+        # Canonical slug is ``mistral`` (#6894), which is also the
+        # _PROVIDER_MODELS key — the wizard gets the curated list rather than
+        # a free-text input.
+        "models": list(_PROVIDER_MODELS.get("mistral", [])),
         "category": "specialized",
     },
     "x-ai": {
@@ -582,6 +585,33 @@ def _extract_current_base_url(cfg: dict) -> str:
     return ""
 
 
+def _canonical_equivalent_provider_key(
+    provider: str, providers_cfg: dict
+) -> str | None:
+    """The ``providers:`` key that canonically matches *provider*, if any.
+
+    Mirrors ``api.config._raw_provider_key_for_provider_id`` so onboarding's
+    stored-key detection and the catalog/endpoint lookup resolve ONE record:
+    the FIRST raw key in config order whose canonical form matches, which is
+    the same ``setdefault`` rule the catalog builders use. Config order alone
+    decides under a canonical+legacy collision, so the answer never depends on
+    which spelling was requested.
+
+    Returns ``None`` when no record matches — the caller then keeps its
+    existing exact-key result (an unconfigured provider stays unconfigured).
+    """
+    requested = str(provider or "").strip().lower()
+    if not requested:
+        return None
+    canonical = _canonicalise_provider_id(requested)
+    if not canonical:
+        return None
+    for raw_key in providers_cfg:
+        if _canonicalise_provider_id(raw_key) == canonical:
+            return raw_key
+    return None
+
+
 def _provider_api_key_present(
     provider: str, cfg: dict, env_values: dict[str, str]
 ) -> bool:
@@ -611,7 +641,26 @@ def _provider_api_key_present(
     # ``... or {}`` degrades that null to an empty mapping (salvage of #3967).
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
+        # #8664 P2-2 (review 2026-11-02): the selector is canonicalised before
+        # this runs, so a request that still spells the LEGACY slug arrives here
+        # as ``mistral`` while the stored record is ``providers.mistralai``. An
+        # exact-key lookup then reports "no key configured" and onboarding
+        # raises ``MISTRAL_API_KEY is required`` for a config that already holds
+        # a usable key. Resolve the record the same canonical-aware way the
+        # catalog and the endpoint lookup do, so stored-key detection and
+        # connection ownership agree on ONE record. A genuinely absent key must
+        # still be rejected, so this only widens WHICH records are inspected —
+        # it never treats a missing value as present.
         provider_cfg = providers_cfg.get(provider, {})
+        if not (
+            isinstance(provider_cfg, dict)
+            and str(provider_cfg.get("api_key") or "").strip()
+        ):
+            canonical_key = _canonical_equivalent_provider_key(provider, providers_cfg)
+            if canonical_key and canonical_key != provider:
+                sibling_cfg = providers_cfg.get(canonical_key)
+                if isinstance(sibling_cfg, dict):
+                    provider_cfg = sibling_cfg
         if (
             isinstance(provider_cfg, dict)
             and str(provider_cfg.get("api_key") or "").strip()
@@ -981,6 +1030,29 @@ def get_onboarding_status() -> dict:
     }
 
 
+def _normalise_provider_selector(provider: object) -> str:
+    """Fold a legacy provider selector onto its canonical setup key.
+
+    #6894 renamed the Mistral setup key ``mistralai`` → ``mistral``, so an
+    existing client (or a config written by an earlier build) still posts the
+    legacy spelling. Canonicalise BEFORE any ``_SUPPORTED_PROVIDER_SETUPS``
+    membership test: a legacy selector must take the same setup path as its
+    canonical twin instead of falling through to the unsupported-provider
+    early completion, which marks onboarding done and leaves ``model: {}``
+    untouched (#8664).
+
+    Only a selector whose canonical form is itself a supported setup is
+    folded — every other value passes through unchanged, so genuinely
+    unsupported providers (openai-codex, copilot, …) keep their existing
+    early-completion behaviour.
+    """
+    raw = str(provider or "").strip().lower()
+    if not raw or raw in _SUPPORTED_PROVIDER_SETUPS:
+        return raw
+    canonical = _canonicalise_provider_id(raw)
+    return canonical if canonical in _SUPPORTED_PROVIDER_SETUPS else raw
+
+
 def apply_onboarding_setup(body: dict) -> dict:
     # Hard guard: if the operator set SKIP_ONBOARDING, the wizard should never
     # have appeared.  Even if the frontend somehow calls this endpoint anyway
@@ -992,7 +1064,11 @@ def apply_onboarding_setup(body: dict) -> dict:
         save_settings({"onboarding_completed": True})
         return get_onboarding_status()
 
-    provider = str(body.get("provider") or "").strip().lower()
+    # Normalise the selector first (#8664): a legacy ``mistralai`` request
+    # must reach the Mistral setup below, not the unsupported early
+    # completion — the membership test and the early completion both run on
+    # the normalised value.
+    provider = _normalise_provider_selector(body.get("provider"))
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     base_url = _normalize_base_url(str(body.get("base_url") or ""))
