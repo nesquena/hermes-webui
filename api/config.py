@@ -4051,7 +4051,7 @@ def _resolve_custom_record_key(
         key_text = str(raw_api_key).strip()
         if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
             api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
-        elif key_text:
+        elif key_text and not _has_env_ref(key_text):
             api_key = key_text
     if not api_key:
         key_env = str(raw_key_env or "").strip()
@@ -5068,12 +5068,22 @@ def _custom_record_pool_runtime(base_url: str | None, record: dict) -> dict | No
         resolve_pool = getattr(_runtime_provider, "_try_resolve_from_custom_pool", None)
         if resolve_pool is None:
             return None
-        return resolve_pool(
+        runtime = resolve_pool(
             base_url,
             "custom",
             _custom_record_api_mode(record),
             provider_name=str(record.get("provider_key") or record.get("name") or "") or None,
         )
+        # A pool credential that is still an unresolved ``${VAR}`` reference is
+        # no credential at all: a named profile reads only its own .env
+        # (#3961), so a variable that profile's .env does not define arrives
+        # here verbatim, and forwarding the literal would hand the provider
+        # ``${VAR}`` as the key. Reporting no pool drops the runtime and the
+        # record's existing "declares a credential source that produced no
+        # key" refusal then names the real cause (#8976).
+        if runtime and _has_env_ref(runtime.get("api_key")):
+            return None
+        return runtime
     except Exception:
         return None
 
