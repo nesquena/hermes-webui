@@ -7008,21 +7008,11 @@ def _apply_core_sync_or_error_marker(
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
-        # Display timestamp only — truncation is fine for chronology, but the
-        # ownership identity below uses the ORIGINAL full-precision
-        # pending_started_at (int() truncation let a tokenless historical row
-        # at the same whole second win the ownership check for a sub-second
-        # current turn, suppressing/losing the prompt), and the recovered row
-        # persists full precision too because its timestamp IS the turn's
-        # identity after pending state is cleared.
-        _recovered_ts = int(time.time())
-        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
-        _recovered_row_ts = (
-            session.pending_started_at
-            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0
-            else time.time()
-        )
+        # Keep a finite timestamp at full precision for recovered-row identity,
+        # and use the same safe fallback for both values when the saved stamp
+        # is malformed. An inline int(+inf) used to abort every repair attempt.
+        _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
+        _recovered_row_ts = _recovered_ts
         # Ownership identity must use the ORIGINAL full-precision
         # pending_started_at: truncating to int() here let a tokenless
         # historical row at the same whole second (500.0) win the
