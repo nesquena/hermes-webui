@@ -19235,11 +19235,14 @@ def _run_agent_streaming(
                     # it (possibly only after this put), so this apperror is the run's
                     # only journaled terminal. Make it a cancel: the run settles as
                     # interrupted-by-user and a replay shows the cancel, not an error.
-                    # Drop the provider fields (the cancel marker says no provider
+                    # Drop the provider details (the cancel marker says no provider
                     # failure occurred) and name the server when it settled the run,
-                    # as _worker_cancel_event_payload does.
+                    # as _worker_cancel_event_payload does. Carry the cancelled-turn
+                    # hint too: when this frame reaches the client before the cancel
+                    # frame, both orderings must render the same from the first
+                    # frame (#9098 item 1).
                     if cancel_event.is_set():
-                        for _provider_key in ('hint', 'details', 'reason'):
+                        for _provider_key in ('details', 'reason'):
                             _error_payload.pop(_provider_key, None)
                         _error_payload['type'] = 'cancelled'
                         _server_reason = _server_settle_reason(stream_id)
@@ -19248,6 +19251,11 @@ def _run_agent_streaming(
                             _error_payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
                         else:
                             _error_payload['message'] = 'Task cancelled.'
+                        _error_payload['hint'] = _cancelled_turn_hint(
+                            initiator=(
+                                CANCEL_INITIATOR_SERVER if _server_reason else CANCEL_INITIATOR_USER
+                            ),
+                        )
                     # The success path clears active_stream_id and publishes
                     # ``done`` before post-success housekeeping (title thread
                     # start). If that fails, keep the published outcome: a

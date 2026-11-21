@@ -13,6 +13,8 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 import api.config as config
 import api.models as models
 import api.streaming as streaming
@@ -23,6 +25,10 @@ STREAMING = Path(__file__).resolve().parents[1] / "api" / "streaming.py"
 MARKER = "Skipping stale stream error writeback"
 NEW_TITLE = "New user title after Stop"
 OLD_TITLE = "Old title before Stop"
+# #9098 item 2: a rotation of the worker-held session id, applied inside the
+# failing title-thread hook. The closing stream_end must name the id the
+# worker held, not this rotated s.session_id.
+ROTATED_SID = "post_success_initial_title-rotated"
 
 
 def _stale_error_branch(src: str) -> str:
@@ -465,6 +471,15 @@ def test_post_success_initial_title_thread_failure_still_closes_the_stream(tmp_p
     def _fail_only_title_refresh_start(thread):
         if getattr(thread, "_target", None) is streaming._run_background_title_update:
             title_thread_starts.append(thread.name)
+            # #9098 item 2: rotate the worker-held session id inside the
+            # failing hook. The branch that closes the transport after the
+            # published ``done`` must name the id the worker held (its
+            # ``session_id`` argument), not the rotated ``s.session_id`` —
+            # a rename after eviction must not close the stream on the wrong
+            # session.
+            _rotated = models.SESSIONS.get(sid)
+            if _rotated is not None:
+                _rotated.session_id = ROTATED_SID
             raise RuntimeError("can't start new thread")
         return original_start(thread)
 
@@ -524,9 +539,43 @@ def test_post_success_initial_title_thread_failure_still_closes_the_stream(tmp_p
     )
 
 
-def _run_stale_error_race(tmp_path, monkeypatch, sid, stream_id, during_pause):
+class _HoldingQueue:
+    """Proxy that holds the first cancel frame so the worker's error lands first.
+
+    ``cancel_stream`` reads the queue from STREAMS at cancel time, while the
+    worker has held the real queue since admission. Swapping the STREAMS entry
+    for this proxy before the cancel lets the worker's ``apperror`` reach the
+    client first; ``release_held`` then delivers the cancel frame, reproducing
+    the error-first ordering (#9098 items 1 and 3) without any real sleep.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._held = None
+
+    def put_nowait(self, item):
+        if self._held is None and isinstance(item, tuple) and item and item[0] == "cancel":
+            self._held = item
+            return
+        return self._inner.put_nowait(item)
+
+    def note_last_event_id(self, event_id):
+        return self._inner.note_last_event_id(event_id)
+
+    def release_held(self):
+        item, self._held = self._held, None
+        if item is not None:
+            self._inner.put_nowait(item)
+
+
+def _run_stale_error_race(tmp_path, monkeypatch, sid, stream_id, during_pause, *, hold_cancel_put=False):
     """Real worker with a failing Agent, paused after its cancel check (the PR's seam); run
-    ``during_pause(captured, stream_id)``, release it, and return the queued frames and session dir."""
+    ``during_pause(captured, stream_id)``, release it, and return the queued frames and session dir.
+
+    ``hold_cancel_put`` swaps the STREAMS queue for a proxy that holds the cancel frame
+    until the worker's own terminal has been queued, so the frames come back in the
+    error-first ordering instead of cancel-first (#9098 item 3).
+    """
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     index_file = session_dir / "_index.json"
@@ -608,14 +657,20 @@ def _run_stale_error_race(tmp_path, monkeypatch, sid, stream_id, during_pause):
 
     worker = threading.Thread(target=_run, name="stale-race-worker", daemon=True)
     worker.start()
+    holding = None
     try:
         assert reached.wait(30), "worker did not reach the post-cancel-check pause"
+        if hold_cancel_put:
+            holding = _HoldingQueue(config.STREAMS[stream_id])
+            config.STREAMS[stream_id] = holding
         during_pause(captured, stream_id)
         release.set()
         worker.join(30)
     finally:
         release.set()
         worker.join(5)
+        if holding is not None:
+            holding.release_held()
         for registry in registries:
             registry.clear()
     assert not worker.is_alive() and errors == []
@@ -625,7 +680,8 @@ def _run_stale_error_race(tmp_path, monkeypatch, sid, stream_id, during_pause):
     return frames, session_dir
 
 
-def test_stop_won_stale_worker_settles_as_cancelled_not_errored(tmp_path, monkeypatch):
+@pytest.mark.parametrize("hold_cancel_put", [False, True], ids=["cancel-first", "error-first"])
+def test_stop_won_stale_worker_settles_as_cancelled_not_errored(tmp_path, monkeypatch, hold_cancel_put):
     """Stop lands after the worker's cancel check but before its ownership check.
 
     cancel_stream already queued the live ``cancel`` frame (not journaled). The stale branch's
@@ -640,7 +696,9 @@ def test_stop_won_stale_worker_settles_as_cancelled_not_errored(tmp_path, monkey
     def _stop(_captured, sid_stream):
         assert streaming.cancel_stream(sid_stream) is True
 
-    frames, session_dir = _run_stale_error_race(tmp_path, monkeypatch, sid, stream_id, _stop)
+    frames, session_dir = _run_stale_error_race(
+        tmp_path, monkeypatch, sid, stream_id, _stop, hold_cancel_put=hold_cancel_put,
+    )
     names = [item[0] for item in frames]
     assert "cancel" in names, names
     apperrors = [item[1] for item in frames if item[0] == "apperror"]
@@ -648,8 +706,11 @@ def test_stop_won_stale_worker_settles_as_cancelled_not_errored(tmp_path, monkey
     assert apperrors[0].get("type") == "cancelled"
     assert apperrors[0].get("message") == "Task cancelled."
     assert "cancel_initiator" not in apperrors[0]
-    # The cancel marker says no provider failure occurred: no provider hint/details/reason.
-    assert not {"hint", "details", "reason"} & set(apperrors[0]), apperrors[0]
+    # #9098 item 1: the apperror carries the cancelled-turn hint the cancel frame
+    # renders, so both orderings match from the first frame. No provider
+    # details/reason survive the cancel classification.
+    assert apperrors[0].get("hint") == streaming._cancelled_turn_hint()
+    assert not {"details", "reason"} & set(apperrors[0]), apperrors[0]
     assert apperrors[0].get("stale_writeback_skipped") is True
     assert apperrors[0].get("session_id") == sid and apperrors[0].get("old_session_id") == sid
 
@@ -660,7 +721,8 @@ def test_stop_won_stale_worker_settles_as_cancelled_not_errored(tmp_path, monkey
     assert terminal is not None and terminal.get("terminal_state") == "interrupted-by-user", terminal
 
 
-def test_server_settled_stale_worker_names_the_server(tmp_path, monkeypatch):
+@pytest.mark.parametrize("hold_cancel_put", [False, True], ids=["cancel-first", "error-first"])
+def test_server_settled_stale_worker_names_the_server(tmp_path, monkeypatch, hold_cancel_put):
     """A server settle (restart drain) that wins the same race is not labelled a user cancel."""
     from api import run_journal
 
@@ -672,7 +734,9 @@ def test_server_settled_stale_worker_names_the_server(tmp_path, monkeypatch):
                                        initiator=streaming.CANCEL_INITIATOR_SERVER) is True
 
     try:
-        frames, session_dir = _run_stale_error_race(tmp_path, monkeypatch, sid, stream_id, _server_settle)
+        frames, session_dir = _run_stale_error_race(
+            tmp_path, monkeypatch, sid, stream_id, _server_settle, hold_cancel_put=hold_cancel_put,
+        )
     finally:
         streaming._SERVER_SETTLE_REASONS.pop(stream_id, None)
     apperrors = [item[1] for item in frames if item[0] == "apperror"]
@@ -680,13 +744,18 @@ def test_server_settled_stale_worker_names_the_server(tmp_path, monkeypatch):
     assert apperrors[0].get("type") == "cancelled"
     assert apperrors[0].get("message") == reason
     assert apperrors[0].get("cancel_initiator") == streaming.CANCEL_INITIATOR_SERVER
-    assert not {"hint", "details", "reason"} & set(apperrors[0]), apperrors[0]
+    # #9098 item 1: the server-settle hint rides the error-first apperror too.
+    assert apperrors[0].get("hint") == streaming._cancelled_turn_hint(
+        initiator=streaming.CANCEL_INITIATOR_SERVER,
+    )
+    assert not {"details", "reason"} & set(apperrors[0]), apperrors[0]
     assert apperrors[0].get("stale_writeback_skipped") is True
     summary = run_journal.find_run_summary(stream_id, session_dir=session_dir)
     assert summary["terminal_state"] == "interrupted-by-user", summary
 
 
-def test_stale_worker_without_stop_still_settles_as_errored(tmp_path, monkeypatch):
+@pytest.mark.parametrize("hold_cancel_put", [False, True], ids=["cancel-first", "error-first"])
+def test_stale_worker_without_stop_still_settles_as_errored(tmp_path, monkeypatch, hold_cancel_put):
     """Control: a newer owner took the session (no Stop). The stale error stays a provider error."""
     from api import run_journal
 
@@ -695,7 +764,9 @@ def test_stale_worker_without_stop_still_settles_as_errored(tmp_path, monkeypatc
     def _newer_owner(captured, _sid_stream):
         captured.active_stream_id = "stream-newer-owner"
 
-    frames, session_dir = _run_stale_error_race(tmp_path, monkeypatch, sid, stream_id, _newer_owner)
+    frames, session_dir = _run_stale_error_race(
+        tmp_path, monkeypatch, sid, stream_id, _newer_owner, hold_cancel_put=hold_cancel_put,
+    )
     names = [item[0] for item in frames]
     assert "cancel" not in names, names
     apperrors = [item[1] for item in frames if item[0] == "apperror"]
@@ -704,3 +775,64 @@ def test_stale_worker_without_stop_still_settles_as_errored(tmp_path, monkeypatc
     assert apperrors[0].get("details") and "cancel_initiator" not in apperrors[0]   # provider error kept intact
     summary = run_journal.find_run_summary(stream_id, session_dir=session_dir)
     assert summary["terminal_state"] == "errored", summary
+
+
+def test_stop_won_error_first_apperror_carries_the_cancelled_hint(tmp_path, monkeypatch):
+    """#9098 item 1: the error frame that reaches the client before the cancel
+    frame must already carry the cancelled-turn hint.
+
+    When Stop wins the race the stale branch's ``apperror`` is the run's only
+    journaled terminal until the live ``cancel`` frame lands. Without the hint
+    the turn renders a bare "Task cancelled." for that window; with it both
+    orderings render the same from the first frame. The cancel put is held
+    until the worker's terminal is queued, so no real sleep is involved.
+    """
+    sid, stream_id = "stop_won_error_first_hint", "stream-stop-won-error-first"
+
+    def _stop(_captured, sid_stream):
+        assert streaming.cancel_stream(sid_stream) is True
+
+    frames, _session_dir = _run_stale_error_race(
+        tmp_path, monkeypatch, sid, stream_id, _stop, hold_cancel_put=True,
+    )
+    names = [item[0] for item in frames]
+    # The ordering under test really is error-first: the apperror terminal
+    # reaches the queue before the cancel frame.
+    terminal_names = [n for n in names if n in {"done", "stream_end", "cancel", "apperror"}]
+    assert terminal_names == ["apperror", "cancel"], terminal_names
+    apperrors = [item[1] for item in frames if item[0] == "apperror"]
+    assert len(apperrors) == 1, names
+    assert apperrors[0].get("type") == "cancelled"
+    assert apperrors[0].get("message") == "Task cancelled."
+    assert apperrors[0].get("hint") == streaming._cancelled_turn_hint()
+    assert not {"details", "reason"} & set(apperrors[0]), apperrors[0]
+
+
+def test_server_settled_error_first_apperror_hint_names_the_server(tmp_path, monkeypatch):
+    """#9098 item 1, server-settle flavour: the error-first apperror's hint says
+    the server stopped the run, matching the cancel frame's copy."""
+    sid, stream_id = "server_settled_error_first_hint", "stream-server-settle-error-first"
+    reason = "The WebUI server restarted and settled this run."
+
+    def _server_settle(_captured, sid_stream):
+        assert streaming.cancel_stream(sid_stream, reason=reason,
+                                       initiator=streaming.CANCEL_INITIATOR_SERVER) is True
+
+    try:
+        frames, _session_dir = _run_stale_error_race(
+            tmp_path, monkeypatch, sid, stream_id, _server_settle, hold_cancel_put=True,
+        )
+    finally:
+        streaming._SERVER_SETTLE_REASONS.pop(stream_id, None)
+    names = [item[0] for item in frames]
+    terminal_names = [n for n in names if n in {"done", "stream_end", "cancel", "apperror"}]
+    assert terminal_names == ["apperror", "cancel"], terminal_names
+    apperrors = [item[1] for item in frames if item[0] == "apperror"]
+    assert len(apperrors) == 1, names
+    assert apperrors[0].get("type") == "cancelled"
+    assert apperrors[0].get("message") == reason
+    assert apperrors[0].get("cancel_initiator") == streaming.CANCEL_INITIATOR_SERVER
+    assert apperrors[0].get("hint") == streaming._cancelled_turn_hint(
+        initiator=streaming.CANCEL_INITIATOR_SERVER,
+    )
+    assert not {"details", "reason"} & set(apperrors[0]), apperrors[0]
