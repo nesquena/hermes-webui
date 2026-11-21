@@ -1,6 +1,7 @@
 """A stale WebUI sidecar must not hide a durable compression continuation."""
 import io
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,17 @@ from types import SimpleNamespace
 import pytest
 
 from api import routes, profiles
+
+
+class _WithRawConn:
+    """The Agent's ``SessionDB`` plus a raw connection on its file as ``_conn``: the tests edit rows directly,
+    and newer cores' ``SessionDB`` stand-in has no connection of its own."""
+
+    def __init__(self, db, path):
+        self._db, self._conn = db, sqlite3.connect(path)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
 
 
 @pytest.fixture
@@ -25,7 +37,9 @@ def lineage(tmp_path, monkeypatch):
     db.end_session("idlechild", "idle_timeout")
     monkeypatch.setattr(profiles, "_resolve_profile_home_for_name", lambda name: str(tmp_path))
     session = SimpleNamespace(session_id="sealedparent", profile="default", pre_compression_snapshot=False)
-    yield db, session
+    wrapped = _WithRawConn(db, tmp_path / "state.db")
+    yield wrapped, session
+    wrapped._conn.close()
     db.close()
 
 

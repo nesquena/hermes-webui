@@ -75,11 +75,27 @@ def _gateway_restart_profile_context(profile: str | None = None) -> tuple[Path, 
     return active_home, raw_profile
 
 
+def monitored_gateway_endpoint() -> str:
+    """The monitored Gateway endpoint as an Agent-update confirmation names it (#8746).
+
+    Normalised like the ownership proof (no userinfo, query or fragment);
+    ``''`` means no remote URL and ``'unresolved'`` a URL that does not normalise.
+    """
+    try:
+        from api import agent_health
+
+        base = agent_health._remote_gateway_base_url()
+        return "" if base is None else (agent_health._normalized_gateway_endpoint(base) or "unresolved")
+    except Exception:
+        return "unresolved"
+
+
 def restart_active_profile_gateway(
     *,
     profile: str | None = None,
     quick_timeout_seconds: float = 2.0,
     background_wait_seconds: float = 240.0,
+    expected_impact: dict | None = None,
 ) -> dict:
     """Run a non-blocking ``hermes gateway restart`` for the active profile.
 
@@ -90,10 +106,24 @@ def restart_active_profile_gateway(
     - busy: restart already in progress from another caller.
     - external: the monitored Gateway is not controlled by this WebUI's local
       CLI (#8391); nothing was launched and nothing was restarted.
+    - restart_blocked: ``expected_impact`` (the Gateway a forced Agent update
+      was confirmed for, #8746) no longer matches this call's capability read,
+      ``profile`` or the monitored endpoint; nothing was launched.
     """
     # Ownership policy runs BEFORE the lock and before any subprocess: a
     # Gateway WebUI does not control must never get a local replacement.
     capability = gateway_lifecycle_capability(profile=profile)
+    if expected_impact is not None and (
+        capability.get("managed") is not expected_impact.get("gateway_restart_managed")
+        or profile != expected_impact.get("gateway_profile")
+        or monitored_gateway_endpoint() != expected_impact.get("gateway_endpoint")
+    ):
+        logger.warning("Skipping gateway restart: it changed after the forced update was confirmed")
+        return {
+            "status": "restart_blocked",
+            "message": "The Gateway changed after the update was confirmed; it was not restarted.",
+            "lifecycle": capability,
+        }
     if not capability.get("managed"):
         logger.info(
             "Skipping gateway restart: monitored Gateway is managed outside WebUI (%s)",
