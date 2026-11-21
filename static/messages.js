@@ -6305,6 +6305,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   let _lastRenderMs=0;
+  let _lastRenderCostMs=0;
+  const LIVE_RENDER_BUSY_FACTOR=4;
   // Parse-result cache: _scheduleRender can accept a pre-computed _parseStreamState()
   // from the token event handler, avoiding a duplicate O(n) scan inside _doRender
   // when the rAF fires before the next token arrives.
@@ -6326,12 +6328,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // the rAF/setTimeout window between schedule and execution can outlive a session switch.
     if(!_isActiveSession()) return;
     _renderPending=true;
-    // Cap render rate to ~15fps. The browser's rAF fires at 60fps, but each DOM
-    // update takes 50-150ms on large sessions. During GC pauses, rAF callbacks
-    // accumulate and then execute all at once, blocking the main thread for
-    // multi-second stretches and crashing the renderer (Chrome error code 4/5).
-    // Throttling to 66ms intervals prevents this pileup without noticeable
-    // visual degradation — streaming text updates still feel immediate.
+    // Start at ~15fps, then lengthen the interval from measured render cost so
+    // expensive live DOM updates cannot run back-to-back and monopolize the main
+    // thread. Cheap renders retain the original 66ms pacing; costly renders are
+    // capped at one start per second. Existing rAF + timeout queuing is unchanged.
     // performance.now() is monotonic so tab suspend/resume and NTP adjustments
     // cannot produce negative or enormous deltas.
     const sinceLastMs=performance.now()-_lastRenderMs;
@@ -6388,8 +6388,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
       scrollIfPinned();
       _throttledSnapshotLiveTurn();
+      const renderCostMs=performance.now()-_lastRenderMs;
+      _lastRenderCostMs=_lastRenderCostMs===0?renderCostMs:0.7*_lastRenderCostMs+0.3*renderCostMs;
     };
-    const frameIntervalMs=_shouldUseLiveProseFade()?33:66;
+    const useLiveProseFade=_shouldUseLiveProseFade();
+    let frameIntervalMs=useLiveProseFade?33:66;
+    if(!useLiveProseFade) frameIntervalMs=Math.min(1000,Math.max(66,LIVE_RENDER_BUSY_FACTOR*_lastRenderCostMs));
     if(sinceLastMs>=frameIntervalMs){
       _pendingRafHandle=requestAnimationFrame(_doRender);
     } else {
