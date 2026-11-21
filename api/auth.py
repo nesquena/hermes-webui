@@ -1230,6 +1230,10 @@ def check_auth(handler, parsed) -> bool:
     if parsed.path == '/api/auth/logout':
         if has_session:
             return True
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
         body = b'{"error":"Authentication required"}'
         handler.send_response(401)
         handler.send_header('Content-Type', 'application/json')
@@ -1241,10 +1245,18 @@ def check_auth(handler, parsed) -> bool:
     if session_info:
         if not trusted_session_allows_active_profile(session_info):
             if parsed.path.startswith('/api/'):
+                try:
+                    handler.close_connection = True
+                except Exception:
+                    pass
                 body = b'{"error":"Profile access forbidden"}'
                 handler.send_response(403)
                 handler.send_header('Content-Type', 'application/json')
             else:
+                try:
+                    handler.close_connection = True
+                except Exception:
+                    pass
                 body = b'Profile access forbidden'
                 handler.send_response(403)
                 handler.send_header('Content-Type', 'text/plain; charset=utf-8')
@@ -1255,6 +1267,10 @@ def check_auth(handler, parsed) -> bool:
         return True
     # Not authorized
     if parsed.path.startswith('/api/'):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
         body = b'{"error":"Authentication required"}'
         handler.send_response(401)
         handler.send_header('Content-Type', 'application/json')
