@@ -61,7 +61,7 @@ def _invoke(session, query=None):
          patch("api.routes._clear_stale_stream_state", return_value=False), \
          patch("api.routes._lookup_cli_session_metadata", return_value={}), \
          patch("api.routes.get_state_db_session_messages", return_value=[]), \
-         patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
+         patch("api.routes.redact_session_data", side_effect=lambda raw, **kwargs: raw), \
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(SimpleNamespace(), parsed)
     return captured["data"]["session"]

@@ -15,9 +15,11 @@ helpers from static/sessions.js and the real pending-prompt producer from static
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -101,7 +103,24 @@ def _run(body: str, oldest_idx: int = 0) -> dict:
             body,
         ]
     )
-    done = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False, cwd=ROOT)
+    # Run from a temp file, not `-e`: the composed script can approach Linux's
+    # MAX_ARG_STRLEN (131072 bytes per argv entry). Strip NODE_CHANNEL_FD /
+    # NODE_OPTIONS, which a launcher may export — either makes a fresh node
+    # abort on exit with SIGABRT after writing correct output (returncode -6
+    # with empty stderr, easily mistaken for a script bug).
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("NODE_CHANNEL_FD", "NODE_OPTIONS")}
+    fd, script_path = tempfile.mkstemp(suffix=".js", prefix="issue8698-", dir=str(ROOT))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        done = subprocess.run([NODE, script_path], capture_output=True, text=True,
+                              check=False, cwd=ROOT, env=env)
+    finally:
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
     assert done.returncode == 0, done.stderr or done.stdout
     return json.loads(done.stdout)
 
