@@ -16,6 +16,7 @@ shell, while every guard that keeps the restart manual stays fail-closed:
 from __future__ import annotations
 
 import errno
+import importlib.util
 import os
 import subprocess
 import sys
@@ -24,6 +25,19 @@ import time
 import types
 
 import pytest
+
+# The real held-checkout tests launch a child that imports ``fcntl`` and takes
+# a POSIX ``flock`` on the checkout lock (see ``_hold_checkout_lock``). Native
+# Windows has no ``fcntl`` module, so those tests must SKIP there instead of
+# failing at the custody child's readiness assertion. The modeled Windows
+# custody tests below do not need ``fcntl`` and stay runnable on every platform.
+_HAS_FCNTL = importlib.util.find_spec("fcntl") is not None
+
+# ``errno.EDEADLOCK`` is Linux/Windows-only; macOS omits it while exercising
+# the modeled ``msvcrt.locking`` range probe. The production guard catches any
+# ``OSError``, so an equivalent contention errno keeps those tests runnable
+# everywhere without changing what the mock models.
+_DEADLOCK_ERRNO = getattr(errno, "EDEADLOCK", errno.EACCES)
 
 # The real-boundary regressions below reuse the shared staging fixture that
 # already exercises the SHIPPED revision guard — a real Git checkout, a real
@@ -711,6 +725,48 @@ def _publish_dead_owner_marker(checkout):
     marker.write_text(f"{process.pid}\n{time.time()}\n", encoding="utf-8")
 
 
+def _publish_long_delegate_marker(checkout):
+    """A dead owner with a 5,000-digit delegate id.
+
+    Fits the 64 KiB marker cap but exceeds Python's default 4,300-digit
+    ``int()`` string-conversion limit, so the delegate line reaches the
+    guard's conversion unchecked (#8500 F1).
+    """
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=10)
+    marker = checkout.home / ".hermes-update-in-progress"
+    marker.write_text(
+        f"{process.pid}\n{time.time()}\n"
+        f"delegate:{'9' * 5000} ct:{time.time():.3f}\n",
+        encoding="utf-8",
+    )
+
+
+def test_long_delegate_id_reads_unknown_instead_of_raising(real_restart_env):
+    """A 5,000-digit delegate id must not escape as ValueError (#8500 F1).
+
+    ``int()`` refuses >4,300 digits, and the marker still fits the 64 KiB cap,
+    so a dead owner plus this delegate line reaches the conversion on the real
+    recovery path. The marker must classify ``unknown`` (fail closed) and the
+    route must return the typed stale-runtime refusal with zero scheduling —
+    never a 500 from an uncaught ValueError.
+    """
+    env = real_restart_env
+    _publish_long_delegate_marker(env.checkout)
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "unknown"
+    assert result["restart_scheduled"] is False
+    assert result["restart_available"] is True
+    assert env.checkout.workers == [], (
+        "an unverifiable delegate must not schedule a recovery worker"
+    )
+    assert env.destructive_total() == 0
+
+
 def _relaunch_under_profile(env, name="webui"):
     """Re-point the captured ``HERMES_HOME`` at ``<root>/profiles/<name>``."""
     root = env.checkout.home
@@ -1086,7 +1142,15 @@ def _hold_checkout_lock(checkout, hold_seconds=60):
 
 @pytest.fixture
 def held_checkout_lock():
-    """Spawn updater-custody children; every one is terminated on teardown."""
+    """Spawn updater-custody children; every one is terminated on teardown.
+
+    The custody child takes a POSIX ``flock`` on the real checkout lock, so
+    this fixture is unsupported on native Windows: skip there rather than fail
+    at the child's readiness assertion (#8500 F3). The modeled Windows custody
+    tests elsewhere in this file do not use this fixture and stay runnable.
+    """
+    if not _HAS_FCNTL:
+        pytest.skip("real checkout flock custody requires POSIX fcntl")
     children = []
 
     def hold(checkout):
@@ -1263,7 +1327,7 @@ class _ModeledMsvcrt:
             )
             self.calls.append((fd, mode, offset, count))
             if contended:
-                raise OSError(errno.EDEADLOCK, "resource deadlock avoided")
+                raise OSError(_DEADLOCK_ERRNO, "resource deadlock avoided")
             held.append([offset, count, fd])
             return
         if mode == self.LK_UNLCK:

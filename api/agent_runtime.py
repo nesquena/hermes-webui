@@ -43,7 +43,11 @@ _AGENT_UPDATE_MAX_AGE_SECONDS = 20 * 60
 # proof the update finished.  Only the pid is needed here; the ct value
 # belongs to the Agent's own incarnation probe.
 _AGENT_DELEGATE_LINE = re.compile(
-    r"delegate:([0-9]+)\s+ct:[0-9]+(?:\.[0-9]+)?", re.ASCII
+    # A delegate id is an OS pid: bound it well above every real pid range so
+    # an unbounded digit run cannot reach int(), whose 4,300-digit string
+    # conversion limit raises ValueError on a marker that still fits the
+    # 64 KiB read cap.
+    r"delegate:([0-9]{1,12})\s+ct:[0-9]+(?:\.[0-9]+)?", re.ASCII
 )
 # Fold order across candidate marker homes and identity claims: an
 # unverifiable marker outranks an in-flight one, an in-flight one outranks
@@ -344,7 +348,13 @@ def _read_live_agent_update(marker: Path) -> str:
 
     # The owner is gone.  A surviving delegate keeps the update in flight;
     # without one the marker is a crashed update's leftover.
-    delegate_pid = _marker_delegate_pid(lines[2:])
+    try:
+        delegate_pid = _marker_delegate_pid(lines[2:])
+    except _MalformedDelegateLine:
+        # A delegate identity we cannot bound or convert is unverifiable,
+        # never "absent": classifying the marker unknown fails closed
+        # instead of authorising recovery on missing proof.
+        return "unknown"
     if delegate_pid is None:
         return "stale"
     delegate_state = _marker_identity_state(delegate_pid, age_seconds)
@@ -371,14 +381,33 @@ def _marker_identity_state(pid: int, age_seconds: float) -> str:
     return "active"
 
 
+class _MalformedDelegateLine(ValueError):
+    """A marker's delegate line names an identity the guard cannot classify."""
+
+
 def _marker_delegate_pid(tagged_lines: list[str]) -> int | None:
-    """Return the first well-formed ``delegate:<pid> ct:<ct>`` line's pid."""
+    """Return the first well-formed ``delegate:<pid> ct:<ct>`` line's pid.
+
+    A ``delegate:`` line whose id cannot be bounded and converted is never
+    silently ignored: returning ``None`` would read as "no surviving delegate"
+    and authorise recovery.  Raise ``_MalformedDelegateLine`` instead so the
+    caller classifies the whole marker ``unknown`` — missing proof is not
+    permission to restart.
+    """
     for line in tagged_lines:
-        match = _AGENT_DELEGATE_LINE.fullmatch(line.strip())
-        if match:
+        stripped = line.strip()
+        if not stripped.startswith("delegate:"):
+            continue
+        match = _AGENT_DELEGATE_LINE.fullmatch(stripped)
+        if match is None:
+            raise _MalformedDelegateLine(stripped)
+        try:
             pid = int(match.group(1))
-            if pid > 0:
-                return pid
+        except ValueError as exc:  # pragma: no cover - the regex bounds digits
+            raise _MalformedDelegateLine(stripped) from exc
+        if pid <= 0:
+            raise _MalformedDelegateLine(stripped)
+        return pid
     return None
 
 
