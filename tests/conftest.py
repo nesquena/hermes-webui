@@ -62,7 +62,9 @@ _hermes_root_guard.real_roots()
 # ── Test server config ────────────────────────────────────────────────────
 # Port and state dir auto-derive from the repo path when no env var is set,
 # giving every worktree its own isolated port (20000-29999) and state directory.
-# Override with HERMES_WEBUI_TEST_PORT / HERMES_WEBUI_TEST_STATE_DIR to pin.
+# Override with HERMES_WEBUI_TEST_PORT / HERMES_WEBUI_TEST_STATE_DIR to pin;
+# when HERMES_WEBUI_TEST_PORT is pinned and state dir is derived, the state dir
+# appends -p<pid> so concurrent runs sharing a pinned port do not collide.
 
 def _auto_test_port(repo_root) -> int:
     """Pick a port for the session test server.
@@ -107,7 +109,8 @@ def _auto_state_dir_name(repo_root, port=None) -> str:
     from the same worktree — e.g. a developer's suite + a Codex/Opus gate's
     ./scripts/test.sh — get DISTINCT state dirs and never clobber each other's
     sessions/db or race on teardown rmtree. Falls back to repo-hash-only when no
-    port is supplied (legacy callers).
+    port is supplied (legacy callers). When the port is pinned, the derived state
+    dir name appends -p<pid> via per_process_dir_name to isolate concurrent runs.
     """
     import hashlib
     h = hashlib.md5(str(repo_root).encode()).hexdigest()[:8]
@@ -144,7 +147,9 @@ _TEST_STATE_ROOT = pathlib.Path(
 _TEST_STATE_DIR_RAW = os.getenv('HERMES_WEBUI_TEST_STATE_DIR') or ''
 TEST_STATE_DIR = pathlib.Path(
     _TEST_STATE_DIR_RAW if _TEST_STATE_DIR_RAW.strip()
-    else str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT, TEST_PORT))
+    else str(_TEST_STATE_ROOT / _hermes_root_guard.per_process_dir_name(
+        _auto_state_dir_name(REPO_ROOT, TEST_PORT), TEST_PORT_PINNED, os.getpid()
+    ))
 ).resolve()
 
 # Belt and braces for an explicit value: never let the session fixture (which
@@ -233,6 +238,9 @@ _PLAYWRIGHT_FALLBACK = (WINDOWS and 'AppData/Local/ms-playwright' in _LINK_FAILE
                         and _hermes_root_guard.playwright_uses_default_cache(os.environ))
 if _PLAYWRIGHT_FALLBACK:  # no symlink privilege: point Playwright at the original cache directly
     os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(_PLAYWRIGHT_CACHES[2][0])
+_agent_override = _hermes_root_guard.agent_dir_override(_LINK_FAILED, _HOME_DIR_LINKS, os.environ)
+if _agent_override is not None:
+    os.environ['HERMES_WEBUI_AGENT_DIR'] = str(_agent_override)
 for _path_var in ('HERMES_WEBUI_AGENT_DIR', 'HERMES_WEBUI_PYTHON'):  # '~' must keep meaning the real home
     if os.environ.get(_path_var, '').startswith('~'):
         os.environ[_path_var] = os.path.expanduser(os.environ[_path_var])
@@ -290,18 +298,30 @@ def _no_real_hermes_root_writes():
                     + "; ".join(_hermes_root_guard.VIOLATIONS[seen:]), pytrace=False)
 
 
+def _record_guard_failure(session, problems: list) -> None:
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    message = "REAL HERMES ROOT CHANGED DURING THIS TEST RUN:\n  " + "\n  ".join(problems)
+    reporter = session.config.pluginmanager.get_plugin('terminalreporter')
+    if reporter is not None:
+        from _pytest.reports import TestReport
+        report = TestReport(
+            nodeid='real-hermes-root-guard',
+            location=('', 0, 'real Hermes root guard'),
+            keywords={},
+            outcome='failed',
+            longrepr=message,
+            when='collect',
+        )
+        reporter.stats.setdefault('error', []).append(report)
+    else:
+        sys.stderr.write(message + "\n")
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionfinish(session, exitstatus):
     problems = _hermes_root_guard.finish()
     if problems:
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
-        message = "REAL HERMES ROOT CHANGED DURING THIS TEST RUN:\n  " + "\n  ".join(problems)
-        reporter = session.config.pluginmanager.get_plugin('terminalreporter')
-        if reporter is not None:
-            reporter.write_sep('!', 'real Hermes root guard', red=True, bold=True)
-            reporter.write_line(message, red=True)
-        else:
-            sys.stderr.write(message + "\n")
+        _record_guard_failure(session, problems)
     if _SANDBOX_HOME_CREATED:
         shutil.rmtree(SANDBOX_HOME, ignore_errors=True)  # links are removed, never followed
 

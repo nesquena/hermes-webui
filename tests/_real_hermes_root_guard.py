@@ -287,6 +287,27 @@ def playwright_uses_default_cache(environ) -> bool:
     return not next((environ[k] for k in PLAYWRIGHT_PATH_VARS if k in environ), None)
 
 
+AGENT_LINK_REL = "AppData/Local/hermes/hermes-agent"
+
+
+def agent_dir_override(failed, pairs, environ) -> pathlib.Path | None:
+    """Fall back to the real Agent checkout when the Windows native root link failed."""
+    if environ.get("HERMES_WEBUI_AGENT_DIR", "").strip():
+        return None
+    if AGENT_LINK_REL not in failed:
+        return None
+    for src, rel in pairs:
+        if rel == AGENT_LINK_REL:
+            p = pathlib.Path(src)
+            return p if p.is_dir() else None
+    return None
+
+
+def per_process_dir_name(base: str, pinned: bool, pid: int) -> str:
+    """Return f"{base}-p{pid}" when pinned is true and base unchanged otherwise."""
+    return f"{base}-p{pid}" if pinned else str(base)
+
+
 def finish() -> list:
     """Stop guarding and return every problem found during the session."""
     _STATE["active"] = False
