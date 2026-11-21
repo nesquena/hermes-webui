@@ -183,13 +183,20 @@ def _read_backend_env_strict(env_path: Path) -> dict[str, str]:
     return values
 
 
-def _require_backend_inputs_read(profile: str) -> None:
-    """Raise unless the inputs that resolved *profile* to the local backend were read.
+def _require_backend_inputs_read(profile: str) -> tuple[dict | None, dict[str, str]]:
+    """Read the inputs that resolve *profile*'s chat backend, strictly.
+
+    Returns ``(config_data, environ)`` for :func:`webui_chat_backend_mode`: the
+    parsed ``config.yaml`` (``None`` when no config was read) and the environ the
+    profile's own ``.env`` wins in. Deciding the backend from these values —
+    instead of re-reading the files a second time — is what keeps the replay
+    check consistent when a config write lands between two reads (#9050).
 
     The shared config and ``.env`` readers map an unreadable or malformed file
     to "no settings", which resolves to the local default. That fallback stays
     as it is for everyone else; replay only needs to tell "the inputs say
-    local" from "a reader swallowed an error", and the latter is undetermined.
+    local" from "a reader swallowed an error", and the latter is undetermined,
+    so an unreadable or malformed file raises here instead of reading as local.
     """
     from api import profiles
     from api.config import _get_config_path, _profile_home_config_source
@@ -198,22 +205,28 @@ def _require_backend_inputs_read(profile: str) -> None:
 
     home = Path(profiles.get_hermes_home_for_profile(profile))
     env = _read_backend_env_strict(home / ".env")
-    process_value = "" if _WEBUI_CHAT_BACKEND_ENV in profiles._loaded_profile_env_keys else os.environ.get(
-        _WEBUI_CHAT_BACKEND_ENV, ""
-    )
-    if str(env.get(_WEBUI_CHAT_BACKEND_ENV) or process_value or "").strip():
-        return  # an explicit env choice wins over config.yaml
+    # The environ precedence the real resolver sees: the profile's own .env wins
+    # over the process env for the keys the profile defines.
+    environ = {k: v for k, v in os.environ.items() if k not in profiles._loaded_profile_env_keys}
+    environ.update(env)
+    # Test the RAW value, as webui_chat_backend_mode() does: a non-empty env
+    # value — even one that is only whitespace — is "set" before stripping, so it
+    # wins over config.yaml and short-circuits the read below. Stripping first
+    # would treat "  " as unset and then fail on a config the resolver ignores.
+    if environ.get(_WEBUI_CHAT_BACKEND_ENV):
+        return None, environ  # an explicit env choice wins over config.yaml
     source = _profile_home_config_source(home)
     if source is None:
-        return  # no profile home: no config, the documented local default
+        return None, environ  # no profile home: no config, the documented local default
     path = source if isinstance(source, Path) else _get_config_path()  # else: _AMBIENT_CONFIG
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return  # no config.yaml: the documented local default
+        return None, environ  # no config.yaml: the documented local default
     loaded = yaml_compat.safe_load(text)
     if loaded is not None and not isinstance(loaded, dict):
         raise ValueError(f"{path} is not a mapping")
+    return loaded, environ
 
 
 def _session_runs_in_process(session_id: str) -> bool:
@@ -227,7 +240,7 @@ def _session_runs_in_process(session_id: str) -> bool:
     nobody else would deliver it.
     """
     from api import profiles
-    from api.gateway_delegation_wakeup import _profile_uses_gateway
+    from api.gateway_chat import webui_chat_backend_mode
     from api.models import get_session_profile_readonly
     from api.runtime_adapter import runtime_adapter_runner_enabled
 
@@ -239,9 +252,12 @@ def _session_runs_in_process(session_id: str) -> bool:
         return False
     if runtime_adapter_runner_enabled():
         return False
-    if _profile_uses_gateway(name):
+    # One strict read of .env and config.yaml decides the backend. Re-reading the
+    # files (as the old _profile_uses_gateway() call did) could see a different
+    # half-written config and misroute the row (#9050).
+    config_data, environ = _require_backend_inputs_read(name)  # raises: undetermined, retried by the sweep
+    if webui_chat_backend_mode(config_data, environ) == "gateway":
         return False
-    _require_backend_inputs_read(name)  # raises: undetermined, retried by the sweep
     return True
 
 
