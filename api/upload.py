@@ -1,9 +1,11 @@
 """
 Hermes Web UI -- File upload: multipart parser and upload handler.
 """
+import errno
 import mimetypes
 import os
 import re as _re
+import stat
 import tempfile
 from pathlib import Path
 
@@ -203,11 +205,17 @@ def _sanitize_upload_name(filename: str) -> str:
 
 
 def _attachment_root() -> Path:
-    """Return the configured upload inbox root.
+    """Return the configured upload inbox root, resolved by name.
 
     Plain chat attachments are transient context for the agent, not project
     source files.  Keep them out of the active workspace by default while still
     allowing operators to move the inbox with HERMES_WEBUI_ATTACHMENT_DIR.
+
+    Security-sensitive readers must not use this: it re-resolves the
+    configured spelling on every call, so a symlink planted later over the
+    inbox or one of its ancestors moves it.  They use
+    ``_trusted_attachment_root()``, which resolves once at server startup
+    (#8590, #8786).
     """
     override = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip()
     if override:
@@ -215,33 +223,85 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
-_SHARE_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
+_TRUSTED_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
+
+# mkdir() failures that mean the destination path can never become the inbox
+# (and are therefore upload refusals): a symlink loop, or a path component
+# that is not a directory. Every other errno out of mkdir() -- ENOSPC, EDQUOT,
+# EROFS, EIO, EACCES -- is a server-side storage fault and propagates to
+# handle_upload()'s HTTP500 branch.
+_UPLOAD_REFUSAL_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 
 
-def _share_attachment_root() -> Path | None:
-    """The attachment root as trusted by public shares, or None (#8590).
+
+def _trusted_attachment_root() -> Path | None:
+    """The attachment root as trusted at server startup, or None (#8590, #8786).
 
     Resolved once per configured spelling -- at import, i.e. server startup,
     since STATE_DIR and HERMES_WEBUI_ATTACHMENT_DIR are process-wide -- and
-    never by name again: shares walk it no-follow, so a symlink planted later
-    (e.g. inside a workspace that contains it) cannot move it.  A root that
-    cannot be resolved is None (fail closed).  Uploads keep _attachment_root().
+    never by name again: every reader contains paths under it by comparing
+    against this resolved root (uploads, the vision allow-check) or by
+    walking it no-follow (public shares), so a symlink planted later (e.g.
+    inside a workspace that contains the inbox) cannot move it.  A root that
+    cannot be resolved is None (fail closed): uploads refuse, shares drop it,
+    and the vision allow-check stops allowing it.
     """
     key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
-    if key not in _SHARE_ATTACHMENT_ROOTS:
+    if key not in _TRUSTED_ATTACHMENT_ROOTS:
         try:
-            _SHARE_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
+            resolved = Path(key).expanduser().resolve()
         except (OSError, RuntimeError, ValueError):
-            _SHARE_ATTACHMENT_ROOTS[key] = None
-    return _SHARE_ATTACHMENT_ROOTS[key]
+            _TRUSTED_ATTACHMENT_ROOTS[key] = None
+        else:
+            # A resolved path is only trusted when it can actually be used as
+            # the inbox. A symlink loop can resolve WITHOUT raising on some
+            # platforms (macOS raises RuntimeError, Linux returns a path),
+            # and the root is then unusable: mkdir() there fails with ELOOP
+            # and the upload would surface as a 500 instead of a refusal.
+            # stat() distinguishes the two cases by errno -- ENOENT means
+            # "not created yet", which is fine (the upload creates it), while
+            # ELOOP (and any other error) means the path can never be a
+            # directory, so the root fails closed on every platform.
+            try:
+                usable = stat.S_ISDIR(os.stat(resolved).st_mode)
+            except FileNotFoundError:
+                usable = True
+            except OSError:
+                usable = False
+            _TRUSTED_ATTACHMENT_ROOTS[key] = resolved if usable else None
+    return _TRUSTED_ATTACHMENT_ROOTS[key]
 
 
-_share_attachment_root()
+_trusted_attachment_root()
+
+
+def _share_attachment_root() -> Path | None:
+    """Backwards-compatible alias for :func:`_trusted_attachment_root`.
+
+    The share reader used to own the startup-trusted root under this name
+    (#8590). The root is now trusted by every reader that contains paths
+    under it — shares, uploads and the vision allow-check (#8786) — so the
+    implementation moved; the old name stays as an alias so anything that
+    imported it keeps working.
+    """
+    return _trusted_attachment_root()
 
 
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
     dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # Only the errnos that mean "this path can never be the inbox" are
+        # upload refusals: a symlink loop planted in the inbox (ELOOP) or a
+        # path component that is not a directory (ENOTDIR). Everything else
+        # that mkdir() can raise -- ENOSPC, EDQUOT, EROFS, EIO, EACCES -- is a
+        # server-side storage fault, and must reach handle_upload()'s HTTP500
+        # branch and its error log instead of being reported as a client
+        # mistake (which would also hide it from the operator).
+        if e.errno not in _UPLOAD_REFUSAL_ERRNOS:
+            raise
+        raise ValueError(f'Upload destination unavailable: {e.strerror or e}') from e
     dest = (dest_dir / safe_name).resolve()
     if not dest.is_relative_to(dest_dir):
         raise ValueError('Invalid upload destination')
@@ -259,7 +319,18 @@ def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None =
 
 
 def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Path:
-    root = (root or _attachment_root()).resolve()
+    if root is None:
+        # #8786: trust the inbox as resolved at server startup, never by name
+        # again -- a symlink planted over the inbox or one of its ancestors
+        # afterwards must not redirect uploads.  The resolved destination is
+        # compared against the trusted root below, so a redirect fails closed;
+        # an unresolvable root (None) refuses the upload instead of falling
+        # back to a by-name resolve, which would leave the hole open.
+        root = _trusted_attachment_root()
+        if root is None:
+            raise ValueError('Attachment inbox is unavailable')
+    else:
+        root = root.resolve()
     dest_dir = (root / _re.sub(r'[^\w.\-]', '_', str(session_id or 'session'))[:120]).resolve()
     if not dest_dir.is_relative_to(root):
         raise ValueError('Invalid attachment directory')

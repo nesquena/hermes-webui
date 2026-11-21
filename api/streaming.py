@@ -4713,16 +4713,21 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
     # design). The pre-existing `path.relative_to(workspace_root)` guard would
     # silently reject every image upload for vision-capable models. Allow the
-    # configured attachment root in addition to workspace_root so native
-    # multimodal embeds still build the base64 image_url part. The
-    # _attachment_root() helper applies expanduser+resolve and is also reused
-    # by _upload_destination — single source of truth for the inbox root.
+    # attachment inbox root in addition to workspace_root so native
+    # multimodal embeds still build the base64 image_url part. The root is
+    # trusted as resolved at server startup and never re-resolved by name
+    # (#8786): a symlink planted over the inbox or an ancestor afterwards must
+    # not widen which local files may be read into the model's context. An
+    # unresolvable root is dropped (fail closed) instead of resolved by name.
+    _allowed_roots = [workspace_root]
     try:
-        from api.upload import _attachment_root
-        attachment_root = _attachment_root()
-        _allowed_roots = (workspace_root, attachment_root)
+        from api.upload import _trusted_attachment_root
+        _trusted_root = _trusted_attachment_root()
     except Exception:
-        _allowed_roots = (workspace_root,)
+        _trusted_root = None
+    if _trusted_root is not None:
+        _allowed_roots.append(_trusted_root)
+    _allowed_roots = tuple(_allowed_roots)
     image_count = 0
 
     for att in attachments or []:
