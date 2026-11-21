@@ -67,6 +67,13 @@ def test_apply_force_update_removes_untracked_files_before_reset(tmp_path):
             # rewind guard probe: origin/master is NOT an ancestor of HEAD
             # (it's the update target ahead of HEAD) -> allow the reset.
             return '', False
+        if args == ['merge-base', 'HEAD', 'origin/master']:
+            # ancestry probe (#8655): a reachable merge base proves the target is
+            # on the same line, so the reset is admitted rather than refused as
+            # an unknown-ancestry rewind.
+            return 'deadbeef', True
+        if args == ['rev-parse', '--is-shallow-repository']:
+            return 'false', True
         if args == ['reset', '--hard', 'origin/master']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
@@ -108,6 +115,12 @@ def test_apply_force_update_proceeds_when_clean_fails(tmp_path):
             # rewind guard probe: origin/master is NOT an ancestor of HEAD
             # (it's the update target ahead of HEAD) -> allow the reset.
             return '', False
+        if args == ['merge-base', 'HEAD', 'origin/master']:
+            # ancestry probe (#8655): reachable merge base, so the target is on
+            # the same line and the reset is not an unknown-ancestry rewind.
+            return 'deadbeef', True
+        if args == ['rev-parse', '--is-shallow-repository']:
+            return 'false', True
         if args == ['reset', '--hard', 'origin/master']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
