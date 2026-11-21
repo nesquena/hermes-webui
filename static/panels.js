@@ -10917,6 +10917,8 @@ async function loadSettingsPanel(){
       _syncSpeechPreferenceCache('tts_voice',current);
       if(engine==='elevenlabs'){
         ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
+      } else if(engine==='gemini'){
+        ttsVoiceSel.innerHTML='<option value="">Gemini voice (server-configured; default Kore)</option>';
       } else if(engine==='openai'){
         ttsVoiceSel.innerHTML='<option value="">OpenAI voice (server-configured)</option>';
       } else if(engine==='edge'){
@@ -10984,9 +10986,9 @@ async function loadSettingsPanel(){
       // select (selectedIndex -1) instead of keeping its labelled default.
       if(Array.from(ttsVoiceSel.options||[]).some(o=>o.value===current)) ttsVoiceSel.value=current;
     };
-    if(ttsVoiceSel&&'speechSynthesis' in window){
+    if(ttsVoiceSel){
       window._populateTtsVoices();
-      speechSynthesis.addEventListener('voiceschanged',function(){
+      if('speechSynthesis' in window) speechSynthesis.addEventListener('voiceschanged',function(){
         const engine=localStorage.getItem('hermes-tts-engine')||'browser';
         if(engine==='browser') window._populateTtsVoices();
       },{once:false});
