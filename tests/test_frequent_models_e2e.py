@@ -55,6 +55,13 @@ def test_real_page_pin_refresh_search_unpin_and_provider_selection(mobile):
             candidate.locator('.model-pin-star').focus()
             page.keyboard.press('Enter')
         page.wait_for_function("_modelFrequentCache.pins.some(p=>p.provider==='custom:two')")
+        if not mobile:
+            assert page.evaluate("""() => {
+              const active=document.activeElement;
+              return active?.classList.contains('model-pin-star')
+                && active.getAttribute('data-pin-provider')==='custom:two'
+                && active.getAttribute('data-pin-model')==='@custom:two:model-a';
+            }"""), 'the real renderer must preserve keyboard focus after pinning'
         assert page.evaluate("document.getElementById('modelSelect').value")==previous
         assert dd.evaluate("el=>el.classList.contains('open')")
         assert search.count()==1

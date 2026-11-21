@@ -6801,7 +6801,11 @@ function _rowPinStarHtml(m){
   if(!provider||!m||m.value==null) return '';
   const pinned=_frequentIsPinned(m.value,provider);
   const label=pinned?(t('model_unpin_aria')||'Unpin model'):(t('model_pin_aria')||'Pin to top');
-  return `<button type="button" class="model-pin-star${pinned?' pinned':''}" role="switch" aria-checked="${pinned?'true':'false'}" aria-label="${esc(label)}" title="${esc(label)}" data-route-pin="1">${li('star',13)}</button>`;
+  // The row's model+provider identity travels on the button itself: focus
+  // restoration and scroll targeting match on it after a rebuild destroys the
+  // node. Never the visible text (the same id can show under two providers),
+  // never a selector built from the key (escaping/injection).
+  return `<button type="button" class="model-pin-star${pinned?' pinned':''}" role="switch" aria-checked="${pinned?'true':'false'}" aria-label="${esc(label)}" title="${esc(label)}" data-route-pin="1" data-pin-model="${esc(String(m.value))}" data-pin-provider="${esc(provider)}">${li('star',13)}</button>`;
 }
 function _bindRowStar(row,m){
   const provider=_rowPinProvider(m);
@@ -6810,11 +6814,13 @@ function _bindRowStar(row,m){
   if(!btn) return;
   btn.addEventListener('click',(e)=>{
     e.preventDefault();e.stopPropagation(); // no select, no close
-    if(btn.disabled) return;
-    btn.disabled=true;
+    if(btn.disabled||btn.getAttribute('aria-disabled')==='true') return;
+    // Keep a keyboard-activated star focusable while its save is pending.
+    // Native disabled blurs it before the renderer can capture its identity.
+    btn.setAttribute('aria-disabled','true');
     _toggleModelPin(m.value,provider).then(ok=>{
       if(ok===true) btn.setAttribute('aria-checked',String(_frequentIsPinned(m.value,provider)));
-    }).finally(()=>{btn.disabled=false;});
+    }).finally(()=>{btn.removeAttribute('aria-disabled');});
   });
 }
 // Scroll the row for `changedKey` into view after the picker re-renders, so a
@@ -6825,19 +6831,22 @@ function _bindRowStar(row,m){
 // (the #3696 brick class this repo's scope_undef_gate enforces).
 function _scrollFrequentRowIntoView(dd,changedKey){
   if(!dd||changedKey==null||typeof dd.querySelectorAll!=='function') return;
+  const want=String(changedKey);
   const rows=dd.querySelectorAll('.model-opt');
   for(const row of rows){
     if(!row||typeof row.querySelector!=='function') continue;
     const btn=row.querySelector('.model-pin-star');
-    const idEl=row.querySelector('.model-opt-id');
-    if(!idEl) continue;
-    // The star's aria state is the only per-row pin identity in the DOM; match
-    // on the row's visible model id against the key's model segment.
-    const want=String(changedKey);
-    const id=String(idEl.textContent||'').trim();
-    if(id && (want===id || want.endsWith('::'+id) || want.endsWith(':'+id))){
+    if(!btn) continue;
+    // Match on the row's OWN model+provider identity through the SAME key
+    // function the caller used. The old comparison matched the JSON key
+    // against the visible id text (plain / colon-suffix), which never matched
+    // — the helper always no-opped. Same-id/different-provider rows and
+    // namespaced models stay distinct because the key carries both segments;
+    // no selector is built from the key, so quotes in an id cannot escape.
+    const key=_frequentModelKey(btn.getAttribute('data-pin-model'),btn.getAttribute('data-pin-provider'));
+    if(key===want){
       try{row.scrollIntoView({block:'nearest'});}catch(_e){}
-      if(btn) row.classList.add('model-opt--pinned-flash');
+      row.classList.add('model-opt--pinned-flash');
       return;
     }
   }
@@ -6896,6 +6905,14 @@ function _refreshOpenFrequent(_changedKey){
     const si=dd.querySelector&&dd.querySelector('.model-search-input');
     const term=(si&&si.value)||'';
     const hadFocus=document.activeElement===si;
+    // A keyboard (or mouse) user who just activated a star keeps focus on
+    // that button; the rebuild below destroys the node. Capture the star's
+    // model+provider identity BEFORE the teardown so focus can be restored
+    // on the replacement — otherwise focus falls back to <body> and the next
+    // Tab leaves the picker entirely.
+    const _focusEl=(typeof document!=='undefined')?document.activeElement:null;
+    const _starEl=(_focusEl&&_focusEl.classList&&_focusEl.classList.contains('model-pin-star')&&typeof dd.contains==='function'&&dd.contains(_focusEl))?_focusEl:null;
+    const _starKey=_starEl?_frequentModelKey(_starEl.getAttribute('data-pin-model'),_starEl.getAttribute('data-pin-provider')):null;
     const scrollTop=typeof dd.scrollTop==='number'?dd.scrollTop:0;
     try{renderModelDropdown(combo.opts());}catch(_e){continue;}
     const ns=dd.querySelector&&dd.querySelector('.model-search-input');
@@ -6906,6 +6923,23 @@ function _refreshOpenFrequent(_changedKey){
     try{dd.scrollTop=scrollTop;}catch(_e){}
     if(_changedKey!=null&&typeof _scrollFrequentRowIntoView==='function'){
       try{_scrollFrequentRowIntoView(dd,_changedKey);}catch(_e){}
+    }
+    // Restore star focus by identity. Never steal it back: if the user moved
+    // focus elsewhere while the save was in flight, activeElement is a live
+    // element that is neither <body> nor the destroyed star.
+    if(_starKey!=null){
+      const _now=(typeof document!=='undefined')?document.activeElement:null;
+      const _moved=!!(_now&&_now!==_starEl&&_now!==document.body&&typeof _now.focus==='function');
+      if(!_moved){
+        const _stars=dd.querySelectorAll?dd.querySelectorAll('.model-pin-star'):[];
+        for(let _i=0;_i<_stars.length;_i++){
+          const _b=_stars[_i];
+          if(_frequentModelKey(_b.getAttribute('data-pin-model'),_b.getAttribute('data-pin-provider'))===_starKey){
+            try{_b.focus();}catch(_e){}
+            break;
+          }
+        }
+      }
     }
   }
 }

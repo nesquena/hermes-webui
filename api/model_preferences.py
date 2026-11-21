@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -188,6 +189,44 @@ def set_pin(state_dir, model, provider, pinned):
             pins.remove(entry)
         _write_pins_path(path, pins)
         return pins
+
+
+def delete_profile_store(profile):
+    """Drop a deleted named profile's pin store (#8622).
+
+    Pins live under ``STATE_DIR/model_preferences/<owner>`` — OUTSIDE the
+    profile home — so removing the profile directory leaves them behind, and
+    recreating a profile with the same name resurrects the deleted profile's
+    pins, filling the allowance with models that may no longer exist.  The
+    store layout and the owner alias contract stay in this module; callers
+    (the profile-deletion path) only name the profile.
+
+    Returns True when a store directory was removed, False when there was
+    nothing to remove or the name is not a deletable named profile (the root
+    alias shares the 'default' store and can never be deleted).  A failing
+    removal raises: the caller must not report a successful delete when the
+    store survived.
+    """
+    name = profile.strip() if isinstance(profile, str) and profile.strip() else ''
+    if not name or not _SAFE_ID.fullmatch(name) or name in ('.', '..'):
+        return False
+    from api.profiles import _is_root_profile
+    if _is_root_profile(name):
+        return False
+    owner = _canonical_profile_owner(name)
+    if owner == 'default' or owner != name:
+        return False
+    root = _state_dir() / 'model_preferences'
+    store = root / owner
+    with _pin_lock:
+        # Never traverse links when deleting a profile-owned store, including
+        # a link at the shared parent. Refusal must not be reported as success.
+        if root.is_symlink() or store.is_symlink() or store.resolve().parent != root.resolve():
+            raise PreferencesError('Refusing to remove a linked profile pin store')
+        if not store.exists():
+            return False
+        shutil.rmtree(store)
+    return True
 
 
 def _native_writable_sessions(session_dir, profile):

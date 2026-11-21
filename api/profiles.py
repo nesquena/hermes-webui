@@ -3367,6 +3367,11 @@ def delete_profile_api(name: str) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     _drop_profile_models_cache(name)
+    # The pin store lives outside the profile home; a same-name recreate must
+    # not resurrect the deleted profile's pins (#8622).  Runs only after a
+    # successful delete, and a failing cleanup raises instead of claiming ok.
+    from api import model_preferences as _model_preferences
+    _model_preferences.delete_profile_store(name)
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     invalidate_profile_skills_stats()
     _invalidate_list_profiles_cache()
