@@ -181,7 +181,7 @@ def test_daily_tooltip_uses_the_full_prompt_as_denominator():
         globalThis.li = () => '';
         globalThis.$ = () => null;
         globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
-        for (const name of ['_renderStaticModelHealthTable', '_renderSkillUsage', '_renderLlmWikiStatus', '_renderSystemHealthPanel']) {
+        for (const name of ['_renderStaticModelHealthTable', '_renderSkillUsage', '_renderLlmWikiStatus', '_renderSystemHealthPanel', '_renderTrafficPanel']) {
           globalThis[name] = () => '';
         }
         %(bucket)s
