@@ -73,6 +73,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import (
+    ShareLinkOwnedElsewhere,
     build_share_snapshot,
     load_share,
     revoke_share,
@@ -14912,6 +14913,8 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     resolve_gateway_pending_local_all,
     resolve_gateway_pending_local_no_run_mirror,
     set_session_yolo_enabled,
+    session_yolo_state,
+    yolo_revision_conflict,
     submit_gateway_pending_mirror,
     submit_pending,
 )
@@ -18974,7 +18977,7 @@ def handle_get(handler, parsed) -> bool:
         bridge_failure = approval_bridge_failure(yolo=True)
         if bridge_failure is not None:
             return j(handler, bridge_failure[0], status=bridge_failure[1])
-        return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
+        return j(handler, session_yolo_state(sid))
 
     if parsed.path == "/api/session/usage":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -20278,7 +20281,12 @@ def handle_post(handler, parsed) -> bool:
             # Re-read inside the lock: saving the object resolved before the wait
             # would revert a title rename or an appended message that landed while
             # this request was blocked.
-            persisted_session = _reload_session_for_share(sid) or stored_session
+            # Never the resident object itself: the pre-save mirror skips its
+            # source, so a pair set here would be the resident's own change
+            # until the commit, and an eviction before it keeps it (#8735).
+            persisted_session = _reload_session_for_share(sid) or (
+                copy.copy(stored_session) if stored_session is not None else None
+            )
             if persisted_session is None:
                 persisted_session = _build_share_metadata_sidecar(
                     sid,
@@ -20331,11 +20339,14 @@ def handle_post(handler, parsed) -> bool:
             # it is live before the snapshot writer may keep it.
             if durable_token and load_share(durable_token) is None:
                 durable_token = ""
-            share_meta = write_share_snapshot(
-                snapshot,
-                token=durable_token,
-                source_session_id=sid,
-            )
+            try:
+                share_meta = write_share_snapshot(
+                    snapshot,
+                    token=durable_token,
+                    source_session_id=sid,
+                )
+            except ShareLinkOwnedElsewhere as exc:
+                return bad(handler, str(exc), 409)  # #8734: nothing was written
             persisted_session.share_token = share_meta["share_token"]
             persisted_session.share_created_at = share_meta["share_created_at"]
             # Update the live cached copy BEFORE the durable save (#8255 review,
@@ -20421,7 +20432,10 @@ def handle_post(handler, parsed) -> bool:
         if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
             return bad(handler, "Session busy, try again", 503)
         try:
-            target_session = _reload_session_for_share(sid) or stored_session
+            # Never the resident object itself (#8735, as in create).
+            target_session = _reload_session_for_share(sid) or (
+                copy.copy(stored_session) if stored_session is not None else None
+            )
             if target_session is None:
                 token = str(getattr(snapshot_session, "share_token", "") or "").strip()
                 if not token:
@@ -20443,7 +20457,10 @@ def handle_post(handler, parsed) -> bool:
                 # revoke_share() locates the published snapshot through the
                 # session's token field, so hand it the resolved authority.
                 target_session.share_token = token
-                revoke_share(target_session)
+                try:
+                    revoke_share(target_session)
+                except ShareLinkOwnedElsewhere as exc:
+                    return bad(handler, str(exc), 409)  # #8734: the link and both pairs are untouched
                 if load_share(token) is not None:
                     return bad(handler, "Share link could not be revoked", 500)
             # A writer may have saved while the revoke was reading the snapshot
@@ -22245,23 +22262,46 @@ def handle_post(handler, parsed) -> bool:
     #   • Cross-tab: state is SHARED (same server-side flag per session)
     #   • Server restart: state is LOST (in-memory only)
     #   • Cross-session: isolated (each session has its own flag)
-    # Fixes #467
+    #   • Compression rotation: not yet carried to the continuation session
+    #     (a separate #9101 follow-up)
+    # Fixes #467. #9101: ``enabled`` must be a boolean (a missing value used to
+    # enable). ``expected_revision``/``expected_epoch`` (from a GET) make the
+    # write conditional: if the session's YOLO moved since, nothing changes.
     if parsed.path == "/api/session/yolo":
         try:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
         sid = str(body["session_id"] or "").strip()
-        enabled = bool(body.get("enabled", True))
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return bad(handler, "enabled is required and must be true or false")
+        expected = None
+        if body.get("expected_revision") is not None:
+            expected_revision = body.get("expected_revision")
+            expected_epoch = body.get("expected_epoch")
+            if (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+                or expected_revision < 0
+                or not (expected_epoch is None or isinstance(expected_epoch, str))
+            ):
+                return bad(handler, "expected_revision must be a non-negative integer")
+            expected = (expected_revision, expected_epoch)
         bridge_failure = approval_bridge_failure(yolo=True)
         if bridge_failure is not None:
             return j(handler, bridge_failure[0], status=bridge_failure[1])
         if not enabled:
             with gateway_yolo_handoff(sid):
+                conflict = yolo_revision_conflict(sid, expected)
+                if conflict is not None:
+                    return j(handler, conflict, status=409)
                 set_session_yolo_enabled(sid, False)
-                return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
+                return j(handler, {"ok": True, **session_yolo_state(sid)})
 
-        payload, status = _enable_session_yolo_and_release_pending(sid, choice="once")
+        payload, status = _enable_session_yolo_and_release_pending(
+            sid, choice="once", expected=expected
+        )
         return j(handler, payload, status=status)
 
     if parsed.path == "/api/btw":
@@ -23842,6 +23882,14 @@ def handle_post(handler, parsed) -> bool:
         return _handle_session_import(handler, body)
 
     # ── Self-update (POST) ──
+    if parsed.path in ("/api/updates/apply", "/api/updates/force", "/api/updates/clear_lock"):
+        from api.updates import confirmed_gateway_impact
+
+        try:  # #8746: a confirmation field of the wrong type is a bad request
+            confirmed_gateway_impact(body)
+        except ValueError as exc:
+            return bad(handler, str(exc))
+
     if parsed.path == "/api/updates/apply":
         target = body.get("target", "")
         if target not in ("webui", "agent"):
@@ -23853,12 +23901,15 @@ def handle_post(handler, parsed) -> bool:
         _apply_channel = body.get("channel") if isinstance(body, dict) else None
         if _apply_channel not in ("stable", "experimental"):
             _apply_channel = None
-        from api.updates import apply_update
+        from api.updates import apply_update, confirmed_gateway_impact
 
         # #7293: an update refuses while WebUI-owned runs are active unless the
         # client re-sends it with an explicit, user-confirmed force.
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True
-        return j(handler, apply_update(target, _apply_channel, force_active_runs=_force_active_runs))
+        return j(handler, apply_update(
+            target, _apply_channel, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/force":
         target = body.get("target", "")
@@ -23867,10 +23918,13 @@ def handle_post(handler, parsed) -> bool:
         _force_channel = body.get("channel") if isinstance(body, dict) else None
         if _force_channel not in ("stable", "experimental"):
             _force_channel = None
-        from api.updates import apply_force_update
+        from api.updates import apply_force_update, confirmed_gateway_impact
 
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True  # #7293
-        return j(handler, apply_force_update(target, _force_channel, force_active_runs=_force_active_runs))
+        return j(handler, apply_force_update(
+            target, _force_channel, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/clear_lock":
         # Manual-instruction recovery for the .git/index.lock case. The
@@ -23883,10 +23937,13 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target", "")
         if target not in ("webui", "agent"):
             return bad(handler, 'target must be "webui" or "agent"')
-        from api.updates import apply_clear_lock
+        from api.updates import apply_clear_lock, confirmed_gateway_impact
 
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True  # #7293
-        return j(handler, apply_clear_lock(target, force_active_runs=_force_active_runs))
+        return j(handler, apply_clear_lock(
+            target, force_active_runs=_force_active_runs,
+            confirmed_gateway=confirmed_gateway_impact(body),  # #8746
+        ))
 
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload
@@ -26555,6 +26612,45 @@ def _default_edge_voice(text: str = "") -> str:
     return "it-IT-ElsaNeural"
 
 
+class _TtsRateLimiter:
+    """Per-client 2 s throttle for the TTS endpoint.
+
+    Keys on the same client identity the login limiter uses
+    (``_login_client_ip``). See ``_get_client_key`` for the trust model.
+    """
+
+    def __init__(self, window_seconds=2.0, prune_interval=50):
+        self.window = window_seconds
+        self.prune_interval = prune_interval
+        self._hits = {}
+        self._lock = threading.Lock()
+        self._checks = 0
+
+    def _get_client_key(self, h):
+        # #8610: parity with the login limiter — the raw socket peer unless
+        # per-client buckets are opted in AND the peer is a listed trusted
+        # proxy (HERMES_WEBUI_TRUSTED_PROXY_CIDRS). The old path trusted ANY
+        # peer's forwarded headers once HERMES_WEBUI_TRUST_FORWARDED_FOR was
+        # set, so a client could pick a fresh bucket (and a log identity) on
+        # every request.
+        return _login_client_ip(h)
+
+    def check(self, handler, session_cookie=None):
+        key = self._get_client_key(handler)
+        if session_cookie and "." in str(session_cookie):
+            key = str(session_cookie).split(".", 1)[0]
+        now = time.time()
+        with self._lock:
+            self._checks += 1
+            if self._checks % self.prune_interval == 0:
+                cutoff = now - (self.window * 10)
+                self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
+            last = self._hits.get(key, 0)
+            if now - last < self.window:
+                return False
+            self._hits[key] = now
+            return True
+
 
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
@@ -26659,42 +26755,6 @@ def _handle_tts(handler, parsed):
 
     # High-quality per-client rate limiting for TTS.
     if not hasattr(_handle_tts, "_tts_limiter"):
-        import time as _time, threading as _threading
-        class _TtsRateLimiter:
-            def __init__(self, window_seconds=2.0, prune_interval=50):
-                self.window = window_seconds
-                self.prune_interval = prune_interval
-                self._hits = {}
-                self._lock = _threading.Lock()
-                self._checks = 0
-
-            def _get_client_key(self, h):
-                trust_proxy = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "").strip().lower()
-                if trust_proxy in ("1", "true", "yes", "on"):
-                    for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
-                        val = h.headers.get(hdr)
-                        if val:
-                            ip = val.split(",")[0].strip().split(";")[0].strip()
-                            if ip:
-                                return ip
-                return getattr(h, "client_address", ("unknown",))[0]
-
-            def check(self, handler, session_cookie=None):
-                key = self._get_client_key(handler)
-                if session_cookie and "." in str(session_cookie):
-                    key = str(session_cookie).split(".", 1)[0]
-                now = _time.time()
-                with self._lock:
-                    self._checks += 1
-                    if self._checks % self.prune_interval == 0:
-                        cutoff = now - (self.window * 10)
-                        self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
-                    last = self._hits.get(key, 0)
-                    if now - last < self.window:
-                        return False
-                    self._hits[key] = now
-                    return True
-
         _handle_tts._tts_limiter = _TtsRateLimiter(window_seconds=2.0)
 
     limiter = _handle_tts._tts_limiter
@@ -34991,7 +35051,7 @@ def _gateway_approval_failure(
         "error": error,
     }
     if enable_yolo:
-        payload["yolo_enabled"] = bool(is_session_yolo_enabled(sid))
+        payload.update(session_yolo_state(sid))
     return payload, status
 
 
@@ -35275,7 +35335,7 @@ def _relay_gateway_run_approval(
             "relayed": True,
             **({"already_resolved": True} if already_resolved else {}),
             **(
-                {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                session_yolo_state(sid)
                 if enable_yolo
                 else {}
             ),
@@ -35323,8 +35383,13 @@ def _enable_session_yolo_and_release_pending(
     run_id: str = "",
     mirror_token: str = "",
     include_choice: bool = False,
+    expected: tuple[int, str | None] | None = None,
 ) -> tuple[dict, int]:
-    """Relay every parked remote approval, drain local waiters, then commit YOLO."""
+    """Relay every parked remote approval, drain local waiters, then commit YOLO.
+
+    ``expected`` (a ``(revision, epoch)`` the caller read) refuses the enable
+    with 409 when the session's YOLO moved since that read (#9101).
+    """
     approval_id = str(approval_id or "").strip()
     run_id = str(run_id or "").strip()
     mirror_token = str(mirror_token or "").strip()
@@ -35342,6 +35407,9 @@ def _enable_session_yolo_and_release_pending(
     yolo_transition = None
     try:
         with gateway_yolo_handoff(sid):
+            conflict = yolo_revision_conflict(sid, expected)
+            if conflict is not None:
+                return conflict, 409
             yolo_transition = begin_session_yolo_transition(sid)
             stale_cleared = False
             if approval_id:
@@ -35380,7 +35448,7 @@ def _enable_session_yolo_and_release_pending(
                     yolo_transition = None
                     return {
                         **relay_payload,
-                        "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                        **session_yolo_state(sid),
                     }, relay_status
                 relayed += 1
 
@@ -35392,7 +35460,7 @@ def _enable_session_yolo_and_release_pending(
             yolo_transition = None
             return {
                 "ok": True,
-                "yolo_enabled": bool(is_session_yolo_enabled(sid)),
+                **session_yolo_state(sid),
                 **({"choice": choice} if include_choice or relayed else {}),
                 **({"relayed": True} if relayed else {}),
                 **({"stale_cleared": True} if stale_cleared else {}),
@@ -35670,7 +35738,7 @@ def _handle_approval_respond(handler, body):
                     "choice": choice,
                     "local_retired": True,
                     **(
-                        {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                        session_yolo_state(sid)
                         if enable_yolo
                         else {}
                     ),
@@ -35730,7 +35798,7 @@ def _handle_approval_respond(handler, body):
             "choice": choice,
             "stale_cleared": True,
             **(
-                {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+                session_yolo_state(sid)
                 if enable_yolo
                 else {}
             ),
@@ -35741,7 +35809,7 @@ def _handle_approval_respond(handler, body):
         "ok": ok,
         "choice": choice,
         **(
-            {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
+            session_yolo_state(sid)
             if ok and enable_yolo
             else {}
         ),
