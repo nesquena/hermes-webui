@@ -131,6 +131,24 @@ def control(run_id, action, **params):
         raise SessionTransportError("Gateway control was not acknowledged. Refresh the conversation before retrying.") from None
 
 
+def active_session_run_id(stream_id):
+    """Deterministic run id of the live relay for this WebUI stream, if any.
+
+    The relay registers under its deterministic id before the first dial and
+    keeps it until ``run()`` finishes, so a Stop can reach a turn whose
+    ``prompt.submit`` has not returned yet — the run id is only published to
+    the WebUI stream registry after the submission (#9227).
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    with _LOCK:
+        for relay in _CONNECTIONS.values():
+            if relay.stream_id == stream_id:
+                return relay.run_id
+    return None
+
+
 def respond_clarify(session_id, clarify_id, answer):
     """None for local prompts; a remote prompt can never fall back to local settlement."""
     if not str(clarify_id).startswith("gw-session:"):
@@ -369,6 +387,16 @@ class SessionRelay:
         while True:
             attempted_before_connect = self.attempted
             terminal_outcome = False
+            # #9227: register under the deterministic run id BEFORE the first
+            # dial. The WebUI run id is only published after `prompt.submit`
+            # returns, so without this a browser Stop on a not-yet-submitted
+            # turn could not reach the relay and returned 502 without
+            # cancelling; the turn then submitted once the transport
+            # reconnected. `control("stop")` on this registered relay cancels
+            # a never-submitted turn locally and still refuses an uncertain
+            # submission (attempted receipt), which keeps recovery intact.
+            with _LOCK:
+                _CONNECTIONS[self.run_id] = self
             try:
                 async with self.connector() as client:
                     self.client = client
@@ -392,8 +420,6 @@ class SessionRelay:
                     self.attempted = True
                     self.receipt = await client.rpc("prompt.submit", **self.request)
                     self.record(self.run_id, self.request)
-                    with _LOCK:
-                        _CONNECTIONS[self.run_id] = self
                     _publish_gateway_run_id(self.stream_id, self.run_id)
                     if self.epoch is not None:
                         replay = await client.rpc("session.events.since", session_id=self.canonical_session_id,

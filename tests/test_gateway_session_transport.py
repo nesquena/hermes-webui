@@ -644,3 +644,194 @@ def test_stop_still_refuses_after_a_submission(protocol, monkeypatch):
     with pytest.raises(sessions.SessionTransportError, match="reconnecting"):
         asyncio.run(instance.control("stop"))
     assert not instance.cancel.is_set()
+
+
+# ── #9227: the public Stop path must reach an unsubmitted session turn ───────
+#
+# `SessionRelay.run` used to register itself in `_CONNECTIONS` and publish its
+# WebUI run id only AFTER `prompt.submit` returned. The browser's Stop goes
+# through `/api/chat/cancel`, which waits for that published run id; before the
+# first submission there is nothing to wait for, so the route timed out and
+# returned 502 without setting the cancel flag. The turn then submitted
+# normally once the transport reconnected, even though the user had pressed
+# Stop. The relay now registers under its deterministic run id before the
+# first dial, and the cancel route resolves that id first, so the SAME public
+# Stop path reaches it. A submission that was already attempted stays
+# uncertain on purpose: Stop must not treat it as never submitted, must not
+# clear its recovery state, and must not submit twice.
+
+class _HeldConnector:
+    """A transport connector whose first dial parks until the test releases it."""
+
+    def __init__(self, client, entered, release):
+        self.client, self.entered, self.release = client, entered, release
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        await asyncio.to_thread(self.entered.set)
+        await asyncio.to_thread(self.release.wait, 5)
+        return self.client
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def test_cancel_route_cancels_an_unsubmitted_session_turn(protocol, monkeypatch):
+    """A Stop during the first connect must cancel the turn, not submit it.
+
+    Drives the REAL `/api/chat/cancel` route against a REAL relay whose fake
+    transport is parked before `prompt.submit`. This is the browser's path: it
+    never calls `SessionRelay.control("stop")` directly.
+    """
+    import urllib.parse
+
+    from api import gateway_chat, routes
+
+    stream_id = "stable"
+    instance, events, records = relay()
+    client = Client()
+    entered, release = threading.Event(), threading.Event()
+    instance.connector = _HeldConnector(client, entered, release)
+    outcome = {}
+
+    def run_relay():
+        try:
+            outcome["value"] = asyncio.run(instance.run())
+        except BaseException as exc:  # recorded so a failure cannot hang the test
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_relay, daemon=True)
+    worker.start()
+    assert entered.wait(timeout=5), "the relay never dialled the transport"
+
+    # The Gateway worker marks its run `pending` before the session transport
+    # publishes a run id. This is the exact state a pre-submission Stop lands in.
+    gateway_chat._mark_gateway_run_starting(stream_id)
+    replies = []
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "j", lambda _handler, data, status=200, **_kw: replies.append((status, data)))
+    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: True)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda *_args, **_kw: False)
+    # Baseline path (no deterministic resolution) waits this long for a run id
+    # that cannot exist before the submission; keep the RED run short.
+    monkeypatch.setattr(gateway_chat, "GATEWAY_RUN_ID_WAIT_TIMEOUT", 0.05)
+    try:
+        routes.handle_get(object(), urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}"))
+
+        assert replies, "the cancel route produced no response"
+        status, payload = replies[0]
+        assert status == 200, (
+            f"Stop before the first submission must succeed, got {status}: {payload}"
+        )
+        assert payload.get("ok") is True and payload.get("cancelled") is True, payload
+        assert instance.cancel.is_set(), (
+            "the public Stop path must set the turn's cancel flag before it is submitted"
+        )
+    finally:
+        release.set()
+        worker.join(timeout=5)
+        gateway_chat._STREAM_RUN_LIFECYCLE.pop(stream_id, None)
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+
+    assert not worker.is_alive(), "the relay did not finish after the transport was released"
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome.get("value") == (None, {}), (
+        f"a cancelled, never-submitted turn must end locally, got {outcome.get('value')!r}"
+    )
+    assert [method for method, _ in client.calls if method == "prompt.submit"] == [], (
+        "a stopped turn must never be submitted"
+    )
+    assert records == [], f"an unsubmitted turn must leave no admission record: {records!r}"
+    assert "session:stable" not in sessions._CONNECTIONS
+
+
+class _SubmitParkedClient(Client):
+    """A client whose `prompt.submit` was attempted but whose receipt is unknown."""
+
+    def __init__(self):
+        super().__init__()
+        self.submit_entered = threading.Event()
+        self.submit_release = threading.Event()
+
+    async def rpc(self, method, **params):
+        if method == "prompt.submit":
+            self.calls.append((method, params))
+            await asyncio.to_thread(self.submit_entered.set)
+            await asyncio.to_thread(self.submit_release.wait, 5)
+            return {"admission_id": "one-admission", "status": "terminal",
+                    "execution_generation": self.generation, "outcome": "completed",
+                    "result": self.result}
+        return await super().rpc(method, **params)
+
+
+def test_cancel_route_keeps_an_uncertain_submission_recoverable(protocol, monkeypatch):
+    """A Stop after a submission was attempted must not be treated as never sent.
+
+    `prompt.submit` is parked: the turn was attempted, its acknowledgement is
+    unknown. The cancel route must keep the existing contract (502, retry after
+    reconnect), must NOT set the local cancel flag, must keep the durable
+    request, and must not submit a second time.
+    """
+    import urllib.parse
+
+    from api import gateway_chat, routes
+
+    stream_id = "stable"
+    instance, events, records = relay()
+    client = _SubmitParkedClient()
+
+    @asynccontextmanager
+    async def connect():
+        yield client
+
+    instance.connector = connect
+    outcome = {}
+
+    def run_relay():
+        try:
+            outcome["value"] = asyncio.run(instance.run())
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run_relay, daemon=True)
+    worker.start()
+    assert client.submit_entered.wait(timeout=5), "the relay never attempted the submission"
+    assert instance.attempted is True and instance.receipt is None
+
+    gateway_chat._mark_gateway_run_starting(stream_id)
+    replies = []
+    monkeypatch.setattr(routes, "_stream_id_visible_to_request_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "j", lambda _handler, data, status=200, **_kw: replies.append((status, data)))
+    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: True)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda *_args, **_kw: False)
+    monkeypatch.setattr(gateway_chat, "GATEWAY_RUN_ID_WAIT_TIMEOUT", 0.05)
+    try:
+        routes.handle_get(object(), urllib.parse.urlparse(f"/api/chat/cancel?stream_id={stream_id}"))
+
+        assert replies, "the cancel route produced no response"
+        status, payload = replies[0]
+        assert status == 502, (
+            f"an uncertain submission must keep the retry contract, got {status}: {payload}"
+        )
+        assert payload.get("ok") is False and payload.get("cancelled") is False, payload
+        assert not instance.cancel.is_set(), (
+            "an attempted submission must not be cancelled locally as if it never happened"
+        )
+        assert records and records[0] == ("", instance.request), (
+            f"the durable request must survive for recovery: {records!r}"
+        )
+        assert len([m for m, _ in client.calls if m == "prompt.submit"]) == 1
+    finally:
+        client.submit_release.set()
+        worker.join(timeout=5)
+        gateway_chat._STREAM_RUN_LIFECYCLE.pop(stream_id, None)
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+
+    assert not worker.is_alive(), "the relay did not finish after the submission was released"
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome.get("value") == ("original session reply", {}), outcome.get("value")
+    assert len([m for m, _ in client.calls if m == "prompt.submit"]) == 1, (
+        "a stopped-but-uncertain turn must not be submitted twice"
+    )
