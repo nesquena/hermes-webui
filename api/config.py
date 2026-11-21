@@ -4051,7 +4051,7 @@ def _resolve_custom_record_key(
         key_text = str(raw_api_key).strip()
         if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
             api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
-        elif key_text:
+        elif key_text and not _has_env_ref(key_text):
             api_key = key_text
     if not api_key:
         key_env = str(raw_key_env or "").strip()

@@ -71,16 +71,17 @@ def test_env_ref_beside_other_characters_is_still_unresolved(monkeypatch, value)
     assert config._custom_record_pool_runtime(_URL, _record()) is None, value
 
 
-def test_unresolved_pool_key_falls_through_to_the_no_credential_refusal(monkeypatch):
+@pytest.mark.parametrize("reference", ["${WEBUI_TEST_UNSET_KEY}", "prefix-${WEBUI_TEST_UNSET_KEY}"])
+def test_unresolved_pool_key_falls_through_to_the_no_credential_refusal(monkeypatch, reference):
     """End-to-end: the existing refusal applies instead of a literal-key 401."""
-    cfg = {"custom_providers": [_record(api_key="${MY_KEY}")]}
+    cfg = {"custom_providers": [_record(api_key=reference)]}
     monkeypatch.setattr(config, "get_config", lambda *a, **k: cfg)
     monkeypatch.setattr(config, "cfg", cfg)
-    _pool_stub(monkeypatch, {"api_key": "${MY_KEY}", "credential_pool": object()})
+    _pool_stub(monkeypatch, {"api_key": reference, "credential_pool": object()})
 
     bundle = config.merge_custom_provider_runtime_bundle("custom:pooled", None, None, None)
 
-    assert "${MY_KEY}" not in str(bundle)
+    assert reference not in str(bundle)
     assert bundle["api_key"] is None
     assert bundle["base_url"] == _URL
     verdict = config.custom_provider_route_error(bundle)

@@ -116,6 +116,8 @@ will run WebUI.
 
 The setup step groups providers by how much information they usually need.
 
+For a named profile, define any environment variables referenced by a custom provider's credential in that profile's `.env`. An unresolved `${VAR}` in a pool key or its static fallback is treated as missing, rather than sent as a literal key. If no other configured credential source resolves, WebUI reports a missing credential before sending the request.
+
 | Group | Examples | What you usually enter |
 |---|---|---|
 | Easy start | OpenRouter, Anthropic, OpenAI | API key and model. |
