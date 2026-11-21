@@ -668,3 +668,36 @@ def test_stale_user_repair_keeps_the_image_parts():
         assert images == [image_part], (
             f"the user's image must survive the text repair ({field}): {parts}"
         )
+
+
+def test_stale_user_repair_flattens_text_only_list_rows():
+    """A list row carrying only text parts is repaired to the plain string.
+
+    Both the display projection and the model-facing ``api_content`` field are
+    compared against the submitted turn as a string. When nothing non-text
+    survives there is nothing to preserve, so the repaired value must be the
+    submitted text itself rather than a one-part list — the list shape broke
+    the existing contamination contract on both surfaces (greptile P1,
+    2026-11-20).
+    """
+    from api.streaming import _strip_stale_user_merge_from_messages
+
+    prior_tail = "please use the larger context model"
+    current_turn = "can you summarize the release blockers?"
+    polluted_text = f"{prior_tail}\n\n{current_turn}"
+
+    row = _user(polluted_text, id=21, timestamp=2)
+    row["content"] = [{"type": "text", "text": polluted_text}]
+    row["api_content"] = [{"type": "text", "text": polluted_text}]
+
+    cleaned = _strip_stale_user_merge_from_messages(
+        [copy.deepcopy(row)], current_turn, prior_tail
+    )
+    repaired = cleaned[0]
+
+    for field in ("content", "api_content"):
+        assert repaired.get(field) == current_turn, (
+            f"text-only {field} must flatten to the submitted string, "
+            f"got {repaired.get(field)!r}"
+        )
+

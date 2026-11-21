@@ -11906,6 +11906,12 @@ def _clean_stale_merge_content(content, msg_text):
         for part in content
         if not (isinstance(part, dict) and str(part.get('type') or '') == 'text')
     ]
+    if not kept:
+        # Text-only row: keep the historical contract where the repaired
+        # content IS the submitted string. A wrapping list here would desync
+        # display/context rows that expect a plain-text current turn
+        # (greptile P1, 2026-11-20).
+        return msg_text
     if not msg_text:
         return kept
     return [{'type': 'text', 'text': msg_text}, *kept]
