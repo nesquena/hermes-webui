@@ -74,6 +74,9 @@ from api.helpers import (
     redact_session_data,
     scrub_internal_replay_fields,
     _redact_text,
+    StreamDeltaRedactor,
+    flush_stream_delta_tail,
+    redact_stream_boundary_text,
     _is_client_disconnect_error,
     _as_client_disconnect,
 )
@@ -14800,8 +14803,17 @@ def _run_agent_streaming(
                 'session_id': session_id, 'text': '\n'.join(leftovers),
             })
 
+    # #8901: per-stream redactor for live and replayed token deltas. Created
+    # before put() so even an early terminal event can flush it.
+    _delta_redactor = StreamDeltaRedactor()
+
     def put(event, data):
         nonlocal _stream_end_published
+        # #8901: release any held-back delta tail before the stream settles,
+        # so a secret-shaped prefix is never swallowed at end of turn. The
+        # released text is redacted and journaled like any other delta.
+        if event in ('done', 'stream_end', 'apperror'):
+            flush_stream_delta_tail(_delta_redactor, put)
         if event in ('done', 'apperror', 'stream_end'):
             _settle_pending_steer()
         # If cancelled, drop all further events except the cancel event itself
@@ -15561,7 +15573,14 @@ def _run_agent_streaming(
                 # worth it for a recoverable staleness window.
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
-                put('token', {'text': text})
+                # #8901: redact the delta before it reaches SSE or the run
+                # journal (a replay after reconnect re-sends the journaled
+                # event). Text that could still grow into a secret with the
+                # next delta is held back and released by a later delta or
+                # by the flush in put().
+                _safe_delta = _delta_redactor.feed(str(text))
+                if _safe_delta:
+                    put('token', {'text': _safe_delta})
                 # Update live throughput from stream delta callbacks, not from
                 # byte/character length. If a backend cannot provide live deltas,
                 # the frontend hides TPS rather than showing an estimate.
@@ -15632,6 +15651,12 @@ def _run_agent_streaming(
                 # segment is starting and subsequent reasoning must be attributed
                 # to the next message.
                 _current_reasoning_idx += 1
+                # #8901: the delta redactor's held tail belongs to the segment
+                # that just ended. Release it BEFORE the boundary frame — both
+                # here and in put() — so its last characters stay in this
+                # paragraph instead of starting the next one (a replay rebuilds
+                # the same split from the frame order).
+                flush_stream_delta_tail(_delta_redactor, put)
                 if text is None:
                     return
                 visible = str(text).strip()
@@ -15646,7 +15671,10 @@ def _run_agent_streaming(
                 reasoning_echo = _strip_reasoning_output_echo(visible)
                 already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
                 payload = {
-                    'text': visible,
+                    # #8901: the boundary frame re-sends the segment text, so
+                    # it obeys the same redaction contract as the deltas that
+                    # streamed it (and stays consistent with them).
+                    'text': redact_stream_boundary_text(visible),
                     'already_streamed': already_streamed,
                 }
                 if reasoning_echo:
