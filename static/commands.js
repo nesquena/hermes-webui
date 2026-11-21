@@ -2625,6 +2625,10 @@ async function cmdYolo(){
     // another client moved the flag first the server answers 409 yolo_changed
     // with the CURRENT state; the catch below refreshes the view from it
     // instead of failing blind or toggling again.
+    // The request's generation is taken when the write is SENT: it orders
+    // this answer against the others, so a late answer of an older request
+    // cannot replace what a newer one confirmed (#9101 review round 9).
+    const reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;
     const result=await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable,expected_revision:expectedRevision}),
@@ -2635,6 +2639,7 @@ async function cmdYolo(){
       gen:generation,
       rev:result&&typeof result.yolo_revision==='number'?result.yolo_revision:null,
       epoch:result&&typeof result.yolo_epoch==='string'?result.yolo_epoch:null,
+      reqGen:reqGen,
     });
     showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
   }catch(e){
@@ -2645,11 +2650,14 @@ async function cmdYolo(){
     }
     if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
       // 409 yolo_changed lands here with the server's current state: the view
-      // is refreshed from it, so the pill matches the server again.
+      // is refreshed from it, so the pill matches the server again. The
+      // payload carries the CURRENT revision, so it never rolls the
+      // confirmed revision back.
       _applyYoloState(sid,errorPayload.yolo_enabled,{
         gen:generation,
         rev:typeof errorPayload.yolo_revision==='number'?errorPayload.yolo_revision:null,
         epoch:typeof errorPayload.yolo_epoch==='string'?errorPayload.yolo_epoch:null,
+        reqGen:(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null,
       });
     }
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
@@ -2674,6 +2682,10 @@ async function disableYoloFromPill(){
   // yolo_changed means the flag moved since (another tab, a restart): its
   // payload carries the current state and the view is refreshed from it.
   const expectedRevision=(_yoloView.sid===sid&&typeof _yoloView.rev==='number')?_yoloView.rev:0;
+  // The request's generation is taken when the write is SENT: it orders this
+  // answer against the others, so a late answer of an older request cannot
+  // replace what a newer one confirmed (#9101 review round 9).
+  const reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;
   try{
     const result=await api('/api/session/yolo',{
       method:'POST',
@@ -2686,6 +2698,7 @@ async function disableYoloFromPill(){
       gen:generation,
       rev:result&&typeof result.yolo_revision==='number'?result.yolo_revision:null,
       epoch:result&&typeof result.yolo_epoch==='string'?result.yolo_epoch:null,
+      reqGen:reqGen,
     }))_updateYoloPill();
     showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
   }catch(e){
@@ -2698,6 +2711,7 @@ async function disableYoloFromPill(){
         gen:generation,
         rev:typeof errorPayload.yolo_revision==='number'?errorPayload.yolo_revision:null,
         epoch:typeof errorPayload.yolo_epoch==='string'?errorPayload.yolo_epoch:null,
+        reqGen:(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null,
       }));
     if(!applied)_updateYoloPill();
     showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||(e&&e.message)||''));

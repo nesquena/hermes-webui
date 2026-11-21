@@ -59,16 +59,53 @@ def test_yolo_view_tracks_the_server_revision_and_run():
     """The view carries the answer's revision and server run, and remembers
     every run it confirmed so a late old-run answer can be recognised."""
     src = _read("messages.js")
-    assert "let _yoloView = {sid: null, enabled: false, gen: 0, seq: 0, rev: 0, epoch: null};" in src
+    assert "let _yoloView = {sid: null, enabled: false, gen: 0, seq: 0, rev: 0, epoch: null, reqGen: 0};" in src
     assert "let _yoloKnownRuns = new Set();" in src
     body = _function_body(src, "_applyYoloState")
-    # Same run: an older revision never rolls a read back.
-    assert "if (isRead && aRun && _yoloView.epoch === aRun && aRev !== null && aRev < _yoloView.rev) return false;" in body
+    # Same run: an older revision never rolls the view back — for a read AND
+    # for a write (a write answer is not covered by the read sequence rule).
+    assert (
+        "if (aRun && _yoloView.epoch === aRun && aRev !== null && aRev < _yoloView.rev) return false;"
+        in body
+    )
     # Another run: only one this tab has NOT confirmed is the current state.
     assert "if (_yoloKnownRuns.has(aRun)) return false;" in body
     # A session install keeps the confirmed run and restarts the revision.
-    assert "rev: 0, epoch: _yoloView.epoch};" in body
+    assert "rev: 0, epoch: _yoloView.epoch, reqGen: _yoloView.reqGen};" in body
     assert "if (aRun) _yoloKnownRuns.add(aRun);" in body
+
+
+def test_yolo_answers_are_ordered_by_the_request_that_produced_them():
+    """A late answer must not replace what a NEWER request confirmed: every
+    YOLO request takes a generation when it is SENT, and the answer carries
+    it back. Two requests sent around a server restart can be delivered in
+    any order — the answer of the request sent FIRST is the older one."""
+    src = _read("messages.js")
+    assert "let _yoloReqGen = 0;" in src
+    assert "function _nextYoloReqGen() {" in src
+    body = _function_body(src, "_applyYoloState")
+    # An answer of an OLDER request is a leftover of the previous run.
+    assert (
+        "if (aReq !== null && _yoloView.reqGen > 0 && aReq < _yoloView.reqGen) {"
+        in body
+    )
+    # The read path takes its generation when the request is sent.
+    read = _function_body(src, "_fetchYoloState")
+    assert "reqGen: ++_yoloReqGen," in read
+    # Every write path takes one too: /yolo, the pill's disable and the
+    # approval card's projection.
+    cmd = _function_body(_read("commands.js"), "cmdYolo")
+    pill = _function_body(_read("commands.js"), "disableYoloFromPill")
+    assert "const reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;" in cmd
+    assert "const reqGen=(typeof _nextYoloReqGen==='function')?_nextYoloReqGen():null;" in pill
+    assert "reqGen:reqGen," in cmd
+    assert "reqGen:reqGen," in pill
+    # The card takes its generation when its request is SENT, not when its
+    # answer arrives, and hands it to the projection.
+    respond = _function_body(src, "respondApproval")
+    assert "const reqGen=options.yolo&&typeof _nextYoloReqGen==='function'?_nextYoloReqGen():null;" in respond
+    card = _function_body(src, "_applyApprovalYoloProjection")
+    assert "reqGen: typeof reqGen === \"number\" ? reqGen : null," in card
 
 
 def test_yolo_write_answer_is_confirmed_by_a_follow_up_read():
@@ -137,6 +174,11 @@ def test_conflict_payload_refreshes_the_view_instead_of_failing_blind():
         # (c) run/epoch: late answers from a run the tab moved past are
         # dropped instead of overriding the current run's answer.
         "r11c_old_process_answers_keep_their_revision_order",
+        # (d) a late answer of an OLDER request must not replace what a newer
+        # request confirmed (the first sync overlapping a restart).
+        "r22_late_old_process_answer_never_blocks_the_current_process",
+        # (e) an older write answer must not roll back the confirmed revision.
+        "r23_older_write_answer_never_rolls_back_a_confirmed_revision",
     ],
 )
 def test_revision_browser_scenarios_hold(name):

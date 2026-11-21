@@ -110,6 +110,16 @@ REVISION_SCENARIOS = [
     "r16_unobserved_restart_old_post_then_old_newer_read",
     "r17_unobserved_restart_old_writes",
     "r21_older_off_reads_around_yolo_never_hide_its_on",
+    # Review round 9 (Greptile P1 "Current server answers stay blocked"):
+    # the FIRST sync of a tab overlaps a restart. The current process's
+    # answer lands first; the old process's delayed answer must not take
+    # the view back to the dead run (which would block every later answer
+    # of the current process).
+    "r22_late_old_process_answer_never_blocks_the_current_process",
+    # Review round 9 (Greptile P1 "Older answers hide the warning"): inside
+    # one run, an OLDER write answer must not roll back the revision a read
+    # already confirmed — not even when the confirmation read fails.
+    "r23_older_write_answer_never_rolls_back_a_confirmed_revision",
 ]
 
 # Orderings that need more than the client can see. The revision-ordering
