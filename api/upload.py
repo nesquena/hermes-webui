@@ -248,6 +248,18 @@ def _trusted_attachment_root() -> Path | None:
 _trusted_attachment_root()
 
 
+def _share_attachment_root() -> Path | None:
+    """Backwards-compatible alias for :func:`_trusted_attachment_root`.
+
+    The share reader used to own the startup-trusted root under this name
+    (#8590). The root is now trusted by every reader that contains paths
+    under it — shares, uploads and the vision allow-check (#8786) — so the
+    implementation moved; the old name stays as an alias so anything that
+    imported it keeps working.
+    """
+    return _trusted_attachment_root()
+
+
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
     dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
