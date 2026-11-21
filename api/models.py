@@ -736,7 +736,17 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 raise ValueError("session index must be a list")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
-                updated_map = {s.session_id: s.compact() for s in updates}
+                # #8861: refuse updates loaded from a sidecar whose body names
+                # another session. Such an object carries that other session's
+                # id, so patching it in would replace the other session's row
+                # with this file's metadata (the #8861 sidebar overwrite, via
+                # whichever caller produced the object). Skipping the update
+                # fails closed: the existing row stays exactly as it is.
+                updated_map = {
+                    s.session_id: s.compact()
+                    for s in updates
+                    if not getattr(s, '_sidecar_names_other_session', None)
+                }
 
             existing = [
                 e for e in existing
@@ -9977,6 +9987,15 @@ def all_sessions(
                 if 'last_message_at' not in s:
                     _diag_stage(diag, "all_sessions.backfill_load")
                     full = _load_session_for_listing(s.get('session_id'))  # never saves (#9007)
+                    # #8861: the same stem/body contract as the recovery pass
+                    # below. A row keyed ``copy-8852`` whose file names
+                    # ``victim-8852`` must not be re-keyed onto the owner:
+                    # replacing index[i] with that compact() hands the owner's
+                    # id to the copy's metadata, and the backfill write then
+                    # overwrites the owner's row. Keep the row as-is and write
+                    # nothing back for it.
+                    if full and str(getattr(full, 'session_id', '') or '') != str(s.get('session_id') or ''):
+                        continue
                     if full:
                         index[i] = full.compact(sidebar_metadata_only=sidebar_metadata_only)
                         backfilled.append(full)
@@ -10029,6 +10048,21 @@ def all_sessions(
                     except Exception:
                         sidecar = None
                     if not sidecar:
+                        continue
+                    # #8861: a sidecar whose body names another session must
+                    # never be recovered under that other id. ``missing`` is
+                    # enumerated by file stem, so a copy (``copy-8852.json``
+                    # whose body names ``victim-8852``) looked like a missing
+                    # row on every listing, and its stub overwrote the owner's
+                    # row — in the response and in _index.json alike. A stem
+                    # only recovers a row when the file's body names the stem
+                    # itself; anything else is skipped. Fail closed: no row is
+                    # written and the owner's row is left untouched.
+                    if str(getattr(sidecar, 'session_id', '') or '') != sid:
+                        logger.debug(
+                            "Skipping index recovery for %s.json: its body names %r",
+                            sid, getattr(sidecar, 'session_id', None),
+                        )
                         continue
                     index_map[sidecar.session_id] = sidecar.compact(
                         include_runtime=True,
