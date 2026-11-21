@@ -9922,6 +9922,17 @@ def _context_lookup_agent_fallback(agent, resolved_api_key=None, resolved_base_u
     )
 
 
+def _context_lookup_config_base_url(value: object) -> str:
+    """A config-declared ``base_url``, or ``""`` when it is not a string (#8982).
+
+    ``base_url`` values come straight out of YAML, so ``base_url: 123`` is an
+    ``int``. Stringifying it turned a broken setting into the endpoint "123" and
+    handed it to ``get_model_context_length()``; a non-string declares no
+    endpoint at all. String values keep master's ``strip()`` exactly.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _context_length_lookup_inputs_for_model(
     model: str | None,
     provider: str | None = None,
@@ -10014,7 +10025,7 @@ def _context_length_lookup_inputs_for_model(
                 or not _model_cfg_provider
                 or _providers_match_for_context(_owner_provider, _session_provider)
             ):
-                effective_base_url = str(model_cfg.get("base_url") or "").strip()
+                effective_base_url = _context_lookup_config_base_url(model_cfg.get("base_url"))
 
     custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
     if not isinstance(custom_providers, list):
@@ -10029,7 +10040,7 @@ def _context_length_lookup_inputs_for_model(
             if not _providers_match_for_context(provider_key, effective_provider):
                 continue
             if not effective_base_url:
-                effective_base_url = str(provider_cfg.get("base_url") or "").strip()
+                effective_base_url = _context_lookup_config_base_url(provider_cfg.get("base_url"))
             provider_context_length = _models_config_context_length(
                 provider_cfg.get("models"),
                 bare_model or model_for_lookup,
@@ -10064,7 +10075,7 @@ def _context_length_lookup_inputs_for_model(
                 continue
             entry_name = str(entry.get("name") or "").strip()
             entry_slug = _custom_provider_slug_for_context(entry_name)
-            entry_base = str(entry.get("base_url") or "").strip()
+            entry_base = _context_lookup_config_base_url(entry.get("base_url"))
             entry_base_norm = entry_base.rstrip("/")
             provider_matches = bool(
                 effective_provider
@@ -11258,7 +11269,10 @@ def _session_context_length_lookup_state(
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model_for_resolution)
         model_for_lookup = str(resolved_model or model_for_lookup).strip()
         provider_for_lookup = str(resolved_provider or provider_for_lookup or "").strip()
-        base_url_for_lookup = str(resolved_base_url or "").strip()
+        # Only a str is an endpoint here. A non-string base_url out of a YAML
+        # record (``base_url: 123``, #8982) is not a URL; stringifying it would
+        # put "123" in front of the lookup as if the user had configured it.
+        base_url_for_lookup = _context_lookup_config_base_url(resolved_base_url)
     except Exception:
         logger.debug("session context-length lookup state resolution failed", exc_info=True)
     if _session_context_lookup_uses_chat_route(provider_for_lookup):
@@ -11294,7 +11308,10 @@ def _session_context_length_lookup_state(
                 lookup_only=True,
             )
             raise_for_custom_provider_route(route)
-            route_url = str(route.get("base_url") or "").strip()
+            # Same type rule as above: the merge normally hands back a str or
+            # None, but this boundary is what actually feeds the lookup, so a
+            # non-string value never becomes a URL by way of str().
+            route_url = _context_lookup_config_base_url(route.get("base_url"))
             if route_url:
                 base_url_for_lookup = route_url
             # #8963: no switched-off verdict of the lookup's own here. The chat

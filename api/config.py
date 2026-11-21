@@ -4028,10 +4028,22 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
 
 
 def _custom_record_base_url(record: object) -> str | None:
-    """Return a custom record's OWN endpoint, or None when it declares none."""
+    """Return a custom record's OWN endpoint, or None when it declares none.
+
+    Only a ``str`` declares an endpoint. ``base_url`` comes from YAML, where a
+    bare ``123`` parses as an ``int`` (#8982): coercing it with ``str()`` turned
+    a broken setting into the endpoint ``"123"``, so the record still counted as
+    endpoint-owning and its credential travelled with that non-URL to
+    ``get_model_context_length()``. A non-string value is not an endpoint, so it
+    is reported exactly like an absent one and the merge refuses the route
+    before any credential is paired with a URL nobody declared.
+    """
     if not isinstance(record, dict):
         return None
-    return str(record.get("base_url") or "").strip() or None
+    raw_base_url = record.get("base_url")
+    if not isinstance(raw_base_url, str):
+        return None
+    return raw_base_url.strip() or None
 
 
 def _resolve_custom_record_key(
