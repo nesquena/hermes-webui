@@ -280,6 +280,28 @@ def test_display_projection_keeps_native_identity_without_inventing_merge_id():
     assert "id" not in rows[0]  # state.db cold reads do not synthesize this either
 
 
+def test_canonical_display_restores_the_raw_skill_command():
+    """The Gateway stores the model-facing expansion as prompt.submit.text, so
+    its display history shows the expansion. The WebUI transcript must keep the
+    raw `/skill ...` command on this turn (#5896 re-gate)."""
+    rows = sessions.display_history({"display_messages": [
+        {"role": "user", "text": "older question"},
+        {"role": "assistant", "text": "older answer"},
+        {"role": "user", "text": "EXPANSION"},
+        {"role": "assistant", "text": "answer"},
+    ]})
+    sessions.restore_raw_display_turn(rows, "EXPANSION", "/my-skill do x")
+    assert [row["content"] for row in rows] == [
+        "older question", "older answer", "/my-skill do x", "answer",
+    ]
+    # No skill turn: the display history is left untouched.
+    plain = sessions.display_history({"display_messages": [
+        {"role": "user", "text": "plain question"},
+    ]})
+    sessions.restore_raw_display_turn(plain, None, None)
+    assert plain[0]["content"] == "plain question"
+
+
 def test_distinct_clarification_ids_do_not_collapse_equal_questions():
     from api import clarify
     sid = "canonical-clarify-identity-test"
@@ -464,3 +486,70 @@ def test_native_approval_http_response_keeps_transport_owner(
         with route_approvals._lock:
             route_approvals._pending.pop(sid, None)
             route_approvals._gateway_queues.pop(sid, None)
+
+
+def test_run_session_carries_model_text_into_the_session_request(monkeypatch):
+    """#5896 re-gate: the Gateway session RPC must send the model-facing text
+    (the resolved skill expansion) in `session_request.text`, not the raw
+    `/skill …` command. Removing the `model_text` forwarding fails here."""
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class FakeRelay:
+        def __init__(self, session_id, stream_id, home, request, emit, cancel, record,
+                     connector=None, *, recovering=False):
+            captured["request"] = request
+            self.snapshot = None
+
+        async def run(self):
+            return "ok", {}
+
+    monkeypatch.setattr(sessions, "SessionRelay", FakeRelay)
+    monkeypatch.setattr(
+        sessions, "config_for_session",
+        lambda _cfg: {"webui_gateway_session_transport": "local"},
+    )
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _p: "/tmp")
+
+    sessions.run_session(
+        SimpleNamespace(profile="default", session_id="s1"),
+        "stream",
+        "/skill-a x",
+        emit=None, cancel=None, record=None,
+        model_text="EXPANSION",
+    )
+
+    assert captured["request"]["text"] == "EXPANSION"
+
+
+def test_run_session_keeps_raw_text_when_no_model_text(monkeypatch):
+    """A non-skill turn still sends its text unchanged."""
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class FakeRelay:
+        def __init__(self, session_id, stream_id, home, request, emit, cancel, record,
+                     connector=None, *, recovering=False):
+            captured["request"] = request
+            self.snapshot = None
+
+        async def run(self):
+            return "ok", {}
+
+    monkeypatch.setattr(sessions, "SessionRelay", FakeRelay)
+    monkeypatch.setattr(
+        sessions, "config_for_session",
+        lambda _cfg: {"webui_gateway_session_transport": "local"},
+    )
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _p: "/tmp")
+
+    sessions.run_session(
+        SimpleNamespace(profile="default", session_id="s1"),
+        "stream",
+        "hello",
+        emit=None, cancel=None, record=None,
+    )
+
+    assert captured["request"]["text"] == "hello"
