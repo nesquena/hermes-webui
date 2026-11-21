@@ -240,17 +240,37 @@ def test_percent_encoded_addresses_match_plain_ones(call):
 
 
 def test_a_list_number_counts_only_where_the_browser_shows_it(call):
-    # A numbered list shows its item's number.
+    # A numbered list shows its item's number in full up to four digits.
     assert _missing(call, '<ol><li value="3">item</li></ol>', ["ol", {}, ["li", {"value": "3"}, "item"]]) == []
-    # Outside an <ol>, or past the browser's limit, the number is invisible.
-    for number, dom in [
-        ("731337", ["ul", {}, ["li", {"value": "731337"}, "item"]]),
-        ("731338", ["li", {"value": "731338"}, "item"]),
-        ("99999999999", ["ol", {}, ["li", {"value": "99999999999"}, "item"]]),
-    ]:
-        tag = dom[0]
-        src = f'<li value="{number}">item</li>' if tag == "li" else f'<{tag}><li value="{number}">item</li></{tag}>'
-        assert _missing(call, src, dom) == [number]
+    assert _missing(call, "2023. Launched\n2024. Grew",
+                    ["ol", {}, ["li", {"value": "2023"}, "Launched"], ["li", {"value": "2024"}, "Grew"]]) == []
+    # Outside an <ol>, past four digits (a phone cuts the leading digits), or inside a block that
+    # clips the margin where the number is drawn, the number is not shown in full.
+    cases = [
+        ("731337", '<ul><li value="731337">item</li></ul>', ["ul", {}, ["li", {"value": "731337"}, "item"]]),
+        ("731338", '<li value="731338">item</li>', ["li", {"value": "731338"}, "item"]),
+        ("99999999999", '<ol><li value="99999999999">item</li></ol>',
+         ["ol", {}, ["li", {"value": "99999999999"}, "item"]]),
+        ("12345", "12345. item", ["ol", {}, ["li", {"value": "12345"}, "item"]]),
+        ("42", '<div class="katex-block"><ol><li value="42">x</li></ol></div>',
+         ["div", {"class": "katex-block"}, ["ol", {}, ["li", {"value": "42"}, "x"]]]),
+        ("123", '<div class="mermaid-block"><ol><li value="123">x</li></ol></div>',
+         ["div", {"class": "mermaid-block"}, ["ol", {}, ["li", {"value": "123"}, "x"]]]),
+        ("4321", '<pre><ol><li value="4321">x</li></ol></pre>',
+         ["pre", {}, ["ol", {}, ["li", {"value": "4321"}, "x"]]]),
+    ]
+    for number, src, dom in cases:
+        assert _missing(call, src, dom) == [number], src
+
+
+def test_html_examples_in_code_keep_their_formatting(call):
+    src = "HTML: `<span>Hello</span><span>world</span>`. See [documentation](https://example.org/html)."
+    dom = ["p", {}, "HTML: ", ["code", {}, "<span>Hello</span><span>world</span>"], ". See ",
+           ["a", {"href": "https://example.org/html"}, "documentation"], "."]
+    assert _missing(call, src, dom) == []
+    src = "```\n<b>bold</b><i>it</i>\n```"
+    dom = ["pre", {}, ["code", {}, "<b>bold</b><i>it</i>"]]
+    assert _missing(call, src, dom) == []
 
 
 def test_link_labels_match_their_address_the_same_way_on_both_sides(call):
@@ -264,6 +284,16 @@ def test_link_labels_match_their_address_the_same_way_on_both_sides(call):
     # A hidden copy of the address word is still caught.
     dom = ["p", {}, ["a", {"href": "https://example.com/"}, "https://example.com"], " ", {"comment": " example "}]
     assert _missing(call, "[https://example.com](https://example.com/) <!-- example -->", dom) == ["example"]
+    # The renderer drops the address of a raw anchor with any other scheme, so an encoded label
+    # gives no credit for the address's words.
+    for href in ["secret-plan", "javascript:secret-plan", "ftp://secret-plan"]:
+        src = f'<a href="{href}">%73%65%63%72%65%74-%70%6C%61%6E</a>'
+        assert set(_missing(call, src, ["p", {}, ["a", {}, "%73%65%63%72%65%74-%70%6C%61%6E"]])) >= {"secret", "plan"}, href
+    # Other attributes of an address-labelled anchor keep their words.
+    src = '<a href="https://e.com/zqd3x" title="zqd4x">https://e.com/zqd3x</a>'
+    assert _missing(call, src, ["p", {}, ["a", {"href": "https://e.com/zqd3x"}, "https://e.com/zqd3x"]]) == ["zqd4x"]
+    src = '<a href="https://e.com/zqd9x"/title="zqe1x">https://e.com/zqd9x</a>'
+    assert "zqe1x" in _missing(call, src, ["p", {}, ["a", {"href": "https://e.com/zqd9x"}, "https://e.com/zqd9x"]])
 
 
 @pytest.mark.parametrize(

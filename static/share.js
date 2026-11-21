@@ -105,9 +105,20 @@ function _shareSourceWords(source){
       if(name.toLowerCase()==='href'){ hrefCount++; href=dq!==undefined?dq:(sq!==undefined?sq:(bare!==undefined?bare:'')); }
       return '';
     });
-    if(hrefCount!==1||href===undefined||!_shareSameWords(_shareWordsOf(label),_shareWordsOf(href))) return all;
+    // The renderer keeps a raw anchor's address only for these schemes; with any other the
+    // address is dropped, so the label alone must show its words.
+    if(hrefCount!==1||href===undefined||!/^(?:https?:\/\/|mailto:|tel:|message:)/i.test(href)
+      ||!_shareSameWords(_shareWordsOf(label),_shareWordsOf(href))) return all;
     const rest=attrs.replace(_SHARE_ATTR_RE,(part,name)=>name.toLowerCase()==='href'?'':part);
     return '<a'+rest+'>'+label+'</a>';
+  });
+  // Keep literal code intact during the HTML tag comparison pass.
+  const literalCode=[];
+  let literalPrefix='\x00SHARE_LITERAL_';
+  while(s.includes(literalPrefix)) literalPrefix+='_';
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)|`([^`\n]+)`/g,part=>{
+    literalCode.push(part);
+    return literalPrefix+(literalCode.length-1)+'\x00';
   });
   s=s.replace(_SHARE_TAG_RE,(tag,_close,name,attrs)=>{
     const n=name.toLowerCase();
@@ -121,6 +132,7 @@ function _shareSourceWords(source){
     const edge=_SHARE_INLINE_TAGS.has(n)?'':' ';
     return edge+kept+edge;
   });
+  s=s.replace(new RegExp(literalPrefix+'(\\d+)\\x00','g'),(_m,i)=>literalCode[+i]);
   return _shareAddWords(_shareNormalize(s),new Map());
 }
 
@@ -157,7 +169,8 @@ function _shareVisibleWords(root){
   const counts=new Map();
   const text=[];
   const add=map=>{ for(const [w,c] of map) counts.set(w,(counts.get(w)||0)+c); };
-  const walk=node=>{
+  // `clipped`: inside a block that cuts off anything drawn outside it (code, math, diagram).
+  const walk=(node,clipped)=>{
     for(const child of Array.from(node.childNodes||[])){
       if(child.nodeType===3){ text.push(child.data); continue; }
       if(child.nodeType!==1) continue;  // comments are never shown
@@ -168,7 +181,7 @@ function _shareVisibleWords(root){
       const inline=_SHARE_INLINE_TAGS.has(tag)&&!math;
       if(!inline) text.push(' ');
       const start=text.length;
-      walk(child);
+      walk(child,clipped||tag==='pre'||attrs.some(a=>a.name==='class'&&/\b(?:katex|mermaid)-block\b/.test(a.value)));
       if(!inline) text.push(' ');
       const ownText=text.slice(start).join('');
       for(const attr of attrs){
@@ -176,16 +189,17 @@ function _shareVisibleWords(root){
         let value=String(attr.value||'');
         if(name.startsWith('data-')||name==='download'||name==='style') continue;
         if(name==='class') value=value.split(/\s+/).filter(c=>!/^language-/i.test(c)).join(' ');
-        // A list item's number shows only inside a numbered list, and only up to the browser's
-        // limit; anywhere else the value is invisible, so it gives no credit.
-        if(name==='value'&&tag==='li'&&!(String(node.tagName||'').toLowerCase()==='ol'&&/^(?:0|[1-9]\d{0,8})$/.test(value))) continue;
+        // A list item's number is drawn in the margin left of the item. It shows only inside a
+        // numbered list, not inside a block that clips that margin, and in full only up to four
+        // digits (longer numbers lose their leading digits on a phone). Otherwise it gives no credit.
+        if(name==='value'&&tag==='li'&&!(String(node.tagName||'').toLowerCase()==='ol'&&!clipped&&/^(?:0|[1-9]\d{0,3})$/.test(value))) continue;
         // A bare link shows its own address: count it once, not twice.
         if(name==='href'&&_shareSameWords(_shareWordsOf(value),_shareWordsOf(ownText))) continue;
         add(_shareWordsOf(value));
       }
     }
   };
-  walk(root);
+  walk(root,false);
   add(_shareWordsOf(text.join('')));
   return counts;
 }

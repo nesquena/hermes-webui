@@ -89,6 +89,16 @@ HIDING = [
     '<li value="731338">item</li>',
     '- one\n<li value="731339">two</li>',
     '<ol><li value="99999999999">item</li></ol>',
+    # ...and not in full past four digits, or inside a block that clips the margin.
+    "12345. item",
+    '<div class="katex-block"><ol><li value="42">x</li></ol></div>',
+    '<div class="mermaid-block"><ol><li value="123">x</li></ol></div>',
+    '<pre><ol><li value="4321">x</li></ol></pre>',
+    # A raw anchor whose address the renderer drops, with an encoded label; other attributes of an
+    # address-labelled anchor.
+    '<a href="secret-plan">%73%65%63%72%65%74-%70%6C%61%6E</a>',
+    '<a href="https://e.com/zqd3x" title="zqd4x">https://e.com/zqd3x</a>',
+    '<a href="https://e.com/zqd9x"/title="zqe1x">https://e.com/zqd9x</a>',
 ]
 
 # Realistic content that must keep its formatting.
@@ -131,6 +141,10 @@ ORDINARY = [
     "[https://example.com](https://example.com/)",
     '<a href="https://example.com/docs" target="_blank" rel="noopener">https://example.com/docs</a>',
     "3. third step\n4. fourth step",
+    # HTML examples in code keep their formatting and neighbouring links; year lists keep theirs.
+    "HTML: `<span>Hello</span><span>world</span>`. See [documentation](https://example.org/html).",
+    "```html\n<b>bold</b><i>it</i>\n```",
+    "2023. Launched\n2024. Grew",
 ]
 
 # Random messages: tokens renderMd treats specially, with numbered marker words.
